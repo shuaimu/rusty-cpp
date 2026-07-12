@@ -128,6 +128,74 @@ def patch_rusty(path: Path) -> None:
     t = path.read_text()
     # (b) the crate defines its own RandomState — undo the builtin mapping.
     t = t.replace("::hashbrown::DefaultHashBuilder", "::hash::random::RandomState")
+    # (io-cursor) same class of hijack for the crate's own io module: the
+    # builtin io::->rusty::io mapping requalifies intra-crate io::error::*
+    # refs into the runtime namespace, which has no `error` submodule.
+    t = t.replace("rusty::io::error::", "::io::error::")
+    # (io-cursor) `pub(crate) use error::const_error;` re-exports a macro —
+    # expanded away by cargo-expand, so no C++ entity exists to alias.
+    t = t.replace("    export using error::const_error;\n", "")
+    # (io-cursor) the crate now DECLARES an io::Write trait, so the
+    # Hasher::write/io::Write::write name collision emits a 3-tier UFCS
+    # dispatch lambda whose fallback (Write_::write_) is unviable for
+    # SipHasher. Call the runtime member directly (supersedes the old
+    # rusty::io::write(this->_0, msg) rule below on this emission shape).
+    t = re.sub(
+        r"\(\[\]\(auto&& __self, auto&& __arg0\) -> decltype\(auto\) \{[^\n]*\)\(this->_0, msg\);",
+        "this->_0.write(msg);",
+        t,
+    )
+    # (io-cursor) slice split/copy emitted as MEMBER calls on std::span; the
+    # runtime provides free-function forms (rusty::split_at returns a tuple,
+    # clone_from_slice(dst, src)).
+    t = t.replace("self_.split_at(", "rusty::split_at(self_, ")
+    t = t.replace(
+        "mem::take(self_).split_at_mut(", "rusty::split_at(mem::take(self_), "
+    )
+    t = t.replace("slice.split_at(", "rusty::split_at(slice, ")
+    t = t.replace("slice.split_at_mut(", "rusty::split_at(slice, ")
+    t = t.replace("a.copy_from_slice(", "rusty::clone_from_slice(a, ")
+    # (io-cursor) `self.inner.as_ref()` (AsRef<[u8]>) lowered to
+    # rusty::to_string_view — wrong for byte buffers (no span overload).
+    # Route through rusty::as_slice; the split() binding must not take a
+    # reference to the returned temporary.
+    t = t.replace(
+        "auto& slice = rusty::to_string_view(this->inner);",
+        "auto slice = rusty::as_slice(this->inner);",
+    )
+    t = t.replace(
+        "rusty::to_string_view(this->inner)", "rusty::as_slice(this->inner)"
+    )
+    t = t.replace(
+        "rusty::to_string_view(self_.inner)", "rusty::as_slice(self_.inner)"
+    )
+    # (io-cursor) split_mut(): `as_mut()` emitted as a member-call lambda on
+    # the inner container; std::span has no as_mut. Use the runtime
+    # as_mut_slice free fn (identity-ish for spans).
+    t = re.sub(
+        r"auto& slice = rusty::deref_call\(this->inner, \[&\]\(auto&& __recv\) -> decltype\([^\n]*?\.as_mut\(\); \}\);",
+        "auto slice = rusty::as_mut_slice(this->inner);",
+        t,
+    )
+    # (io-cursor) `impl Read/BufRead for &[u8]`: the transpiler flattened the
+    # `&mut &[u8]` receiver to std::span<uint8_t>, dropping the inner const.
+    # Cursor::split() (const) hands span<const uint8_t> to these — restore
+    # the const element type (Write for &mut [u8] correctly keeps mutable).
+    t = t.replace(
+        "read(std::span<uint8_t> self_,", "read(std::span<const uint8_t> self_,"
+    )
+    t = t.replace(
+        "read_exact(std::span<uint8_t> self_,",
+        "read_exact(std::span<const uint8_t> self_,",
+    )
+    t = t.replace(
+        "fill_buf(std::span<uint8_t> self_)",
+        "fill_buf(std::span<const uint8_t> self_)",
+    )
+    t = t.replace(
+        "consume(std::span<uint8_t> self_,",
+        "consume(std::span<const uint8_t> self_,",
+    )
     # TryReserveError -> the rusty runtime type (same as the alloc patcher).
     t = t.replace("std::collections::TryReserveError", "rusty::collections::TryReserveError")
     # (c) SipHasher runtime class.

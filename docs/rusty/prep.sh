@@ -66,4 +66,13 @@ if start >= 0:
 p.write_text(s)
 PYEOF
 fi
+
+# --- io-cursor slice: import split + block surgery ---
+if [[ -d "$SRC/io" ]]; then
+  sed -i \
+    -e 's|use crate::cmp;|use std::cmp;|' \
+    -e 's|use crate::io::{self, BorrowedCursor, ErrorKind, IoSlice, IoSliceMut, SeekFrom};|use crate::io::{self, ErrorKind, SeekFrom};|' \
+    "$SRC/io/cursor.rs"
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/prep_io.py" "$SRC/io"
+fi
 echo "prep.sh complete: $SRC"

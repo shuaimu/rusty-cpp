@@ -13,9 +13,12 @@ bash "$REPO/docs/rusty/build.sh" "$W" | tail -3
 FLAGS="-std=c++23 -DRUSTY_PORTABLE_INTRINSICS=1 -march=native -I$REPO/include"
 clang++ $FLAGS -c "$W/out/hashbrown/hashbrown.pcm" -o "$W/hashbrown.o" 2>"$W/ho.err" || { echo "hashbrown obj FAIL"; tail -3 "$W/ho.err"; exit 1; }
 clang++ $FLAGS -fmodule-file=hashbrown="$W/out/hashbrown/hashbrown.pcm" -c "$W/out/rusty.pcm" -o "$W/rusty.o" 2>"$W/ro.err" || { echo "rusty obj FAIL"; tail -3 "$W/ro.err"; exit 1; }
-clang++ $FLAGS -fmodule-file=rusty="$W/out/rusty.pcm" -fmodule-file=hashbrown="$W/out/hashbrown/hashbrown.pcm" \
-  -c "$REPO/docs/rusty/test_rusty.cpp" -o "$W/test.o" 2>"$W/tc.err" \
-  || { echo "test compile: $(grep -c error: "$W/tc.err") errors"; grep error: "$W/tc.err" | head; exit 1; }
-clang++ $FLAGS -o "$W/test_bin" "$W/test.o" "$W/rusty.o" "$W/hashbrown.o" 2>"$W/tl.err" \
-  || { echo "link FAIL"; grep -iE "error|undefined" "$W/tl.err" | head; exit 1; }
-"$W/test_bin" && echo "=== rusty (std) RUNTIME PASS ==="
+for T in test_rusty test_cursor; do
+  clang++ $FLAGS -fmodule-file=rusty="$W/out/rusty.pcm" -fmodule-file=hashbrown="$W/out/hashbrown/hashbrown.pcm" \
+    -c "$REPO/docs/rusty/$T.cpp" -o "$W/$T.o" 2>"$W/$T.cerr" \
+    || { echo "$T compile: $(grep -c ' error: ' "$W/$T.cerr") errors"; grep ' error: ' "$W/$T.cerr" | head; exit 1; }
+  clang++ $FLAGS -o "$W/${T}_bin" "$W/$T.o" "$W/rusty.o" "$W/hashbrown.o" 2>"$W/$T.lerr" \
+    || { echo "$T link FAIL"; grep -iE "error|undefined" "$W/$T.lerr" | head; exit 1; }
+  "$W/${T}_bin" || { echo "$T RUNTIME FAIL"; exit 1; }
+done
+echo "=== rusty (std) RUNTIME PASS ==="
