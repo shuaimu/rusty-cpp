@@ -69,6 +69,13 @@ int main() {
         assert(*b == 7 && sync_mod::Arc<int>::strong_count(a) == 2); }
       assert(sync_mod::Arc<int>::strong_count(a) == 1); }
 
-    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc)\n");
+
+    // vec![x; n] (from_elem)
+    { auto vf = vec::from_elem(7, static_cast<size_t>(5));
+      assert(vf.len() == 5);
+      const auto& r = vf;
+      for (size_t i = 0; i < 5; ++i) assert(r[i] == 7); }
+
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem)\n");
     return 0;
 }

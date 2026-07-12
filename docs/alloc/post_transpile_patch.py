@@ -868,8 +868,13 @@ def _alloc_specific(cpp_out: Path):
         # injection anchors on an import line we stripped, so inject directly at
         # global scope before the first `namespace vec {`.
         stubs = (
+            # SpecFromElem must DECLARE a concrete return type (a deduced
+            # return can't be used before the definition, and callers appear
+            # mid-module); the real body is appended at end-of-module where
+            # vec::Vec is complete.
+            "namespace vec { export template<typename T, typename A> struct Vec; }\n"
             "struct SpecFromElem { template<typename T, typename A>"
-            " static auto from_elem(T elem, std::size_t n, A alloc); };\n"
+            " static vec::Vec<T, A> from_elem(T elem, std::size_t n, A alloc); };\n"
             "template<typename T, typename Iter> struct SpecFromIter"
             " { template<typename I> static auto from_iter(I); };\n"
             "template<typename T, typename Iter> struct SpecExtend"
@@ -881,6 +886,18 @@ def _alloc_specific(cpp_out: Path):
         )
         if "struct SpecFromElem {" not in t and "\nnamespace vec {" in t:
             t = t.replace("\nnamespace vec {", "\n" + stubs + "\nnamespace vec {", 1)
+            # from_elem's real body (vec![x; n]): out-of-line at end-of-module,
+            # where vec::Vec is complete. Semantics = Rust's SpecFromElem
+            # default: with_capacity + n cloned pushes.
+            t += (
+                "\n// vec![x; n] support (SpecFromElem::from_elem out-of-line body)\n"
+                "template<typename T, typename A>\n"
+                "vec::Vec<T, A> SpecFromElem::from_elem(T elem, std::size_t n, A alloc) {\n"
+                "    auto v = vec::Vec<T, A>::with_capacity_in(n, std::move(alloc));\n"
+                "    for (std::size_t i = 0; i < n; ++i) v.push(rusty::clone(elem));\n"
+                "    return v;\n"
+                "}\n"
+            )
         # ── borrow (Cow/ToOwned) submodule ──
         # vec-side impls (From<Vec<T>>/PartialEq<Vec<U>> for Cow<[T]>, from
         # vec/cow.rs + vec/partial_eq.rs) are spliced into borrow::Cow's class
