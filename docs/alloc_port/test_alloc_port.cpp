@@ -32,6 +32,10 @@ int main() {
     { long sum=0; int cnt=0; auto it=v3.into_iter();
       while(true){auto n=it.next(); if(!n.is_some())break; sum+=n.unwrap(); ++cnt;}
       assert(cnt==3 && sum==6); }
+
+    // Vec range-for + std algorithms (needs begin/end members)
+    { auto vr = VI::new_(); vr.push(3); vr.push(7); vr.push(9);
+      long s2=0; for (const auto& x : vr) s2 += x; assert(s2==19); }
     std::printf("alloc_port BROAD runtime OK\n");
     return 0;
 }

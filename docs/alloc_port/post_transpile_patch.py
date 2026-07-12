@@ -381,6 +381,26 @@ def _alloc_specific(cpp_out: Path):
         # which mis-types the deque as its own element. Call the member directly.
         t = t.replace("rusty::get((*this), ", "this->get(")
         t = t.replace("rusty::get_mut((*this), ", "this->get_mut(")
+        # Vec has no begin()/end() members, so range-for and the winnow
+        # slice-`contains` dispatcher don't fire (contains silently returns
+        # false). Inject them (verbatim vec_port), anchored before as_mut_ptr.
+        t = t.replace(
+            "constexpr std::add_pointer_t<T> as_mut_ptr() {",
+            "T* begin() { return this->as_mut_ptr(); }\n"
+            "        T* end() { return this->as_mut_ptr() + this->len_field; }\n"
+            "        const T* begin() const { return this->as_ptr(); }\n"
+            "        const T* end() const { return this->as_ptr() + this->len_field; }\n"
+            "        constexpr std::add_pointer_t<T> as_mut_ptr() {",
+        )
+        # Vec::from([T;N]): the owned by-value From is the intended one; the
+        # `std::array<T,N>&` reference overload only collides under C++ ref
+        # binding (3-overload ambiguity). Delete it.
+        t = re.sub(
+            r"\n\s*template<size_t N>\n\s*static Vec<T> from\(std::array<T, N>& s\) \{\n"
+            r"\s*return Vec<T, A>::from\(rusty::as_mut_slice\(s\)\);\n\s*\}\n",
+            "\n",
+            t,
+        )
         # RawVecInner::shrink_unchecked passes the raw NonNull<u8> from
         # alloc.shrink() straight into set_ptr_and_cap, whose param is the fat
         # NonNullSlice<u8> with an EXPLICIT NonNull ctor → copy-init ill-formed.
