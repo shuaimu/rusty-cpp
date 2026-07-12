@@ -8,8 +8,8 @@ the crate family — with each translated crate a matrix target:
 | Rust crate | role | our treatment |
 |---|---|---|
 | `core` | no-alloc fundamentals; where compiler intrinsics live | stays HAND-WRITTEN (`include/rusty/*.hpp`) — this is the runtime/FFI boundary, same reasoning as Rust keeping core magical |
-| `alloc` | heap types: Vec, VecDeque, Box, Rc, Arc, String, BTreeMap… | TRANSPILED as module `alloc` — matrix target ✅ (vec+raw_vec+vec_deque runtime-green); WIDEN to remaining submodules |
-| `std` | facade + OS layer: HashMap(hashbrown), io, fs, thread, sync | TRANSPILE as module **`rusty`** — renamed (C++ `std` collision). Convergence: the transpiler already lowers Rust `std::` to C++ `rusty::`, and the hand-written umbrella module is already named `rusty`; the transpiled std progressively REPLACES the hand-written umbrella. Standalone build until cutover (they'd collide in one TU). |
+| `alloc` | heap types: Vec, VecDeque, Box, Rc, Arc, String, BTreeMap… | TRANSPILED as module `alloc` — matrix target ✅ (8 submodules runtime-green: vec, raw_vec, vec_deque, binary_heap, linked_list, borrow, rc, sync/Arc); still out: btree (#53 machinery), boxed/string (large) |
+| `std` | facade + OS layer: HashMap(hashbrown), io, fs, thread, sync | TRANSPILED as module **`rusty`** — matrix target ✅ (collections::hash slice runtime-green over recursively-transpiled hashbrown 0.16.1; pipeline docs/rusty/) — renamed (C++ `std` collision). Convergence: the transpiler already lowers Rust `std::` to C++ `rusty::`, and the hand-written umbrella module is already named `rusty`; the transpiled std progressively REPLACES the hand-written umbrella. Standalone build until cutover (they'd collide in one TU). |
 
 std's OS-facing parts (fs/net/process/thread/sys) map onto the hand-written
 runtime rather than being transpiled rawly — same boundary logic as core.
