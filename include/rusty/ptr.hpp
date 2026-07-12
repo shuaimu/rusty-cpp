@@ -124,6 +124,20 @@ public:
         return reinterpret_cast<std::uintptr_t>(ptr_);
     }
 
+    // Rust `NonNull::without_provenance(addr)` — an address-only,
+    // never-dereferenced pointer (Weak::new's usize::MAX dangling sentinel).
+    // Accepts NonZero-likes (`.get()`) or integrals.
+    template<typename AddrLike>
+    static NonNull<T> without_provenance(AddrLike addr_like) noexcept {
+        std::uintptr_t a;
+        if constexpr (requires { addr_like.get(); }) {
+            a = static_cast<std::uintptr_t>(addr_like.get());
+        } else {
+            a = static_cast<std::uintptr_t>(addr_like);
+        }
+        return NonNull<T>(reinterpret_cast<T*>(a));
+    }
+
     // Rust's `NonNull::from(&mut T)` / `NonNull::from(&T)` converts a
     // borrow into a non-null raw-pointer wrapper. In transpiled C++ the
     // `&mut T` argument arrives as a `T*` (e.g. the return of
@@ -716,8 +730,29 @@ public:
     constexpr std::size_t as_nonzero() const noexcept { return value_; }
     template<typename T>
     static constexpr Alignment of() noexcept { return Alignment(alignof(T)); }
+    // Rust `Alignment::of_val_raw(ptr)` — the pointee's alignment. The port
+    // has no DSTs, so this is just alignof of the (sized) pointee.
+    template<typename P>
+    static constexpr Alignment of_val_raw(P* /*p*/) noexcept { return Alignment(alignof(P)); }
     constexpr bool operator==(const Alignment& o) const noexcept = default;
 };
+
+// Rust `ptr::addr_eq(a, b)` — compare pointers by ADDRESS only (ignores
+// pointee types / any would-be metadata; the port has no fat pointers).
+template<typename A2, typename B2>
+inline bool addr_eq(const A2* a, const B2* b) noexcept {
+    return static_cast<const void*>(a) == static_cast<const void*>(b);
+}
+
+// Rust `ptr::from_ref(&v)` / `ptr::from_mut(&mut v)` — reference to raw
+// pointer. from_ref returns a MUTABLE pointer (Rust yields *const T, but the
+// transpiled cast sites re-type it to byte pointers for memcpy SOURCES —
+// const_cast here avoids a cast-away-const error at those sites; the
+// storage is never written through this path).
+template<typename T>
+inline T* from_ref(const T& r) noexcept { return const_cast<T*>(&r); }
+template<typename T>
+inline T* from_mut(T& r) noexcept { return &r; }
 
 // `core::ptr::replace(dst, src)` — atomic-ish swap that returns the
 // old value while overwriting `*dst`. For our purposes (cell_port

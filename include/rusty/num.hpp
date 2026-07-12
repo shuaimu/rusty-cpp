@@ -43,6 +43,9 @@ private:
 public:
     constexpr explicit NonZero(T value) noexcept : value_(value) {}
 
+    // Rust `NonZero*::MAX` (Weak::new's dangling-sentinel address).
+    inline static const NonZero<T> MAX = NonZero<T>(std::numeric_limits<T>::max());
+
     static Option<NonZero<T>> new_(T value) noexcept {
         if (value == static_cast<T>(0)) {
             return Option<NonZero<T>>(rusty::None);

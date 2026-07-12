@@ -241,6 +241,151 @@ def _patch_linked_list(t: str) -> str:
     return "".join(out)
 
 
+def _replace_method_body(t: str, sig_marker: str, new_body_line: str) -> str:
+    """Replace the balanced-brace body of the method whose signature LINE
+    contains sig_marker (and an opening `{`) with `{ new_body_line }`.
+    Line-walk, all occurrences."""
+    lines = t.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if sig_marker in line and "{" in line and not line.lstrip().startswith("//"):
+            indent = re.match(r"\s*", line).group(0)
+            head = line[: line.index("{") + 1]
+            out.append(f"{head} {new_body_line} }}\n")
+            depth = 0
+            seen = False
+            j = i
+            while j < len(lines):
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1
+                        seen = True
+                    elif ch == "}":
+                        depth -= 1
+                j += 1
+                if seen and depth == 0:
+                    break
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
+def _delete_method(t: str, sig_marker: str) -> str:
+    """Delete the whole method (signature line through balanced close) whose
+    signature line contains sig_marker. Line-walk, all occurrences."""
+    lines = t.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if sig_marker in line and "{" in line and not line.lstrip().startswith("//"):
+            depth = 0
+            seen = False
+            j = i
+            while j < len(lines):
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1
+                        seen = True
+                    elif ch == "}":
+                        depth -= 1
+                j += 1
+                if seen and depth == 0:
+                    break
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
+def _rc_rules(t: str) -> str:
+    """rc.rs (Rc/Weak) submodule rules."""
+    # `Global.allocate(...)` — a unit TYPE used with the dot operator.
+    t = t.replace("rusty::alloc::Global.", "rusty::alloc::Global{}.")
+    # to_rc_slice UFCS fwd-decls use a 1-arg Rc before the defaulted decl.
+    t = t.replace(
+        "::rc::Rc<std::span<const T>> to_rc_slice",
+        "::rc::Rc<std::span<const T>, rusty::alloc::Global> to_rc_slice",
+    )
+    # Rust passes the fn item `<*mut u8>::cast` as allocate_for_layout's
+    # mem_to_rc_inner callback; it emits as bare `::cast` (unparseable). The
+    # DEF below re-types the pointer itself (correctly, with ITS OWN T), so
+    # the callback arg is dead — pass a parseable dummy.
+    t = t.replace(", ::cast)", ", 0)")
+    t = t.replace(
+        "auto inner = mem_to_rc_inner(rusty::as_ptr(ptr_shadow1.as_non_null_ptr()));",
+        "auto inner = reinterpret_cast<std::add_pointer_t<RcInner<T>>>("
+        "rusty::as_ptr(ptr_shadow1.as_non_null_ptr())); (void)mem_to_rc_inner;",
+    )
+    # `let x = if let Some(v) = e { v } else { return };` — the diverging else
+    # embeds `return` as an EXPRESSION (`decltype((return))`, `.emplace(return)`).
+    # Rewrite to an early-return. (Transpiler bug, also hit by sync.rs.)
+    t = re.sub(
+        r"std::optional<std::remove_cvref_t<decltype\(\(return\)\)>> (\w+);\n"
+        r"(\s*)\{\n"
+        r"\s*auto&& (\w+) = ([^\n]+);\n"
+        r"\s*if \(\3\.is_some\(\)\) \{\n"
+        r"\s*auto (\w+) = \3\.unwrap\(\);\n"
+        r"\s*\1\.emplace\(\5\);\n"
+        r"\s*\} else \{ \1\.emplace\(return\); \}\n"
+        r"\s*\}\n"
+        r"\s*const auto (\w+) = std::move\(\1\)\.value\(\);",
+        r"auto&& \3 = \4;\n"
+        r"\2if (!\3.is_some()) { return; }\n"
+        r"\2const auto \6 = \3.unwrap();",
+        t,
+    )
+    # dyn-Any downcast (Rust `Rc<dyn Any>::downcast`) — no C++ dyn-Any model;
+    # abort-stub (signature kept so the class parses).
+    t = _replace_method_body(
+        t, "rusty::Result<Rc<T, A>, Rc<T, A>> downcast() const {", "std::abort();"
+    )
+    t = _replace_method_body(t, "Rc<T, A> downcast_unchecked() const {", "std::abort();")
+    # From<&str> for Rc<str> — the body routes through a span-of-span
+    # mis-emission and collides with another from(string_view) overload;
+    # str-Rc isn't part of the port surface. Delete.
+    t = _delete_method(t, "static Rc<std::string_view> from(std::string_view v) {")
+    # is_dangling: `(ptr as *const ()).addr() == usize::MAX` — addr() on a
+    # cast raw pointer; spell the address read directly.
+    t = t.replace(
+        "(reinterpret_cast<const rusty::Unit*>(ptr))->addr()",
+        "reinterpret_cast<std::uintptr_t>(ptr)",
+    )
+    # make_mut: local shadows the free fn (`auto size_of_val = size_of_val(…)`
+    # — deduced type in its own initializer).
+    t = t.replace(
+        "auto size_of_val = size_of_val(",
+        "auto size_of_val_v = size_of_val(",
+    )
+    t = t.replace(
+        "reinterpret_cast<uint8_t*>(in_progress.data_ptr()), std::move(size_of_val));",
+        "reinterpret_cast<uint8_t*>(in_progress.data_ptr()), std::move(size_of_val_v));",
+    )
+    # UniqueRc::drop: `drop_in_place((*this).deref_mut())` — no deref_mut
+    # member; the target is the RcInner's value field.
+    t = t.replace(
+        "drop_in_place((*this).deref_mut());",
+        "drop_in_place(&(*rusty::as_ptr(this->ptr)).value);",
+    )
+    # drop_slow builds Rust's `Weak<T, &A>` (allocator BY REFERENCE); with the
+    # stateless Global pass a copy (the by-value ctor).
+    t = t.replace(
+        "Weak<T, A>(this->ptr, &this->alloc)",
+        "Weak<T, A>(this->ptr, this->alloc)",
+    )
+    # `Rc::from_inner(Box::leak(b).into())` — the NonNull-from-ref `.into()`
+    # is dropped, leaving a raw RcInner<T>*; from_inner takes NonNull. Wrap.
+    t = re.sub(
+        r"from_inner\(\((rusty::Box<RcInner<T>>::[^;]*)\)\.leak\(\)\);",
+        r"from_inner(rusty::ptr::NonNull<RcInner<T>>::new_unchecked((\1).leak()));",
+        t,
+    )
+    return t
+
+
 def _alloc_specific(cpp_out: Path):
     """Rules the per-port patchers apply per-FILE (so they miss the single
     module) or that only arise in the consolidated crate. Applied glob-wide."""
@@ -378,6 +523,8 @@ def _alloc_specific(cpp_out: Path):
         )
         # Rename the hoisted Guard/Dropper collisions.
         t = _disambiguate_hoisted_helpers(t)
+        # rc.rs (Rc/Weak) rules.
+        t = _rc_rules(t)
         # Stub next_chunk (ill-formed rusty::array::IntoIter return type poisons
         # the enclosing IntoIter class → cascades to clone/next_back "not a
         # member").

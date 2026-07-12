@@ -2,6 +2,7 @@
 #define RUSTY_MEM_HPP
 
 #include <array>
+#include <rusty/maybe_uninit.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -17,6 +18,11 @@
 
 namespace rusty {
 namespace mem {
+
+// Rust spells it `mem::MaybeUninit`; the port's class lives at rusty:: root
+// (maybe_uninit.hpp). Alias it here so `mem::MaybeUninit<T>` paths resolve.
+using ::rusty::MaybeUninit;
+
 
 namespace detail {
 // The global forgotten-address table is GONE under the strict null-state

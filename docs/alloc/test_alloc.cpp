@@ -51,6 +51,15 @@ int main() {
       assert(l.pop_back().unwrap()==3);
       assert(l.pop_front().unwrap()==2); }
 
-    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList)\n");
+
+    // Rc: shared ownership with correct refcounting
+    { auto a = rc::Rc<int>::new_(42);
+      assert(*a == 42);
+      assert(rc::Rc<int>::strong_count(a) == 1);
+      { auto b = a.clone();
+        assert(*b == 42 && rc::Rc<int>::strong_count(a) == 2); }
+      assert(rc::Rc<int>::strong_count(a) == 1); }
+
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc)\n");
     return 0;
 }

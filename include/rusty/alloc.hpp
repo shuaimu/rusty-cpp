@@ -38,6 +38,27 @@ struct Layout {
         return rusty::ptr::Alignment(align);
     }
 
+    // Rust `Layout::for_value_raw(ptr)` — layout of the (sized) pointee.
+    // The port has no DSTs, so this equals Layout::of the pointee type.
+    template<typename P>
+    static constexpr Layout for_value_raw(P* /*p*/) noexcept {
+        using V = std::remove_cv_t<P>;
+        return Layout{sizeof(V), alignof(V)};
+    }
+
+    // Rust `Layout::padding_needed_for(align)` — bytes to round `size` up to
+    // the next multiple of `align`.
+    template<typename Al>
+    constexpr std::size_t padding_needed_for(Al align_like) const noexcept {
+        std::size_t a;
+        if constexpr (requires { align_like.as_usize(); }) {
+            a = align_like.as_usize();
+        } else {
+            a = static_cast<std::size_t>(align_like);
+        }
+        return (a - (size % a)) % a;
+    }
+
     static constexpr Layout from_size_align_unchecked(
         std::size_t size,
         std::size_t align) noexcept {
