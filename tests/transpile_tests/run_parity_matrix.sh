@@ -26,6 +26,15 @@ declare -a MATRIX_CRATES=(
     # btree: committed local crate like `vec` — focused BTreeMap/BTreeSet
     # parity tests (ordered iteration, ranges, entry API, set algebra).
     "btree"
+    # alloc_port: the CONSOLIDATED stdlib module — Rust's `alloc` crate
+    # (vec + raw_vec + collections/vec_deque) emitted as ONE C++20 module via
+    # --expand, dissolving the Vec<->VecDeque cycle stubs and the per-port
+    # fragmentation. Not a transpiled consumer crate: validated by building the
+    # module and RUNNING a runtime assertion test (docs/alloc_port/runtest.sh),
+    # which instantiates Vec with a concrete type (the --precompile skips
+    # template bodies) and asserts behavior. Special-cased in
+    # run_parity_for_crate. See docs/port_regen/STATUS.md.
+    "alloc_port"
     # itertools: temporarily disabled — iterator-item engine + FoldWhile_Ok done
     # (quick leak-free), remaining = tree_reduce alias-hoist (UFCS path, collision-
     # safe) + projected-push transpile leaks. Re-enable when those land.
@@ -335,6 +344,13 @@ fi
 
 ensure_crate_checkout() {
     local crate="$1"
+
+    # alloc_port has no crate checkout — it builds the stdlib module from the
+    # rustc sysroot source via docs/alloc_port/build.sh (see run_parity_for_crate).
+    if [[ "${crate}" == "alloc_port" ]]; then
+        return 0
+    fi
+
     local crate_dir="${SCRIPT_DIR}/${crate}"
     local work_dir="${WORK_ROOT}/${crate}"
 
@@ -378,6 +394,34 @@ ensure_crate_checkout() {
 
 run_parity_for_crate() {
     local crate="$1"
+
+    # alloc_port is the consolidated stdlib MODULE itself, not a transpiled
+    # consumer crate. Validate it by building the module + running the runtime
+    # assertion test (which INSTANTIATES Vec with a concrete type — something
+    # the module's own --precompile never does — and asserts behavior).
+    if [[ "${crate}" == "alloc_port" ]]; then
+        local work_dir="${WORK_ROOT}/alloc_port"
+        local matrix_log="${work_dir}.log"
+        echo "crate: alloc_port (consolidated stdlib module: build + runtime test)"
+        echo "  command: bash ${REPO_ROOT}/docs/alloc_port/runtest.sh ${work_dir}"
+        if [[ "${DRY_RUN}" -eq 1 ]]; then
+            return 0
+        fi
+        mkdir -p "${WORK_ROOT}"
+        if RUSTY_CPP_TRANSPILER_BIN="${TRANSPILER_BIN}" \
+              bash "${REPO_ROOT}/docs/alloc_port/runtest.sh" "${work_dir}" \
+              >"${matrix_log}" 2>&1 \
+           && grep -q "alloc_port RUNTIME PASS" "${matrix_log}"; then
+            echo "  PASS: alloc_port"
+            return 0
+        fi
+        record_first_failure "alloc_port" "${work_dir}" "${matrix_log}"
+        echo "  FAIL: alloc_port" >&2
+        echo "  tail of runtest log:" >&2
+        tail -n 40 "${matrix_log}" >&2 || true
+        return 1
+    fi
+
     local crate_dir="${SCRIPT_DIR}/${crate}"
     local manifest_rel="${CRATE_MANIFEST_REL[${crate}]:-Cargo.toml}"
     local manifest="${crate_dir}/${manifest_rel}"

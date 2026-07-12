@@ -25,10 +25,16 @@ version = "0.0.1"
 edition = "2021"
 [lib]
 path = "src/lib.rs"
+# Empty [workspace] so cargo-expand treats this as a standalone crate even
+# when the work dir is INSIDE the repo (e.g. .rusty-parity-matrix/alloc_port);
+# otherwise cargo believes it belongs to the repo workspace and `cargo expand`
+# aborts, forcing the per-submodule fallback (illegal C++ module cycle).
+[workspace]
 EOF
 printf '#![allow(unused)]\npub mod raw_vec;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
 bash "$REPO/docs/alloc_port/prep.sh" "$W/src" >/dev/null
-"$REPO/target/release/rusty-cpp-transpiler" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1
+TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
+"$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1
 echo "transpile exit=$? ($(tail -1 "$W/transpile.log"))"
 CPPM="$W/out/alloc_port.cppm"
 [[ -f "$CPPM" ]] || { echo "no single-module output — see $W/transpile.log"; exit 1; }
