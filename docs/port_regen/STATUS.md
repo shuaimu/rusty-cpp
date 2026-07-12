@@ -1,5 +1,22 @@
 # Stdlib-port regen un-rot — status & method
 
+## ★★ DIRECTION (2026-07-12, user): translate the Rust std FAMILY, matrix-gated
+
+The end goal is translating Rust's std library **as Rust structures it** —
+the crate family — with each translated crate a matrix target:
+
+| Rust crate | role | our treatment |
+|---|---|---|
+| `core` | no-alloc fundamentals; where compiler intrinsics live | stays HAND-WRITTEN (`include/rusty/*.hpp`) — this is the runtime/FFI boundary, same reasoning as Rust keeping core magical |
+| `alloc` | heap types: Vec, VecDeque, Box, Rc, Arc, String, BTreeMap… | TRANSPILED as module `alloc` — matrix target ✅ (vec+raw_vec+vec_deque runtime-green); WIDEN to remaining submodules |
+| `std` | facade + OS layer: HashMap(hashbrown), io, fs, thread, sync | TRANSPILE as module **`rusty`** — renamed (C++ `std` collision). Convergence: the transpiler already lowers Rust `std::` to C++ `rusty::`, and the hand-written umbrella module is already named `rusty`; the transpiled std progressively REPLACES the hand-written umbrella. Standalone build until cutover (they'd collide in one TU). |
+
+std's OS-facing parts (fs/net/process/thread/sys) map onto the hand-written
+runtime rather than being transpiled rawly — same boundary logic as core.
+First std slice: `std::collections::hash` (HashMap/HashSet over hashbrown —
+hashbrown already transpiles in the matrix) + `std::hash` (RandomState with
+stubbed seeding, SipHash is pure Rust).
+
 ## ★ SINGLE-CRATE alloc COMPILES CLEAN — 455 → 0 (2026-07-11)
 
 The un-rot direction pivoted (validated with the user) from per-port
