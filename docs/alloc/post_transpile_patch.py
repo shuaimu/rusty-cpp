@@ -132,6 +132,115 @@ def _stub_next_chunk(t: str) -> str:
     return "".join(out)
 
 
+def _scope_binary_heap(t: str) -> str:
+    """The vec-scoped global rules (`IntoIter<T[,A]>` -> into_iter::IntoIter,
+    `IntoIter into_iter(` -> `IntoIter<T, A> into_iter(`) are WRONG inside
+    `namespace binary_heap`: its IntoIter is its own direct member (no
+    into_iter child namespace) and BinaryHeap carries a `using IntoIter = …;`
+    alias that shadows the template name. Revert both inside binary_heap
+    regions only (brace-depth tracked)."""
+    lines = t.split("\n")
+    depth = 0
+    bh_depth = None
+    for i, line in enumerate(lines):
+        if bh_depth is not None and depth >= bh_depth:
+            line = re.sub(r"(?<![:\w])into_iter::IntoIter<", "IntoIter<", line)
+            line = line.replace("IntoIter<T, A> into_iter(", "IntoIter into_iter(")
+            lines[i] = line
+        idx = line.find("namespace binary_heap")
+        if idx != -1 and bh_depth is None:
+            bh_depth = depth + line[:idx].count("{") + 1
+        depth += line.count("{") - line.count("}")
+        if bh_depth is not None and depth < bh_depth:
+            bh_depth = None
+    return "\n".join(lines)
+
+
+def _patch_linked_list(t: str) -> str:
+    """linked_list rules: (R1) the UFCS SpecExtend fwd-decl elides Rust's
+    default allocator param — spell it; (R2) the emitter qualifies iterator
+    types `into_iter::IntoIter` by the vec/vec_deque submodule convention, but
+    linked_list is a single-FILE module (IntoIter is a direct member) — inside
+    linked_list regions qualify absolutely instead (a bare `IntoIter<` would
+    hit the member alias, a non-template name); (R3) stub assert_covariance
+    (Rust dead code that exists only for rustc's lifetime-variance check; its
+    emission force-instantiates LinkedList<string_view> through Box APIs
+    nothing else needs)."""
+    t = t.replace(
+        "::collections::linked_list::LinkedList<T>",
+        "::collections::linked_list::LinkedList<T, rusty::alloc::Global>",
+    )
+    # Node::into_element (Rust `fn into_element(self: Box<Self, A>) -> T`) was
+    # emitted as a member TEMPLATE over the Box's allocator A — undeducible at
+    # the `(*box).into_element()` call and unused in the body. De-template it.
+    t = t.replace(
+        "template<typename A>\n            T into_element() {",
+        "T into_element() {",
+    )
+    out = []
+    depth = 0
+    ll_stack = []
+    for line in t.splitlines(keepends=True):
+        m = re.match(r"^\s*namespace (\w+) \{\s*$", line)
+        if m and m.group(1) == "linked_list":
+            ll_stack.append(depth)
+        if ll_stack and not (m and m.group(1) == "linked_list"):
+            line = re.sub(
+                r"(?<![\w:])into_iter::IntoIter<",
+                "::collections::linked_list::IntoIter<",
+                line,
+            )
+            # Rust `&self.alloc` (by-ref allocator) lowered to a C++ POINTER,
+            # but Box::new_in/from_raw_in take A by value. Global is a
+            # stateless empty struct — pass a copy.
+            line = line.replace("&this->alloc", "this->alloc")
+            # Rust `Option<NonNull<Node<T>>>` is COPY: push_front_node/
+            # push_back_node assign `node` into a link field in the match arm
+            # AND then into head/tail — two uses of one value. The emission
+            # std::move's BOTH, so the second gets a moved-out husk (None) and
+            # the list silently corrupts (runtime-caught). Copy instead —
+            # exactly Rust's Copy semantics.
+            line = line.replace("std::move(node_shadow1)", "node_shadow1")
+            # Rust `Box<Node<T>, &A>` (allocator-BY-REFERENCE Box) — with the
+            # stateless Global it degenerates to Box<Node<T>>; and rusty::Box
+            # has from_raw (no allocator-taking from_raw_in).
+            line = line.replace("rusty::Box<Node<T>, const A&>", "rusty::Box<Node<T>>")
+            line = line.replace(
+                "::from_raw_in(rusty::as_ptr(node), this->alloc)",
+                "::from_raw(rusty::as_ptr(node))",
+            )
+            # Cursor paths: the Box type arg was spelled from decltype(as_ptr(x))
+            # = Node<T>* (a POINTER — Box-of-pointer is wrong); unwrap it and
+            # drop the by-ref allocator arg.
+            line = re.sub(
+                r"rusty::Box<std::remove_cvref_t<decltype\(\(rusty::as_ptr\((\w+)\)\)\)>>"
+                r"::from_raw_in\(rusty::as_ptr\(\1\), &this->list\.alloc\)",
+                r"rusty::Box<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::as_ptr(\1)))>>>"
+                r"::from_raw(rusty::as_ptr(\1))",
+                line,
+            )
+        depth += line.count("{") - line.count("}")
+        while ll_stack and depth <= ll_stack[-1]:
+            ll_stack.pop()
+        out.append(line)
+    t = "".join(out)
+    lines = t.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        m = re.match(r"^(\s*)void assert_covariance\(\) \{\s*$", lines[i])
+        if m:
+            indent = m.group(1)
+            j = i + 1
+            while j < len(lines) and not lines[j].startswith(indent + "}"):
+                j += 1
+            out.append(indent + "void assert_covariance() {}\n")
+            i = j + 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
+
+
 def _alloc_specific(cpp_out: Path):
     """Rules the per-port patchers apply per-FILE (so they miss the single
     module) or that only arise in the consolidated crate. Applied glob-wide."""
@@ -552,6 +661,71 @@ def _alloc_specific(cpp_out: Path):
         )
         if "struct SpecFromElem {" not in t and "\nnamespace vec {" in t:
             t = t.replace("\nnamespace vec {", "\n" + stubs + "\nnamespace vec {", 1)
+        # ── borrow (Cow/ToOwned) submodule ──
+        # vec-side impls (From<Vec<T>>/PartialEq<Vec<U>> for Cow<[T]>, from
+        # vec/cow.rs + vec/partial_eq.rs) are spliced into borrow::Cow's class
+        # body but keep the `Vec` spelling that's valid only inside namespace
+        # vec — qualify. (The operator== rule is indent-anchored: 8 spaces =
+        # Cow's body; vec::Vec's own copy at 12 spaces is untouched.)
+        t = t.replace(
+            "static Cow<std::span<const T>> from(Vec<T> v) {",
+            "static Cow<std::span<const T>> from(vec::Vec<T> v) {",
+        )
+        t = t.replace(
+            "static Cow<std::span<const T>> from(const Vec<T>& v) {",
+            "static Cow<std::span<const T>> from(const vec::Vec<T>& v) {",
+        )
+        t = t.replace(
+            "\n        bool operator==(const Vec<U, A>& other) const {",
+            "\n        bool operator==(const vec::Vec<U, A>& other) const {",
+        )
+        # ToOwnedTraits' primary template hard-requires B::Owned, but foreign B
+        # (str -> std::string_view, [T] -> std::span<const T>) have no member
+        # Owned; Rust's blanket `impl<T: Clone> ToOwned for T` makes identity
+        # the fallback. SFINAE the primary + add the two foreign specializations.
+        t = t.replace(
+            "template <class B> struct ToOwnedTraits { using Owned = typename B::Owned; };\n"
+            "    template <class S> struct ToOwnedTraits<S*> { using Owned = typename ToOwnedTraits<S>::Owned; };\n"
+            "    template <class S> struct ToOwnedTraits<S&> { using Owned = typename ToOwnedTraits<S>::Owned; };",
+            "template <class B, class = void> struct ToOwnedTraits { using Owned = std::remove_cvref_t<B>; };\n"
+            "    template <class B> struct ToOwnedTraits<B, std::void_t<typename B::Owned>> { using Owned = typename B::Owned; };\n"
+            "    template <class S> struct ToOwnedTraits<S*, void> { using Owned = typename ToOwnedTraits<S>::Owned; };\n"
+            "    template <class S> struct ToOwnedTraits<S&, void> { using Owned = typename ToOwnedTraits<S>::Owned; };\n"
+            "    template <> struct ToOwnedTraits<std::string_view, void> { using Owned = rusty::String; };\n"
+            "    template <class T> struct ToOwnedTraits<std::span<const T>, void> { using Owned = vec::Vec<T>; };",
+        )
+        # ── binary_heap: usize::BITS leaked verbatim (assoc-const on primitive).
+        t = t.replace("usize::BITS", "(8u * sizeof(size_t))")
+        # binary_heap instantiation fixes (surface with concrete T):
+        # Rust raw-pointer args emitted as lvalues — restore the address-of.
+        t = t.replace(
+            "auto elt = rusty::ptr::read(data[std::move(pos)]);",
+            "auto elt = rusty::ptr::read(&data[std::move(pos)]);",
+        )
+        t = t.replace(
+            "rusty::detail::deref_if_pointer_like(this->elt)), this->data[std::move(pos)], 1);",
+            "rusty::detail::deref_if_pointer_like(this->elt)), &this->data[std::move(pos)], 1);",
+        )
+        # mem::swap takes T&, T& (Rust &mut lowered to pointer — strip).
+        t = t.replace(
+            "rusty::mem::swap(&item, &this->data[static_cast<size_t>(0)]);",
+            "rusty::mem::swap(item, this->data[static_cast<size_t>(0)]);",
+        )
+        # Hole::element returns const T& but elt is ManuallyDrop<T> — deref.
+        t = t.replace(
+            "const T& element() const {\n                return this->elt;",
+            "const T& element() const {\n                return *this->elt;",
+        )
+        # linked_list: Node::into_element(self: Box<Self>) — deref_if_pointer_like
+        # does not peel rusty::Box; deref explicitly (Box::operator*).
+        t = t.replace(
+            "rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).into_element()",
+            "(*std::forward<decltype(_v)>(_v)).into_element()",
+        )
+        # ── region-scoped reverts/qualifications for the single-file submodules
+        # (must run AFTER the vec-scoped global IntoIter rules above).
+        t = _scope_binary_heap(t)
+        t = _patch_linked_list(t)
         if t != o:
             path.write_text(t)
 

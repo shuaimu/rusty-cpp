@@ -4,9 +4,11 @@
 # KEY: use --expand (cargo-expand → one flattened crate module). Per-submodule
 # emission creates ILLEGAL C++ module cycles (alloc.vec <-> alloc.collections.
 # vec_deque); Rust compiles a crate as ONE unit, so we emit ONE .cppm — no
-# inter-module imports, no cycle. Scope: vec+raw_vec+vec_deque (the proven
-# Vec<->VecDeque cluster). Widen to full collections once btree's NodeRef<auto>
-# inference leak is fixed (it panics --expand today).
+# inter-module imports, no cycle. Scope: vec+raw_vec+vec_deque+binary_heap+
+# linked_list+borrow. Still out: btree/rc/sync/boxed/string — gated on the
+# Box<auto>::new_uninit / NonNull<auto> lateral-inference transpiler fix
+# (rc 49 / arc 60 / btree 88 errors once unblocked) and, for boxed/string,
+# builtin-type self-definition mapping suppression (see STATUS.md).
 #
 # Usage: build.sh <work_dir>
 set -uo pipefail
@@ -17,7 +19,10 @@ rm -rf "$W"; mkdir -p "$W/src/collections"
 cp -r "$SRC/vec" "$W/src/vec"
 cp -r "$SRC/raw_vec" "$W/src/raw_vec"
 cp -r "$SRC/collections/vec_deque" "$W/src/collections/vec_deque"
-printf 'pub mod vec_deque;\npub use vec_deque::VecDeque;\n' > "$W/src/collections/mod.rs"
+cp -r "$SRC/collections/binary_heap" "$W/src/collections/binary_heap"
+cp "$SRC/collections/linked_list.rs" "$W/src/collections/linked_list.rs"
+cp "$SRC/borrow.rs" "$W/src/borrow.rs"
+printf 'pub mod vec_deque;\npub use vec_deque::VecDeque;\npub mod binary_heap;\npub use binary_heap::BinaryHeap;\npub mod linked_list;\npub use linked_list::LinkedList;\n' > "$W/src/collections/mod.rs"
 cat > "$W/Cargo.toml" <<EOF
 [package]
 name = "alloc"
@@ -31,7 +36,7 @@ path = "src/lib.rs"
 # aborts, forcing the per-submodule fallback (illegal C++ module cycle).
 [workspace]
 EOF
-printf '#![allow(unused)]\npub mod raw_vec;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
+printf '#![allow(unused)]\npub mod raw_vec;\npub mod borrow;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
 bash "$REPO/docs/alloc/prep.sh" "$W/src" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
 "$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1

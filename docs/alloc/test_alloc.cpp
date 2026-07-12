@@ -36,6 +36,21 @@ int main() {
     // Vec range-for + std algorithms (needs begin/end members)
     { auto vr = VI::new_(); vr.push(3); vr.push(7); vr.push(9);
       long s2=0; for (const auto& x : vr) s2 += x; assert(s2==19); }
-    std::printf("alloc BROAD runtime OK\n");
+
+    // BinaryHeap: max-order pop
+    { auto h = collections::binary_heap::BinaryHeap<int>::with_capacity(4);
+      h.push(3); h.push(9); h.push(1); h.push(7);
+      assert(h.pop().unwrap()==9 && h.pop().unwrap()==7 && h.pop().unwrap()==3 && h.pop().unwrap()==1);
+      assert(!h.pop().is_some()); }
+
+    // LinkedList: push/pop both ends, order preserved
+    { auto l = collections::linked_list::LinkedList<int>::new_();
+      l.push_back(2); l.push_front(1); l.push_back(3);
+      assert(l.len()==3);
+      assert(l.pop_front().unwrap()==1);
+      assert(l.pop_back().unwrap()==3);
+      assert(l.pop_front().unwrap()==2); }
+
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList)\n");
     return 0;
 }

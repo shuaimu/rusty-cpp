@@ -33,9 +33,6 @@ find "$SRC" -name "*.rs" -exec sed -i \
   -e 's|use crate::sync::|use std::sync::|g' \
   -e 's|realalloc::collections::TryReserveError|std::collections::TryReserveError|g' \
   -e 's|realalloc::collections::TryReserveErrorKind|std::collections::TryReserveErrorKind|g' \
-  -e 's|use crate::borrow::|use std::borrow::|g' \
-  -e 's|crate::borrow::Cow|std::borrow::Cow|g' \
-  -e 's|crate::borrow::ToOwned|std::borrow::ToOwned|g' \
   -e 's|use crate::fmt|use std::fmt|g' \
   -e 's|crate::fmt::|std::fmt::|g' \
   -e 's|use core::|use std::|g' \
