@@ -97,6 +97,53 @@ def _alloc_specific(cpp_out: Path):
         t = re.sub(r"rusty::iter::Copied<([^;]+?)> iter\)", r"\1 iter)", t)
         # std::hint branch hints have no C++ form.
         t = t.replace("std::hint::unlikely(", "(").replace("std::hint::likely(", "(")
+        # `using std::ub_checks;` (the module import survived even though the
+        # only member use was already rewritten) — nothing to import, strip it.
+        t = re.sub(r"\n\s*using std::ub_checks;", "", t)
+        # Stray cross-crate ref to the OLD per-port module surface; in the
+        # single crate it's the sibling submodule.
+        t = t.replace("rusty::port::vec::IntoIter", "vec::into_iter::IntoIter")
+        # `let (src, dst, len) = if … else …;` tuple-destructure: the transpiler
+        # emits the branch assignments but drops the hoisted binding decl.
+        # join_head_and_tail_wrapping is the one site; inject the decl (all
+        # three are physical indices → size_t, matching the vendored port).
+        t = t.replace(
+            "const auto join_head_and_tail_wrapping = [](auto& source_deque, "
+            "size_t drain_len, size_t head_len, size_t tail_len) {\n",
+            "const auto join_head_and_tail_wrapping = [](auto& source_deque, "
+            "size_t drain_len, size_t head_len, size_t tail_len) {\n"
+            "                                size_t src, dst, len;\n",
+        )
+        # Late-init `let ret; unsafe { ret = ptr::read(..); .. }` — the transpiler
+        # scopes `ret` inside the inner unsafe block, which closes before
+        # `return Some(ret)`. Dissolve the inner block so ret survives (it's
+        # move-initialized → can't be default-declared and hoisted).
+        t = re.sub(
+            r"\n( +)\{\n"
+            r"( +auto ptr_shadow1 = rusty::ptr::add\(.*?\n"
+            r" +auto ret = rusty::ptr::read\(ptr_shadow1\);\n"
+            r" +rusty::ptr::copy\(.*?\n)"
+            r" +\}\n"
+            r"( +this->set_len)",
+            r"\n\1\2\3",
+            t,
+            flags=re.DOTALL,
+        )
+        # `if const { size_of::<SRC>()==0 || … }` compile-time fences were
+        # elided to `(void)0`, which isn't bool-convertible. They guard ZST /
+        # debug-assert paths the port never exercises — make the guard false so
+        # the branch is dead.
+        t = t.replace(
+            "/* const-block elided (Rust 2024 compile-time fence) */ (void)0",
+            "false",
+        )
+        # `const { … }` value blocks emitted as an argument (const-eval seed)
+        # also collapse to `(void)0`; already covered by the replace above.
+        # `rusty::alloc::Global` is a (unit) TYPE; using it as a value needs an
+        # instance.
+        t = t.replace("= rusty::alloc::Global;", "= rusty::alloc::Global{};")
+        # `::IS_ZST` lost its `T::` type qualifier (bare-global ZST probe).
+        t = t.replace("rusty::detail::rust_not(::IS_ZST)", "rusty::detail::rust_not(T::IS_ZST)")
         # Spec* extension-trait stubs (real impls live in dropped spec_* modules
         # in the per-port layout; here they're forward-declared). The per-port
         # injection anchors on an import line we stripped, so inject directly at
