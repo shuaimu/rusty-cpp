@@ -41,6 +41,64 @@ def load(rel):
 
 import re
 
+
+def _disambiguate_hoisted_helpers(t: str) -> str:
+    """Rename duplicate `struct Guard`/`struct Dropper` that the transpiler
+    hoists to class scope (Rust method-local structs with a shared name →
+    C++ member-type redefinition). First occurrence keeps its name; each
+    later one is suffixed `_2`, `_3`, … and its uses within the following
+    method body are renamed to match. Indent-agnostic port of the
+    vec_deque_port helper (single module uses deeper indentation)."""
+    lines = t.splitlines(keepends=True)
+    counts: dict = {}
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\s+)struct (Guard|Dropper) \{\s*$", lines[i])
+        if not m:
+            i += 1
+            continue
+        indent, name = m.group(1), m.group(2)
+        counts[name] = counts.get(name, 0) + 1
+        if counts[name] == 1:
+            i += 1
+            continue
+        new_name = f"{name}_{counts[name]}"
+        # struct end: matching `};` at same brace depth.
+        depth = 0
+        seen = False
+        j = i
+        while j < len(lines):
+            for ch in lines[j]:
+                if ch == "{":
+                    depth += 1; seen = True
+                elif ch == "}":
+                    depth -= 1
+            j += 1
+            if seen and depth == 0:
+                break
+        struct_end = j
+        # method body end: depth back to 0, or next hoisted struct.
+        depth = 0
+        seen = False
+        method_end = struct_end
+        for k in range(struct_end, len(lines)):
+            if re.match(r"^\s+struct \w+ \{\s*$", lines[k]):
+                method_end = k
+                break
+            for ch in lines[k]:
+                if ch == "{":
+                    depth += 1; seen = True
+                elif ch == "}":
+                    depth -= 1
+            if seen and depth == 0:
+                method_end = k + 1
+                break
+        for r in range(i, method_end):
+            lines[r] = re.sub(rf"(?<![:\w]){name}\b", new_name, lines[r])
+        i = method_end
+    return "".join(lines)
+
+
 def _alloc_specific(cpp_out: Path):
     """Rules the per-port patchers apply per-FILE (so they miss the single
     module) or that only arise in the consolidated crate. Applied glob-wide."""
@@ -144,6 +202,45 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace("= rusty::alloc::Global;", "= rusty::alloc::Global{};")
         # `::IS_ZST` lost its `T::` type qualifier (bare-global ZST probe).
         t = t.replace("rusty::detail::rust_not(::IS_ZST)", "rusty::detail::rust_not(T::IS_ZST)")
+        # spec_extend_front(Copied<…> | Rev<Copied<…>>) — Rust perf
+        # specializations with no core::iter::Copied C++ analog; the generic
+        # template-I overload covers all callers. Delete both the UFCS
+        # forward-decls (end in `;`) and the class-method defs (have a body).
+        # (Vendored vec_deque_port deletes these too.)
+        t = re.sub(
+            r"\n\s*export template<[^\n]*>\n\s*void spec_extend_front\([^;{]*Copied[^;{]*\);",
+            "",
+            t,
+        )
+        _vd = load("docs/vec_deque_port/post_transpile_patch.py")
+        t = _vd._stub_copied_spec_extend_front(t)
+        # The stubber deletes the decl body but leaves the `export template<…>`
+        # head dangling ("expected unqualified-id"). Drop the orphan head.
+        t = re.sub(
+            r"\n\s*export template<[^\n]*>\n(\s*// patcher: spec_extend_front<Copied)",
+            r"\n\1",
+            t,
+        )
+        # The remaining spec_extend_front(Drain<…>) forward-decls use a bare
+        # `Drain` (the class-method def already qualifies it). Qualify to the
+        # defining submodule.
+        t = t.replace(
+            "self_, Drain<T, A2>",
+            "self_, collections::vec_deque::drain::Drain<T, A2>",
+        )
+        t = t.replace(
+            "std::declval<Drain<T, A2>>",
+            "std::declval<collections::vec_deque::drain::Drain<T, A2>>",
+        )
+        # Rename the hoisted Guard/Dropper collisions.
+        t = _disambiguate_hoisted_helpers(t)
+        # `usize::abs_diff` has no rusty analog and wasn't lowered; inline it
+        # (both operands are size_t → the std::move is a no-op copy).
+        t = re.sub(
+            r"(\w+)\.abs_diff\(std::move\((\w+)\)\)",
+            r"(std::max<size_t>(\1, \2) - std::min<size_t>(\1, \2))",
+            t,
+        )
         # Spec* extension-trait stubs (real impls live in dropped spec_* modules
         # in the per-port layout; here they're forward-declared). The per-port
         # injection anchors on an import line we stripped, so inject directly at
