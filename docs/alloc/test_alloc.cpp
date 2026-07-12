@@ -1,4 +1,4 @@
-import alloc_port;
+import alloc;
 #include <cassert>
 #include <utility>
 #include <cstdio>
@@ -36,6 +36,6 @@ int main() {
     // Vec range-for + std algorithms (needs begin/end members)
     { auto vr = VI::new_(); vr.push(3); vr.push(7); vr.push(9);
       long s2=0; for (const auto& x : vr) s2 += x; assert(s2==19); }
-    std::printf("alloc_port BROAD runtime OK\n");
+    std::printf("alloc BROAD runtime OK\n");
     return 0;
 }

@@ -1,40 +1,40 @@
 # Stdlib-port regen un-rot — status & method
 
-## ★ SINGLE-CRATE alloc_port COMPILES CLEAN — 455 → 0 (2026-07-11)
+## ★ SINGLE-CRATE alloc COMPILES CLEAN — 455 → 0 (2026-07-11)
 
 The un-rot direction pivoted (validated with the user) from per-port
 re-baseline to **consolidating the 8 fragmented `*_port` modules into ONE
-`alloc_port` crate** — because the 8 ports ARE Rust's single `alloc` crate
+`alloc` crate** — because the 8 ports ARE Rust's single `alloc` crate
 artificially shattered, and that fragmentation is the root of BOTH the
 circular-dep stubs (into_vecdeque→abort) AND the interface-compat wall.
 
 **DONE:** vec + raw_vec + collections/vec_deque transpiled as ONE crate via
 `--expand` (cargo-expand → one flattened module, no illegal C++ module
-cycle) and driven to **0 compile errors** (14,804-line `alloc_port.cppm` →
+cycle) and driven to **0 compile errors** (14,804-line `alloc.cppm` →
 36 MB BMI). The Vec↔VecDeque cycle resolves for real (into_vecdeque has a
 real impl, no abort). Pipeline is committed + reproducible:
-`docs/alloc_port/{prep.sh, build.sh, post_transpile_patch.py}`; iterate with
-`bash docs/alloc_port/build.sh <work_dir>`. Commits: `3fab7fed` (infra) →
+`docs/alloc/{prep.sh, build.sh, post_transpile_patch.py}`; iterate with
+`bash docs/alloc/build.sh <work_dir>`. Commits: `3fab7fed` (infra) →
 `18a6bd60` (0 errors). The patcher is a CURATED reuse — it imports the
 vec_port + vec_deque_port CONTENT rules, NEUTRALIZEs their per-submodule
 STRUCTURAL rules (qualifier-strip etc. that mangle the real single-module
 namespaces), and adds the glob/tail rules those patchers did per-file.
 
 **REMAINING (the matrix half of the goal — a large cutover, NOT wired yet):**
-1. **Widen** alloc_port past collections: fix btree's `NodeRef<auto>`
+1. **Widen** alloc past collections: fix btree's `NodeRef<auto>`
    inference leak that panics `--expand` (mod.rs:3019 strict-auto guard),
    then add rc/sync/string/boxed.
 2. **Interface cutover**: consumers `import vec_port.vec;`/`import
-   vec_deque_port;` and reference `rusty::port::vec::Vec`; alloc_port is one
-   module named `alloc_port` exposing `vec::Vec` at root. Drop-in needs (a)
+   vec_deque_port;` and reference `rusty::port::vec::Vec`; alloc is one
+   module named `alloc` exposing `vec::Vec` at root. Drop-in needs (a)
    wrap crate content in `namespace rusty::port {…}` (keep the str/bytes-Cow
    prelude at `rusty::` root — surgical), (b) rewire the transpiler's
    port-import emission + include/rusty umbrella + consumer imports, (c)
    delete the 8 vendored `*_port` dirs + CMake wiring.
-3. **Matrix-validate** vec/btree/indexmap/serde against alloc_port.
+3. **Matrix-validate** vec/btree/indexmap/serde against alloc.
 
-The current matrix stays GREEN on the vendored ports — the alloc_port work
-is isolated in `docs/alloc_port/`, zero build blast radius. The per-port
+The current matrix stays GREEN on the vendored ports — the alloc work
+is isolated in `docs/alloc/`, zero build blast radius. The per-port
 re-baseline notes below are SUPERSEDED by this consolidation but kept for the
 lost-fix recovery method (clone_into etc.).
 

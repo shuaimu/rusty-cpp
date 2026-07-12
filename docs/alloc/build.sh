@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate + compile the consolidated alloc_port as ONE C++ module.
+# Regenerate + compile the consolidated alloc as ONE C++ module.
 #
 # KEY: use --expand (cargo-expand → one flattened crate module). Per-submodule
 # emission creates ILLEGAL C++ module cycles (alloc.vec <-> alloc.collections.
@@ -20,28 +20,28 @@ cp -r "$SRC/collections/vec_deque" "$W/src/collections/vec_deque"
 printf 'pub mod vec_deque;\npub use vec_deque::VecDeque;\n' > "$W/src/collections/mod.rs"
 cat > "$W/Cargo.toml" <<EOF
 [package]
-name = "alloc_port"
+name = "alloc"
 version = "0.0.1"
 edition = "2021"
 [lib]
 path = "src/lib.rs"
 # Empty [workspace] so cargo-expand treats this as a standalone crate even
-# when the work dir is INSIDE the repo (e.g. .rusty-parity-matrix/alloc_port);
+# when the work dir is INSIDE the repo (e.g. .rusty-parity-matrix/alloc);
 # otherwise cargo believes it belongs to the repo workspace and `cargo expand`
 # aborts, forcing the per-submodule fallback (illegal C++ module cycle).
 [workspace]
 EOF
 printf '#![allow(unused)]\npub mod raw_vec;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
-bash "$REPO/docs/alloc_port/prep.sh" "$W/src" >/dev/null
+bash "$REPO/docs/alloc/prep.sh" "$W/src" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
 "$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1
 echo "transpile exit=$? ($(tail -1 "$W/transpile.log"))"
-CPPM="$W/out/alloc_port.cppm"
+CPPM="$W/out/alloc.cppm"
 [[ -f "$CPPM" ]] || { echo "no single-module output — see $W/transpile.log"; exit 1; }
-[[ -f "$REPO/docs/alloc_port/post_transpile_patch.py" ]] && python3 "$REPO/docs/alloc_port/post_transpile_patch.py" "$W/out" >/dev/null 2>&1
+[[ -f "$REPO/docs/alloc/post_transpile_patch.py" ]] && python3 "$REPO/docs/alloc/post_transpile_patch.py" "$W/out" >/dev/null 2>&1
 # strip circular/self imports (rusty umbrella + the OLD *_port modules this replaces)
 sed -i '/^import rusty;$/d; /^import [a-z_]*_port\./d' "$CPPM"
 FLAGS="-std=c++23 -DRUSTY_PORTABLE_INTRINSICS=1 -march=native -I$REPO/include -x c++-module"
-clang++ $FLAGS --precompile -o "$W/out/alloc_port.pcm" "$CPPM" -ferror-limit=0 2> "$W/compile.err"
+clang++ $FLAGS --precompile -o "$W/out/alloc.pcm" "$CPPM" -ferror-limit=0 2> "$W/compile.err"
 echo "compile: $(grep -c 'error:' "$W/compile.err") errors"
 grep -hoE "error: .*" "$W/compile.err" | sed -E "s/'[^']*'/'X'/g; s/[0-9]+/N/g" | sort | uniq -c | sort -rn | head -10

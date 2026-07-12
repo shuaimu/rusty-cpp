@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified alloc_port patcher.
+"""Unified alloc patcher.
 
 The consolidated alloc crate is ONE C++ module with the FULL namespace tree
 preserved (vec::is_zero::__ufcs_IsZero, collections::vec_deque, …). The
