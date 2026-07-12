@@ -293,6 +293,41 @@ def _alloc_specific(cpp_out: Path):
             r"\1                return false;\n\2",
             t,
         )
+        # `super::Vec` (into_iter's Default) — parent module is `vec`.
+        t = t.replace(
+            "super::Vec<T, rusty::alloc::Global>",
+            "vec::Vec<T, rusty::alloc::Global>",
+        )
+        # VecDeque::from([T;N]): the transpiler used the array-length param N as
+        # the type argument (`VecDeque<N>`); it's the deque's own T, A.
+        t = t.replace(
+            "auto deq = VecDeque<N>::with_capacity(N);",
+            "auto deq = VecDeque<T, A>::with_capacity(N);",
+        )
+        # usize::unchecked_sub not lowered (like abs_diff) — plain subtraction.
+        t = t.replace(
+            "rusty::field_end(initialized).unchecked_sub(std::move(rusty::field_start(initialized)))",
+            "(rusty::field_end(initialized) - rusty::field_start(initialized))",
+        )
+        # in-place-collect: PhantomData<Src>/RawVec<Src, A> reference type names
+        # the transpiler didn't thread through — `Src` is `I::Src`, and the
+        # drop's `A` is the (only) Global allocator.
+        t = t.replace("rusty::PhantomData<Src>{}", "rusty::PhantomData<typename I::Src>{}")
+        t = t.replace(
+            "raw_vec::RawVec<Src, A>::from_nonnull_in",
+            "raw_vec::RawVec<Src, rusty::alloc::Global>::from_nonnull_in",
+        )
+        # handle_error: the TryReserveErrorKind match mis-emitted a unit-variant
+        # arm as a `const auto& Enum::Variant = _m;` binding. Both arms are
+        # infallible-reserve OOM handlers that abort, so collapse to abort.
+        t = re.sub(
+            r"return \[&\]\(\) -> void \{ auto&& _m = e\.kind\(\);.*?"
+            r"rusty::collections::TryReserveErrorKind::CapacityOverflow = _m;.*?"
+            r"rusty::intrinsics::unreachable\(\); \}\(\); \}\(\);",
+            "(void)e; std::abort();",
+            t,
+            flags=re.DOTALL,
+        )
         # Spec* extension-trait stubs (real impls live in dropped spec_* modules
         # in the per-port layout; here they're forward-declared). The per-port
         # injection anchors on an import line we stripped, so inject directly at
