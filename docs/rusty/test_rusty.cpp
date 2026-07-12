@@ -5,6 +5,7 @@
 import rusty;
 #include <cassert>
 #include <cstdio>
+#include <string_view>
 
 using HM = collections::hash::map::HashMap<int, int, ::hash::random::RandomState>;
 using HS = collections::hash::set::HashSet<int, ::hash::random::RandomState>;
@@ -26,6 +27,18 @@ int main() {
     assert(s.insert(7) && !s.insert(7));  // second insert: already present
     assert(s.contains(7) && !s.contains(8));
 
-    std::printf("rusty (std) runtime OK: HashMap insert/get/overwrite/remove + HashSet\n");
+
+    // String keys: content-hashed through DefaultHasher/SipHasher
+    using HMS = collections::hash::map::HashMap<std::string_view, int, ::hash::random::RandomState>;
+    auto sm = HMS::new_();
+    sm.insert("alpha", 1);
+    sm.insert("beta", 2);
+    assert(sm.len() == 2);
+    assert(sm.get("beta").is_some() && sm.get("beta").unwrap() == 2);
+    assert(!sm.get("delta").is_some());
+    sm.insert("beta", 22);
+    assert(sm.get("beta").unwrap() == 22 && sm.len() == 2);
+
+    std::printf("rusty (std) runtime OK: HashMap(int+string keys) insert/get/overwrite/remove + HashSet\n");
     return 0;
 }
