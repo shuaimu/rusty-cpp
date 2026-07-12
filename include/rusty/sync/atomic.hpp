@@ -195,6 +195,12 @@ private:
 
 } // namespace detail
 
+// Rust >=1.9x spells the generic atomic `Atomic<T>` (generic_atomic); the
+// port previously exported only the concrete aliases below. Export the
+// template so transpiled `Atomic<size_t>` fields resolve.
+template<typename T>
+using Atomic = detail::Atomic<T>;
+
 using AtomicBool = detail::Atomic<bool>;
 using AtomicI8 = detail::Atomic<std::int8_t>;
 using AtomicI16 = detail::Atomic<std::int16_t>;

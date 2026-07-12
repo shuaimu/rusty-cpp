@@ -27,8 +27,6 @@ find "$SRC" -name "*.rs" -exec sed -i \
   -e 's|crate::alloc::handle_alloc_error|std::alloc::handle_alloc_error|g' \
   -e 's|use crate::boxed::Box|use alloc::boxed::Box|g' \
   -e 's|crate::boxed::Box|alloc::boxed::Box|g' \
-  -e 's|crate::sync::Arc|std::sync::Arc|g' \
-  -e 's|use crate::sync::|use std::sync::|g' \
   -e 's|realalloc::collections::TryReserveError|std::collections::TryReserveError|g' \
   -e 's|realalloc::collections::TryReserveErrorKind|std::collections::TryReserveErrorKind|g' \
   -e 's|use crate::fmt|use std::fmt|g' \

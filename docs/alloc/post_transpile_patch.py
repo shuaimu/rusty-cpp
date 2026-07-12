@@ -386,6 +386,74 @@ def _rc_rules(t: str) -> str:
     return t
 
 
+def _arc_rules(t: str) -> str:
+    """sync.rs (Arc/Weak) rules — mirrors the rc rules where the family
+    recurs; arc-only items below. (The module namespace may be renamed
+    `sync_mod` by the conflict-rename machinery — cover both spellings.)"""
+    for ns in ("sync", "sync_mod"):
+        t = t.replace(
+            f"::{ns}::Arc<std::span<const T>> to_arc_slice",
+            f"::{ns}::Arc<std::span<const T>, rusty::alloc::Global> to_arc_slice",
+        )
+    # Rust `hint::spin_loop()` — a CPU pause hint; safe to elide.
+    t = t.replace("std::hint::spin_loop();", "/* spin_loop hint */;")
+    # panicking::panic_display -> the existing panic_fmt(std::string) entry.
+    t = t.replace(
+        "rusty::panicking::panic_display(",
+        "rusty::panicking::panic_fmt(std::string(",
+    )
+    t = t.replace(
+        "rusty::panicking::panic_fmt(std::string(INTERNAL_OVERFLOW_ERROR);",
+        "rusty::panicking::panic_fmt(std::string(INTERNAL_OVERFLOW_ERROR));",
+    )
+    # dyn-Any downcast + nightly error::Request provide — no C++ model.
+    t = _replace_method_body(
+        t, "rusty::Result<Arc<T, A>, Arc<T, A>> downcast() const {", "std::abort();"
+    )
+    t = _replace_method_body(t, "Arc<T, A> downcast_unchecked() const {", "std::abort();")
+    t = _delete_method(t, "void provide(rusty::error::Request& req) const {")
+    # From<&str> for Arc<str> — same span-of-span mis-emission as Rc's.
+    t = _delete_method(t, "static Arc<std::string_view> from(std::string_view v) {")
+    # Arc's drop_slow / from_inner leak-wrap mirror the rc shapes with
+    # ArcInner — reuse by textual analogy.
+    t = re.sub(
+        r"from_inner\(\((rusty::Box<ArcInner<T>>::[^;]*)\)\.leak\(\)\);",
+        r"from_inner(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked((\1).leak()));",
+        t,
+    )
+    t = t.replace(
+        "auto inner = mem_to_arc_inner(rusty::as_ptr(ptr_shadow1.as_non_null_ptr()));",
+        "auto inner = reinterpret_cast<std::add_pointer_t<ArcInner<T>>>("
+        "rusty::as_ptr(ptr_shadow1.as_non_null_ptr())); (void)mem_to_arc_inner;",
+    )
+    # Arc::new_: `let x = Box::new(ArcInner{..})` emitted as a CONST local,
+    # but leak() mutates; and from_inner takes NonNull. Make the local
+    # mutable + wrap.
+    t = t.replace(
+        "const auto x = rusty::Box<ArcInner<T>>::new_(",
+        "auto x = rusty::Box<ArcInner<T>>::new_(",
+    )
+    t = t.replace(
+        "return Arc<T, A>::from_inner((std::move(x)).leak());",
+        "return Arc<T, A>::from_inner("
+        "rusty::ptr::NonNull<ArcInner<T>>::new_unchecked((std::move(x)).leak()));",
+    )
+    # `ptr::addr_eq(p, &STATIC_INNER_SLICE.inner)` — the address-of on the
+    # static's field was dropped.
+    t = t.replace(
+        "addr_eq(rusty::as_ptr(this->ptr), STATIC_INNER_SLICE.inner)",
+        "addr_eq(rusty::as_ptr(this->ptr), &STATIC_INNER_SLICE.inner)",
+    )
+    # is_dangling's param was emitted as `std::add_pointer_t<std::add_const_t
+    # <T>>` — a NON-DEDUCED context, so bare calls can't infer T. Spell it
+    # deducibly.
+    t = t.replace(
+        "is_dangling(std::add_pointer_t<std::add_const_t<T>> ptr)",
+        "is_dangling(const T* ptr)",
+    )
+    return t
+
+
 def _alloc_specific(cpp_out: Path):
     """Rules the per-port patchers apply per-FILE (so they miss the single
     module) or that only arise in the consolidated crate. Applied glob-wide."""
@@ -523,8 +591,9 @@ def _alloc_specific(cpp_out: Path):
         )
         # Rename the hoisted Guard/Dropper collisions.
         t = _disambiguate_hoisted_helpers(t)
-        # rc.rs (Rc/Weak) rules.
+        # rc.rs (Rc/Weak) + sync.rs (Arc) rules.
         t = _rc_rules(t)
+        t = _arc_rules(t)
         # Stub next_chunk (ill-formed rusty::array::IntoIter return type poisons
         # the enclosing IntoIter class → cascades to clone/next_back "not a
         # member").

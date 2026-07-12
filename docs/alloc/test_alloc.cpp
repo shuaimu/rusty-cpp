@@ -60,6 +60,15 @@ int main() {
         assert(*b == 42 && rc::Rc<int>::strong_count(a) == 2); }
       assert(rc::Rc<int>::strong_count(a) == 1); }
 
-    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc)\n");
+
+    // Arc: atomic shared ownership
+    { auto a = sync_mod::Arc<int>::new_(7);
+      assert(*a == 7);
+      assert(sync_mod::Arc<int>::strong_count(a) == 1);
+      { auto b = a.clone();
+        assert(*b == 7 && sync_mod::Arc<int>::strong_count(a) == 2); }
+      assert(sync_mod::Arc<int>::strong_count(a) == 1); }
+
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc)\n");
     return 0;
 }
