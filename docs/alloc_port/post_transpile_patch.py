@@ -99,6 +99,39 @@ def _disambiguate_hoisted_helpers(t: str) -> str:
     return "".join(lines)
 
 
+def _stub_next_chunk(t: str) -> str:
+    """`Iterator::next_chunk` (nightly) returns `Result<[T;N], array::IntoIter>`
+    but there is no `rusty::array::IntoIter`, so the return type is ill-formed.
+    An ill-formed member declaration poisons the whole class — clang then
+    reports later members (clone/next_back) as "not a member" and the
+    clone-delegating copy-ctor fails. next_chunk is unexercised; stub it to a
+    valid signature (matches vendored vec_port)."""
+    lines = t.splitlines(keepends=True)
+    out = []
+    i = 0
+    while i < len(lines):
+        if re.search(r"\bnext_chunk\(\)\s*\{", lines[i]) and "array::IntoIter" in lines[i]:
+            indent = re.match(r"\s*", lines[i]).group(0)
+            out.append(f"{indent}auto next_chunk() {{ std::abort(); }}\n")
+            depth = 0
+            seen = False
+            j = i
+            while j < len(lines):
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1; seen = True
+                    elif ch == "}":
+                        depth -= 1
+                j += 1
+                if seen and depth == 0:
+                    break
+            i = j
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
+
+
 def _alloc_specific(cpp_out: Path):
     """Rules the per-port patchers apply per-FILE (so they miss the single
     module) or that only arise in the consolidated crate. Applied glob-wide."""
@@ -234,11 +267,30 @@ def _alloc_specific(cpp_out: Path):
         )
         # Rename the hoisted Guard/Dropper collisions.
         t = _disambiguate_hoisted_helpers(t)
+        # Stub next_chunk (ill-formed rusty::array::IntoIter return type poisons
+        # the enclosing IntoIter class → cascades to clone/next_back "not a
+        # member").
+        t = _stub_next_chunk(t)
         # `usize::abs_diff` has no rusty analog and wasn't lowered; inline it
         # (both operands are size_t → the std::move is a no-op copy).
         t = re.sub(
             r"(\w+)\.abs_diff\(std::move\((\w+)\)\)",
             r"(std::max<size_t>(\1, \2) - std::min<size_t>(\1, \2))",
+            t,
+        )
+        # `is_zero(Option<…bool…>)` uses Rust niche layout: Option<bool> is 1
+        # byte there, so it transmutes to u8 and compares. rusty::Option<bool>
+        # is 2 bytes → the transmute size-assert fires. is_zero only gates a
+        # memset-zero fast path, so returning false (element-wise fill) is
+        # always correct. Rewrite just the Option-of-bool bodies (same-size
+        # is_zero(u8)/(i8)/… transmutes are fine, left untouched).
+        t = re.sub(
+            r"(export bool is_zero\(const rusty::Option<[^;{]*?bool[^;{]*?>& self_\) \{\n)"
+            r" +using Self[^\n]*\n"
+            r" +const uint8_t raw = rusty::mem::transmute[^\n]*\n"
+            r" +return rusty::detail::deref_if_pointer_like\(raw\)[^\n]*\n"
+            r"( +\})",
+            r"\1                return false;\n\2",
             t,
         )
         # Spec* extension-trait stubs (real impls live in dropped spec_* modules
