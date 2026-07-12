@@ -318,16 +318,20 @@ def _alloc_specific(cpp_out: Path):
         # scopes `ret` inside the inner unsafe block, which closes before
         # `return Some(ret)`. Dissolve the inner block so ret survives (it's
         # move-initialized → can't be default-declared and hoisted).
+        # LINE-BOUNDED ([^\n]*, no DOTALL): with DOTALL the non-greedy spans
+        # matched ACROSS functions once new submodules added more ptr::add
+        # sites, deleting a brace pair mid-Vec (boxed probe: a 698-error
+        # structural cascade). The rule's shape is strictly 4 consecutive
+        # lines — encode that.
         t = re.sub(
             r"\n( +)\{\n"
-            r"( +auto ptr_shadow1 = rusty::ptr::add\(.*?\n"
+            r"( +auto ptr_shadow1 = rusty::ptr::add\([^\n]*\n"
             r" +auto ret = rusty::ptr::read\(ptr_shadow1\);\n"
-            r" +rusty::ptr::copy\(.*?\n)"
+            r" +rusty::ptr::copy\([^\n]*\n)"
             r" +\}\n"
             r"( +this->set_len)",
             r"\n\1\2\3",
             t,
-            flags=re.DOTALL,
         )
         # `if const { size_of::<SRC>()==0 || … }` compile-time fences were
         # elided to `(void)0`, which isn't bool-convertible. They guard ZST /
