@@ -14383,6 +14383,45 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // Rust's write-into-fresh-uninit idiom: `Box::write(Box::new_uninit(),
+        // value)` (Rc/Arc/Box in-place construction; rc.rs/sync.rs in the
+        // stdlib alloc port). `Box::<T>::new_uninit()` is a ZERO-arg factory,
+        // so its element type is only recoverable LATERALLY — from the sibling
+        // value argument of the enclosing `write`. Without this both the
+        // argument and the decltype-derived owner emit `Box<auto>`, tripping
+        // the strict-auto backstop. `write_`/`new_uninit` live on rusty::Box
+        // (include/rusty/box.hpp).
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && call.args.len() == 2
+            && fp.path.segments.len() >= 2
+            && fp.path.segments.last().is_some_and(|s| s.ident == "write")
+            && fp.path.segments[fp.path.segments.len() - 2].ident == "Box"
+            && let syn::Expr::Call(inner) = self.peel_paren_group_expr(&call.args[0])
+            && inner.args.is_empty()
+            && let syn::Expr::Path(ip) = inner.func.as_ref()
+            && ip.path.segments.len() >= 2
+            && ip.path.segments[ip.path.segments.len() - 2].ident == "Box"
+            && ip.path.segments.last().is_some_and(|s| {
+                matches!(s.ident.to_string().as_str(), "new_uninit" | "new_zeroed")
+                    && matches!(s.arguments, syn::PathArguments::None)
+            })
+        {
+            let elem = self
+                .infer_hint_type_from_expr(&call.args[1])
+                .or_else(|| self.infer_simple_expr_type(&call.args[1]))
+                .map(|ty| self.map_type(&ty))
+                .filter(|t| {
+                    t != "auto"
+                        && !t.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(t)
+                });
+            if let Some(elem) = elem {
+                let value = self.emit_expr_maybe_move(&call.args[1]);
+                return format!(
+                    "rusty::Box<{elem}>::write_(rusty::Box<{elem}>::new_uninit(), {value})"
+                );
+            }
+        }
         // `guard(self, |s| ...)` / `guard(&mut place, ...)`: the ScopeGuard
         // slot must ALIAS the place — a value slot copies (a Clone-backed
         // RawTable copy re-enters clone_from_impl's own guard: infinite

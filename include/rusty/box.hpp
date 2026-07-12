@@ -10,6 +10,7 @@
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
 #include <rusty/alloc.hpp>
+#include <rusty/maybe_uninit.hpp>  // Box::new_uninit / Box::write_
 
 // Box<T> - A smart pointer for heap-allocated values with single ownership
 // Equivalent to Rust's Box<T>
@@ -98,6 +99,30 @@ public:
     // @lifetime: owned
     static Box new_(T value) requires std::is_default_constructible_v<A> {
         return new_in(std::move(value), A{});
+    }
+
+    // Rust `Box::<T>::new_uninit() -> Box<MaybeUninit<T>>`: heap storage for
+    // a T without constructing it. Pair with `Box::write_` — the
+    // write-into-fresh-uninit idiom the stdlib alloc port's Rc/Arc
+    // constructors use.
+    // @lifetime: owned
+    static Box<rusty::MaybeUninit<T>, A> new_uninit()
+        requires std::is_default_constructible_v<A>
+    {
+        return Box<rusty::MaybeUninit<T>, A>::new_(rusty::MaybeUninit<T>());
+    }
+
+    // Rust `Box::<MaybeUninit<U>>::write(boxed, value) -> Box<U>`: construct
+    // the value into the uninit storage and re-type the SAME allocation
+    // (MaybeUninit<U> is alignas(U) storage of sizeof(U) — layout-identical).
+    // A static template over U so it resolves from ANY `Box<...>::write_`
+    // owner spelling the emitter produces (incl. decltype-derived owners).
+    // @lifetime: owned
+    template<typename U>
+    static Box<U> write_(Box<rusty::MaybeUninit<U>> boxed, U value) {
+        rusty::MaybeUninit<U>* slot = boxed.into_raw();
+        slot->write(std::move(value));
+        return Box<U>::from_raw(reinterpret_cast<U*>(slot));
     }
 
     // Rust's `Box::new_in(value, alloc)` — faithful: ask `alloc_inst` for raw

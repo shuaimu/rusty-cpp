@@ -9060,6 +9060,70 @@ impl CodeGen {
                     inferred[param_idx] = Some(arg_cpp_ty.clone());
                 }
             }
+            // Structural pass: a declared `Self`/`&Self`/`&mut Self` param
+            // (assoc fns like `NodeRef::as_internal_ptr(&self.node)`, the
+            // btree strict-auto gate) — the argument's concrete `Owner<...>`
+            // instantiation binds every owner param POSITIONALLY.
+            if inferred.iter().any(|entry| entry.is_none()) {
+                let peeled = self.peel_reference_paren_group_type(&expected_arg_ty);
+                let is_self_param = matches!(
+                    peeled,
+                    syn::Type::Path(tp)
+                        if tp.qself.is_none()
+                            && tp.path.segments.len() == 1
+                            && tp.path.segments[0].ident == "Self"
+                            && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                );
+                if is_self_param {
+                    let needle = format!("{owner_name}<");
+                    let owner_open = arg_cpp_ty.match_indices(&needle).find_map(|(pos, _)| {
+                        // ident-boundary guard: don't match `InternalNodeRef<`
+                        // when the owner is `NodeRef`.
+                        let boundary_ok = pos == 0
+                            || !arg_cpp_ty[..pos]
+                                .chars()
+                                .next_back()
+                                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                        boundary_ok.then_some(pos + needle.len())
+                    });
+                    if let Some(args_start) = owner_open {
+                        let tail = &arg_cpp_ty[args_start..];
+                        let mut depth = 1i32;
+                        let mut args_end = None;
+                        for (i, ch) in tail.char_indices() {
+                            match ch {
+                                '<' => depth += 1,
+                                '>' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        args_end = Some(i);
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(args_end) = args_end {
+                            let parsed = Self::split_top_level_comma_args(&tail[..args_end]);
+                            if parsed.len() == type_params.len()
+                                && parsed.iter().all(|a| {
+                                    let a = a.trim();
+                                    !a.is_empty()
+                                        && a != "auto"
+                                        && !type_string_has_auto_placeholder(a)
+                                        && !self.owner_template_arg_is_value_identifier(a)
+                                })
+                            {
+                                for (idx, val) in parsed.iter().enumerate() {
+                                    if inferred[idx].is_none() {
+                                        inferred[idx] = Some(val.trim().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if inferred.iter().any(|entry| entry.is_some()) {
             Some(inferred)
