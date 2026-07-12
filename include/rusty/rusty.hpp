@@ -100,6 +100,7 @@
 #include "rusty/dispatch.hpp"
 
 // Synchronization primitives (std::sync equivalent)
+#include "rusty/hash.hpp"
 #include "rusty/sync/atomic.hpp"
 #include "rusty/sync/mpsc.hpp"
 

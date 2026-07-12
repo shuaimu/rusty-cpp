@@ -48333,16 +48333,25 @@ constexpr T* get_unchecked_mut(T& value) {\n\
 namespace hash {\n\
 template<typename State>\n\
 inline void combine(State& state, std::size_t value) {\n\
-    std::size_t seed;\n\
     if constexpr (requires { state.state; }) {\n\
-        seed = state.state;\n\
-    } else {\n\
-        seed = static_cast<std::size_t>(state);\n\
-    }\n\
-    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);\n\
-    if constexpr (requires { state.state; }) {\n\
+        std::size_t seed = state.state;\n\
+        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);\n\
         state.state = seed;\n\
+    } else if constexpr (requires {\n\
+        state.write_(std::span<const unsigned char>{});\n\
+        state.finish();\n\
+    }) {\n\
+        /* A real Hasher-protocol state (e.g. the transpiled std\n\
+           DefaultHasher wrapping rusty::hash::SipHasher): feed the value's\n\
+           bytes through the hasher instead of integer-state mixing. Only\n\
+           types that previously FAILED the static_cast fallback take this\n\
+           branch, so existing integer-state hashers are unchanged. */\n\
+        unsigned char bytes[sizeof(std::size_t)];\n\
+        __builtin_memcpy(bytes, &value, sizeof(value));\n\
+        state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));\n\
     } else {\n\
+        std::size_t seed = static_cast<std::size_t>(state);\n\
+        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);\n\
         state = static_cast<State>(seed);\n\
     }\n\
 }\n\

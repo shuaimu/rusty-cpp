@@ -35,6 +35,13 @@ declare -a MATRIX_CRATES=(
     # template bodies) and asserts behavior. Special-cased in
     # run_parity_for_crate. See docs/port_regen/STATUS.md.
     "alloc"
+    # rusty: the transpiled Rust **std** port (renamed: C++ std collision) —
+    # first slice std::collections::hash (HashMap/HashSet over a recursively-
+    # transpiled hashbrown 0.16.1 path dep) + std::hash (RandomState with
+    # fixed-seed stub over rusty::hash::SipHasher). Validated like alloc: build
+    # the modules + RUN docs/rusty/runtest.sh assertions. Special-cased in
+    # run_parity_for_crate. See docs/port_regen/STATUS.md.
+    "rusty"
     # itertools: temporarily disabled — iterator-item engine + FoldWhile_Ok done
     # (quick leak-free), remaining = tree_reduce alias-hoist (UFCS path, collision-
     # safe) + projected-push transpile leaks. Re-enable when those land.
@@ -345,9 +352,9 @@ fi
 ensure_crate_checkout() {
     local crate="$1"
 
-    # alloc has no crate checkout — it builds the stdlib module from the
-    # rustc sysroot source via docs/alloc/build.sh (see run_parity_for_crate).
-    if [[ "${crate}" == "alloc" ]]; then
+    # alloc/rusty have no crate checkout — they build the stdlib modules from
+    # the rustc sysroot source via docs/{alloc,rusty}/build.sh.
+    if [[ "${crate}" == "alloc" || "${crate}" == "rusty" ]]; then
         return 0
     fi
 
@@ -399,24 +406,24 @@ run_parity_for_crate() {
     # consumer crate. Validate it by building the module + running the runtime
     # assertion test (which INSTANTIATES Vec with a concrete type — something
     # the module's own --precompile never does — and asserts behavior).
-    if [[ "${crate}" == "alloc" ]]; then
-        local work_dir="${WORK_ROOT}/alloc"
+    if [[ "${crate}" == "alloc" || "${crate}" == "rusty" ]]; then
+        local work_dir="${WORK_ROOT}/${crate}"
         local matrix_log="${work_dir}.log"
-        echo "crate: alloc (consolidated stdlib module: build + runtime test)"
-        echo "  command: bash ${REPO_ROOT}/docs/alloc/runtest.sh ${work_dir}"
+        echo "crate: ${crate} (transpiled stdlib module: build + runtime test)"
+        echo "  command: bash ${REPO_ROOT}/docs/${crate}/runtest.sh ${work_dir}"
         if [[ "${DRY_RUN}" -eq 1 ]]; then
             return 0
         fi
         mkdir -p "${WORK_ROOT}"
         if RUSTY_CPP_TRANSPILER_BIN="${TRANSPILER_BIN}" \
-              bash "${REPO_ROOT}/docs/alloc/runtest.sh" "${work_dir}" \
+              bash "${REPO_ROOT}/docs/${crate}/runtest.sh" "${work_dir}" \
               >"${matrix_log}" 2>&1 \
-           && grep -q "alloc RUNTIME PASS" "${matrix_log}"; then
-            echo "  PASS: alloc"
+           && grep -q "RUNTIME PASS" "${matrix_log}"; then
+            echo "  PASS: ${crate}"
             return 0
         fi
-        record_first_failure "alloc" "${work_dir}" "${matrix_log}"
-        echo "  FAIL: alloc" >&2
+        record_first_failure "${crate}" "${work_dir}" "${matrix_log}"
+        echo "  FAIL: ${crate}" >&2
         echo "  tail of runtest log:" >&2
         tail -n 40 "${matrix_log}" >&2 || true
         return 1
