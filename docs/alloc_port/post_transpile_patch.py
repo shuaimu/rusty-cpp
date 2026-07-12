@@ -293,6 +293,36 @@ def _alloc_specific(cpp_out: Path):
             r"\1                return false;\n\2",
             t,
         )
+        # `impl PartialEq<Vec/[U]> for Cow<[T]>` — but Cow<[T]> collapsed to the
+        # prelude's str/bytes `rusty::Cow` (a std::variant), so the param type is
+        # CONCRETE. That makes `slice_full(self_)` a non-dependent expression,
+        # instantiated at template-DEFINITION time (two-phase lookup) → array.hpp
+        # asserts (no len() for the Cow variant) even though nothing calls it.
+        # These slice-Cow comparisons can't be expressed against a str/bytes Cow;
+        # abort (loud if the unexercised path is ever hit, per vendored practice).
+        t = re.sub(
+            r"(bool (?:eq|ne)\(const rusty::Cow& self_,[^{]*\{)\n"
+            r"\s*using Self[^\n]*\n"
+            r"\s*return [^\n]*slice_full\(self_\)[^\n]*\n"
+            r"(\s*\})",
+            r"\1 std::abort(); \2",
+            t,
+        )
+        # write_iter_wrapping (uncalled abbreviated-template helper): `size_t::
+        # ByRefSized` is a non-dependent name that fails at parse. ByRefSized is
+        # just a zero-cost re-borrow; `iter.take(…)` is dependent (unchecked
+        # unless instantiated) and the correct intent.
+        t = t.replace(
+            "size_t::ByRefSized(&iter).take(",
+            "iter.take(",
+        )
+        # VecDeque::resize used core::iter::repeat_n (no rusty::iter analog).
+        # Emit a real loop so resize actually works (vendored abort-stubs it).
+        t = t.replace(
+            "this->extend(rusty::iter::repeat_n(std::move(value), std::move(extra)));",
+            "for (size_t _ri = 0; _ri < rusty::detail::deref_if_pointer_like(extra); ++_ri) "
+            "{ this->push_back(rusty::clone(value)); }",
+        )
         # `super::Vec` (into_iter's Default) — parent module is `vec`.
         t = t.replace(
             "super::Vec<T, rusty::alloc::Global>",
