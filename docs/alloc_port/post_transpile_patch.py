@@ -391,14 +391,18 @@ def _alloc_specific(cpp_out: Path):
             "this->set_ptr_and_cap(std::move(ptr_shadow2), std::move(cap));",
             "this->set_ptr_and_cap(rusty::ptr::NonNullSlice<uint8_t>(std::move(ptr_shadow2)), std::move(cap));",
         )
-        # ── ManuallyDrop receivers not dereferenced (recurring; the same method
-        # bodies correctly use `(*me)` two lines away — inconsistent emission).
-        # Vec::into_raw_parts_with_alloc (feeds VecDeque::from(Vec)):
-        t = t.replace("auto len = rusty::len(me);", "auto len = rusty::len((*me));")
+        # ── ManuallyDrop `me` receivers not dereferenced (recurring across
+        # into_raw_parts_with_alloc AND into_iter; the same bodies use `(*me)`
+        # correctly two lines away — inconsistent emission). `me` is always a
+        # `manually_drop_new(...)` local in these bodies, so generalize:
+        t = t.replace("rusty::len(me)", "rusty::len((*me))")
         t = t.replace("auto capacity = me.capacity();", "auto capacity = (*me).capacity();")
+        # allocator() returns a const ref; ptr::read wants a pointer → move it
+        # out via const_cast (vendored vec_port form). Covers both the
+        # `auto alloc = …;` and `manually_drop_new(ptr::read(me.allocator()))` forms.
         t = t.replace(
-            "auto alloc = rusty::ptr::read(me.allocator());",
-            "auto alloc = std::move(const_cast<A&>((*me).allocator()));",
+            "rusty::ptr::read(me.allocator())",
+            "std::move(const_cast<A&>((*me).allocator()))",
         )
         # Vec::from(VecDeque) len (the allocator/capacity derefs live in the
         # existing Vec::from(VecDeque) rule block below).
@@ -417,6 +421,35 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace(
             "const auto ptr_shadow1 = ptr.cast();",
             "const auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);",
+        )
+        # The (dead) ZST arms of `(sizeof(T)==0) ? … : …` RUNTIME ternaries in
+        # Vec::into_iter/IntoIter::size_hint call raw-pointer methods
+        # (`begin->wrapping_byte_add`, `p->addr()`) on a bare `const T*`, which
+        # must still COMPILE. Lower them to pointer arithmetic on the raw ptr.
+        t = t.replace(
+            "begin->wrapping_byte_add(rusty::len((*me)))",
+            "reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>("
+            "reinterpret_cast<const char*>(begin) + rusty::len((*me)))",
+        )
+        # Vec::into_iter builds the result with a DESIGNATED initializer, but
+        # IntoIter has user-declared ctors (non-aggregate). Use its positional
+        # ctor (same field order). buf is a trivially-copyable NonNull so the
+        # double std::move is a pointer copy (both buf and ptr get it).
+        t = t.replace(
+            "return IntoIter{.buf = std::move(buf), .phantom = rusty::PhantomData<T>{}, "
+            ".cap = std::move(cap), .alloc = std::move(alloc), .ptr = std::move(buf), "
+            ".end = std::move(end)};",
+            "return IntoIter(std::move(buf), rusty::PhantomData<T>{}, std::move(cap), "
+            "std::move(alloc), std::move(buf), std::move(end));",
+        )
+        # IntoIter::size_hint's `exact` is a convoluted `(sizeof==0)? … : …`
+        # with a `*ptr.method()` precedence bug in the else arm. `end - ptr` (in
+        # elements) is the exact remaining count; compute it by byte-diff/size.
+        t = re.sub(
+            r"auto exact = \(\(sizeof\(T\) == 0\) \?.*?\);\n(\s*return std::make_tuple\(std::move\(exact\))",
+            r"auto exact = (reinterpret_cast<std::size_t>(this->end) - "
+            r"reinterpret_cast<std::size_t>(rusty::as_ptr(this->ptr))) / (sizeof(T) == 0 ? 1 : sizeof(T));\n\1",
+            t,
         )
         # slice_ranges: `slice_ext::range(...)` returns std::pair<size_t,size_t>
         # (slice.hpp:2400), so `.start`/`.end` must be `.first`/`.second`.

@@ -26,6 +26,12 @@ int main() {
     auto fromv = DQ::from(std::move(v2));
     assert(fromv.len()==2);
     { const auto& r=fromv; assert(r[0]==100 && r[1]==200); }
+
+    // Vec::into_iter + IntoIter::next (consuming iteration)
+    auto v3 = VI::new_(); v3.push(1); v3.push(2); v3.push(3);
+    { long sum=0; int cnt=0; auto it=v3.into_iter();
+      while(true){auto n=it.next(); if(!n.is_some())break; sum+=n.unwrap(); ++cnt;}
+      assert(cnt==3 && sum==6); }
     std::printf("alloc_port BROAD runtime OK\n");
     return 0;
 }

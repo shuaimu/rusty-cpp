@@ -108,6 +108,22 @@ public:
     // @unsafe
     constexpr T* get() const noexcept { return ptr_; }
 
+    // Rust `NonNull<T>` pointer-arithmetic / read methods the transpiled
+    // stdlib port (vec::IntoIter etc.) calls directly. The port's NonNull
+    // omitted them; they are thin wrappers over the raw pointer.
+    // A default ctor is needed for `decltype(ptr) x{};` late-init locals
+    // (immediately reassigned; the transient null never escapes).
+    constexpr NonNull() noexcept : ptr_(nullptr) {}
+    constexpr NonNull<T> add(std::size_t n) const noexcept { return NonNull<T>(ptr_ + n); }
+    constexpr NonNull<T> sub(std::size_t n) const noexcept { return NonNull<T>(ptr_ - n); }
+    constexpr T read() const noexcept { return *ptr_; }
+    constexpr std::size_t offset_from_unsigned(NonNull<T> origin) const noexcept {
+        return static_cast<std::size_t>(ptr_ - origin.ptr_);
+    }
+    constexpr std::size_t addr() const noexcept {
+        return reinterpret_cast<std::uintptr_t>(ptr_);
+    }
+
     // Rust's `NonNull::from(&mut T)` / `NonNull::from(&T)` converts a
     // borrow into a non-null raw-pointer wrapper. In transpiled C++ the
     // `&mut T` argument arrives as a `T*` (e.g. the return of
