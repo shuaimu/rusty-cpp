@@ -323,6 +323,56 @@ def _alloc_specific(cpp_out: Path):
             "for (size_t _ri = 0; _ri < rusty::detail::deref_if_pointer_like(extra); ++_ri) "
             "{ this->push_back(rusty::clone(value)); }",
         )
+        # Vec::operator[]/index_mut lower Rust's `Index::index` to `.index()` on
+        # the dereffed `*this`, but that derefs to std::span which has no
+        # .index(). Route to `as_slice(*this)[i]` (vendored vec_port does the
+        # same; its rule is anchored to 4-space indent so it misses the single
+        # module — the body expr is indent-independent, replace directly).
+        t = t.replace(
+            "(rusty::detail::deref_if_pointer_like((*this))).index(std::move(index))",
+            "rusty::as_slice((*this))[static_cast<size_t>(index)]",
+        )
+        t = t.replace(
+            "(rusty::detail::deref_if_pointer_like((*this))).index_mut(std::move(index))",
+            "rusty::as_mut_slice((*this))[static_cast<size_t>(index)]",
+        )
+        # --- instantiation-time fixes (surface when Vec/VecDeque are actually
+        # used with a concrete T; the BMI precompile skips these template
+        # bodies). These mirror vec_port/vec_deque_port's file-specific rules. ---
+        # Vec::clone: `std::span::to_vec_in` doesn't exist; do with_capacity_in
+        # + a clone loop (vendored form).
+        t = t.replace(
+            "return std::span<const T>::to_vec_in("
+            "rusty::detail::deref_if_pointer_like((*this)), std::move(alloc));",
+            "auto out = Vec<T, A>::with_capacity_in(this->len_field, std::move(alloc)); "
+            "auto src = rusty::as_slice(*this); "
+            "for (size_t i = 0; i < src.size(); ++i) { out.push(rusty::clone(src[i])); } "
+            "return out;",
+        )
+        # `if (T::IS_ZST)` fails for primitive T (`int::IS_ZST`). Make the ZST
+        # branch a dead `if constexpr` (ZSTs are never exercised).
+        t = t.replace(
+            "if (T::IS_ZST) {",
+            "if constexpr (requires { T::IS_ZST; } && false) {",
+        )
+        # RawVec::non_null: `.cast()` yields a CastProxy that implicitly
+        # converts to NonNull<T>; `.as_non_null_ptr()` forces it to NonNull<u8>
+        # (wrong return type). Strip it (vendored raw_vec rule).
+        t = t.replace(
+            "this->ptr_field.cast().as_non_null_ptr()",
+            "this->ptr_field.cast()",
+        )
+        # Vec::from(VecDeque): buf access derefs the ManuallyDrop but capacity()/
+        # allocator() were emitted without the deref.
+        t = t.replace(
+            "auto cap = other_shadow1.capacity();",
+            "auto cap = rusty::detail::deref_if_pointer((*other_shadow1)).capacity();",
+        )
+        t = t.replace(
+            "auto alloc = rusty::ptr::read(other_shadow1.allocator());",
+            "auto alloc = rusty::ptr::read("
+            "rusty::detail::deref_if_pointer((*other_shadow1)).allocator());",
+        )
         # `super::Vec` (into_iter's Default) — parent module is `vec`.
         t = t.replace(
             "super::Vec<T, rusty::alloc::Global>",
