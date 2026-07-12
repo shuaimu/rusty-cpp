@@ -391,6 +391,33 @@ def _alloc_specific(cpp_out: Path):
             "this->set_ptr_and_cap(std::move(ptr_shadow2), std::move(cap));",
             "this->set_ptr_and_cap(rusty::ptr::NonNullSlice<uint8_t>(std::move(ptr_shadow2)), std::move(cap));",
         )
+        # ── ManuallyDrop receivers not dereferenced (recurring; the same method
+        # bodies correctly use `(*me)` two lines away — inconsistent emission).
+        # Vec::into_raw_parts_with_alloc (feeds VecDeque::from(Vec)):
+        t = t.replace("auto len = rusty::len(me);", "auto len = rusty::len((*me));")
+        t = t.replace("auto capacity = me.capacity();", "auto capacity = (*me).capacity();")
+        t = t.replace(
+            "auto alloc = rusty::ptr::read(me.allocator());",
+            "auto alloc = std::move(const_cast<A&>((*me).allocator()));",
+        )
+        # Vec::from(VecDeque) len (the allocator/capacity derefs live in the
+        # existing Vec::from(VecDeque) rule block below).
+        t = t.replace(
+            "auto len = rusty::len(other_shadow1);",
+            "auto len = rusty::len((*other_shadow1));",
+        )
+        # ── Raw-pointer methods emitted as C++ member calls on a bare T*
+        # (Rust `*mut T`::add/cast). buf is `.buf.ptr()` (a T*): `buf.add(n)`
+        # -> rusty::ptr::add(buf, n). from_raw_parts_in casts T* -> uint8_t* for
+        # the type-erased RawVecInner: `ptr.cast()` -> reinterpret_cast.
+        t = t.replace(
+            "rusty::ptr::copy(buf.add(std::move(rusty::detail::deref_if_pointer((*other_shadow1)).head)), std::move(buf), std::move(len));",
+            "rusty::ptr::copy(rusty::ptr::add(buf, std::move(rusty::detail::deref_if_pointer((*other_shadow1)).head)), std::move(buf), std::move(len));",
+        )
+        t = t.replace(
+            "const auto ptr_shadow1 = ptr.cast();",
+            "const auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);",
+        )
         # slice_ranges: `slice_ext::range(...)` returns std::pair<size_t,size_t>
         # (slice.hpp:2400), so `.start`/`.end` must be `.first`/`.second`.
         t = t.replace(
@@ -416,8 +443,8 @@ def _alloc_specific(cpp_out: Path):
         )
         t = t.replace(
             "auto alloc = rusty::ptr::read(other_shadow1.allocator());",
-            "auto alloc = rusty::ptr::read("
-            "rusty::detail::deref_if_pointer((*other_shadow1)).allocator());",
+            "auto alloc = std::move(const_cast<A&>("
+            "rusty::detail::deref_if_pointer((*other_shadow1)).allocator()));",
         )
         # `super::Vec` (into_iter's Default) — parent module is `vec`.
         t = t.replace(
