@@ -233,8 +233,6 @@ def _alloc_specific(cpp_out: Path):
         # `rusty::alloc::Global` is a (unit) TYPE; using it as a value needs an
         # instance.
         t = t.replace("= rusty::alloc::Global;", "= rusty::alloc::Global{};")
-        # `::IS_ZST` lost its `T::` type qualifier (bare-global ZST probe).
-        t = t.replace("rusty::detail::rust_not(::IS_ZST)", "rusty::detail::rust_not(T::IS_ZST)")
         # spec_extend_front(Copied<…> | Rev<Copied<…>>) — Rust perf
         # specializations with no core::iter::Copied C++ analog; the generic
         # template-I overload covers all callers. Delete both the UFCS
@@ -349,11 +347,49 @@ def _alloc_specific(cpp_out: Path):
             "for (size_t i = 0; i < src.size(); ++i) { out.push(rusty::clone(src[i])); } "
             "return out;",
         )
-        # `if (T::IS_ZST)` fails for primitive T (`int::IS_ZST`). Make the ZST
-        # branch a dead `if constexpr` (ZSTs are never exercised).
+        # `T::IS_ZST` / `::IS_ZST` are ill-formed for primitive T (`int::IS_ZST`)
+        # in EVERY position — `if (…)`, `… ? a : b` ternaries, bare exprs. Rust's
+        # ZST check is `size_of::<T>()==0`; C++ has no zero-size types so
+        # `(sizeof(T)==0)` is always false — the exact vendored vec_deque_port
+        # rule. Do the general rewrite first, then make the `if`-statement form
+        # `if constexpr` so the (dead) ZST branch body isn't even instantiated.
+        t = re.sub(r"(?<![A-Za-z0-9_:])::IS_ZST\b", "(sizeof(T) == 0)", t)
+        t = re.sub(r"(?<![A-Za-z0-9_])T::IS_ZST\b", "(sizeof(T) == 0)", t)
+        t = t.replace("if ((sizeof(T) == 0)) {", "if constexpr ((sizeof(T) == 0)) {")
+        # ── Raw slice pointer (`*mut [T]`/`*const [T]`) is a Rust FAT pointer; it
+        # must lower to std::span<T> (a VALUE), not `std::span<T>*`. The
+        # transpiler mismodels it as `std::add_pointer_t<std::span<T>>` on the
+        # method RETURN type (buffer_range/as_raw_mut_slice/Drain::as_slices) and
+        # then callers deref `*this->buffer_range(...)`. This single bug blocks
+        # ALL VecDeque construction (~VecDeque→as_mut_slices→buffer_range).
+        # Fix: span value return + drop the deref (do NOT stub ~VecDeque like
+        # vec_deque_port — stubbing leaks non-trivial elements).
+        t = t.replace("std::add_pointer_t<std::span<T>>", "std::span<T>")
+        t = re.sub(r"\*this->buffer_range\(", "this->buffer_range(", t)
+        t = re.sub(r"\*this->as_raw_mut_slice\(", "this->as_raw_mut_slice(", t)
+        # `expr as *mut [T]` also surfaces as `const_cast<…span<T>*…>(slice_from(x))`
+        # (truncate/clear's drop_back/drop_front). slice_from returns a span
+        # value; drop_in_place accepts a span. Strip the const_cast<span*> wrap.
+        t = re.sub(
+            r"const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<"
+            r"decltype\(\(rusty::slice_from\(([^)]*)\)\)\)>>>\*>\(rusty::slice_from\(\1\)\)",
+            r"rusty::slice_from(\1)",
+            t,
+        )
+        # UFCS-migration regression: inherent `.get()`/`.get_mut()` on VecDeque
+        # (a non-contiguous type) routed through the `rusty::get` slice helper,
+        # which mis-types the deque as its own element. Call the member directly.
+        t = t.replace("rusty::get((*this), ", "this->get(")
+        t = t.replace("rusty::get_mut((*this), ", "this->get_mut(")
+        # RawVecInner::shrink_unchecked passes the raw NonNull<u8> from
+        # alloc.shrink() straight into set_ptr_and_cap, whose param is the fat
+        # NonNullSlice<u8> with an EXPLICIT NonNull ctor → copy-init ill-formed.
+        # Direct-init via a functional cast fires the ctor (len_=0 is unused by
+        # set_ptr_and_cap, which only takes ptr.cast()). ptr_shadow2 is unique
+        # to shrink_unchecked.
         t = t.replace(
-            "if (T::IS_ZST) {",
-            "if constexpr (requires { T::IS_ZST; } && false) {",
+            "this->set_ptr_and_cap(std::move(ptr_shadow2), std::move(cap));",
+            "this->set_ptr_and_cap(rusty::ptr::NonNullSlice<uint8_t>(std::move(ptr_shadow2)), std::move(cap));",
         )
         # slice_ranges: `slice_ext::range(...)` returns std::pair<size_t,size_t>
         # (slice.hpp:2400), so `.start`/`.end` must be `.first`/`.second`.
