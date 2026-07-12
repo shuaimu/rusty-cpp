@@ -73,12 +73,28 @@ def _alloc_specific(cpp_out: Path):
         t = re.sub(r"\n\s*requires \(rusty::alloc::Allocator<A>\)", "", t)
         # Vec/VecDeque forward decls then need a default allocator (Vec<T> in
         # from_elem etc.). VecDeque already carries one; add it to Vec.
-        t = re.sub(
-            r"(export template<typename T, typename A)(>\n\s*struct Vec;)",
-            r"\1 = rusty::alloc::Global\2",
-            t,
-        )
+        for name in ("Vec", "IntoIter", "Drain"):
+            t = re.sub(
+                rf"(export template<typename T, typename A)(>\n\s*struct {name};)",
+                r"\1 = rusty::alloc::Global\2",
+                t,
+            )
         t = t.replace("IntoIter into_iter(", "IntoIter<T, A> into_iter(")
+        # bare NonZero::new_ -> qualified; and its Option constant can't be
+        # constexpr (non-literal type) -> inline const.
+        t = t.replace("NonZero::new_(", "rusty::num::NonZero<size_t>::new_(")
+        t = t.replace(
+            "static constexpr rusty::Option<rusty::num::NonZero<size_t>>",
+            "static inline const rusty::Option<rusty::num::NonZero<size_t>>",
+        )
+        # Bare submodule types referenced from a sibling/parent scope in the
+        # single module: qualify to their defining submodule namespace.
+        t = re.sub(r"(?<![:\w])IntoIter<T>", "into_iter::IntoIter<T>", t)
+        t = re.sub(r"(?<![:\w])IntoIter<T, A2?>", lambda m: "into_iter::" + m.group(0), t)
+        # rusty::iter::Copied<X> adapter isn't exposed under rusty::iter; the
+        # spec_extend_front decl that uses it is a dead specialization — drop
+        # the Copied wrapper to its inner iterator type so the decl compiles.
+        t = re.sub(r"rusty::iter::Copied<([^;]+?)> iter\)", r"\1 iter)", t)
         # std::hint branch hints have no C++ form.
         t = t.replace("std::hint::unlikely(", "(").replace("std::hint::likely(", "(")
         # Spec* extension-trait stubs (real impls live in dropped spec_* modules
