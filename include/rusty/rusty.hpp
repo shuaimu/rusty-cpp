@@ -42,6 +42,7 @@
 // commit 2454468 added them back after the b8776ff retirement broke
 // consumers that hadn't migrated to the transpiled port::sync::Arc.
 #include "rusty/sync/weak.hpp"
+#include "rusty/peekable.hpp"
 #include "rusty/vec.hpp"
 #include "rusty/vecdeque.hpp"
 #include "rusty/collections.hpp"  // TryReserveError (added for vec_port)

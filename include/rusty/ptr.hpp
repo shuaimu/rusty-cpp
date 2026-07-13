@@ -144,6 +144,10 @@ public:
     // `Box::leak(b)`), so the most useful spelling here is `from(T*)`,
     // accepting an already non-null pointer.
     // @unsafe
+    // Rust `impl From<&T> for NonNull<T>` / `From<&mut T>`.
+    static constexpr NonNull<T> from(T& r) noexcept {
+        return NonNull<T>{std::addressof(r)};
+    }
     static constexpr NonNull<T> from(T* ptr) noexcept {
         return NonNull<T>(ptr);
     }

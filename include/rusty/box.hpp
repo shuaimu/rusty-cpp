@@ -112,6 +112,25 @@ public:
         return Box<rusty::MaybeUninit<T>, A>::new_(rusty::MaybeUninit<T>());
     }
 
+    // Rust `Box::<T>::new_uninit_in(alloc) -> Box<MaybeUninit<T>, A>` —
+    // allocator-parameterized twin of new_uninit (the allocator is a
+    // zero-state tag in this runtime; it participates only in the type).
+    // @lifetime: owned
+    template<typename A2>
+    static Box<rusty::MaybeUninit<T>, A> new_uninit_in(A2&&)
+    {
+        return Box<rusty::MaybeUninit<T>, A>::new_(rusty::MaybeUninit<T>());
+    }
+
+    // Rust `Box::<MaybeUninit<U>>::assume_init(self) -> Box<U>`: re-type the
+    // SAME allocation once the caller has initialized the storage.
+    // @lifetime: owned
+    template<typename TT = T, typename U = typename rusty::detail::maybe_uninit_inner<TT>::type>
+    Box<U, A> assume_init() {
+        rusty::MaybeUninit<U>* slot = this->into_raw();
+        return Box<U, A>::from_raw(reinterpret_cast<U*>(slot));
+    }
+
     // Rust `Box::<MaybeUninit<U>>::write(boxed, value) -> Box<U>`: construct
     // the value into the uninit storage and re-type the SAME allocation
     // (MaybeUninit<U> is alignas(U) storage of sizeof(U) — layout-identical).

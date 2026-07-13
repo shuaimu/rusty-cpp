@@ -21,6 +21,11 @@
 
 // @safe
 namespace rusty {
+namespace detail {
+// Maps MaybeUninit<U> -> U for Box::assume_init's constrained re-typing.
+template <typename U> struct maybe_uninit_inner;
+} // namespace detail
+
 
 template<typename T>
 class MaybeUninit {
@@ -348,6 +353,43 @@ public:
     }
 };
 
+} // namespace rusty
+
+
+namespace rusty {
+// Rust `MaybeUninit::slice_assume_init_ref(&[MaybeUninit<T>]) -> &[T]`.
+template <typename T, std::size_t N>
+inline std::span<const T> assume_init_slice_ref(std::span<const MaybeUninit<T>, N> s) noexcept {
+    return {reinterpret_cast<const T*>(s.data()), s.size()};
+}
+template <typename T, std::size_t N>
+inline std::span<const T> assume_init_slice_ref(std::span<MaybeUninit<T>, N> s) noexcept {
+    return {reinterpret_cast<const T*>(s.data()), s.size()};
+}
+template <typename T, std::size_t N>
+inline std::span<T> assume_init_slice_mut(std::span<MaybeUninit<T>, N> s) noexcept {
+    return {reinterpret_cast<T*>(s.data()), s.size()};
+}
+
+namespace detail {
+template <typename U> struct maybe_uninit_inner<MaybeUninit<U>> { using type = U; };
+} // namespace detail
+
+// Slice-by-range helper for transpiled `slice[range]` on std::span (#89):
+// dispatches on the rusty range family's member shape.
+template <typename T, std::size_t N, typename R>
+auto subspan_by_range(std::span<T, N> s, const R& r) {
+    if constexpr (requires { r.end_value(); r.start; }) {
+        const auto lo = static_cast<std::size_t>(r.start);
+        return std::span<T>(s.subspan(lo, static_cast<std::size_t>(r.end_value()) - lo));
+    } else if constexpr (requires { r.end; }) {
+        return std::span<T>(s.first(static_cast<std::size_t>(r.end)));
+    } else if constexpr (requires { r.start; }) {
+        return std::span<T>(s.subspan(static_cast<std::size_t>(r.start)));
+    } else {
+        return std::span<T>(s);
+    }
+}
 } // namespace rusty
 
 #endif // RUSTY_MAYBE_UNINIT_HPP
