@@ -3235,6 +3235,14 @@ impl CodeGen {
         {
             return false;
         }
+        // Drop-glue shape: `drop(ptr::read(self).into_iter())`. The read
+        // yields the CURRENT crate type; routing through the generic
+        // rusty::iter(...) wrapper would destroy a bitwise COPY whose own
+        // destructor recurses until stack overflow (#89 b43). Emit the
+        // member into_iter — a missing member fails loudly at compile time.
+        if Self::expr_is_ptr_read_init(self.peel_paren_group_expr(receiver)) {
+            return false;
+        }
         let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
             // Unknown direct `.into_iter()` receiver types are usually generic or
             // pattern-introduced values without a concrete member surface.

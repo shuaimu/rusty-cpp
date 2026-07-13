@@ -3295,7 +3295,12 @@ impl CodeGen {
                         && !self.expr_reference_type_lowers_to_value_cpp(&init.expr)
                 });
                 let init_returns_reference_by_shape = local.init.as_ref().is_some_and(|init| {
-                    match self.peel_paren_group_expr(&init.expr) {
+                    // Peel through `unsafe { … }` / block tails too —
+                    // `let k = unsafe { x.assume_init_ref() };` is the
+                    // canonical shape (btree into_kv, #89 b42).
+                    let peeled = peel_to_tail_expr(&init.expr)
+                        .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr));
+                    match peeled {
                         syn::Expr::MethodCall(mc) => {
                             self.method_call_is_reference_like_by_shape(mc)
                         }

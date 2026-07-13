@@ -4849,6 +4849,18 @@ impl CodeGen {
                         let tail = tail_seg.ident.to_string();
                         for item in &impl_block.items {
                             let syn::ImplItem::Fn(m) = item else { continue };
+                            if let Some(syn::FnArg::Receiver(recv)) = m.sig.inputs.first() {
+                                let kind: u8 = match (recv.reference.is_some(), recv.mutability.is_some()) {
+                                    (true, false) => 0,
+                                    (true, true) => 1,
+                                    (false, false) => 2,
+                                    (false, true) => 3,
+                                };
+                                self.impl_method_receiver_kinds
+                                    .entry(tail.clone())
+                                    .or_default()
+                                    .insert(m.sig.ident.to_string(), kind);
+                            }
                             let per_type =
                                 self.impl_method_self_tys.entry(tail.clone()).or_default();
                             match per_type.entry(m.sig.ident.to_string()) {
@@ -6132,10 +6144,25 @@ impl CodeGen {
             return (Vec::new(), Vec::new());
         }
 
+        let constraints =
+            self.collect_template_constraints_for_params(generics, &emitted_type_params);
+
+        (params, constraints)
+    }
+
+    /// The constraint half of `collect_emitted_template_parts`, independent of
+    /// the param-visibility filter (#89: the out-of-line class-template method
+    /// prefix must repeat the class's `requires` clause, computed while the
+    /// class params are already in scope).
+    pub(super) fn collect_template_constraints_for_params(
+        &self,
+        generics: &syn::Generics,
+        emitted_type_params: &[&syn::TypeParam],
+    ) -> Vec<String> {
         let mut constraints: Vec<String> = Vec::new();
         let skip_facade_constraints = self.module_name.is_some();
 
-        for tp in &emitted_type_params {
+        for tp in emitted_type_params {
             for bound in &tp.bounds {
                 if let syn::TypeParamBound::Trait(tb) = bound {
                     if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
@@ -6182,7 +6209,7 @@ impl CodeGen {
             }
         }
 
-        (params, constraints)
+        constraints
     }
 
     pub(super) fn collect_current_struct_assoc_projection_names(

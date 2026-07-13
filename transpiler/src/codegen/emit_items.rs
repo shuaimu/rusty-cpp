@@ -1600,10 +1600,36 @@ impl CodeGen {
                     if prefix_params.is_empty() {
                         None
                     } else {
-                        Some((
-                            format!("<{}>", arg_names.join(", ")),
-                            vec![format!("template<{}>", prefix_params.join(", "))],
-                        ))
+                        let mut prefix_lines =
+                            vec![format!("template<{}>", prefix_params.join(", "))];
+                        // A CONSTRAINED class template's out-of-line member
+                        // definitions must repeat the class's `requires`
+                        // clause verbatim (C++ redeclaration matching). The
+                        // class params are already in scope here, so the
+                        // filtered collect_emitted_template_parts would
+                        // return nothing — use the unfiltered constraint
+                        // helper on the same generics (#89).
+                        let struct_type_params: Vec<&syn::TypeParam> = s
+                            .generics
+                            .params
+                            .iter()
+                            .filter_map(|p| match p {
+                                syn::GenericParam::Type(tp) => Some(tp),
+                                _ => None,
+                            })
+                            .collect();
+                        let prev_constraint_emit = self.in_constraint_emit.get();
+                        self.in_constraint_emit.set(true);
+                        let constraints = self.collect_template_constraints_for_params(
+                            &s.generics,
+                            &struct_type_params,
+                        );
+                        self.in_constraint_emit.set(prev_constraint_emit);
+                        if !constraints.is_empty() {
+                            prefix_lines
+                                .push(format!("    requires ({})", constraints.join(" && ")));
+                        }
+                        Some((format!("<{}>", arg_names.join(", ")), prefix_lines))
                     }
                 } else {
                     None
@@ -6411,10 +6437,18 @@ impl CodeGen {
                     // like `!TestFlags::A` (where A is `static const`)
                     // type-check.
                     ("".to_string(), false)
-                } else {
-                    // `fn foo(self)` (no `mut`, no field moves) →
-                    // emit as const. The body only reads through
-                    // self in ways the compiler can lift to copies.
+                } else if !self
+                    .current_struct
+                    .as_ref()
+                    .is_some_and(|owner| {
+                        let tail = owner.rsplit("::").next().unwrap_or(owner).to_string();
+                        self.body_calls_mutating_method_on_self(&method.block, &tail)
+                    })
+                {
+                    // `fn foo(self)` (no `mut`, no field moves, no method
+                    // calls THROUGH self) → emit as const. The body only
+                    // reads through self in ways the compiler can lift to
+                    // copies.
                     //
                     // Modeling as a C++ const method lets call sites
                     // where the receiver is bound through a const
@@ -6422,18 +6456,17 @@ impl CodeGen {
                     // in a match arm — see btree_port B3 in
                     // tests/btree_port_iter_remove_movonly_test.cpp)
                     // dispatch successfully.
-                    //
-                    // Heuristic limitation: `body_moves_out_self_field`
-                    // looks for `self.<ident>` and counts ALL field
-                    // reads as potential moves (since the field's
-                    // Copy-ness depends on T which we don't know at
-                    // emit time). For Copy-only-field bodies (like
-                    // `fn forget_type(self) -> NodeRef { NodeRef {
-                    // height: self.height, node: self.node, _marker:
-                    // PhantomData } }` where `height: u8` and `node:
-                    // NonNull` are both Copy), we over-classify as
-                    // non-const, but that's the SAFE direction.
                     (" const".to_string(), false)
+                } else {
+                    // `fn foo(self)` whose body CALLS methods on self:
+                    // consuming Rust methods routinely delegate to other
+                    // consuming/mutating methods (`self.insert(...)`,
+                    // `self.split(...)`). On a const *this those calls
+                    // select const overloads that don't exist — btree's
+                    // insert_recursing/remove_leaf_kv family was emitted
+                    // const and every caller needed a const_cast (#89).
+                    // Consuming-self is semantically non-const anyway.
+                    ("".to_string(), false)
                 }
             }
             _ => {

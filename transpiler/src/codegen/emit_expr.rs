@@ -15145,6 +15145,25 @@ impl CodeGen {
                 let fmt_arg = self.emit_expr_to_string(&call.args[1]);
                 return format!("write_fmt({}, {})", writer, fmt_arg);
             }
+            if call.args.len() == 1
+                && matches!(
+                    joined.as_str(),
+                    "hint::likely"
+                        | "std::hint::likely"
+                        | "core::hint::likely"
+                        | "hint::unlikely"
+                        | "std::hint::unlikely"
+                        | "core::hint::unlikely"
+                        | "hint::black_box"
+                        | "std::hint::black_box"
+                        | "core::hint::black_box"
+                )
+            {
+                // Branch-prediction/opt-barrier hints are IDENTITY functions
+                // semantically — pass the operand through.
+                let inner = self.emit_expr_to_string(&call.args[0]);
+                return format!("({})", inner);
+            }
             if call.args.len() == 3
                 && matches!(
                     joined.as_str(),

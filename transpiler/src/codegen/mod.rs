@@ -1233,6 +1233,11 @@ pub struct CodeGen {
     /// impls: btree's Handle<NodeRef<Mut<'a>, K, V, Internal>, Edge>).
     pub(crate) impl_method_self_tys:
         HashMap<String, HashMap<String, Option<syn::Type>>>,
+    /// (type tail -> method -> receiver kind): 0=&self, 1=&mut self,
+    /// 2=self, 3=mut self. Consulted by the consuming-self constness
+    /// decision (a `fn f(self)` body calling a MUTATING sibling must emit
+    /// non-const; one calling only &self/self siblings stays const).
+    pub(crate) impl_method_receiver_kinds: HashMap<String, HashMap<String, u8>>,
     /// #88: stack — the Self type of the impl declaring the method currently
     /// being emitted (None when unknown or poisoned).
     pub(crate) current_impl_method_self_tys: Vec<Option<syn::Type>>,
@@ -1947,6 +1952,7 @@ impl CodeGen {
             local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),
             impl_method_self_tys: HashMap::new(),
+            impl_method_receiver_kinds: HashMap::new(),
             current_impl_method_self_tys: Vec::new(),
             ufcs_impl_module_path: Vec::new(),
             local_cpp_bindings: Vec::new(),
@@ -20417,6 +20423,71 @@ impl CodeGen {
     /// - `self.method(...)` — method call, borrow of self (`&self` or
     ///   `&mut self` depending on receiver).
     /// - bare `self` references (we look for field accesses).
+    /// Does the body invoke a MUTATING method THROUGH `self` — a direct
+    /// `self.m(...)` whose sibling `m` takes `&mut self`/`mut self`
+    /// (per `impl_method_receiver_kinds`), or a mut-suffixed method on a
+    /// field (`self.node.into_leaf_mut()`)? Consuming-`self` methods that
+    /// do so must emit NON-const: on a const `*this` those calls select
+    /// const overloads that don't exist (btree's insert_recursing family,
+    /// #89). Calls to `&self`/plain-`self` siblings (hashbrown's
+    /// `Tag::special_is_empty` asserting `self.is_special()`) keep the
+    /// const modeling that as_const'd call sites rely on.
+    pub(crate) fn body_calls_mutating_method_on_self(
+        &self,
+        block: &syn::Block,
+        owner_tail: &str,
+    ) -> bool {
+        use syn::visit::Visit;
+        struct V<'a> {
+            found: bool,
+            kinds: Option<&'a HashMap<String, u8>>,
+        }
+        impl<'ast, 'a> Visit<'ast> for V<'a> {
+            fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                if self.found {
+                    return;
+                }
+                let mut recv = mc.receiver.as_ref();
+                loop {
+                    match recv {
+                        syn::Expr::Paren(p) => recv = &p.expr,
+                        syn::Expr::Group(g) => recv = &g.expr,
+                        _ => break,
+                    }
+                }
+                match recv {
+                    syn::Expr::Path(p) if p.path.is_ident("self") => {
+                        let mutating = self
+                            .kinds
+                            .and_then(|k| k.get(&mc.method.to_string()))
+                            .is_some_and(|kind| matches!(kind, 1 | 3));
+                        if mutating {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                    syn::Expr::Field(f) => {
+                        if let syn::Expr::Path(base) = f.base.as_ref()
+                            && base.path.is_ident("self")
+                            && mc.method.to_string().ends_with("_mut")
+                        {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+                syn::visit::visit_expr_method_call(self, mc);
+            }
+        }
+        let mut v = V {
+            found: false,
+            kinds: self.impl_method_receiver_kinds.get(owner_tail),
+        };
+        v.visit_block(block);
+        v.found
+    }
+
     fn body_moves_out_self_field(block: &syn::Block) -> bool {
         use syn::visit::Visit;
         struct V {
@@ -29621,7 +29692,58 @@ impl CodeGen {
                     | "last_mut"
             ) || mut_ref_yielding_method_shape(&inner_method);
         }
+        // MaybeUninit's assume_init_ref/_mut ALWAYS return references —
+        // binding them with a decaying `auto` produced tuples of references
+        // to dead locals (btree into_kv: get() read garbage while writes
+        // went to stack copies, #89 b42).
+        if matches!(method.as_str(), "assume_init_ref" | "assume_init_mut") {
+            return true;
+        }
+        // Generic prong: a crate-declared method whose declared Rust return
+        // is a REFERENCE yields a reference regardless of the name lists
+        // above. Shape-only scan (the resolvability-filtered unique lookup
+        // would skip `&V`-style returns); every same-tail declaration must
+        // agree. A false positive fails loudly at compile time as an
+        // unbindable `auto&`, never silently.
+        if self.all_declared_returns_by_name_are_references(&method) {
+            return true;
+        }
         false
+    }
+
+    fn all_declared_returns_by_name_are_references(&self, method_name: &str) -> bool {
+        let mut found = false;
+        for (key, ret_ty) in self.function_return_types.iter() {
+            let Some(ret_ty) = ret_ty.as_ref() else {
+                continue;
+            };
+            let Some((_, tail)) = key.rsplit_once("::") else {
+                continue;
+            };
+            if tail != method_name {
+                continue;
+            }
+            if !matches!(
+                self.peel_paren_group_type_shallow(ret_ty),
+                syn::Type::Reference(_)
+            ) {
+                return false;
+            }
+            found = true;
+        }
+        found
+    }
+
+    /// Peel Paren/Group (NOT references) off a type.
+    fn peel_paren_group_type_shallow<'a>(&self, ty: &'a syn::Type) -> &'a syn::Type {
+        let mut t = ty;
+        loop {
+            match t {
+                syn::Type::Paren(p) => t = &p.elem,
+                syn::Type::Group(g) => t = &g.elem,
+                _ => return t,
+            }
+        }
     }
 
     fn method_call_receiver_owner_tail(&self, receiver: &syn::Expr) -> Option<String> {
@@ -41052,7 +41174,7 @@ impl CodeGen {
         // wrapper type by value (e.g. `NodeRef { node, ... }`), not a
         // reference — binding it to `auto&` would fail "can't bind lvalue
         // reference to temporary."
-        let peeled = self.peel_paren_group_expr(expr);
+        let peeled = peel_to_tail_expr(expr).unwrap_or_else(|| self.peel_paren_group_expr(expr));
         if let syn::Expr::MethodCall(mc) = peeled {
             let method = mc.method.to_string();
             // `RefCell::borrow()` / `borrow_mut()` return guard wrappers
@@ -44087,13 +44209,23 @@ fn merge_impl_type_generics_into_method_with_decomp(
     // references E outside any __TemplateArgs recovery — without the
     // exception, the emitted method has no `template<typename E>` and clang
     // errors with "use of undeclared identifier 'E'".
-    let return_type_referenced_idents: HashSet<String> = if let syn::ReturnType::Type(_, ret_ty) =
-        &method.sig.output
-    {
-        collect_type_path_idents(ret_ty)
-    } else {
-        HashSet::new()
-    };
+    let mut return_type_referenced_idents: HashSet<String> =
+        if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output {
+            collect_type_path_idents(ret_ty)
+        } else {
+            HashSet::new()
+        };
+    // #53/#89: the same exception for NON-RECEIVER PARAM types. A structural
+    // generic spelled in a plain param (btree's
+    // `fn new_kv(node: NodeRef<BorrowType, K, V, NodeType>, idx: usize)` on
+    // `impl<…> Handle<NodeRef<…>, marker::KV>`) is DEDUCIBLE from that
+    // argument at every call site — skipping it just leaves an undeclared
+    // identifier in the emitted signature.
+    for input in &method.sig.inputs {
+        if let syn::FnArg::Typed(pat_ty) = input {
+            return_type_referenced_idents.extend(collect_type_path_idents(&pat_ty.ty));
+        }
+    }
 
     for param in &impl_generics.params {
         match param {
