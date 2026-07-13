@@ -13,7 +13,7 @@ bash "$REPO/docs/rusty/build.sh" "$W" | tail -3
 FLAGS="-std=c++23 -DRUSTY_PORTABLE_INTRINSICS=1 -march=native -I$REPO/include"
 clang++ $FLAGS -c "$W/out/hashbrown/hashbrown.pcm" -o "$W/hashbrown.o" 2>"$W/ho.err" || { echo "hashbrown obj FAIL"; tail -3 "$W/ho.err"; exit 1; }
 clang++ $FLAGS -fmodule-file=hashbrown="$W/out/hashbrown/hashbrown.pcm" -c "$W/out/rusty.pcm" -o "$W/rusty.o" 2>"$W/ro.err" || { echo "rusty obj FAIL"; tail -3 "$W/ro.err"; exit 1; }
-for T in test_rusty test_cursor; do
+for T in test_rusty test_cursor test_error_smoke; do
   clang++ $FLAGS -fmodule-file=rusty="$W/out/rusty.pcm" -fmodule-file=hashbrown="$W/out/hashbrown/hashbrown.pcm" \
     -c "$REPO/docs/rusty/$T.cpp" -o "$W/$T.o" 2>"$W/$T.cerr" \
     || { echo "$T compile: $(grep -c ' error: ' "$W/$T.cerr") errors"; grep ' error: ' "$W/$T.cerr" | head; exit 1; }

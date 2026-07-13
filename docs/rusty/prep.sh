@@ -75,4 +75,93 @@ if [[ -d "$SRC/io" ]]; then
     "$SRC/io/cursor.rs"
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/prep_io.py" "$SRC/io"
 fi
+# ============================================================================
+# std::error slice (merged core::error + std::error in src/error.rs).
+# Runs AFTER the generic seds above, so markers match post-rewrite text.
+# Stubs (each reported by the widening probe):
+#   S1  use crate::any::TypeId          -> deleted (no rusty::any::TypeId yet)
+#   S2  Error::type_id + mod private    -> deleted (needs TypeId)
+#   S3  impl dyn Error downcast trio    -> deleted (needs TypeId + ptr casts)
+#   S4  Request/Tagged/Erased machinery -> stub Request + request_* -> None
+#       (nightly provide API; pointer-tagging is untranspilable — this is the
+#        std::error::Request recursion the alloc boxed probe hit)
+#   S5  impl Error for ! / FusedIterator / external-type impls -> deleted
+#   S6  crate::backtrace::Backtrace     -> local inert stub (OS/sys boundary)
+#   S7  duplicate `use std::fmt::{self, Write}` (std part) -> fmt::Write only
+# ============================================================================
+ERR="$SRC/error.rs"
+if [[ -f "$ERR" ]]; then
+  python3 - "$ERR" <<'PYEOF'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+def cut(s, start, end, keep_end, label):
+    i = s.find(start)
+    assert i >= 0, f"start marker missing: {label}"
+    j = s.find(end, i)
+    assert j > i, f"end marker missing: {label}"
+    if not keep_end:
+        j += len(end)
+    print(f"  cut {label}")
+    return s[:i] + s[j:]
+
+# S1: TypeId import
+s = s.replace("use crate::any::TypeId;\n", "")
+# S2a: trait method type_id (attrs through closing brace)
+s = cut(s, "    #[doc(hidden)]\n    #[unstable(\n        feature = \"error_type_id\",",
+        "        TypeId::of::<Self>()\n    }\n", False, "Error::type_id")
+# S2b: mod private
+s = cut(s, "mod private {", "\n}\n", False, "mod private")
+# S5a: impl Error for !
+s = s.replace('#[unstable(feature = "never_type", issue = "35121")]\nimpl Error for ! {}\n', "")
+# S3: the three dyn-Error downcast impl blocks (is/downcast_ref/downcast_mut)
+s = cut(s, "// Copied from `any.rs`.", "impl dyn Error {", True, "dyn downcast impls")
+# S4: Request pointer-tagging machinery -> inert stubs
+s = cut(s, '#[unstable(feature = "error_generic_member_access", issue = "99301")]\npub fn request_value',
+        "/// An iterator over an [`Error`] and its sources.", True, "Request machinery")
+stub = '''// STUB (prep S4): nightly Request/provide (Tagged/Erased/TypeId pointer
+// tagging) is not transpilable; request_* always answer "nothing provided".
+pub struct Request<'a>(std::marker::PhantomData<&'a mut &'a ()>);
+pub fn request_value<'a, T>(_err: &'a (impl Error + ?Sized)) -> Option<T>
+where T: 'static {
+    None
+}
+pub fn request_ref<'a, T>(_err: &'a (impl Error + ?Sized)) -> Option<&'a T>
+where T: 'static + ?Sized {
+    None
+}
+
+'''
+i = s.find("/// An iterator over an [`Error`] and its sources.")
+s = s[:i] + stub + s[i:]
+# S5b: FusedIterator marker impl (inline crate::iter path would not resolve)
+s = re.sub(r'#\[unstable\(feature = "error_iter", issue = "58520"\)\]\nimpl<\'a> crate::iter::FusedIterator for Source<\'a> \{\}\n', "", s, count=1)
+# S5c: Error impls for external (non-slice) types
+s, n = re.subn(r'#\[stable\([^)]*\)\]\nimpl Error for (?:crate|std)::[A-Za-z_:]+ \{\}\n', "", s)
+print(f"  dropped {n} external-type Error impls")
+# S8: blanket `impl Error for &'a T` — emits an __ufcs_Error deref-forwarding
+# shim whose using-decls into Error_ collide with the trait's own
+# default-method templates (same template<T>(const T&) signature; Rust
+# disambiguates by impl selection, the C++ flattening cannot).
+s = cut(s, '#[stable(feature = "error_by_ref", since = "1.51.0")]\nimpl<\'a, T: Error + ?Sized> Error for &\'a T {',
+        "\n}\n", False, "blanket impl Error for &T")
+# std part: kill the now-self-referential re-exports of the merged module
+s = s.replace('#[stable(feature = "rust1", since = "1.0.0")]\npub use std::error::Error;\n', "")
+s = s.replace('#[unstable(feature = "error_generic_member_access", issue = "99301")]\npub use std::error::{Request, request_ref, request_value};\n', "")
+# S7: second fmt import would collide on `self`
+s = s.replace("use std::fmt::{self, Write};", "use std::fmt::Write;")
+# S6: Backtrace stub (OS boundary: std::backtrace -> sys, hand-written runtime)
+s = s.replace("use crate::backtrace::Backtrace;\n", '''// STUB (prep S6): std::backtrace is OS/sys layer, not transpiled.
+#[derive(Debug)]
+pub struct Backtrace(());
+impl fmt::Display for Backtrace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<backtrace unavailable>")
+    }
+}
+''')
+p.write_text(s)
+print("  error.rs prep complete")
+PYEOF
+fi
+
 echo "prep.sh complete: $SRC"

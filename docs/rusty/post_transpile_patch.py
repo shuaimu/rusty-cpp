@@ -134,7 +134,10 @@ def patch_rusty(path: Path) -> None:
     t = t.replace("rusty::io::error::", "::io::error::")
     # (io-cursor) `pub(crate) use error::const_error;` re-exports a macro —
     # expanded away by cargo-expand, so no C++ entity exists to alias.
+    # Emitted unqualified pre-error-slice; `::error::`-qualified once the
+    # top-level error module exists.
     t = t.replace("    export using error::const_error;\n", "")
+    t = t.replace("    export using ::error::const_error;\n", "")
     # (io-cursor) the crate now DECLARES an io::Write trait, so the
     # Hasher::write/io::Write::write name collision emits a 3-tier UFCS
     # dispatch lambda whose fallback (Write_::write_) is unviable for
@@ -227,6 +230,77 @@ def patch_rusty(path: Path) -> None:
         "rusty::collections::TryReserveErrorKind::AllocError(layout, std::make_tuple()))",
         "rusty::collections::TryReserveError("
         "rusty::collections::TryReserveError::Kind::AllocError, layout.size, layout.align)",
+    )
+    # ---- std::error slice (widening probe) ----
+    # (e1) Report::backtrace(): `request_ref(&self.error)` had its type arg
+    # inferred (Backtrace) in Rust; the transpiler leaked the literal `T`.
+    t = t.replace(
+        "request_ref<T>(this->error)",
+        "request_ref<Backtrace>(this->error)",
+    )
+    # (e2) fmt_singleline: `<dyn Error>::sources` (an inherent fn on the trait
+    # object) was mis-bound as a local variable `sources`, yielding a
+    # use-before-decl self-ref-tmp pair. The chain is unimplementable anyway
+    # under the void* dyn-Error erasure — truncate to the top error (a
+    # dependent empty array keeps the loop body deferred).
+    t = re.sub(
+        r"const auto sources_self_ref_tmp = rusty::flat_map\(rusty::iter\(.*"
+        r"std::move\(sources\)\);\n(\s*)const auto sources = "
+        r"std::move\(sources_self_ref_tmp\);",
+        r"\1// PATCH e2: source-chain walk truncated (void* dyn erasure)."
+        r"\n\1const auto sources = std::array<const E*, 0>{};",
+        t,
+        count=1,
+    )
+    # (e3) Source::next: Option<const void*&>::and_then does not exist on the
+    # runtime's Option<T&> specialization, and the forwarded `.source()` can
+    # never be called on a type-erased const void* anyway — the iterator
+    # yields the seed error once, then ends.
+    t = re.sub(
+        r"this->current = this->current\.and_then\(.*\);\n",
+        "this->current = rusty::Option<const void*&>{rusty::None};"
+        "  // PATCH e3: chain walk truncated\n",
+        t,
+        count=1,
+    )
+    # (e4) Report::backtrace(): Option<const Backtrace&>::or_else does not
+    # exist on the runtime's Option<T&> specialization, and the fallback scans
+    # the source chain (void* wall) for something the stubbed request_ref can
+    # never yield. Return the (always-None) direct probe.
+    t = re.sub(
+        r"auto backtrace_shadow1 = backtrace\.or_else\(\[&\]\(\) \{.*?\}\);"
+        r"\n(\s*)return std::move\(backtrace_shadow1\);",
+        r"\1// PATCH e4: or_else source-scan truncated (stubbed request_ref"
+        r" is always None).\n\1return std::move(backtrace);",
+        t,
+        count=1,
+        flags=re.S,
+    )
+    # (e5) fmt_multiline: the cause-chain walk calls .sources() (dropped
+    # dyn-inherent fn) and dispatches source() through deref_if_pointer_like
+    # on const void* — both hard errors on instantiation. Guard the walk
+    # behind `requires {{ cause.sources(); }}` (never satisfiable today).
+    lines = t.splitlines(keepends=True)
+    for i, ln in enumerate(lines):
+        if "const auto multiple = " in ln and "(cause).is_some();" in ln:
+            for j in range(i + 1, len(lines)):
+                if lines[j].rstrip("\n") == "                }":
+                    lines[i] = (
+                        "                // PATCH e5: cause-chain walk gated"
+                        " off (void* dyn erasure; dyn-inherent sources()"
+                        " dropped).\n"
+                        "                if constexpr (requires { cause.sources(); }) {\n"
+                        + lines[i]
+                    )
+                    lines[j] = lines[j] + "                }\n"
+                    break
+            break
+    t = "".join(lines)
+    # (e6) Backtrace stub Display: `backtrace.to_string().trim_end()` — Rust
+    # String::trim_end has no std::string counterpart.
+    t = t.replace(
+        "rusty::to_string(rusty::to_string(backtrace).trim_end())",
+        "rusty::to_string(backtrace)",
     )
     # (a) import the recursively-transpiled dep + bridge its glob re-exports
     # (they are emitted as un-exported using-directives, invisible to

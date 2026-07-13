@@ -15,6 +15,7 @@ W="${1:?usage: build.sh <work_dir>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 SRC="$(rustc --print sysroot)/lib/rustlib/src/rust/library/std/src"
+CORE="$(rustc --print sysroot)/lib/rustlib/src/rust/library/core/src"
 rm -rf "$W"; mkdir -p "$W/src/collections/hash" "$W/src/hash"
 
 # --- std sources (raw; prep.sh rewrites in place) ---
@@ -24,7 +25,15 @@ cp "$SRC/hash/random.rs" "$W/src/hash/random.rs"
 printf 'pub mod map;\npub mod set;\n' > "$W/src/collections/hash/mod.rs"
 printf 'pub mod hash;\npub use hash::map::HashMap;\npub use hash::set::HashSet;\n' > "$W/src/collections/mod.rs"
 printf 'pub mod random;\npub use random::{DefaultHasher, RandomState};\n' > "$W/src/hash/mod.rs"
-printf '#![allow(unused)]\n#![allow(deprecated)]\npub mod collections;\npub mod hash;\npub mod io;\n' > "$W/src/lib.rs"
+printf '#![allow(unused)]\n#![allow(deprecated)]\npub mod collections;\npub mod error;\npub mod hash;\npub mod io;\n' > "$W/src/lib.rs"
+
+# --- std::error slice: std's error.rs is only Report+Indented over a
+#     `pub use core::error::*` — the Error TRAIT lives in core::error.
+#     Merge both files into ONE src/error.rs so trait/Report/Source stay
+#     intra-module (no self-referential `pub use std::error::Error` after
+#     the core::->std:: prep rewrite). Inner attrs (#![doc=include_str!],
+#     #![stable]) stripped — invalid outside the crate root. ---
+{ grep -v '^#!\[' "$CORE/error.rs"; printf '\n// ==== std::error (Report) — appended by build.sh ====\n'; grep -v '^#!\[' "$SRC/error.rs"; } > "$W/src/error.rs"
 
 # --- io-cursor slice: cursor.rs + trimmed impls.rs from std, hand facades ---
 mkdir -p "$W/src/io"
