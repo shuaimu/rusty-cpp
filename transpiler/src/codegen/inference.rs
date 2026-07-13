@@ -8774,6 +8774,60 @@ impl CodeGen {
     /// where `impl<…> Handle<NodeRef<…>, marker::Edge>` defines `new_edge`,
     /// position 0 deduces via `decltype(node)` and position 1 takes the
     /// concrete `marker::Edge` from the impl signature.
+    /// Collect bare single-ident path types that LOOK like type params
+    /// (uppercase-initial CamelCase, no path/args) anywhere inside `ty`.
+    fn collect_bare_probable_type_param_idents_in_type(
+        ty: &syn::Type,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                {
+                    let name = tp.path.segments[0].ident.to_string();
+                    if Self::owner_template_arg_is_probable_type_param_ident(&name) {
+                        out.insert(name);
+                    }
+                }
+                for seg in &tp.path.segments {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                Self::collect_bare_probable_type_param_idents_in_type(inner, out);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Reference(r) => {
+                Self::collect_bare_probable_type_param_idents_in_type(&r.elem, out)
+            }
+            syn::Type::Ptr(p) => {
+                Self::collect_bare_probable_type_param_idents_in_type(&p.elem, out)
+            }
+            syn::Type::Paren(p) => {
+                Self::collect_bare_probable_type_param_idents_in_type(&p.elem, out)
+            }
+            syn::Type::Group(g) => {
+                Self::collect_bare_probable_type_param_idents_in_type(&g.elem, out)
+            }
+            syn::Type::Tuple(t) => {
+                for elem in &t.elems {
+                    Self::collect_bare_probable_type_param_idents_in_type(elem, out);
+                }
+            }
+            syn::Type::Array(a) => {
+                Self::collect_bare_probable_type_param_idents_in_type(&a.elem, out)
+            }
+            syn::Type::Slice(s) => {
+                Self::collect_bare_probable_type_param_idents_in_type(&s.elem, out)
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn infer_owner_template_args_from_defining_impl_block(
         &self,
         owner_name: &str,
@@ -8866,6 +8920,22 @@ impl CodeGen {
                     } else {
                         out.push(None);
                     }
+                    continue;
+                }
+                // Composite position (`NodeRef<BorrowType, K, V, NodeType>`):
+                // usable only when every probable-type-param ident inside is
+                // BOUND at the call site — an unbound impl generic would leak
+                // an undeclared identifier AND shadow the declared-signature
+                // inference that CAN resolve the position from the call args.
+                let mut inner_idents = std::collections::BTreeSet::new();
+                Self::collect_bare_probable_type_param_idents_in_type(arg_ty, &mut inner_idents);
+                let all_bound = inner_idents.iter().all(|name| {
+                    self.is_type_param_in_scope(name)
+                        || current_struct_params.iter().any(|p| p == name)
+                        || self.simple_ident_is_known_type_name(name)
+                });
+                if !all_bound {
+                    out.push(None);
                     continue;
                 }
                 let mapped = self.map_type(arg_ty);
@@ -12218,6 +12288,18 @@ impl CodeGen {
         let last_seg = path.segments.last()?;
         if !matches!(last_seg.arguments, syn::PathArguments::None) {
             return None;
+        }
+        if path.segments.len() == 1 {
+            // A TYPE PARAM shadows any same-named declared type (Handle's
+            // `Node` param vs linked_list's `struct Node<T>`) — never
+            // arity-complete it (#89: `Node` field became `Node<Node>` once
+            // linked_list joined the module set).
+            let local_name = last_seg.ident.to_string();
+            if self.is_type_param_in_scope(&local_name)
+                || self.is_struct_type_param(&local_name)
+            {
+                return Some(mapped_path.to_string());
+            }
         }
         if self.current_struct.is_some() && path.segments.len() == 1 {
             let local_name = last_seg.ident.to_string();
