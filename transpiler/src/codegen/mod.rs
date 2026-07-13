@@ -1224,6 +1224,18 @@ pub struct CodeGen {
     /// Used to keep initializer expression/type lookup resolving the outer
     /// binding when a local shadows an existing name (`let x = x.next()`).
     pub(crate) in_progress_local_initializers: Vec<String>,
+    /// #88: (type name -> method name -> declaring impl's Self type),
+    /// recorded while collecting impls. `None` = poisoned (the same method
+    /// name appeared on impls with DIFFERENT Self instantiations, so no
+    /// single answer exists). Consulted through
+    /// `current_impl_method_self_tys` to type `self.FIELD` arguments whose
+    /// declared field type is a struct type param (partially-applied generic
+    /// impls: btree's Handle<NodeRef<Mut<'a>, K, V, Internal>, Edge>).
+    pub(crate) impl_method_self_tys:
+        HashMap<String, HashMap<String, Option<syn::Type>>>,
+    /// #88: stack — the Self type of the impl declaring the method currently
+    /// being emitted (None when unknown or poisoned).
+    pub(crate) current_impl_method_self_tys: Vec<Option<syn::Type>>,
     /// Scoped Rust-local to emitted-C++ local name mappings.
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
@@ -1928,6 +1940,8 @@ impl CodeGen {
             local_bindings: Vec::new(),
             local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),
+            impl_method_self_tys: HashMap::new(),
+            current_impl_method_self_tys: Vec::new(),
             local_cpp_bindings: Vec::new(),
             local_cpp_names_used: Vec::new(),
             pending_loop_var_bindings: Vec::new(),
@@ -34215,6 +34229,21 @@ impl CodeGen {
             && !Self::simple_ident_is_builtin_cpp_type_name(trimmed)
     }
 
+    /// Uppercase-initial CamelCase single idents (`K`, `V`, `Node`,
+    /// `BorrowType`) are type params by Rust convention even when scope
+    /// tracking can't see their frame (impl generics inside a flattened
+    /// class emission, #88). ALL_CAPS idents (`CAPACITY`) stay excluded —
+    /// those are consts, i.e. genuinely value identifiers.
+    pub(crate) fn owner_template_arg_is_probable_type_param_ident(arg: &str) -> bool {
+        let trimmed = arg.trim();
+        Self::is_simple_ident(trimmed)
+            && trimmed.starts_with(|c: char| c.is_ascii_uppercase())
+            && !(trimmed.len() > 1
+                && trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
+    }
+
     fn owner_template_arg_looks_like_namespace_path(&self, arg: &str) -> bool {
         let trimmed = arg.trim().trim_start_matches("::");
         if trimmed == "std::string_view" {
@@ -35316,6 +35345,15 @@ impl CodeGen {
             if owner_rebound_cpp_path.is_some() && idx < owner_idx {
                 continue;
             }
+            // Rust path keywords have no C++ spelling; `super::Vec::new_in`
+            // resolves via parent-namespace lookup once the segment is
+            // dropped (a sibling emitted from `vec::into_iter` finds
+            // `vec::Vec` by ascent).
+            if idx < owner_idx
+                && matches!(seg.ident.to_string().as_str(), "super" | "crate" | "self")
+            {
+                continue;
+            }
             if owner_name == "Vec" && idx < owner_idx {
                 let seg_name = seg.ident.to_string();
                 let is_std_alloc_prefix = idx == 0 && matches!(seg_name.as_str(), "std" | "alloc");
@@ -35662,7 +35700,17 @@ impl CodeGen {
                                     .as_ref()
                                     .and_then(|args| args.get(arg_idx))
                                     .and_then(|arg| arg.clone())
-                                    .and_then(|arg| owner_arg_is_usable(&arg).then_some(arg));
+                                    // #88: declared-signature inference can
+                                    // legitimately yield impl generics (K/V)
+                                    // that scope tracking can't see — accept
+                                    // probable type-param idents here.
+                                    .and_then(|arg| {
+                                        (owner_arg_is_usable(&arg)
+                                            || Self::owner_template_arg_is_probable_type_param_ident(
+                                                &arg,
+                                            ))
+                                        .then_some(arg)
+                                    });
                                 let scoped = scoped_owner_args
                                     .as_ref()
                                     .and_then(|args| args.get(arg_idx))

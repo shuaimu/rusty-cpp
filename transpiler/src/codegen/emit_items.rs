@@ -5975,6 +5975,24 @@ impl CodeGen {
     }
 
     pub(super) fn emit_method(&mut self, method: &syn::ImplItemFn) {
+        // #88: expose the declaring impl's instantiated Self type to body
+        // emission (types `self.FIELD` when the field's declared type is a
+        // struct type param — partially-applied generic impls like btree's
+        // Handle<NodeRef<Mut<'a>, K, V, Internal>, Edge>). Wrapper keeps the
+        // push/pop balanced across every return path of the real emitter.
+        let impl_self_ty = self
+            .current_struct
+            .as_ref()
+            .and_then(|s| self.impl_method_self_tys.get(s))
+            .and_then(|per_type| per_type.get(&method.sig.ident.to_string()))
+            .cloned()
+            .flatten();
+        self.current_impl_method_self_tys.push(impl_self_ty);
+        self.emit_method_inner(method);
+        self.current_impl_method_self_tys.pop();
+    }
+
+    fn emit_method_inner(&mut self, method: &syn::ImplItemFn) {
         let profile_method = std::env::var_os("RUSTY_CPP_PROFILE_METHODS").is_some();
         let method_profile_start = if profile_method {
             let owner = self.current_struct.as_deref().unwrap_or("<free-impl>");

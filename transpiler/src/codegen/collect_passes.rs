@@ -4838,6 +4838,35 @@ impl CodeGen {
                     self.record_function_return_type(&scoped_name, return_ty);
                 }
                 syn::Item::Impl(impl_block) => {
+                    // #88: record each method's declaring-impl Self type
+                    // (keyed by the type's TAIL name, matching current_struct
+                    // at emission). Poison on a conflicting Self for the same
+                    // method name — no single answer exists then.
+                    if let Some(tp) = Self::impl_self_type_path(impl_block.self_ty.as_ref())
+                        && let Some(tail_seg) = tp.path.segments.last()
+                    {
+                        use quote::ToTokens;
+                        let tail = tail_seg.ident.to_string();
+                        for item in &impl_block.items {
+                            let syn::ImplItem::Fn(m) = item else { continue };
+                            let per_type =
+                                self.impl_method_self_tys.entry(tail.clone()).or_default();
+                            match per_type.entry(m.sig.ident.to_string()) {
+                                std::collections::hash_map::Entry::Occupied(mut o) => {
+                                    let same = o.get().as_ref().is_some_and(|prev| {
+                                        prev.to_token_stream().to_string()
+                                            == impl_block.self_ty.to_token_stream().to_string()
+                                    });
+                                    if !same {
+                                        o.insert(None);
+                                    }
+                                }
+                                std::collections::hash_map::Entry::Vacant(v) => {
+                                    v.insert(Some((*impl_block.self_ty).clone()));
+                                }
+                            }
+                        }
+                    }
                     let mut owner_keys: Vec<String> = Vec::new();
                     if let Some(tp) = Self::impl_self_type_path(impl_block.self_ty.as_ref())
                         && !tp.path.segments.is_empty()

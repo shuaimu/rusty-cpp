@@ -8808,6 +8808,82 @@ impl CodeGen {
             chosen = Some(item_impl);
             break;
         }
+        // #88 fallback: single-module pipelines never populate
+        // `cross_file_impl_blocks`; the per-method declaring-impl self-ty
+        // map (`impl_method_self_tys`) records the same owner-arg shape.
+        // Concrete positions emit literally; bare generic positions
+        // name-match the call site's type params (`NodeRef<Owned, K, V,
+        // Leaf>::new_leaf` built from inside `VacantEntry<K, V, A>` binds
+        // K/V to the surrounding params, as Rust's inference does).
+        if chosen.is_none() {
+            let self_ty = self
+                .impl_method_self_tys
+                .get(owner_name)
+                .and_then(|per_type| per_type.get(method_name))
+                .cloned()
+                .flatten()?;
+            let syn::Type::Path(tp) = &self_ty else {
+                return None;
+            };
+            let last = tp.path.segments.last()?;
+            if last.ident != owner_name {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(impl_args) = &last.arguments else {
+                return None;
+            };
+            let current_struct_params: Vec<String> = self
+                .current_struct
+                .as_ref()
+                .and_then(|s| {
+                    self.declared_type_params
+                        .get(s)
+                        .or_else(|| self.declared_type_params.get(&self.scoped_type_key(s)))
+                })
+                .cloned()
+                .unwrap_or_default();
+            let mut out: Vec<Option<String>> = Vec::new();
+            for arg in impl_args.args.iter() {
+                let syn::GenericArgument::Type(arg_ty) = arg else {
+                    out.push(None);
+                    continue;
+                };
+                if let syn::Type::Path(arg_tp) = arg_ty
+                    && arg_tp.qself.is_none()
+                    && arg_tp.path.segments.len() == 1
+                    && matches!(arg_tp.path.segments[0].arguments, syn::PathArguments::None)
+                    && Self::owner_template_arg_is_probable_type_param_ident(
+                        &arg_tp.path.segments[0].ident.to_string(),
+                    )
+                    && !self
+                        .simple_ident_is_known_type_name(&arg_tp.path.segments[0].ident.to_string())
+                {
+                    let name = arg_tp.path.segments[0].ident.to_string();
+                    if self.is_type_param_in_scope(&name)
+                        || current_struct_params.iter().any(|p| p == &name)
+                    {
+                        out.push(Some(name));
+                    } else {
+                        out.push(None);
+                    }
+                    continue;
+                }
+                let mapped = self.map_type(arg_ty);
+                if mapped == "auto"
+                    || mapped.contains("/* TODO")
+                    || type_string_has_auto_placeholder(&mapped)
+                    || self.owner_template_arg_is_value_identifier(&mapped)
+                {
+                    out.push(None);
+                } else {
+                    out.push(Some(mapped));
+                }
+            }
+            if out.iter().all(|entry| entry.is_none()) {
+                return None;
+            }
+            return Some(out);
+        }
         let item_impl = chosen?;
         // Extract `Self<…>`'s angle-bracket args from the impl's self_ty.
         let syn::Type::Path(tp) = item_impl.self_ty.as_ref() else {
@@ -8925,6 +9001,24 @@ impl CodeGen {
                     }
                 }
             }
+            // Bare impl-generic position (`K`) not deducible from any call
+            // arg, but whose NAME is a type param in scope at the call site
+            // (btree entry code building `NodeRef<Owned, K, V, Leaf>` from
+            // inside `VacantEntry<K, V, A>::insert_entry`): the name-matched
+            // in-scope param is the binding Rust's inference picks too —
+            // the surrounding code instantiates the owner with its own
+            // same-named params (#88).
+            if let syn::Type::Path(tp) = arg_ty
+                && tp.qself.is_none()
+                && tp.path.segments.len() == 1
+                && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+            {
+                let name = tp.path.segments[0].ident.to_string();
+                if impl_generic_names.contains(&name) && self.is_type_param_in_scope(&name) {
+                    out.push(Some(name));
+                    continue;
+                }
+            }
             out.push(None);
         }
         if out.iter().all(|entry| entry.is_none()) {
@@ -9007,6 +9101,70 @@ impl CodeGen {
         None
     }
 
+    /// #88: type a `self.FIELD` expression whose declared field type is (or
+    /// contains) one of the owner struct's type params, by substituting the
+    /// CURRENT impl's instantiated Self type (partially-applied generic
+    /// impls: a `Handle<NodeRef<Mut<'a>, K, V, Internal>, Edge>` method
+    /// passing `&self.node` — declared field type is Handle's param `Node` —
+    /// to a bare NodeRef assoc fn). Returns the substituted RUST type; the
+    /// caller maps it to C++.
+    pub(super) fn infer_self_field_type_via_impl_self_ty(
+        &self,
+        expr: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let mut e = expr;
+        loop {
+            match e {
+                syn::Expr::Reference(r) => e = &r.expr,
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                _ => break,
+            }
+        }
+        let syn::Expr::Field(f) = e else { return None };
+        let syn::Expr::Path(base) = f.base.as_ref() else {
+            return None;
+        };
+        if !base.path.is_ident("self") {
+            return None;
+        }
+        let syn::Member::Named(field_ident) = &f.member else {
+            return None;
+        };
+        let self_ty = self.current_impl_method_self_tys.last()?.as_ref()?;
+        let syn::Type::Path(tp) = self_ty else { return None };
+        let seg = tp.path.segments.last()?;
+        let owner_name = seg.ident.to_string();
+        let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+            return None;
+        };
+        let inst_args: Vec<syn::Type> = ab
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        if inst_args.is_empty() {
+            return None;
+        }
+        let field_ty = self.lookup_struct_field_type(&owner_name, &field_ident.to_string());
+        let params = self.declared_type_params.get(&owner_name);
+        let field_ty = field_ty?;
+        let params = params?;
+        // Positional binding requires the instantiation to cover the struct's
+        // declared TYPE params exactly (lifetimes are absent from both).
+        if params.len() != inst_args.len() {
+            return None;
+        }
+        let mut subs: HashMap<String, syn::Type> = HashMap::new();
+        for (param, arg) in params.iter().zip(inst_args.iter()) {
+            subs.insert(param.clone(), arg.clone());
+        }
+        Some(self.substitute_type_params_in_type(&field_ty, &subs))
+    }
+
     pub(super) fn infer_owner_template_args_from_declared_method_signature(
         &self,
         owner_path: Option<&syn::Path>,
@@ -9035,9 +9193,36 @@ impl CodeGen {
             ) else {
                 continue;
             };
-            let arg_cpp_ty = self
+            let primary_arg_ty = self
                 .infer_hint_type_from_expr(arg_expr)
-                .or_else(|| self.infer_simple_expr_type(arg_expr))
+                .or_else(|| self.infer_simple_expr_type(arg_expr));
+            // #88: `self.FIELD` through the current impl's instantiated Self
+            // type (partially-applied generic impls). When the primary
+            // inference parrots the declared field type as a bare struct
+            // type param (e.g. `Node` for Handle<Node, Type>), the
+            // impl-substituted form is strictly more concrete — prefer it.
+            let arg_cpp_ty = match primary_arg_ty {
+                Some(ty) => {
+                    let is_bare_ident = matches!(
+                        &ty,
+                        syn::Type::Path(tp)
+                            if tp.qself.is_none()
+                                && tp.path.segments.len() == 1
+                                && matches!(
+                                    tp.path.segments[0].arguments,
+                                    syn::PathArguments::None
+                                )
+                    );
+                    if is_bare_ident {
+                        self.infer_self_field_type_via_impl_self_ty(arg_expr)
+                            .or(Some(ty))
+                    } else {
+                        Some(ty)
+                    }
+                }
+                None => self.infer_self_field_type_via_impl_self_ty(arg_expr),
+            };
+            let arg_cpp_ty = arg_cpp_ty
                 .map(|ty| self.map_type(&ty))
                 .filter(|mapped| {
                     mapped != "auto"
@@ -9066,13 +9251,21 @@ impl CodeGen {
             // instantiation binds every owner param POSITIONALLY.
             if inferred.iter().any(|entry| entry.is_none()) {
                 let peeled = self.peel_reference_paren_group_type(&expected_arg_ty);
+                // Self-equivalent declared params: the literal `Self`, or the
+                // owner spelled out (`NodeRef<BorrowType, K, V, Internal>` for
+                // `fn as_internal_ptr(this: &Self)` when metadata records the
+                // impl-resolved form) — either way the actual argument's
+                // concrete `Owner<...>` instantiation IS the qualification.
                 let is_self_param = matches!(
                     peeled,
                     syn::Type::Path(tp)
                         if tp.qself.is_none()
-                            && tp.path.segments.len() == 1
-                            && tp.path.segments[0].ident == "Self"
-                            && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                            && tp.path.segments.last().is_some_and(|seg| {
+                                (seg.ident == "Self"
+                                    && tp.path.segments.len() == 1
+                                    && matches!(seg.arguments, syn::PathArguments::None))
+                                    || seg.ident == owner_name
+                            })
                 );
                 if is_self_param {
                     let needle = format!("{owner_name}<");
@@ -9111,7 +9304,12 @@ impl CodeGen {
                                     !a.is_empty()
                                         && a != "auto"
                                         && !type_string_has_auto_placeholder(a)
-                                        && !self.owner_template_arg_is_value_identifier(a)
+                                        // Impl generics (K/V) that scope
+                                        // tracking can't see are acceptable;
+                                        // the value-ident guard targets
+                                        // lowercase locals like `ptr` (#88).
+                                        && (!self.owner_template_arg_is_value_identifier(a)
+                                            || Self::owner_template_arg_is_probable_type_param_ident(a))
                                 })
                             {
                                 for (idx, val) in parsed.iter().enumerate() {
