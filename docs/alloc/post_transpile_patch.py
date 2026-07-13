@@ -1387,11 +1387,6 @@ def _alloc_specific(cpp_out: Path):
         # (b31) remaining `mut self` methods emitted const + span
         # assume_init member-call + dropped bare-glob force() arms.
         t = t.replace(
-            "insert_recursing(K key, V value, A alloc, auto&& split_root) const {",
-            "insert_recursing(K key, V value, A alloc, auto&& split_root) {",
-        )
-        t = t.replace("V& into_val_mut() const {", "V& into_val_mut() {")
-        t = t.replace(
             "rusty::slice_to(leaf.keys, static_cast<size_t>(leaf.len)).assume_init_ref()",
             "rusty::assume_init_slice_ref(rusty::slice_to(leaf.keys, static_cast<size_t>(leaf.len)))",
         )
@@ -1616,13 +1611,6 @@ def _alloc_specific(cpp_out: Path):
             r"typename V = typename __TemplateArgs<Node>::arg_2>\1\2\3(",
             t,
         )
-        # …and they are `mut self` in Rust — strip the const (their bodies
-        # call the non-const remove()/ok()).
-        t = re.sub(
-            r"(remove_leaf_kv|remove_internal_kv)\(F handle_emptied_internal_root, A alloc\) const \{",
-            r"\1(F handle_emptied_internal_root, A alloc) {",
-            t,
-        )
         t = t.replace(
             "const auto left_leaf_kv = ",
             "auto left_leaf_kv = ",
@@ -1700,27 +1688,6 @@ def _alloc_specific(cpp_out: Path):
             "auto __it = this->iter(); for (auto __v = __it.next(); __v.is_some(); __v = __it.next()) "
             "{ if (!other.contains(__v.unwrap())) { return false; } } return true;",
         )
-        # (b43) BTreeMap/BTreeSet Drop: `drop(ptr::read(self).into_iter())`
-        # emitted as the GENERIC rusty::iter(...) wrapper — dropping the
-        # wrapper destroys the bitwise COPY, whose ~BTreeMap recurses
-        # (stack-overflow SEGV at scope exit). Call the real into_iter().
-        t = t.replace(
-            "rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))));",
-            "rusty::mem::drop(rusty::ptr::read(&(*this)).into_iter());",
-        )
-        # (b42) into_kv/into_key_val: subscript+assume_init_ref results bound
-        # with DECAYING `auto`, then returned as tuple<const K&, const V&> —
-        # references to dead locals (the get() garbage + the stack-copy
-        # writes). Reference-preserve exactly the assume_init_ref bindings.
-        t = re.sub(
-            r"auto (k|v_self_ref_tmp) = (\(\[&\]\(auto&& __recv, auto&& __idx\)[^\n]*\.assume_init_ref\(\);)",
-            r"decltype(auto) \1 = \2",
-            t,
-        )
-        t = t.replace(
-            "auto v = std::move(v_self_ref_tmp);",
-            "decltype(auto) v = v_self_ref_tmp;",
-        )
         # (b35) correct_childrens_parent_links: the RANGE method-generic R
         # leaked as Handle's owner arg; the receiver IS the internal NodeRef.
         t = t.replace(
@@ -1739,10 +1706,6 @@ def _alloc_specific(cpp_out: Path):
             r"typename NodeType = typename __TemplateArgs<Node>::arg_3>\1"
             r"Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, NodeType>, Type> awaken() const {",
             t,
-        )
-        t = t.replace(
-            "insert(K key, V val, A alloc) const {",
-            "insert(K key, V val, A alloc) {",
         )
         # (b23) legacy Eq-adapter specializations emitted without their
         # primary templates (dead residue — UFCS handles eq dispatch).

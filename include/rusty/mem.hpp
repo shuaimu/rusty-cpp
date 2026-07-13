@@ -228,6 +228,14 @@ public:
         return *ptr();
     }
 
+    // Rust Deref-coercion shim: transpiled Vec/VecDeque IntoIterator glue
+    // spells `me.allocator()` on a ManuallyDrop<coll> (auto-deref in Rust).
+    decltype(auto) allocator() const
+        requires requires(const T& t) { t.allocator(); }
+    {
+        return (**this).allocator();
+    }
+
     // Rust's `ManuallyDrop::take(&mut slot) -> T` is a static fn that moves
     // the inner value out, leaving the wrapper logically uninitialized.
     // Transpiler emits it as an instance call `slot.take()` rather than the
