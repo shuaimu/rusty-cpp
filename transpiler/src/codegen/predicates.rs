@@ -543,6 +543,61 @@ impl CodeGen {
             .any(|scope| scope.contains(name))
     }
 
+    /// Bare std-shape names (Range, Bound, Either, …) map to the rusty
+    /// runtime UNLESS the current module actually binds that name — by
+    /// declaring it, aliasing it, or importing it from a crate module. The
+    /// crate-wide `local_declared_types` tail check is wrong for
+    /// multi-module crates: btree::map declaring `Range` must not hijack
+    /// vec_deque's `use core::ops::Range` (#89).
+    pub(super) fn current_module_binds_bare_type_name(&self, name: &str) -> bool {
+        if self.is_local_type_name_in_scope(name) {
+            return true;
+        }
+        // Effective module scope: UFCS helper-namespace emissions run with an
+        // empty module_stack BY DESIGN (their bytes must match global-scope
+        // emission); ufcs_impl_module_path carries the impl's module then.
+        let scope: &[String] = if !self.module_stack.is_empty() {
+            &self.module_stack
+        } else {
+            &self.ufcs_impl_module_path
+        };
+        let scoped_key = if scope.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", scope.join("::"), name)
+        };
+        if scope.is_empty() {
+            // True crate root: only a ROOT declaration binds the bare name —
+            // the crate-wide tail set would let a nested same-tail type
+            // (btree::map::Range) hijack it.
+            if self.root_declared_type_names.contains(name)
+                || self.type_alias_targets.contains_key(name)
+            {
+                return true;
+            }
+        } else if self.module_path_declares_type_name_exact(scope, name)
+            || self.type_alias_targets.contains_key(&scoped_key)
+        {
+            return true;
+        }
+        let scope_key = scope.join("::");
+        self.resolve_scope_import_binding_path_for_scope(&scope_key, name)
+            .is_some_and(|target| {
+                let normalized = target.trim().trim_start_matches("::").to_string();
+                if normalized.is_empty()
+                    || normalized.starts_with("std::ops")
+                    || normalized.starts_with("core::ops")
+                {
+                    // std/core ops imports keep the runtime mapping.
+                    return false;
+                }
+                self.local_declared_types.contains(&normalized)
+                    || self
+                        .local_declared_types
+                        .contains(&Self::escape_qualified_path_preserve_global(&normalized))
+            })
+    }
+
     pub(super) fn should_emit_data_enum_variant_ctor_helper(&self, ctor_name: &str) -> bool {
         if ctor_name.is_empty() {
             return false;

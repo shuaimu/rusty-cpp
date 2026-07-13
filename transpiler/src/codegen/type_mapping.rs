@@ -2063,57 +2063,49 @@ impl CodeGen {
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "Bound"
-                    && !self.is_local_type_name_in_scope("Bound")
-                    && !self.local_declared_types.contains("Bound")
+                    && !self.current_module_binds_bare_type_name("Bound")
                 {
                     path_str = "rusty::Bound".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "Range"
-                    && !self.is_local_type_name_in_scope("Range")
-                    && !self.local_declared_types.contains("Range")
+                    && !self.current_module_binds_bare_type_name("Range")
                 {
                     path_str = "rusty::range".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "RangeInclusive"
-                    && !self.is_local_type_name_in_scope("RangeInclusive")
-                    && !self.local_declared_types.contains("RangeInclusive")
+                    && !self.current_module_binds_bare_type_name("RangeInclusive")
                 {
                     path_str = "rusty::range_inclusive".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "RangeFrom"
-                    && !self.is_local_type_name_in_scope("RangeFrom")
-                    && !self.local_declared_types.contains("RangeFrom")
+                    && !self.current_module_binds_bare_type_name("RangeFrom")
                 {
                     path_str = "rusty::range_from".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "RangeTo"
-                    && !self.is_local_type_name_in_scope("RangeTo")
-                    && !self.local_declared_types.contains("RangeTo")
+                    && !self.current_module_binds_bare_type_name("RangeTo")
                 {
                     path_str = "rusty::range_to".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "RangeToInclusive"
-                    && !self.is_local_type_name_in_scope("RangeToInclusive")
-                    && !self.local_declared_types.contains("RangeToInclusive")
+                    && !self.current_module_binds_bare_type_name("RangeToInclusive")
                 {
                     path_str = "rusty::range_to_inclusive".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "RangeFull"
-                    && !self.is_local_type_name_in_scope("RangeFull")
-                    && !self.local_declared_types.contains("RangeFull")
+                    && !self.current_module_binds_bare_type_name("RangeFull")
                 {
                     path_str = "rusty::range_full".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "Either"
-                    && !self.is_local_type_name_in_scope("Either")
-                    && !self.local_declared_types.contains("Either")
+                    && !self.current_module_binds_bare_type_name("Either")
                 {
                     path_str = "rusty::Either".to_string();
                 }

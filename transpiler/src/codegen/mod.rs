@@ -1236,6 +1236,12 @@ pub struct CodeGen {
     /// #88: stack — the Self type of the impl declaring the method currently
     /// being emitted (None when unknown or poisoned).
     pub(crate) current_impl_method_self_tys: Vec<Option<syn::Type>>,
+    /// #89: the impl's module path while emitting UFCS helper-namespace free
+    /// functions. Those emissions run with an EMPTY module_stack by design
+    /// (bytes must match global-scope emission for lexical shadowing), so
+    /// bare-name binding checks (does THIS module declare/import `Range`?)
+    /// read the module from here instead.
+    pub(crate) ufcs_impl_module_path: Vec<String>,
     /// Scoped Rust-local to emitted-C++ local name mappings.
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
@@ -1942,6 +1948,7 @@ impl CodeGen {
             in_progress_local_initializers: Vec::new(),
             impl_method_self_tys: HashMap::new(),
             current_impl_method_self_tys: Vec::new(),
+            ufcs_impl_module_path: Vec::new(),
             local_cpp_bindings: Vec::new(),
             local_cpp_names_used: Vec::new(),
             pending_loop_var_bindings: Vec::new(),
@@ -13497,14 +13504,27 @@ impl CodeGen {
         if self.is_local_type_name_in_scope(name) {
             return true;
         }
+        self.module_path_declares_type_name_exact(&self.module_stack, name)
+    }
+
+    /// The scope-parameterized core of `current_module_declares_type_name_exact`
+    /// (#89: UFCS helper-namespace emissions carry their module in
+    /// `ufcs_impl_module_path` rather than `module_stack`).
+    pub(crate) fn module_path_declares_type_name_exact(
+        &self,
+        module_path: &[String],
+        name: &str,
+    ) -> bool {
+        if name.is_empty() {
+            return false;
+        }
         let escaped_name = escape_cpp_keyword(name);
-        if self.module_stack.is_empty() {
+        if module_path.is_empty() {
             return self.local_declared_types.contains(name)
                 || self.local_declared_types.contains(&escaped_name);
         }
-        let scope = self.module_stack.join("::");
-        let escaped_scope = self
-            .module_stack
+        let scope = module_path.join("::");
+        let escaped_scope = module_path
             .iter()
             .map(|seg| escape_cpp_keyword(seg))
             .collect::<Vec<String>>()
@@ -15387,6 +15407,9 @@ impl CodeGen {
             "// UFCS trait migration: free functions for `impl {} for ...`",
             trait_name
         ));
+        // #89: expose the impl's module to bare-name binding checks (see
+        // ufcs_impl_module_path) without pushing module_stack.
+        self.ufcs_impl_module_path = module_path.to_vec();
         if module_path.is_empty() {
             self.writeln(&format!("namespace {}_ {{", trait_name));
             self.indent += 1;
@@ -15399,6 +15422,7 @@ impl CodeGen {
             }
             self.indent -= 1;
             self.writeln("}");
+            self.ufcs_impl_module_path.clear();
             return;
         }
         // Nested-module impl: emit the definitions into the per-module helper
@@ -15422,6 +15446,7 @@ impl CodeGen {
             self.newline();
         }
         self.ufcs_helper_shadowing_segments.clear();
+        self.ufcs_impl_module_path.clear();
         self.indent -= 1;
         self.writeln("}");
         for _ in &segments {
@@ -15508,6 +15533,9 @@ impl CodeGen {
         // member form did flag-off), then bridge into `<Tr>_` with a
         // using-DECLARATION. For a crate-root impl (empty module path) the body
         // already resolves at global scope, so keep the original flat shape.
+        // #89: expose the impl's module to bare-name binding checks (see
+        // ufcs_impl_module_path) without pushing module_stack.
+        self.ufcs_impl_module_path = module_path.to_vec();
         if module_path.is_empty() {
             self.writeln(&format!("namespace {}_ {{", trait_name));
             self.indent += 1;
@@ -15533,6 +15561,7 @@ impl CodeGen {
             // Bring the trait free functions into the enclosing scope so an
             // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
             self.writeln(&format!("using namespace {}_;", trait_name));
+            self.ufcs_impl_module_path.clear();
             return;
         }
 
@@ -15606,6 +15635,7 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.writeln(&format!("using namespace {}_;", trait_name));
+        self.ufcs_impl_module_path.clear();
     }
 
     /// The per-module helper sub-namespace name that holds a nested-module trait
