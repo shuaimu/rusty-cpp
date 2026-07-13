@@ -273,6 +273,105 @@ def _replace_method_body(t: str, sig_marker: str, new_body_line: str) -> str:
     return "".join(out)
 
 
+def _strip_as_mut_slice_around_area(t: str) -> str:
+    """`*_area_mut(...)` returns a std::span after the b32 rewrite; any
+    remaining `rusty::as_mut_slice(...)` wrapper around such an argument
+    re-wraps it into owned_container_slice and breaks span-typed callees.
+    Paren-balanced strip of the wrapper wherever the argument mentions
+    `_area_mut(`."""
+    marker = "rusty::as_mut_slice("
+    out = []
+    i = 0
+    while True:
+        j = t.find(marker, i)
+        if j == -1:
+            out.append(t[i:])
+            break
+        start = j + len(marker)
+        depth = 1
+        k = start
+        while k < len(t) and depth:
+            if t[k] == "(":
+                depth += 1
+            elif t[k] == ")":
+                depth -= 1
+            k += 1
+        arg = t[start : k - 1]
+        if "_area_mut(" in arg:
+            out.append(t[i:j])
+            out.append("(" + arg + ")")
+        else:
+            out.append(t[i:k])
+        i = k
+    return "".join(out)
+
+
+def _delete_second_and_later_methods(t, sig_marker) -> str:
+    """Like _delete_method but KEEPS the first occurrence PER CLASS — for C++
+    redeclaration clashes where two Rust impls collapse to one signature.
+    (`struct X {` lines reset the seen flag so an unrelated class's only
+    method with the same signature is untouched.)"""
+    lines = t.splitlines(keepends=True)
+    out, i, seen_first = [], 0, False
+    while i < len(lines):
+        line = lines[i]
+        if "struct " in line and "{" in line and not line.lstrip().startswith("//"):
+            seen_first = False
+        markers = (sig_marker,) if isinstance(sig_marker, str) else tuple(sig_marker)
+        if any(m in line for m in markers) and "{" in line and not line.lstrip().startswith("//"):
+            if not seen_first:
+                seen_first = True
+            else:
+                depth = 0
+                seen = False
+                j = i
+                while j < len(lines):
+                    for ch in lines[j]:
+                        if ch == "{":
+                            depth += 1
+                            seen = True
+                        elif ch == "}":
+                            depth -= 1
+                    j += 1
+                    if seen and depth == 0:
+                        break
+                i = j
+                continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
+def _delete_adapter_spec_blocks(t: str, class_marker: str) -> str:
+    """Delete `template <>` + `class <marker>… { … };` specialization blocks
+    (legacy trait-adapter residue emitted without their primary templates)."""
+    lines = t.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if class_marker in line and "{" in line and not line.lstrip().startswith("//"):
+            if out and out[-1].strip() == "template <>":
+                out.pop()
+            depth = 0
+            seen = False
+            j = i
+            while j < len(lines):
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1
+                        seen = True
+                    elif ch == "}":
+                        depth -= 1
+                j += 1
+                if seen and depth == 0:
+                    break
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
 def _delete_method(t: str, sig_marker: str) -> str:
     """Delete the whole method (signature line through balanced close) whose
     signature line contains sig_marker. Line-walk, all occurrences."""
@@ -973,6 +1072,690 @@ def _alloc_specific(cpp_out: Path):
         # (b2) `alloc::boxed::Box` maps to rusty::Box — the runtime has no
         # `boxed` sub-namespace.
         t = t.replace("rusty::boxed::Box<", "rusty::Box<")
+        # (b3-b5) DROPPED UNINITIALIZED LETS: `let mut x;` / `let (a, b);`
+        # lose their declarations; the first branch-assignment becomes a
+        # misscoped `auto x = …` inside the arm and later uses are
+        # undeclared. Site-local re-declarations (transpiler fix pending).
+        # (b3) merge_iter.rs nexts(): `let mut a_next; let mut b_next;`
+        t = re.sub(
+            r"( *)(auto nexts\(Cmp cmp\) \{\n)",
+            r"\1\2\1    rusty::Option<rusty::detail::associated_item_t<I>> a_next;\n"
+            r"\1    rusty::Option<rusty::detail::associated_item_t<I>> b_next;\n",
+            t,
+            count=1,
+        )
+        # (negative lookahead: Intersection::next()'s Stitch arm has LEGIT
+        # `auto a_next = RUSTY_TRY_OPT(…)` declarations — keep those.)
+        t = re.sub(r"auto (a_next|b_next) = (?!RUSTY_TRY_OPT)", r"\1 = ", t)
+        # (b4) split.rs calc_split_length(): `let (length_a, length_b);`
+        t = re.sub(
+            r"( *)(inline std::tuple<size_t, size_t> __rusty_alias_Root_calc_split_length\([^)]*\) \{\n)",
+            r"\1\2\1    size_t length_a; size_t length_b;\n",
+            t,
+            count=1,
+        )
+        # (b5) append.rs bulk_push(): `let mut open_node;` — typed via the
+        # (scope-visible) Err-arm assignment's decltype.
+        t = re.sub(
+            r"( *)(auto test_node = cur_node\.forget_type\(\);\n)",
+            r"\1std::remove_cvref_t<decltype(self_.push_internal_level(rusty::clone(alloc)))> open_node;\n\1\2",
+            t,
+            count=1,
+        )
+        t = t.replace("auto open_node = parent_shadow1;", "open_node = parent_shadow1;")
+        # (b6) set.rs is_subset(): refutable `let (Some(a), Some(b)) = … else`
+        # emitted as /* TODO: pattern */ structured bindings with the else
+        # branch dropped. Rebuild the guard + bindings by hand.
+        b6_old = (
+            "auto [/* TODO: pattern */, /* TODO: pattern */_shadow1] = "
+            "rusty::detail::deref_if_pointer_like(std::make_tuple(this->first(), this->last()));"
+        )
+        if b6_old in t:
+            indent = t[: t.find(b6_old)].rsplit("\n", 1)[-1]
+            b6_new = (
+                "auto __self_mm = std::make_tuple(this->first(), this->last());\n"
+                f"{indent}if (std::get<0>(__self_mm).is_none() || std::get<1>(__self_mm).is_none()) {{ return true; }}\n"
+                f"{indent}auto&& self_min = std::get<0>(__self_mm).unwrap();\n"
+                f"{indent}auto&& self_max = std::get<1>(__self_mm).unwrap();"
+            )
+            t = t.replace(b6_old, b6_new, 1)
+        b6_old2 = (
+            "auto [/* TODO: pattern */_shadow2, /* TODO: pattern */_shadow3] = "
+            "rusty::detail::deref_if_pointer_like(std::make_tuple(other.first(), other.last()));"
+        )
+        if b6_old2 in t:
+            indent = t[: t.find(b6_old2)].rsplit("\n", 1)[-1]
+            b6_new2 = (
+                "auto __other_mm = std::make_tuple(other.first(), other.last());\n"
+                f"{indent}if (std::get<0>(__other_mm).is_none() || std::get<1>(__other_mm).is_none()) {{ return false; }}\n"
+                f"{indent}auto&& other_min = std::get<0>(__other_mm).unwrap();\n"
+                f"{indent}auto&& other_max = std::get<1>(__other_mm).unwrap();"
+            )
+            t = t.replace(b6_old2, b6_new2, 1)
+        # (b7) set.rs difference()/intersection(): the refutable
+        # `let (Some(min), Some(max)) = … else` dispatch emitted as
+        # `if (unreachable() && …)` mangles. The Stitch/Iterate/Answer arms
+        # are size-based OPTIMIZATIONS; the Search variant (iterate one set,
+        # membership-test the other) is semantically correct for every input
+        # — pin the dispatch to it.
+        t = _replace_method_body(
+            t,
+            "Difference<T, A> BTreeSet<T, A>::difference(const BTreeSet<T, A>& other) const {",
+            "return Difference<T, A>(DifferenceInner<T, A>::Search(this->iter(), other));",
+        )
+        t = _replace_method_body(
+            t,
+            "Intersection<T, A> BTreeSet<T, A>::intersection(const BTreeSet<T, A>& other) const {",
+            "return Intersection<T, A>(IntersectionInner<T, A>::Search(this->iter(), other));",
+        )
+        # (b8) BTreeMap/BTreeSet::into_iter return type cross-wired to vec's
+        # `into_iter::IntoIter<T, A>` (same-tail); the classes' own IntoIter
+        # alias is the correct spelling. (FillGapOnDrop's identical-looking
+        # method sits inside namespace vec where the spelling RESOLVES — the
+        # `auto me = manually_drop_new` body line disambiguates the map one.)
+        t = re.sub(
+            r"into_iter::IntoIter<T, A> into_iter\(\) const \{(\n\s*auto me = rusty::mem::manually_drop_new)",
+            r"IntoIter into_iter() {\1",
+            t,
+            count=1,
+        )
+        t = t.replace(
+            "into_iter::IntoIter<T, A> into_iter() {",
+            "IntoIter into_iter() {",
+        )
+        # (b9) Entry_Occupied/Entry_Vacant referenced from BTreeMap (namespace
+        # map) — the variant structs live in sibling namespace entry.
+        for v in ("Entry_Occupied", "Entry_Vacant"):
+            t = t.replace(
+                f"variant_holds<{v}<K, V, A>>",
+                f"variant_holds<entry::{v}<K, V, A>>",
+            )
+            t = t.replace(
+                f"variant_get<{v}<K, V, A>>",
+                f"variant_get<entry::{v}<K, V, A>>",
+            )
+        # (b10) `ManuallyDrop::into_inner(x)` — the runtime unwraps via
+        # operator* (no static into_inner).
+        t = t.replace(
+            "ManuallyDrop::into_inner(rusty::clone(this->map.alloc))",
+            "*rusty::clone(this->map.alloc)",
+        )
+        # ── btree long tail (each 1-2 sites) ──
+        # (b11) bare None comparison
+        t = t.replace("if (_mv1 == None) {", "if (_mv1 == rusty::None) {")
+        # (b12) correct_parent_link: K/V free in the flattened Handle<Node,
+        # Type> body — Node IS NodeRef<Mut,K,V,Internal> at every real
+        # instantiation, so route through Node and deduce the pointee.
+        t = t.replace(
+            "auto ptr_shadow1 = std::conditional_t<true, NonNull<InternalNode<K, V>>, Node>"
+            "::new_unchecked(std::conditional_t<true, NodeRef<::collections::btree::node::marker::Mut,"
+            " K, V, ::collections::btree::node::marker::Internal>, Node>::as_internal_ptr(this->node));",
+            "auto ptr_shadow1 = NonNull<std::remove_pointer_t<decltype(Node::as_internal_ptr"
+            "(this->node))>>::new_unchecked(Node::as_internal_ptr(this->node));",
+        )
+        # (b13) splitpoint: Right{0} deduces LeftOrRight_Right<int>; the
+        # sibling tuple element is LeftOrRight<size_t>.
+        t = t.replace(
+            "LeftOrRight_Right{0}",
+            "LeftOrRight_Right{static_cast<size_t>(0)}",
+        )
+        # (b14) map::IntoIter is move-only in Rust (no Clone impl); the
+        # synthesized copy ctor/assign delegate to a clone() that doesn't
+        # exist.
+        t = t.replace(
+            "IntoIter(const IntoIter& other) : IntoIter(other.clone()) {}\n",
+            "IntoIter(const IntoIter&) = delete;\n",
+        )
+        t = t.replace(
+            "IntoIter& operator=(const IntoIter& other) { if (this != &other) "
+            "{ this->~IntoIter(); new (this) IntoIter(other.clone()); } return *this; }\n",
+            "IntoIter& operator=(const IntoIter&) = delete;\n",
+        )
+        # (b15) BTreeMap root re-seeding: BorrowType unbound — the root field
+        # is Option<Root<K,V>> = Option<NodeRef<Owned, K, V, LeafOrInternal>>.
+        t = t.replace(
+            "rusty::Option<collections::btree::node::NodeRef<BorrowType, K, V,",
+            "rusty::Option<collections::btree::node::NodeRef<"
+            "::collections::btree::node::marker::Owned, K, V,",
+        )
+        # (b16) `Global` the TYPE where a VALUE is needed
+        t = t.replace(
+            "rusty::mem::manually_drop_new(rusty::alloc::Global)",
+            "rusty::mem::manually_drop_new(rusty::alloc::Global{})",
+        )
+        # (b17) append(): callee-signature Q leaked into the call site; the
+        # key is this map's K.
+        t = t.replace(
+            "rusty::Bound<const Q&>::Included(first_other_key)",
+            "rusty::Bound<const K&>::Included(first_other_key)",
+        )
+        # (b18) entry(): map's VacantEntry/OccupiedEntry cross-wired to
+        # <T, A> (set's arity); map's are <K, V, A>. Qualified spellings
+        # only — set's own 2-param VacantEntry<T, A> is correct.
+        for entry_ty in ("VacantEntry", "OccupiedEntry"):
+            t = t.replace(
+                f"collections::btree::map::entry::{entry_ty}<T, A>(",
+                f"collections::btree::map::entry::{entry_ty}<K, V, A>(",
+            )
+        # (b19) set::IntoIter Default cross-wired to vec's shape (`.iter =
+        # default_like<A>()` — A is the ALLOCATOR); delete it,
+        # rusty::default_like falls back to value-init.
+        t = _delete_method(t, "static into_iter::IntoIter<T, A> default_() {")
+        # (b20) `extend<Iter>` param type emitted as `Iter<T>` (the param
+        # APPLIED with args); and the by-ref Extend impl collapses to the
+        # same C++ signature as the by-value one — drop the duplicate.
+        t = t.replace("void extend(Iter<T> iter) {", "void extend(Iter iter) {")
+        t = _delete_second_and_later_methods(
+            t,
+            ("void extend(I iter) {", "void extend(T iter) {", "void extend(Iter iter) {"),
+        )
+        # (b21) `<V as IsSetVal>::is_set_val()` — specialization-based trait
+        # (default false, SetValZST true) — becomes the type test.
+        t = t.replace(
+            "collections::btree::set_val::IsSetVal::is_set_val()",
+            "std::is_same_v<V, ::collections::btree::set_val::SetValZST>",
+        )
+        # (b22) misc: Option static Some; ref-to-temp length; nexts cmp fn
+        # ref (`Self::Item::cmp` mangled); bare NodeRef in the global-scope
+        # __TemplateArgs specialization; push_with_handle's Self literal
+        # with unbound BorrowType/NodeType.
+        t = t.replace(
+            "rusty::Option<rusty::cmp::Ordering>::Some(rusty::cmp::Ordering::Equal)",
+            "rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal)",
+        )
+        t = t.replace(
+            "size_t& length = static_cast<size_t>(0);",
+            "size_t length = 0;",
+        )
+        t = t.replace(
+            "this->_0.nexts(const T&<T>::cmp)",
+            "this->_0.nexts([](auto&& __a, auto&& __b) { return rusty::cmp::cmp(__a, __b); })",
+        )
+        t = t.replace(
+            "struct __TemplateArgs<NodeRef<BorrowType, K, V, Type>> {",
+            "struct __TemplateArgs<::collections::btree::node::NodeRef<BorrowType, K, V, Type>> {",
+        )
+        # (b24) `.peekable()` is a member-call convention the emitted
+        # iterators don't provide — route through the runtime adapter
+        # (rusty::iter_adapters::Peekable).
+        t = t.replace(
+            "decltype(std::declval<I>().peekable())",
+            "rusty::iter_adapters::Peekable<I>",
+        )
+        t = t.replace(
+            "decltype(std::declval<Iter<T>>().peekable())",
+            "rusty::iter_adapters::Peekable<Iter<T>>",
+        )
+        t = t.replace(
+            "rusty::deref_call(iter, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)"
+            ">(__recv).peekable()) { return std::forward<decltype(__recv)>(__recv).peekable(); })",
+            "rusty::iter_adapters::peekable(std::move(iter))",
+        )
+        # (b25) DormantMutRef instantiated with a WRONG type arg (K/Q/F/R
+        # instead of the referent's type) — deduce from the argument.
+        t = re.sub(
+            r"DormantMutRef<[A-Za-z_]+>::new_\(\(\*this\)\)",
+            "DormantMutRef<std::remove_cvref_t<decltype(*this)>>::new_((*this))",
+            t,
+        )
+        t = re.sub(
+            r"DormantMutRef<[A-Za-z_]+>::new_\(root\)",
+            "DormantMutRef<std::remove_cvref_t<decltype(root)>>::new_(root)",
+            t,
+        )
+        # (b26) DormantMutRef::new_ binds the awakened alias as CONST,
+        # then returns it through tuple<T&, …> (Rust: `&mut *ptr`).
+        t = t.replace(
+            "const T& new_ref = *rusty::as_ptr(ptr_shadow1);",
+            "T& new_ref = *rusty::as_ptr(ptr_shadow1);",
+        )
+        # (b27) `const auto root = map.root.insert(…)` — root is borrowed
+        # mutably right after (borrow_mut/cast_to_leaf_unchecked).
+        t = t.replace(
+            "const auto root = map.root.insert(",
+            "auto root = map.root.insert(",
+        )
+        # (b28) UNDEDUCIBLE return-only method generics (the #53 class of
+        # residue): (a) slice-area accessors deduce their Output from the
+        # subscript instead; (b) no-arg methods whose generics mirror the
+        # host's Node decomposition get __TemplateArgs defaults.
+        t = re.sub(
+            r"template<typename I, typename Output>(\n\s*)Output& (key_area_mut|val_area_mut|edge_area_mut)\(I index\) \{",
+            r"template<typename I>\1decltype(auto) \2(I index) {",
+            t,
+        )
+        t = re.sub(
+            r"template<typename K, typename V>(\n\s*)std::tuple<K&, V&> kv_mut\(\) \{",
+            r"template<typename K = typename __TemplateArgs<Node>::arg_1, "
+            r"typename V = typename __TemplateArgs<Node>::arg_2>\1std::tuple<K&, V&> kv_mut() {",
+            t,
+        )
+        t = re.sub(
+            r"template<typename BorrowType, typename K, typename V>(\n\s*)"
+            r"Handle<NodeRef<BorrowType, K, V, ::collections::btree::node::marker::LeafOrInternal>, Type> forget_node_type\(\) const \{",
+            r"template<typename BorrowType = typename __TemplateArgs<Node>::arg_0, "
+            r"typename K = typename __TemplateArgs<Node>::arg_1, "
+            r"typename V = typename __TemplateArgs<Node>::arg_2>\1"
+            r"Handle<NodeRef<BorrowType, K, V, ::collections::btree::node::marker::LeafOrInternal>, Type> forget_node_type() const {",
+            t,
+        )
+        # (b30) GENERIC rule for the whole undeducible family: a no-arg
+        # method templated over Handle's decomposed generics (BorrowType/K/V/
+        # NodeType) can never deduce them — give each the positional
+        # __TemplateArgs<Node> default. (Covers into_kv, into_val_mut, force,
+        # and any siblings the next instantiation surfaces.)
+        _ARG_POS = {"BorrowType": 0, "K": 1, "V": 2, "NodeType": 3}
+
+        def _default_no_arg_generics(m):
+            params = [p.strip() for p in m.group(1).split(",")]
+            names = [p.split()[-1] for p in params]
+            if not all(n in _ARG_POS for n in names):
+                return m.group(0)
+            new_params = ", ".join(
+                f"typename {n} = typename __TemplateArgs<Node>::arg_{_ARG_POS[n]}"
+                for n in names
+            )
+            return f"template<{new_params}>{m.group(2)}{m.group(3)}"
+
+        # Apply only inside the flattened `struct Handle {` region — a
+        # method elsewhere may resolve `Node` to the NAMESPACE node.
+        _h_start = t.find("struct Handle {")
+        if _h_start != -1:
+            _depth, _i, _seen = 0, _h_start, False
+            while _i < len(t):
+                if t[_i] == "{":
+                    _depth += 1
+                    _seen = True
+                elif t[_i] == "}":
+                    _depth -= 1
+                    if _seen and _depth == 0:
+                        break
+                _i += 1
+            _h_end = _i + 1
+            t = t[:_h_start] + re.sub(
+                r"template<((?:typename \w+)(?:, typename \w+)*)>(\n\s*)"
+                r"([^\n(]*\(\) (?:const )?\{)",
+                _default_no_arg_generics,
+                t[_h_start:_h_end],
+            ) + t[_h_end:]
+        # insert_recursing (`mut self` in Rust) emitted const — its body
+        # calls the non-const insert().
+        t = t.replace(
+            "insert_recursing(K key, V value, A alloc, F split_root) const {",
+            "insert_recursing(K key, V value, A alloc, F split_root) {",
+        )
+        # (b31) remaining `mut self` methods emitted const + span
+        # assume_init member-call + dropped bare-glob force() arms.
+        t = t.replace(
+            "insert_recursing(K key, V value, A alloc, auto&& split_root) const {",
+            "insert_recursing(K key, V value, A alloc, auto&& split_root) {",
+        )
+        t = t.replace("V& into_val_mut() const {", "V& into_val_mut() {")
+        t = t.replace(
+            "rusty::slice_to(leaf.keys, static_cast<size_t>(leaf.len)).assume_init_ref()",
+            "rusty::assume_init_slice_ref(rusty::slice_to(leaf.keys, static_cast<size_t>(leaf.len)))",
+        )
+        t = t.replace(
+            "rusty::slice_to(leaf.vals, static_cast<size_t>(leaf.len)).assume_init_ref()",
+            "rusty::assume_init_slice_ref(rusty::slice_to(leaf.vals, static_cast<size_t>(leaf.len)))",
+        )
+        # force() match arms whose `use ForceResult::*` guards were dropped
+        # (`/* TODO … bare-glob variant */ true`): rebuild variant_index
+        # guards + std::get payload access. ForceResult = variant<Leaf,
+        # Internal> so Leaf==0, Internal==1.
+        _lines = t.splitlines(keepends=True)
+        _scrut, _arm = None, None
+        for _i, _ln in enumerate(_lines):
+            _mm = re.search(r"auto&& (\w+) = [^;]*\.force\(\);", _ln)
+            if _mm:
+                _scrut = _mm.group(1)
+                continue
+            if "bare-glob variant `Leaf`" in _ln and _scrut:
+                _lines[_i] = re.sub(
+                    r"/\* TODO[^*]*\*/ true",
+                    f"rusty::detail::variant_index(rusty::detail::deref_if_pointer({_scrut})) == 0",
+                    _ln,
+                )
+                _arm = 0
+                continue
+            if "bare-glob variant `Internal`" in _ln and _scrut:
+                _lines[_i] = re.sub(
+                    r"/\* TODO[^*]*\*/ true",
+                    f"rusty::detail::variant_index(rusty::detail::deref_if_pointer({_scrut})) == 1",
+                    _ln,
+                )
+                _arm = 1
+                continue
+            if _arm is not None and _scrut:
+                _needle = f"rusty::detail::deref_if_pointer({_scrut})._0"
+                if _needle in _ln:
+                    _lines[_i] = _ln.replace(
+                        _needle,
+                        f"std::get<{_arm}>(rusty::detail::deref_if_pointer({_scrut}))._0",
+                    )
+                    _arm = None
+        t = "".join(_lines)
+        # (b32) area accessors subscript a std::span with a rusty range —
+        # dispatch integral index vs range subspan; split()'s K/V are
+        # return-only (A alone deduces).
+        for fld in ("keys", "vals", "edges"):
+            t = t.replace(
+                f"return rusty::as_mut_slice(this->as_leaf_mut().{fld})[std::move(index)];",
+                "{ auto __s = rusty::as_mut_slice(this->as_leaf_mut()." + fld + ");\n"
+                "                        if constexpr (std::is_integral_v<std::remove_cvref_t<I>>) "
+                "{ return __s[static_cast<size_t>(index)]; }\n"
+                "                        else { return rusty::subspan_by_range(__s, index); } }",
+            )
+            t = t.replace(
+                f"return rusty::as_mut_slice(this->as_internal_mut().{fld})[std::move(index)];",
+                "{ auto __s = rusty::as_mut_slice(this->as_internal_mut()." + fld + ");\n"
+                "                        if constexpr (std::is_integral_v<std::remove_cvref_t<I>>) "
+                "{ return __s[static_cast<size_t>(index)]; }\n"
+                "                        else { return rusty::subspan_by_range(__s, index); } }",
+            )
+        t = re.sub(
+            r"template<typename A, typename K, typename V>\n(\s*)requires \(([^\n]*)\)\n(\s*)"
+            r"SplitResult<K, V, ::collections::btree::node::marker::(Leaf|Internal)> split\(A alloc\) \{",
+            r"template<typename A, typename K = typename __TemplateArgs<Node>::arg_1, "
+            r"typename V = typename __TemplateArgs<Node>::arg_2>\n"
+            r"\1requires (\2 && std::same_as<typename __TemplateArgs<Node>::arg_3, "
+            r"::collections::btree::node::marker::\4>)\n\3"
+            r"SplitResult<K, V, ::collections::btree::node::marker::\4> split(A alloc) {",
+            t,
+        )
+        # (b33) leftover shapes: bare assoc-fn call missing its `this_`
+        # argument; double-wrapped slice_insert arg (key_area_mut already
+        # returns a span after b32).
+        t = t.replace(
+            "const auto* leaf_ptr = as_leaf_ptr();",
+            "const auto* leaf_ptr = as_leaf_ptr((*this));",
+        )
+        t = t.replace(
+            "const auto ptr_shadow1 = as_leaf_ptr();",
+            "const auto ptr_shadow1 = as_leaf_ptr((*this));",
+        )
+        t = t.replace(
+            "slice_insert(rusty::as_mut_slice(",
+            "slice_insert((",
+        )
+        # (b34) round: decay-copy the allocator so A deduces the plain type
+        # (C++23 auto()); ascend() derefs the parent NonNull it should pass;
+        # NodeRef's Rust field `height` is emitted `height_field`.
+        t = t.replace(
+            "LeafNode<K, V>::new_(std::move(alloc))",
+            "LeafNode<K, V>::new_(auto(std::move(alloc)))",
+        )
+        t = t.replace(
+            "from_internal(std::move(rusty::deref_mut(parent)),",
+            "from_internal(parent,",
+        )
+        t = t.replace(
+            "rusty::detail::deref_if_pointer_like(edge.height)",
+            "rusty::detail::deref_if_pointer_like(edge.height_field)",
+        )
+        t = t.replace(
+            "rusty::detail::deref_if_pointer_like(this->node.height)",
+            "rusty::detail::deref_if_pointer_like(this->node.height_field)",
+        )
+        # (b36) move_to_slice double-wrap (b33's twin) + the decltype(&x)
+        # pointer-owner spelling from the #88 decltype fallback.
+        t = t.replace("move_to_slice(rusty::as_mut_slice(", "move_to_slice((")
+        t = _strip_as_mut_slice_around_area(t)
+        t = t.replace("slice_remove(rusty::as_mut_slice(", "slice_remove((")
+        t = t.replace("slice_shr(rusty::as_mut_slice(", "slice_shr((")
+        t = t.replace("slice_shl(rusty::as_mut_slice(", "slice_shl((")
+        t = t.replace(
+            "std::remove_cvref_t<decltype(&this->node)>::",
+            "std::remove_cvref_t<decltype(this->node)>::",
+        )
+        # (b37) InternalNode::new_'s Box owner nested ITSELF into the
+        # allocator slot; two more `.height` field spellings; ptr::write_
+        # handed the slot REFERENCE where it takes a pointer.
+        t = t.replace(
+            "rusty::Box<InternalNode<K, V>, rusty::Box<InternalNode<K, V>, A>>::new_uninit_in",
+            "rusty::Box<InternalNode<K, V>, A>::new_uninit_in",
+        )
+        t = t.replace(
+            "rusty::detail::deref_if_pointer_like(child.height)",
+            "rusty::detail::deref_if_pointer_like(child.height_field)",
+        )
+        t = t.replace(
+            "rusty::detail::deref_if_pointer_like(right_node.height)",
+            "rusty::detail::deref_if_pointer_like(right_node.height_field)",
+        )
+        t = t.replace(
+            "rusty::ptr::write_(v, std::move(new_value));",
+            "rusty::ptr::write_(std::addressof(v), std::move(new_value));",
+        )
+        # (b38) NonZero height passed through from_into (identity-rejected);
+        # Box<MaybeUninit>::as_mut_ptr needs the MaybeUninit hop for `.data`;
+        # another leaked bare owner arg (K) on new_edge.
+        t = t.replace(
+            "rusty::from_into<size_t>(std::move(height))",
+            "std::move(height).get()",
+        )
+        t = t.replace(
+            "&(*rusty::as_mut_ptr(node)).data",
+            "&((*node).as_mut_ptr()->data)",
+        )
+        t = t.replace(
+            "Handle<K, ::collections::btree::node::marker::Edge>::new_edge(this->reborrow_mut(),",
+            "Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, "
+            "::collections::btree::node::marker::Internal>, "
+            "::collections::btree::node::marker::Edge>::new_edge(this->reborrow_mut(),",
+        )
+        # (b39) final test-TU tail: ptr::read wants a pointer; two
+        # artificially-const bindings (the as_const destructive-unwrap guard)
+        # feeding mutable paths — const_cast is safe, the owning objects are
+        # mutable; a by-value borrow_mut result bound to auto&.
+        t = t.replace(
+            "rusty::ptr::read(std::move(root)).first_leaf_edge()",
+            "rusty::ptr::read(std::addressof(root)).first_leaf_edge()",
+        )
+        t = t.replace(
+            "marker::Edge>&>(edge); } }",
+            "marker::Edge>&>(const_cast<std::remove_cvref_t<decltype(edge)>&>(edge)); } }",
+        )
+        t = t.replace(
+            "auto& root_node = RUSTY_TRY_OPT(map.root.as_mut()).borrow_mut();",
+            "auto root_node = RUSTY_TRY_OPT(map.root.as_mut()).borrow_mut();",
+        )
+        t = t.replace(
+            "auto& root = _mv1;",
+            "auto& root = const_cast<std::remove_cvref_t<decltype(_mv1)>&>(_mv1);",
+        )
+        # (b40) the INTERNAL-receiver split() def was dropped by the
+        # same-signature flattening collapse (only the Leaf one survived);
+        # reconstruct it from node.rs, mirroring the emitted idioms, right
+        # after the Leaf def. Plus this round's small shapes.
+        _leaf_split_ret = (
+            "return SplitResult<K, V, ::collections::btree::node::marker::Leaf>"
+            "(std::move(this->node), std::move(kv), std::move(right));"
+        )
+        _i = t.find(_leaf_split_ret)
+        if _i != -1 and "marker::Internal> split(A alloc)" not in t:
+            _j = t.find("}", _i)          # Leaf split's closing brace
+            _j = t.find("\n", _j) + 1
+            _indent = " " * 16
+            _b = " " * 20
+            _internal_split = (
+                f"{_indent}template<typename A, typename K = typename __TemplateArgs<Node>::arg_1, "
+                f"typename V = typename __TemplateArgs<Node>::arg_2>\n"
+                f"{_indent}    requires (rusty::alloc::Allocator<A> && std::copyable<A> && "
+                f"std::same_as<typename __TemplateArgs<Node>::arg_3, "
+                f"::collections::btree::node::marker::Internal>)\n"
+                f"{_indent}SplitResult<K, V, ::collections::btree::node::marker::Internal> split(A alloc) {{\n"
+                f"{_b}const auto old_len = rusty::len(this->node);\n"
+                f"{_b}auto new_node = InternalNode<K, V>::new_(auto(std::move(alloc)));\n"
+                f"{_b}auto kv = this->split_leaf_data((*new_node).data);\n"
+                f"{_b}const size_t new_len = old_len - this->idx_field - 1;\n"
+                f"{_b}move_to_slice(this->node.edge_area_mut(rusty::range(this->idx_field + 1, old_len + 1)),\n"
+                f"{_b}    rusty::subspan_by_range(rusty::as_mut_slice((*new_node).edges), rusty::range_to(new_len + 1)));\n"
+                f"{_b}auto right = NodeRef<::collections::btree::node::marker::Owned, K, V, "
+                f"::collections::btree::node::marker::Internal>::from_new_internal(std::move(new_node), "
+                f"rusty::num::NonZero<size_t>::new_(this->node.height_field).unwrap());\n"
+                f"{_b}return SplitResult<K, V, ::collections::btree::node::marker::Internal>"
+                f"(std::move(this->node), std::move(kv), std::move(right));\n"
+                f"{_indent}}}\n"
+            )
+            t = t[:_j] + _internal_split + t[_j:]
+        t = t.replace(
+            "rusty::ptr::read(std::move(root)).last_leaf_edge()",
+            "rusty::ptr::read(std::addressof(root)).last_leaf_edge()",
+        )
+        t = t.replace(
+            "auto& root_node = this->borrow_mut();",
+            "auto root_node = this->borrow_mut();",
+        )
+        # remove_kv_tracking / remove_leaf_kv / remove_internal_kv: K/V are
+        # return-only (F, A deduce from args)
+        t = re.sub(
+            r"template<typename F, typename A, typename K, typename V>(\n\s*requires [^\n]*\n\s*)"
+            r"(std::tuple<std::tuple<K, V>, Handle<[^\n]*)(remove_kv_tracking|remove_leaf_kv|remove_internal_kv)\(",
+            r"template<typename F, typename A, typename K = typename __TemplateArgs<Node>::arg_1, "
+            r"typename V = typename __TemplateArgs<Node>::arg_2>\1\2\3(",
+            t,
+        )
+        # …and they are `mut self` in Rust — strip the const (their bodies
+        # call the non-const remove()/ok()).
+        t = re.sub(
+            r"(remove_leaf_kv|remove_internal_kv)\(F handle_emptied_internal_root, A alloc\) const \{",
+            r"\1(F handle_emptied_internal_root, A alloc) {",
+            t,
+        )
+        t = t.replace(
+            "const auto left_leaf_kv = ",
+            "auto left_leaf_kv = ",
+        )
+        t = t.replace(
+            "const auto left_leaf_kv_shadow1 = ",
+            "auto left_leaf_kv_shadow1 = ",
+        )
+        # BalancingContext receivers bound const through the as_const
+        # destructive-unwrap guard, then used mutably (merge/steal) — the
+        # owning object is mutable; const_cast at the call.
+        for recv in ("left_parent_kv", "right_parent_kv"):
+            for meth in ("merge_tracking_child_edge", "steal_left", "steal_right",
+                         "bulk_steal_left", "bulk_steal_right"):
+                t = t.replace(
+                    f"{recv}.{meth}(",
+                    f"const_cast<BalancingContext<K, V>&>({recv}).{meth}(",
+                )
+        # …the arms produce Handle<NodeRef<Mut,K,V,LeafOrInternal>, Edge>
+        # and the post-match `pos = new_pos.cast_to_leaf_unchecked()` already
+        # exists — only the new_pos LAMBDA's return type was cross-wired to
+        # the class's Handle<Node, Type> (= …KV).
+        _np_start = t.find("const auto new_pos = [&]() -> Handle<Node, Type> {")
+        _np_end = t.find("pos = new_pos.cast_to_leaf_unchecked();", _np_start)
+        if _np_start != -1 and _np_end != -1:
+            _edge_handle = (
+                "Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, "
+                "::collections::btree::node::marker::LeafOrInternal>, "
+                "::collections::btree::node::marker::Edge>"
+            )
+            _region = t[_np_start:_np_end].replace(
+                "-> Handle<Node, Type> {", f"-> {_edge_handle} {{"
+            ).replace("const auto new_pos = ", "auto new_pos = ", 1)
+            t = t[:_np_start] + _region + t[_np_end:]
+        t = t.replace(
+            "return Handle<Node, ::collections::btree::node::marker::Edge>::new_edge(std::move(pos), std::move(idx));",
+            "return Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, "
+            "::collections::btree::node::marker::LeafOrInternal>, "
+            "::collections::btree::node::marker::Edge>::new_edge(std::move(pos), std::move(idx));",
+        )
+        # (b44) full_range() return hardcodes Immut; the Dying receiver
+        # (drop path) flows through the same flattened def — the class's own
+        # BorrowType is the correct spelling for both impls.
+        t = t.replace(
+            "::collections::btree::navigate::LazyLeafRange<::collections::btree::node::marker::Immut, K, V> full_range() const {",
+            "::collections::btree::navigate::LazyLeafRange<BorrowType, K, V> full_range() const {",
+        )
+        # (b45) deallocating_next_unchecked (Handle flavor): K/V return-only.
+        t = re.sub(
+            r"template<typename A, typename K, typename V>(\n\s*requires [^\n]*\n\s*)"
+            r"((?:rusty::Option<std::tuple<Handle<Node, Type>, )?Handle<NodeRef<::collections::btree::node::marker::Dying, K, V, [^\n]*deallocating_next)",
+            r"template<typename A, typename K = typename __TemplateArgs<Node>::arg_1, "
+            r"typename V = typename __TemplateArgs<Node>::arg_2>\1\2",
+            t,
+        )
+        # (b46) `node.as_mut_ptr()` on Box<MaybeUninit<T>> emitted as the
+        # free rusty::as_mut_ptr — which resolves to a generic overload
+        # returning the address of the STACK Box object (ASan
+        # stack-buffer-overflow in LeafNode::init). Route through the heap
+        # slot: (*box).as_mut_ptr().
+        t = t.replace(
+            "reinterpret_cast<LeafNode<K, V>*>(rusty::as_mut_ptr(leaf))",
+            "(*leaf).as_mut_ptr()",
+        )
+        t = t.replace(
+            "reinterpret_cast<InternalNode<K, V>*>(rusty::as_mut_ptr(node))",
+            "(*node).as_mut_ptr()",
+        )
+        # (b47) is_subset: std's range-split fast path misbehaves through
+        # the emitted double-ended-iter plumbing; pin to the simple
+        # contains-scan (correct for every input, like b7's Search pin).
+        t = _replace_method_body(
+            t,
+            "bool is_subset(const BTreeSet<T, A>& other) const {",
+            "auto __it = this->iter(); for (auto __v = __it.next(); __v.is_some(); __v = __it.next()) "
+            "{ if (!other.contains(__v.unwrap())) { return false; } } return true;",
+        )
+        # (b43) BTreeMap/BTreeSet Drop: `drop(ptr::read(self).into_iter())`
+        # emitted as the GENERIC rusty::iter(...) wrapper — dropping the
+        # wrapper destroys the bitwise COPY, whose ~BTreeMap recurses
+        # (stack-overflow SEGV at scope exit). Call the real into_iter().
+        t = t.replace(
+            "rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))));",
+            "rusty::mem::drop(rusty::ptr::read(&(*this)).into_iter());",
+        )
+        # (b42) into_kv/into_key_val: subscript+assume_init_ref results bound
+        # with DECAYING `auto`, then returned as tuple<const K&, const V&> —
+        # references to dead locals (the get() garbage + the stack-copy
+        # writes). Reference-preserve exactly the assume_init_ref bindings.
+        t = re.sub(
+            r"auto (k|v_self_ref_tmp) = (\(\[&\]\(auto&& __recv, auto&& __idx\)[^\n]*\.assume_init_ref\(\);)",
+            r"decltype(auto) \1 = \2",
+            t,
+        )
+        t = t.replace(
+            "auto v = std::move(v_self_ref_tmp);",
+            "decltype(auto) v = v_self_ref_tmp;",
+        )
+        # (b35) correct_childrens_parent_links: the RANGE method-generic R
+        # leaked as Handle's owner arg; the receiver IS the internal NodeRef.
+        t = t.replace(
+            "Handle<R, ::collections::btree::node::marker::Edge>::new_edge(this->reborrow_mut(), std::move(i))",
+            "Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, "
+            "::collections::btree::node::marker::Internal>, "
+            "::collections::btree::node::marker::Edge>::new_edge(this->reborrow_mut(), std::move(i))",
+        )
+        # (b29) more undeducible return-only generics + a `mut self` method
+        # emitted const.
+        t = re.sub(
+            r"template<typename K, typename V, typename NodeType>(\n\s*)"
+            r"Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, NodeType>, Type> awaken\(\) const \{",
+            r"template<typename K = typename __TemplateArgs<Node>::arg_1, "
+            r"typename V = typename __TemplateArgs<Node>::arg_2, "
+            r"typename NodeType = typename __TemplateArgs<Node>::arg_3>\1"
+            r"Handle<NodeRef<::collections::btree::node::marker::Mut, K, V, NodeType>, Type> awaken() const {",
+            t,
+        )
+        t = t.replace(
+            "insert(K key, V val, A alloc) const {",
+            "insert(K key, V val, A alloc) {",
+        )
+        # (b23) legacy Eq-adapter specializations emitted without their
+        # primary templates (dead residue — UFCS handles eq dispatch).
+        for marker in ("class EqAdapter<", "class EqAdapterRef<", "class EqAdapterRefMut<"):
+            t = _delete_adapter_spec_blocks(t, marker)
+        t = t.replace(
+            "new_kv(NodeRef<BorrowType, K, V, NodeType>{.height_field = this->height_field, "
+            ".node = this->node, ._marker = rusty::PhantomData<std::tuple<BorrowType, NodeType>>{}}",
+            "new_kv(NodeRef<::collections::btree::node::marker::Mut, K, V, "
+            "::collections::btree::node::marker::Leaf>{.height_field = this->height_field, "
+            ".node = this->node, ._marker = rusty::PhantomData<std::tuple<"
+            "::collections::btree::node::marker::Mut, ::collections::btree::node::marker::Leaf>>{}}",
+        )
         if t != o:
             path.write_text(t)
 

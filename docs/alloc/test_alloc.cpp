@@ -1,6 +1,7 @@
 import alloc;
 #include <cassert>
 #include <utility>
+#include <tuple>
 #include <cstdio>
 using VI = vec::Vec<int>;
 using DQ = collections::vec_deque::VecDeque<int>;
@@ -76,6 +77,61 @@ int main() {
       const auto& r = vf;
       for (size_t i = 0; i < 5; ++i) assert(r[i] == 7); }
 
-    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem)\n");
+
+    // BTreeMap: insert/get/remove + ordered iteration
+    { auto m = collections::btree::map::BTreeMap<int, int>::new_();
+      assert(m.len() == 0 && m.is_empty());
+      assert(m.insert(3, 30).is_none());
+      assert(m.insert(1, 10).is_none());
+      assert(m.insert(2, 20).is_none());
+      assert(m.insert(2, 21).unwrap() == 20);   // replace returns old
+      assert(m.len() == 3);
+      assert(m.get(2).unwrap() == 21);
+      assert(m.get(9).is_none());
+      assert(m.contains_key(1) && !m.contains_key(9));
+      // ordered iteration (sorted by key)
+      { int expect_k = 1;
+        auto it = m.iter();
+        for (auto kv = it.next(); kv.is_some(); kv = it.next()) {
+          assert(std::get<0>(kv.unwrap()) == expect_k); ++expect_k; }
+        assert(expect_k == 4); }
+      assert(m.first_key_value().unwrap() == std::make_tuple(1, 10));
+      assert(m.last_key_value().unwrap() == std::make_tuple(3, 30));
+      assert(m.remove(2).unwrap() == 21);
+      assert(m.len() == 2 && m.get(2).is_none()); }
+
+
+    // BTreeSet: insert/contains + ordered iteration + set algebra
+    { auto s = collections::btree::set::BTreeSet<int>::new_();
+      assert(s.insert(3) && s.insert(1) && s.insert(2));
+      assert(!s.insert(2));                      // duplicate
+      assert(s.len() == 3 && s.contains(1) && !s.contains(9));
+      { int expect = 1;
+        auto it = s.iter();
+        for (auto v = it.next(); v.is_some(); v = it.next()) {
+          assert(v.unwrap() == expect); ++expect; }
+        assert(expect == 4); }
+      auto t2 = collections::btree::set::BTreeSet<int>::new_();
+      t2.insert(2); t2.insert(3); t2.insert(4);
+      // difference {1,2,3}\{2,3,4} = {1}  (Search-pinned dispatch)
+      { auto d = s.difference(t2);
+        auto first = d.next();
+        assert(first.is_some() && first.unwrap() == 1);
+        assert(d.next().is_none()); }
+      // intersection {1,2,3}∩{2,3,4} = {2,3}
+      { auto ix = s.intersection(t2);
+        assert(ix.next().unwrap() == 2);
+        assert(ix.next().unwrap() == 3);
+        assert(ix.next().is_none()); }
+      // is_subset via the rebuilt min/max guard
+      { auto sub = collections::btree::set::BTreeSet<int>::new_();
+        sub.insert(2); sub.insert(3);
+        assert(sub.is_subset(t2));
+        assert(!s.is_subset(t2));
+        auto empty = collections::btree::set::BTreeSet<int>::new_();
+        assert(empty.is_subset(t2)); } }
+
+
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem+BTreeMap+BTreeSet)\n");
     return 0;
 }

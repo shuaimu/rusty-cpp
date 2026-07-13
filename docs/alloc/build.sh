@@ -21,10 +21,11 @@ cp -r "$SRC/raw_vec" "$W/src/raw_vec"
 cp -r "$SRC/collections/vec_deque" "$W/src/collections/vec_deque"
 cp -r "$SRC/collections/binary_heap" "$W/src/collections/binary_heap"
 cp "$SRC/collections/linked_list.rs" "$W/src/collections/linked_list.rs"
+cp -r "$SRC/collections/btree" "$W/src/collections/btree"
 cp "$SRC/borrow.rs" "$W/src/borrow.rs"
 cp "$SRC/rc.rs" "$W/src/rc.rs"
 cp "$SRC/sync.rs" "$W/src/sync.rs"
-printf 'pub mod vec_deque;\npub use vec_deque::VecDeque;\npub mod binary_heap;\npub use binary_heap::BinaryHeap;\npub mod linked_list;\npub use linked_list::LinkedList;\n' > "$W/src/collections/mod.rs"
+printf 'pub mod vec_deque;\npub use vec_deque::VecDeque;\npub mod binary_heap;\npub use binary_heap::BinaryHeap;\npub mod linked_list;\npub use linked_list::LinkedList;\nmod btree;\npub mod btree_map {\n    pub use super::btree::map::*;\n}\npub mod btree_set {\n    pub use super::btree::set::*;\n}\npub use btree_map::BTreeMap;\npub use btree_set::BTreeSet;\n' > "$W/src/collections/mod.rs"
 cat > "$W/Cargo.toml" <<EOF
 [package]
 name = "alloc"
