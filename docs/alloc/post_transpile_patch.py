@@ -963,6 +963,16 @@ def _alloc_specific(cpp_out: Path):
         # (must run AFTER the vec-scoped global IntoIter rules above).
         t = _scope_binary_heap(t)
         t = _patch_linked_list(t)
+        # ── btree widening (#89) — no-ops until btree joins the module set.
+        # (b1) `use super::map::MIN_LEN` in remove.rs/fix.rs: the const import
+        # is lost when the flattened method bodies emit in sibling namespaces.
+        t = t.replace(
+            "deref_if_pointer_like(MIN_LEN)",
+            "deref_if_pointer_like(::collections::btree::map::MIN_LEN)",
+        )
+        # (b2) `alloc::boxed::Box` maps to rusty::Box — the runtime has no
+        # `boxed` sub-namespace.
+        t = t.replace("rusty::boxed::Box<", "rusty::Box<")
         if t != o:
             path.write_text(t)
 
