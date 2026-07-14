@@ -2651,8 +2651,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         // them to the umbrella `rusty::*` alias (which collides with and
         // circularly imports the very type the port defines). Explicit std
         // paths (`std::collections::HashMap`) are multi-segment and still map.
+        // Scope-aware (see type_mapping.rs): only suppress where the bare name
+        // actually binds to the crate's own type in the current module.
         let suppress_std_map =
-            segments.len() == 1 && self.crate_declares_std_named_type(&joined);
+            segments.len() == 1 && self.bare_std_named_type_suppression_applies(&joined);
         if !suppress_std_map {
             if let Some((cpp_type, _)) = types::map_std_type(&joined) {
                 return cpp_type.to_string();

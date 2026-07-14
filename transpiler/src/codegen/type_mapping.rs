@@ -2408,8 +2408,14 @@ impl CodeGen {
                         // import the very type it defines. Explicit std paths
                         // (`std::collections::HashMap`) are multi-segment and
                         // still map.
+                        // Scope-aware: suppression applies only where the bare
+                        // name actually BINDS to the crate's type (declared in
+                        // the current module or imported into it). A crate that
+                        // declares `boxed::Box` must not lose the runtime
+                        // mapping for bare `Box` in sibling modules that never
+                        // import it.
                         let suppress_std_map = tp.path.segments.len() == 1
-                            && self.crate_declares_std_named_type(&joined_no_args);
+                            && self.bare_std_named_type_suppression_applies(&joined_no_args);
                         let std_generic_base = (!suppress_std_map)
                             .then(|| {
                                 types::map_std_type(&joined_no_args).and_then(

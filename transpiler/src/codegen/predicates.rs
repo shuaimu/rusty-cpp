@@ -591,11 +591,44 @@ impl CodeGen {
                     // std/core ops imports keep the runtime mapping.
                     return false;
                 }
-                self.local_declared_types.contains(&normalized)
+                if self.local_declared_types.contains(&normalized)
                     || self
                         .local_declared_types
                         .contains(&Self::escape_qualified_path_preserve_global(&normalized))
+                {
+                    return true;
+                }
+                // Fail TOWARD binding for crate-internal imports that don't
+                // normalize to a declared-type key (re-export chains,
+                // cfg-selected inner modules — hashbrown's
+                // `use crate::raw::{.., Global, ..}` reaches
+                // raw::alloc::inner::Global through a pub(crate) re-export).
+                // An import line naming this leaf means the module DOES bind
+                // it in Rust; only std/core/alloc/rusty-external targets keep
+                // the runtime mapping.
+                !normalized.starts_with("std::")
+                    && !normalized.starts_with("core::")
+                    && !normalized.starts_with("alloc::")
+                    && !normalized.starts_with("rusty::")
             })
+    }
+
+    /// The suppress_std_map predicate for BARE references to std-named types
+    /// the crate declares (type_mapping.rs / paths.rs seams). Scope-aware
+    /// inside a module: suppression applies only where the bare name actually
+    /// binds to the crate's type. ROOT-scope emissions (adapter specs, helper
+    /// namespaces emitted with an empty module stack) keep the historical
+    /// crate-wide suppression — their spellings must agree with the
+    /// qualified overload sets emitted from the declaring module (hashbrown's
+    /// `Global` dyn-Allocator adapter).
+    pub(super) fn bare_std_named_type_suppression_applies(&self, name: &str) -> bool {
+        if !self.crate_declares_std_named_type(name) {
+            return false;
+        }
+        if self.module_stack.is_empty() && self.ufcs_impl_module_path.is_empty() {
+            return true;
+        }
+        self.current_module_binds_bare_type_name(name)
     }
 
     pub(super) fn should_emit_data_enum_variant_ctor_helper(&self, ctor_name: &str) -> bool {
