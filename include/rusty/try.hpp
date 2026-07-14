@@ -44,20 +44,47 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
 // Note: Requires GCC or Clang (uses statement expressions extension).
 // MSVC does not support statement expressions.
 
+#include <memory>
+#include <utility>
+
+// Statement expressions yield their final expression AS AN RVALUE — a
+// reference-typed unwrap (Option<&T> / Result<&T, E> through `?`) DECAYS to a
+// value copy at the macro boundary, and any reference formed from the binding
+// afterwards dangles once the copy dies (btree Difference::next returned
+// Option<const T&> into a dead stack slot — ASan stack-use-after-return).
+// Carry the unwrapped value through the boundary in a trivially-movable
+// wrapper instead: lvalues travel as a pointer and are re-derefed outside the
+// statement expression; prvalues travel by move.
+namespace rusty::detail {
+template <typename T> struct try_ref_carrier { T* p; };
+template <typename T> struct try_val_carrier { T v; };
+
+template <typename T>
+inline auto make_try_carrier(T&& v) {
+    if constexpr (std::is_lvalue_reference_v<T&&>) {
+        return try_ref_carrier<std::remove_reference_t<T>>{std::addressof(v)};
+    } else {
+        return try_val_carrier<std::remove_reference_t<T>>{std::forward<T>(v)};
+    }
+}
+template <typename T> inline T& unwrap_try_carrier(try_ref_carrier<T> c) { return *c.p; }
+template <typename T> inline T unwrap_try_carrier(try_val_carrier<T>&& c) { return std::move(c.v); }
+} // namespace rusty::detail
+
 // ? on Result<T, E> — unwrap Ok(T) or return Err(E)
 #define RUSTY_TRY(expr) \
-    ({ \
+    (::rusty::detail::unwrap_try_carrier(({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
             return std::move(_rusty_try_result); \
         } \
-        _rusty_try_result.unwrap(); \
-    })
+        ::rusty::detail::make_try_carrier(_rusty_try_result.unwrap()); \
+    })))
 
 // ? on Result<T, E> in a function returning a different Result<U, E>.
 // `__VA_ARGS__` carries the full return Result type (may include commas).
 #define RUSTY_TRY_INTO(expr, ...) \
-    ({ \
+    (::rusty::detail::unwrap_try_carrier(({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
             using _rusty_target_result_t = __VA_ARGS__; \
@@ -67,22 +94,22 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
                 ::rusty::detail::convert_try_into_error<_rusty_target_err_t>( \
                     std::forward<decltype(_rusty_try_err)>(_rusty_try_err))); \
         } \
-        _rusty_try_result.unwrap(); \
-    })
+        ::rusty::detail::make_try_carrier(_rusty_try_result.unwrap()); \
+    })))
 
 // ? on Result<T, E> in async context — uses co_return
 #define RUSTY_CO_TRY(expr) \
-    ({ \
+    (::rusty::detail::unwrap_try_carrier(({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
             co_return std::move(_rusty_try_result); \
         } \
-        _rusty_try_result.unwrap(); \
-    })
+        ::rusty::detail::make_try_carrier(_rusty_try_result.unwrap()); \
+    })))
 
 // ? on Result<T, E> in async context with explicit Result<U, E> return type.
 #define RUSTY_CO_TRY_INTO(expr, ...) \
-    ({ \
+    (::rusty::detail::unwrap_try_carrier(({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
             using _rusty_target_result_t = __VA_ARGS__; \
@@ -92,8 +119,8 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
                 ::rusty::detail::convert_try_into_error<_rusty_target_err_t>( \
                     std::forward<decltype(_rusty_try_err)>(_rusty_try_err))); \
         } \
-        _rusty_try_result.unwrap(); \
-    })
+        ::rusty::detail::make_try_carrier(_rusty_try_result.unwrap()); \
+    })))
 
 // ? on Option<T> — unwrap Some(T) or return None
 //
@@ -103,22 +130,22 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
 // `?` semantics where `Option<X>::None` can short-circuit a function
 // returning `Option<Y>` because both share the unit None variant.
 #define RUSTY_TRY_OPT(expr) \
-    ({ \
+    (::rusty::detail::unwrap_try_carrier(({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
             return ::rusty::None; \
         } \
-        _rusty_try_result.unwrap(); \
-    })
+        ::rusty::detail::make_try_carrier(_rusty_try_result.unwrap()); \
+    })))
 
 // ? on Option<T> in async context
 #define RUSTY_CO_TRY_OPT(expr) \
-    ({ \
+    (::rusty::detail::unwrap_try_carrier(({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
             co_return rusty::None; \
         } \
-        _rusty_try_result.unwrap(); \
-    })
+        ::rusty::detail::make_try_carrier(_rusty_try_result.unwrap()); \
+    })))
 
 #endif // RUSTY_TRY_HPP

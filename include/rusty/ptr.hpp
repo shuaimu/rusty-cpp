@@ -181,6 +181,16 @@ public:
         return ptr_;
     }
 
+    // Rust NonNull spells both accesses `as_ptr`; the emitter routes mutable
+    // accesses through the free `rusty::as_mut_ptr` helper, whose GENERIC
+    // fallback returns the address of the receiver OBJECT — for a NonNull
+    // that is the address of the stack slot holding ptr_, not the pointee
+    // (boxed box_new_uninit stored &stack and Box freed a stack address).
+    // Providing the member makes the helper's first arm hit.
+    constexpr T* as_mut_ptr() const noexcept {
+        return ptr_;
+    }
+
     constexpr T& as_mut() noexcept {
         return *ptr_;
     }

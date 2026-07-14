@@ -3358,6 +3358,13 @@ impl CodeGen {
                 } else if is_mut
                     || is_consumed
                     || init_is_ptr_read
+                    || local.init.as_ref().is_some_and(|init| {
+                        matches!(
+                            peel_to_tail_expr(&init.expr)
+                                .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr)),
+                            syn::Expr::Try(_)
+                        )
+                    })
                     || self.mutable_pointer_aliased_vars.contains(&name_str)
                     || self.deref_assigned_vars.contains(&name_str)
                     || inferred_mut_reference_binding
@@ -3433,18 +3440,52 @@ impl CodeGen {
                 let init_reference_lowers_to_value = inferred_binding_ty
                     .as_ref()
                     .is_some_and(|ty| self.reference_type_lowers_to_value_cpp(ty));
+                // `let x = e?;` — the try macros carry the unwrapped value through
+                // the statement-expression boundary ref-preservingly
+                // (rusty::detail::try_*_carrier); binding `auto` would re-copy
+                // a reference success value and any reference formed from the
+                // binding afterwards dangles (btree Difference::next returned
+                // Option<const T&> to a dead stack slot). `auto&&` binds the
+                // true lvalue in the reference case and lifetime-extends the
+                // materialized value in the value case.
+                let init_is_try_unwrap = local.init.as_ref().is_some_and(|init| {
+                    matches!(
+                        peel_to_tail_expr(&init.expr)
+                            .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr)),
+                        syn::Expr::Try(_)
+                    )
+                });
                 let ref_suffix = if emits_ref_binding
                     || (init_returns_reference_binding && !init_reference_lowers_to_value)
                 {
                     "&"
+                } else if init_is_try_unwrap
+                    && type_str == "auto"
+                    && !(is_mut && self.reassigned_vars.contains(&name_str))
+                {
+                    "&&"
                 } else {
                     ""
                 };
+                let try_reassigned_ref_rebind = init_is_try_unwrap
+                    && is_mut
+                    && self.reassigned_vars.contains(&name_str)
+                    && local.init.as_ref().is_some_and(|init| {
+                        self.try_init_success_is_reference(&init.expr) == Some(true)
+                    });
                 let init_is_ref_binding = local
                     .init
                     .as_ref()
                     .is_some_and(|init| self.is_ref_init(&init.expr));
                 let local_decl_is_reference = ref_suffix == "&"
+                    // Reassigned `let mut x = e?;` whose success type RESOLVES
+                    // to a reference — Rust rebinds the reference; route
+                    // through the established pointer-rebind model. Value or
+                    // unresolvable success types keep the plain owned binding
+                    // (hashbrown's `let mut new_table = self.prepare_resize(..)?;`
+                    // yields a ScopeGuard by VALUE — `&(temp)` would not
+                    // compile).
+                    || try_reassigned_ref_rebind
                     || init_is_ref_binding
                     || inferred_binding_ty.as_ref().is_some_and(|ty| {
                         self.type_is_reference_like(ty)
@@ -3581,6 +3622,15 @@ impl CodeGen {
                         self.writeln("}");
                         self.indent -= 1;
                         self.writeln("}();");
+                    } else if needs_rebind_pointer_local && init_is_try_unwrap {
+                        // `let mut x = e?;` reassigned later — pointer-model
+                        // init takes the address of the carrier-preserved
+                        // success lvalue.
+                        let ptr_type = rebind_pointer_decl_type
+                            .clone()
+                            .unwrap_or_else(|| "auto*".to_string());
+                        let inner = self.emit_expr_to_string(&init.expr);
+                        self.writeln(&format!("{} {} = &({});", ptr_type, cpp_name, inner));
                     } else if self.is_ref_init(&init.expr) {
                         let inner = self.extract_ref_inner(&init.expr);
                         if needs_rebind_pointer_local {
