@@ -422,6 +422,45 @@ for name in ("from_utf8_lossy", "from_utf8_lossy_owned", "from_utf16",
              "from_utf16be", "from_utf16be_lossy", "into_boxed_str"):
     s = drop_fn(s, name, name)
 
+# S10: Cow<str> <-> String conversions — str's ToOwned::Owned resolves onto
+# the MAPPED std::string_view instead of the runtime String, and the borrow
+# module's Cow<str> path worked pre-fold without these additions. Strip the
+# whole Cow-interop set.
+for hdr, label in (
+    ("impl<'a> From<Cow<'a, str>> for String {", "From<Cow> for String"),
+    ("impl<'a> From<&'a str> for Cow<'a, str> {", "From<&str> for Cow"),
+    ("impl<'a> From<String> for Cow<'a, str> {", "From<String> for Cow"),
+    ("impl<'a> From<&'a String> for Cow<'a, str> {", "From<&String> for Cow"),
+    ("impl<'a> FromIterator<char> for Cow<'a, str> {", "FromIterator<char> for Cow"),
+    ("impl<'a, 'b> FromIterator<&'b str> for Cow<'a, str> {", "FromIterator<&str> for Cow"),
+    ("impl<'a> FromIterator<String> for Cow<'a, str> {", "FromIterator<String> for Cow"),
+):
+    s = drop_impl(s, hdr, label)
+
+# S8: Extend impls for String (ExtendAdapter/extend_one/extend_reserve
+# trait-lowering the runtime String doesn't model; push_str covers usage).
+for hdr, label in (
+    ("impl Extend<char> for String {", "Extend<char>"),
+    ("impl<'a> Extend<&'a char> for String {", "Extend<&char>"),
+    ("impl<'a> Extend<&'a str> for String {", "Extend<&str>"),
+    ("impl<'a, T: IntoIterator<Item = &'a str>> SpecExtendStr for T {", "SpecExtendStr blanket"),
+    ("impl SpecExtendStr for [&str] {", "SpecExtendStr [&str]"),
+    ("impl<const N: usize> SpecExtendStr for [&str; N] {", "SpecExtendStr [&str; N]"),
+    ("impl Extend<String> for String {", "Extend<String>"),
+    ("impl<'a> Extend<Cow<'a, str>> for String {", "Extend<Cow>"),
+):
+    s = drop_impl(s, hdr, label)
+# S9: IntoChars/Drain iterator adapters — call as_str/size_hint/next_back/
+# offset on the runtime str iterators (Chars/CharIndices) which lack them;
+# the runtime test uses push_str/from/len, not String char iteration.
+for hdr, label in (
+    ("impl Iterator for IntoChars {", "Iterator IntoChars"),
+    ("impl DoubleEndedIterator for IntoChars {", "DoubleEnded IntoChars"),
+    ("impl Iterator for Drain<'_> {", "Iterator Drain"),
+    ("impl DoubleEndedIterator for Drain<'_> {", "DoubleEnded Drain"),
+):
+    s = drop_impl(s, hdr, label)
+
 # S5: the entire ToString / SpecToString tower (blanket + all primitive
 # specializations + fmt::Arguments) — nightly formatting the runtime already
 # provides via rusty::to_string; the emitted _fmt/ilog10/core::mem/Formatter
