@@ -2641,7 +2641,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
 
         // Try mapping as a function/method path (e.g., Box::new → rusty::Box::new_)
-        if let Some(cpp_fn) = types::map_function_path(&joined) {
+        // — scope-aware: not where the bare owner binds the crate's own type.
+        if let Some(cpp_fn) = self.map_function_path_scope_aware(&joined) {
             return cpp_fn.to_string();
         }
 
@@ -3287,7 +3288,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             }
             return format!("{}{{}}", self.rewrite_seed_ctor_path_string(&ctor));
         }
-        if types::map_function_path(&joined).is_none() {
+        if self.map_function_path_scope_aware(&joined).is_none() {
             if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
                 if let Some(template_args) = self.emit_expr_path_template_args(path) {
                     rewritten.push_str(&template_args);

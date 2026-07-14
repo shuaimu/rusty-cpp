@@ -35687,7 +35687,7 @@ impl CodeGen {
                     if let Some(alias_args) = owner_alias_omitted_args.as_ref()
                         && !alias_args.is_empty()
                     {
-                        if owner_name == "Box" {
+                        if owner_name == "Box" && !self.bare_std_named_type_suppression_applies("Box") {
                             seg_text = format!("rusty::Box<{}>", alias_args.join(", "));
                         } else {
                             seg_text = format!("{}<{}>", seg_text, alias_args.join(", "));
@@ -36031,7 +36031,7 @@ impl CodeGen {
                             }
                             if complete && !recovered.is_empty() {
                                 // Box needs rusty:: prefix to become rusty::Box<T>
-                                if owner_name == "Box" {
+                                if owner_name == "Box" && !self.bare_std_named_type_suppression_applies("Box") {
                                     seg_text = format!("rusty::Box<{}>", recovered.join(", "));
                                 } else {
                                     seg_text = format!("{}<{}>", seg_text, recovered.join(", "));
@@ -36090,7 +36090,7 @@ impl CodeGen {
                                             }
                                         });
                                     if let Some(scoped_args) = scoped_tail_recovery {
-                                        if owner_name == "Box" {
+                                        if owner_name == "Box" && !self.bare_std_named_type_suppression_applies("Box") {
                                             seg_text =
                                                 format!("rusty::Box<{}>", scoped_args.join(", "));
                                         } else {
@@ -36246,7 +36246,7 @@ impl CodeGen {
                                             });
                                         if recovered_arg0_is_owner_instance {
                                             seg_text = recovered_args[0].clone();
-                                        } else if owner_name == "Box" {
+                                        } else if owner_name == "Box" && !self.bare_std_named_type_suppression_applies("Box") {
                                             seg_text = format!(
                                                 "rusty::Box<{}>",
                                                 recovered_args.join(", ")
@@ -37378,6 +37378,12 @@ impl CodeGen {
             }
             syn::Expr::Paren(paren) => self.emit_rebind_reference_assignment_rhs(&paren.expr),
             syn::Expr::Group(group) => self.emit_rebind_reference_assignment_rhs(&group.expr),
+            // `x = e?;` rebinding a reference local: the try macros yield the
+            // unwrapped success LVALUE (rusty::detail::try_*_carrier), so the
+            // pointer-model reassignment takes its address.
+            syn::Expr::Try(_) => {
+                format!("&({})", self.emit_expr_to_string(rhs))
+            }
             _ => {
                 let emitted = self.emit_expr_to_string(rhs);
                 if emitted.starts_with('&') || self.is_expr_raw_pointer_like(rhs) {

@@ -15883,7 +15883,8 @@ impl CodeGen {
                 ) && matches!(
                     method.map(|seg| seg.ident.to_string()).as_deref(),
                     Some("from_raw")
-                ) {
+                ) && !self.bare_std_named_type_suppression_applies("Box")
+                {
                     // Infer template arg from the pointer argument's pointee type.
                     let inferred = call
                         .args
@@ -19576,7 +19577,13 @@ impl CodeGen {
                         self.emit_expr_to_string(&un.expr)
                     } else {
                         let operand = self.emit_expr_to_string(&un.expr);
-                        if self.in_deref_method_scope() {
+                        if self.is_expr_raw_pointer_like(&un.expr) {
+                            // A raw pointer derefs directly — the per-module
+                            // deref shims take lvalue refs and cannot bind a
+                            // prvalue pointer (crate Box's Deref through
+                            // `self.0.as_ptr()`).
+                            format!("*{}", operand)
+                        } else if self.in_deref_method_scope() {
                             format!("rusty::deref_ref({})", operand)
                         } else if self.in_deref_mut_method_scope() {
                             if self.should_fallback_to_deref_ref_in_deref_mut_scope() {

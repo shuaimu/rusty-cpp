@@ -583,7 +583,16 @@ impl CodeGen {
         let scope_key = scope.join("::");
         self.resolve_scope_import_binding_path_for_scope(&scope_key, name)
             .is_some_and(|target| {
-                let normalized = target.trim().trim_start_matches("::").to_string();
+                let mut normalized = target.trim().trim_start_matches("::").to_string();
+                // Own-crate-name prefix is crate-internal: std-family sources
+                // import their own types by crate name (`use alloc::boxed::Box`
+                // INSIDE the alloc crate) — strip it so the declared-type
+                // check below sees the local key (boxed::Box).
+                if let Some(crate_name) = self.crate_name.as_deref() {
+                    if let Some(stripped) = normalized.strip_prefix(&format!("{}::", crate_name)) {
+                        normalized = stripped.to_string();
+                    }
+                }
                 if normalized.is_empty()
                     || normalized.starts_with("std::ops")
                     || normalized.starts_with("core::ops")
@@ -630,6 +639,55 @@ impl CodeGen {
             let segs: Vec<String> = m.split("::").map(str::to_string).collect();
             self.module_path_declares_type_name_exact(&segs, name)
         })
+    }
+
+    /// types::map_function_path, scope-aware: the static table maps
+    /// `Box::new` -> `rusty::Box::new_` etc.; inside a module where the bare
+    /// owner name binds the CRATE's same-named type, those mappings must not
+    /// fire (the boxed module's own `Box::new(t)` targets crate Box).
+    pub(super) fn map_function_path_scope_aware(&self, joined: &str) -> Option<&'static str> {
+        let mapped = types::map_function_path(joined)?;
+        if let Some((owner, _)) = joined.split_once("::") {
+            if types::map_std_type(owner).is_some()
+                && self.bare_std_named_type_suppression_applies(owner)
+            {
+                return None;
+            }
+        }
+        Some(mapped)
+    }
+
+    /// For `let x = e?;`: whether the try's SUCCESS type is a reference
+    /// (`Option<&T>` / `Result<&T, E>`), resolved from the inner call's
+    /// declared return type. `Some(true)` = reference (a reassigned binding
+    /// needs the pointer-rebind model), `Some(false)` = value (plain owned
+    /// binding), `None` = unresolvable.
+    pub(super) fn try_init_success_is_reference(&self, init: &syn::Expr) -> Option<bool> {
+        let peeled = super::peel_to_tail_expr(init)
+            .unwrap_or_else(|| self.peel_paren_group_expr(init));
+        let syn::Expr::Try(t) = peeled else {
+            return None;
+        };
+        let inner = self.peel_paren_group_expr(&t.expr);
+        let ty = match inner {
+            syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
+            syn::Expr::Call(c) => self.lookup_fn_return_type_with_import_fallback(c.func.as_ref()),
+            _ => None,
+        }?;
+        let ty = self.peel_reference_paren_group_type(&ty);
+        let syn::Type::Path(tp) = ty else { return None };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Option" && last.ident != "Result" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let first = args.args.iter().find_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })?;
+        Some(matches!(first, syn::Type::Reference(_)))
     }
 
     pub(super) fn bare_std_named_type_suppression_applies(&self, name: &str) -> bool {
