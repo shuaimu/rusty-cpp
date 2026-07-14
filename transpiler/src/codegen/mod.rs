@@ -7631,11 +7631,90 @@ impl CodeGen {
         if target_scc != owner_scc {
             return;
         }
+        // A cross-module by-value field only needs indirection when it forms a
+        // GENUINE C++ definition cycle — the field's type must transitively
+        // contain the owner type BY VALUE. The module-SCC condition above is a
+        // necessary-but-insufficient proxy: a big module cycle (string ->
+        // borrow -> string) sweeps in fields like `String { vec: Vec<u8> }`
+        // whose target (Vec) never contains String, so boxing them is wrong
+        // (it made String.vec a `Box<Vec<u8>>` and broke every String method).
+        // Require real by-value reachability back to the owner.
+        let field_leaf = Self::by_value_field_type_leaf_name(field_ty);
+        if let Some(field_leaf) = field_leaf {
+            if !self.type_by_value_reaches(&field_leaf, owner_type, &mut HashSet::new(), 0) {
+                return;
+            }
+        } else {
+            return;
+        }
         self.auto_cross_module_by_value_rewrite_fields
             .insert(ByValueCycleRewriteFieldKey {
                 owner_type: owner_type.to_string(),
                 field_name: Self::format_by_value_field_name(variant_name, field_name),
             });
+    }
+
+    /// The bare leaf name of a field type IF it is a by-value struct/enum
+    /// reference (not a pointer/reference/indirection wrapper that already
+    /// breaks a definition cycle). Returns None for `*T`, `&T`, and the
+    /// indirection wrappers (Box/Rc/Arc/NonNull/Unique/…).
+    fn by_value_field_type_leaf_name(ty: &syn::Type) -> Option<String> {
+        match ty {
+            syn::Type::Path(tp) => {
+                let seg = tp.path.segments.last()?;
+                let name = seg.ident.to_string();
+                if matches!(
+                    name.as_str(),
+                    "Box" | "Rc" | "Arc" | "Weak" | "NonNull" | "Unique" | "Ref" | "RefMut"
+                        | "PhantomData" | "ManuallyDrop"
+                ) {
+                    return None;
+                }
+                Some(name)
+            }
+            syn::Type::Paren(p) => Self::by_value_field_type_leaf_name(&p.elem),
+            syn::Type::Group(g) => Self::by_value_field_type_leaf_name(&g.elem),
+            // Pointers and references are indirection — no by-value cycle.
+            _ => None,
+        }
+    }
+
+    /// True when `start_type`'s definition transitively contains `target_owner`
+    /// through BY-VALUE struct/enum fields (following the same indirection rules
+    /// as `by_value_field_type_leaf_name`). DFS over `struct_field_types`.
+    fn type_by_value_reaches(
+        &self,
+        start_type: &str,
+        target_owner: &str,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > 64 || !visited.insert(start_type.to_string()) {
+            return false;
+        }
+        // struct_field_types may be keyed by a scoped path; match on the leaf.
+        let fields = self.struct_field_types.get(start_type).or_else(|| {
+            self.struct_field_types.iter().find_map(|(k, v)| {
+                (k.rsplit("::").next() == Some(start_type)).then_some(v)
+            })
+        });
+        let Some(fields) = fields else {
+            return false;
+        };
+        for field_ty in fields.values() {
+            let Some(leaf) = Self::by_value_field_type_leaf_name(field_ty) else {
+                continue;
+            };
+            if leaf == target_owner
+                || leaf.rsplit("::").next() == Some(target_owner)
+            {
+                return true;
+            }
+            if self.type_by_value_reaches(&leaf, target_owner, visited, depth + 1) {
+                return true;
+            }
+        }
+        false
     }
 
 
