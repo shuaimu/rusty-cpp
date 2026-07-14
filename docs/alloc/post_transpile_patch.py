@@ -1737,6 +1737,19 @@ def _alloc_specific(cpp_out: Path):
             "bool is_zero(const rusty::Option<::boxed::Box<T>>& self_);",
             "bool is_zero(const rusty::Option<::boxed::Box<T, rusty::alloc::Global>>& self_);",
         )
+        # (b53) into_raw_with_allocator: Rust `&raw mut **b` (deref ManuallyDrop
+        # THEN Box) emitted with only the ManuallyDrop peel — the address of
+        # the Box, not the payload.
+        t = t.replace(
+            "auto ptr_shadow1 = &rusty::detail::deref_if_pointer_like(b_shadow1);",
+            "auto ptr_shadow1 = &(*(*b_shadow1));",
+        )
+        # (b52) Layout accessor calls on free-fn params (box_new_uninit's
+        # `layout` — free-fn param types aren't in infer_simple_expr_type, so
+        # the emit-side size()/align() field lowering can't fire there). The
+        # alloc module only ever sees the runtime Layout (public fields).
+        t = t.replace("layout.size()", "layout.size")
+        t = t.replace("layout.align()", "layout.align")
         # (b51) linked_list crate-Box API on the runtime rusty::Box: the
         # expected-source recovery yields the correct owner (Box<Node<T>,
         # const A&>) but the runtime Box neither stores reference allocators

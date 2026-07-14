@@ -166,8 +166,70 @@ boxed = pathlib.Path(sys.argv[1]); s = boxed.read_text()
 s = s.replace("NonNull::dangling()", "NonNull::<mem::MaybeUninit<T>>::dangling()")
 # X6: de-sugar SizedTypeProperties::LAYOUT + write_via_move intrinsic to plain Rust
 s = s.replace("<T as SizedTypeProperties>::LAYOUT", "Layout::new::<T>()")
-s = s.replace("core::intrinsics::write_via_move(ptr, x)", "ptr.write(x)")
-s = s.replace("core::intrinsics::transmute_unchecked(self)", "mem::transmute(self)")
+s = s.replace("core::intrinsics::write_via_move(ptr, x)", "core::ptr::write(ptr, x)")
+s = s.replace("core::intrinsics::transmute_unchecked(self)",
+              "{ let (raw, alloc) = Box::into_raw_with_allocator(self); Box::from_raw_in(raw as *mut T, alloc) }")
+# X7: the transmute-based constructor tails assume Box is pointer-sized; the
+# emitted Box is not (it carries _rusty_forgotten). Route through from_raw.
+s = s.replace("unsafe { mem::transmute(ptr) }", "unsafe { Box::from_raw(ptr) }")
+s = s.replace("unsafe { mem::transmute(box_new_uninit(Layout::new::<T>())) }",
+              "unsafe { Box::from_raw(box_new_uninit(Layout::new::<T>()) as *mut mem::MaybeUninit<T>) }")
+# X8: new_uninit_in's try_-chain references the stripped try_new_uninit_in;
+# allocate directly (global allocation, allocator stored — Global-only tier).
+s = s.replace("""        // NOTE: Prefer match over unwrap_or_else since closure sometimes not inlineable.
+        // That would make code size bigger.
+        match Box::try_new_uninit_in(alloc) {
+            Ok(m) => m,
+            Err(_) => handle_alloc_error(layout),
+        }""",
+              """        let ptr = box_new_uninit(layout) as *mut mem::MaybeUninit<T>;
+        unsafe { Box::from_raw_in(ptr, alloc) }""")
+# X12: Box's Deref/DerefMut are rustc lang-item magic (`&**self` bottoms out
+# in the compiler); transpiled naively they self-recurse through operator*.
+# Go through the Unique field directly.
+s = s.replace("""    fn deref(&self) -> &T {
+        &**self
+    }""",
+              """    fn deref(&self) -> &T {
+        unsafe { &*(self.0.as_ptr()) }
+    }""")
+s = s.replace("""    fn deref_mut(&mut self) -> &mut T {
+        &mut **self
+    }""",
+              """    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *(self.0.as_ptr()) }
+    }""")
+# X11: into_inner's `*boxed` (consuming deref) collapses to a bare move of
+# the Box in emission; desugar to the explicit read+deallocate form.
+s = s.replace("""    pub fn into_inner(boxed: Self) -> T {
+        *boxed
+    }""",
+              """    pub fn into_inner(boxed: Self) -> T {
+        let (raw, alloc) = Box::into_raw_with_allocator(boxed);
+        unsafe {
+            let value = ptr::read(raw);
+            alloc.deallocate(NonNull::new_unchecked(raw as *mut u8), Layout::new::<T>());
+            value
+        }
+    }""")
+# X10: new_in's uninit chain (new_uninit_in + Box<MaybeUninit>::write +
+# assume_init) instantiates recursively through the flattened MaybeUninit
+# impls; allocate-write-adopt directly, mirroring Box::new.
+s = s.replace("""        let mut boxed = Self::new_uninit_in(alloc);
+        boxed.write(x);
+        unsafe { boxed.assume_init() }""",
+              """        let ptr = box_new_uninit(Layout::new::<T>()) as *mut T;
+        unsafe { core::ptr::write(ptr, x) };
+        unsafe { Box::from_raw_in(ptr, alloc) }""")
+# X9: Clone for Box via clone_to_uninit needs per-T CloneToUninit machinery
+# the runtime does not model; allocate-and-move the clone instead.
+s = s.replace("""        // Pre-allocate memory to allow writing the cloned value directly.
+        let mut boxed = Self::new_uninit_in(self.1.clone());
+        unsafe {
+            (**self).clone_to_uninit(boxed.as_mut_ptr().cast());
+            boxed.assume_init()
+        }""",
+              """        Box::new_in((**self).clone(), self.1.clone())""")
 # X1: thin module + re-export (nightly ThinBox / ptr::metadata)
 s = s.replace("mod thin;\n", "")
 s = s.replace("pub use thin::ThinBox;\n", "")
