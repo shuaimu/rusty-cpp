@@ -709,6 +709,12 @@ pub struct CodeGen {
     pub(crate) impl_source_modules: HashMap<String, HashSet<String>>,
     /// Namespace using declarations to emit inside merged method bodies.
     pub(crate) merged_method_using_namespaces: Vec<String>,
+    /// Unescaped Rust module paths of the same source impls — consulted by the
+    /// bare-std-named-type gates: a name declared by an AUTHORING module of the
+    /// merged methods is the crate's type even when the emission scope (the
+    /// merged struct's module) does not bind it (vec_deque's `From<VecDeque>`
+    /// impl emitted into `struct Vec` under the `vec` namespace).
+    pub(crate) merged_method_source_modules_raw: Vec<String>,
     /// When true, emit_mod only emits function items (deferred second pass).
     pub(crate) deferred_module_function_pass: bool,
     /// When true, first-pass module emission suppresses function definitions
@@ -1833,6 +1839,7 @@ impl CodeGen {
             consumed_impl_blocks: HashMap::new(),
             impl_source_modules: HashMap::new(),
             merged_method_using_namespaces: Vec::new(),
+            merged_method_source_modules_raw: Vec::new(),
             deferred_module_function_pass: false,
             defer_module_functions_recursively: false,
             deferred_self_const_defs: Vec::new(),
@@ -30111,6 +30118,18 @@ impl CodeGen {
         {
             return None;
         }
+        // Bare std-named base in a scope that does NOT bind the crate's
+        // same-named declaration: the base is the RUNTIME wrapper (handled by
+        // the deref whitelist), not the crate type — its recorded Deref impl
+        // must not add a second deref layer (`(*(*new_node)).edges` after the
+        // boxed fold).
+        if types::map_std_type(&base_struct).is_some()
+            && self.crate_declares_std_named_type(&base_struct)
+            && !self.bare_std_named_type_suppression_applies(&base_struct)
+            && !self.any_merged_source_module_declares(&base_struct)
+        {
+            return None;
+        }
         let scoped = self.scoped_type_key(&base_struct);
         let target_ty = self
             .user_deref_targets
@@ -35085,7 +35104,21 @@ impl CodeGen {
         for seg in path.segments.iter().take(owner_idx + 1) {
             owner_path.segments.push(seg.clone());
         }
-        let owner_declared_params_for_path = self.declared_type_params_for_path(&owner_path);
+        // Bare std-named owner in a scope that does NOT bind the crate's
+        // same-named declaration: the call targets the RUNTIME type, so
+        // crate-declared params/arity/self-ty shapes must not drive the
+        // recovery — the expected/inferred sources (closure return type,
+        // first-arg type) carry the correct owner args, exactly as before
+        // the crate declared the type.
+        let owner_is_runtime_mapped_bare = owner_path.segments.len() == 1
+            && types::map_std_type(&owner_name).is_some()
+            && self.crate_declares_std_named_type(&owner_name)
+            && !self.bare_std_named_type_suppression_applies(&owner_name);
+        let owner_declared_params_for_path = if owner_is_runtime_mapped_bare {
+            None
+        } else {
+            self.declared_type_params_for_path(&owner_path)
+        };
         let owner_has_declared_generics =
             owner_declared_params_for_path.is_some_and(|params| !params.is_empty());
         let allow_unqualified_deserializer_tail_generic_recovery = matches!(
@@ -35096,6 +35129,8 @@ impl CodeGen {
                 | "SpannedDeserializer"
         );
         let owner_has_any_declared_generic_tail = if owner_path.segments.len() > 1 {
+            false
+        } else if owner_is_runtime_mapped_bare {
             false
         } else if owner_declared_params_for_path.is_some() {
             // This path resolved to a concrete declared type in-scope. Avoid
@@ -35112,12 +35147,15 @@ impl CodeGen {
         } else {
             self.owner_has_any_declared_generic_tail(&owner_name)
         };
-        let owner_declared_arity = self
-            .declared_type_params_for_path(&owner_path)
+        let owner_declared_arity = owner_declared_params_for_path
+            .as_ref()
             .map(|params| params.len())
             .filter(|arity| *arity > 0)
             .or_else(|| {
-                if owner_declared_params_for_path.is_some() || owner_path.segments.len() > 1 {
+                if owner_is_runtime_mapped_bare
+                    || owner_declared_params_for_path.is_some()
+                    || owner_path.segments.len() > 1
+                {
                     None
                 } else if owner_name.ends_with("Deserializer")
                     && !allow_unqualified_deserializer_tail_generic_recovery
@@ -35411,19 +35449,22 @@ impl CodeGen {
             &method_name,
             call,
         );
-        let scoped_owner_args = self
-            .recover_omitted_owner_generic_args_from_scope(&owner_path)
-            .or_else(|| {
-                (owner_args_omitted && !owner_has_explicit_args)
-                    .then(|| self.declared_owner_type_param_names_by_tail(&owner_name))
-                    .flatten()
-                    .filter(|params| {
-                        !params.is_empty()
-                            && params
-                                .iter()
-                                .all(|param| self.is_type_param_in_scope(param))
+        let scoped_owner_args = (!owner_is_runtime_mapped_bare)
+            .then(|| {
+                self.recover_omitted_owner_generic_args_from_scope(&owner_path)
+                    .or_else(|| {
+                        (owner_args_omitted && !owner_has_explicit_args)
+                            .then(|| self.declared_owner_type_param_names_by_tail(&owner_name))
+                            .flatten()
+                            .filter(|params| {
+                                !params.is_empty()
+                                    && params
+                                        .iter()
+                                        .all(|param| self.is_type_param_in_scope(param))
+                            })
                     })
-            });
+            })
+            .flatten();
         let debug_smallvec_owner = std::env::var_os("RUSTY_CPP_DEBUG_SMALLVECDATA_OWNER").is_some()
             && owner_name == "SmallVecData"
             && method_name == "from_heap";

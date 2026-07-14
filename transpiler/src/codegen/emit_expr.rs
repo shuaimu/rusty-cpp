@@ -8149,6 +8149,35 @@ impl CodeGen {
             }
             return receiver;
         }
+        if matches!(method_name.as_str(), "size" | "align")
+            && args.is_empty()
+            && mc.turbofish.is_none()
+            && !self.current_module_binds_bare_type_name("Layout")
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                .as_ref()
+                .map(|ty| self.peel_reference_paren_group_type(ty))
+                .is_some_and(|ty| match ty {
+                    syn::Type::Path(tp) => tp
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|seg| seg.ident == "Layout"),
+                    _ => false,
+                })
+        {
+            // Runtime rusty::alloc::Layout exposes `size`/`align` as public
+            // FIELDS (alloc.hpp), so Rust's accessor calls lower to field
+            // access. Gated on the module not binding its own `Layout`.
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("{}.{}", receiver, method_name);
+        }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
             // Expose the expected pointer's element type to the receiver emission so
             // a return-only-`T` method-template receiver can recover its turbofish.
@@ -19746,9 +19775,19 @@ impl CodeGen {
                             format!("{}.{}", base_for_field, emitted)
                         }
                         syn::Member::Unnamed(idx) => {
+                            let inferred_base_ty = self.infer_simple_expr_type(&f.base);
                             if self.expr_base_is_tuple_like_for_field_access(&f.base) {
                                 format!("std::get<{}>({})", idx.index, base_for_field)
-                            } else if self.infer_simple_expr_type(&f.base).is_some() {
+                            } else if inferred_base_ty
+                                .as_ref()
+                                .is_some_and(|ty| self.is_manually_drop_type(ty))
+                            {
+                                // Rust tuple-index access through ManuallyDrop's
+                                // Deref (`md.1` with md: ManuallyDrop<Box<T, A>>).
+                                // ManuallyDrop's own field is private, so `._N`
+                                // necessarily targets the wrapped value.
+                                format!("(*{})._{}", base_for_field, idx.index)
+                            } else if inferred_base_ty.is_some() {
                                 // Base type is known and not tuple-like — must
                                 // be a transpiler-synthesized tuple-struct
                                 // whose members are named `_0`, `_1`, ….

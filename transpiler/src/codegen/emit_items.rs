@@ -1541,7 +1541,7 @@ impl CodeGen {
             // Collect source modules for using-namespace inside method bodies
             let current_module = self.module_stack.join("::");
             let scoped = self.scoped_type_key(&name_str);
-            let mut source_modules_for_methods: Vec<String> = self
+            let raw_source_modules: Vec<String> = self
                 .impl_source_modules
                 .get(&name_str)
                 .or_else(|| self.impl_source_modules.get(&scoped))
@@ -1549,11 +1549,18 @@ impl CodeGen {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|m| m != &current_module && !m.is_empty())
-                .map(|m| self.escape_and_rename_qualified_name(&m))
+                .collect();
+            let mut source_modules_for_methods: Vec<String> = raw_source_modules
+                .iter()
+                .map(|m| self.escape_and_rename_qualified_name(m))
                 .collect();
             source_modules_for_methods.sort();
             source_modules_for_methods.dedup();
             self.merged_method_using_namespaces = source_modules_for_methods;
+            let mut raw_sorted = raw_source_modules;
+            raw_sorted.sort();
+            raw_sorted.dedup();
+            self.merged_method_source_modules_raw = raw_sorted;
 
             // Reorder static const members so dependencies come before dependents.
             // E.g., `const ABC = A.bits() | B.bits()` must come after `const A`, `const B`.
@@ -1801,6 +1808,7 @@ impl CodeGen {
                 self.method_emission_skip_conflict_registration = prev_local_skip_conflict;
             }
             self.merged_method_using_namespaces.clear();
+            self.merged_method_source_modules_raw.clear();
             self.current_struct_method_output_types.pop();
             self.current_struct_assoc_cpp_types.pop();
             self.emitted_non_method_member_names.pop();

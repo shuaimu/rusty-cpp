@@ -8834,6 +8834,18 @@ impl CodeGen {
         method_name: &str,
         call: &syn::ExprCall,
     ) -> Option<Vec<Option<String>>> {
+        // Bare std-named owner in a scope that does NOT bind the crate's
+        // same-named declaration: the call targets the RUNTIME type
+        // (rusty::Box), so the crate impl's self-ty shape must not supply
+        // owner args — its bare generic idents (T, A) name-match the
+        // CALLER's unrelated in-scope params (rc/linked_list emitted
+        // `rusty::Box<T>::new_(RcInner<T>{..})` after the boxed fold).
+        if types::map_std_type(owner_name).is_some()
+            && self.crate_declares_std_named_type(owner_name)
+            && !self.bare_std_named_type_suppression_applies(owner_name)
+        {
+            return None;
+        }
         // Walk every recorded ItemImpl and find one whose self_ty is
         // `Owner<…>` (matching `owner_name`) and whose body contains a
         // method named `method_name`. Use the FIRST match — for our
@@ -11985,6 +11997,17 @@ impl CodeGen {
         if self.root_declared_type_names.contains(name) {
             return None;
         }
+        // Bare std-named type in a scope that does NOT bind it: the reference
+        // is the prelude/runtime type (rusty::Box), not the crate's same-named
+        // declaration — fall through to the scope-aware std-map seams instead
+        // of requalifying to the unique crate tail (alloc's boxed::Box hijacked
+        // bare `Box` in linked_list/rc/btree after their imports were stripped).
+        if types::map_std_type(name).is_some()
+            && !self.bare_std_named_type_suppression_applies(name)
+            && !self.any_merged_source_module_declares(name)
+        {
+            return None;
+        }
 
         let mut scoped_matches: Vec<&str> = self
             .local_declared_types
@@ -12127,6 +12150,17 @@ impl CodeGen {
             } else {
                 return None;
             }
+        }
+        // Bare std-named type in a scope that does NOT bind it (no declaration,
+        // no import — checked AFTER the explicit scope-import branch above so
+        // real `use crate::boxed::Box` bindings still resolve): the reference
+        // is the prelude/runtime type — do not requalify to the unique crate
+        // tail; fall through to the scope-aware std-map seams.
+        if types::map_std_type(name).is_some()
+            && !self.bare_std_named_type_suppression_applies(name)
+            && !self.any_merged_source_module_declares(name)
+        {
+            return None;
         }
 
         let mut scoped_matches: Vec<&str> = self

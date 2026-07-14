@@ -621,6 +621,17 @@ impl CodeGen {
     /// crate-wide suppression — their spellings must agree with the
     /// qualified overload sets emitted from the declaring module (hashbrown's
     /// `Global` dyn-Allocator adapter).
+    /// True when one of the AUTHORING modules of the currently-merging
+    /// struct's methods declares `name` exactly. Rust guarantees the authored
+    /// source bound the name (it compiled), so a bare reference emitted under
+    /// the merged struct's foreign scope still targets the crate's type.
+    pub(super) fn any_merged_source_module_declares(&self, name: &str) -> bool {
+        self.merged_method_source_modules_raw.iter().any(|m| {
+            let segs: Vec<String> = m.split("::").map(str::to_string).collect();
+            self.module_path_declares_type_name_exact(&segs, name)
+        })
+    }
+
     pub(super) fn bare_std_named_type_suppression_applies(&self, name: &str) -> bool {
         if !self.crate_declares_std_named_type(name) {
             return false;
