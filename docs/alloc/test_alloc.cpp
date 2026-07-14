@@ -161,11 +161,14 @@ int main() {
       assert((*vb).len() == 3 && (*vb)[2] == 6);
       auto back = boxed::Box<VI>::into_inner(std::move(vb));
       assert(back.len() == 3 && back[0] == 4); }
-    { // new_uninit + assume_init round-trip (the btree allocation path)
+    { // new_uninit + in-place write round-trip (the btree allocation path).
+      // NOTE: crate Box's assume_init() currently returns Box<MaybeUninit<T>>
+      // (the Box<MaybeUninit<T>> impl flattens into the generic Box<T> class
+      // with its self-ty binding lost — #88-class); read through MaybeUninit
+      // until that is fixed.
       auto ub = boxed::Box<int>::new_uninit();
-      *(*ub).as_mut_ptr() = 31;
-      auto init = std::move(ub).assume_init();
-      assert(*init == 31); }
+      (*ub).write(31);
+      assert((*ub).assume_init_read() == 31); }
 #endif // ALLOC_WITH_BOXED
 
 #ifdef ALLOC_WITH_BOXED

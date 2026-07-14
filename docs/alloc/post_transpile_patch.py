@@ -181,10 +181,13 @@ def _patch_linked_list(t: str) -> str:
     depth = 0
     ll_stack = []
     for line in t.splitlines(keepends=True):
-        m = re.match(r"^\s*namespace (\w+) \{\s*$", line)
-        if m and m.group(1) == "linked_list":
+        m = re.match(r"^\s*namespace ((?:\w+::)*\w+) \{\s*$", line)
+        ll_ns = bool(m) and (
+            m.group(1) == "linked_list" or m.group(1).endswith("::linked_list")
+        )
+        if ll_ns:
             ll_stack.append(depth)
-        if ll_stack and not (m and m.group(1) == "linked_list"):
+        if ll_stack and not ll_ns:
             line = re.sub(
                 r"(?<![\w:])into_iter::IntoIter<",
                 "::collections::linked_list::IntoIter<",
@@ -201,6 +204,14 @@ def _patch_linked_list(t: str) -> str:
             # the list silently corrupts (runtime-caught). Copy instead —
             # exactly Rust's Copy semantics.
             line = line.replace("std::move(node_shadow1)", "node_shadow1")
+            line = line.replace(
+                "this->head = std::move(node_shadow1.next);",
+                "this->head = std::move((*node_shadow1).next);",
+            )
+            line = line.replace(
+                "this->tail = std::move(node_shadow1.prev);",
+                "this->tail = std::move((*node_shadow1).prev);",
+            )
             # Rust `Box<Node<T>, &A>` (allocator-BY-REFERENCE Box) — with the
             # stateless Global it degenerates to Box<Node<T>>; and rusty::Box
             # has from_raw (no allocator-taking from_raw_in).
@@ -1725,6 +1736,17 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace(
             "bool is_zero(const rusty::Option<::boxed::Box<T>>& self_);",
             "bool is_zero(const rusty::Option<::boxed::Box<T, rusty::alloc::Global>>& self_);",
+        )
+        # (b51) linked_list crate-Box API on the runtime rusty::Box: the
+        # expected-source recovery yields the correct owner (Box<Node<T>,
+        # const A&>) but the runtime Box neither stores reference allocators
+        # nor exposes from_raw_in; normalize to the pre-fold runtime forms.
+        t = t.replace(
+            "rusty::Box<Node<T>>::from_raw_in("
+            "const_cast<std::add_pointer_t<T>>("
+            "reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>("
+            "rusty::as_ptr(node))), this->alloc)",
+            "rusty::Box<Node<T>>::from_raw(rusty::as_ptr(node))",
         )
         # (b50) node.rs Box::<Self, A>::new_uninit_in (prep turbofish): the
         # turbofish static-call owner renderer resolves bare `Box` against the
