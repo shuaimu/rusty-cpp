@@ -132,6 +132,46 @@ int main() {
         assert(empty.is_subset(t2)); } }
 
 
+#ifdef ALLOC_WITH_BOXED
+    // ---- crate Box (boxed.rs) ----
+    { // deref + mutate through the heap slot
+      auto b = boxed::Box<int>::new_(42);
+      assert(*b == 42);
+      *b += 1;
+      assert(*b == 43);
+      // clone is a deep copy
+      auto b2 = b.clone();
+      assert(*b2 == 43);
+      *b2 = 7;
+      assert(*b == 43 && *b2 == 7);
+      // move transfers the allocation
+      auto moved = std::move(b2);
+      assert(*moved == 7);
+      // into_inner returns the payload
+      int inner = boxed::Box<int>::into_inner(std::move(moved));
+      assert(inner == 7);
+      // From<T>
+      auto bf = boxed::Box<int>::from(9);
+      assert(*bf == 9); }
+    { // non-trivial payload owned through Box
+      auto pv = VI::new_(); pv.push(4); pv.push(5);
+      auto vb = boxed::Box<VI>::new_(std::move(pv));
+      assert((*vb).len() == 2);
+      (*vb).push(6);
+      assert((*vb).len() == 3 && (*vb)[2] == 6);
+      auto back = boxed::Box<VI>::into_inner(std::move(vb));
+      assert(back.len() == 3 && back[0] == 4); }
+    { // new_uninit + assume_init round-trip (the btree allocation path)
+      auto ub = boxed::Box<int>::new_uninit();
+      *(*ub).as_mut_ptr() = 31;
+      auto init = std::move(ub).assume_init();
+      assert(*init == 31); }
+#endif // ALLOC_WITH_BOXED
+
+#ifdef ALLOC_WITH_BOXED
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem+BTreeMap+BTreeSet+Box)\n");
+#else
     std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem+BTreeMap+BTreeSet)\n");
+#endif
     return 0;
 }

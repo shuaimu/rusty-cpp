@@ -1719,6 +1719,31 @@ def _alloc_specific(cpp_out: Path):
             ".node = this->node, ._marker = rusty::PhantomData<std::tuple<"
             "::collections::btree::node::marker::Mut, ::collections::btree::node::marker::Leaf>>{}}",
         )
+        # (b48) boxed fold: is_zero forward-decls drop crate-Box's default
+        # allocator arg (the definition carries `typename A = rusty::alloc::Global`,
+        # the fwd-decls don't).
+        t = t.replace(
+            "bool is_zero(const rusty::Option<::boxed::Box<T>>& self_);",
+            "bool is_zero(const rusty::Option<::boxed::Box<T, rusty::alloc::Global>>& self_);",
+        )
+        # (b50) node.rs Box::<Self, A>::new_uninit_in (prep turbofish): the
+        # turbofish static-call owner renderer resolves bare `Box` against the
+        # crate-declared boxed::Box scope-blind, emitting an unqualified owner
+        # in btree::node (which never imports it). Pending the scope-aware fix
+        # in that third seam, restore the runtime mapping textually.
+        for owner in ("LeafNode<K, V>", "InternalNode<K, V>"):
+            t = t.replace(
+                f"= Box<{owner}, A>::new_uninit_in(",
+                f"= rusty::Box<{owner}, A>::new_uninit_in(",
+            )
+        # (b49) linked_list pop_*_node: out-of-line definitions grew a
+        # `const A&` allocator arg on the crate-Box spelling while the
+        # in-class declarations kept the 1-arg form.
+        for m in ("pop_front_node", "pop_back_node"):
+            t = t.replace(
+                f"rusty::Option<rusty::Box<Node<T>, const A&>> LinkedList<T, A>::{m}()",
+                f"rusty::Option<rusty::Box<Node<T>>> LinkedList<T, A>::{m}()",
+            )
         if t != o:
             path.write_text(t)
 

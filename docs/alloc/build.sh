@@ -22,6 +22,17 @@ cp -r "$SRC/collections/vec_deque" "$W/src/collections/vec_deque"
 cp -r "$SRC/collections/binary_heap" "$W/src/collections/binary_heap"
 cp "$SRC/collections/linked_list.rs" "$W/src/collections/linked_list.rs"
 cp -r "$SRC/collections/btree" "$W/src/collections/btree"
+# boxed fold: opt-in while the mixed Box-binding fallout is open — crate-Box
+# declared returns leak `::boxed::Box` into consumer modules' inferred
+# lambda/return annotations while expr owners keep the runtime rusty::Box
+# spelling (the #53 type-tail-keyed registry family). Module itself compiles
+# clean under the flag; consumer instantiation from the test TU does not yet.
+if [[ "${RUSTY_ALLOC_WITH_BOXED:-0}" == "1" ]]; then
+  mkdir -p "$W/src/boxed"
+  cp "$SRC/boxed.rs" "$W/src/boxed.rs"
+  cp "$SRC/boxed/convert.rs" "$W/src/boxed/convert.rs"
+  cp "$SRC/boxed/iter.rs" "$W/src/boxed/iter.rs"
+fi
 cp "$SRC/borrow.rs" "$W/src/borrow.rs"
 cp "$SRC/rc.rs" "$W/src/rc.rs"
 cp "$SRC/sync.rs" "$W/src/sync.rs"
@@ -39,7 +50,11 @@ path = "src/lib.rs"
 # aborts, forcing the per-submodule fallback (illegal C++ module cycle).
 [workspace]
 EOF
-printf '#![allow(unused)]\npub mod raw_vec;\npub mod borrow;\npub mod rc;\npub mod sync;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
+if [[ "${RUSTY_ALLOC_WITH_BOXED:-0}" == "1" ]]; then
+  printf '#![allow(unused)]\npub mod raw_vec;\npub mod boxed;\npub mod borrow;\npub mod rc;\npub mod sync;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
+else
+  printf '#![allow(unused)]\npub mod raw_vec;\npub mod borrow;\npub mod rc;\npub mod sync;\npub mod collections;\npub mod vec;\n' > "$W/src/lib.rs"
+fi
 bash "$REPO/docs/alloc/prep.sh" "$W/src" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
 "$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1

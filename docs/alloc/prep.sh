@@ -87,4 +87,161 @@ if old in s and new not in s:
     p.write_text(s.replace(old, new)); print("  rewrote finish_grow if-let-tuple-destructure")
 PYEOF
 fi
+# ============================================================================
+# boxed slice strips (each reported by the widening probe):
+#   X1  mod thin / ThinBox        -> nightly thin-pointer Box (ptr::metadata)
+#   X2  Coroutine impls           -> nightly coroutine machinery
+#   X3  impl Error for Box<E>     -> error::Request lives in the std (rusty)
+#                                    module, not alloc
+# ============================================================================
+BOXED="$SRC/boxed.rs"
+if [[ -f "$BOXED" ]]; then
+  # Consumer decouple: linked_list/rc/sync/btree/vec/raw_vec keep binding the
+  # RUNTIME rusty::Box (their pre-fold, runtime-green emission). Crate-Box is
+  # exercised by the boxed module itself + test_alloc.cpp. Flipping consumers
+  # to crate-Box is a later, module-by-module migration.
+  grep -rl "use alloc::boxed::Box;" "$SRC" --include="*.rs" | grep -v "/boxed" |     xargs -r sed -i 's/^use alloc::boxed::Box;$//'
+
+  python3 - "$BOXED" "$SRC/boxed/convert.rs" "$SRC/boxed/iter.rs" "$SRC/vec/mod.rs" <<'PYB'
+import sys, pathlib, re
+
+def drop_fn(s, name, label):
+    """Remove `pub fn NAME...` through its balanced close, including the
+    attribute/doc block directly above it."""
+    m = re.search(rf"\n(    )pub fn {name}[<(]", s)
+    if not m:
+        print(f"  (fn {label}: not found, skipped)")
+        return s
+    start = m.start() + 1
+    # walk back over attribute/doc lines
+    lines_before = s[:start].split("\n")
+    k = len(lines_before) - 1
+    while k > 0 and (lines_before[k-1].lstrip().startswith("#[")
+                     or lines_before[k-1].lstrip().startswith("///")
+                     or lines_before[k-1].lstrip().startswith("//!")
+                     or lines_before[k-1].strip() == ""):
+        if lines_before[k-1].strip() == "" and not (k > 1 and (lines_before[k-2].lstrip().startswith("#[") or lines_before[k-2].lstrip().startswith("///"))):
+            break
+        k -= 1
+    start = len("\n".join(lines_before[:k])) + (1 if k > 0 else 0)
+    depth = 0; seen = False; idx = m.end()
+    while idx < len(s):
+        c = s[idx]
+        if c == "{": depth += 1; seen = True
+        elif c == "}":
+            depth -= 1
+            if seen and depth == 0: break
+        idx += 1
+    print(f"  drop fn {label}")
+    return s[:start] + s[idx+1:]
+
+def drop_impl(s, header_sub, label):
+    i = s.find(header_sub)
+    if i == -1:
+        print(f"  (impl {label}: not found, skipped)")
+        return s
+    # back up over attributes/docs
+    line_start = s.rfind("\n", 0, i) + 1
+    k = line_start
+    while True:
+        prev_end = s.rfind("\n", 0, k - 1) + 1 if k > 0 else 0
+        prev = s[prev_end:k]
+        if prev.lstrip().startswith("#[") or prev.lstrip().startswith("///"):
+            k = prev_end
+        else:
+            break
+    depth = 0; seen = False; idx = i
+    while idx < len(s):
+        c = s[idx]
+        if c == "{": depth += 1; seen = True
+        elif c == "}":
+            depth -= 1
+            if seen and depth == 0: break
+        idx += 1
+    print(f"  drop impl {label}")
+    return s[:k] + s[idx+1:]
+
+boxed = pathlib.Path(sys.argv[1]); s = boxed.read_text()
+# X0: dangling turbofish (all bind NonNull<MaybeUninit<T>>)
+s = s.replace("NonNull::dangling()", "NonNull::<mem::MaybeUninit<T>>::dangling()")
+# X6: de-sugar SizedTypeProperties::LAYOUT + write_via_move intrinsic to plain Rust
+s = s.replace("<T as SizedTypeProperties>::LAYOUT", "Layout::new::<T>()")
+s = s.replace("core::intrinsics::write_via_move(ptr, x)", "ptr.write(x)")
+s = s.replace("core::intrinsics::transmute_unchecked(self)", "mem::transmute(self)")
+# X1: thin module + re-export (nightly ThinBox / ptr::metadata)
+s = s.replace("mod thin;\n", "")
+s = s.replace("pub use thin::ThinBox;\n", "")
+# X2: nightly Coroutine + Future impls
+s = drop_impl(s, "impl<G: ?Sized + Coroutine<R> + Unpin, R, A: Allocator> Coroutine<R> for Box<G, A> {", "Coroutine for Box")
+s = drop_impl(s, "impl<G: ?Sized + Coroutine<R>, R, A: Allocator> Coroutine<R> for Pin<Box<G, A>>", "Coroutine for Pin<Box>")
+s = drop_impl(s, "impl<F: ?Sized + Future + Unpin, A: Allocator> Future for Box<F, A> {", "Future for Box")
+# X3: Error impl (error::Request lives in the std module, not alloc)
+s = drop_impl(s, "impl<E: Error> Error for Box<E> {", "Error for Box")
+# X4: zeroed/try_new/map family (unstable allocator_api; intrinsics-heavy)
+for name in ("map", "new_zeroed", "try_new", "try_new_uninit", "try_new_zeroed",
+             "try_new_in", "try_new_uninit_in", "new_zeroed_in", "try_new_zeroed_in",
+             "new_zeroed_slice", "try_new_uninit_slice", "try_new_zeroed_slice",
+             "new_zeroed_slice_in", "try_new_uninit_slice_in", "try_new_zeroed_slice_in"):
+    s = drop_fn(s, name, name)
+# X5: rustc-internal vec bridge (depends on stripped Box<[T]>::into_vec)
+s = drop_impl(s, "pub fn box_assume_init_into_vec_unsafe<T, const N: usize>(", "box_assume_init_into_vec_unsafe")
+boxed.write_text(s)
+print("  boxed.rs prep complete")
+
+conv = pathlib.Path(sys.argv[2]); s = conv.read_text()
+# dyn-Any downcast machinery + unsized slice conversions + Box<str> pieces
+for hdr, label in (
+    ("impl<A: Allocator> Box<dyn Any, A> {", "Box<dyn Any> downcast"),
+    ("impl<A: Allocator> Box<dyn Any + Send, A> {", "Box<dyn Any+Send> downcast"),
+    ("impl<A: Allocator> Box<dyn Any + Send + Sync, A> {", "Box<dyn Any+Send+Sync> downcast"),
+    ("impl From<&str> for Box<str> {", "From<&str> collides with From<T> at T=string_view"),
+    ("impl From<&mut str> for Box<str> {", "From<&mut str> dup of From<&str>"),
+    ("impl<'a> From<&str> for Box<dyn Error + Send + Sync + 'a> {", "From<&str> for Box<dyn Error+S+S>"),
+    ("impl<'a> From<&str> for Box<dyn Error + 'a> {", "From<&str> for Box<dyn Error>"),
+    ("impl<'a, 'b> From<Cow<'b, str>> for Box<dyn Error + Send + Sync + 'a> {", "From<Cow> for Box<dyn Error+S+S>"),
+    ("impl<'a, 'b> From<Cow<'b, str>> for Box<dyn Error + 'a> {", "From<Cow> for Box<dyn Error>"),
+    ("impl From<Cow<'_, str>> for Box<str> {", "From<Cow<str>> dup of From<&str>"),
+    ("impl<T, const N: usize> TryFrom<Box<[T]>> for Box<[T; N]> {", "TryFrom<Box<[T]>>"),
+    ("impl<T, const N: usize> TryFrom<Vec<T>> for Box<[T; N]> {", "TryFrom<Vec>"),
+):
+    s = drop_impl(s, hdr, label)
+conv.write_text(s)
+print("  convert.rs prep complete")
+
+it = pathlib.Path(sys.argv[3]); s = it.read_text()
+s = s.replace("use std::async_iter::AsyncIterator;\n", "")
+for hdr, label in (
+    ("impl<S: ?Sized + AsyncIterator + Unpin> AsyncIterator for Box<S> {", "AsyncIterator for Box"),
+    ("impl<I, A: Allocator> IntoIterator for Box<[I], A> {", "IntoIterator for Box<[T]> (into_vec)"),
+    ("impl FromIterator<char> for Box<str> {", "FromIterator<char> for Box<str>"),
+    ("impl<'a> FromIterator<&'a char> for Box<str> {", "FromIterator<&char> for Box<str>"),
+    ("impl<'a> FromIterator<&'a str> for Box<str> {", "FromIterator<&str> for Box<str>"),
+    ("impl FromIterator<String> for Box<str> {", "FromIterator<String> for Box<str>"),
+    ("impl<A: Allocator> FromIterator<Box<str, A>> for Box<str> {", "FromIterator<Box<str>> for Box<str>"),
+    ("impl<'a> FromIterator<Cow<'a, str>> for Box<str> {", "FromIterator<Cow<str>> for Box<str>"),
+):
+    s = drop_impl(s, hdr, label)
+it.write_text(s)
+print("  iter.rs prep complete")
+
+vm = pathlib.Path(sys.argv[4]); s = vm.read_text()
+# slice-box conversion: Box<[T]> has no C++ analog; with crate-Box folded in it
+# emits a Vec-typed member into boxed's namespace
+s = drop_impl(s, "impl<T, A: Allocator> From<Vec<T, A>> for Box<[T], A> {", "From<Vec> for Box<[T]> (vec/mod.rs)")
+vm.write_text(s)
+print("  vec/mod.rs boxed-prep complete")
+PYB
+fi
+
+# btree x boxed interplay: with the crate now DEFINING Box, the omitted
+# turbofish on node.rs's two Box::new_uninit_in sites no longer resolves
+# (strict-auto panic on the A slot) — spell them.
+NODE_RS="$SRC/collections/btree/node.rs"
+if [[ -f "$NODE_RS" && -f "$SRC/boxed.rs" ]]; then
+  sed -i \
+    -e 's|let mut leaf = Box::new_uninit_in(alloc);|let mut leaf = Box::<Self, A>::new_uninit_in(alloc);|' \
+    -e 's|let mut node = Box::<Self, _>::new_uninit_in(alloc);|let mut node = Box::<Self, A>::new_uninit_in(alloc);|' \
+    "$NODE_RS"
+fi
+
 echo "prep.sh complete: $SRC"
