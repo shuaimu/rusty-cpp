@@ -12,7 +12,8 @@ bash "$REPO/docs/alloc/build.sh" "$W" | tail -2
 CPPM="$W/out/alloc.cppm"
 [[ -f "$W/out/alloc.pcm" ]] || { echo "no BMI — build failed"; exit 1; }
 FLAGS="-std=c++23 -DRUSTY_PORTABLE_INTRINSICS=1 -march=native -I$REPO/include"
-[[ "${RUSTY_ALLOC_WITH_BOXED:-0}" == "1" ]] && FLAGS="$FLAGS -DALLOC_WITH_BOXED"
+[[ "${RUSTY_ALLOC_WITH_BOXED:-1}" == "1" ]] && FLAGS="$FLAGS -DALLOC_WITH_BOXED"
+[[ "${RUSTY_ALLOC_WITH_STRING:-0}" == "1" ]] && FLAGS="$FLAGS -DALLOC_WITH_STRING"
 clang++ $FLAGS -c "$W/out/alloc.pcm" -o "$W/alloc.o" 2>"$W/mo.err" || { echo "module obj FAIL"; tail -3 "$W/mo.err"; exit 1; }
 clang++ $FLAGS -fmodule-file=alloc="$W/out/alloc.pcm" -c "$REPO/docs/alloc/test_alloc.cpp" -o "$W/test.o" 2>"$W/tc.err" \
   || { echo "test compile: $(grep -c error: "$W/tc.err") errors"; grep error: "$W/tc.err" | head; exit 1; }

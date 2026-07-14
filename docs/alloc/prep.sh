@@ -295,6 +295,145 @@ print("  vec/mod.rs boxed-prep complete")
 PYB
 fi
 
+STRING_RS="$SRC/string.rs"
+if [[ -f "$STRING_RS" ]]; then
+  python3 - "$STRING_RS" <<'PYS'
+import sys, pathlib, re
+
+def drop_fn(s, name, label):
+    m = re.search(rf"\n(    )pub fn {name}[<(]", s)
+    if not m:
+        print(f"  (fn {label}: not found, skipped)")
+        return s
+    start = m.start() + 1
+    lines_before = s[:start].split("\n")
+    k = len(lines_before) - 1
+    while k > 0 and (lines_before[k-1].lstrip().startswith("#[")
+                     or lines_before[k-1].lstrip().startswith("///")
+                     or lines_before[k-1].strip() == ""):
+        if lines_before[k-1].strip() == "" and not (k > 1 and (lines_before[k-2].lstrip().startswith("#[") or lines_before[k-2].lstrip().startswith("///"))):
+            break
+        k -= 1
+    start = len("\n".join(lines_before[:k])) + (1 if k > 0 else 0)
+    depth = 0; seen = False; idx = m.end()
+    while idx < len(s):
+        c = s[idx]
+        if c == "{": depth += 1; seen = True
+        elif c == "}":
+            depth -= 1
+            if seen and depth == 0: break
+        idx += 1
+    print(f"  drop fn {label}")
+    return s[:start] + s[idx+1:]
+
+def drop_impl(s, header_sub, label):
+    i = s.find(header_sub)
+    if i == -1:
+        print(f"  (impl {label}: not found, skipped)")
+        return s
+    line_start = s.rfind("\n", 0, i) + 1
+    k = line_start
+    while True:
+        prev_end = s.rfind("\n", 0, k - 1) + 1 if k > 0 else 0
+        prev = s[prev_end:k]
+        if prev.lstrip().startswith("#[") or prev.lstrip().startswith("///"):
+            k = prev_end
+        else:
+            break
+    depth = 0; seen = False; idx = i
+    while idx < len(s):
+        c = s[idx]
+        if c == "{": depth += 1; seen = True
+        elif c == "}":
+            depth -= 1
+            if seen and depth == 0: break
+        idx += 1
+    print(f"  drop impl {label}")
+    return s[:k] + s[idx+1:]
+
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+# S0: bare Vec ctors in String's field context — element type u8 undeduced
+# (the #74 family); turbofish explicitly.
+s = s.replace("String { vec: Vec::new() }", "String { vec: Vec::<u8>::new() }")
+s = s.replace("String { vec: Vec::with_capacity(capacity) }",
+              "String { vec: Vec::<u8>::with_capacity(capacity) }")
+s = s.replace("Ok(String { vec: Vec::try_with_capacity(capacity)? })",
+              "Ok(String { vec: Vec::<u8>::try_with_capacity(capacity)? })")
+s = s.replace("let mut v = Vec::with_capacity(self.bytes.len());",
+              "let mut v = Vec::<u8>::with_capacity(self.bytes.len());")
+# S1: Pattern/Searcher machinery — the runtime has no Searcher model.
+for name in ("remove_matches", "replace_first", "replace_last"):
+    s = drop_fn(s, name, name)
+s = drop_impl(s, "impl<'b> Pattern for &'b String {", "Pattern for &String")
+s = s.replace("use std::str::pattern::{Pattern, Utf8Pattern};\n", "")
+# S2: ascii::Char (nightly) surface
+for hdr, label in (
+    ("impl FromIterator<core::ascii::Char> for String {", "FromIterator<ascii::Char>"),
+    ("impl<'a> FromIterator<&'a core::ascii::Char> for String {", "FromIterator<&ascii::Char>"),
+    ("impl Extend<core::ascii::Char> for String {", "Extend<ascii::Char>"),
+    ("impl<'a> Extend<&'a core::ascii::Char> for String {", "Extend<&ascii::Char>"),
+    ("impl SpecToString for core::ascii::Char {", "SpecToString ascii::Char"),
+    ("impl<'a> FromIterator<core::ascii::Char> for Cow<'a, str> {", "FromIterator<ascii::Char> for Cow"),
+):
+    s = drop_impl(s, hdr, label)
+# S3: 128-bit to_string (no C++ __int128 formatting model)
+s = s.replace("    i128, u128,\n", "")
+# S4: Box<str> iterator impls (Box<str> has no C++ analog)
+for hdr, label in (
+    ("impl<A: Allocator> FromIterator<Box<str, A>> for String {", "FromIterator<Box<str>>"),
+    ("impl<A: Allocator> Extend<Box<str, A>> for String {", "Extend<Box<str>>"),
+):
+    s = drop_impl(s, hdr, label)
+def cut_range(s, start_sub, end_sub, label):
+    """Cut [start of the line containing start_sub, incl. leading attrs/docs ..
+    start of the line containing end_sub, incl. ITS leading attrs) ."""
+    i = s.find(start_sub)
+    if i == -1:
+        print(f"  (range {label}: start not found, skipped)"); return s
+    j = s.find(end_sub, i)
+    if j == -1:
+        print(f"  (range {label}: end not found, skipped)"); return s
+    def back_over_attrs(idx):
+        line_start = s.rfind("\n", 0, idx) + 1
+        k = line_start
+        while True:
+            prev_end = s.rfind("\n", 0, k - 1) + 1 if k > 0 else 0
+            prev = s[prev_end:k]
+            ls = prev.lstrip()
+            if ls.startswith("#[") or ls.startswith("///") or ls.startswith("//!") or ls.strip() == "":
+                k = prev_end
+                if k == 0: break
+            else:
+                break
+        return k
+    start = back_over_attrs(i)
+    end = back_over_attrs(j)
+    print(f"  cut range {label}")
+    return s[:start] + s[end:]
+
+# S6: impl From<String> for Vec<u8> creates a FALSE by-value cycle
+# (String has a Vec<u8> field; this conversion makes the cycle-breaker box
+# String's `vec` field). Strip it — the runtime test does not need it.
+s = drop_impl(s, "impl From<String> for Vec<u8> {", "From<String> for Vec<u8>")
+# S7: nightly UTF-16 + utf8-lossy + boxed-str surface (as_chunks/align_to/
+# utf8_chunks/decode_utf16/from_boxed_utf8_unchecked — unmapped runtime).
+for name in ("from_utf8_lossy", "from_utf8_lossy_owned", "from_utf16",
+             "from_utf16_lossy", "from_utf16le", "from_utf16le_lossy",
+             "from_utf16be", "from_utf16be_lossy", "into_boxed_str"):
+    s = drop_fn(s, name, name)
+
+# S5: the entire ToString / SpecToString tower (blanket + all primitive
+# specializations + fmt::Arguments) — nightly formatting the runtime already
+# provides via rusty::to_string; the emitted _fmt/ilog10/core::mem/Formatter
+# machinery is unmappable.
+s = cut_range(s, "pub trait ToString {", "impl AsRef<str> for String {",
+              "ToString/SpecToString tower")
+
+p.write_text(s)
+print("  string.rs prep complete")
+PYS
+fi
+
 # btree x boxed interplay: with the crate now DEFINING Box, the omitted
 # turbofish on node.rs's two Box::new_uninit_in sites no longer resolves
 # (strict-auto panic on the A slot) — spell them.
