@@ -48894,7 +48894,7 @@ struct Utf8Error {\n\
         if (error_len_ < 0) { return rusty::Option<std::size_t>(rusty::None); }\n\
         return rusty::Option<std::size_t>(static_cast<std::size_t>(error_len_));\n\
     }\n\
-    rusty::String to_string() const { return rusty::String::from(\"invalid utf-8 sequence\"); }\n\
+    std::string to_string() const { return \"invalid utf-8 sequence\"; }\n\
     constexpr bool operator==(const Utf8Error&) const = default;\n\
 };\n\
 // Rust-faithful UTF-8 validation: on failure reports where the valid prefix\n\
@@ -48945,20 +48945,25 @@ inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {\n\
 }\n\
 template<typename Bytes>\n\
 rusty::Result<std::string_view, Utf8Error> from_utf8(const Bytes& bytes) {\n\
+    const unsigned char* data = nullptr;\n\
+    std::size_t len = 0;\n\
     if constexpr (requires { bytes.data(); bytes.size(); }) {\n\
-        const auto* raw = bytes.data();\n\
-        const std::size_t len = static_cast<std::size_t>(bytes.size());\n\
-        const auto* data = reinterpret_cast<const unsigned char*>(raw);\n\
-        bool ok = true;\n\
-        const auto err = validate_utf8(data, len, ok);\n\
-        if (!ok) {\n\
-            return rusty::Result<std::string_view, Utf8Error>::Err(err);\n\
-        }\n\
-        return rusty::Result<std::string_view, Utf8Error>::Ok(\n\
-            std::string_view(reinterpret_cast<const char*>(raw), len)\n\
-        );\n\
+        data = reinterpret_cast<const unsigned char*>(bytes.data());\n\
+        len = static_cast<std::size_t>(bytes.size());\n\
+    } else if constexpr (requires { rusty::as_ptr(bytes); rusty::len(bytes); }) {\n\
+        data = reinterpret_cast<const unsigned char*>(rusty::as_ptr(bytes));\n\
+        len = static_cast<std::size_t>(rusty::len(bytes));\n\
+    } else {\n\
+        return rusty::Result<std::string_view, Utf8Error>::Err(Utf8Error{});\n\
     }\n\
-    return rusty::Result<std::string_view, Utf8Error>::Err(Utf8Error{});\n\
+    bool ok = true;\n\
+    const auto err = validate_utf8(data, len, ok);\n\
+    if (!ok) {\n\
+        return rusty::Result<std::string_view, Utf8Error>::Err(err);\n\
+    }\n\
+    return rusty::Result<std::string_view, Utf8Error>::Ok(\n\
+        std::string_view(reinterpret_cast<const char*>(data), len)\n\
+    );\n\
 }\n\
 template<typename Bytes>\n\
 std::string_view from_utf8_unchecked(Bytes&& bytes) {\n\
@@ -49313,6 +49318,27 @@ inline std::size_t len_utf8(char32_t ch) {\n\
     if (code < 0x80) return 1;\n\
     if (code < 0x800) return 2;\n\
     if (code < 0x10000) return 3;\n\
+    return 4;\n\
+}\n\
+template<typename Dst>\n\
+inline std::size_t encode_utf8_raw_unchecked(uint32_t code, Dst dst) {\n\
+    using B = std::remove_reference_t<decltype(dst[0])>;\n\
+    if (code < 0x80u) { dst[0] = static_cast<B>(code); return 1; }\n\
+    if (code < 0x800u) {\n\
+        dst[0] = static_cast<B>(0xC0u | (code >> 6));\n\
+        dst[1] = static_cast<B>(0x80u | (code & 0x3Fu));\n\
+        return 2;\n\
+    }\n\
+    if (code < 0x10000u) {\n\
+        dst[0] = static_cast<B>(0xE0u | (code >> 12));\n\
+        dst[1] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));\n\
+        dst[2] = static_cast<B>(0x80u | (code & 0x3Fu));\n\
+        return 3;\n\
+    }\n\
+    dst[0] = static_cast<B>(0xF0u | (code >> 18));\n\
+    dst[1] = static_cast<B>(0x80u | ((code >> 12) & 0x3Fu));\n\
+    dst[2] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));\n\
+    dst[3] = static_cast<B>(0x80u | (code & 0x3Fu));\n\
     return 4;\n\
 }\n\
 template<typename Buffer>\n\

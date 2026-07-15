@@ -2551,7 +2551,14 @@ decltype(auto) slice_from(Container& container, Start start) {
     {
         auto span = slice_full(container);
         detail::validate_slice_bounds(span, start_index, span.size());
-        return span.subspan(start_index);
+        // str slices lower to std::string_view, which spells the tail
+        // operation `substr`, not `subspan` (Vec/array slices use spans).
+        if constexpr (std::is_same_v<std::remove_cvref_t<decltype(span)>,
+                                     std::string_view>) {
+            return span.substr(start_index);
+        } else {
+            return span.subspan(start_index);
+        }
     }
 }
 

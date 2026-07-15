@@ -740,6 +740,12 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         | "core::char::from_u32"
         | "char::from_u32"
         | "char32_t::from_u32" => Some("rusty::char_runtime::from_u32"),
+        "std::char::encode_utf8_raw_unchecked"
+        | "core::char::encode_utf8_raw_unchecked"
+        | "char::encode_utf8_raw_unchecked"
+        | "char32_t::encode_utf8_raw_unchecked" => {
+            Some("rusty::char_runtime::encode_utf8_raw_unchecked")
+        }
         "core::fmt::Formatter::debug_tuple_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_tuple_field1_finish")
         }
