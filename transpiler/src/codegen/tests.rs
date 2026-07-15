@@ -35277,3 +35277,28 @@ fn test_enum_deref_self_return_coerces_via_operator_star() {
         "enum as_ref must deref-coerce self, not return the whole value:\n{out}"
     );
 }
+
+#[test]
+fn test_at_binding_let_emits_subpattern_destructure() {
+    // `let whole @ Struct { a, b } = init;` binds `whole` to the value AND
+    // destructures its fields. The Pat::Ident emit arm emitted only `whole`,
+    // dropping the sub-pattern, so `a`/`b` were undeclared. Regression:
+    // string.rs's `let src @ Range { start, end } = slice::range(..)`.
+    let out = transpile_str(
+        r#"
+        pub struct Rg { pub start: usize, pub end: usize }
+        pub fn mk() -> Rg { Rg { start: 1, end: 5 } }
+        pub fn f() -> usize {
+            let whole @ Rg { start, end } = mk();
+            start + end + whole.start
+        }
+        "#,
+    );
+    // `whole` is bound...
+    assert!(out.contains("whole = "), "{out}");
+    // ...and the sub-pattern fields are destructured against it.
+    assert!(out.contains("_let_pat = whole") || out.contains(".start"), "{out}");
+    assert!(out.contains("start ="), "at-binding dropped the start binding:\n{out}");
+    assert!(out.contains("end ="), "at-binding dropped the end binding:\n{out}");
+    assert!(!out.contains("// TODO: complex pattern binding"), "{out}");
+}

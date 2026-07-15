@@ -3933,11 +3933,27 @@ impl CodeGen {
                 // (e.g., `let rhs = rhs.next()` → `rhs_shadow2 = rhs_shadow1.next()`).
                 if shadows_outer {
                     if let Some(scope) = self.local_cpp_bindings.last_mut() {
-                        scope.insert(name_str, cpp_name);
+                        scope.insert(name_str.clone(), cpp_name);
                     }
                 }
                 if track_in_progress_initializer {
                     self.pop_in_progress_local_initializer();
+                }
+                // At-binding `let whole @ Struct { a, b } = ...;` binds `whole`
+                // to the whole value AND destructures its fields. The code
+                // above emitted only `whole`; now emit the sub-pattern's
+                // bindings against `whole` (else `a`/`b` are undeclared —
+                // string.rs's `let src @ Range { start, end } = ...`).
+                if let Some((_, subpat)) = &pat_ident.subpat {
+                    if !matches!(subpat.as_ref(), syn::Pat::Wild(_)) {
+                        if let Ok(whole_expr) = syn::parse_str::<syn::Expr>(&name_str) {
+                            self.emit_complex_local_pattern_binding_from_init(
+                                subpat,
+                                &whole_expr,
+                                None,
+                            );
+                        }
+                    }
                 }
             }
             syn::Pat::Tuple(tuple) => {
