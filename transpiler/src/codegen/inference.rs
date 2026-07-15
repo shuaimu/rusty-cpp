@@ -7047,10 +7047,30 @@ impl CodeGen {
         method_name: &str,
         method_template_args: Option<&str>,
     ) -> Option<String> {
-        let owner_match = self
-            .infer_simple_expr_type(receiver_expr)
+        let inferred_receiver_ty = self.infer_simple_expr_type(receiver_expr);
+        // A receiver whose type resolves to a KNOWN concrete path type
+        // (not a bare type parameter) pins the owner: if that type has no
+        // alias for the method, it is a member/runtime call — routing it to
+        // an unrelated type's alias by method name alone is a mis-dispatch
+        // (String.vec: Vec<u8> whose `.split_off` was bound to btree
+        // `Root::split_off`, the sole alias with that method name). Only fall
+        // back to by-method-name resolution when the receiver type is
+        // genuinely unknown.
+        let receiver_type_is_known_concrete = inferred_receiver_ty.as_ref().is_some_and(|ty| {
+            match self.peel_reference_paren_group_type(ty) {
+                syn::Type::Path(tp) => tp
+                    .path
+                    .segments
+                    .last()
+                    .map(|seg| seg.ident.to_string())
+                    .is_some_and(|name| !self.is_type_param_in_scope(&name)),
+                _ => false,
+            }
+        });
+        let owner_match = inferred_receiver_ty
+            .as_ref()
             .and_then(|receiver_ty| {
-                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+                let receiver_ty = self.peel_reference_paren_group_type(receiver_ty);
                 if let syn::Type::Path(tp) = receiver_ty {
                     let owner_name = tp
                         .path
@@ -7076,7 +7096,11 @@ impl CodeGen {
                     )
                 }
             })
-            .or_else(|| self.resolve_alias_owner_key_with_receiver_method_name(method_name));
+            .or_else(|| {
+                (!receiver_type_is_known_concrete)
+                    .then(|| self.resolve_alias_owner_key_with_receiver_method_name(method_name))
+                    .flatten()
+            });
         let (owner_key, receiver_shape) = owner_match?;
         if matches!(receiver_shape, Some(false)) {
             return None;

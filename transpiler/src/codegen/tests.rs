@@ -35211,3 +35211,42 @@ fn test_loop_rebind_match_arm_lowers_as_statement() {
     assert!(out.contains("while (true)"), "{out}");
 }
 
+
+#[test]
+fn test_known_receiver_type_not_misrouted_to_unrelated_alias() {
+    // A method call whose receiver type is a KNOWN concrete type must resolve
+    // to that type's member/runtime method — never fall back to a same-named
+    // inherent method on an UNRELATED type-alias owner (which emits a
+    // `__rusty_alias_<Owner>_<method>` free fn). Regression: `String.vec:
+    // Vec<u8>`'s `.split_off` was mis-dispatched to btree `Root::split_off`
+    // (the sole `split_off` alias) because the by-method-name fallback fired
+    // even though the receiver's `Vec` type was known.
+    let out = transpile_str(
+        r#"
+        pub struct MyVec { len: usize }
+        impl MyVec {
+            pub fn split_off(&mut self, at: usize) -> MyVec { MyVec { len: 0 } }
+        }
+        pub struct NodeRef { h: usize }
+        pub type Root = NodeRef;
+        impl Root {
+            pub fn split_off(&mut self, at: usize) -> Root { NodeRef { h: 0 } }
+        }
+        pub struct Holder { v: MyVec }
+        impl Holder {
+            pub fn go(&mut self, at: usize) -> MyVec {
+                self.v.split_off(at)
+            }
+        }
+        "#,
+    );
+    // `Root::split_off` still emits its alias helper (it is a type-alias owner)...
+    assert!(out.contains("__rusty_alias_Root_split_off"), "{out}");
+    // ...but the KNOWN-typed `self.v` receiver must call the member directly,
+    // not route to that unrelated alias.
+    assert!(out.contains("this->v.split_off"), "{out}");
+    assert!(
+        !out.contains("__rusty_alias_Root_split_off(this->v"),
+        "known Vec receiver mis-dispatched to Root's split_off alias:\n{out}"
+    );
+}
