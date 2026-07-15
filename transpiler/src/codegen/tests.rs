@@ -35250,3 +35250,30 @@ fn test_known_receiver_type_not_misrouted_to_unrelated_alias() {
         "known Vec receiver mis-dispatched to Root's split_off alias:\n{out}"
     );
 }
+
+#[test]
+fn test_enum_deref_self_return_coerces_via_operator_star() {
+    // `fn as_ref(&self) -> &Target { self }` deref-coerces &Self to
+    // &Deref::Target. This works for structs; the ENUM emit path does not
+    // push a method-output scope, so the deref lookup missed it and the enum
+    // returned the whole value (`return (*this)`) instead of the deref.
+    // Regression: Cow<B>'s `AsRef<T>::as_ref` (enum, Deref param B vs AsRef
+    // param T) returned the whole Cow. Fixed via user_deref_targets.
+    let out = transpile_str(
+        r#"
+        pub enum E<T> { A(T), B(T) }
+        impl<T> core::ops::Deref for E<T> {
+            type Target = T;
+            fn deref(&self) -> &T { match self { E::A(x) => x, E::B(x) => x } }
+        }
+        impl<T> AsRef<T> for E<T> {
+            fn as_ref(&self) -> &T { self }
+        }
+        "#,
+    );
+    assert!(out.contains("as_ref() const"), "{out}");
+    assert!(
+        out.contains("return this->operator*();"),
+        "enum as_ref must deref-coerce self, not return the whole value:\n{out}"
+    );
+}

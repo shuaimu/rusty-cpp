@@ -1744,13 +1744,9 @@ def _alloc_specific(cpp_out: Path):
             "auto ptr_shadow1 = &rusty::detail::deref_if_pointer_like(b_shadow1);",
             "auto ptr_shadow1 = &(*(*b_shadow1));",
         )
-        # (b54) string-fold: Cow's generic `fn as_ref(&self) -> &T { self }`
-        # missed the &self->&Deref::Target coercion the concrete String path
-        # gets, so it returned the whole Cow. Deref explicitly.
-        t = t.replace(
-            "const B& as_ref() const {\n            return (*this);\n        }",
-            "const B& as_ref() const {\n            return this->operator*();\n        }",
-        )
+        # (b54) REMOVED — the Cow as_ref deref coercion is now handled at
+        # emit (should_coerce_self_path_to_deref covers enums via
+        # user_deref_targets); kept as a no-op marker.
         # (b55) Vec::into_raw_parts: the emitter auto-derefs the ManuallyDrop
         # binding for as_mut_ptr/len but not capacity.
         t = t.replace(

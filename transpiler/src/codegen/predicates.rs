@@ -2699,8 +2699,17 @@ impl CodeGen {
         if self.type_is_current_struct_self_type(&expected_ref.elem) {
             return false;
         }
-        self.lookup_current_struct_method_return_type("deref")
-            .is_some()
+        // The current type implements Deref. Check both the method-output
+        // registry (populated for struct emit) AND user_deref_targets (which
+        // records every user Deref impl, including ENUMS — the enum emit path
+        // does not push a method-output scope, so a bare `fn as_ref(&self) ->
+        // &Target { self }` on an enum like Cow would otherwise miss the
+        // coercion and return the whole value instead of the deref).
+        self.lookup_current_struct_method_return_type("deref").is_some()
+            || self.current_struct.as_ref().is_some_and(|n| {
+                self.user_deref_targets.contains_key(n)
+                    || self.user_deref_targets.contains_key(&self.scoped_type_key(n))
+            })
     }
 
     pub(super) fn should_suppress_inferred_expected_for_struct_literal(
