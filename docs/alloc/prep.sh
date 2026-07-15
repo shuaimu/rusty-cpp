@@ -512,13 +512,12 @@ for hdr, label in (
 # S13: nightly/non-core String methods that pull unmappable machinery:
 #  into_utf8_lossy/into_string (utf8_chunks, from_utf8_unchecked→String),
 #  push_str_slice (Saturating += / mem::take on non-default-constructible),
-#  split_off (its BODY's from_utf8_unchecked maps to the runtime string_view
-#  version despite the crate declaring its own — a separate open bug; the
-#  split_off alias mis-dispatch itself is FIXED),
 #  into_chars (IntoIter<u8>::clone → to_vec_in).
 #  (extend_from_within is NO LONGER stripped — its at-binding destructure bug
-#  is fixed in the emitter.)
-for name in ("into_utf8_lossy", "into_string", "push_str_slice", "split_off",
+#  is fixed in the emitter. split_off is NO LONGER stripped — its BODY's
+#  from_utf8_unchecked now routes to the crate's own method, not the runtime
+#  string_view helper, since the scope-aware remap fix landed.)
+for name in ("into_utf8_lossy", "into_string", "push_str_slice",
              "into_chars"):
     s = drop_fn(s, name, name)
 # IntoChars derives Clone (→ IntoIter<u8>::clone → to_vec_in on span, a Vec
