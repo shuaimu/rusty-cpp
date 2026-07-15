@@ -30,9 +30,9 @@ if [[ "${RUSTY_ALLOC_WITH_BOXED:-1}" == "1" ]]; then
   cp "$SRC/boxed/convert.rs" "$W/src/boxed/convert.rs"
   cp "$SRC/boxed/iter.rs" "$W/src/boxed/iter.rs"
 fi
-# string fold: opt-in while the slice is driven to RUNTIME PASS (String
-# depends on crate Box/Vec — run with boxed ON).
-if [[ "${RUSTY_ALLOC_WITH_STRING:-0}" == "1" ]]; then
+# string fold: DEFAULT ON since it reached RUNTIME PASS (f1531361/38837df0);
+# the env stays as an opt-out escape hatch. Depends on crate Box/Vec.
+if [[ "${RUSTY_ALLOC_WITH_STRING:-1}" == "1" ]]; then
   cp "$SRC/string.rs" "$W/src/string.rs"
 fi
 cp "$SRC/borrow.rs" "$W/src/borrow.rs"
@@ -54,7 +54,7 @@ path = "src/lib.rs"
 EOF
 MODS='#![allow(unused)]\npub mod raw_vec;\n'
 [[ "${RUSTY_ALLOC_WITH_BOXED:-1}" == "1" ]] && MODS+='pub mod boxed;\n'
-[[ "${RUSTY_ALLOC_WITH_STRING:-0}" == "1" ]] && MODS+='pub mod string;\n'
+[[ "${RUSTY_ALLOC_WITH_STRING:-1}" == "1" ]] && MODS+='pub mod string;\n'
 MODS+='pub mod borrow;\npub mod rc;\npub mod sync;\npub mod collections;\npub mod vec;\n'
 printf "$MODS" > "$W/src/lib.rs"
 bash "$REPO/docs/alloc/prep.sh" "$W/src" >/dev/null
