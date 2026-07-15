@@ -35302,3 +35302,33 @@ fn test_at_binding_let_emits_subpattern_destructure() {
     assert!(out.contains("end ="), "at-binding dropped the end binding:\n{out}");
     assert!(!out.contains("// TODO: complex pattern binding"), "{out}");
 }
+
+#[test]
+fn test_crate_owned_string_from_utf8_unchecked_not_remapped_to_runtime() {
+    // A crate that declares its own `String` (e.g. the folded string.rs port)
+    // and calls `String::from_utf8_unchecked` must route to the CRATE's inherent
+    // method, not the runtime `rusty::str_runtime::from_utf8_unchecked` helper
+    // (which returns a string_view). The post-recovery remap in emit_call was
+    // unconditional; it now consults bare_std_named_type_suppression_applies.
+    let out = transpile_str(
+        r#"
+        pub mod string {
+            pub struct String { v: usize }
+            impl String {
+                pub unsafe fn from_utf8_unchecked(bytes: usize) -> String { String { v: bytes } }
+                pub fn caller(&self) -> String {
+                    unsafe { String::from_utf8_unchecked(self.v) }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("String::from_utf8_unchecked(this->v)"),
+        "crate-owned String::from_utf8_unchecked call was not preserved:\n{out}"
+    );
+    assert!(
+        !out.contains("rusty::str_runtime::from_utf8_unchecked(this->v)"),
+        "crate-owned call was wrongly remapped to the runtime helper:\n{out}"
+    );
+}

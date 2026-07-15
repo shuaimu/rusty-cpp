@@ -16157,14 +16157,22 @@ impl CodeGen {
                 func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
             }
         }
+        // The bare `String::from_utf8_unchecked` remap must not fire inside a
+        // module that declares its own `String` (e.g. the folded string.rs port):
+        // there the call targets the CRATE's inherent method, not the runtime
+        // helper. `rusty::String::...` forms only appear once the type has already
+        // been rewritten to the runtime String, so they always remap.
+        let crate_owns_string = self.bare_std_named_type_suppression_applies("String");
         func = match func.as_str() {
             "std::string_view::from_utf8" | "::std::string_view::from_utf8" => {
                 "rusty::str_runtime::from_utf8".to_string()
             }
-            "String::from_utf8_unchecked"
-            | "::String::from_utf8_unchecked"
-            | "rusty::String::from_utf8_unchecked"
-            | "::rusty::String::from_utf8_unchecked" => {
+            "String::from_utf8_unchecked" | "::String::from_utf8_unchecked"
+                if !crate_owns_string =>
+            {
+                "rusty::str_runtime::from_utf8_unchecked".to_string()
+            }
+            "rusty::String::from_utf8_unchecked" | "::rusty::String::from_utf8_unchecked" => {
                 "rusty::str_runtime::from_utf8_unchecked".to_string()
             }
             "std::string_view::from_utf8_unchecked" | "::std::string_view::from_utf8_unchecked" => {
