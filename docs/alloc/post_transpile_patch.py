@@ -1744,6 +1744,19 @@ def _alloc_specific(cpp_out: Path):
             "auto ptr_shadow1 = &rusty::detail::deref_if_pointer_like(b_shadow1);",
             "auto ptr_shadow1 = &(*(*b_shadow1));",
         )
+        # (b54) string-fold: Cow's generic `fn as_ref(&self) -> &T { self }`
+        # missed the &self->&Deref::Target coercion the concrete String path
+        # gets, so it returned the whole Cow. Deref explicitly.
+        t = t.replace(
+            "const B& as_ref() const {\n            return (*this);\n        }",
+            "const B& as_ref() const {\n            return this->operator*();\n        }",
+        )
+        # (b55) Vec::into_raw_parts: the emitter auto-derefs the ManuallyDrop
+        # binding for as_mut_ptr/len but not capacity.
+        t = t.replace(
+            "rusty::len((*me)), me.capacity())",
+            "rusty::len((*me)), (*me).capacity())",
+        )
         # (b52) Layout accessor calls on free-fn params (box_new_uninit's
         # `layout` — free-fn param types aren't in infer_simple_expr_type, so
         # the emit-side size()/align() field lowering can't fire there). The

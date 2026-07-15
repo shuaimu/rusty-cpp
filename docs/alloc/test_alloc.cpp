@@ -3,6 +3,8 @@ import alloc;
 #include <utility>
 #include <tuple>
 #include <cstdio>
+#include <cstdint>
+#include <string_view>
 using VI = vec::Vec<int>;
 using DQ = collections::vec_deque::VecDeque<int>;
 int main() {
@@ -171,10 +173,50 @@ int main() {
       assert((*ub).assume_init_read() == 31); }
 #endif // ALLOC_WITH_BOXED
 
+#ifdef ALLOC_WITH_STRING
+    // ---- crate String (string.rs) ----
+    { auto s = string::String::new_();
+      assert(s.is_empty() && s.len() == 0);
+      s.push_str("hello");
+      assert(s.len() == 5 && !s.is_empty());
+      s.push(',');
+      s.push(' ');
+      s.push_str("world");
+      assert(s.len() == 12);
+      assert(s.as_str() == std::string_view("hello, world"));
+      // From<&str>
+      auto s2 = string::String::from("abc");
+      assert(s2.len() == 3 && s2.as_str() == std::string_view("abc"));
+      // From<char>
+      auto s3 = string::String::from('Z');
+      assert(s3.len() == 1 && s3.as_str() == std::string_view("Z"));
+      // with_capacity + push growth
+      auto s4 = string::String::with_capacity(static_cast<size_t>(4));
+      for (int i = 0; i < 10; ++i) s4.push('x');
+      assert(s4.len() == 10);
+      // clone is independent
+      auto s5 = s.clone();
+      s5.push('!');
+      assert(s.len() == 12 && s5.len() == 13);
+      // clear
+      s5.clear();
+      assert(s5.is_empty()); }
+    { // from_utf8 round-trip on valid bytes
+      auto v = vec::Vec<uint8_t>::new_();
+      v.push(static_cast<uint8_t>('h')); v.push(static_cast<uint8_t>('i'));
+      auto r = string::String::from_utf8(std::move(v));
+      assert(r.is_ok());
+      auto s = std::move(r).unwrap();
+      assert(s.as_str() == std::string_view("hi")); }
+#endif // ALLOC_WITH_STRING
+
+    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem+BTreeMap+BTreeSet"
 #ifdef ALLOC_WITH_BOXED
-    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem+BTreeMap+BTreeSet+Box)\n");
-#else
-    std::printf("alloc BROAD runtime OK (Vec+VecDeque+conv+BinaryHeap+LinkedList+Rc+Arc+from_elem+BTreeMap+BTreeSet)\n");
+                "+Box"
 #endif
+#ifdef ALLOC_WITH_STRING
+                "+String"
+#endif
+                ")\n");
     return 0;
 }

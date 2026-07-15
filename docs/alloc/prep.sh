@@ -262,6 +262,10 @@ for hdr, label in (
     ("impl<'a> From<&str> for Box<dyn Error + 'a> {", "From<&str> for Box<dyn Error>"),
     ("impl<'a, 'b> From<Cow<'b, str>> for Box<dyn Error + Send + Sync + 'a> {", "From<Cow> for Box<dyn Error+S+S>"),
     ("impl<'a, 'b> From<Cow<'b, str>> for Box<dyn Error + 'a> {", "From<Cow> for Box<dyn Error>"),
+    # String-fold: the StringError newtype (field _0: String by value) lands in
+    # the boxed:: namespace BEFORE String is complete → incomplete-type field.
+    ("impl<'a> From<String> for Box<dyn Error + Send + Sync + 'a> {", "From<String> for Box<dyn Error+S+S> (StringError)"),
+    ("impl<'a> From<String> for Box<dyn Error + 'a> {", "From<String> for Box<dyn Error>"),
     ("impl From<Cow<'_, str>> for Box<str> {", "From<Cow<str>> dup of From<&str>"),
     ("impl<T, const N: usize> TryFrom<Box<[T]>> for Box<[T; N]> {", "TryFrom<Box<[T]>>"),
     ("impl<T, const N: usize> TryFrom<Vec<T>> for Box<[T; N]> {", "TryFrom<Vec>"),
@@ -301,7 +305,8 @@ if [[ -f "$STRING_RS" ]]; then
 import sys, pathlib, re
 
 def drop_fn(s, name, label):
-    m = re.search(rf"\n(    )pub fn {name}[<(]", s)
+    # matches pub and PRIVATE fns (unsafe/const qualifiers allowed).
+    m = re.search(rf"\n(    )(?:pub(?:\([^)]*\))? )?(?:unsafe )?(?:const )?fn {name}[<(]", s)
     if not m:
         print(f"  (fn {label}: not found, skipped)")
         return s
@@ -361,6 +366,9 @@ s = s.replace("Ok(String { vec: Vec::try_with_capacity(capacity)? })",
               "Ok(String { vec: Vec::<u8>::try_with_capacity(capacity)? })")
 s = s.replace("let mut v = Vec::with_capacity(self.bytes.len());",
               "let mut v = Vec::<u8>::with_capacity(self.bytes.len());")
+# S0b: from_utf8's `Ok(..)` rest-pattern → the `..` reaches a None-bail path
+# that fails to emit the match; `Ok(_)` (Wild payload) lowers correctly.
+s = s.replace("Ok(..) => Ok(String { vec }),", "Ok(_) => Ok(String { vec }),")
 # S1: Pattern/Searcher machinery — the runtime has no Searcher model.
 for name in ("remove_matches", "replace_first", "replace_last"):
     s = drop_fn(s, name, name)
@@ -468,6 +476,56 @@ for hdr, label in (
 s = cut_range(s, "pub trait ToString {", "impl AsRef<str> for String {",
               "ToString/SpecToString tower")
 
+# S11: From<&str>/<&mut str> for String route through s.to_owned() (ToOwned
+# lowers to runtime rusty::String, no conversion to crate String); desugar to
+# the crate push_str path.
+s = s.replace("    fn from(s: &str) -> String {\n        s.to_owned()\n    }",
+              "    fn from(s: &str) -> String {\n        let mut buf = String::new();\n        buf.push_str(s);\n        buf\n    }")
+s = s.replace("    fn from(s: &mut str) -> String {\n        s.to_owned()\n    }",
+              "    fn from(s: &mut str) -> String {\n        let mut buf = String::new();\n        buf.push_str(s);\n        buf\n    }")
+# From<char> for String routed through the (stripped) ToString → desugar to push.
+s = s.replace("    fn from(c: char) -> Self {\n        c.to_string()\n    }",
+              "    fn from(c: char) -> Self {\n        let mut buf = String::new();\n        buf.push(c);\n        buf\n    }")
+# S12: dead/nightly String conversions + iterator surfaces (all reachable only
+# via strippable non-core paths — verified by the trace workflow).
+s = drop_impl(s, "impl From<Box<str>> for String {", "From<Box<str>> for String")
+for hdr, label in (
+    ("impl FromIterator<char> for String {", "FromIterator<char> for String"),
+    ("impl<'a> FromIterator<&'a char> for String {", "FromIterator<&char> for String"),
+    ("impl<'a> FromIterator<&'a str> for String {", "FromIterator<&str> for String"),
+    ("impl FromIterator<String> for String {", "FromIterator<String> for String"),
+    ("impl<'a> FromIterator<Cow<'a, str>> for String {", "FromIterator<Cow> for String"),
+    # Drain str-view surface (Chars::as_str placeholder returns Chars) + Drop
+    # (offset_from_unsigned on a raw ptr) — leaves struct Drain + String::drain.
+    ("impl fmt::Debug for Drain<'_> {", "Debug for Drain"),
+    ("impl<'a> Drain<'a> {", "Drain::as_str"),
+    ("impl<'a> AsRef<str> for Drain<'a> {", "AsRef<str> for Drain"),
+    ("impl<'a> AsRef<[u8]> for Drain<'a> {", "AsRef<[u8]> for Drain (calls as_str)"),
+    ("impl Drop for Drain<'_> {", "Drop for Drain"),
+    # From<String> for Box<str> → s.into_boxed_str() (stripped) → Box<String>
+    # vs Box<string_view> return; whole path is nightly Box<str>.
+    ("impl From<String> for Box<str> {", "From<String> for Box<str>"),
+    ("impl IntoChars {", "impl IntoChars (into_string collect)"),
+    ("impl fmt::Debug for IntoChars {", "Debug for IntoChars"),
+):
+    s = drop_impl(s, hdr, label)
+# S13: nightly/non-core String methods that pull unmappable machinery:
+#  into_utf8_lossy/into_string (utf8_chunks, from_utf8_unchecked→String),
+#  push_str_slice (Saturating += / mem::take on non-default-constructible),
+#  split_off (mis-resolves to btree Root alias), extend_from_within (at-binding
+#  Range destructure lost), into_chars (IntoIter<u8>::clone → to_vec_in).
+for name in ("into_utf8_lossy", "into_string", "push_str_slice", "split_off",
+             "extend_from_within", "into_chars"):
+    s = drop_fn(s, name, name)
+# IntoChars derives Clone (→ IntoIter<u8>::clone → to_vec_in on span, a Vec
+# from_iter_in_place path). Drop the derive line (attrs sit between it and the
+# struct, so target the line alone). Eliminates the IntoIter<u8>::clone ODR-use.
+s = s.replace("#[cfg_attr(not(no_global_oom_handling), derive(Clone))]\n#[must_use = \"iterators are lazy and do nothing unless consumed\"]\n#[unstable(feature = \"string_into_chars\", issue = \"133125\")]\npub struct IntoChars",
+              "#[must_use = \"iterators are lazy and do nothing unless consumed\"]\n#[unstable(feature = \"string_into_chars\", issue = \"133125\")]\npub struct IntoChars")
+# S14: impl_eq! PartialEq macro (String/Cow <-> str; the `for str` halves lower
+# to rusty_ext free fns comparing span<const char> vs string_view).
+s = cut_range(s, "macro_rules! impl_eq {", "impl const Default for String {",
+              "impl_eq PartialEq macro + invocations")
 p.write_text(s)
 print("  string.rs prep complete")
 PYS
