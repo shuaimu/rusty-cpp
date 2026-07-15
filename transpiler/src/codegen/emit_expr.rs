@@ -1878,161 +1878,194 @@ impl CodeGen {
         self.cf_stack.push(crate::codegen::CfFrame::Switch);
         self.writeln(&format!("switch ({}) {{", scrutinee));
 
-        // Track emitted case values across ALL arms to detect duplicates.
-        // When multiple arms have the same pattern (e.g., `false if guard =>` and `false =>`),
-        // we emit the first as case label and subsequent arms as else-if chains.
-        let mut emitted_cases: HashMap<String, (bool, &syn::Arm)> = HashMap::new();
+        // Group arms by their primary (first) case label, preserving the order in
+        // which each label first appears. Several arms can share one pattern when
+        // guards discriminate them (e.g. `State::Body if !p.is_empty() => {…}` then
+        // `State::Body => {…}` in std::path's Components::next). Each group emits as
+        // ONE case block holding an `if / else-if / else` chain with a single
+        // trailing `break;` — streaming the arms individually mis-owns the braces
+        // (a guarded arm closes its case with `break; }` before the fall-through
+        // arm can chain its `} else {`, producing a dangling else).
+        let arm_labels: Vec<Vec<String>> = arms
+            .iter()
+            .map(|arm| self.switch_case_labels_for_pat(&arm.pat, variant_ctx))
+            .collect();
 
-        for arm in arms {
-            // Determine the case label(s) for this arm's pattern
-            let case_labels: Vec<String> = match &arm.pat {
-                syn::Pat::Wild(_) => vec!["default".to_string()],
-                syn::Pat::Lit(lit) => vec![self.emit_lit(&lit.lit)],
-                syn::Pat::Path(pp) => {
-                    vec![self.emit_switch_pattern_path_value(&pp.path, variant_ctx)]
-                }
-                syn::Pat::Or(or_pat) => {
-                    // OR pattern: collect all case labels, deduplicating within the OR
-                    let mut labels: Vec<String> = Vec::new();
-                    let mut seen_in_or: HashSet<String> = HashSet::new();
-                    for case in &or_pat.cases {
-                        match case {
-                            syn::Pat::Lit(lit) => {
-                                let val = self.emit_lit(&lit.lit);
-                                if !seen_in_or.contains(&val) {
-                                    seen_in_or.insert(val.clone());
-                                    labels.push(val);
-                                }
-                            }
-                            syn::Pat::Wild(_) => {
-                                if !seen_in_or.contains("default") {
-                                    seen_in_or.insert("default".to_string());
-                                    labels.push("default".to_string());
-                                }
-                            }
-                            syn::Pat::Path(pp) => {
-                                let val =
-                                    self.emit_switch_pattern_path_value(&pp.path, variant_ctx);
-                                if !seen_in_or.contains(&val) {
-                                    seen_in_or.insert(val.clone());
-                                    labels.push(val);
-                                }
-                            }
-                            // Bare C-like-enum variant by name (glob-imported), e.g.
-                            // `YAML_UTF16LE_ENCODING | YAML_UTF16BE_ENCODING`.
-                            syn::Pat::Ident(pi) if pi.subpat.is_none() => {
-                                if let Some(val) =
-                                    self.bare_c_like_enum_const_case_label(&pi.ident.to_string())
-                                    && !seen_in_or.contains(&val)
-                                {
-                                    seen_in_or.insert(val.clone());
-                                    labels.push(val);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    labels
-                }
-                // A bare ident that names a unique C-like-enum constant is a CASE,
-                // not a binding catch-all (`default`).
-                syn::Pat::Ident(pi)
-                    if pi.subpat.is_none()
-                        && self
-                            .bare_c_like_enum_const_case_label(&pi.ident.to_string())
-                            .is_some() =>
-                {
-                    vec![self
-                        .bare_c_like_enum_const_case_label(&pi.ident.to_string())
-                        .unwrap()]
-                }
-                _ => vec!["default".to_string()],
-            };
-
-            // Check if any case label was already emitted by a previous arm
-            let first_label = case_labels.first().cloned().unwrap_or_default();
-            let is_duplicate = emitted_cases.contains_key(&first_label);
-
-            if is_duplicate {
-                // This arm has a duplicate pattern with a previous arm.
-                // For duplicate patterns, we need to emit an else clause.
-                // However, if the previous arm had a guard and this arm's body is empty,
-                // we can skip this arm because the fall-through is implicit.
-                let prev_had_guard = emitted_cases
-                    .get(&first_label)
-                    .map(|(had_guard, _)| *had_guard)
-                    .unwrap_or(false);
-
-                // Check if this arm's body is empty (just "{}")
-                let is_body_empty = match &*arm.body {
-                    syn::Expr::Block(block) => block.block.stmts.is_empty(),
-                    _ => false,
-                };
-
-                if prev_had_guard && is_body_empty {
-                    // Previous arm had a guard and this arm has empty body.
-                    // Skip this arm - fall-through behavior is correct.
-                } else if prev_had_guard {
-                    // Previous arm had a guard, emit as else clause
-                    self.writeln("} else {");
-                    self.indent += 1;
-                    self.emit_arm_body(&arm.body);
-                    self.indent -= 1;
-                    self.writeln("}");
-                } else {
-                    // Previous arm had no guard - this is a problem
-                    self.writeln("// TODO: duplicate pattern without guard ordering");
-                }
+        // groups: (case labels from the first arm, arm indices) in first-seen order.
+        let mut groups: Vec<(Vec<String>, Vec<usize>)> = Vec::new();
+        let mut label_to_group: HashMap<String, usize> = HashMap::new();
+        for (i, labels) in arm_labels.iter().enumerate() {
+            let primary = labels.first().cloned().unwrap_or_default();
+            if let Some(&gi) = label_to_group.get(&primary) {
+                groups[gi].1.push(i);
             } else {
-                // Emit case label(s) for this arm
-                for label in &case_labels {
-                    emitted_cases.insert(label.clone(), (arm.guard.is_some(), arm));
-                    if label == "default" {
-                        self.writeln("default:");
-                    } else {
-                        self.writeln(&format!("case {}:", label));
-                    }
+                let gi = groups.len();
+                for l in labels {
+                    label_to_group.entry(l.clone()).or_insert(gi);
                 }
+                groups.push((labels.clone(), vec![i]));
+            }
+        }
 
-                self.writeln("{");
-                self.indent += 1;
-                let mut pattern_binding_stmts = Vec::new();
-                if self.collect_pattern_binding_stmts(
-                    &arm.pat,
-                    scrutinee,
-                    &mut pattern_binding_stmts,
-                ) {
-                    for stmt in &pattern_binding_stmts {
-                        self.writeln(stmt);
-                    }
+        for (labels, arm_idxs) in &groups {
+            for label in labels {
+                if label == "default" {
+                    self.writeln("default:");
+                } else {
+                    self.writeln(&format!("case {}:", label));
                 }
+            }
+            self.writeln("{");
+            self.indent += 1;
 
-                // Emit guard if present
+            // Pattern bindings come from the first arm's pattern (duplicates share it).
+            let first_arm = &arms[arm_idxs[0]];
+            let mut pattern_binding_stmts = Vec::new();
+            if self.collect_pattern_binding_stmts(
+                &first_arm.pat,
+                scrutinee,
+                &mut pattern_binding_stmts,
+            ) {
+                for stmt in &pattern_binding_stmts {
+                    self.writeln(stmt);
+                }
+            }
+
+            // Emit the arms of this group as an if / else-if / else chain. A guarded
+            // arm opens (or extends) the chain and leaves its `{` OPEN so the next
+            // arm can attach `} else …`. An unguarded arm terminates the chain.
+            let mut chain_open = false;
+            for &ai in arm_idxs {
+                let arm = &arms[ai];
                 if let Some((_, guard)) = &arm.guard {
                     let guard_str = self.emit_expr_to_string(guard);
-                    self.writeln(&format!("if ({}) {{", guard_str));
+                    if chain_open {
+                        self.writeln(&format!("}} else if ({}) {{", guard_str));
+                    } else {
+                        self.writeln(&format!("if ({}) {{", guard_str));
+                    }
                     self.indent += 1;
                     self.emit_arm_body(&arm.body);
                     self.indent -= 1;
-                    self.writeln("}");
+                    chain_open = true;
                 } else {
-                    self.emit_arm_body(&arm.body);
+                    let is_body_empty = matches!(
+                        &*arm.body,
+                        syn::Expr::Block(block) if block.block.stmts.is_empty()
+                    );
+                    if !chain_open {
+                        // Sole/leading unguarded arm: body runs unconditionally.
+                        self.emit_arm_body(&arm.body);
+                    } else if is_body_empty {
+                        // Fall-through arm after guard(s): nothing to run; the open
+                        // `if` is closed below.
+                    } else {
+                        self.writeln("} else {");
+                        self.indent += 1;
+                        self.emit_arm_body(&arm.body);
+                        self.indent -= 1;
+                    }
+                    if chain_open {
+                        self.writeln("}");
+                        chain_open = false;
+                    }
+                    // An unguarded arm is exhaustive for this label; any later
+                    // same-pattern arm is unreachable in Rust — stop here.
+                    break;
                 }
-
-                // Emit the switch-case terminator `break;` UNLESS the (unguarded)
-                // arm body already diverges — i.e. ends in a Rust break/continue/
-                // return, which lowers to a C++ break/goto/return that makes the
-                // terminator unreachable dead code. (A guarded arm can still fall
-                // through when the guard is false, so it always needs the break.)
-                if arm.guard.is_some() || !self.match_arm_body_diverges(&arm.body) {
-                    self.writeln("break;");
-                }
-                self.indent -= 1;
+            }
+            if chain_open {
+                // All arms in the group were guarded: close the final `if`.
                 self.writeln("}");
             }
+
+            // Emit the switch-case terminator `break;` UNLESS the group is a single
+            // unguarded arm whose body already diverges (ends in a Rust break/
+            // continue/return), which makes the terminator unreachable dead code.
+            // Any guard leaves a fall-through path, so the break is still needed.
+            let single_unguarded_diverging = arm_idxs.len() == 1
+                && first_arm.guard.is_none()
+                && self.match_arm_body_diverges(&first_arm.body);
+            if !single_unguarded_diverging {
+                self.writeln("break;");
+            }
+            self.indent -= 1;
+            self.writeln("}");
         }
         self.writeln("}");
         self.cf_stack.pop();
+    }
+
+    /// Compute the C++ `switch` case label(s) for a match-arm pattern. A `_`/binding
+    /// catch-all is `default`; literals, unit-variant paths, and bare C-like-enum
+    /// constants become `case <value>`; an OR pattern yields one label per alternative.
+    fn switch_case_labels_for_pat(
+        &mut self,
+        pat: &syn::Pat,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> Vec<String> {
+        match pat {
+            syn::Pat::Wild(_) => vec!["default".to_string()],
+            syn::Pat::Lit(lit) => vec![self.emit_lit(&lit.lit)],
+            syn::Pat::Path(pp) => {
+                vec![self.emit_switch_pattern_path_value(&pp.path, variant_ctx)]
+            }
+            syn::Pat::Or(or_pat) => {
+                // OR pattern: collect all case labels, deduplicating within the OR
+                let mut labels: Vec<String> = Vec::new();
+                let mut seen_in_or: HashSet<String> = HashSet::new();
+                for case in &or_pat.cases {
+                    match case {
+                        syn::Pat::Lit(lit) => {
+                            let val = self.emit_lit(&lit.lit);
+                            if !seen_in_or.contains(&val) {
+                                seen_in_or.insert(val.clone());
+                                labels.push(val);
+                            }
+                        }
+                        syn::Pat::Wild(_) => {
+                            if !seen_in_or.contains("default") {
+                                seen_in_or.insert("default".to_string());
+                                labels.push("default".to_string());
+                            }
+                        }
+                        syn::Pat::Path(pp) => {
+                            let val = self.emit_switch_pattern_path_value(&pp.path, variant_ctx);
+                            if !seen_in_or.contains(&val) {
+                                seen_in_or.insert(val.clone());
+                                labels.push(val);
+                            }
+                        }
+                        // Bare C-like-enum variant by name (glob-imported), e.g.
+                        // `YAML_UTF16LE_ENCODING | YAML_UTF16BE_ENCODING`.
+                        syn::Pat::Ident(pi) if pi.subpat.is_none() => {
+                            if let Some(val) =
+                                self.bare_c_like_enum_const_case_label(&pi.ident.to_string())
+                                && !seen_in_or.contains(&val)
+                            {
+                                seen_in_or.insert(val.clone());
+                                labels.push(val);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                labels
+            }
+            // A bare ident that names a unique C-like-enum constant is a CASE,
+            // not a binding catch-all (`default`).
+            syn::Pat::Ident(pi)
+                if pi.subpat.is_none()
+                    && self
+                        .bare_c_like_enum_const_case_label(&pi.ident.to_string())
+                        .is_some() =>
+            {
+                vec![self
+                    .bare_c_like_enum_const_case_label(&pi.ident.to_string())
+                    .unwrap()]
+            }
+            _ => vec!["default".to_string()],
+        }
     }
 
     /// Whether a match-arm body unconditionally diverges: it is, or ends in, a

@@ -35332,3 +35332,66 @@ fn test_crate_owned_string_from_utf8_unchecked_not_remapped_to_runtime() {
         "crate-owned call was wrongly remapped to the runtime helper:\n{out}"
     );
 }
+
+#[test]
+fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
+    // A C-like-enum `match` lowered to a C++ `switch` where the same variant
+    // appears twice — first guarded, then an unguarded fall-through with a
+    // NON-EMPTY body (std::path's Components::next: `State::Body if … => {…}`
+    // then `State::Body => {…}`). The old streaming emitter closed the guarded
+    // arm with `break; }` before the fall-through arm could chain its `} else {`,
+    // producing a dangling `} else {` after a closed case block (unbalanced,
+    // wouldn't compile). Arms sharing a case label now emit as one if/else chain.
+    let out = transpile_str(
+        r#"
+        pub enum State { A, B, Done }
+        pub struct S { pub front: State, pub n: u32 }
+        impl S {
+            pub fn step(&mut self) -> u32 {
+                match self.front {
+                    State::A if self.n > 0 => { return 1; }
+                    State::A => { self.front = State::B; }
+                    State::B if self.n > 5 => { return 2; }
+                    State::B => { self.front = State::Done; }
+                    State::Done => { return 0; }
+                }
+                99
+            }
+        }
+        "#,
+    );
+    // The guarded/fall-through pairs collapse to `if (...) { ... } else { ... }`.
+    assert!(out.contains("} else {"), "expected an else-chain:\n{out}");
+    assert!(
+        !out.contains("// TODO: duplicate pattern without guard ordering"),
+        "duplicate-pattern arm fell into the TODO stub:\n{out}"
+    );
+    // The malformed shape was `break;` then a case-closing `}` then a dangling
+    // `} else` — i.e. `break;}}else` once whitespace is stripped. It must be gone,
+    // and the emitted switch must be brace-balanced.
+    let dense: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        !dense.contains("break;}}else"),
+        "dangling `}} else {{` after a closed case block:\n{out}"
+    );
+    // Extract the switch body and confirm braces balance.
+    let sw = out.find("switch (").expect("no switch emitted");
+    let mut depth = 0i32;
+    let mut started = false;
+    for ch in out[sw..].chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                started = true;
+            }
+            '}' => {
+                depth -= 1;
+                if started && depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "switch braces do not balance:\n{out}");
+}
