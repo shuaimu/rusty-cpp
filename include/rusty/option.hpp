@@ -943,6 +943,27 @@ public:
           && std::is_convertible_v<decltype(*std::declval<const U&>()), const T&>
     Option(const U& ref_like) : ptr(&static_cast<const T&>(*ref_like)) {}
 
+    // Rust parity for the reference specialization: and_then / ok_or / and.
+    template<typename F>
+    auto and_then(F&& f) const {
+        using ResultType = decltype(f(*ptr));
+        if (ptr) {
+            return f(*ptr);
+        }
+        return ResultType(None);
+    }
+    template<typename E>
+    Result<const T&, E> ok_or(E err) const {
+        if (ptr) {
+            return Result<const T&, E>::Ok(*ptr);
+        }
+        return Result<const T&, E>::Err(std::move(err));
+    }
+    template<typename U>
+    Option<U> and_(Option<U> optb) const {
+        return ptr ? optb : Option<U>(None);
+    }
+
     // Convert Option<U&> -> Option<const T&> when references are compatible.
     template<typename U>
     requires std::is_convertible_v<U&, T&>

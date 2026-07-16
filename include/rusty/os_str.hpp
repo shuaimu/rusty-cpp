@@ -43,13 +43,15 @@ struct OsBytes {
     }
     OsBytes slice_to(std::size_t end) const { return OsBytes{ptr_, end}; }
 
-    rusty::Option<std::uint8_t> last() const {
+    // &[u8]::last()/first() yield Option<&u8> — a reference Option, so callers
+    // can `.copied()`.
+    rusty::Option<const std::uint8_t&> last() const {
         if (len_ == 0) return rusty::None;
-        return rusty::Option<std::uint8_t>(ptr_[len_ - 1]);
+        return rusty::Option<const std::uint8_t&>(ptr_[len_ - 1]);
     }
-    rusty::Option<std::uint8_t> first() const {
+    rusty::Option<const std::uint8_t&> first() const {
         if (len_ == 0) return rusty::None;
-        return rusty::Option<std::uint8_t>(ptr_[0]);
+        return rusty::Option<const std::uint8_t&>(ptr_[0]);
     }
 
     template <typename Pred>

@@ -34,6 +34,14 @@ def patch(text: str) -> str:
         "    Path(const rusty::ffi::OsStr& _o) : inner(_o) {}\n",
     )
 
+    # Components is a DoubleEndedIterator (has next/next_back). The transpiler
+    # emits `x.rev()` as a member call; provide it via the runtime free function.
+    text = text.replace(
+        "export struct Components {\n    using Item = Component;\n",
+        "export struct Components {\n    using Item = Component;\n"
+        "    auto rev() { return rusty::rev(std::move(*this)); }\n",
+    )
+
     # Component is a data enum whose derived PartialEq compares the underlying
     # std::variant — which needs each alternative to have operator==. The
     # transpiler emits variant member structs (Component_RootDir/…/Normal)
