@@ -106,6 +106,11 @@ drop("pub fn try_reserve_exact(&mut self", "try_reserve_exact")
 # make-absolute pulls env::current_dir + io.
 drop("pub fn absolute<P: AsRef<Path>>", "absolute")
 
+# validate_extension is called only by the stripped extension setters; its
+# `for byte in extension.as_encoded_bytes()` loop (for_in over OsBytes) triggers
+# a clang mangler ICE during module codegen. Dead — strip it.
+drop("fn validate_extension(extension: &OsStr)", "validate_extension")
+
 # Extension SETTERS use the raw-pointer `.addr()` truncate-to-offset trick
 # (`slice[len..].as_ptr().addr() - self.as_ptr().addr()`), which the value port
 # can't express (pointers into copied buffers are unrelated). Secondary to the

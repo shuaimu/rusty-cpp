@@ -178,6 +178,28 @@ def patch(text: str) -> str:
         "        rusty::ffi::OsStr::from_encoded_bytes_unchecked(comp)}});\n",
     )
 
+    # Path::from_u8_slice returns `&Path` into an OWNED OsStr temporary (the
+    # value port can't borrow a &[u8] as &Path like Rust). Keep the bytes alive
+    # in a thread_local Path (same idiom as rusty::path::as_ref) so the returned
+    # reference is valid until the next call — callers consume it immediately.
+    text = _replace_fn_body(
+        text,
+        "const Path& Path::from_u8_slice(std::span<const uint8_t> s) ",
+        "\n"
+        "    thread_local Path _from_u8_tmp;\n"
+        "    _from_u8_tmp = Path{rusty::ffi::OsStr::from_encoded_bytes_unchecked(s)};\n"
+        "    return _from_u8_tmp;\n",
+    )
+
+    # Path::is_absolute delegates to sys::path::is_absolute(self), which the
+    # transpiler mis-lowered to `(*this).is_absolute()` — infinite recursion. On
+    # Unix is_absolute == has_root (a leading '/').
+    text = _replace_fn_body(
+        text,
+        "bool Path::is_absolute() const ",
+        "\n    return this->has_root();\n",
+    )
+
     # Component is a data enum whose derived PartialEq compares the underlying
     # std::variant — which needs each alternative to have operator==. The
     # transpiler emits variant member structs (Component_RootDir/…/Normal)
@@ -196,6 +218,23 @@ def patch(text: str) -> str:
     # reachable through a prefix (always None on Unix), so the branch never runs.
     text = text.replace("p.has_implicit_root()", "false")
     text = text.replace("p.is_verbatim()", "false")
+
+    # Free-vs-member name collision: `Components::is_sep_byte(&self, b)` calls the
+    # FREE `sys::path::is_sep_byte(b)` (no `self.` in Rust), but emitted unqualified
+    # it binds to the member itself -> infinite recursion at run time. Qualify the
+    # free calls. (General transpiler gap: a method calling a same-named free fn.)
+    text = text.replace(
+        "    if (this->prefix_verbatim()) {\n"
+        "        return is_verbatim_sep(std::move(b));\n"
+        "    } else {\n"
+        "        return is_sep_byte(std::move(b));\n"
+        "    }",
+        "    if (this->prefix_verbatim()) {\n"
+        "        return ::rusty::sys::path::is_verbatim_sep(std::move(b));\n"
+        "    } else {\n"
+        "        return ::rusty::sys::path::is_sep_byte(std::move(b));\n"
+        "    }",
+    )
     return text
 
 
