@@ -28,6 +28,23 @@ def patch(text: str) -> str:
         "export inline const std::string_view MAIN_SEPARATOR_STR = sys::path::MAIN_SEP_STR;",
     )
 
+    # trim_trailing_sep: `while let Some((&last, init)) = bytes.split_last()`
+    # lost its bindings (last/init) and its condition became unreachable(). Patch
+    # to a correct OsBytes trailing-separator trim over `bytes`.
+    text = text.replace(
+        "while (rusty::intrinsics::unreachable() && is_sep_byte("
+        "std::move(rusty::detail::deref_if_pointer_like(last)))) {\n"
+        "            bytes = std::move(init);\n"
+        "        }",
+        "while (bytes.len() > 0 && is_sep_byte(bytes[bytes.len() - 1])) {\n"
+        "            bytes = bytes.slice_to(bytes.len() - 1);\n"
+        "        }",
+    )
+
+    # `Iterator::eq(a, b)` (element-wise iterator equality) has no such type in
+    # scope; use the runtime free function.
+    text = text.replace("Iterator::eq(", "rusty::iter_eq(")
+
     # Rust-style `{name:?}` interpolation survives into a std::println format
     # string (consteval-invalid in C++). Drop the interpolation placeholders.
     text = re.sub(r'\{[A-Za-z_][A-Za-z0-9_]*:\?\}', "", text)

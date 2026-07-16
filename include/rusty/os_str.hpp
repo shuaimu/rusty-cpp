@@ -21,6 +21,20 @@
 #include "option.hpp"
 
 namespace rusty {
+
+// Element-wise equality of two iterators (both expose next() -> Option<Item>,
+// Item comparable). std::path's Components::operator== uses Iterator::eq.
+template <typename A, typename B>
+inline bool iter_eq(A a, B b) {
+    for (;;) {
+        auto x = a.next();
+        auto y = b.next();
+        if (x.is_none() && y.is_none()) return true;
+        if (x.is_none() || y.is_none()) return false;
+        if (!(x.unwrap() == y.unwrap())) return false;
+    }
+}
+
 namespace ffi {
 
 // The &[u8] view returned by OsStr/OsString::as_encoded_bytes(). Provides the
