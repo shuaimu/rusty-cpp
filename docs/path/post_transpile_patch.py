@@ -22,6 +22,18 @@ def patch(text: str) -> str:
     )
     text = re.sub(r"^using ::ffi::os_str;\n", "", text, flags=re.M)
 
+    # AsRef<Path>: path.rs's generic `P: AsRef<Path>` methods lower `x.as_ref()`
+    # to a member call yielding an OsStr& (see os_str.hpp; Path/PathBuf already
+    # have their own as_ref from the kept AsRef impls). Make Path implicitly
+    # constructible from OsStr so `_push(const Path&)` accepts that OsStr&. Path
+    # is never aggregate-initialized here.
+    text = text.replace(
+        "export struct Path {\n    using Owned = PathBuf;\n    rusty::ffi::OsStr inner;\n",
+        "export struct Path {\n    using Owned = PathBuf;\n    rusty::ffi::OsStr inner;\n"
+        "    Path() = default;\n"
+        "    Path(const rusty::ffi::OsStr& _o) : inner(_o) {}\n",
+    )
+
     # Component is a data enum whose derived PartialEq compares the underlying
     # std::variant — which needs each alternative to have operator==. The
     # transpiler emits variant member structs (Component_RootDir/…/Normal)

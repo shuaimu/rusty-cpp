@@ -120,6 +120,10 @@ struct OsBytes {
     std::string_view as_str_view() const {
         return std::string_view(reinterpret_cast<const char*>(ptr_), len_);
     }
+    // Rust `&[u8]` also flows as std::span at some seams.
+    operator std::span<const std::uint8_t>() const {
+        return std::span<const std::uint8_t>(ptr_, len_);
+    }
 
     bool operator==(const OsBytes& o) const {
         return len_ == o.len_ && std::equal(ptr_, ptr_ + len_, o.ptr_);
@@ -172,6 +176,12 @@ struct OsStr {
     std::string_view display() const { return as_str_view(); }
 
     OsString to_os_string() const;
+
+    // AsRef<OsStr>/AsRef<Path>: Path is repr(transparent) over OsStr, so a
+    // reference to the bytes serves both. Callers that want a Path reinterpret
+    // this OsStr& (Path is implicitly constructible from OsStr — see the port's
+    // post_transpile_patch).
+    const OsStr& as_ref() const { return *this; }
 
     // Clone helpers (Box<OsStr> / spec-clone internals).
     void clone_into(OsString& target) const;
@@ -241,6 +251,7 @@ struct OsString {
 
     OsString clone() const { return OsString(bytes_); }
     void clone_from(const OsString& other) { bytes_ = other.bytes_; }
+    const OsStr& as_ref() const { return as_os_str(); }
     std::string_view as_str_view() const {
         return std::string_view(reinterpret_cast<const char*>(bytes_.data()), bytes_.size());
     }
