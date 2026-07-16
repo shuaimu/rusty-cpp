@@ -35334,6 +35334,35 @@ fn test_crate_owned_string_from_utf8_unchecked_not_remapped_to_runtime() {
 }
 
 #[test]
+fn test_user_deref_type_routes_target_method_through_deref() {
+    // A type implementing `Deref<Target=U>` (e.g. PathBuf: Deref<Target=Path>)
+    // calling a method that lives only on U must route through the deref
+    // (`*receiver`), not emit a plain member call the wrapper can't resolve.
+    let out = transpile_str(
+        r#"
+        pub struct Inner { pub v: usize }
+        impl Inner {
+            pub fn describe(&self) -> usize { self.v }
+        }
+        pub struct Wrapper { pub inner: Inner }
+        impl std::ops::Deref for Wrapper {
+            type Target = Inner;
+            fn deref(&self) -> &Inner { &self.inner }
+        }
+        pub fn use_it(w: Wrapper) -> usize {
+            w.describe()
+        }
+        "#,
+    );
+    // `w.describe()` — describe is only on Inner, reached via Wrapper's Deref —
+    // routes through the deref helper rather than `w.describe()` directly.
+    assert!(
+        out.contains("deref_if_pointer_like") && out.contains(".describe("),
+        "user-Deref method call not routed through deref:\n{out}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a

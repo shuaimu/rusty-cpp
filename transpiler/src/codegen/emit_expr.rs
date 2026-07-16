@@ -5226,6 +5226,65 @@ impl CodeGen {
         self.emit_expr_to_string_with_expected(expr, fallback_expected)
     }
 
+    /// User-`Deref` coercion for method calls. When `receiver.method(args)` has a
+    /// receiver whose inferred type `T` implements `Deref<Target = U>` (recorded
+    /// in `user_deref_targets`), `T` does NOT declare `method`, but `U` does,
+    /// route the call through the deref (`*receiver`) so `U`'s inherent method
+    /// resolves — e.g. `PathBuf` (which derefs to `Path`) calling `.components()`.
+    ///
+    /// This only fires for calls that would otherwise fail to resolve on `T`
+    /// (member syntax on `T` sees only `T`'s own methods), so it cannot change
+    /// the meaning of a call that already compiles: if `method` is on `T`, the
+    /// `Some(true)` guard below bails and the normal member emission runs.
+    fn try_emit_user_deref_target_method_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<String> {
+        let method = mc.method.to_string();
+        let receiver_ty = self.infer_simple_expr_type(&mc.receiver)?;
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return None;
+        };
+        let type_name = tp.path.segments.last()?.ident.to_string();
+
+        // The receiver's type must implement a user `Deref`.
+        let target = self
+            .user_deref_targets
+            .get(&type_name)
+            .or_else(|| self.user_deref_targets.get(&self.scoped_type_key(&type_name)))?
+            .clone();
+
+        // The method must NOT be an inherent method of the receiver's own type
+        // (else the plain member call is correct and this must not preempt it).
+        if self.lookup_owner_method_has_receiver(&type_name, &method) == Some(true) {
+            return None;
+        }
+
+        // ...but it MUST be declared on the Deref target, so routing there resolves.
+        let target = self.peel_reference_paren_group_type(&target);
+        let syn::Type::Path(target_tp) = target else {
+            return None;
+        };
+        let target_name = target_tp.path.segments.last()?.ident.to_string();
+        if self.lookup_owner_method_has_receiver(&target_name, &method) != Some(true) {
+            return None;
+        }
+
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let args: Vec<String> = mc
+            .args
+            .iter()
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        Some(format!(
+            "rusty::detail::deref_if_pointer_like({}).{}({})",
+            receiver,
+            Self::escape_cpp_method_name(&method),
+            args.join(", ")
+        ))
+    }
+
     pub(super) fn try_emit_static_typed_self_method_call(
         &self,
         receiver_expr: &syn::Expr,
@@ -5804,6 +5863,9 @@ impl CodeGen {
         }
         if let Some(into_owned_call) = self.try_emit_into_owned_method_call(mc) {
             return into_owned_call;
+        }
+        if let Some(deref_call) = self.try_emit_user_deref_target_method_call(mc) {
+            return deref_call;
         }
         if let Some(visit_call) = self.try_emit_visit_method_fallback_call(mc, expected_ty) {
             return visit_call;
