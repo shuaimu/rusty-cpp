@@ -86,13 +86,27 @@ def patch(text: str) -> str:
         "export struct Path {\n    using Owned = PathBuf;\n    rusty::ffi::OsStr inner;\n"
         "    Path() = default;\n"
         "    Path(const rusty::ffi::OsStr& _o) : inner(_o) {}\n"
-        "    const rusty::ffi::OsStr& as_ref() const { return inner; }\n"
-        "    operator const rusty::ffi::OsStr&() const { return inner; }\n",
+        "    const rusty::ffi::OsStr& as_ref() const { return inner; }\n",
+    )
+
+    # _push does `self.inner.push(path)` where path is &Path; OsString::push wants
+    # an OsStr, so route through Path::as_ref (an implicit Path->OsStr would make
+    # `Path == OsStr` ambiguous).
+    text = text.replace(
+        "this->inner.push(std::move(path))", "this->inner.push(path.as_ref())"
     )
 
     # `cfg!(target_os = "cygwin")` lowers to a comment, leaving an empty ternary
     # condition; it is false on Linux.
     text = text.replace('/* cfg!(target_os = "cygwin") */', "false")
+
+    # `const { … }` blocks are elided to `(void)0`. On Unix:
+    #  - `if const { !HAS_PREFIXES }`  ->  if (true)
+    #  - Components front init `const { if HAS_PREFIXES {Prefix} else {StartDir} }`
+    #    ->  State_StartDir()
+    cb = "/* const-block elided (Rust 2024 compile-time fence) */ (void)0"
+    text = text.replace(f"if ({cb})", "if (true)")
+    text = text.replace(f"{cb}, State_Body()", "State_StartDir(), State_Body()")
 
     # split_file_at_dot returns (&OsStr, Option<&OsStr>) in Rust, but the value
     # port's from_encoded_bytes_unchecked yields owned OsStr temporaries — a tuple
