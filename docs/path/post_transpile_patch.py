@@ -11,6 +11,19 @@ import sys
 
 
 def patch(text: str) -> str:
+    # Some `matches!(...)` invocations on the dead Prefix machinery lower to a
+    # comment (unresolved), leaving `return /* … */;` in a bool function — void.
+    # These are unreachable on Unix (no prefix is ever built); make them `false`.
+    text = re.sub(r"return /\* matches!\([^;]*\*/;", "return false;", text)
+
+    # `_ if const { !HAS_PREFIXES } => unreachable!()` lowers to
+    # `HAS_PREFIXES && rusty::intrinsics::unreachable()` — but unreachable()
+    # returns void, invalid in `&&`. The branch is dead on Unix; make it `false`.
+    text = text.replace(
+        "rusty::detail::deref_if_pointer_like(HAS_PREFIXES) && rusty::intrinsics::unreachable()",
+        "false",
+    )
+
     # Drop emitted `using ::X::Y;` re-exports for std namespaces the Unix port
     # doesn't materialize: their trait impls are prep-stripped and the bare
     # names (Cow/Rc/Arc/OsStr/…) resolve through the transpiler's type mapping.
