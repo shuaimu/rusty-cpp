@@ -305,12 +305,9 @@ inline constexpr std::string_view MAIN_SEP_STR = "/";
 inline bool is_sep_byte(std::uint8_t b) { return b == static_cast<std::uint8_t>('/'); }
 inline bool is_verbatim_sep(std::uint8_t b) { return b == static_cast<std::uint8_t>('/'); }
 
-// parse_prefix always None on Unix — the Prefix machinery is prep-stripped, so
-// this returns a plain optional<none> the caller compares against.
-template <typename Prefix>
-inline rusty::Option<Prefix> parse_prefix(const rusty::ffi::OsStr&) {
-    return rusty::None;
-}
+// parse_prefix always None on Unix. Returns None_t (converts to the caller's
+// Option<Prefix>) so callers needn't spell the Prefix type.
+inline rusty::None_t parse_prefix(const rusty::ffi::OsStr&) { return rusty::None; }
 
 }  // namespace path
 }  // namespace sys

@@ -86,7 +86,20 @@ def patch(text: str) -> str:
         "export struct Path {\n    using Owned = PathBuf;\n    rusty::ffi::OsStr inner;\n"
         "    Path() = default;\n"
         "    Path(const rusty::ffi::OsStr& _o) : inner(_o) {}\n"
-        "    const rusty::ffi::OsStr& as_ref() const { return inner; }\n",
+        "    const rusty::ffi::OsStr& as_ref() const { return inner; }\n"
+        "    operator const rusty::ffi::OsStr&() const { return inner; }\n",
+    )
+
+    # `cfg!(target_os = "cygwin")` lowers to a comment, leaving an empty ternary
+    # condition; it is false on Linux.
+    text = text.replace('/* cfg!(target_os = "cygwin") */', "false")
+
+    # split_file_at_dot returns (&OsStr, Option<&OsStr>) in Rust, but the value
+    # port's from_encoded_bytes_unchecked yields owned OsStr temporaries — a tuple
+    # of references would dangle. Make the tuple own its OsStr values.
+    text = text.replace(
+        "std::tuple<const rusty::ffi::OsStr&, rusty::Option<const rusty::ffi::OsStr&>>",
+        "std::tuple<rusty::ffi::OsStr, rusty::Option<rusty::ffi::OsStr>>",
     )
 
     # Components is a DoubleEndedIterator (has next/next_back). The transpiler
