@@ -235,6 +235,24 @@ for a in ("pub fn display(&self)", "pub struct Display<'a>",
           "impl fmt::Debug for Display<'_>", "impl fmt::Display for Display<'_>"):
     drop(a, a)
 
+# with_added_extension calls the stripped add_extension. Debug impls each emit a
+# namespace-scope DebugHelper struct that collides (redefinition); Debug is not
+# needed for RUNTIME PASS.
+for a in ("pub fn with_added_extension<S: AsRef<OsStr>>",
+          "impl fmt::Debug for Components<'_>", "impl fmt::Debug for Iter<'_>",
+          "impl fmt::Debug for PathBuf", "impl fmt::Debug for Path"):
+    drop(a, a)
+
+# Dead verbatim-normalization branch in PathBuf::_push (prefix_verbatim() is
+# always false on Unix): it builds a Vec<Component> that emits as std::vector
+# without push/truncate. Neutralize the whole `else if` branch.
+_i = s.find("} else if comps.prefix_verbatim() && !path.inner.is_empty() {")
+if _i >= 0:
+    _b = s.find("{", _i)
+    s = s[:_i] + "} else if false {}" + s[matching_close(s, _b):]
+else:
+    sys.stderr.write("  WARN: verbatim _push branch not found\n")
+
 open(p, "w").write(s)
 print("  path.rs prep complete")
 PYS
