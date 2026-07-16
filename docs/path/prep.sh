@@ -106,6 +106,18 @@ drop("pub fn try_reserve_exact(&mut self", "try_reserve_exact")
 # make-absolute pulls env::current_dir + io.
 drop("pub fn absolute<P: AsRef<Path>>", "absolute")
 
+# Extension SETTERS use the raw-pointer `.addr()` truncate-to-offset trick
+# (`slice[len..].as_ptr().addr() - self.as_ptr().addr()`), which the value port
+# can't express (pointers into copied buffers are unrelated). Secondary to the
+# core path API — strip for the first RUNTIME PASS. (extension() getter stays.)
+for a in ("pub fn set_extension<S: AsRef<OsStr>>", "fn _set_extension(&mut self",
+          "pub fn add_extension<S: AsRef<OsStr>>", "fn _add_extension(&mut self",
+          "pub fn with_extension<S: AsRef<OsStr>>", "fn _with_extension(&self"):
+    drop(a, a)
+# normalize_lexically builds a Vec<Component> (emitted as std::vector, no
+# push/truncate) and is a lexical-normalization extra — strip for now.
+drop("pub fn normalize_lexically(&self)", "normalize_lexically")
+
 # Foreign / multi-target AsRef impls: their <Trait>Adapter<U> specializations
 # collide (keyed on impl type, not target) and inherit an undeclared AsRef base.
 # The path-manipulation core needs only AsRef for Path/PathBuf.
@@ -182,19 +194,8 @@ rep("""                    Component::Prefix(prefix) => {
                     }
 """, "", "_push Prefix arm")
 
-# components()/normalize strip_prefix arms.
-rep("""            Some(Component::Prefix(prefix)) => {
-                lexical.push(prefix.as_os_str());
-                iter.next();
-                if let Some(p @ Component::RootDir) = iter.peek() {
-                    lexical.push(p);
-                    iter.next();
-                }
-                lexical.as_os_str().len()
-            }
-""", "", "normalize Prefix arm")
-rep("                Component::Prefix(_) => return Err(NormalizeError),\n", "",
-    "normalize Prefix err arm")
+# (normalize_lexically's Component::Prefix arms are removed with the whole fn,
+# which is stripped above.)
 
 # PrefixComponent comparison impls depend on the removed Prefix ==/ord/hash.
 for a in ("impl<'a> PartialEq for PrefixComponent<'a>",
