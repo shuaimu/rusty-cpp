@@ -45,6 +45,14 @@ def patch(text: str) -> str:
     # scope; use the runtime free function.
     text = text.replace("Iterator::eq(", "rusty::iter_eq(")
 
+    # A component-boundary scan lambda (`let (extra, comp) = if position() … else`)
+    # has its return type mis-inferred as tuple<int, &u8>; both branches actually
+    # produce (int, &[u8]) — a byte SPAN, not a byte reference.
+    text = text.replace(
+        "std::tuple<int32_t, const uint8_t&>",
+        "std::tuple<int32_t, std::span<const std::uint8_t>>",
+    )
+
     # Rust-style `{name:?}` interpolation survives into a std::println format
     # string (consteval-invalid in C++). Drop the interpolation placeholders.
     text = re.sub(r'\{[A-Za-z_][A-Za-z0-9_]*:\?\}', "", text)
