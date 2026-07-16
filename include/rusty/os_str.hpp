@@ -12,6 +12,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -145,6 +146,11 @@ struct OsStr {
     }
     static OsStr from_encoded_bytes_unchecked(std::vector<std::uint8_t> b) {
         return OsStr(std::move(b));
+    }
+    // Rust `&[u8]` byte slices lower to std::span, so byte sub-slices (from
+    // rsplitn/split) arrive as spans, not OsBytes.
+    static OsStr from_encoded_bytes_unchecked(std::span<const std::uint8_t> b) {
+        return OsStr(std::vector<std::uint8_t>(b.begin(), b.end()));
     }
     static OsStr from_encoded_bytes_unchecked(std::string_view s) {
         return OsStr(std::vector<std::uint8_t>(s.begin(), s.end()));
