@@ -35363,6 +35363,42 @@ fn test_user_deref_type_routes_target_method_through_deref() {
 }
 
 #[test]
+fn test_method_calling_same_named_free_fn_qualifies_to_avoid_self_recursion() {
+    // A method whose body calls a FREE function of the same name (Rust resolves
+    // the bare call to the free fn — inherent methods need a receiver) must be
+    // emitted QUALIFIED. Emitted unqualified, C++ member-scope lookup binds the
+    // call to the method itself → silent infinite recursion at run time (it still
+    // compiles). This is std::path's Components::is_sep_byte calling the free
+    // sys::path::is_sep_byte. Uses a `use` import so it exercises the
+    // scope-import-binding qualification path (the case that reaches bare emission).
+    let out = transpile_str(
+        r#"
+        mod sys {
+            pub mod path {
+                pub fn is_sep_byte(b: u8) -> bool { b == b'/' }
+            }
+        }
+        use sys::path::is_sep_byte;
+        pub struct Comp { pub verbatim: bool }
+        impl Comp {
+            fn is_sep_byte(&self, b: u8) -> bool { is_sep_byte(b) }
+        }
+        "#,
+    );
+    // The inner call must be QUALIFIED to the free fn's path…
+    assert!(
+        out.contains("sys::path::is_sep_byte(std::move(b))"),
+        "member is_sep_byte body should call the QUALIFIED free fn:\n{out}"
+    );
+    // …and must NOT be the bare `return is_sep_byte(...)` that recurses into the
+    // member (the qualified form has `::sys::path::` between `return` and the name).
+    assert!(
+        !out.contains("return is_sep_byte(std::move(b))"),
+        "inner call still emits the bare (recursive) is_sep_byte:\n{out}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a

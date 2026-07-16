@@ -479,13 +479,22 @@ impl CodeGen {
                                 .ends_with(&format!("::{}", qualified_parent))));
                 if directly_inside {
                     let local_name = escape_cpp_keyword(&path.segments[0].ident.to_string());
+                    let raw_name = path.segments[0].ident.to_string();
                     let collides_with_member = self
                         .emitted_non_method_member_names
                         .last()
-                        .is_some_and(|members| members.contains(&local_name));
+                        .is_some_and(|members| members.contains(&local_name))
+                        || self.current_struct.as_deref().is_some_and(|owner| {
+                            self.lookup_owner_method_has_receiver(owner, &raw_name)
+                                .is_some()
+                        });
                     if collides_with_member {
                         // Inside methods, unqualified function calls can be shadowed by
-                        // same-name fields (e.g. `validate_struct_keys` bool member).
+                        // a same-name FIELD (e.g. `validate_struct_keys` bool member) or
+                        // a same-name METHOD of the enclosing Self type. In Rust a bare
+                        // call (no receiver) is always the free function; emitted
+                        // unqualified, C++ member-scope lookup would bind it to the field
+                        // or method instead (for a method: silent infinite recursion).
                         // Keep the free-function call explicit in that case.
                         return Some(format!("::{}", escaped));
                     }
@@ -495,6 +504,49 @@ impl CodeGen {
             return Some(format!("::{}", escaped));
         }
         None
+    }
+
+    /// A single-segment BARE call `name(...)` inside a method whose enclosing
+    /// Self type also has a method called `name` is, in Rust, necessarily a call
+    /// to a FREE function — inherent/associated methods require a receiver
+    /// (`self.name()`) or a type qualifier (`Type::name()`), so a bare `name()`
+    /// can only be the free function brought in via a `use` import. Emitted
+    /// unqualified, however, C++ member-scope lookup binds it to the method
+    /// (member scope hides the namespace-level `using`-declaration) → the method
+    /// calls itself → silent infinite recursion at run time (it still compiles).
+    ///
+    /// When such a collision exists AND the free function is reachable through a
+    /// `use` import, return its `::`-qualified path so the call binds to the free
+    /// function. Returns None when there is no collision or the name is not a
+    /// resolvable use-import (module-local free functions are handled by the
+    /// field/method collision guard in `resolve_known_free_function_expr_path`).
+    pub(super) fn qualify_use_imported_fn_shadowed_by_self_method(
+        &self,
+        path: &syn::Path,
+    ) -> Option<String> {
+        if path.segments.len() != 1 {
+            return None;
+        }
+        let name = path.segments[0].ident.to_string();
+        // The enclosing Self type has a method of this exact name?
+        let owner = self.current_struct.as_deref()?;
+        self.lookup_owner_method_has_receiver(owner, &name)?;
+        // A bare call is the free fn: qualify to its real (use-imported) path,
+        // forcing global scope so member lookup cannot intercept it.
+        let mut full = self.resolve_scope_import_binding_path(&name)?;
+        // `crate::` is a Rust path root, not a C++ namespace — drop it (the rest
+        // of the codegen strips it too, e.g. in the emitted `using`-declaration).
+        for root in ["crate::", "::crate::"] {
+            if let Some(rest) = full.strip_prefix(root) {
+                full = rest.to_string();
+                break;
+            }
+        }
+        Some(if full.starts_with("::") {
+            full
+        } else {
+            format!("::{full}")
+        })
     }
 
     pub(super) fn resolve_scoped_namespace_function_expr_path(

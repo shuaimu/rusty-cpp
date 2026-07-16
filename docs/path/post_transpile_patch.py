@@ -219,22 +219,10 @@ def patch(text: str) -> str:
     text = text.replace("p.has_implicit_root()", "false")
     text = text.replace("p.is_verbatim()", "false")
 
-    # Free-vs-member name collision: `Components::is_sep_byte(&self, b)` calls the
-    # FREE `sys::path::is_sep_byte(b)` (no `self.` in Rust), but emitted unqualified
-    # it binds to the member itself -> infinite recursion at run time. Qualify the
-    # free calls. (General transpiler gap: a method calling a same-named free fn.)
-    text = text.replace(
-        "    if (this->prefix_verbatim()) {\n"
-        "        return is_verbatim_sep(std::move(b));\n"
-        "    } else {\n"
-        "        return is_sep_byte(std::move(b));\n"
-        "    }",
-        "    if (this->prefix_verbatim()) {\n"
-        "        return ::rusty::sys::path::is_verbatim_sep(std::move(b));\n"
-        "    } else {\n"
-        "        return ::rusty::sys::path::is_sep_byte(std::move(b));\n"
-        "    }",
-    )
+    # NOTE: the Components::is_sep_byte free-vs-member name collision (the member
+    # called the FREE sys::path::is_sep_byte unqualified -> bound to itself ->
+    # infinite recursion) is now fixed IN THE TRANSPILER (it qualifies a bare call
+    # that collides with an enclosing-Self method), so no patch is needed here.
     return text
 
 

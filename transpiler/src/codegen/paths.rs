@@ -3296,6 +3296,18 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 return rewritten;
             }
         }
+        // A bare single-segment call to a use-imported free function whose name
+        // collides with a method of the enclosing Self type must be emitted with
+        // its qualified path — otherwise C++ member-scope lookup binds it to the
+        // method and the method silently calls itself forever (the free fn resolves
+        // as a candidate only when module-local; use-imports don't, so guard here
+        // before the bare-name fallback). See the helper for the full rationale.
+        if let Some(mut qualified) = self.qualify_use_imported_fn_shadowed_by_self_method(path) {
+            if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                qualified.push_str(&template_args);
+            }
+            return qualified;
+        }
         // Keep this rewrite for unqualified names only. Qualified paths like
         // `std::process::Command::new` must flow through normal path mapping
         // so `std::*` namespace remaps are applied.
