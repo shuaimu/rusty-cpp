@@ -20,6 +20,18 @@ def patch(text: str) -> str:
     # char* has no member as_ref); wrap in an OsStr, which does.
     text = text.replace('this->push("")', 'this->push(rusty::ffi::OsStr::new_(""))')
 
+    # MAIN_SEPARATOR_STR: rusty::to_string_view(MAIN_SEP_STR) isn't constexpr;
+    # MAIN_SEP_STR is already a string_view "/", so bind it directly, non-constexpr.
+    text = text.replace(
+        "export constexpr std::string_view MAIN_SEPARATOR_STR = "
+        "rusty::to_string_view(sys::path::MAIN_SEP_STR);",
+        "export inline const std::string_view MAIN_SEPARATOR_STR = sys::path::MAIN_SEP_STR;",
+    )
+
+    # Rust-style `{name:?}` interpolation survives into a std::println format
+    # string (consteval-invalid in C++). Drop the interpolation placeholders.
+    text = re.sub(r'\{[A-Za-z_][A-Za-z0-9_]*:\?\}', "", text)
+
     # `_ if const { !HAS_PREFIXES } => unreachable!()` lowers to
     # `HAS_PREFIXES && rusty::intrinsics::unreachable()` — but unreachable()
     # returns void, invalid in `&&`. The branch is dead on Unix; make it `false`.

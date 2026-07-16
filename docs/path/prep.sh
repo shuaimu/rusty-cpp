@@ -256,7 +256,8 @@ for a in ("pub fn into_boxed_path(self)",
           "impl From<&Path> for Box<Path>", "impl From<&mut Path> for Box<Path>",
           "impl From<Cow<'_, Path>> for Box<Path>",
           "impl Clone for Box<Path>", "pub fn into_path_buf(self: Box<Self>)",
-          "impl FromStr for PathBuf"):
+          "impl FromStr for PathBuf",
+          "impl<'a> From<Cow<'a, Path>> for PathBuf"):
     drop(a, a)
 
 # Dead verbatim-normalization branch in PathBuf::_push (prefix_verbatim() is

@@ -146,6 +146,8 @@ struct OsStr {
 
     OsStr() = default;
     explicit OsStr(std::vector<std::uint8_t> b) : bytes_(std::move(b)) {}
+    // `&str` / string literals convert to &OsStr (AsRef<OsStr> for str).
+    OsStr(std::string_view s) : bytes_(s.begin(), s.end()) {}
 
     static OsStr from_encoded_bytes_unchecked(OsBytes b) {
         return OsStr(std::vector<std::uint8_t>(b.ptr_, b.ptr_ + b.len_));
