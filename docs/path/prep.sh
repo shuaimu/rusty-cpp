@@ -257,7 +257,20 @@ for a in ("pub fn into_boxed_path(self)",
           "impl From<Cow<'_, Path>> for Box<Path>",
           "impl Clone for Box<Path>", "pub fn into_path_buf(self: Box<Self>)",
           "impl FromStr for PathBuf",
-          "impl<'a> From<Cow<'a, Path>> for PathBuf"):
+          "impl<'a> From<Cow<'a, Path>> for PathBuf",
+          # These hit two transpiler-emission bugs (a match-in-lambda where one arm
+          # returns Some(x) and another None fails C++ return-type deduction; and
+          # &OsStr value-vs-reference in the value port). Strip for the first
+          # compile milestone — TODO: restore once the transpiler emits an explicit
+          # lambda return type for None/Some match arms.
+          "pub fn file_name(&self)", "pub fn file_stem(&self)",
+          "pub fn extension(&self)", "pub fn file_prefix(&self)",
+          "pub fn to_string_lossy(&self)",
+          # set_file_name/with_file_name call the stripped file_name;
+          # with_trailing_sep (nightly) does self.join("") (str.as_ref, no member).
+          "pub fn set_file_name<S: AsRef<OsStr>>", "fn _set_file_name(&mut self",
+          "pub fn with_file_name<S: AsRef<OsStr>>", "fn _with_file_name(&self",
+          "pub fn with_trailing_sep(&self)"):
     drop(a, a)
 
 # Dead verbatim-normalization branch in PathBuf::_push (prefix_verbatim() is

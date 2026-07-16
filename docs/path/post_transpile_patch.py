@@ -10,6 +10,26 @@ import re
 import sys
 
 
+def _replace_fn_body(text: str, sig: str, new_body: str) -> str:
+    """Replace the `{ … }` body of the function whose definition starts with
+    `sig` (everything up to but excluding the opening brace)."""
+    i = text.find(sig)
+    if i < 0:
+        sys.stderr.write(f"  WARN: fn sig not found: {sig[:40]}...\n")
+        return text
+    b = text.index("{", i + len(sig))
+    depth, j = 0, b
+    while j < len(text):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return text[: b + 1] + new_body + text[j:]
+
+
 def patch(text: str) -> str:
     # Some `matches!(...)` invocations on the dead Prefix machinery lower to a
     # comment (unresolved), leaving `return /* … */;` in a bool function — void.
@@ -115,6 +135,13 @@ def patch(text: str) -> str:
         "std::tuple<const rusty::ffi::OsStr&, rusty::Option<const rusty::ffi::OsStr&>>",
         "std::tuple<rusty::ffi::OsStr, rusty::Option<rusty::ffi::OsStr>>",
     )
+    # rsplit_file_at_dot likewise returns (Option<&OsStr>, Option<&OsStr>) from
+    # owned temporaries — own both Options.
+    text = text.replace(
+        "std::tuple<rusty::Option<const rusty::ffi::OsStr&>, "
+        "rusty::Option<const rusty::ffi::OsStr&>>",
+        "std::tuple<rusty::Option<rusty::ffi::OsStr>, rusty::Option<rusty::ffi::OsStr>>",
+    )
 
     # Components is a DoubleEndedIterator (has next/next_back). The transpiler
     # emits `x.rev()` as a member call; provide it via the runtime free function.
@@ -122,6 +149,33 @@ def patch(text: str) -> str:
         "export struct Components {\n    using Item = Component;\n",
         "export struct Components {\n    using Item = Component;\n"
         "    auto rev() { return rusty::rev(std::move(*this)); }\n",
+    )
+
+    # Component_Normal holds &OsStr in Rust, but the value port builds it from
+    # owned OsStr temporaries (from_encoded_bytes_unchecked) — a reference member
+    # would dangle. Store the OsStr by value.
+    text = text.replace(
+        "export struct Component_Normal {\n    const rusty::ffi::OsStr& _0;\n};",
+        "export struct Component_Normal {\n    rusty::ffi::OsStr _0;\n};",
+    )
+
+    # parse_single_component matches a &[u8] against b"."/b".."/b"" — the
+    # transpiler mis-lowers a byte-slice match to std::visit on the span (all arms
+    # unreachable, and wrong at runtime). Replace with a correct byte match.
+    text = _replace_fn_body(
+        text,
+        "rusty::Option<Component> Components::parse_single_component"
+        "(std::span<const uint8_t> comp) const ",
+        "\n"
+        "    auto _eq = [](std::span<const uint8_t> a, const char* b, std::size_t n) {\n"
+        "        return a.size() == n && std::equal(a.begin(), a.end(),\n"
+        "            reinterpret_cast<const std::uint8_t*>(b));\n"
+        "    };\n"
+        "    if (_eq(comp, \".\", 1)) { return rusty::None; }\n"
+        "    if (_eq(comp, \"..\", 2)) { return rusty::Option<Component>(Component{Component_ParentDir{}}); }\n"
+        "    if (comp.empty()) { return rusty::None; }\n"
+        "    return rusty::Option<Component>(Component{Component_Normal{\n"
+        "        rusty::ffi::OsStr::from_encoded_bytes_unchecked(comp)}});\n",
     )
 
     # Component is a data enum whose derived PartialEq compares the underlying

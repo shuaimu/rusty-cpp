@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 #include "option.hpp"
@@ -93,7 +94,9 @@ struct OsBytes {
     // rsplitn(n, pred): yields at most n sub-slices, splitting from the end.
     template <typename Pred>
     struct RSplitN {
-        OsBytes rem;
+        // ptr+len rather than an OsBytes member (OsBytes is incomplete here).
+        const std::uint8_t* ptr;
+        std::size_t len;
         std::size_t n;
         Pred pred;
         bool done = false;
@@ -102,23 +105,23 @@ struct OsBytes {
             if (done) return rusty::None;
             if (n <= 1) {
                 done = true;
-                return rusty::Option<OsBytes>(rem);
+                return rusty::Option<OsBytes>(OsBytes{ptr, len});
             }
-            for (std::size_t i = rem.len_; i-- > 0;) {
-                if (pred(rem.ptr_[i])) {
-                    OsBytes piece{rem.ptr_ + i + 1, rem.len_ - (i + 1)};
-                    rem = OsBytes{rem.ptr_, i};
+            for (std::size_t i = len; i-- > 0;) {
+                if (pred(ptr[i])) {
+                    OsBytes piece{ptr + i + 1, len - (i + 1)};
+                    len = i;
                     --n;
                     return rusty::Option<OsBytes>(piece);
                 }
             }
             done = true;
-            return rusty::Option<OsBytes>(rem);
+            return rusty::Option<OsBytes>(OsBytes{ptr, len});
         }
     };
     template <typename Pred>
     RSplitN<std::decay_t<Pred>> rsplitn(std::size_t n, Pred&& pred) const {
-        return RSplitN<std::decay_t<Pred>>{*this, n, std::forward<Pred>(pred)};
+        return RSplitN<std::decay_t<Pred>>{ptr_, len_, n, std::forward<Pred>(pred)};
     }
 
     // iter(): yields each byte (Rust yields &u8; we yield the value).
@@ -205,7 +208,11 @@ struct OsStr {
     void clone_into(OsString& target) const;
     template <typename Dst>
     void clone_to_uninit(Dst dst) const {
-        *dst = OsStr(bytes_);
+        // Rust CloneToUninit copies self's bytes into the raw destination.
+        if constexpr (std::is_pointer_v<Dst>) {
+            std::copy(bytes_.begin(), bytes_.end(),
+                      reinterpret_cast<std::uint8_t*>(dst));
+        }
     }
     const std::uint8_t* into_raw() const { return bytes_.data(); }
 
