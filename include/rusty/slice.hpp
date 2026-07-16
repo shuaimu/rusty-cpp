@@ -117,6 +117,23 @@ public:
         return rusty::None;
     }
 
+    // rposition: index (from the front) of the LAST element matching pred.
+    // Consumes the iterator with a forward scan keeping the last match.
+    template<typename Pred>
+    rusty::Option<size_t> rposition(Pred&& pred) {
+        rusty::Option<size_t> found = rusty::None;
+        size_t idx = 0;
+        while (cur_ != end_) {
+            pointer current = cur_;
+            ++cur_;
+            if (pred(*current)) {
+                found = rusty::Option<size_t>(idx);
+            }
+            ++idx;
+        }
+        return found;
+    }
+
     class ClonedIter {
     public:
         using value_type = std::remove_const_t<T>;

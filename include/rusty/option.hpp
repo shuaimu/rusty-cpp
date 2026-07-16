@@ -236,6 +236,10 @@ public:
     bool is_none() const { return !has_value; }
     bool is_ok() const { return has_value; }
     bool is_err() const { return !has_value; }
+    template<typename Pred>
+    bool is_some_and(Pred&& pred) const {
+        return has_value && std::forward<Pred>(pred)(value);
+    }
 
     // Clone the Option (explicit copy) - Rust style
     // Requires T to be copyable

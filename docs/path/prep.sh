@@ -243,6 +243,20 @@ for a in ("pub fn with_added_extension<S: AsRef<OsStr>>",
           "impl fmt::Debug for PathBuf", "impl fmt::Debug for Path"):
     drop(a, a)
 
+# Box/Rc/Arc conversions + FromIterator/Extend use raw-pointer casts / trait
+# machinery not needed for the RUNTIME-PASS core (join/parent/file_name/…).
+for a in ("pub fn into_boxed_path(self)",
+          "impl<P: AsRef<Path>> FromIterator<P> for PathBuf",
+          "impl<P: AsRef<Path>> Extend<P> for PathBuf",
+          "impl From<Box<Path>> for PathBuf", "impl From<PathBuf> for Box<Path>",
+          "impl From<PathBuf> for Arc<Path>", "impl From<&Path> for Arc<Path>",
+          "impl From<&mut Path> for Arc<Path>",
+          "impl From<PathBuf> for Rc<Path>", "impl From<&Path> for Rc<Path>",
+          "impl From<&mut Path> for Rc<Path>",
+          "impl From<&Path> for Box<Path>", "impl From<&mut Path> for Box<Path>",
+          "impl From<Cow<'_, Path>> for Box<Path>"):
+    drop(a, a)
+
 # Dead verbatim-normalization branch in PathBuf::_push (prefix_verbatim() is
 # always false on Unix): it builds a Vec<Component> that emits as std::vector
 # without push/truncate. Neutralize the whole `else if` branch.
