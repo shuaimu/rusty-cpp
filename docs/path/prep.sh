@@ -116,6 +116,93 @@ for a in ("impl AsRef<Path> for Cow<'_, OsStr>", "impl AsRef<Path> for OsString"
           "impl AsRef<OsStr> for Iter<'_>", "impl AsRef<Path> for Iter<'_>"):
     drop(a, a)
 
+# --- Prefix cascade strip (Unix-dead) --------------------------------------
+# On Unix parse_prefix is always None, so the Component::Prefix variant is never
+# constructed and State::Prefix never entered. Keeping the variant forces the
+# emitted Component `operator==` to compare PrefixComponent (which itself
+# compares Prefix), and the Prefix data-enum `==`/`<` need per-variant operators
+# that don't exist. Drop the derives that emit those operators, remove the
+# Component::Prefix variant + its construction/match sites, and drop
+# PrefixComponent's comparison impls (they depend on the removed Prefix ==/ord).
+def rep(old, new, label):
+    global s
+    if old not in s:
+        sys.stderr.write(f"  WARN: replace anchor not found: {label}\n")
+        return
+    s = s.replace(old, new)
+
+# Prefix / State derives → drop PartialEq/Eq/PartialOrd/Ord/Hash emission.
+rep("#[derive(Copy, Clone, Debug, Hash, PartialOrd, Ord, PartialEq, Eq)]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\npub enum Prefix<'a> {",
+    "#[derive(Copy, Clone, Debug)]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\npub enum Prefix<'a> {",
+    "Prefix derive")
+
+# Remove the Component::Prefix variant.
+rep("    #[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "    Prefix(#[stable(feature = \"rust1\", since = \"1.0.0\")] PrefixComponent<'a>),\n\n",
+    "", "Component::Prefix variant")
+
+# Component::as_os_str arm.
+rep("            Component::Prefix(p) => p.as_os_str(),\n", "", "as_os_str Prefix arm")
+
+# Components::next State::Prefix arms.
+rep("""                State::Prefix if self.prefix_len() == 0 => {
+                    self.front = State::StartDir;
+                }
+                State::Prefix => {
+                    self.front = State::StartDir;
+                    debug_assert!(self.prefix_len() <= self.path.len());
+                    let raw = &self.path[..self.prefix_len()];
+                    self.path = &self.path[self.prefix_len()..];
+                    return Some(Component::Prefix(PrefixComponent {
+                        raw: unsafe { OsStr::from_encoded_bytes_unchecked(raw) },
+                        parsed: self.prefix.unwrap(),
+                    }));
+                }
+""", "", "next State::Prefix arms")
+
+# Components::next_back State::Prefix arms.
+rep("""                State::Prefix if self.prefix_len() > 0 => {
+                    self.back = State::Done;
+                    return Some(Component::Prefix(PrefixComponent {
+                        raw: unsafe { OsStr::from_encoded_bytes_unchecked(self.path) },
+                        parsed: self.prefix.unwrap(),
+                    }));
+                }
+                State::Prefix => {
+                    self.back = State::Done;
+                    return None;
+                }
+""", "", "next_back State::Prefix arms")
+
+# PathBuf::_push need_sep Component::Prefix arm.
+rep("""                    Component::Prefix(prefix) => {
+                        !prefix.parsed.is_drive() && prefix.parsed.len() > 0
+                    }
+""", "", "_push Prefix arm")
+
+# components()/normalize strip_prefix arms.
+rep("""            Some(Component::Prefix(prefix)) => {
+                lexical.push(prefix.as_os_str());
+                iter.next();
+                if let Some(p @ Component::RootDir) = iter.peek() {
+                    lexical.push(p);
+                    iter.next();
+                }
+                lexical.as_os_str().len()
+            }
+""", "", "normalize Prefix arm")
+rep("                Component::Prefix(_) => return Err(NormalizeError),\n", "",
+    "normalize Prefix err arm")
+
+# PrefixComponent comparison impls depend on the removed Prefix ==/ord/hash.
+for a in ("impl<'a> PartialEq for PrefixComponent<'a>",
+          "impl<'a> PartialOrd for PrefixComponent<'a>",
+          "impl Ord for PrefixComponent<'_>",
+          "impl Hash for PrefixComponent<'_>"):
+    drop(a, a)
+
 open(p, "w").write(s)
 print("  path.rs prep complete")
 PYS
