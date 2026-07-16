@@ -22,6 +22,19 @@ def patch(text: str) -> str:
     )
     text = re.sub(r"^using ::ffi::os_str;\n", "", text, flags=re.M)
 
+    # Component is a data enum whose derived PartialEq compares the underlying
+    # std::variant — which needs each alternative to have operator==. The
+    # transpiler emits variant member structs (Component_RootDir/…/Normal)
+    # WITHOUT one, so inject a defaulted == (empty variants compare equal;
+    # Component_Normal's reference member compares its OsStr referent).
+    text = re.sub(
+        r"export struct (Component_[A-Za-z]+) \{([^}]*)\};",
+        lambda m: "export struct {0} {{{1} bool operator==(const {0}&) const = default; }};".format(
+            m.group(1), m.group(2)
+        ),
+        text,
+    )
+
     # The dead `self.prefix.map(|p| p.<method>())` branches lose their closure
     # param `p` in emission, leaving it undeclared. These Prefix methods are only
     # reachable through a prefix (always None on Unix), so the branch never runs.

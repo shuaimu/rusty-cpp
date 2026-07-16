@@ -223,7 +223,16 @@ for a in ("impl FusedIterator for Iter<'_>",
           "impl PartialOrd for Path",
           "impl Ord for Path",
           "impl Error for StripPrefixError",
-          "impl Error for NormalizeError"):
+          "impl Error for NormalizeError",
+          # compare_components (byte ordering → cmp::Ordering) is now called only
+          # by Components' PartialOrd (Path/PathBuf Ord/PartialOrd stripped above).
+          "impl<'a> PartialOrd for Components<'a>",
+          "fn compare_components(mut left"):
+    drop(a, a)
+# Path::display + the Display wrapper depend on os_str::Display (no Unix runtime).
+# display() is presentation-only; strip for the first RUNTIME PASS.
+for a in ("pub fn display(&self)", "pub struct Display<'a>",
+          "impl fmt::Debug for Display<'_>", "impl fmt::Display for Display<'_>"):
     drop(a, a)
 
 open(p, "w").write(s)
