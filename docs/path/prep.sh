@@ -203,6 +203,28 @@ for a in ("impl<'a> PartialEq for PrefixComponent<'a>",
           "impl Hash for PrefixComponent<'_>"):
     drop(a, a)
 
+# --- Auxiliary trait impls not needed for RUNTIME-PASS of path manipulation.
+# These pull unresolved std namespaces (::hash::, ::borrow::Borrow,
+# ::iter::FusedIterator, ::error::Error) and the Ord/PartialOrd impls return
+# cmp::Ordering. Keep PartialEq (bool `==`, no Ordering, used by tests).
+for a in ("impl FusedIterator for Iter<'_>",
+          "impl FusedIterator for Components<'_>",
+          "impl FusedIterator for Ancestors<'_>",
+          "impl Eq for Components<'_>",
+          "impl Ord for Components<'_>",
+          "impl Borrow<Path> for PathBuf",
+          "impl Hash for PathBuf",
+          "impl Eq for PathBuf",
+          "impl PartialOrd for PathBuf",
+          "impl Ord for PathBuf",
+          "impl Hash for Path",
+          "impl Eq for Path",
+          "impl PartialOrd for Path",
+          "impl Ord for Path",
+          "impl Error for StripPrefixError",
+          "impl Error for NormalizeError"):
+    drop(a, a)
+
 open(p, "w").write(s)
 print("  path.rs prep complete")
 PYS

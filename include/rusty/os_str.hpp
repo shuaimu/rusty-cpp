@@ -150,7 +150,7 @@ struct OsStr {
         return OsStr(std::vector<std::uint8_t>(s.begin(), s.end()));
     }
 
-    static const OsStr& new_from(std::string_view s);  // for OsStr::new("literal")
+    static const OsStr& new_(std::string_view s);  // for OsStr::new("literal")
 
     OsBytes as_encoded_bytes() const { return OsBytes{bytes_.data(), bytes_.size()}; }
     std::size_t len() const { return bytes_.size(); }
@@ -163,8 +163,17 @@ struct OsStr {
         return rusty::Option<std::string_view>(as_str_view());
     }
     std::string to_string_lossy() const { return std::string(as_str_view()); }
+    std::string_view display() const { return as_str_view(); }
 
     OsString to_os_string() const;
+
+    // Clone helpers (Box<OsStr> / spec-clone internals).
+    void clone_into(OsString& target) const;
+    template <typename Dst>
+    void clone_to_uninit(Dst dst) const {
+        *dst = OsStr(bytes_);
+    }
+    const std::uint8_t* into_raw() const { return bytes_.data(); }
 
     bool operator==(const OsStr& o) const { return bytes_ == o.bytes_; }
 };
@@ -225,6 +234,7 @@ struct OsString {
     OsStr into_boxed_os_str() { return OsStr(std::move(bytes_)); }
 
     OsString clone() const { return OsString(bytes_); }
+    void clone_from(const OsString& other) { bytes_ = other.bytes_; }
     std::string_view as_str_view() const {
         return std::string_view(reinterpret_cast<const char*>(bytes_.data()), bytes_.size());
     }
@@ -234,9 +244,10 @@ struct OsString {
 };
 
 inline OsString OsStr::to_os_string() const { return OsString(bytes_); }
+inline void OsStr::clone_into(OsString& target) const { target.bytes_ = bytes_; }
 
 // OsStr::new("literal") — returns a stable reference to a byte buffer.
-inline const OsStr& OsStr::new_from(std::string_view s) {
+inline const OsStr& OsStr::new_(std::string_view s) {
     thread_local OsStr tmp;
     tmp = OsStr(std::vector<std::uint8_t>(s.begin(), s.end()));
     return tmp;

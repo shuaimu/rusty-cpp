@@ -6,10 +6,22 @@ must still compile: the Windows Prefix machinery. On Unix `parse_prefix` always
 returns None, so `Components.prefix` is permanently None and every branch guarded
 by it is unreachable — we only need those branches to type-check.
 """
+import re
 import sys
 
 
 def patch(text: str) -> str:
+    # Drop emitted `using ::X::Y;` re-exports for std namespaces the Unix port
+    # doesn't materialize: their trait impls are prep-stripped and the bare
+    # names (Cow/Rc/Arc/OsStr/…) resolve through the transpiler's type mapping.
+    text = re.sub(
+        r"^using ::(borrow|error|hash|iter|rc|str|sync_mod|collections|ops)::[^;]*;\n",
+        "",
+        text,
+        flags=re.M,
+    )
+    text = re.sub(r"^using ::ffi::os_str;\n", "", text, flags=re.M)
+
     # The dead `self.prefix.map(|p| p.<method>())` branches lose their closure
     # param `p` in emission, leaving it undeclared. These Prefix methods are only
     # reachable through a prefix (always None on Unix), so the branch never runs.
