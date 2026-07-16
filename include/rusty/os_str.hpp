@@ -218,6 +218,10 @@ struct OsString {
         // OsStr and OsString share layout (a byte vector); expose in place.
         return *reinterpret_cast<const OsStr*>(this);
     }
+    // Implicit OsString -> OsStr& (both are a byte vector) so an OsString binds
+    // where a `&OsStr` / `&mut OsStr` is wanted (Path::from_inner_mut etc.).
+    operator const OsStr&() const { return *reinterpret_cast<const OsStr*>(this); }
+    operator OsStr&() { return *reinterpret_cast<OsStr*>(this); }
     std::size_t len() const { return bytes_.size(); }
     bool is_empty() const { return bytes_.empty(); }
     std::size_t capacity() const { return bytes_.capacity(); }
