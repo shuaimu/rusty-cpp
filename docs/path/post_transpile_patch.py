@@ -16,6 +16,10 @@ def patch(text: str) -> str:
     # These are unreachable on Unix (no prefix is ever built); make them `false`.
     text = re.sub(r"return /\* matches!\([^;]*\*/;", "return false;", text)
 
+    # `x.as_ref()` on a bare string literal (`push("")`) can't resolve (const
+    # char* has no member as_ref); wrap in an OsStr, which does.
+    text = text.replace('this->push("")', 'this->push(rusty::ffi::OsStr::new_(""))')
+
     # `_ if const { !HAS_PREFIXES } => unreachable!()` lowers to
     # `HAS_PREFIXES && rusty::intrinsics::unreachable()` — but unreachable()
     # returns void, invalid in `&&`. The branch is dead on Unix; make it `false`.
@@ -44,7 +48,8 @@ def patch(text: str) -> str:
         "export struct Path {\n    using Owned = PathBuf;\n    rusty::ffi::OsStr inner;\n",
         "export struct Path {\n    using Owned = PathBuf;\n    rusty::ffi::OsStr inner;\n"
         "    Path() = default;\n"
-        "    Path(const rusty::ffi::OsStr& _o) : inner(_o) {}\n",
+        "    Path(const rusty::ffi::OsStr& _o) : inner(_o) {}\n"
+        "    const rusty::ffi::OsStr& as_ref() const { return inner; }\n",
     )
 
     # Components is a DoubleEndedIterator (has next/next_back). The transpiler
