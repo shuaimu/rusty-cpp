@@ -438,6 +438,152 @@ inline Option<std::size_t> checked_next_power_of_two_usize(std::size_t value) {
     return checked_next_power_of_two<std::size_t>(value);
 }
 
+// Integer square root (floor) via integer Newton's method — no FP rounding.
+template<typename U>
+requires(std::is_integral_v<U> && std::is_unsigned_v<U>)
+constexpr U isqrt(U v) {
+    if (v < 2) return v;
+    U x0 = static_cast<U>(U(1) << ((std::bit_width(v) + 1) / 2));
+    U x1 = static_cast<U>((x0 + v / x0) / 2);
+    while (x1 < x0) {
+        x0 = x1;
+        x1 = static_cast<U>((x0 + v / x0) / 2);
+    }
+    return x0;
+}
+template<typename T>
+requires(std::is_integral_v<T> && std::is_signed_v<T>)
+constexpr T isqrt(T v) {
+    // Rust panics on negatives for signed isqrt; mirror by clamping to 0.
+    if (v < 0) return static_cast<T>(0);
+    return static_cast<T>(isqrt<std::make_unsigned_t<T>>(static_cast<std::make_unsigned_t<T>>(v)));
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_rem(T a, T b) {
+    if (b == 0) return Option<T>(rusty::None);
+    if constexpr (std::is_signed_v<T>) {
+        if (a == std::numeric_limits<T>::min() && b == static_cast<T>(-1)) {
+            return Option<T>(rusty::None);
+        }
+    }
+    return Option<T>(static_cast<T>(a % b));
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_neg(T x) {
+    if constexpr (std::is_unsigned_v<T>) {
+        return x == static_cast<T>(0) ? Option<T>(static_cast<T>(0)) : Option<T>(rusty::None);
+    } else {
+        return x == std::numeric_limits<T>::min() ? Option<T>(rusty::None)
+                                                  : Option<T>(static_cast<T>(-x));
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_abs(T x) {
+    if constexpr (std::is_unsigned_v<T>) {
+        return Option<T>(x);
+    } else {
+        return x == std::numeric_limits<T>::min() ? Option<T>(rusty::None)
+                                                  : Option<T>(static_cast<T>(x < 0 ? -x : x));
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_shl(T x, std::uint32_t rhs) {
+    return rhs >= static_cast<std::uint32_t>(sizeof(T) * 8)
+               ? Option<T>(rusty::None)
+               : Option<T>(static_cast<T>(static_cast<std::make_unsigned_t<T>>(x) << rhs));
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_shr(T x, std::uint32_t rhs) {
+    return rhs >= static_cast<std::uint32_t>(sizeof(T) * 8)
+               ? Option<T>(rusty::None)
+               : Option<T>(static_cast<T>(x >> rhs));
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_rem_euclid(T a, T b) {
+    if (b == 0) return Option<T>(rusty::None);
+    if constexpr (std::is_signed_v<T>) {
+        if (a == std::numeric_limits<T>::min() && b == static_cast<T>(-1)) {
+            return Option<T>(rusty::None);
+        }
+        T r = static_cast<T>(a % b);
+        if (r < 0) r = static_cast<T>(r + (b < 0 ? static_cast<T>(-b) : b));
+        return Option<T>(r);
+    } else {
+        return Option<T>(static_cast<T>(a % b));
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_div_euclid(T a, T b) {
+    if (b == 0) return Option<T>(rusty::None);
+    if constexpr (std::is_signed_v<T>) {
+        if (a == std::numeric_limits<T>::min() && b == static_cast<T>(-1)) {
+            return Option<T>(rusty::None);
+        }
+        T q = static_cast<T>(a / b);
+        if ((a % b) < 0) q = static_cast<T>(q + (b > 0 ? static_cast<T>(-1) : static_cast<T>(1)));
+        return Option<T>(q);
+    } else {
+        return Option<T>(static_cast<T>(a / b));
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<std::uint32_t> checked_ilog2(T x) {
+    if (x <= 0) return Option<std::uint32_t>(rusty::None);
+    return Option<std::uint32_t>(
+        static_cast<std::uint32_t>(std::bit_width(static_cast<std::make_unsigned_t<T>>(x)) - 1));
+}
+
+template<typename T>
+requires(std::is_integral_v<T> && std::is_signed_v<T>)
+Option<T> checked_isqrt(T x) {
+    if (x < 0) return Option<T>(rusty::None);
+    return Option<T>(isqrt(x));
+}
+
+// u{N}::checked_add_signed(self, rhs: i{N}). Wrapping add + overflow detect.
+template<typename T, typename S>
+requires(std::is_integral_v<T> && std::is_unsigned_v<T> && std::is_integral_v<std::remove_cvref_t<S>>
+         && std::is_signed_v<std::remove_cvref_t<S>>)
+Option<T> checked_add_signed(T a, S b) {
+    T r = static_cast<T>(a + static_cast<T>(b));
+    bool overflow = (b >= 0) ? (r < a) : (r > a);
+    return overflow ? Option<T>(rusty::None) : Option<T>(r);
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+Option<T> checked_pow(T base, std::uint32_t exp) {
+    // Rust's exponentiation-by-squaring guarded by checked_mul.
+    T acc = static_cast<T>(1);
+    while (exp > 1) {
+        if ((exp & 1u) != 0) {
+            if (__builtin_mul_overflow(acc, base, &acc)) return Option<T>(rusty::None);
+        }
+        exp >>= 1;
+        if (__builtin_mul_overflow(base, base, &base)) return Option<T>(rusty::None);
+    }
+    if (exp == 1) {
+        if (__builtin_mul_overflow(acc, base, &acc)) return Option<T>(rusty::None);
+    }
+    return Option<T>(acc);
+}
+
 // Rust `i*::abs` / `f*::abs`. A member abs() wins (user numeric wrappers);
 // unsigned values pass through; signed/floating flip the sign. Routed for
 // unknown-typed receivers (closure params), so member preference keeps

@@ -24186,6 +24186,35 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_checked_family_routes_to_num_helpers() {
+    // Same-type-arg checked methods use the lambda-cast form.
+    for m in ["checked_rem", "checked_rem_euclid", "checked_div_euclid"] {
+        let out = transpile_str(&format!("pub fn f(x: i32) -> Option<i32> {{ x.{m}(3) }}"));
+        assert!(out.contains(&format!("rusty::{m}(")), "{m}: {out}");
+        assert!(!out.contains(&format!("x.{m}(")), "{m} member call: {out}");
+    }
+    // Fixed-type-arg checked methods pass the arg through.
+    for (m, call) in [
+        ("checked_shl", "x.checked_shl(1)"),
+        ("checked_pow", "x.checked_pow(3)"),
+        ("checked_add_signed", "x.checked_add_signed(1)"),
+    ] {
+        let out = transpile_str(&format!("pub fn f(x: u32) -> Option<u32> {{ {call} }}"));
+        assert!(out.contains(&format!("rusty::{m}(x,")), "{m}: {out}");
+    }
+    // Nullary checked methods.
+    for (m, recv) in [
+        ("checked_neg", "u32"),
+        ("checked_ilog2", "u32"),
+        ("checked_abs", "i32"),
+        ("checked_isqrt", "i32"),
+    ] {
+        let out = transpile_str(&format!("pub fn f(x: {recv}) -> Option<{recv}> {{ x.{m}() }}"));
+        assert!(out.contains(&format!("rusty::{m}(x)")), "{m}: {out}");
+    }
+}
+
+#[test]
 fn test_abs_diff_next_multiple_ilog2_lower() {
     for (src, marker, call) in [
         ("pub fn f(x: i32) -> u32 { x.abs_diff(5) }", "make_unsigned_t<decltype(__a)>", "x.abs_diff("),

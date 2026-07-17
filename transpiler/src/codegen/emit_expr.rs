@@ -10019,7 +10019,13 @@ impl CodeGen {
         // Rust checked arithmetic methods → rusty:: free-function helpers returning Option<T>
         if matches!(
             method_name.as_str(),
-            "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
+            "checked_add"
+                | "checked_sub"
+                | "checked_mul"
+                | "checked_div"
+                | "checked_rem"
+                | "checked_rem_euclid"
+                | "checked_div_euclid"
         ) && args.len() == 1
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
@@ -10067,6 +10073,45 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::checked_next_power_of_two({})", receiver);
+        }
+        // checked_* with a FIXED-type second arg (shift amount u32, exponent u32,
+        // signed addend) — pass it through unchanged; the num.hpp template's
+        // second parameter has the right type. Gated on an integer receiver.
+        if matches!(
+            method_name.as_str(),
+            "checked_shl" | "checked_shr" | "checked_pow" | "checked_add_signed"
+        ) && args.len() == 1
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_integer_like_type(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let arg = self.emit_expr_to_string(&mc.args[0]);
+            return format!("rusty::{}({}, {})", method_name, receiver, arg);
+        }
+        // Nullary checked_* returning Option. Gated on an integer receiver.
+        if matches!(
+            method_name.as_str(),
+            "checked_neg" | "checked_abs" | "checked_ilog2" | "checked_isqrt"
+        ) && args.is_empty()
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_integer_like_type(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::{}({})", method_name, receiver);
         }
         if method_name == "serialize" && args.len() == 1 {
             let receiver = self.emit_expr_to_string(&mc.receiver);
