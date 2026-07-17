@@ -24186,6 +24186,42 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_float_math_methods_lower_to_cmath() {
+    // C++ double/float are primitives — Rust float math methods must lower to
+    // <cmath> free functions. Gated on a statically-known float receiver.
+    let cases = [
+        ("sqrt", "std::sqrt(x)"),
+        ("sin", "std::sin(x)"),
+        ("cos", "std::cos(x)"),
+        ("floor", "std::floor(x)"),
+        ("ceil", "std::ceil(x)"),
+        ("round", "std::round(x)"),
+        ("trunc", "std::trunc(x)"),
+        ("abs", "std::fabs(x)"),
+        ("ln", "std::log(x)"),
+        ("exp", "std::exp(x)"),
+        ("log10", "std::log10(x)"),
+    ];
+    for (method, expected) in cases {
+        let src = format!("pub fn f(x: f64) -> f64 {{ x.{method}() }}");
+        let out = transpile_str(&src);
+        assert!(out.contains(expected), "method {method}: {out}");
+        assert!(!out.contains(&format!("x.{method}()")), "method {method}: {out}");
+    }
+    // Binary-arg forms.
+    let powi = transpile_str("pub fn f(x: f64) -> f64 { x.powi(2) }");
+    assert!(powi.contains("std::pow(x, 2)"), "powi: {powi}");
+    let powf = transpile_str("pub fn f(x: f64) -> f64 { x.powf(2.5) }");
+    assert!(powf.contains("std::pow(x, 2.5)"), "powf: {powf}");
+    let hypot = transpile_str("pub fn f(x: f64, y: f64) -> f64 { x.hypot(y) }");
+    assert!(hypot.contains("std::hypot(x, y)"), "hypot: {hypot}");
+
+    // Integer receivers must NOT be hijacked (no float lowering for ints).
+    let int_pow = transpile_str("pub fn f(x: u32) -> u32 { x.pow(2) }");
+    assert!(!int_pow.contains("std::pow(x"), "int pow untouched: {int_pow}");
+}
+
+#[test]
 fn test_write_writeln_macros_lower_to_write_fmt() {
     // write!/writeln! previously fell through to `/* write!(…) */`, so a chained
     // `.unwrap()` produced ill-formed C++. They now lower to rusty::write_fmt.

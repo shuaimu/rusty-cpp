@@ -6670,6 +6670,84 @@ impl CodeGen {
             let rhs = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("std::copysign({}, {})", receiver, rhs);
         }
+        // Rust float math methods → <cmath> free functions. C++ `double`/`float`
+        // are primitives with no members, so `x.sqrt()` / `x.floor()` / etc. must
+        // lower. Gated on a statically-known float receiver so user types with
+        // same-named methods and integer receivers are left untouched.
+        if mc.args.len() <= 1
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_float_like_type(ty))
+        {
+            let method = mc.method.to_string();
+            let nullary_std: Option<&str> = if mc.args.is_empty() {
+                match method.as_str() {
+                    "sqrt" => Some("sqrt"),
+                    "cbrt" => Some("cbrt"),
+                    "sin" => Some("sin"),
+                    "cos" => Some("cos"),
+                    "tan" => Some("tan"),
+                    "asin" => Some("asin"),
+                    "acos" => Some("acos"),
+                    "atan" => Some("atan"),
+                    "sinh" => Some("sinh"),
+                    "cosh" => Some("cosh"),
+                    "tanh" => Some("tanh"),
+                    "asinh" => Some("asinh"),
+                    "acosh" => Some("acosh"),
+                    "atanh" => Some("atanh"),
+                    "floor" => Some("floor"),
+                    "ceil" => Some("ceil"),
+                    "round" => Some("round"),
+                    "trunc" => Some("trunc"),
+                    "exp" => Some("exp"),
+                    "exp2" => Some("exp2"),
+                    "ln" => Some("log"),
+                    "log10" => Some("log10"),
+                    "log2" => Some("log2"),
+                    "ln_1p" => Some("log1p"),
+                    "exp_m1" => Some("expm1"),
+                    "abs" => Some("fabs"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let binary_std: Option<&str> = if mc.args.len() == 1 {
+                match method.as_str() {
+                    "powi" | "powf" => Some("pow"),
+                    "atan2" => Some("atan2"),
+                    "hypot" => Some("hypot"),
+                    "log" => Some("__log_base"), // std::log(x)/std::log(base)
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if nullary_std.is_some() || binary_std.is_some() {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                if let Some(f) = nullary_std {
+                    return format!("std::{}({})", f, receiver);
+                }
+                let arg = self.emit_expr_to_string(&mc.args[0]);
+                if binary_std == Some("__log_base") {
+                    // Rust `x.log(base)` = ln(x) / ln(base).
+                    return format!("(std::log({}) / std::log({}))", receiver, arg);
+                }
+                return format!(
+                    "std::{}({}, {})",
+                    binary_std.expect("checked is_some"),
+                    receiver,
+                    arg
+                );
+            }
+        }
         if mc.method == "deref" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::deref_ref({})", receiver);
