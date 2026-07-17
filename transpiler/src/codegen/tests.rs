@@ -24186,6 +24186,21 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_str_case_and_repeat_methods_materialize_string() {
+    // &str is std::string_view in C++ and lacks these members; materialize a
+    // rusty::String (which has them).
+    let up = transpile_str("pub fn f(s: &str) -> String { s.to_uppercase() }");
+    assert!(up.contains("rusty::String::from(s).to_uppercase()"), "{up}");
+    let lo = transpile_str("pub fn f(s: &str) -> String { s.to_lowercase() }");
+    assert!(lo.contains("rusty::String::from(s).to_lowercase()"), "{lo}");
+    let rep = transpile_str("pub fn f(s: &str) -> String { s.repeat(3) }");
+    assert!(rep.contains("rusty::String::from(s).repeat(3)"), "{rep}");
+    for call in ["s.to_uppercase()", "s.to_lowercase()", "s.repeat(3)"] {
+        assert!(!up.contains(call) || !lo.contains(call) || !rep.contains(call));
+    }
+}
+
+#[test]
 fn test_more_numeric_methods_lower_without_member_calls() {
     // clamp → std::clamp with a unified template arg.
     let clamp = transpile_str("pub fn f(x: i64) -> i64 { x.clamp(0, 100) }");

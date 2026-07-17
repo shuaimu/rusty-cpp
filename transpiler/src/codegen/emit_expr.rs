@@ -9064,6 +9064,41 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::trim({})", receiver);
         }
+        // `&str::{to_uppercase,to_lowercase}()` and `&str::repeat(n)` don't exist
+        // on std::string_view; materialize a rusty::String (which has them). Only
+        // for string_view-typed receivers — a rusty::String receiver already has
+        // these members, and `[T]::repeat` on a slice must not be hijacked.
+        if matches!(method_name.as_str(), "to_uppercase" | "to_lowercase")
+            && args.is_empty()
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.type_is_string_view_like(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::String::from({}).{}()", receiver, method_name);
+        }
+        if method_name == "repeat"
+            && args.len() == 1
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.type_is_string_view_like(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let count = self.emit_expr_to_string(&mc.args[0]);
+            return format!("rusty::String::from({}).repeat({})", receiver, count);
+        }
         if matches!(
             method_name.as_str(),
             "trim_start_matches" | "trim_end_matches"
