@@ -2813,14 +2813,30 @@ impl CodeGen {
             // next arm stays eligible). Wrap the arm body in the guard
             // condition — bindings are spliced before it by each pattern arm
             // below, and `_m_matched` is only set inside the guard.
-            let arm_body_stmt = if let (true, Some((_, guard_expr))) =
-                (allow_guarded_variant_arms, &arm.guard)
-            {
-                let guard_cpp = self.emit_expr_to_string(guard_expr);
-                if guard_cpp.trim().is_empty() {
-                    return None;
+            let arm_body_stmt = if let Some((_, guard_expr)) = &arm.guard {
+                // A guard on a payload-BINDING pattern (variant/ident/tuple)
+                // references those bindings, which are only in scope when the
+                // variant-arm handling is enabled — gate those on
+                // `allow_guarded_variant_arms`. But a guard on a NON-binding
+                // pattern (literal — incl. byte-string `b"."` — path, or `_`)
+                // only references outer variables, so it is always safe to
+                // apply; otherwise the guard would be silently dropped and the
+                // arm would fire unconditionally (std::path's
+                // `parse_single_component`: `b"." if HAS_PREFIXES && … => CurDir`
+                // then `b"." => None` — the first arm wrongly always matched).
+                let pattern_has_no_bindings = matches!(
+                    &arm.pat,
+                    syn::Pat::Lit(_) | syn::Pat::Path(_) | syn::Pat::Wild(_)
+                );
+                if allow_guarded_variant_arms || pattern_has_no_bindings {
+                    let guard_cpp = self.emit_expr_to_string(guard_expr);
+                    if guard_cpp.trim().is_empty() {
+                        return None;
+                    }
+                    format!("if ({}) {{ {} }}", guard_cpp, arm_body_stmt)
+                } else {
+                    arm_body_stmt
                 }
-                format!("if ({}) {{ {} }}", guard_cpp, arm_body_stmt)
             } else {
                 arm_body_stmt
             };

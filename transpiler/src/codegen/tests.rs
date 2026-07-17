@@ -35429,6 +35429,38 @@ fn test_match_some_none_iife_gets_explicit_option_return_type() {
 }
 
 #[test]
+fn test_value_condition_match_applies_guard_on_literal_arm() {
+    // A `match slice { b"." if guard => …, b"." => …, _ => … }` lowered to the
+    // value-condition form (`_m == std::array{…}`) must APPLY the guard on the
+    // literal arm. Previously the guard was gated on `allow_guarded_variant_arms`
+    // and silently dropped for literal/path/wildcard arms, so the first `b"."`
+    // arm fired unconditionally and the second became dead — std::path's
+    // `parse_single_component` (`b"." if HAS_PREFIXES && … => CurDir` then
+    // `b"." => None`).
+    let out = transpile_str(
+        r#"
+        pub fn classify(c: &[u8], cond: bool) -> i32 {
+            match c {
+                b"." if cond => 1,
+                b"." => 2,
+                b".." => 3,
+                _ => 0,
+            }
+        }
+        "#,
+    );
+    // Value-condition lowering (not std::visit), and the guard is applied.
+    assert!(
+        out.contains("_m == std::array"),
+        "expected the byte-literal value-condition lowering:\n{out}"
+    );
+    assert!(
+        out.contains("if (cond)"),
+        "guard on the literal arm was dropped (should wrap the arm body):\n{out}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a
