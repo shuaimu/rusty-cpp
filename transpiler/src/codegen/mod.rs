@@ -49592,6 +49592,84 @@ inline SplitIter split(const S& value, char32_t delim) {\n\
         return SplitIter{std::string_view{}, delim, true};\n\
     }\n\
 }\n\
+inline bool is_ascii_ws(char c) { return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f' || c == '\\v'; }\n\
+struct WhitespaceSplitIter {\n\
+    std::string_view remaining;\n\
+    rusty::Option<std::string_view> next() {\n\
+        std::size_t i = 0;\n\
+        while (i < remaining.size() && is_ascii_ws(remaining[i])) ++i;\n\
+        remaining = remaining.substr(i);\n\
+        if (remaining.empty()) return rusty::Option<std::string_view>(rusty::None);\n\
+        std::size_t j = 0;\n\
+        while (j < remaining.size() && !is_ascii_ws(remaining[j])) ++j;\n\
+        auto word = remaining.substr(0, j);\n\
+        remaining = remaining.substr(j);\n\
+        return rusty::Option<std::string_view>(word);\n\
+    }\n\
+    rusty::Option<std::string_view> nth(std::size_t n) {\n\
+        for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);\n\
+        return next();\n\
+    }\n\
+};\n\
+inline WhitespaceSplitIter split_whitespace(std::string_view s) { return WhitespaceSplitIter{s}; }\n\
+struct SplitNIter {\n\
+    std::string_view remaining;\n\
+    char32_t delim;\n\
+    std::size_t remaining_count;\n\
+    bool done = false;\n\
+    rusty::Option<std::string_view> next() {\n\
+        if (done) return rusty::Option<std::string_view>(rusty::None);\n\
+        if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
+        auto pos = remaining.find(static_cast<char>(delim));\n\
+        if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
+        auto piece = remaining.substr(0, pos);\n\
+        remaining = remaining.substr(pos + 1);\n\
+        --remaining_count;\n\
+        return rusty::Option<std::string_view>(piece);\n\
+    }\n\
+    rusty::Option<std::string_view> nth(std::size_t n) {\n\
+        for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);\n\
+        return next();\n\
+    }\n\
+};\n\
+inline SplitNIter splitn(std::string_view s, std::size_t n, char32_t delim) { return SplitNIter{s, delim, n, n == 0}; }\n\
+struct LinesIter {\n\
+    std::string_view remaining;\n\
+    bool done = false;\n\
+    rusty::Option<std::string_view> next() {\n\
+        if (done || remaining.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }\n\
+        auto pos = remaining.find('\\n');\n\
+        if (pos == std::string_view::npos) { auto line = remaining; remaining = std::string_view{}; done = true; return rusty::Option<std::string_view>(line); }\n\
+        auto line = remaining.substr(0, pos);\n\
+        if (!line.empty() && line.back() == '\\r') line = line.substr(0, line.size() - 1);\n\
+        remaining = remaining.substr(pos + 1);\n\
+        return rusty::Option<std::string_view>(line);\n\
+    }\n\
+    rusty::Option<std::string_view> nth(std::size_t n) {\n\
+        for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);\n\
+        return next();\n\
+    }\n\
+};\n\
+inline LinesIter lines(std::string_view s) { return LinesIter{s}; }\n\
+struct MatchesIter {\n\
+    std::string_view remaining;\n\
+    std::string pat;\n\
+    bool done = false;\n\
+    rusty::Option<std::string_view> next() {\n\
+        if (done || pat.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }\n\
+        auto pos = remaining.find(pat);\n\
+        if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(rusty::None); }\n\
+        auto m = remaining.substr(pos, pat.size());\n\
+        remaining = remaining.substr(pos + pat.size());\n\
+        return rusty::Option<std::string_view>(m);\n\
+    }\n\
+    rusty::Option<std::string_view> nth(std::size_t n) {\n\
+        for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);\n\
+        return next();\n\
+    }\n\
+};\n\
+inline MatchesIter matches(std::string_view s, std::string_view pat) { return MatchesIter{s, std::string(pat)}; }\n\
+inline MatchesIter matches(std::string_view s, char32_t ch) { return MatchesIter{s, std::string(1, static_cast<char>(ch))}; }\n\
 }\n\
 namespace char_runtime {\n\
 // Rust `char::REPLACEMENT_CHARACTER` (U+FFFD).\n\

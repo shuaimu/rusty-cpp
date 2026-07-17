@@ -24186,6 +24186,22 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_str_iterator_methods_route_and_are_iterators() {
+    // The str iterator methods lower to str_runtime constructors...
+    for (src, ctor) in [
+        ("pub fn f(s: &str) -> usize { s.split_whitespace().count() }", "rusty::str_runtime::split_whitespace(s)"),
+        ("pub fn f(s: &str) -> usize { s.lines().count() }", "rusty::str_runtime::lines(s)"),
+        ("pub fn f(s: &str) -> usize { s.splitn(2, '.').count() }", "rusty::str_runtime::splitn(s, 2,"),
+        ("pub fn f(s: &str) -> usize { s.matches(\"ab\").count() }", "rusty::str_runtime::matches(s,"),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(ctor), "ctor {ctor}: {out}");
+        // ...and are recognized as iterators, so .count() routes to rusty::count.
+        assert!(out.contains("rusty::count("), "iterator recognition: {out}");
+    }
+}
+
+#[test]
 fn test_str_runtime_more_methods_route() {
     for (src, marker, call) in [
         ("pub fn f(s: &str) -> String { s.trim_start().to_string() }", "rusty::str_runtime::trim_start(s)", "s.trim_start()"),

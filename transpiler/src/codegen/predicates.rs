@@ -3107,6 +3107,10 @@ impl CodeGen {
                         | "skip"
                         | "scan"
                         | "split"
+                        | "split_whitespace"
+                        | "splitn"
+                        | "lines"
+                        | "matches"
                         // Map/set iterator views (BTreeMap/HashMap keys(),
                         // values(), range(); BTreeSet/HashSet algebra) —
                         // Rust returns lazy iterators from all of these.
@@ -3152,6 +3156,10 @@ impl CodeGen {
                             | "skip"
                             | "scan"
                             | "split"
+                            | "split_whitespace"
+                            | "splitn"
+                            | "lines"
+                            | "matches"
                     )
                 ) {
                     return true;
@@ -3200,6 +3208,10 @@ impl CodeGen {
                         | "scan"
                         | "rusty::scan"
                         | "split"
+                        | "split_whitespace"
+                        | "splitn"
+                        | "lines"
+                        | "matches"
                         | "str_runtime::split"
                         | "rusty::str_runtime::split"
                 )
