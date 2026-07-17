@@ -42,6 +42,12 @@ declare -a MATRIX_CRATES=(
     # the modules + RUN docs/rusty/runtest.sh assertions. Special-cased in
     # run_parity_for_crate. See docs/port_regen/STATUS.md.
     "rusty"
+    # path: the transpiled std::path Unix port (Path/PathBuf/Components over the
+    # value-semantics OsStr runtime in include/rusty/os_str.hpp). Single-file
+    # (no --expand); validated like alloc/rusty — build the pathmod module + RUN
+    # docs/path/runtest.sh (construct/as_os_str/is_absolute/parent/push-pop/
+    # components/starts_with-strip_prefix). Special-cased in run_parity_for_crate.
+    "path"
     # itertools: temporarily disabled — iterator-item engine + FoldWhile_Ok done
     # (quick leak-free), remaining = tree_reduce alias-hoist (UFCS path, collision-
     # safe) + projected-push transpile leaks. Re-enable when those land.
@@ -352,9 +358,9 @@ fi
 ensure_crate_checkout() {
     local crate="$1"
 
-    # alloc/rusty have no crate checkout — they build the stdlib modules from
-    # the rustc sysroot source via docs/{alloc,rusty}/build.sh.
-    if [[ "${crate}" == "alloc" || "${crate}" == "rusty" ]]; then
+    # alloc/rusty/path have no crate checkout — they build stdlib modules from
+    # the rustc sysroot source via docs/{alloc,rusty,path}/build.sh.
+    if [[ "${crate}" == "alloc" || "${crate}" == "rusty" || "${crate}" == "path" ]]; then
         return 0
     fi
 
@@ -406,7 +412,9 @@ run_parity_for_crate() {
     # consumer crate. Validate it by building the module + running the runtime
     # assertion test (which INSTANTIATES Vec with a concrete type — something
     # the module's own --precompile never does — and asserts behavior).
-    if [[ "${crate}" == "alloc" || "${crate}" == "rusty" ]]; then
+    # rusty/path are the same shape (stdlib-port modules validated by a runtime
+    # test that prints "... RUNTIME PASS").
+    if [[ "${crate}" == "alloc" || "${crate}" == "rusty" || "${crate}" == "path" ]]; then
         local work_dir="${WORK_ROOT}/${crate}"
         local matrix_log="${work_dir}.log"
         echo "crate: ${crate} (transpiled stdlib module: build + runtime test)"
