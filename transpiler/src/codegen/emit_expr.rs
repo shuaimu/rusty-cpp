@@ -2419,10 +2419,38 @@ impl CodeGen {
             "for_both" => self
                 .try_lower_for_both_macro_expr(mac)
                 .unwrap_or_else(|| format!("/* {}!({}) */", macro_name, tokens)),
+            "matches" => self
+                .try_lower_matches_macro_expr(&tokens)
+                .unwrap_or_else(|| format!("/* {}!({}) */", macro_name, tokens)),
             _ => {
                 format!("/* {}!({}) */", macro_name, tokens)
             }
         }
+    }
+
+    /// Lower `matches!(scrutinee, pattern)` / `matches!(scrutinee, pattern if
+    /// guard)` to a boolean by expanding it to `match scrutinee { pattern[ if
+    /// guard] => true, _ => false }` and reusing the ordinary match lowering
+    /// (which already handles literal / range / or / variant / binding patterns).
+    /// Without this, `matches!` fell through to the default macro handler and
+    /// emitted a `/* matches!(…) */` comment — a void expression.
+    fn try_lower_matches_macro_expr(&self, tokens: &str) -> Option<String> {
+        let parts = self.split_macro_args(tokens);
+        if parts.len() < 2 {
+            return None;
+        }
+        let scrutinee = parts[0].trim();
+        // The pattern (optionally with `if guard`) is everything after the first
+        // top-level comma. Patterns carry no top-level commas (tuple/struct
+        // commas are nested), so rejoining the tail is safe.
+        let arm = parts[1..].join(",");
+        let arm = arm.trim();
+        let match_src = format!("match {} {{ {} => true, _ => false }}", scrutinee, arm);
+        let syn::Expr::Match(match_expr) = syn::parse_str::<syn::Expr>(&match_src).ok()? else {
+            return None;
+        };
+        let bool_ty: syn::Type = syn::parse_quote!(bool);
+        Some(self.emit_match_expr_to_string(&match_expr, Some(&bool_ty)))
     }
 
     /// Emit a switch-style match as an expression (returns string for IIFE body).

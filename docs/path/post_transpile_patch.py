@@ -288,6 +288,20 @@ def patch(text: str) -> str:
         "\n    return this->has_root();\n",
     )
 
+    # impl Prefix's methods are DEAD on Unix (Prefix is never constructed) but
+    # must still type-check — they're referenced by the never-taken
+    # `self.prefix.as_ref().map(|p| p.len()/is_verbatim())` closures in
+    # Components. Their real bodies `match *self { … }` / `matches!(*self, …)`
+    # now lower to a Prefix std::visit (matches! became a real expression) that
+    # can't resolve. Replace each body with its Unix-constant value.
+    for sig, body in (
+        ("size_t Prefix::len() const ", "\n    return 0;\n"),
+        ("bool Prefix::is_verbatim() const ", "\n    return false;\n"),
+        ("bool Prefix::is_drive() const ", "\n    return false;\n"),
+        ("bool Prefix::has_implicit_root() const ", "\n    return true;\n"),
+    ):
+        text = _replace_fn_body(text, sig, body)
+
     # NOTE: Component's variant member structs (Component_RootDir/…/Normal) now
     # get their defaulted `operator==` FROM THE TRANSPILER — a data enum deriving
     # PartialEq emits one on each variant struct (needed for the std::variant

@@ -35484,6 +35484,29 @@ fn test_data_enum_derive_partial_eq_emits_variant_operator_eq() {
 }
 
 #[test]
+fn test_matches_macro_lowers_to_boolean() {
+    // `matches!(e, pat)` was unhandled and emitted a `/* matches!(…) */` comment
+    // (a void expression). It now expands to a match and reuses the ordinary
+    // lowering, so all pattern kinds work.
+    let out = transpile_str("pub fn f(x: i32) -> bool { matches!(x, 1 | 2 | 3) }");
+    assert!(
+        !out.contains("/* matches!"),
+        "matches! left as an unhandled comment:\n{out}"
+    );
+    assert!(
+        out.contains("_m == 1 || _m == 2 || _m == 3"),
+        "matches! or-pattern not lowered to the boolean conditions:\n{out}"
+    );
+    // Guard form.
+    let out2 =
+        transpile_str("pub fn g(x: i32, hi: i32) -> bool { matches!(x, n if n < hi) }");
+    assert!(
+        !out2.contains("/* matches!"),
+        "guarded matches! left as a comment:\n{out2}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a
