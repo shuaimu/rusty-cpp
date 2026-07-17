@@ -24186,6 +24186,33 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_more_numeric_methods_lower_without_member_calls() {
+    // clamp → std::clamp with a unified template arg.
+    let clamp = transpile_str("pub fn f(x: i64) -> i64 { x.clamp(0, 100) }");
+    assert!(clamp.contains("std::clamp<std::remove_cvref_t<decltype(x)>>(x, 0, 100)"), "{clamp}");
+
+    // Float specials.
+    let recip = transpile_str("pub fn f(x: f64) -> f64 { x.recip() }");
+    assert!(recip.contains("(1.0 / x)"), "recip: {recip}");
+    let deg = transpile_str("pub fn f(x: f64) -> f64 { x.to_degrees() }");
+    assert!(deg.contains("180.0 / 3.14159"), "to_degrees: {deg}");
+    let mul_add = transpile_str("pub fn f(x: f64) -> f64 { x.mul_add(2.0, 1.0) }");
+    assert!(mul_add.contains("std::fma(x, 2.0, 1.0)"), "mul_add: {mul_add}");
+    let fract = transpile_str("pub fn f(x: f64) -> f64 { x.fract() }");
+    assert!(fract.contains("std::trunc(__v)"), "fract: {fract}");
+
+    // signum / rem_euclid / div_euclid must not stay member calls.
+    for (m, call) in [
+        ("signum", "x.signum()"),
+        ("rem_euclid", "x.rem_euclid(3)"),
+        ("div_euclid", "x.div_euclid(3)"),
+    ] {
+        let out = transpile_str(&format!("pub fn f(x: i32) -> i32 {{ {call} }}"));
+        assert!(!out.contains(call), "method {m} still a member call: {out}");
+    }
+}
+
+#[test]
 fn test_dbg_macro_preserves_value_and_handles_empty() {
     // Expression position: `dbg!(e)` returns the value (was dropped as a comment).
     let expr = transpile_str("pub fn f() -> i32 { let y = dbg!(21 + 21); y }");

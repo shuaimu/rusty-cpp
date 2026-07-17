@@ -6708,7 +6708,7 @@ impl CodeGen {
         // are primitives with no members, so `x.sqrt()` / `x.floor()` / etc. must
         // lower. Gated on a statically-known float receiver so user types with
         // same-named methods and integer receivers are left untouched.
-        if mc.args.len() <= 1
+        if mc.args.len() <= 2
             && self
                 .infer_simple_expr_type(&mc.receiver)
                 .as_ref()
@@ -6780,6 +6780,103 @@ impl CodeGen {
                     receiver,
                     arg
                 );
+            }
+            // Float methods with no direct <cmath> counterpart.
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            if mc.args.is_empty() {
+                match method.as_str() {
+                    "recip" => return format!("(1.0 / {})", receiver),
+                    "to_degrees" => {
+                        return format!("({} * (180.0 / 3.14159265358979323846))", receiver);
+                    }
+                    "to_radians" => {
+                        return format!("({} * (3.14159265358979323846 / 180.0))", receiver);
+                    }
+                    "fract" => {
+                        // self - self.trunc(); evaluate the receiver once.
+                        return format!(
+                            "([&]() {{ auto __v = {}; return __v - std::trunc(__v); }}())",
+                            receiver
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if mc.args.len() == 2 && method == "mul_add" {
+                let a = self.emit_expr_to_string(&mc.args[0]);
+                let b = self.emit_expr_to_string(&mc.args[1]);
+                return format!("std::fma({}, {}, {})", receiver, a, b);
+            }
+        }
+        // `x.clamp(lo, hi)` → std::clamp (works for any numeric receiver). The
+        // explicit template argument unifies the type when the bounds are
+        // literals of a different width (e.g. `x: i64` clamped by `0`/`100`).
+        if mc.method == "clamp"
+            && mc.args.len() == 2
+            && self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
+                self.is_known_integer_like_type(ty) || self.is_known_float_like_type(ty)
+            })
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let lo = self.emit_expr_to_string(&mc.args[0]);
+            let hi = self.emit_expr_to_string(&mc.args[1]);
+            return format!(
+                "std::clamp<std::remove_cvref_t<decltype({})>>({}, {}, {})",
+                receiver, receiver, lo, hi
+            );
+        }
+        // Numeric methods with no C++ member equivalent → inline formulas. Each
+        // IIFE binds the receiver/args once to avoid re-evaluating side effects.
+        if mc.args.len() <= 1
+            && let Some(num_ty) = self.infer_simple_expr_type(&mc.receiver)
+        {
+            let is_float = self.is_known_float_like_type(&num_ty);
+            let is_int = self.is_known_integer_like_type(&num_ty);
+            if is_float || is_int {
+                let method = mc.method.to_string();
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                if method == "signum" && mc.args.is_empty() {
+                    if is_float {
+                        // NaN → NaN; else ±1.0 (copysign matches Rust's ±0 rule).
+                        return format!(
+                            "([&]() {{ auto __v = {}; return std::isnan(__v) ? __v : std::copysign(1.0, __v); }}())",
+                            receiver
+                        );
+                    }
+                    return format!(
+                        "([&]() {{ auto __v = {}; return static_cast<decltype(__v)>((__v > 0) - (__v < 0)); }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.len() == 1 && method == "rem_euclid" {
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __v = {}; auto __n = {}; auto __r = __v % __n; return __r < 0 ? __r + (__n < 0 ? -__n : __n) : __r; }}())",
+                        receiver, arg
+                    );
+                }
+                if is_int && mc.args.len() == 1 && method == "div_euclid" {
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __v = {}; auto __n = {}; auto __q = __v / __n; auto __r = __v % __n; return __r < 0 ? (__n > 0 ? __q - 1 : __q + 1) : __q; }}())",
+                        receiver, arg
+                    );
+                }
             }
         }
         if mc.method == "deref" && mc.args.is_empty() {
