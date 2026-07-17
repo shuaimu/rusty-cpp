@@ -2299,80 +2299,17 @@ impl CodeGen {
 
         match macro_name.as_str() {
             "format" => {
-                format!("std::format({})", self.convert_format_args(&tokens))
-            }
-            "format_args" => {
-                let parts = self.split_macro_args(&tokens);
-                if parts.is_empty() {
-                    "std::string{}".to_string()
+                // The dumb pass-through path can't express Rust-only format
+                // features (inline captures `{x}`, debug specs `{:?}`); route
+                // those through the smart lowering. Plain `{}`/spec literals stay
+                // on the byte-for-byte-compatible pass-through to avoid churn.
+                if self.format_tokens_need_smart_lowering(&tokens) {
+                    self.lower_format_like_tokens(&tokens)
                 } else {
-                    let fmt_expr = parts[0].trim();
-                    let mut debug_arg_positions = HashSet::new();
-                    let mut pretty_debug_arg_positions = HashSet::new();
-                    let mut native_arg_conversions: HashMap<usize, char> = HashMap::new();
-                    let mut native_passthrough_arg_positions: HashSet<usize> = HashSet::new();
-                    let fmt_cpp = if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr) {
-                        let fmt_literal = lit.value();
-                        debug_arg_positions = self.format_literal_debug_arg_positions(
-                            &fmt_literal,
-                            parts.len().saturating_sub(1),
-                        );
-                        pretty_debug_arg_positions = self
-                            .format_literal_pretty_debug_arg_positions(
-                                &fmt_literal,
-                                parts.len().saturating_sub(1),
-                            );
-                        native_arg_conversions = self.format_literal_native_arg_conversions(
-                            &fmt_literal,
-                            parts.len().saturating_sub(1),
-                        );
-                        native_passthrough_arg_positions = self
-                            .format_literal_native_passthrough_arg_positions(
-                                &fmt_literal,
-                                parts.len().saturating_sub(1),
-                            );
-                        let rewritten = self.rewrite_rust_format_literal_for_cpp(&fmt_literal);
-                        let escaped = escape_cpp_string_literal_content(&rewritten);
-                        format!("\"{}\"", escaped)
-                    } else {
-                        self.convert_macro_tokens(fmt_expr)
-                    };
-                    if parts.len() == 1 {
-                        format!("std::string({})", fmt_cpp)
-                    } else {
-                        let wrapped_args: Vec<String> = parts
-                            .iter()
-                            .skip(1)
-                            .enumerate()
-                            .map(|(arg_idx, arg)| {
-                                let lowered = self.convert_format_arg_expr(arg.trim());
-                                if pretty_debug_arg_positions.contains(&arg_idx) {
-                                    format!("rusty::to_debug_string_pretty({})", lowered)
-                                } else if debug_arg_positions.contains(&arg_idx) {
-                                    format!("rusty::to_debug_string({})", lowered)
-                                } else if let Some(conversion) =
-                                    native_arg_conversions.get(&arg_idx).copied()
-                                {
-                                    if self.format_conversion_requires_numeric_bridge(conversion)
-                                        && !self.format_arg_is_known_integer_like(arg.trim())
-                                    {
-                                        format!("rusty::format_numeric_arg({})", lowered)
-                                    } else {
-                                        lowered
-                                    }
-                                } else if native_passthrough_arg_positions.contains(&arg_idx) {
-                                    lowered
-                                } else if self.format_arg_is_known_scalar_like(arg.trim()) {
-                                    lowered
-                                } else {
-                                    format!("rusty::to_string({})", lowered)
-                                }
-                            })
-                            .collect();
-                        format!("std::format({}, {})", fmt_cpp, wrapped_args.join(", "))
-                    }
+                    format!("std::format({})", self.convert_format_args(&tokens))
                 }
             }
+            "format_args" => self.lower_format_like_tokens(&tokens),
             "vec" => {
                 // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}
                 // We can't infer T at this level, so use initializer list

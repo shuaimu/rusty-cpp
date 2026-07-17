@@ -15573,6 +15573,50 @@ fn test_leaf10526_format_args_debug_spec_is_rewritten_for_std_format() {
 }
 
 #[test]
+fn test_format_inline_captured_args_extracted_as_positional() {
+    // Rust 2021 `{x}` captures `x` from scope; C++ std::format has no named
+    // fields, so the capture is pulled out as a trailing positional arg and the
+    // whole literal is rewritten to explicit indices.
+    let pure = transpile_str(r#"fn f(x: i32) -> String { format!("val {x}") }"#);
+    assert!(
+        pure.contains("std::format(\"val {0}\", x)"),
+        "pure capture: {pure}"
+    );
+
+    // Mixed explicit + capture must use ALL manual indices (mixing auto `{}`
+    // and manual `{N}` is ill-formed in std::format). Explicit arg keeps index
+    // 0; captures are appended after it.
+    let mixed =
+        transpile_str(r#"fn f(x: i32, y: i32) -> String { format!("{x} + {y} = {}", x + y) }"#);
+    assert!(
+        mixed.contains("std::format(\"{1} + {2} = {0}\""),
+        "mixed indices: {mixed}"
+    );
+
+    // A captured identifier with a debug spec routes through to_debug_string.
+    let dbg = transpile_str(r#"fn f(x: i32) -> String { format!("dbg {x:?}") }"#);
+    assert!(
+        dbg.contains("std::format(\"dbg {0}\", rusty::to_debug_string(x))"),
+        "capture debug: {dbg}"
+    );
+
+    // Repeated captures dedup to a single argument.
+    let dup = transpile_str(r#"fn f(x: i32) -> String { format!("{x} and {x}") }"#);
+    assert!(
+        dup.contains("std::format(\"{0} and {0}\", x)"),
+        "dedup: {dup}"
+    );
+
+    // A plain `format!("{}", x)` (no capture, no debug) stays on the
+    // byte-for-byte pass-through path — no to_string wrapping churn.
+    let plain = transpile_str(r#"fn f(x: i32) -> String { format!("{}", x) }"#);
+    assert!(
+        plain.contains("std::format(\"{}\" , x)") || plain.contains("std::format(\"{}\", x)"),
+        "plain unchanged: {plain}"
+    );
+}
+
+#[test]
 fn test_leaf105405_format_args_hex_spec_uses_native_numeric_argument() {
     let out = transpile_str(
         r#"

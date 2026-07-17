@@ -23521,6 +23521,237 @@ impl CodeGen {
         self.convert_macro_tokens(tokens)
     }
 
+    /// Rust 2021 lets `{name}` / `{name:spec}` capture a same-named binding from
+    /// the enclosing scope. C++ `std::format` has no named fields, so pull each
+    /// captured identifier out as a trailing positional argument and rewrite
+    /// EVERY placeholder to an explicit numeric index — mixing automatic `{}`
+    /// and manual `{N}` indexing is ill-formed in std::format.
+    ///
+    /// `num_explicit_args` is the count of trailing args already present (before
+    /// the literal); captures are numbered starting there, in first-appearance
+    /// order and deduplicated. Returns `None` when the literal has no inline
+    /// captures, so the caller leaves the untouched literal on its normal path.
+    fn extract_inline_format_captures(
+        &self,
+        fmt: &str,
+        num_explicit_args: usize,
+    ) -> Option<(String, Vec<String>)> {
+        let is_ident = |s: &str| -> bool {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(c) if c.is_alphabetic() || c == '_' => {}
+                _ => return false,
+            }
+            s.chars().all(|c| c.is_alphanumeric() || c == '_')
+        };
+
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut out = String::with_capacity(chars.len());
+        let mut captures: Vec<String> = Vec::new();
+        let mut capture_index: HashMap<String, usize> = HashMap::new();
+        let mut implicit_counter = 0usize;
+        let mut found_capture = false;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    out.push('{');
+                    out.push('{');
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    out.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                // The first `:` separates the argument reference from the format
+                // spec (arg refs are idents/indices and never contain `:`).
+                let (arg_part, spec) = match inner.find(':') {
+                    Some(p) => (inner[..p].to_string(), inner[p..].to_string()),
+                    None => (inner.clone(), String::new()),
+                };
+                let arg_trim = arg_part.trim();
+                let index: usize = if arg_trim.is_empty() {
+                    let idx = implicit_counter;
+                    implicit_counter += 1;
+                    idx
+                } else if arg_trim.chars().all(|c| c.is_ascii_digit()) {
+                    arg_trim.parse::<usize>().unwrap_or(0)
+                } else if is_ident(arg_trim) {
+                    found_capture = true;
+                    if let Some(&idx) = capture_index.get(arg_trim) {
+                        idx
+                    } else {
+                        let idx = num_explicit_args + captures.len();
+                        captures.push(arg_trim.to_string());
+                        capture_index.insert(arg_trim.to_string(), idx);
+                        idx
+                    }
+                } else {
+                    // Unrecognized arg form — keep the field verbatim rather than
+                    // risk corrupting an exotic spec.
+                    out.push('{');
+                    out.push_str(&inner);
+                    out.push('}');
+                    i = j + 1;
+                    continue;
+                };
+                out.push('{');
+                out.push_str(&index.to_string());
+                out.push_str(&spec);
+                out.push('}');
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                out.push('}');
+                out.push('}');
+                i += 2;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        if found_capture {
+            Some((out, captures))
+        } else {
+            None
+        }
+    }
+
+    /// Does a format literal use a Rust-only feature the dumb pass-through path
+    /// can't express in C++ std::format — an inline captured identifier (`{x}`)
+    /// or a debug spec (`{:?}` / `{:#?}`)? Such literals must go through the
+    /// full `lower_format_like_tokens` machinery.
+    fn format_literal_needs_smart_lowering(&self, fmt: &str) -> bool {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                if inner.contains('?') {
+                    return true;
+                }
+                let arg_part = inner.split(':').next().unwrap_or("").trim();
+                if !arg_part.is_empty() && !arg_part.chars().all(|c| c.is_ascii_digit()) {
+                    // A non-numeric, non-empty arg reference is an inline capture.
+                    return true;
+                }
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// True when the `format!`/`format_args!` token stream begins with a string
+    /// literal that needs the smart lowering path (captures or debug specs).
+    fn format_tokens_need_smart_lowering(&self, tokens: &str) -> bool {
+        let parts = self.split_macro_args(tokens);
+        let Some(fmt_expr) = parts.first() else {
+            return false;
+        };
+        let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
+            // Non-literal format string — can't analyze; keep the dumb path.
+            return false;
+        };
+        self.format_literal_needs_smart_lowering(&lit.value())
+    }
+
+    /// Lower a `format!`/`format_args!` token stream to a `std::format(...)` /
+    /// `std::string(...)` call, honoring inline captures, debug specs, native
+    /// conversions and to_string wrapping. Shared by both macros.
+    fn lower_format_like_tokens(&self, tokens: &str) -> String {
+        let parts = self.split_macro_args(tokens);
+        if parts.is_empty() {
+            return "std::string{}".to_string();
+        }
+        let fmt_expr = parts[0].trim();
+        let mut debug_arg_positions = HashSet::new();
+        let mut pretty_debug_arg_positions = HashSet::new();
+        let mut native_arg_conversions: HashMap<usize, char> = HashMap::new();
+        let mut native_passthrough_arg_positions: HashSet<usize> = HashSet::new();
+        // Explicit trailing args; inline captures are appended after being
+        // pulled out of the literal.
+        let mut args: Vec<String> = parts.iter().skip(1).map(|s| s.trim().to_string()).collect();
+        let fmt_cpp = if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr) {
+            let mut fmt_literal = lit.value();
+            if let Some((rewritten, captures)) =
+                self.extract_inline_format_captures(&fmt_literal, args.len())
+            {
+                fmt_literal = rewritten;
+                args.extend(captures);
+            }
+            let arg_count = args.len();
+            debug_arg_positions =
+                self.format_literal_debug_arg_positions(&fmt_literal, arg_count);
+            pretty_debug_arg_positions =
+                self.format_literal_pretty_debug_arg_positions(&fmt_literal, arg_count);
+            native_arg_conversions =
+                self.format_literal_native_arg_conversions(&fmt_literal, arg_count);
+            native_passthrough_arg_positions =
+                self.format_literal_native_passthrough_arg_positions(&fmt_literal, arg_count);
+            let rewritten = self.rewrite_rust_format_literal_for_cpp(&fmt_literal);
+            let escaped = escape_cpp_string_literal_content(&rewritten);
+            format!("\"{}\"", escaped)
+        } else {
+            self.convert_macro_tokens(fmt_expr)
+        };
+        if args.is_empty() {
+            format!("std::string({})", fmt_cpp)
+        } else {
+            let wrapped_args: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(arg_idx, arg)| {
+                    let lowered = self.convert_format_arg_expr(arg.trim());
+                    if pretty_debug_arg_positions.contains(&arg_idx) {
+                        format!("rusty::to_debug_string_pretty({})", lowered)
+                    } else if debug_arg_positions.contains(&arg_idx) {
+                        format!("rusty::to_debug_string({})", lowered)
+                    } else if let Some(conversion) = native_arg_conversions.get(&arg_idx).copied() {
+                        if self.format_conversion_requires_numeric_bridge(conversion)
+                            && !self.format_arg_is_known_integer_like(arg.trim())
+                        {
+                            format!("rusty::format_numeric_arg({})", lowered)
+                        } else {
+                            lowered
+                        }
+                    } else if native_passthrough_arg_positions.contains(&arg_idx) {
+                        lowered
+                    } else if self.format_arg_is_known_scalar_like(arg.trim()) {
+                        lowered
+                    } else {
+                        format!("rusty::to_string({})", lowered)
+                    }
+                })
+                .collect();
+            format!("std::format({}, {})", fmt_cpp, wrapped_args.join(", "))
+        }
+    }
+
     fn convert_format_arg_expr(&self, token_expr: &str) -> String {
         let trimmed = token_expr.trim();
         if let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) {
