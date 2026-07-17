@@ -6804,6 +6804,39 @@ impl CodeGen {
                             receiver
                         );
                     }
+                    // Round half-to-even (banker's rounding). std::nearbyint
+                    // uses the default FE_TONEAREST mode = round-to-even.
+                    "round_ties_even" => return format!("std::nearbyint({})", receiver),
+                    // (sin, cos) tuple.
+                    "sin_cos" => {
+                        return format!(
+                            "std::make_tuple(std::sin({r}), std::cos({r}))",
+                            r = receiver
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if mc.args.len() == 1 {
+                match method.as_str() {
+                    "rem_euclid" => {
+                        let n = self.emit_expr_to_string(&mc.args[0]);
+                        return format!(
+                            "([&]() {{ auto __v = {}; auto __n = {}; auto __r = std::fmod(__v, __n); return __r < 0 ? __r + std::fabs(__n) : __r; }}())",
+                            receiver, n
+                        );
+                    }
+                    "div_euclid" => {
+                        let n = self.emit_expr_to_string(&mc.args[0]);
+                        return format!(
+                            "([&]() {{ auto __v = {}; auto __n = {}; auto __q = std::trunc(__v / __n); return std::fmod(__v, __n) < 0 ? (__n > 0 ? __q - 1 : __q + 1) : __q; }}())",
+                            receiver, n
+                        );
+                    }
+                    "midpoint" => {
+                        let n = self.emit_expr_to_string(&mc.args[0]);
+                        return format!("(({} + {}) / 2)", receiver, n);
+                    }
                     _ => {}
                 }
             }
@@ -6925,6 +6958,59 @@ impl CodeGen {
                     // floor(log2(self)) = bit_width - 1 (self must be > 0, as in Rust).
                     return format!(
                         "([&]() {{ auto __v = {}; return static_cast<uint32_t>(std::bit_width(static_cast<std::make_unsigned_t<decltype(__v)>>(__v)) - 1); }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "leading_ones" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; return static_cast<uint32_t>(std::countl_one(static_cast<std::make_unsigned_t<decltype(__v)>>(__v))); }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "trailing_ones" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; return static_cast<uint32_t>(std::countr_one(static_cast<std::make_unsigned_t<decltype(__v)>>(__v))); }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "is_negative" {
+                    return format!("({} < 0)", receiver);
+                }
+                if is_int && mc.args.is_empty() && method == "is_positive" {
+                    return format!("({} > 0)", receiver);
+                }
+                if is_int && mc.args.is_empty() && method == "isqrt" {
+                    return format!("rusty::isqrt({})", receiver);
+                }
+                if is_int && mc.args.is_empty() && method == "cast_signed" {
+                    return format!(
+                        "static_cast<std::make_signed_t<std::remove_cvref_t<decltype({})>>>({})",
+                        receiver, receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "cast_unsigned" {
+                    return format!(
+                        "static_cast<std::make_unsigned_t<std::remove_cvref_t<decltype({})>>>({})",
+                        receiver, receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "isolate_most_significant_one" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; using __U = std::make_unsigned_t<decltype(__v)>; __U __u = static_cast<__U>(__v); return static_cast<decltype(__v)>(__u == 0 ? __U(0) : (__U(1) << (std::bit_width(__u) - 1))); }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.len() == 1 && method == "div_floor" {
+                    // Floor division (round toward -inf).
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __v = {}; auto __n = {}; auto __q = __v / __n; auto __r = __v % __n; return (__r != 0 && ((__r < 0) != (__n < 0))) ? __q - 1 : __q; }}())",
+                        receiver, arg
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "ilog10" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; uint32_t __r = 0; while (__v >= 10) {{ __v /= 10; ++__r; }} return __r; }}())",
                         receiver
                     );
                 }

@@ -24186,6 +24186,27 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_int_bits_misc_and_float_round2_lower() {
+    for (src, marker, call) in [
+        ("pub fn f(x: u32) -> u32 { x.leading_ones() }", "std::countl_one", "x.leading_ones()"),
+        ("pub fn f(x: u32) -> u32 { x.trailing_ones() }", "std::countr_one", "x.trailing_ones()"),
+        ("pub fn f(x: i32) -> bool { x.is_negative() }", "(x < 0)", "x.is_negative()"),
+        ("pub fn f(x: i32) -> bool { x.is_positive() }", "(x > 0)", "x.is_positive()"),
+        ("pub fn f(x: u32) -> u32 { x.isqrt() }", "rusty::isqrt(x)", "x.isqrt()"),
+        ("pub fn f(x: u32) -> i32 { x.cast_signed() }", "make_signed_t", "x.cast_signed()"),
+        ("pub fn f(x: u32) -> u32 { x.ilog10() }", "__v /= 10", "x.ilog10()"),
+        ("pub fn f(x: i32) -> i32 { x.div_floor(3) }", "__q - 1 : __q", "x.div_floor("),
+        ("pub fn f(x: f64) -> f64 { x.round_ties_even() }", "std::nearbyint(x)", "x.round_ties_even()"),
+        ("pub fn f(x: f64) -> (f64, f64) { x.sin_cos() }", "std::sin(x), std::cos(x)", "x.sin_cos()"),
+        ("pub fn f(x: f64) -> f64 { x.rem_euclid(3.0) }", "std::fmod", "x.rem_euclid("),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+        assert!(!out.contains(call), "member call {call}: {out}");
+    }
+}
+
+#[test]
 fn test_char_value_methods_and_saturating_wrapping_route() {
     // char value methods -> char_runtime.
     let td = transpile_str("pub fn f(c: char) -> Option<u32> { c.to_digit(16) }");
