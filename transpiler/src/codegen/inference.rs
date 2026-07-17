@@ -2724,6 +2724,119 @@ impl CodeGen {
         common
     }
 
+    /// If `expr` is a single-argument `Some(x)` / `Option::Some(x)` call, return
+    /// the inner expression `x`. Used to type the `Some` arm of a match whose
+    /// IIFE return type must be pinned to `Option<typeof x>`.
+    fn option_some_call_inner_expr(expr: &syn::Expr) -> Option<&syn::Expr> {
+        if let syn::Expr::Call(call) = expr
+            && let syn::Expr::Path(path) = call.func.as_ref()
+            && call.args.len() == 1
+            && path
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "Some")
+        {
+            return call.args.first();
+        }
+        None
+    }
+
+    /// Derive the scrutinee's enum type from the match arm PATTERNS — a variant
+    /// pattern like `Component::Normal(p)` or `Comp::Root` names the enum even
+    /// when the scrutinee expr itself has no inferable type (e.g. a closure
+    /// param). Returns the first enum a variant arm resolves to.
+    pub(super) fn scrutinee_enum_type_from_match_arms(
+        &self,
+        arms: &[syn::Arm],
+    ) -> Option<syn::Type> {
+        for arm in arms {
+            let path = match &arm.pat {
+                syn::Pat::TupleStruct(ts) => Some(&ts.path),
+                syn::Pat::Struct(s) => Some(&s.path),
+                syn::Pat::Path(p) => Some(&p.path),
+                _ => None,
+            };
+            if let Some(path) = path
+                && let Some(enum_name) = self.extract_variant_pattern_enum_name(path, "")
+                && let Ok(ty) = syn::parse_str::<syn::Type>(&enum_name)
+            {
+                return Some(ty);
+            }
+        }
+        None
+    }
+
+    /// Like `infer_match_arms_common_type_with_scrutinee`, but the scrutinee
+    /// TYPE is supplied explicitly instead of inferred from the scrutinee expr.
+    /// Used when the scrutinee expr has no inferable type — typically a closure
+    /// parameter, e.g. `next_back().and_then(|p| match p { … })` — but a variant
+    /// arm pattern pins the scrutinee to a known enum. Binding each arm's pattern
+    /// with that enum type lets a `Some(binding)` arm be typed, yielding the
+    /// common `Option<T>` needed to annotate the match IIFE's return type.
+    pub(super) fn infer_match_arms_common_type_with_scrutinee_ty(
+        &self,
+        arms: &[syn::Arm],
+        scrutinee_ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        let mut common: Option<syn::Type> = None;
+        let mut saw_option_none_arm = false;
+        for arm in arms {
+            if self.is_expr_diverging(&arm.body) {
+                continue;
+            }
+            if self.expr_is_option_none_value(&arm.body) {
+                saw_option_none_arm = true;
+                continue;
+            }
+            let arm_value_expr = self
+                .extract_match_arm_value_expr(&arm.body)
+                .unwrap_or(&arm.body);
+            let mut inner = self.new_inner_for_block();
+            if inner.local_bindings.is_empty() {
+                inner.local_bindings.push(HashMap::new());
+                inner.local_shadowed_binding_types.push(HashMap::new());
+                inner.local_const_bindings.push(HashMap::new());
+                inner.local_reference_bindings.push(HashSet::new());
+                inner.rebind_reference_pointer_bindings.push(HashSet::new());
+                inner.local_cpp_bindings.push(HashMap::new());
+            }
+            let mut env = HashMap::new();
+            inner.bind_pattern_types_into_env(&arm.pat, scrutinee_ty, &mut env);
+            // `infer_expr_type_with_env` does not itself type the `Some(x)`
+            // constructor — infer x's type in the arm's binding env and wrap it.
+            let some_arm_ty = Self::option_some_call_inner_expr(arm_value_expr).and_then(|inner_expr| {
+                inner
+                    .infer_expr_type_with_env(inner_expr, &env)
+                    .or_else(|| inner.infer_simple_expr_type(inner_expr))
+                    .map(|inner_ty| -> syn::Type { syn::parse_quote!(Option<#inner_ty>) })
+            });
+            let arm_ty_opt = some_arm_ty
+                .or_else(|| inner.infer_expr_type_with_env(arm_value_expr, &env))
+                .or_else(|| inner.infer_local_binding_type_from_initializer(arm_value_expr))
+                .or_else(|| inner.infer_simple_expr_type(arm_value_expr));
+            let Some(arm_ty) = arm_ty_opt else {
+                if self.match_arm_unknown_type_can_defer(arm) {
+                    continue;
+                }
+                return None;
+            };
+            if !self.merge_match_common_arm_type(&mut common, arm_ty) {
+                return None;
+            }
+        }
+        if saw_option_none_arm {
+            let common_ty = common?;
+            if self.expected_option_type_arg(Some(&common_ty)).is_some()
+                || self.map_type(&common_ty).starts_with("rusty::Option<")
+            {
+                return Some(common_ty);
+            }
+            return None;
+        }
+        common
+    }
+
     pub(super) fn infer_variant_type_context_from_expr(&self, expr: &syn::Expr) -> Option<VariantTypeContext> {
         match expr {
             syn::Expr::Path(path) => {

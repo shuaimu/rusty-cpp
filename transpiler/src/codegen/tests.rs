@@ -35399,6 +35399,36 @@ fn test_method_calling_same_named_free_fn_qualifies_to_avoid_self_recursion() {
 }
 
 #[test]
+fn test_match_some_none_iife_gets_explicit_option_return_type() {
+    // A match lowered to an IIFE whose arms return `Some(x)` / `None` can't have
+    // its C++ return type DEDUCED — `rusty::Some(x)` and `rusty::None` are
+    // different types. The IIFE must carry an explicit `-> rusty::Option<T>`.
+    // The scrutinee here is a closure param whose type the engine can't infer,
+    // so the enum (and thus the Some payload type) is derived from the arm
+    // pattern. This is std::path's file_name shape:
+    // `next_back().and_then(|p| match p { Comp::Normal(p) => Some(p), _ => None })`.
+    let out = transpile_str(
+        r#"
+        pub enum Comp { Normal(u32), Root }
+        pub struct P;
+        impl P {
+            pub fn pick(&self) -> Option<Comp> { None }
+            pub fn last_normal(&self) -> Option<u32> {
+                self.pick().and_then(|p| match p {
+                    Comp::Normal(p) => Some(p),
+                    _ => None,
+                })
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("-> rusty::Option<uint32_t>"),
+        "Some/None match IIFE should get an explicit Option return type:\n{out}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a

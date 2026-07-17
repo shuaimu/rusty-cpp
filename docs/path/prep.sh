@@ -263,11 +263,15 @@ for a in ("pub fn into_boxed_path(self)",
           "impl Clone for Box<Path>", "pub fn into_path_buf(self: Box<Self>)",
           "impl FromStr for PathBuf",
           "impl<'a> From<Cow<'a, Path>> for PathBuf",
-          # These hit two transpiler-emission bugs (a match-in-lambda where one arm
-          # returns Some(x) and another None fails C++ return-type deduction; and
-          # &OsStr value-vs-reference in the value port). Strip for the first
-          # compile milestone — TODO: restore once the transpiler emits an explicit
-          # lambda return type for None/Some match arms.
+          # The match-in-lambda return-type-deduction bug (Some(x)/None IIFE) is
+          # now FIXED in the transpiler (bug #6), so these COMPILE — but they still
+          # DANGLE in the value port: file_name returns `&OsStr` borrowed from
+          # `components().next_back()`, which yields an OWNED Component temporary
+          # (the value port copies bytes into it) whose OsStr dies on return
+          # (ASan: stack-use-after-return). Restoring these needs Component to hold
+          # a VIEW into the path bytes rather than an owned copy — a separate
+          # value-port lifetime change. file_stem/extension/file_prefix also use
+          # split_file_at_dot (tuple of &OsStr); to_string_lossy uses Cow.
           "pub fn file_name(&self)", "pub fn file_stem(&self)",
           "pub fn extension(&self)", "pub fn file_prefix(&self)",
           "pub fn to_string_lossy(&self)",

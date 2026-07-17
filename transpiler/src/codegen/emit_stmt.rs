@@ -889,6 +889,23 @@ impl CodeGen {
                 .or_else(|| {
                     self.infer_match_arms_common_variant_constructor_owner(&match_expr.arms)
                 })
+                .or_else(|| {
+                    // The scrutinee EXPR is often a closure param whose type the
+                    // engine can't see (e.g. std::path's file_name:
+                    // `next_back().and_then(|p| match p {
+                    //     Component::Normal(p) => Some(p), _ => None })`). A
+                    // variant arm pattern pins the scrutinee to a known enum, so
+                    // bind the arms with that type to type the `Some(binding)`
+                    // arm. Without this the IIFE's deduced return type conflicts
+                    // (`rusty::Some<T>` vs `rusty::None_t`) and won't compile.
+                    self.scrutinee_enum_type_from_match_arms(&match_expr.arms)
+                        .and_then(|sty| {
+                            self.infer_match_arms_common_type_with_scrutinee_ty(
+                                &match_expr.arms,
+                                &sty,
+                            )
+                        })
+                })
         } else {
             None
         };
