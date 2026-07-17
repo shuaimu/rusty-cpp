@@ -8698,6 +8698,33 @@ impl CodeGen {
             };
             return format!("rusty::char_runtime::{}({})", char_fn, receiver);
         }
+        // char methods with args / non-classifier char methods.
+        if self.should_lower_char_is_whitespace_method_call(&mc.receiver) {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            if (method_name == "to_digit" || method_name == "is_digit") && args.len() == 1 {
+                let arg = self.emit_expr_to_string(&mc.args[0]);
+                return format!("rusty::char_runtime::{}({}, {})", method_name, receiver, arg);
+            }
+            if method_name == "len_utf16" && args.is_empty() {
+                return format!("rusty::char_runtime::len_utf16({})", receiver);
+            }
+            if method_name == "eq_ignore_ascii_case" && args.len() == 1 {
+                // Rust passes `&char`; the runtime fn takes a value — peel the ref.
+                let mut arg = self.emit_expr_to_string(&mc.args[0]);
+                if let Some(stripped) = arg.strip_prefix('&') {
+                    arg = stripped.trim_start().to_string();
+                }
+                return format!(
+                    "rusty::char_runtime::eq_ignore_ascii_case({}, {})",
+                    receiver, arg
+                );
+            }
+        }
         if method_name == "is_char_boundary" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -10112,6 +10139,66 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::{}({})", method_name, receiver);
+        }
+        // Nullary saturating/wrapping helpers.
+        if matches!(
+            method_name.as_str(),
+            "saturating_abs" | "saturating_neg" | "wrapping_next_power_of_two"
+        ) && args.is_empty()
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_integer_like_type(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::{}({})", method_name, receiver);
+        }
+        // saturating/wrapping with a fixed-type or independently-deduced arg.
+        if matches!(
+            method_name.as_str(),
+            "saturating_pow"
+                | "wrapping_pow"
+                | "saturating_add_unsigned"
+                | "saturating_sub_unsigned"
+        ) && args.len() == 1
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_integer_like_type(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let arg = self.emit_expr_to_string(&mc.args[0]);
+            return format!("rusty::{}({}, {})", method_name, receiver, arg);
+        }
+        // saturating_div: same-type second arg — cast to the receiver type.
+        if method_name == "saturating_div"
+            && args.len() == 1
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_integer_like_type(ty))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let arg = self.emit_expr_to_string(&mc.args[0]);
+            return format!(
+                "rusty::saturating_div({}, static_cast<std::remove_cvref_t<decltype({})>>({}))",
+                receiver, receiver, arg
+            );
         }
         if method_name == "serialize" && args.len() == 1 {
             let receiver = self.emit_expr_to_string(&mc.receiver);

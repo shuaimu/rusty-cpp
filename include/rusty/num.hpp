@@ -584,6 +584,100 @@ Option<T> checked_pow(T base, std::uint32_t exp) {
     return Option<T>(acc);
 }
 
+template<typename T>
+requires(std::is_integral_v<T> && std::is_signed_v<T>)
+constexpr T saturating_abs(T x) {
+    return x == std::numeric_limits<T>::min() ? std::numeric_limits<T>::max()
+                                              : static_cast<T>(x < 0 ? -x : x);
+}
+
+template<typename T>
+requires(std::is_integral_v<T> && std::is_signed_v<T>)
+constexpr T saturating_neg(T x) {
+    return x == std::numeric_limits<T>::min() ? std::numeric_limits<T>::max()
+                                              : static_cast<T>(-x);
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T saturating_div(T a, T b) {
+    if (b == 0) __builtin_trap();  // Rust panics on divide-by-zero
+    if constexpr (std::is_signed_v<T>) {
+        if (a == std::numeric_limits<T>::min() && b == static_cast<T>(-1)) {
+            return std::numeric_limits<T>::max();
+        }
+    }
+    return static_cast<T>(a / b);
+}
+
+template<typename T>
+constexpr T detail_saturating_mul(T a, T b) {
+    T r;
+    if (__builtin_mul_overflow(a, b, &r)) {
+        if constexpr (std::is_signed_v<T>) {
+            return ((a < 0) != (b < 0)) ? std::numeric_limits<T>::min()
+                                        : std::numeric_limits<T>::max();
+        } else {
+            return std::numeric_limits<T>::max();
+        }
+    }
+    return r;
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T saturating_pow(T base, std::uint32_t exp) {
+    T acc = static_cast<T>(1);
+    while (exp > 1) {
+        if ((exp & 1u) != 0) acc = detail_saturating_mul<T>(acc, base);
+        exp >>= 1;
+        base = detail_saturating_mul<T>(base, base);
+    }
+    return exp == 1 ? detail_saturating_mul<T>(acc, base) : acc;
+}
+
+// i{N}::saturating_{add,sub}_unsigned(rhs: u{N}). rhs >= 0, so add only
+// overflows high and sub only underflows low.
+template<typename T>
+requires(std::is_integral_v<T> && std::is_signed_v<T>)
+constexpr T saturating_add_unsigned(T a, std::make_unsigned_t<T> b) {
+    using UT = std::make_unsigned_t<T>;
+    T r = static_cast<T>(static_cast<UT>(a) + b);
+    return r < a ? std::numeric_limits<T>::max() : r;
+}
+
+template<typename T>
+requires(std::is_integral_v<T> && std::is_signed_v<T>)
+constexpr T saturating_sub_unsigned(T a, std::make_unsigned_t<T> b) {
+    using UT = std::make_unsigned_t<T>;
+    T r = static_cast<T>(static_cast<UT>(a) - b);
+    return r > a ? std::numeric_limits<T>::min() : r;
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T wrapping_pow(T base, std::uint32_t exp) {
+    using U = std::make_unsigned_t<T>;
+    U b = static_cast<U>(base);
+    U acc = static_cast<U>(1);
+    while (exp > 1) {
+        if ((exp & 1u) != 0) acc = static_cast<U>(acc * b);
+        exp >>= 1;
+        b = static_cast<U>(b * b);
+    }
+    if (exp == 1) acc = static_cast<U>(acc * b);
+    return static_cast<T>(acc);
+}
+
+template<typename T>
+requires(std::is_integral_v<T> && std::is_unsigned_v<T>)
+constexpr T wrapping_next_power_of_two(T v) {
+    if (v <= static_cast<T>(1)) return static_cast<T>(1);
+    const int w = std::bit_width(static_cast<T>(v - 1));
+    return w >= static_cast<int>(sizeof(T) * 8) ? static_cast<T>(0)
+                                                : static_cast<T>(static_cast<T>(1) << w);
+}
+
 // Rust `i*::abs` / `f*::abs`. A member abs() wins (user numeric wrappers);
 // unsigned values pass through; signed/floating flip the sign. Routed for
 // unknown-typed receivers (closure params), so member preference keeps

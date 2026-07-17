@@ -24186,6 +24186,30 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_char_value_methods_and_saturating_wrapping_route() {
+    // char value methods -> char_runtime.
+    let td = transpile_str("pub fn f(c: char) -> Option<u32> { c.to_digit(16) }");
+    assert!(td.contains("rusty::char_runtime::to_digit(c, 16)"), "{td}");
+    let lu = transpile_str("pub fn f(c: char) -> usize { c.len_utf16() }");
+    assert!(lu.contains("rusty::char_runtime::len_utf16(c)"), "{lu}");
+    let eq = transpile_str("pub fn f(c: char, o: char) -> bool { c.eq_ignore_ascii_case(&o) }");
+    assert!(eq.contains("rusty::char_runtime::eq_ignore_ascii_case(c, o)"), "{eq}");
+
+    // saturating / wrapping int methods -> rusty:: helpers.
+    for (src, marker) in [
+        ("pub fn f(x: i32) -> i32 { x.saturating_abs() }", "rusty::saturating_abs(x)"),
+        ("pub fn f(x: i32) -> i32 { x.saturating_pow(3) }", "rusty::saturating_pow(x, 3)"),
+        ("pub fn f(x: i32) -> i32 { x.saturating_div(2) }", "rusty::saturating_div(x,"),
+        ("pub fn f(x: i32) -> i32 { x.saturating_add_unsigned(1) }", "rusty::saturating_add_unsigned(x, 1)"),
+        ("pub fn f(x: u32) -> u32 { x.wrapping_pow(3) }", "rusty::wrapping_pow(x, 3)"),
+        ("pub fn f(x: u32) -> u32 { x.wrapping_next_power_of_two() }", "rusty::wrapping_next_power_of_two(x)"),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+    }
+}
+
+#[test]
 fn test_checked_family_routes_to_num_helpers() {
     // Same-type-arg checked methods use the lambda-cast form.
     for m in ["checked_rem", "checked_rem_euclid", "checked_div_euclid"] {

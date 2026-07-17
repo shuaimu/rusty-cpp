@@ -49660,6 +49660,26 @@ inline char32_t to_ascii_uppercase(char32_t ch) { const auto c = static_cast<uin
 inline char32_t to_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') ? static_cast<char32_t>(c + 32) : ch; }\n\
 inline char32_t to_lowercase_first(char32_t ch) { return to_ascii_lowercase(ch); }\n\
 inline char32_t to_uppercase_first(char32_t ch) { return to_ascii_uppercase(ch); }\n\
+inline rusty::Option<uint32_t> to_digit(char32_t ch, uint32_t radix) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    uint32_t d;\n\
+    if (c >= '0' && c <= '9') d = c - '0';\n\
+    else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;\n\
+    else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;\n\
+    else return rusty::Option<uint32_t>(rusty::None);\n\
+    return d < radix ? rusty::Option<uint32_t>(d) : rusty::Option<uint32_t>(rusty::None);\n\
+}\n\
+inline bool is_digit(char32_t ch, uint32_t radix) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    uint32_t d;\n\
+    if (c >= '0' && c <= '9') d = c - '0';\n\
+    else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;\n\
+    else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;\n\
+    else return false;\n\
+    return d < radix;\n\
+}\n\
+inline std::size_t len_utf16(char32_t ch) { return static_cast<uint32_t>(ch) <= 0xFFFF ? std::size_t(1) : std::size_t(2); }\n\
+inline bool eq_ignore_ascii_case(char32_t a, char32_t b) { return to_ascii_lowercase(a) == to_ascii_lowercase(b); }\n\
 }\n\
 template<typename T>\n\
 bool is_empty(const T& value) {\n\
