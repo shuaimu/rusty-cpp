@@ -44977,16 +44977,11 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::path::Path",
         "rusty::ffi::",
         "rusty::cmp::Ordering",
-        "rusty::str_runtime::from_utf8",
-        "rusty::str_runtime::from_utf8_unchecked",
-        "rusty::str_runtime::chars(",
-        "rusty::str_runtime::is_char_boundary(",
+        // Any str_runtime reference needs the block. The prefix marker covers
+        // the whole family (from_utf8/chars/trim/split/split_once/replacen/…);
+        // a per-fn list silently missed newly-added helpers.
+        "rusty::str_runtime::",
         "rusty::str_runtime::parse<",
-        "rusty::str_runtime::trim(",
-        "rusty::str_runtime::trim_start_matches(",
-        "rusty::str_runtime::trim_end_matches(",
-        "rusty::str_runtime::strip_prefix(",
-        "rusty::str_runtime::split(",
         "rusty::proc_macro_runtime::is_available",
         // Any char_runtime reference needs the block (the classifier family —
         // is_alphabetic/is_alphanumeric/is_uppercase/to_ascii_uppercase/… — as
@@ -49494,6 +49489,63 @@ inline rusty::Option<std::size_t> find(std::string_view s, const std::array<char
         }\n\
     }\n\
     return rusty::Option<std::size_t>(rusty::None);\n\
+}\n\
+inline std::string_view trim_start(std::string_view s) {\n\
+    auto start = s.find_first_not_of(\" \\t\\n\\r\");\n\
+    return start == std::string_view::npos ? std::string_view{} : s.substr(start);\n\
+}\n\
+inline std::string_view trim_end(std::string_view s) {\n\
+    auto end = s.find_last_not_of(\" \\t\\n\\r\");\n\
+    return end == std::string_view::npos ? std::string_view{} : s.substr(0, end + 1);\n\
+}\n\
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, std::string_view suffix) {\n\
+    if (s.ends_with(suffix)) return rusty::Option<std::string_view>(s.substr(0, s.size() - suffix.size()));\n\
+    return rusty::Option<std::string_view>(rusty::None);\n\
+}\n\
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, char32_t ch) {\n\
+    if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == ch) return rusty::Option<std::string_view>(s.substr(0, s.size() - 1));\n\
+    return rusty::Option<std::string_view>(rusty::None);\n\
+}\n\
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, char32_t delim) {\n\
+    auto pos = s.find(static_cast<char>(delim));\n\
+    if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);\n\
+    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));\n\
+}\n\
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, std::string_view delim) {\n\
+    auto pos = s.find(delim);\n\
+    if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);\n\
+    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));\n\
+}\n\
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, char32_t delim) {\n\
+    auto pos = s.rfind(static_cast<char>(delim));\n\
+    if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);\n\
+    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));\n\
+}\n\
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, std::string_view delim) {\n\
+    auto pos = s.rfind(delim);\n\
+    if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);\n\
+    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));\n\
+}\n\
+inline rusty::String replacen(std::string_view s, std::string_view from, std::string_view to, std::size_t count) {\n\
+    if (from.empty() || count == 0) return rusty::String::from(s);\n\
+    std::string out(s);\n\
+    std::size_t pos = 0, done = 0;\n\
+    while (done < count && (pos = out.find(from, pos)) != std::string::npos) {\n\
+        out.replace(pos, from.size(), to);\n\
+        pos += to.size();\n\
+        ++done;\n\
+    }\n\
+    return rusty::String::from(out);\n\
+}\n\
+inline rusty::String to_ascii_uppercase(std::string_view s) {\n\
+    std::string out(s);\n\
+    for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);\n\
+    return rusty::String::from(out);\n\
+}\n\
+inline rusty::String to_ascii_lowercase(std::string_view s) {\n\
+    std::string out(s);\n\
+    for (auto& c : out) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);\n\
+    return rusty::String::from(out);\n\
 }\n\
 struct SplitIter {\n\
     std::string_view remaining;\n\

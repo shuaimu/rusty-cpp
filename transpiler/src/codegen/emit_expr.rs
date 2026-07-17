@@ -9263,6 +9263,48 @@ impl CodeGen {
             let count = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::String::from({}).repeat({})", receiver, count);
         }
+        // More &str/String methods that don't exist on std::string_view -> the
+        // str_runtime free functions. Gated on a str-like receiver so char/u8/
+        // slice receivers with the same-named methods aren't hijacked.
+        if self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
+            self.type_is_string_view_like(ty) || self.is_known_string_like_type(ty)
+        }) {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let nullary: Option<&str> = if args.is_empty() {
+                match method_name.as_str() {
+                    "trim_start" => Some("trim_start"),
+                    "trim_end" => Some("trim_end"),
+                    "to_ascii_uppercase" => Some("to_ascii_uppercase"),
+                    "to_ascii_lowercase" => Some("to_ascii_lowercase"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(f) = nullary {
+                return format!("rusty::str_runtime::{}({})", f, receiver);
+            }
+            if args.len() == 1
+                && matches!(method_name.as_str(), "strip_suffix" | "split_once" | "rsplit_once")
+            {
+                let arg = self.emit_expr_to_string(&mc.args[0]);
+                return format!("rusty::str_runtime::{}({}, {})", method_name, receiver, arg);
+            }
+            if method_name == "replacen" && args.len() == 3 {
+                let a0 = self.emit_expr_to_string(&mc.args[0]);
+                let a1 = self.emit_expr_to_string(&mc.args[1]);
+                let a2 = self.emit_expr_to_string(&mc.args[2]);
+                return format!(
+                    "rusty::str_runtime::replacen({}, {}, {}, {})",
+                    receiver, a0, a1, a2
+                );
+            }
+        }
         if matches!(
             method_name.as_str(),
             "trim_start_matches" | "trim_end_matches"

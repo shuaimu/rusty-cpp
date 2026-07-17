@@ -24186,6 +24186,24 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_str_runtime_more_methods_route() {
+    for (src, marker, call) in [
+        ("pub fn f(s: &str) -> String { s.trim_start().to_string() }", "rusty::str_runtime::trim_start(s)", "s.trim_start()"),
+        ("pub fn f(s: &str) -> String { s.trim_end().to_string() }", "rusty::str_runtime::trim_end(s)", "s.trim_end()"),
+        ("pub fn f(s: &str) -> String { s.to_ascii_uppercase() }", "rusty::str_runtime::to_ascii_uppercase(s)", "s.to_ascii_uppercase()"),
+        ("pub fn f(s: &str) -> String { s.to_ascii_lowercase() }", "rusty::str_runtime::to_ascii_lowercase(s)", "s.to_ascii_lowercase()"),
+        ("pub fn f(s: &str) -> Option<&str> { s.strip_suffix(\"z\") }", "rusty::str_runtime::strip_suffix(s,", "s.strip_suffix("),
+        ("pub fn f(s: &str) -> Option<(&str, &str)> { s.split_once('=') }", "rusty::str_runtime::split_once(s,", "s.split_once("),
+        ("pub fn f(s: &str) -> Option<(&str, &str)> { s.rsplit_once('=') }", "rusty::str_runtime::rsplit_once(s,", "s.rsplit_once("),
+        ("pub fn f(s: &str) -> String { s.replacen(\"a\", \"X\", 1) }", "rusty::str_runtime::replacen(s,", "s.replacen("),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+        assert!(!out.contains(call), "member call {call}: {out}");
+    }
+}
+
+#[test]
 fn test_int_bits_misc_and_float_round2_lower() {
     for (src, marker, call) in [
         ("pub fn f(x: u32) -> u32 { x.leading_ones() }", "std::countl_one", "x.leading_ones()"),
