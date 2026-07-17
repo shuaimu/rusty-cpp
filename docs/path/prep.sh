@@ -263,16 +263,14 @@ for a in ("pub fn into_boxed_path(self)",
           "impl Clone for Box<Path>", "pub fn into_path_buf(self: Box<Self>)",
           "impl FromStr for PathBuf",
           "impl<'a> From<Cow<'a, Path>> for PathBuf",
-          # The match-in-lambda return-type-deduction bug (Some(x)/None IIFE) is
-          # now FIXED in the transpiler (bug #6), so these COMPILE — but they still
-          # DANGLE in the value port: file_name returns `&OsStr` borrowed from
-          # `components().next_back()`, which yields an OWNED Component temporary
-          # (the value port copies bytes into it) whose OsStr dies on return
-          # (ASan: stack-use-after-return). Restoring these needs Component to hold
-          # a VIEW into the path bytes rather than an owned copy — a separate
-          # value-port lifetime change. file_stem/extension/file_prefix also use
-          # split_file_at_dot (tuple of &OsStr); to_string_lossy uses Cow.
-          "pub fn file_name(&self)", "pub fn file_stem(&self)",
+          # file_name is RESTORED: the match-in-lambda return-type bug is fixed in
+          # the transpiler (bug #6), and its value-port dangle (it returned `&OsStr`
+          # into next_back()'s owned Component temporary) is resolved by a
+          # thread_local materialization patch in post_transpile_patch.py (same
+          # idiom as from_u8_slice). file_stem/extension/file_prefix still use
+          # split_file_at_dot (tuple of &OsStr) with the same value-port lifetime
+          # issue but a more tangled shape; to_string_lossy uses Cow. TODO: restore.
+          "pub fn file_stem(&self)",
           "pub fn extension(&self)", "pub fn file_prefix(&self)",
           "pub fn to_string_lossy(&self)",
           # set_file_name/with_file_name call the stripped file_name;

@@ -49,6 +49,16 @@ int main() {
         assert(s == "/foo");
     }
 
+    STEP("file_name");
+    // file_name(): "/foo/bar" -> Some("bar"); "/" -> None.
+    {
+        auto fnopt = pb.as_path().file_name();
+        assert(fnopt.is_some());
+        assert(sv(fnopt.unwrap()) == "bar");
+        PathBuf root = PathBuf::from(os("/"));
+        assert(root.as_path().file_name().is_none());
+    }
+
     STEP("push/pop");
     // push / pop.
     {

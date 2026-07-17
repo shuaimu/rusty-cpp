@@ -191,6 +191,29 @@ def patch(text: str) -> str:
         "    return _from_u8_tmp;\n",
     )
 
+    # Path::file_name = `next_back().and_then(|p| match p { Normal(p) => Some(p),
+    # _ => None })` returns `&OsStr` borrowed out of next_back()'s OWNED Component
+    # temporary (Component_Normal holds an OsStr BY VALUE in the value port), so
+    # the reference dangles at return (ASan: stack-use-after-return). Materialize
+    # the found component's bytes into a thread_local OsStr — same idiom as
+    # from_u8_slice; callers consume the result immediately. Normal is variant
+    # index 3 (Prefix stripped on Unix: RootDir=0, CurDir=1, ParentDir=2, Normal=3).
+    text = _replace_fn_body(
+        text,
+        "rusty::Option<const rusty::ffi::OsStr&> Path::file_name() const ",
+        "\n"
+        "    thread_local rusty::ffi::OsStr _file_name_tmp;\n"
+        "    auto _comp = this->components().next_back();\n"
+        "    if (_comp.is_some()) {\n"
+        "        auto _c = _comp.unwrap();\n"
+        "        if (_c.index() == 3) {\n"
+        "            _file_name_tmp = std::get<3>(_c)._0;\n"
+        "            return rusty::Option<const rusty::ffi::OsStr&>(_file_name_tmp);\n"
+        "        }\n"
+        "    }\n"
+        "    return rusty::Option<const rusty::ffi::OsStr&>{rusty::None};\n",
+    )
+
     # Path::is_absolute delegates to sys::path::is_absolute(self), which the
     # transpiler mis-lowered to `(*this).is_absolute()` — infinite recursion. On
     # Unix is_absolute == has_root (a leading '/').
