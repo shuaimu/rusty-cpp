@@ -263,15 +263,13 @@ for a in ("pub fn into_boxed_path(self)",
           "impl Clone for Box<Path>", "pub fn into_path_buf(self: Box<Self>)",
           "impl FromStr for PathBuf",
           "impl<'a> From<Cow<'a, Path>> for PathBuf",
-          # file_name is RESTORED: the match-in-lambda return-type bug is fixed in
-          # the transpiler (bug #6), and its value-port dangle (it returned `&OsStr`
-          # into next_back()'s owned Component temporary) is resolved by a
-          # thread_local materialization patch in post_transpile_patch.py (same
-          # idiom as from_u8_slice). file_stem/extension/file_prefix still use
-          # split_file_at_dot (tuple of &OsStr) with the same value-port lifetime
-          # issue but a more tangled shape; to_string_lossy uses Cow. TODO: restore.
-          "pub fn file_stem(&self)",
-          "pub fn extension(&self)", "pub fn file_prefix(&self)",
+          # file_name/file_stem/extension/file_prefix are RESTORED: the
+          # match-in-lambda return-type bug is fixed in the transpiler (bug #6), and
+          # their value-port dangles (they return `&OsStr` borrowed out of an owned
+          # temporary — next_back()'s Component, or split_file_at_dot's tuple) are
+          # resolved by thread_local materialization patches in
+          # post_transpile_patch.py (same idiom as from_u8_slice). to_string_lossy
+          # uses Cow. TODO: restore to_string_lossy.
           "pub fn to_string_lossy(&self)",
           # set_file_name/with_file_name call the stripped file_name;
           # with_trailing_sep (nightly) does self.join("") (str.as_ref, no member).

@@ -59,6 +59,33 @@ int main() {
         assert(root.as_path().file_name().is_none());
     }
 
+    STEP("file_stem/extension/file_prefix");
+    // The file-name family over dotted names.
+    {
+        // "bar": no dot -> stem="bar", ext=None, prefix="bar".
+        assert(sv(pb.as_path().file_stem().unwrap()) == "bar");
+        assert(pb.as_path().extension().is_none());
+        assert(sv(pb.as_path().file_prefix().unwrap()) == "bar");
+
+        // "foo.txt": stem="foo", ext="txt", prefix="foo".
+        PathBuf ft = PathBuf::from(os("/a/foo.txt"));
+        assert(sv(ft.as_path().file_stem().unwrap()) == "foo");
+        assert(sv(ft.as_path().extension().unwrap()) == "txt");
+        assert(sv(ft.as_path().file_prefix().unwrap()) == "foo");
+
+        // "foo.tar.gz": stem uses LAST dot -> "foo.tar"; ext="gz";
+        // prefix uses FIRST dot -> "foo".
+        PathBuf tg = PathBuf::from(os("/foo.tar.gz"));
+        assert(sv(tg.as_path().file_stem().unwrap()) == "foo.tar");
+        assert(sv(tg.as_path().extension().unwrap()) == "gz");
+        assert(sv(tg.as_path().file_prefix().unwrap()) == "foo");
+
+        // ".bashrc": leading dot -> stem=".bashrc", ext=None, prefix=".bashrc".
+        PathBuf hidden = PathBuf::from(os("/home/.bashrc"));
+        assert(sv(hidden.as_path().file_stem().unwrap()) == ".bashrc");
+        assert(hidden.as_path().extension().is_none());
+    }
+
     STEP("push/pop");
     // push / pop.
     {

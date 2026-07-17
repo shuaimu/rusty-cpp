@@ -214,6 +214,69 @@ def patch(text: str) -> str:
         "    return rusty::Option<const rusty::ffi::OsStr&>{rusty::None};\n",
     )
 
+    # file_stem/extension/file_prefix are `file_name().map(r?split_file_at_dot)
+    # .and_then(...)` in Rust — returning `&OsStr` slices of file_name()'s result.
+    # In the value port both file_name()'s thread_local AND split's owned tuple are
+    # temporaries the returned ref would dangle into, and the emitted
+    # Option<OsStr>-value chain doesn't even convert to Option<const OsStr&>.
+    # Reimplement each directly over file_name()'s bytes (byte-find at '.') and
+    # materialize the result into a per-method thread_local OsStr. Mirrors std's
+    # rsplit_file_at_dot (stem=before-or-after, ext=before-and-after; last dot)
+    # and split_file_at_dot (prefix=before; FIRST dot at index >= 1); the leading
+    # dot (index 0) and ".." are treated as an extension-less whole, per std.
+    def _osstr_thread_local_body(tmp, compute):
+        return (
+            "\n"
+            "    thread_local rusty::ffi::OsStr {tmp};\n"
+            "    auto _fn = this->file_name();\n"
+            "    if (_fn.is_none()) {{ return rusty::Option<const rusty::ffi::OsStr&>{{rusty::None}}; }}\n"
+            "    std::string_view _s = _fn.unwrap().as_str_view();\n"
+            "    constexpr auto _npos = std::string_view::npos;\n"
+            "{compute}"
+        ).format(tmp=tmp, compute=compute)
+
+    text = _replace_fn_body(
+        text,
+        "rusty::Option<const rusty::ffi::OsStr&> Path::file_stem() const ",
+        _osstr_thread_local_body(
+            "_stem_tmp",
+            "    std::string_view _r;\n"
+            "    auto _dot = _s.rfind('.');\n"
+            "    if (_s == \"..\" || _dot == _npos || _dot == 0) { _r = _s; }\n"
+            "    else { _r = _s.substr(0, _dot); }\n"
+            "    _stem_tmp = rusty::ffi::OsStr(_r);\n"
+            "    return rusty::Option<const rusty::ffi::OsStr&>(_stem_tmp);\n",
+        ),
+    )
+
+    text = _replace_fn_body(
+        text,
+        "rusty::Option<const rusty::ffi::OsStr&> Path::extension() const ",
+        _osstr_thread_local_body(
+            "_ext_tmp",
+            "    auto _dot = _s.rfind('.');\n"
+            "    if (_s == \"..\" || _dot == _npos || _dot == 0) {\n"
+            "        return rusty::Option<const rusty::ffi::OsStr&>{rusty::None};\n"
+            "    }\n"
+            "    _ext_tmp = rusty::ffi::OsStr(_s.substr(_dot + 1));\n"
+            "    return rusty::Option<const rusty::ffi::OsStr&>(_ext_tmp);\n",
+        ),
+    )
+
+    text = _replace_fn_body(
+        text,
+        "rusty::Option<const rusty::ffi::OsStr&> Path::file_prefix() const ",
+        _osstr_thread_local_body(
+            "_prefix_tmp",
+            "    std::string_view _r;\n"
+            "    auto _dot = _s.find('.', 1);\n"
+            "    if (_s == \"..\" || _dot == _npos) { _r = _s; }\n"
+            "    else { _r = _s.substr(0, _dot); }\n"
+            "    _prefix_tmp = rusty::ffi::OsStr(_r);\n"
+            "    return rusty::Option<const rusty::ffi::OsStr&>(_prefix_tmp);\n",
+        ),
+    )
+
     # Path::is_absolute delegates to sys::path::is_absolute(self), which the
     # transpiler mis-lowered to `(*this).is_absolute()` — infinite recursion. On
     # Unix is_absolute == has_root (a leading '/').
