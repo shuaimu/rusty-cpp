@@ -2310,6 +2310,8 @@ impl CodeGen {
                 }
             }
             "format_args" => self.lower_format_like_tokens(&tokens),
+            "write" => self.lower_write_macro(&tokens, false),
+            "writeln" => self.lower_write_macro(&tokens, true),
             "vec" => {
                 // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}
                 // We can't infer T at this level, so use initializer list
@@ -2378,6 +2380,46 @@ impl CodeGen {
                 format!("/* {}!({}) */", macro_name, tokens)
             }
         }
+    }
+
+    /// Lower `write!(w, fmt, args)` / `writeln!(w, fmt, args)`. In Rust these are
+    /// `w.write_fmt(format_args!(fmt, args))` returning `fmt::Result`; emit
+    /// `rusty::write_fmt(writer, <formatted string>)` — the module-level
+    /// fmt::Write dispatch (member write_fmt → write_str → formatter.write_str).
+    /// `writeln!` appends a newline; `writeln!(w)` writes just the newline. A
+    /// `.unwrap()`/`?` chained onto the macro works because write_fmt returns a
+    /// Result. Without this the macro fell through to the default handler and
+    /// emitted `/* write!(…) */`, an ill-formed void expression.
+    fn lower_write_macro(&self, tokens: &str, newline: bool) -> String {
+        let parts = self.split_macro_args(tokens);
+        let Some(writer_tok) = parts.first() else {
+            return "/* write!() missing writer */".to_string();
+        };
+        // The writer is passed `&mut w` in Rust; peel the reference so the C++
+        // side has a plain lvalue (write_fmt takes it by forwarding reference).
+        let mut writer = if let Ok(expr) = syn::parse_str::<syn::Expr>(writer_tok.trim()) {
+            match self.peel_paren_group_expr(&expr) {
+                syn::Expr::Reference(reference) => self.emit_expr_to_string(&reference.expr),
+                _ => self.emit_expr_to_string(&expr),
+            }
+        } else {
+            self.convert_macro_tokens(writer_tok.trim())
+        };
+        if let Some(stripped) = writer.strip_prefix('&') {
+            writer = stripped.trim_start().to_string();
+        }
+        let formatted = if parts.len() >= 2 {
+            let fmt_tokens = parts[1..].join(",");
+            self.lower_format_like_tokens(&fmt_tokens)
+        } else {
+            "std::string()".to_string()
+        };
+        let payload = if newline {
+            format!("{} + std::string(\"\\n\")", formatted)
+        } else {
+            formatted
+        };
+        format!("rusty::write_fmt({}, {})", writer, payload)
     }
 
     /// Lower `matches!(scrutinee, pattern)` / `matches!(scrutinee, pattern if

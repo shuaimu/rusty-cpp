@@ -44994,6 +44994,9 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         // marker covers all of them; a per-fn list silently missed classifiers
         // used without is_whitespace in the same module.
         "rusty::char_runtime::",
+        // The module-level `rusty::write_fmt` fmt::Write dispatch (emitted in
+        // the same helper block). write!/writeln! and fmt::write lower to it.
+        "rusty::write_fmt(",
         "rusty::is_empty(",
         "rusty::deref_ref(",
         "rusty::deref_mut(",

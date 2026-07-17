@@ -24186,6 +24186,43 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_write_writeln_macros_lower_to_write_fmt() {
+    // write!/writeln! previously fell through to `/* write!(…) */`, so a chained
+    // `.unwrap()` produced ill-formed C++. They now lower to rusty::write_fmt.
+    let w = transpile_str_module(
+        r#"pub fn f(buf: &mut String, x: i32) { write!(buf, "val {}", x).unwrap(); }"#,
+        "wmod",
+    );
+    assert!(
+        w.contains(r#"rusty::write_fmt(buf, std::format("val {}", x)).unwrap()"#),
+        "write!: {w}"
+    );
+    assert!(!w.contains("/* write!"), "no comment fallback: {w}");
+    // The fmt::Write dispatch block must be pulled in.
+    assert!(w.contains("Result write_fmt(Writer"), "write_fmt block: {w}");
+
+    // writeln! appends a newline and still honors inline captures.
+    let wl = transpile_str_module(
+        r#"pub fn f(buf: &mut String, x: i32) { writeln!(buf, "line {x}").unwrap(); }"#,
+        "wlmod",
+    );
+    assert!(
+        wl.contains(r#"rusty::write_fmt(buf, std::format("line {0}", x) + std::string("\n")).unwrap()"#),
+        "writeln!: {wl}"
+    );
+
+    // writeln!(buf) with no format writes just the newline.
+    let wl0 = transpile_str_module(
+        r#"pub fn f(buf: &mut String) { writeln!(buf).unwrap(); }"#,
+        "wl0mod",
+    );
+    assert!(
+        wl0.contains(r#"rusty::write_fmt(buf, std::string() + std::string("\n")).unwrap()"#),
+        "writeln!(buf): {wl0}"
+    );
+}
+
+#[test]
 fn test_leaf5165_scan_chars_item_param_is_whitespace_uses_runtime_helper() {
     let out = transpile_str(
         r#"
