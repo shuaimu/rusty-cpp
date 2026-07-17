@@ -44988,10 +44988,12 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::strip_prefix(",
         "rusty::str_runtime::split(",
         "rusty::proc_macro_runtime::is_available",
-        "rusty::char_runtime::from_u32",
-        "rusty::char_runtime::len_utf8(",
-        "rusty::char_runtime::encode_utf8(",
-        "rusty::char_runtime::is_whitespace(",
+        // Any char_runtime reference needs the block (the classifier family —
+        // is_alphabetic/is_alphanumeric/is_uppercase/to_ascii_uppercase/… — as
+        // well as from_u32/len_utf8/encode_utf8/is_whitespace). The prefix
+        // marker covers all of them; a per-fn list silently missed classifiers
+        // used without is_whitespace in the same module.
+        "rusty::char_runtime::",
         "rusty::is_empty(",
         "rusty::deref_ref(",
         "rusty::deref_mut(",

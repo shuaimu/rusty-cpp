@@ -24166,6 +24166,26 @@ fn test_char_classifier_methods_use_runtime_helpers() {
 }
 
 #[test]
+fn test_char_classifier_alone_emits_char_runtime_block() {
+    // Regression: a module that uses a char classifier WITHOUT is_whitespace
+    // must still emit the `char_runtime` helper block. A per-fn marker list
+    // previously only recognized from_u32/len_utf8/encode_utf8/is_whitespace,
+    // so `is_alphabetic` alone referenced an undefined `char_runtime::`.
+    let out = transpile_str_module(
+        "pub fn only_alpha(c: char) -> bool { c.is_alphabetic() }",
+        "charmod",
+    );
+    assert!(
+        out.contains("rusty::char_runtime::is_alphabetic("),
+        "routing: {out}"
+    );
+    assert!(
+        out.contains("namespace char_runtime {"),
+        "char_runtime block must be emitted: {out}"
+    );
+}
+
+#[test]
 fn test_leaf5165_scan_chars_item_param_is_whitespace_uses_runtime_helper() {
     let out = transpile_str(
         r#"
