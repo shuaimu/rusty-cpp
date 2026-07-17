@@ -8360,6 +8360,42 @@ impl CodeGen {
             };
             return format!("rusty::char_runtime::is_whitespace({})", receiver);
         }
+        // Remaining `char` classifiers / ASCII transforms. C++ `char32_t` is a
+        // primitive with no methods, so `c.is_alphabetic()` etc. must lower to
+        // the `char_runtime` free functions. Gated on a char-like receiver (or a
+        // char predicate on an untyped closure param), same as is_whitespace.
+        if args.is_empty()
+            && self.should_lower_char_is_whitespace_method_call(&mc.receiver)
+            && let Some(char_fn) = match method_name.as_str() {
+                "is_alphabetic" => Some("is_alphabetic"),
+                "is_alphanumeric" => Some("is_alphanumeric"),
+                "is_numeric" => Some("is_numeric"),
+                "is_uppercase" => Some("is_uppercase"),
+                "is_lowercase" => Some("is_lowercase"),
+                "is_control" => Some("is_control"),
+                "is_ascii" => Some("is_ascii"),
+                "is_ascii_alphabetic" => Some("is_ascii_alphabetic"),
+                "is_ascii_alphanumeric" => Some("is_ascii_alphanumeric"),
+                "is_ascii_uppercase" => Some("is_ascii_uppercase"),
+                "is_ascii_lowercase" => Some("is_ascii_lowercase"),
+                "is_ascii_hexdigit" => Some("is_ascii_hexdigit"),
+                "is_ascii_whitespace" => Some("is_ascii_whitespace"),
+                "is_ascii_control" => Some("is_ascii_control"),
+                "is_ascii_graphic" => Some("is_ascii_graphic"),
+                "is_ascii_punctuation" => Some("is_ascii_punctuation"),
+                "to_ascii_uppercase" => Some("to_ascii_uppercase"),
+                "to_ascii_lowercase" => Some("to_ascii_lowercase"),
+                _ => None,
+            }
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::char_runtime::{}({})", char_fn, receiver);
+        }
         if method_name == "is_char_boundary" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {

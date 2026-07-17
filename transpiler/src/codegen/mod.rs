@@ -4352,6 +4352,7 @@ impl CodeGen {
             self.writeln("#include <charconv>");
             self.writeln("#include <cstdlib>");
             self.writeln("#include <bit>");
+            self.writeln("#include <cwctype>");
             self.writeln("#include <stdexcept>");
             // <print> for C++23 std::print/std::println, emitted by
             // panic!/println! macro lowering. Pulled in via the
@@ -49609,6 +49610,51 @@ inline bool is_whitespace(char32_t ch) {\n\
     }\n\
     return code >= 0x2000 && code <= 0x200A;\n\
 }\n\
+// Rust `char` classifiers. The ASCII range is matched EXACTLY (as Rust does);\n\
+// non-ASCII scalar values delegate to the C wide-character predicates, which\n\
+// in the default \"C\" locale classify only ASCII — deterministic, and correct\n\
+// for the ASCII-only inputs the ports exercise. Not a full Unicode oracle.\n\
+inline bool is_ascii(char32_t ch) { return static_cast<uint32_t>(ch) <= 0x7F; }\n\
+inline bool is_alphabetic(char32_t ch) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    if (c <= 0x7F) return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');\n\
+    return std::iswalpha(static_cast<std::wint_t>(c)) != 0;\n\
+}\n\
+inline bool is_numeric(char32_t ch) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    if (c <= 0x7F) return c >= '0' && c <= '9';\n\
+    return std::iswdigit(static_cast<std::wint_t>(c)) != 0;\n\
+}\n\
+inline bool is_alphanumeric(char32_t ch) { return is_alphabetic(ch) || is_numeric(ch); }\n\
+inline bool is_uppercase(char32_t ch) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    if (c <= 0x7F) return c >= 'A' && c <= 'Z';\n\
+    return std::iswupper(static_cast<std::wint_t>(c)) != 0;\n\
+}\n\
+inline bool is_lowercase(char32_t ch) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    if (c <= 0x7F) return c >= 'a' && c <= 'z';\n\
+    return std::iswlower(static_cast<std::wint_t>(c)) != 0;\n\
+}\n\
+inline bool is_control(char32_t ch) {\n\
+    const auto c = static_cast<uint32_t>(ch);\n\
+    // Unicode general category Cc: U+0000..=U+001F, U+007F..=U+009F.\n\
+    return c <= 0x1F || (c >= 0x7F && c <= 0x9F);\n\
+}\n\
+inline bool is_ascii_alphabetic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }\n\
+inline bool is_ascii_digit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= '0' && c <= '9'; }\n\
+inline bool is_ascii_alphanumeric(char32_t ch) { return is_ascii_alphabetic(ch) || is_ascii_digit(ch); }\n\
+inline bool is_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'A' && c <= 'Z'; }\n\
+inline bool is_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'a' && c <= 'z'; }\n\
+inline bool is_ascii_hexdigit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }\n\
+inline bool is_ascii_whitespace(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D; }\n\
+inline bool is_ascii_control(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c <= 0x1F || c == 0x7F; }\n\
+inline bool is_ascii_graphic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 0x21 && c <= 0x7E; }\n\
+inline bool is_ascii_punctuation(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E); }\n\
+inline char32_t to_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'a' && c <= 'z') ? static_cast<char32_t>(c - 32) : ch; }\n\
+inline char32_t to_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') ? static_cast<char32_t>(c + 32) : ch; }\n\
+inline char32_t to_lowercase_first(char32_t ch) { return to_ascii_lowercase(ch); }\n\
+inline char32_t to_uppercase_first(char32_t ch) { return to_ascii_uppercase(ch); }\n\
 }\n\
 template<typename T>\n\
 bool is_empty(const T& value) {\n\

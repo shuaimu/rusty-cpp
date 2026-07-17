@@ -24138,6 +24138,34 @@ fn test_leaf5165_char_is_whitespace_method_call_uses_runtime_helper() {
 }
 
 #[test]
+fn test_char_classifier_methods_use_runtime_helpers() {
+    // C++ char32_t is a primitive with no methods, so every Rust `char`
+    // classifier must lower to a `char_runtime` free function.
+    let cases = [
+        ("is_alphabetic", "is_alphabetic"),
+        ("is_alphanumeric", "is_alphanumeric"),
+        ("is_numeric", "is_numeric"),
+        ("is_uppercase", "is_uppercase"),
+        ("is_lowercase", "is_lowercase"),
+        ("is_control", "is_control"),
+        ("is_ascii_alphanumeric", "is_ascii_alphanumeric"),
+        ("is_ascii_uppercase", "is_ascii_uppercase"),
+        ("is_ascii_hexdigit", "is_ascii_hexdigit"),
+        ("to_ascii_uppercase", "to_ascii_uppercase"),
+        ("to_ascii_lowercase", "to_ascii_lowercase"),
+    ];
+    for (method, helper) in cases {
+        let src = format!("fn f(ch: char) -> bool {{ ch.{method}(); true }}");
+        let out = transpile_str(&src);
+        assert!(
+            out.contains(&format!("rusty::char_runtime::{helper}(ch)")),
+            "method {method}: {out}"
+        );
+        assert!(!out.contains(&format!("ch.{method}()")), "method {method}: {out}");
+    }
+}
+
+#[test]
 fn test_leaf5165_scan_chars_item_param_is_whitespace_uses_runtime_helper() {
     let out = transpile_str(
         r#"
