@@ -6877,6 +6877,34 @@ impl CodeGen {
                         receiver, arg
                     );
                 }
+                if is_int && mc.args.is_empty() && method == "reverse_bits" {
+                    // No single <bit> intrinsic; reverse bit-by-bit over the
+                    // unsigned width. Evaluates the receiver once.
+                    return format!(
+                        "([&]() {{ auto __v = {}; using __U = std::make_unsigned_t<decltype(__v)>; __U __in = static_cast<__U>(__v); __U __out = 0; for (std::size_t __i = 0; __i < sizeof(__U) * 8; ++__i) {{ __out = static_cast<__U>((__out << 1) | (__in & 1)); __in = static_cast<__U>(__in >> 1); }} return static_cast<decltype(__v)>(__out); }}())",
+                        receiver
+                    );
+                }
+                if is_int
+                    && mc.args.len() == 1
+                    && matches!(
+                        method.as_str(),
+                        "overflowing_add" | "overflowing_sub" | "overflowing_mul"
+                    )
+                {
+                    // Rust returns (wrapping_result, overflowed). Use the
+                    // compiler's checked-arithmetic builtins.
+                    let builtin = match method.as_str() {
+                        "overflowing_add" => "__builtin_add_overflow",
+                        "overflowing_sub" => "__builtin_sub_overflow",
+                        _ => "__builtin_mul_overflow",
+                    };
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __a = {}; decltype(__a) __b = {}; decltype(__a) __r; bool __o = {}(__a, __b, &__r); return std::make_tuple(__r, __o); }}())",
+                        receiver, arg, builtin
+                    );
+                }
             }
         }
         if mc.method == "deref" && mc.args.is_empty() {

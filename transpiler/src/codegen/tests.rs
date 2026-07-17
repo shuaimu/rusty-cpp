@@ -24186,6 +24186,24 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_reverse_bits_and_overflowing_ops_lower() {
+    let rb = transpile_str("pub fn f(x: u32) -> u32 { x.reverse_bits() }");
+    assert!(!rb.contains("x.reverse_bits()"), "reverse_bits member call: {rb}");
+    assert!(rb.contains("std::make_unsigned_t<decltype(__v)>"), "{rb}");
+
+    for (m, builtin) in [
+        ("overflowing_add", "__builtin_add_overflow"),
+        ("overflowing_sub", "__builtin_sub_overflow"),
+        ("overflowing_mul", "__builtin_mul_overflow"),
+    ] {
+        let out = transpile_str(&format!("pub fn f(x: i32) -> (i32, bool) {{ x.{m}(1) }}"));
+        assert!(out.contains(builtin), "method {m}: {out}");
+        assert!(out.contains("std::make_tuple(__r, __o)"), "method {m}: {out}");
+        assert!(!out.contains(&format!("x.{m}(")), "method {m} member call: {out}");
+    }
+}
+
+#[test]
 fn test_str_case_and_repeat_methods_materialize_string() {
     // &str is std::string_view in C++ and lacks these members; materialize a
     // rusty::String (which has them).
