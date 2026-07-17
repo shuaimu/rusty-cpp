@@ -2229,10 +2229,15 @@ impl CodeGen {
                 }
             }
             "dbg" => {
-                self.writeln(&format!(
-                    "std::println(stderr, \"{{}}\", {});",
-                    self.convert_macro_tokens(&tokens)
-                ));
+                // Statement position: `dbg!(x);` prints and discards. `dbg!()`
+                // has no operand — emit a bare marker rather than a malformed
+                // `std::println(stderr, "{}", )` with a trailing empty arg.
+                let inner = self.convert_macro_tokens(&tokens);
+                if inner.trim().is_empty() {
+                    self.writeln("std::println(stderr, \"[dbg]\");");
+                } else {
+                    self.writeln(&format!("std::println(stderr, \"{{}}\", {});", inner));
+                }
             }
             "for_both" => {
                 if let Some(lowered) = self.try_lower_for_both_macro_expr(mac) {
@@ -2312,6 +2317,7 @@ impl CodeGen {
             "format_args" => self.lower_format_like_tokens(&tokens),
             "write" => self.lower_write_macro(&tokens, false),
             "writeln" => self.lower_write_macro(&tokens, true),
+            "dbg" => self.lower_dbg_macro(&tokens),
             "vec" => {
                 // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}
                 // We can't infer T at this level, so use initializer list
@@ -2380,6 +2386,34 @@ impl CodeGen {
                 format!("/* {}!({}) */", macro_name, tokens)
             }
         }
+    }
+
+    /// Lower `dbg!(...)`. Rust's `dbg!(e)` prints `e` to stderr and RETURNS the
+    /// value; `dbg!()` returns `()`; `dbg!(a, b)` returns a tuple. It was
+    /// falling through to `/* dbg!(…) */`, which drops the value
+    /// (`let y = dbg!(e)` bound `y` to void). Preserve the VALUE — the stderr
+    /// print is a debugging side effect that never affects program results, so
+    /// we omit it (its `rusty::to_debug_string` helper is block-gated and would
+    /// otherwise force a runtime-helper dependency on a bare `dbg!`).
+    fn lower_dbg_macro(&self, tokens: &str) -> String {
+        let parts: Vec<String> = self
+            .split_macro_args(tokens)
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .collect();
+        if parts.is_empty() {
+            // dbg!() → unit.
+            return "std::make_tuple()".to_string();
+        }
+        if parts.len() == 1 {
+            return format!("({})", self.convert_format_arg_expr(parts[0].trim()));
+        }
+        // dbg!(a, b, …) → tuple of the values.
+        let vals: Vec<String> = parts
+            .iter()
+            .map(|p| self.convert_format_arg_expr(p.trim()))
+            .collect();
+        format!("std::make_tuple({})", vals.join(", "))
     }
 
     /// Lower `write!(w, fmt, args)` / `writeln!(w, fmt, args)`. In Rust these are

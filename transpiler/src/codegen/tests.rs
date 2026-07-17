@@ -24186,6 +24186,20 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_dbg_macro_preserves_value_and_handles_empty() {
+    // Expression position: `dbg!(e)` returns the value (was dropped as a comment).
+    let expr = transpile_str("pub fn f() -> i32 { let y = dbg!(21 + 21); y }");
+    assert!(expr.contains("auto y = (21 + 21)"), "value preserved: {expr}");
+    assert!(!expr.contains("/* dbg!"), "no comment: {expr}");
+    // Statement position: `dbg!()` must not emit a malformed trailing-comma call.
+    let empty = transpile_str("pub fn g() { dbg!(); }");
+    assert!(
+        !empty.contains(r#"std::println(stderr, "{}", )"#),
+        "no malformed empty dbg: {empty}"
+    );
+}
+
+#[test]
 fn test_float_math_methods_lower_to_cmath() {
     // C++ double/float are primitives — Rust float math methods must lower to
     // <cmath> free functions. Gated on a statically-known float receiver.
