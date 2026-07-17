@@ -6905,6 +6905,29 @@ impl CodeGen {
                         receiver, arg, builtin
                     );
                 }
+                if is_int && mc.args.len() == 1 && method == "abs_diff" {
+                    // Returns the UNSIGNED absolute difference; compute in the
+                    // unsigned domain to avoid signed overflow.
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __a = {}; decltype(__a) __b = {}; using __U = std::make_unsigned_t<decltype(__a)>; return __a < __b ? static_cast<__U>(static_cast<__U>(__b) - static_cast<__U>(__a)) : static_cast<__U>(static_cast<__U>(__a) - static_cast<__U>(__b)); }}())",
+                        receiver, arg
+                    );
+                }
+                if is_int && mc.args.len() == 1 && method == "next_multiple_of" {
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __v = {}; decltype(__v) __n = {}; auto __r = __v % __n; return __r == 0 ? __v : static_cast<decltype(__v)>(__v + (__n - __r)); }}())",
+                        receiver, arg
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "ilog2" {
+                    // floor(log2(self)) = bit_width - 1 (self must be > 0, as in Rust).
+                    return format!(
+                        "([&]() {{ auto __v = {}; return static_cast<uint32_t>(std::bit_width(static_cast<std::make_unsigned_t<decltype(__v)>>(__v)) - 1); }}())",
+                        receiver
+                    );
+                }
             }
         }
         if mc.method == "deref" && mc.args.is_empty() {

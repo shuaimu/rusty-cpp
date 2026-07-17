@@ -24186,6 +24186,19 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_abs_diff_next_multiple_ilog2_lower() {
+    for (src, marker, call) in [
+        ("pub fn f(x: i32) -> u32 { x.abs_diff(5) }", "make_unsigned_t<decltype(__a)>", "x.abs_diff("),
+        ("pub fn f(x: u32) -> u32 { x.next_multiple_of(8) }", "__v + (__n - __r)", "x.next_multiple_of("),
+        ("pub fn f(x: u64) -> u32 { x.ilog2() }", "std::bit_width(", "x.ilog2("),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker for {call}: {out}");
+        assert!(!out.contains(call), "member call {call}: {out}");
+    }
+}
+
+#[test]
 fn test_reverse_bits_and_overflowing_ops_lower() {
     let rb = transpile_str("pub fn f(x: u32) -> u32 { x.reverse_bits() }");
     assert!(!rb.contains("x.reverse_bits()"), "reverse_bits member call: {rb}");
