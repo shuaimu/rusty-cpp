@@ -2285,6 +2285,16 @@ impl CodeGen {
         self.enum_type_params
             .insert(name.to_string(), type_params.clone());
         let has_generics = !type_params.is_empty();
+        // A data enum that derives PartialEq/Eq lowers to a struct over
+        // `std::variant<Variant0, …>`, and the enum's derived `==` compares that
+        // std::variant — which requires EACH alternative (the variant member
+        // structs) to have `operator==`. Emit a defaulted one on each variant
+        // struct below. (Rust guarantees all fields are PartialEq, so the default
+        // is never implicitly deleted at a use site.)
+        let enum_derives_eq = self
+            .extract_derives(&e.attrs)
+            .iter()
+            .any(|d| d == "PartialEq" || d == "Eq");
         let template_prefix = if has_generics {
             format!(
                 "template<{}>",
@@ -2421,6 +2431,12 @@ impl CodeGen {
                                 );
                             }
                         }
+                        if enum_derives_eq {
+                            self.writeln(&format!(
+                                "bool operator==(const {}_{}&) const = default;",
+                                name, vname
+                            ));
+                        }
                         self.indent -= 1;
                         self.writeln("};");
                     }
@@ -2452,21 +2468,39 @@ impl CodeGen {
                             );
                             self.writeln(&format!("{} _{};", ftype, i));
                         }
+                        if enum_derives_eq {
+                            self.writeln(&format!(
+                                "bool operator==(const {}_{}&) const = default;",
+                                name, vname
+                            ));
+                        }
                         self.indent -= 1;
                         self.writeln("};");
                     }
                     syn::Fields::Unit => {
+                        // Even an EMPTY variant struct needs `operator==` for the
+                        // enum's std::variant comparison (an empty struct has no
+                        // implicit `==` in C++). A defaulted one on an empty
+                        // struct always compares equal.
+                        let unit_body = if enum_derives_eq {
+                            format!(
+                                "{{ bool operator==(const {}_{}&) const = default; }};",
+                                name, vname
+                            )
+                        } else {
+                            "{};".to_string()
+                        };
                         if has_generics {
                             if enum_export_prefix.is_empty() {
                                 self.writeln(&template_prefix);
                             } else {
                                 self.writeln(&format!("{}{}", enum_export_prefix, template_prefix));
                             }
-                            self.writeln(&format!("struct {}_{} {{}};", name, vname));
+                            self.writeln(&format!("struct {}_{} {}", name, vname, unit_body));
                         } else {
                             self.writeln(&format!(
-                                "{}struct {}_{} {{}};",
-                                enum_export_prefix, name, vname
+                                "{}struct {}_{} {}",
+                                enum_export_prefix, name, vname, unit_body
                             ));
                         }
                     }

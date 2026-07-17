@@ -35461,6 +35461,29 @@ fn test_value_condition_match_applies_guard_on_literal_arm() {
 }
 
 #[test]
+fn test_data_enum_derive_partial_eq_emits_variant_operator_eq() {
+    // A data enum deriving PartialEq/Eq lowers to `struct E : std::variant<E_A,
+    // E_B, E_C>`; its `==` compares the variant, which needs EACH alternative
+    // (the variant member structs) to have `operator==`. Emit a defaulted one on
+    // each — including the empty (unit) variant, which otherwise has no `==`.
+    let out = transpile_str(
+        "#[derive(PartialEq, Eq)] pub enum E { A, B(u32), C { x: i32 } }",
+    );
+    for v in ["E_A", "E_B", "E_C"] {
+        assert!(
+            out.contains(&format!("bool operator==(const {v}&) const = default;")),
+            "variant member struct {v} missing defaulted operator==:\n{out}"
+        );
+    }
+    // Gated on the derive: an enum WITHOUT PartialEq must not get it.
+    let out2 = transpile_str("pub enum F { A, B(u32) }");
+    assert!(
+        !out2.contains("bool operator==(const F_A&)"),
+        "operator== emitted for a non-PartialEq enum:\n{out2}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a

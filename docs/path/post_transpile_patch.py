@@ -153,10 +153,12 @@ def patch(text: str) -> str:
 
     # Component_Normal holds &OsStr in Rust, but the value port builds it from
     # owned OsStr temporaries (from_encoded_bytes_unchecked) — a reference member
-    # would dangle. Store the OsStr by value.
+    # would dangle. Store the OsStr by value. (Replace just the field line — the
+    # struct now also carries a transpiler-emitted `operator== = default` after
+    # it, from derive(PartialEq); the defaulted == then compares the OsStr value.)
     text = text.replace(
-        "export struct Component_Normal {\n    const rusty::ffi::OsStr& _0;\n};",
-        "export struct Component_Normal {\n    rusty::ffi::OsStr _0;\n};",
+        "export struct Component_Normal {\n    const rusty::ffi::OsStr& _0;\n",
+        "export struct Component_Normal {\n    rusty::ffi::OsStr _0;\n",
     )
 
     # parse_single_component matches a &[u8] against b"."/b".."/b"" — the
@@ -286,18 +288,10 @@ def patch(text: str) -> str:
         "\n    return this->has_root();\n",
     )
 
-    # Component is a data enum whose derived PartialEq compares the underlying
-    # std::variant — which needs each alternative to have operator==. The
-    # transpiler emits variant member structs (Component_RootDir/…/Normal)
-    # WITHOUT one, so inject a defaulted == (empty variants compare equal;
-    # Component_Normal's reference member compares its OsStr referent).
-    text = re.sub(
-        r"export struct (Component_[A-Za-z]+) \{([^}]*)\};",
-        lambda m: "export struct {0} {{{1} bool operator==(const {0}&) const = default; }};".format(
-            m.group(1), m.group(2)
-        ),
-        text,
-    )
+    # NOTE: Component's variant member structs (Component_RootDir/…/Normal) now
+    # get their defaulted `operator==` FROM THE TRANSPILER — a data enum deriving
+    # PartialEq emits one on each variant struct (needed for the std::variant
+    # comparison). No injection needed here.
 
     # The dead `self.prefix.map(|p| p.<method>())` branches lose their closure
     # param `p` in emission, leaving it undeclared. These Prefix methods are only
