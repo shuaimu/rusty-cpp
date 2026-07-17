@@ -35507,6 +35507,30 @@ fn test_matches_macro_lowers_to_boolean() {
 }
 
 #[test]
+fn test_diverging_tail_branch_emitted_as_statement_not_returned() {
+    // A diverging if/else branch (panic!/todo!/unreachable!) has no value and its
+    // lowered form is `throw …` / a [[noreturn]] void call — it must be emitted
+    // as a statement, not `return <void>` ("cannot initialize <T> with void").
+    let out = transpile_str("pub fn f(x: i32) -> i32 { if x > 0 { x } else { todo!() } }");
+    assert!(
+        out.contains("throw std::logic_error"),
+        "todo! not lowered:\n{out}"
+    );
+    assert!(
+        !out.contains("return throw"),
+        "diverging todo! branch was wrongly return-wrapped:\n{out}"
+    );
+    // panic! in expression position must emit a real diverging call, not a
+    // `/* panic!(…) */` comment (which is a silent no-op).
+    let out2 = transpile_str(r#"pub fn g(x: i32) -> i32 { if x > 0 { x } else { panic!("no") } }"#);
+    assert!(!out2.contains("/* panic!"), "panic! left as a comment:\n{out2}");
+    assert!(
+        out2.contains("std::abort()"),
+        "panic! not lowered to abort():\n{out2}"
+    );
+}
+
+#[test]
 fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     // A C-like-enum `match` lowered to a C++ `switch` where the same variant
     // appears twice — first guarded, then an unguarded fall-through with a

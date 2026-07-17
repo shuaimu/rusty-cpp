@@ -334,8 +334,14 @@ impl CodeGen {
                 {
                     return;
                 }
-                let should_emit_tail_return =
-                    is_tail && semi.is_none() && self.in_value_return_scope();
+                // A DIVERGING tail (`panic!()`/`todo!()`/`unreachable!()`) has no
+                // value and its lowered form is `throw …` / a [[noreturn]] void
+                // call — `return`ing it from a non-void function is ill-formed
+                // ("cannot initialize <T> with void"). Emit it as a bare statement.
+                let should_emit_tail_return = is_tail
+                    && semi.is_none()
+                    && self.in_value_return_scope()
+                    && !self.tail_diverges_via_void_macro(expr);
                 if !should_emit_tail_return
                     && self.try_emit_statement_compound_assign_without_unit_wrapper(expr)
                 {

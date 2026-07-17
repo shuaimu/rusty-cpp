@@ -1844,6 +1844,35 @@ impl CodeGen {
         }
     }
 
+    /// A tail expression that lowers to a VOID/throw diverging form — the
+    /// `panic!`/`todo!`/`unimplemented!`/`unreachable!`/`abort!` macros (possibly
+    /// inside a `{ … }` / `unsafe { … }` block tail). Unlike the broad
+    /// `is_expr_diverging`, this excludes `return`/`break`/`continue` and
+    /// diverging function calls — those are already emitted correctly in return
+    /// position. Used to avoid `return <void>` for the macro forms only.
+    pub(super) fn tail_diverges_via_void_macro(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Macro(m) => matches!(
+                m.mac
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .as_deref(),
+                Some("panic" | "unreachable" | "unimplemented" | "todo" | "abort")
+            ),
+            syn::Expr::Block(eb) => matches!(
+                eb.block.stmts.last(),
+                Some(syn::Stmt::Expr(e, _)) if self.tail_diverges_via_void_macro(e)
+            ),
+            syn::Expr::Unsafe(u) => matches!(
+                u.block.stmts.last(),
+                Some(syn::Stmt::Expr(e, _)) if self.tail_diverges_via_void_macro(e)
+            ),
+            _ => false,
+        }
+    }
+
     pub(super) fn is_diverging_function_path(path: &str) -> bool {
         // Bare `use`-imported divergent calls arrive as just the leaf name —
         // e.g. `handle_alloc_error(layout)` via `use core::alloc::handle_alloc_error`,

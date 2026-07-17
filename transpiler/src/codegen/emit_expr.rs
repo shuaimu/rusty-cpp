@@ -2385,6 +2385,21 @@ impl CodeGen {
                     self.convert_macro_tokens(&tokens)
                 )
             }
+            "panic" => {
+                // Rust's `panic!()` in expression position (an if/match branch,
+                // a `?`-fallback, etc.). It diverges; emit `std::abort()` (a
+                // [[noreturn]] void expression), printing the message first via an
+                // IIFE when one is given. Mirrors `unreachable!()` below.
+                if tokens.is_empty() {
+                    "std::abort()".to_string()
+                } else {
+                    let args = self.convert_format_args(&tokens);
+                    format!(
+                        "([&]() {{ std::println(stderr, {}); std::abort(); }}())",
+                        args
+                    )
+                }
+            }
             "todo" => "throw std::logic_error(\"not yet implemented\")".to_string(),
             "unimplemented" => "throw std::logic_error(\"not implemented\")".to_string(),
             "unreachable" => {
