@@ -1915,13 +1915,66 @@ impl CodeGen {
                     self.writeln(&format!("static {} default_() {{ return {{}}; }}", name));
                 }
                 "Debug" => {
-                    // Simple stream operator stub
+                    // Real derive(Debug) repr: `Name { field: <dbg>, … }` /
+                    // `Name(<dbg>, …)` / `Name`. Emitted as a member the
+                    // runtime to_debug_string prefers over its generic
+                    // fallbacks (the old stub printed `Name { ... }`,
+                    // silently dropping every field value).
+                    let debug_body = match &s.fields {
+                        syn::Fields::Named(fields) => {
+                            let pieces: Vec<String> = fields
+                                .named
+                                .iter()
+                                .filter_map(|field| field.ident.as_ref())
+                                .map(|ident| {
+                                    let rust_name = ident.to_string();
+                                    let cpp_name = named_field_cpp_names
+                                        .get(&rust_name)
+                                        .cloned()
+                                        .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                                    format!(
+                                        "\"{}: \" + rusty::to_debug_string(this->{})",
+                                        rust_name, cpp_name
+                                    )
+                                })
+                                .collect();
+                            if pieces.is_empty() {
+                                format!("return std::string(\"{}\");", name)
+                            } else {
+                                format!(
+                                    "return std::string(\"{} {{ \") + {} + \" }}\";",
+                                    name,
+                                    pieces.join(" + \", \" + ")
+                                )
+                            }
+                        }
+                        syn::Fields::Unnamed(fields) => {
+                            let pieces: Vec<String> = (0..fields.unnamed.len())
+                                .map(|idx| format!("rusty::to_debug_string(this->_{})", idx))
+                                .collect();
+                            if pieces.is_empty() {
+                                format!("return std::string(\"{}\");", name)
+                            } else {
+                                format!(
+                                    "return std::string(\"{}(\") + {} + \")\";",
+                                    name,
+                                    pieces.join(" + \", \" + ")
+                                )
+                            }
+                        }
+                        syn::Fields::Unit => format!("return std::string(\"{}\");", name),
+                    };
+                    self.writeln("std::string rusty_debug_string() const {");
+                    self.indent += 1;
+                    self.writeln(&debug_body);
+                    self.indent -= 1;
+                    self.writeln("}");
                     self.writeln(&format!(
                         "friend std::ostream& operator<<(std::ostream& os, const {}& v) {{",
                         name
                     ));
                     self.indent += 1;
-                    self.writeln(&format!("return os << \"{} {{ ... }}\";", name));
+                    self.writeln("return os << v.rusty_debug_string();");
                     self.indent -= 1;
                     self.writeln("}");
                 }

@@ -14919,6 +14919,42 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_derive_debug_emits_real_field_repr() {
+    let out = transpile_str(
+        r#"
+        #[derive(Debug)]
+        struct P { x: i32, y: i32 }
+        #[derive(Debug)]
+        struct Pt(i32, i32);
+        fn f(p: P, t: Pt) {
+            println!("{:?}", p);
+            println!("{:#?}", t);
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty_debug_string"),
+        "derive(Debug) must emit a real debug repr member:\n{}",
+        out
+    );
+    assert!(
+        out.contains("\"x: \" + rusty::to_debug_string(this->x)"),
+        "named fields must appear in the repr:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("{ ... }"),
+        "the field-dropping stub must be gone:\n{}",
+        out
+    );
+    assert!(
+        out.contains("rusty::detail::pretty_debug_string("),
+        "module prelude must define the pretty helper the {{:#?}} lowering calls:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_float_precision_specs_gain_fixed_notation_type_char() {
     let out = transpile_str(
         r#"

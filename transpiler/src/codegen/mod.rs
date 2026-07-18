@@ -45175,6 +45175,12 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         // the same helper block). write!/writeln! and fmt::write lower to it.
         "rusty::write_fmt(",
         "rusty::is_empty(",
+        // Debug-format family: {:?}/{:#?} lower to these, and derive(Debug)
+        // structs emit a rusty_debug_string() member calling to_debug_string.
+        // Without markers the emissions referenced undefined helpers.
+        "rusty::to_debug_string",
+        "rusty::detail::escape_debug_string(",
+        "rusty::detail::pretty_debug_string(",
         // Slice-algorithm helpers emitted in this block: without their own
         // markers, a module whose ONLY block reference is one of these calls
         // (array receiver, no panicking/str_runtime hit) referenced an
@@ -45461,13 +45467,174 @@ std::string to_string(const T& value) {
 // emitting a duplicate here makes a qualified `rusty::clone(...)` call
 // ambiguous for any type both overloads accept (e.g. `rusty::String`), so we
 // omit it — mirroring the non-module helper text in `runtime_path_fallback_helpers_text`.
+namespace detail {
+inline std::string escape_debug_string(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    for (char ch : input) {
+        switch (ch) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out.push_back(ch); break;
+        }
+    }
+    return out;
+}
+inline std::string pretty_debug_string(std::string_view input) {
+    if (input.find(',') == std::string_view::npos
+        && input.find('[') == std::string_view::npos
+        && input.find('{') == std::string_view::npos) {
+        return std::string(input);
+    }
+    struct Frame {
+        char open;
+        bool saw_value;
+        bool last_was_comma;
+    };
+    auto matching_close = [](char open) {
+        switch (open) {
+            case '(': return ')';
+            case '[': return ']';
+            case '{': return '}';
+            default: return '\0';
+        }
+    };
+    auto append_indent = [](std::string& out, std::size_t spaces) {
+        out.append(spaces, ' ');
+    };
+    auto is_ws = [](char c) {
+        return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == '\v';
+    };
+
+    std::string out;
+    out.reserve(input.size() + 32);
+    std::vector<Frame> stack;
+    bool in_string = false;
+    bool escaped = false;
+
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const char ch = input[i];
+        if (in_string) {
+            out.push_back(ch);
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (is_ws(ch)) {
+            continue;
+        }
+        if (ch == '"') {
+            if (!stack.empty()) {
+                stack.back().saw_value = true;
+                stack.back().last_was_comma = false;
+            }
+            in_string = true;
+            out.push_back(ch);
+            continue;
+        }
+        if (ch == '(' || ch == '[' || ch == '{') {
+            if (!stack.empty()) {
+                stack.back().saw_value = true;
+                stack.back().last_was_comma = false;
+            }
+            if (ch == '{' && !out.empty() && out.back() != ' ' && out.back() != '\n') {
+                out.push_back(' ');
+            }
+            out.push_back(ch);
+            stack.push_back(Frame{ch, false, false});
+            std::size_t j = i + 1;
+            while (j < input.size() && is_ws(input[j])) {
+                ++j;
+            }
+            if (j < input.size() && input[j] != matching_close(ch)) {
+                out.push_back('\n');
+                append_indent(out, stack.size() * 4);
+            }
+            continue;
+        }
+        if (!stack.empty() && ch == ',') {
+            out.push_back(',');
+            stack.back().last_was_comma = true;
+            out.push_back('\n');
+            append_indent(out, stack.size() * 4);
+            continue;
+        }
+        if (!stack.empty() && ch == matching_close(stack.back().open)) {
+            auto frame = stack.back();
+            stack.pop_back();
+            if (frame.saw_value && !frame.last_was_comma) {
+                out.push_back(',');
+            }
+            if (frame.saw_value) {
+                out.push_back('\n');
+                append_indent(out, stack.size() * 4);
+            }
+            out.push_back(ch);
+            if (!stack.empty()) {
+                stack.back().saw_value = true;
+                stack.back().last_was_comma = false;
+            }
+            continue;
+        }
+        out.push_back(ch);
+        if (ch == ':') {
+            out.push_back(' ');
+        }
+        if (!stack.empty()) {
+            stack.back().saw_value = true;
+            stack.back().last_was_comma = false;
+        }
+    }
+    return out;
+}
+}
 template<typename T>
 std::string to_debug_string(const T& value) {
-    return rusty::to_string(value);
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    if constexpr (requires { value.rusty_debug_string(); }) {
+        return value.rusty_debug_string();
+    } else if constexpr (std::is_convertible_v<T, std::string_view>) {
+        return std::string("\"")
+            + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
+            + "\"";
+    } else if constexpr (requires { value.as_str(); }) {
+        auto s = value.as_str();
+        if constexpr (requires { s.is_some(); s.unwrap(); }) {
+            return std::string("\"")
+                + rusty::detail::escape_debug_string(s.is_some() ? std::string(s.unwrap()) : std::string())
+                + "\"";
+        } else {
+            return std::string("\"")
+                + rusty::detail::escape_debug_string(std::string(s))
+                + "\"";
+        }
+    } else if constexpr (!std::is_arithmetic_v<Value> && requires { std::begin(value); std::end(value); }) {
+        std::string out = "[";
+        bool first = true;
+        for (const auto& item : value) {
+            if (!first) {
+                out += ", ";
+            }
+            first = false;
+            out += rusty::to_debug_string(item);
+        }
+        out += "]";
+        return out;
+    } else {
+        return rusty::to_string(value);
+    }
 }
 template<typename T>
 std::string to_debug_string_pretty(const T& value) {
-    return rusty::to_debug_string(value);
+    return rusty::detail::pretty_debug_string(rusty::to_debug_string(value));
 }
 namespace panicking {
 enum class AssertKind { Eq, Ne };
@@ -48616,6 +48783,9 @@ inline std::string pretty_debug_string(std::string_view input) {\n\
                 stack.back().saw_value = true;\n\
                 stack.back().last_was_comma = false;\n\
             }\n\
+            if (ch == '{' && !out.empty() && out.back() != ' ' && out.back() != '\\n') {\n\
+                out.push_back(' ');\n\
+            }\n\
             out.push_back(ch);\n\
             stack.push_back(Frame{ch, false, false});\n\
             std::size_t j = i + 1;\n\
@@ -48653,6 +48823,9 @@ inline std::string pretty_debug_string(std::string_view input) {\n\
             continue;\n\
         }\n\
         out.push_back(ch);\n\
+        if (ch == ':') {\n\
+            out.push_back(' ');\n\
+        }\n\
         if (!stack.empty()) {\n\
             stack.back().saw_value = true;\n\
             stack.back().last_was_comma = false;\n\
@@ -48739,7 +48912,9 @@ requires (\n\
 template<typename T>\n\
 std::string to_debug_string(const T& value) {\n\
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
-    if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {\n\
+    if constexpr (requires { value.rusty_debug_string(); }) {\n\
+        return value.rusty_debug_string();\n\
+    } else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {\n\
         return std::to_string(static_cast<int>(value));\n\
     } else if constexpr (std::is_same_v<Value, char>\n\
         || std::is_same_v<Value, signed char>\n\
