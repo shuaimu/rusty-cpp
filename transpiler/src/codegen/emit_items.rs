@@ -264,6 +264,13 @@ impl CodeGen {
         // Skip #[cfg(test)] functions in non-test output
         // (they'll be emitted separately as test cases)
 
+        // Anchor for relocated local trait-adapter specializations: they must
+        // be DEFINED before the first function body that materializes one at
+        // a `&dyn Trait` call site (see emit_local_trait_adapter_specializations).
+        if self.local_adapter_insert_pos.is_none() && self.module_stack.is_empty() {
+            self.local_adapter_insert_pos = Some(self.output.len());
+        }
+
         if self.is_rust_libtest_main(f) {
             self.writeln("// Rust-only libtest main omitted");
             return;

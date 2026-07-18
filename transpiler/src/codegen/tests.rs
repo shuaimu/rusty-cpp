@@ -8171,9 +8171,13 @@ fn test_trait_bound() {
 
 #[test]
 fn test_multiple_bounds() {
+    // Clone maps to the std::copyable concept; Send has no C++ analog and
+    // emits NO constraint (the old `SendFacade::is_satisfied_by<T>()` was an
+    // unbound identifier — no Facade type is ever generated).
     let out = transpile_str("fn f<T: Clone + Send>(x: T) {}");
     assert!(out.contains("requires"));
-    assert!(out.contains("&&"));
+    assert!(out.contains("std::copyable<T>"));
+    assert!(!out.contains("Facade::is_satisfied_by"));
 }
 
 #[test]
@@ -14916,6 +14920,74 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
     assert!(out.contains("struct OnceCell"), "{out}");
     assert!(out.contains("void init("), "{out}");
     assert!(out.contains("cell.init("), "{out}");
+}
+
+#[test]
+fn test_generic_fn_trait_bound_emits_no_phantom_facade_requires() {
+    let out = transpile_str(
+        r#"
+        trait Area { fn area(&self) -> i64; }
+        struct Sq { s: i64 }
+        impl Area for Sq { fn area(&self) -> i64 { self.s * self.s } }
+        fn total<T: Area>(x: &T) -> i64 { x.area() + 1 }
+        fn with_where<T>(x: &T) -> i64 where T: Area { x.area() }
+        fn f() -> i64 { let q = Sq { s: 4 }; total(&q) + with_where(&q) }
+        "#,
+    );
+    assert!(
+        !out.contains("Facade::is_satisfied_by"),
+        "no Facade type is ever generated; the requires clause was an unbound identifier:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_impl_trait_return_uses_deduction_not_abstract_class() {
+    let out = transpile_str(
+        r#"
+        trait Shape { fn area(&self) -> i64; }
+        struct Circle { r: i64 }
+        impl Shape for Circle { fn area(&self) -> i64 { 3 * self.r * self.r } }
+        fn make(r: i64) -> impl Shape { Circle { r } }
+        fn f() -> i64 { make(4).area() }
+        "#,
+    );
+    assert!(
+        out.contains("auto make(") || out.contains("auto ::make("),
+        "-> impl Trait must lower to a deduced return type:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Shape make("),
+        "returning the abstract interface class by value is ill-formed:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_dyn_adapter_specializations_precede_first_function() {
+    let out = transpile_str(
+        r#"
+        trait Speak { fn volume(&self) -> i32; }
+        struct Dog;
+        impl Speak for Dog { fn volume(&self) -> i32 { 10 } }
+        fn loudness(s: &dyn Speak) -> i32 { s.volume() * 2 }
+        fn f() -> i32 { let d = Dog; loudness(&d) }
+        "#,
+    );
+    let spec = out
+        .find("class SpeakAdapterRef<")
+        .expect("adapter specialization missing");
+    let use_site = out
+        .find("SpeakAdapterRef<std::remove_cvref_t")
+        .expect("adapter use site missing");
+    assert!(
+        spec < use_site,
+        "explicit specialization must be defined before its first use (spec at {}, use at {}):\n{}",
+        spec,
+        use_site,
+        out
+    );
 }
 
 #[test]

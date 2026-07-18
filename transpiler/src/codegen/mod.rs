@@ -1047,6 +1047,13 @@ pub struct CodeGen {
     /// Used to avoid duplicate full C-like enum definitions from the global
     /// recursive forward-declaration pass.
     pub(crate) module_body_forward_decl_pass: bool,
+    /// Output position of the first top-level function DEFINITION. Local
+    /// trait-adapter explicit specializations are relocated here: C++
+    /// requires an explicit specialization to be defined before its first
+    /// use, and function bodies materialize `TraitAdapterRef<U>(x)` at
+    /// `&dyn Trait` call sites — appending the specializations at file end
+    /// left them after `main()`.
+    pub(crate) local_adapter_insert_pos: Option<usize>,
     /// Depth counter for type argument nesting.  When > 0, `impl Trait` maps
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).
@@ -1914,6 +1921,7 @@ impl CodeGen {
             forward_emitted_c_like_enums: HashSet::new(),
             forward_emitted_consts: HashSet::new(),
             module_body_forward_decl_pass: false,
+            local_adapter_insert_pos: None,
             type_arg_nesting: std::cell::Cell::new(0),
             unwrap_tmp_counter: std::cell::Cell::new(0),
             iflet_result_counter: 0,
@@ -4644,7 +4652,20 @@ impl CodeGen {
         // These cases don't go through the rusty_ext free-function pipeline
         // (their methods are merged into U's struct as inherent methods),
         // so the Adapter delegates directly to value_.method(args...).
+        // C++ requires explicit specializations to be defined before first
+        // use; function bodies materialize `TraitAdapterRef<U>(x)` at
+        // `&dyn Trait` call sites, so relocate the specializations to just
+        // before the first top-level function definition instead of leaving
+        // them appended after main().
+        let adapter_start = self.output.len();
         self.emit_local_trait_adapter_specializations(&file.items);
+        if let Some(anchor) = self.local_adapter_insert_pos
+            && anchor < adapter_start
+            && self.output.len() > adapter_start
+        {
+            let adapters = self.output.split_off(adapter_start);
+            self.output.insert_str(anchor, &adapters);
+        }
         log_emit("emit_local_trait_adapter_specializations");
 
         // UFCS trait migration, Phase 2 (book § 3.2.2): emit

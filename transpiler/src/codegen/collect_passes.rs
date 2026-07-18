@@ -6160,7 +6160,12 @@ impl CodeGen {
         emitted_type_params: &[&syn::TypeParam],
     ) -> Vec<String> {
         let mut constraints: Vec<String> = Vec::new();
-        let skip_facade_constraints = self.module_name.is_some();
+        // User-trait bounds intentionally emit NO constraint: nothing ever
+        // generates a `<Trait>Facade` type, so the old
+        // `<Trait>Facade::is_satisfied_by<T>()` clause was an unbound
+        // identifier in every non-module output (modules already skipped it,
+        // and impl-level bounds are dropped the same way). Only the
+        // well-known std/runtime concepts survive as real constraints.
 
         for tp in emitted_type_params {
             for bound in &tp.bounds {
@@ -6169,14 +6174,6 @@ impl CodeGen {
                         if !self.trait_path_is_crate_declared_local(&tb.path) {
                             constraints.push(format!("{}<{}>", concept, tp.ident));
                         }
-                        continue;
-                    }
-                    if skip_facade_constraints {
-                        continue;
-                    }
-                    if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
-                        constraints
-                            .push(format!("{}::is_satisfied_by<{}>()", facade_name, tp.ident));
                     }
                 }
             }
@@ -6192,16 +6189,6 @@ impl CodeGen {
                                 if !self.trait_path_is_crate_declared_local(&tb.path) {
                                     constraints.push(format!("{}<{}>", concept, ty_name));
                                 }
-                                continue;
-                            }
-                            if skip_facade_constraints {
-                                continue;
-                            }
-                            if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
-                                constraints.push(format!(
-                                    "{}::is_satisfied_by<{}>()",
-                                    facade_name, ty_name
-                                ));
                             }
                         }
                     }

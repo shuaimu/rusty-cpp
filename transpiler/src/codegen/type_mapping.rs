@@ -3755,11 +3755,15 @@ impl CodeGen {
                     if let Some(concrete) = self.try_map_fn_trait(tb) {
                         return concrete;
                     }
-                    // First trait bound isn't Fn-family (e.g. `impl Iterator`);
-                    // fall through to the normal impl-Trait handling in map_type.
                     break;
                 }
             }
+            // Non-Fn `-> impl Trait`: Rust guarantees exactly one concrete
+            // type per function, so C++ return-type deduction produces it.
+            // The old fallthrough mapped this to the abstract interface class
+            // returned BY VALUE (ill-formed twice over: abstract return type,
+            // and no derived-to-base value conversion exists).
+            return "auto".to_string();
         }
         self.map_type(ty)
     }
