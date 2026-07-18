@@ -471,11 +471,18 @@ bool contains(const Haystack& haystack, const Needle& needle) {
         return h.find(n) != std::string_view::npos;
     } else if constexpr (requires { std::begin(haystack); std::end(haystack); }) {
         for (const auto& item : haystack) {
-            if constexpr (requires { item == needle; }) {
+            // Raw arms only when item/needle pointer-ness matches — clang
+            // accepts a pointer-vs-integer comparison inside `requires`
+            // (C-compat) and then hard-errors on the instantiation, so an
+            // int item vs int* needle must fall to the peeled arms below.
+            constexpr bool ptr_match =
+                std::is_pointer_v<std::remove_cvref_t<decltype(item)>>
+                == std::is_pointer_v<std::remove_cvref_t<Needle>>;
+            if constexpr (ptr_match && requires { item == needle; }) {
                 if (item == needle) {
                     return true;
                 }
-            } else if constexpr (requires { needle == item; }) {
+            } else if constexpr (ptr_match && requires { needle == item; }) {
                 if (needle == item) {
                     return true;
                 }
