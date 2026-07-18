@@ -3381,10 +3381,21 @@ impl CodeGen {
                                 )))
                         })
                     });
+                // Move closures are emitted as `mutable` lambdas (captures are
+                // owned and may be consumed), so even a non-`mut` Rust binding
+                // must not be const — `const auto f = [...] mutable {...}` makes
+                // every call ill-formed.
+                let init_is_move_closure = local.init.as_ref().is_some_and(|init| {
+                    matches!(
+                        self.peel_paren_group_expr(&init.expr),
+                        syn::Expr::Closure(c) if c.capture.is_some()
+                    )
+                });
                 let qualifier = if emits_ref_binding {
                     if is_mut { "" } else { "const " }
                 } else if is_mut
                     || is_consumed
+                    || init_is_move_closure
                     || init_is_ptr_read
                     || local.init.as_ref().is_some_and(|init| {
                         matches!(

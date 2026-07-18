@@ -2140,17 +2140,36 @@ impl CodeGen {
         let tokens = mac.tokens.to_string();
 
         match macro_name.as_str() {
+            // The println family shares format!'s smart gate: args the dumb
+            // token pass-through can't reproduce (casts, calls, references,
+            // keyword-escaped locals…) lower through emit_expr via
+            // lower_format_like_tokens, wrapped as std::println("{}", fmt).
             "println" => {
-                let args = self.convert_format_args(&tokens);
-                self.writeln(&format!("std::println({});", args));
+                if self.format_tokens_need_smart_lowering(&tokens) {
+                    let formatted = self.lower_format_like_tokens(&tokens);
+                    self.writeln(&format!("std::println(\"{{}}\", {});", formatted));
+                } else {
+                    let args = self.convert_format_args(&tokens);
+                    self.writeln(&format!("std::println({});", args));
+                }
             }
             "eprintln" => {
-                let args = self.convert_format_args(&tokens);
-                self.writeln(&format!("std::println(stderr, {});", args));
+                if self.format_tokens_need_smart_lowering(&tokens) {
+                    let formatted = self.lower_format_like_tokens(&tokens);
+                    self.writeln(&format!("std::println(stderr, \"{{}}\", {});", formatted));
+                } else {
+                    let args = self.convert_format_args(&tokens);
+                    self.writeln(&format!("std::println(stderr, {});", args));
+                }
             }
             "print" => {
-                let args = self.convert_format_args(&tokens);
-                self.writeln(&format!("std::print({});", args));
+                if self.format_tokens_need_smart_lowering(&tokens) {
+                    let formatted = self.lower_format_like_tokens(&tokens);
+                    self.writeln(&format!("std::print(\"{{}}\", {});", formatted));
+                } else {
+                    let args = self.convert_format_args(&tokens);
+                    self.writeln(&format!("std::print({});", args));
+                }
             }
             "panic" => {
                 if tokens.is_empty() {
@@ -23400,8 +23419,19 @@ impl CodeGen {
         // (which binds `i` via `deref_if_pointer_like`) still fires. Without this the
         // binding is dropped: the param is emitted as an anonymous `_` while the body
         // still references `i` (indexmap's `move |&i: &usize| entries[i]…`).
+        // Same for a TYPED destructure param `|(a, b): (i32, i32)|` — without the
+        // unwrap it falls to emit_closure_param's Pat::Type arm, which names the
+        // param `_` and silently drops the bindings the body references.
         let pat = match pat {
-            syn::Pat::Type(pt) if matches!(pt.pat.as_ref(), syn::Pat::Reference(_)) => {
+            syn::Pat::Type(pt)
+                if matches!(
+                    pt.pat.as_ref(),
+                    syn::Pat::Reference(_)
+                        | syn::Pat::Tuple(_)
+                        | syn::Pat::TupleStruct(_)
+                        | syn::Pat::Struct(_)
+                ) =>
+            {
                 pt.pat.as_ref()
             }
             other => other,

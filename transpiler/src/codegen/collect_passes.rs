@@ -8984,6 +8984,41 @@ impl CodeGen {
         for stmt in stmts {
             rest_visitor.visit_stmt(stmt);
         }
+        // A `move` closure init-captures its free variables by value via
+        // `x = std::move(x)` — locals it references must not bind const, or
+        // the move decays to a (possibly deleted) copy.
+        struct MoveClosureCaptures<'a> {
+            result: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for MoveClosureCaptures<'_> {
+            fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+                if c.capture.is_some() {
+                    struct Idents<'a> {
+                        result: &'a mut HashSet<String>,
+                    }
+                    impl<'ast> Visit<'ast> for Idents<'_> {
+                        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+                            if p.qself.is_none() && p.path.segments.len() == 1 {
+                                self.result
+                                    .insert(p.path.segments[0].ident.to_string());
+                            }
+                            visit::visit_expr_path(self, p);
+                        }
+                    }
+                    let mut idents = Idents {
+                        result: self.result,
+                    };
+                    idents.visit_expr(&c.body);
+                }
+                visit::visit_expr_closure(self, c);
+            }
+        }
+        let mut capture_visitor = MoveClosureCaptures {
+            result: &mut result,
+        };
+        for stmt in stmts {
+            capture_visitor.visit_stmt(stmt);
+        }
         result
     }
 
@@ -9001,7 +9036,57 @@ impl CodeGen {
             syn::Stmt::Expr(expr, _) => {
                 self.collect_value_call_argument_locals_in_expr(expr, result);
             }
-            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+            syn::Stmt::Macro(sm) => {
+                self.collect_value_call_argument_locals_in_macro(&sm.mac, result);
+            }
+            syn::Stmt::Item(_) => {}
+        }
+    }
+
+    /// Call arguments inside format-like macro token streams (`println!("{}",
+    /// consume(x))`) are invisible to the AST walkers above — parse each
+    /// top-level macro arg back to an expression so by-value consumption of
+    /// locals is still detected.
+    pub(super) fn collect_value_call_argument_locals_in_macro(
+        &self,
+        mac: &syn::Macro,
+        result: &mut HashSet<String>,
+    ) {
+        let name = mac
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        if !matches!(
+            name.as_str(),
+            "println"
+                | "print"
+                | "eprintln"
+                | "eprint"
+                | "format"
+                | "format_args"
+                | "write"
+                | "writeln"
+                | "panic"
+                | "assert"
+                | "debug_assert"
+                | "assert_eq"
+                | "assert_ne"
+                | "debug_assert_eq"
+                | "debug_assert_ne"
+                | "vec"
+                | "matches"
+                | "dbg"
+                | "unreachable"
+                | "todo"
+        ) {
+            return;
+        }
+        for part in self.split_macro_args(&mac.tokens.to_string()) {
+            if let Ok(expr) = syn::parse_str::<syn::Expr>(part.trim()) {
+                self.collect_value_call_argument_locals_in_expr(&expr, result);
+            }
         }
     }
 
@@ -9168,6 +9253,9 @@ impl CodeGen {
             }
             syn::Expr::Closure(closure) => {
                 self.collect_value_call_argument_locals_in_expr(&closure.body, result)
+            }
+            syn::Expr::Macro(macro_expr) => {
+                self.collect_value_call_argument_locals_in_macro(&macro_expr.mac, result)
             }
             syn::Expr::Let(let_expr) => {
                 self.collect_value_call_argument_locals_in_expr(&let_expr.expr, result)

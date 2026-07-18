@@ -14919,6 +14919,82 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_move_closure_local_and_captured_source_bind_non_const() {
+    let out = transpile_str(
+        r#"
+        fn f() -> usize {
+            let name = String::from("alice");
+            let greet = move || name.len();
+            greet()
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto greet"),
+        "move closures are mutable lambdas; the binding must not be const:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("const auto name"),
+        "a local move-captured via x = std::move(x) must not bind const:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_typed_tuple_closure_param_destructures_in_body() {
+    let out = transpile_str(
+        r#"
+        fn f(pairs: &[(i32, i32)]) -> i32 {
+            let mut total = 0;
+            for s in pairs.iter().map(|(a, b): &(i32, i32)| a + b) {
+                total += s;
+            }
+            total
+        }
+        "#,
+    );
+    assert!(
+        out.contains("_destruct_param"),
+        "typed tuple closure param must destructure through a temp:\n{}",
+        out
+    );
+    assert!(
+        out.contains("std::get<0>") && out.contains("std::get<1>"),
+        "tuple elements must be bound in the body:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_println_call_args_route_through_smart_lowering() {
+    let out = transpile_str(
+        r#"
+        fn call_it(f: Box<dyn Fn(i32) -> i32>, v: i32) -> i32 { f(v) }
+        fn g() {
+            let double = Box::new(|x: i32| x * 2);
+            println!("{}", call_it(double, 5));
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::format("),
+        "println with call args must take the smart path:\n{}",
+        out
+    );
+    assert!(
+        out.contains("std::move(double_)"),
+        "keyword-escaped consumed local must emit escaped + moved:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("call_it (double ,"),
+        "dumb token pass-through must not leak the unescaped keyword:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_struct_update_call_base_evaluates_once() {
     let out = transpile_str(
         r#"

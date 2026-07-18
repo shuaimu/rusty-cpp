@@ -306,6 +306,22 @@ public:
         }
     }
 
+    // Rust `Box<dyn Fn…>` calls through the box. Forwarding operator() makes a
+    // boxed callable itself callable — and therefore convertible to
+    // rusty::Function (whose constructor requires an invocable), so
+    // `Box::new(closure)` flows into `Box<dyn Fn>`-typed parameters.
+    template<typename... CallArgs>
+        requires std::invocable<T&, CallArgs...>
+    decltype(auto) operator()(CallArgs&&... args) {
+        return (**this)(std::forward<CallArgs>(args)...);
+    }
+
+    template<typename... CallArgs>
+        requires std::invocable<const T&, CallArgs...>
+    decltype(auto) operator()(CallArgs&&... args) const {
+        return (**this)(std::forward<CallArgs>(args)...);
+    }
+
     // Rust Box::as_mut / Box::as_ref — borrow the boxed value.
     // @lifetime: (&'a mut) -> &'a mut
     T& as_mut() {
