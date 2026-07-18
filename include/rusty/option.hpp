@@ -507,6 +507,119 @@ public:
         return default_fn();
     }
 
+    // Rust parity: Option::filter(self, pred) -> Option<T>. Keeps Some(x) only
+    // when pred(&x) holds; otherwise None. Consumes self (like Rust).
+    template<typename P>
+    Option filter(P&& pred) {
+        if (has_value && std::forward<P>(pred)(value)) {
+            return Option(std::move(value));
+        }
+        return Option(None);
+    }
+    template<typename P>
+    Option filter(P&& pred) const {
+        if (has_value && std::forward<P>(pred)(value)) {
+            return Option(value);
+        }
+        return Option(None);
+    }
+
+    // Rust parity: Option::is_none_or(self, pred) -> bool (1.82+). True when
+    // None, or when pred(&x) holds for the contained value.
+    template<typename P>
+    bool is_none_or(P&& pred) const {
+        return !has_value || std::forward<P>(pred)(value);
+    }
+
+    // Rust parity: Option::inspect(self, f) -> Option<T>. Runs f(&x) for its
+    // side effect when Some, then returns self unchanged (for chaining).
+    template<typename F>
+    Option inspect(F&& f) && {
+        if (has_value) {
+            std::forward<F>(f)(value);
+        }
+        return std::move(*this);
+    }
+    template<typename F>
+    Option inspect(F&& f) const& {
+        if (has_value) {
+            std::forward<F>(f)(value);
+        }
+        return *this;
+    }
+
+    // Rust parity: Option::and(self, optb) -> Option<U>. optb when self is
+    // Some, else None. (Transpiler renames `and` -> `and_`.)
+    template<typename U>
+    Option<U> and_(Option<U> optb) const {
+        if (has_value) {
+            return optb;
+        }
+        return Option<U>(None);
+    }
+
+    // Rust parity: Option::xor(self, other) -> Option<T>. Some iff exactly one
+    // of the two is Some. (Transpiler renames `xor` -> `xor_`.)
+    Option xor_(Option other) {
+        if (has_value != other.has_value) {
+            return has_value ? Option(std::move(value)) : std::move(other);
+        }
+        return Option(None);
+    }
+
+    // Rust parity: Option<T: Deref>::as_deref(&self) -> Option<&Target>.
+    // Return type deduced from the body, so only instantiated when called
+    // (where T is a smart pointer / Deref type).
+    auto as_deref() const {
+        using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
+        if (has_value) {
+            return Option<const Tgt&>(*value);
+        }
+        return Option<const Tgt&>(None);
+    }
+    auto as_deref_mut() {
+        using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
+        if (has_value) {
+            return Option<Tgt&>(*value);
+        }
+        return Option<Tgt&>(None);
+    }
+
+    // Rust parity: Option<(A, B)>::unzip(self) -> (Option<A>, Option<B>).
+    // Member template (Tup defaults to T) so the signature is only checked at
+    // the call site, where T is a tuple/pair.
+    template<typename Tup = T>
+    auto unzip() {
+        using A = std::tuple_element_t<0, Tup>;
+        using B = std::tuple_element_t<1, Tup>;
+        if (has_value) {
+            return std::pair<Option<A>, Option<B>>(
+                Option<A>(std::get<0>(std::move(value))),
+                Option<B>(std::get<1>(std::move(value))));
+        }
+        return std::pair<Option<A>, Option<B>>(Option<A>(None), Option<B>(None));
+    }
+
+    // Rust parity: Option<T>::zip(self, other: Option<U>) -> Option<(T, U)>.
+    // Some((a, b)) iff both are Some, else None.
+    template<typename U>
+    Option<std::tuple<T, U>> zip(Option<U> other) {
+        if (has_value && other.is_some()) {
+            return Option<std::tuple<T, U>>(
+                std::make_tuple(std::move(value), other.unwrap()));
+        }
+        return Option<std::tuple<T, U>>(None);
+    }
+
+    // Rust parity: Option<Option<U>>::flatten(self) -> Option<U>. Here T is the
+    // inner Option type, so the return type is simply T.
+    T flatten() {
+        if (has_value) {
+            return std::move(value);
+        }
+        return T(None);
+    }
+
     // Rust parity: Option<Result<T, E>>::transpose(self) -> Result<Option<T>, E>
     template<typename Q = T>
     auto transpose() -> Result<Option<option_result_ok_t<Q>>, option_result_err_t<Q>>
@@ -871,6 +984,20 @@ public:
         return Option<U>(None);
     }
 
+    // Rust parity: Option<&T>::cloned() -> Option<T> (clones the referent;
+    // falls back to .clone() when the payload isn't copy-constructible).
+    Option<std::remove_cv_t<T>> cloned() const {
+        using U = std::remove_cv_t<T>;
+        if (ptr) {
+            if constexpr (std::is_copy_constructible_v<U>) {
+                return Option<U>(U(*ptr));
+            } else {
+                return Option<U>((*ptr).clone());
+            }
+        }
+        return Option<U>(None);
+    }
+
     Option or_(Option other) const {
         if (ptr) {
             return Option(*ptr);
@@ -1162,6 +1289,20 @@ public:
         using U = std::remove_cv_t<T>;
         if (ptr) {
             return Option<U>(static_cast<U>(*ptr));
+        }
+        return Option<U>(None);
+    }
+
+    // Rust parity: Option<&T>::cloned() -> Option<T> (clones the referent;
+    // falls back to .clone() when the payload isn't copy-constructible).
+    Option<std::remove_cv_t<T>> cloned() const {
+        using U = std::remove_cv_t<T>;
+        if (ptr) {
+            if constexpr (std::is_copy_constructible_v<U>) {
+                return Option<U>(U(*ptr));
+            } else {
+                return Option<U>((*ptr).clone());
+            }
         }
         return Option<U>(None);
     }

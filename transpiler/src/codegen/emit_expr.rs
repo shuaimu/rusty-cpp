@@ -9735,6 +9735,23 @@ impl CodeGen {
             return format!("rusty::partial_cmp({}, {})", receiver, rhs);
         }
         if method_name == "zip" && mc.args.len() == 1 {
+            // `Option::zip(other)` is a MEMBER returning `Option<(T, U)>`, not
+            // the iterator adapter. Route by receiver type so an Option isn't
+            // handed to `rusty::zip` (which then fails as a non-iterable).
+            if self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_option_like_syn_type(ty))
+            {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                let arg = self.emit_expr_maybe_move(&mc.args[0]);
+                return format!("{}.zip({})", receiver, arg);
+            }
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                 format!("({})", raw_receiver)

@@ -579,7 +579,93 @@ public:
             return f(std::move(err_ref()));
         }
     }
-    
+
+    // Rust parity: Result::map_or(self, default, f) -> U. f(ok) when Ok, else default.
+    template<typename U, typename F>
+    U map_or(U default_value, F&& f) {
+        if (is_ok_value) {
+            return std::forward<F>(f)(std::move(ok_ref()));
+        }
+        return default_value;
+    }
+
+    // Rust parity: Result::map_or_else(self, err_f, ok_f) -> U.
+    template<typename D, typename F>
+    auto map_or_else(D&& default_fn, F&& f) -> decltype(f(std::declval<T>())) {
+        if (is_ok_value) {
+            return std::forward<F>(f)(std::move(ok_ref()));
+        }
+        return std::forward<D>(default_fn)(std::move(err_ref()));
+    }
+
+    // Rust parity: Result::is_ok_and(self, f) -> bool.
+    template<typename F>
+    bool is_ok_and(F&& f) const {
+        return is_ok_value && std::forward<F>(f)(ok_ref());
+    }
+
+    // Rust parity: Result::is_err_and(self, f) -> bool.
+    template<typename F>
+    bool is_err_and(F&& f) const {
+        return !is_ok_value && std::forward<F>(f)(err_ref());
+    }
+
+    // Rust parity: Result::inspect(self, f) -> Result<T,E>. Runs f(&ok) for its
+    // side effect when Ok, then returns self unchanged (for chaining).
+    template<typename F>
+    Result inspect(F&& f) {
+        if (is_ok_value) {
+            std::forward<F>(f)(ok_ref());
+        }
+        return std::move(*this);
+    }
+
+    // Rust parity: Result::inspect_err(self, f) -> Result<T,E>.
+    template<typename F>
+    Result inspect_err(F&& f) {
+        if (!is_ok_value) {
+            std::forward<F>(f)(err_ref());
+        }
+        return std::move(*this);
+    }
+
+    // Rust parity: Result::and(self, res) -> Result<U,E>. res when Ok, else the
+    // Err. (Transpiler renames `and` -> `and_`.)
+    template<typename U>
+    Result<U, E> and_(Result<U, E> res) {
+        if (is_ok_value) {
+            return res;
+        }
+        return Result<U, E>::Err(std::move(err_ref()));
+    }
+
+    // Rust parity: Result::or(self, res) -> Result<T,F2>. self's Ok when Ok,
+    // else res. (Transpiler renames `or` -> `or_`.)
+    template<typename F2>
+    Result<T, F2> or_(Result<T, F2> res) {
+        if (is_ok_value) {
+            return Result<T, F2>::Ok(std::move(ok_ref()));
+        }
+        return res;
+    }
+
+    // Rust parity: Result<&T,E>::cloned()/copied() -> Result<T,E>. For a value
+    // payload these clone/copy the Ok. Only instantiated when called.
+    auto cloned() const {
+        using Clean = std::remove_cv_t<std::remove_reference_t<T>>;
+        if (is_ok_value) {
+            return Result<Clean, E>::Ok(ok_ref());
+        }
+        return Result<Clean, E>::Err(err_ref());
+    }
+    auto copied() const {
+        using Clean = std::remove_cv_t<std::remove_reference_t<T>>;
+        if (is_ok_value) {
+            return Result<Clean, E>::Ok(ok_ref());
+        }
+        return Result<Clean, E>::Err(err_ref());
+    }
+
     // Explicit bool conversion - true if Ok
     explicit operator bool() const {
         return is_ok_value;

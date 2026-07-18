@@ -24194,6 +24194,17 @@ fn test_float_total_cmp_lowers_to_bit_ordering() {
 }
 
 #[test]
+fn test_option_zip_routes_to_member_not_iterator_adapter() {
+    // On an Option receiver, `.zip(other)` is the Option member returning
+    // Option<(T,U)>, NOT the iterator adapter rusty::zip.
+    let out = transpile_str(
+        "pub fn f(a: Option<i32>, b: Option<i32>) -> Option<(i32, i32)> { a.zip(b) }",
+    );
+    assert!(out.contains("a.zip("), "member call: {out}");
+    assert!(!out.contains("rusty::zip(a"), "must not route Option to rusty::zip: {out}");
+}
+
+#[test]
 fn test_float_rest_and_int_bytes_lower() {
     // Float methods with no <cmath> counterpart.
     for (src, marker, call) in [
