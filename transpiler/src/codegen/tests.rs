@@ -24233,6 +24233,21 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_iter_constructors_and_mem_take_route() {
+    // Terminals on call-form iterator constructors route to the rusty::
+    // free fns (the constructors are recognized as iterator receivers).
+    let o = transpile_str("pub fn f() -> i32 { std::iter::once(5).sum() }");
+    assert!(o.contains("rusty::sum(rusty::once(5))"), "once+sum: {o}");
+    let s = transpile_str(
+        "pub fn f() -> i32 { std::iter::successors(Some(1), |&x| if x < 8 { Some(x * 2) } else { None }).sum() }",
+    );
+    assert!(s.contains("rusty::sum(rusty::successors(rusty::Option<int32_t>(1),"), "successors: {s}");
+    let t = transpile_str("pub fn f(y: &mut i32) -> i32 { std::mem::take(y) }");
+    assert!(t.contains("rusty::mem::take(y)"), "mem::take: {t}");
+    assert!(!t.contains("std::mem::take"), "no verbatim std::mem: {t}");
+}
+
+#[test]
 fn test_option_replace_insert_array_rotate() {
     // Array-literal locals with unambiguous element types are typed [T; N],
     // so fixed-array routing (rotate_left -> rusty::rotate_left) sees

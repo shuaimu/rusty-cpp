@@ -1901,6 +1901,33 @@ once_iter<std::decay_t<T>> once(T&& value) {
     return once_iter<std::decay_t<T>>(std::forward<T>(value));
 }
 
+// Rust `iter::successors(first, f)` — yields `first`, then repeatedly
+// f(&prev) until it returns None.
+template<typename T, typename F>
+struct successors_iter {
+    using Item = T;
+
+    rusty::Option<T> current_;
+    F func_;
+
+    successors_iter into_iter() { return std::move(*this); }
+
+    rusty::Option<T> next() {
+        if (!current_.is_some()) {
+            return rusty::None;
+        }
+        T value = current_.take().unwrap();
+        current_ = func_(value);
+        return rusty::Option<T>(std::move(value));
+    }
+};
+
+template<typename T, typename F>
+auto successors(rusty::Option<T> first, F&& func) {
+    return successors_iter<T, std::remove_reference_t<F>>{
+        std::move(first), std::forward<F>(func)};
+}
+
 template<typename Range>
 decltype(auto) iter_mut(Range&& range) {
     // Mirror the `rusty::iter` change: walk the deref chain for `.iter_mut()`

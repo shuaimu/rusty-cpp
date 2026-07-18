@@ -3207,6 +3207,21 @@ impl CodeGen {
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
+                // Call-form iterator CONSTRUCTORS (iter::once(x), repeat(x),
+                // successors(..)) — resolve through the path map so
+                // use-imported bare spellings count too, then check the
+                // mapped rusty:: name.
+                if matches!(
+                    self.map_function_path_scope_aware(&joined)
+                        .unwrap_or(joined.as_str()),
+                    "rusty::once"
+                        | "rusty::empty"
+                        | "rusty::repeat"
+                        | "rusty::repeat_with"
+                        | "rusty::successors"
+                ) {
+                    return true;
+                }
                 matches!(
                     joined.as_str(),
                     "iter"

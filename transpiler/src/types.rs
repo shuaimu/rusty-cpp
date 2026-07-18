@@ -491,6 +491,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         }
         "iter::once" | "core::iter::once" | "std::iter::once" => Some("rusty::once"),
         "iter::empty" | "core::iter::empty" | "std::iter::empty" => Some("rusty::empty"),
+        "iter::successors" | "core::iter::successors" | "std::iter::successors" => {
+            Some("rusty::successors")
+        }
         "iter::repeat_with" | "core::iter::repeat_with" | "std::iter::repeat_with" => {
             Some("rusty::repeat_with")
         }
@@ -673,6 +676,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         }
         "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
         "std::mem::swap" | "core::mem::swap" | "mem::swap" => Some("rusty::mem::swap"),
+        "std::mem::take" | "core::mem::take" => Some("rusty::mem::take"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
         "usize::checked_next_power_of_two"
         | "std::usize::checked_next_power_of_two"
