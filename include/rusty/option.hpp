@@ -567,6 +567,29 @@ public:
         return Option(None);
     }
 
+    // Rust parity: Option<&T>::copied()/cloned() when the reference is
+    // represented as a raw-pointer payload (iterator items: iter_max/
+    // iter_last/nth yield Option<T*>). Constrained to pointer payloads so
+    // requires-probes on non-pointer Options stay cleanly false.
+    auto copied() const requires std::is_pointer_v<T> {
+        using Val = std::remove_cv_t<std::remove_pointer_t<T>>;
+        if (has_value && value != nullptr) {
+            return Option<Val>(*value);
+        }
+        return Option<Val>(None);
+    }
+    auto cloned() const requires std::is_pointer_v<T> {
+        using Val = std::remove_cv_t<std::remove_pointer_t<T>>;
+        if (has_value && value != nullptr) {
+            if constexpr (std::is_copy_constructible_v<Val>) {
+                return Option<Val>(Val(*value));
+            } else {
+                return Option<Val>((*value).clone());
+            }
+        }
+        return Option<Val>(None);
+    }
+
     // Rust parity: Option<T: Deref>::as_deref(&self) -> Option<&Target>.
     // Return type deduced from the body, so only instantiated when called
     // (where T is a smart pointer / Deref type).

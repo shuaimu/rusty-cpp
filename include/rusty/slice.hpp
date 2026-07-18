@@ -626,6 +626,100 @@ private:
     Iter iter_;
 };
 
+// Rust `Iterator::take_while(pred)` / `::skip_while(pred)` over any
+// option-like-next iterator. take_while ends the iteration permanently at
+// the first non-matching item; skip_while drops the initial matching run
+// and then yields everything.
+template<typename Iter, typename Pred>
+class take_while_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::take_while requires next() to return an Option/optional-like value"
+    );
+
+    take_while_next_iter(Iter iter, Pred pred)
+        : iter_(std::move(iter)), pred_(std::move(pred)) {}
+
+    take_while_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    rusty::Option<next_item_t<Iter>> next() {
+        using next_result = rusty::Option<next_item_t<Iter>>;
+        if (done_) {
+            return next_result(rusty::None);
+        }
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            done_ = true;
+            return next_result(rusty::None);
+        }
+        auto value = option_like_take_value(item);
+        if (!pred_(value)) {
+            done_ = true;
+            return next_result(rusty::None);
+        }
+        return next_result(std::move(value));
+    }
+
+private:
+    Iter iter_;
+    Pred pred_;
+    bool done_ = false;
+};
+
+template<typename Iter, typename Pred>
+auto make_take_while_next_iter(Iter&& iter, Pred&& pred) {
+    return take_while_next_iter<std::remove_reference_t<Iter>,
+                                std::remove_reference_t<Pred>>(
+        std::forward<Iter>(iter), std::forward<Pred>(pred));
+}
+
+template<typename Iter, typename Pred>
+class skip_while_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::skip_while requires next() to return an Option/optional-like value"
+    );
+
+    skip_while_next_iter(Iter iter, Pred pred)
+        : iter_(std::move(iter)), pred_(std::move(pred)) {}
+
+    skip_while_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    rusty::Option<next_item_t<Iter>> next() {
+        using next_result = rusty::Option<next_item_t<Iter>>;
+        while (true) {
+            auto item = iter_.next();
+            if (!option_like_has_value(item)) {
+                return next_result(rusty::None);
+            }
+            auto value = option_like_take_value(item);
+            if (skipping_ && pred_(value)) {
+                continue;
+            }
+            skipping_ = false;
+            return next_result(std::move(value));
+        }
+    }
+
+private:
+    Iter iter_;
+    Pred pred_;
+    bool skipping_ = true;
+};
+
+template<typename Iter, typename Pred>
+auto make_skip_while_next_iter(Iter&& iter, Pred&& pred) {
+    return skip_while_next_iter<std::remove_reference_t<Iter>,
+                                std::remove_reference_t<Pred>>(
+        std::forward<Iter>(iter), std::forward<Pred>(pred));
+}
+
 // Rust `Iterator::copied()` / `::cloned()` over ANY option-like-next
 // iterator whose items are references — materializes each item by value.
 // Runtime iterator types (slice_iter::Iter etc.) carry their own member
@@ -2262,6 +2356,330 @@ auto product(Range&& range) {
         acc *= detail::deref_if_pointer_like(item);
     }
     return acc;
+}
+
+// Iterator terminals returning the item Option. The `iter_` prefix keeps
+// them clear of the same-named container helpers (rusty::last(container),
+// rusty::max(a, b)). Items are yielded exactly as next() produces them
+// (pointers for slice iterators) so downstream .copied()/.unwrap() chains
+// keep Rust's Option<&T> shape.
+
+// Rust `Iterator::last()` — the final item.
+template<typename Range>
+auto iter_last(Range&& range) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto value = detail::option_like_take_value(item);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            value = detail::option_like_take_value(nxt);
+        }
+        return next_result(std::move(value));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_last(std::forward<Range>(range).into_iter());
+    } else {
+        return iter_last(iter(std::forward<Range>(range)));
+    }
+}
+
+// Rust `Iterator::nth(n)` — skip n items, then yield the next.
+template<typename Range>
+auto iter_nth(Range&& range, size_t n) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        for (size_t i = 0; i < n; ++i) {
+            auto skipped = it.next();
+            if (!detail::option_like_has_value(skipped)) {
+                return next_result(rusty::None);
+            }
+        }
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(detail::option_like_take_value(item));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_nth(std::forward<Range>(range).into_iter(), n);
+    } else {
+        return iter_nth(iter(std::forward<Range>(range)), n);
+    }
+}
+
+// Rust `Iterator::max_by(cmp)` — last item ranked Greater; ties keep the
+// later item (Rust replaces unless the incumbent compares Greater). The
+// comparator returns the module-emitted `rusty::cmp::Ordering`, which this
+// HEADER cannot name — resolve its `Greater` enumerator dependently from
+// the comparator's own return type at instantiation.
+template<typename Range, typename Cmp>
+auto iter_max_by(Range&& range, Cmp&& cmp) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto best = detail::option_like_take_value(item);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            auto value = detail::option_like_take_value(nxt);
+            auto ord = cmp(best, value);
+            using Ord = std::remove_cvref_t<decltype(ord)>;
+            if (ord != Ord::Greater) {
+                best = std::move(value);
+            }
+        }
+        return next_result(std::move(best));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_max_by(std::forward<Range>(range).into_iter(),
+                           std::forward<Cmp>(cmp));
+    } else {
+        return iter_max_by(iter(std::forward<Range>(range)),
+                           std::forward<Cmp>(cmp));
+    }
+}
+
+// Rust `Iterator::min_by(cmp)` — first item ranked Less; ties keep the
+// earlier item (Rust replaces only when the incumbent compares Greater).
+template<typename Range, typename Cmp>
+auto iter_min_by(Range&& range, Cmp&& cmp) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto best = detail::option_like_take_value(item);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            auto value = detail::option_like_take_value(nxt);
+            auto ord = cmp(best, value);
+            using Ord = std::remove_cvref_t<decltype(ord)>;
+            if (ord == Ord::Greater) {
+                best = std::move(value);
+            }
+        }
+        return next_result(std::move(best));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_min_by(std::forward<Range>(range).into_iter(),
+                           std::forward<Cmp>(cmp));
+    } else {
+        return iter_min_by(iter(std::forward<Range>(range)),
+                           std::forward<Cmp>(cmp));
+    }
+}
+
+// Rust `Iterator::max()` / `::min()` — Ord-based via `<` on the deref'd
+// values; max keeps the LAST maximum, min the FIRST minimum (matching
+// Rust's tie-breaking).
+template<typename Range>
+auto iter_max(Range&& range) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto best = detail::option_like_take_value(item);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            auto value = detail::option_like_take_value(nxt);
+            if (!(detail::deref_if_pointer_like(value)
+                  < detail::deref_if_pointer_like(best))) {
+                best = std::move(value);
+            }
+        }
+        return next_result(std::move(best));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_max(std::forward<Range>(range).into_iter());
+    } else {
+        return iter_max(iter(std::forward<Range>(range)));
+    }
+}
+
+template<typename Range>
+auto iter_min(Range&& range) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto best = detail::option_like_take_value(item);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            auto value = detail::option_like_take_value(nxt);
+            if (detail::deref_if_pointer_like(value)
+                < detail::deref_if_pointer_like(best)) {
+                best = std::move(value);
+            }
+        }
+        return next_result(std::move(best));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_min(std::forward<Range>(range).into_iter());
+    } else {
+        return iter_min(iter(std::forward<Range>(range)));
+    }
+}
+
+// Rust `Iterator::max_by_key(f)` / `::min_by_key(f)` — rank by a derived
+// key; same tie-breaking as max/min.
+template<typename Range, typename KeyFn>
+auto iter_max_by_key(Range&& range, KeyFn&& key_fn) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto best = detail::option_like_take_value(item);
+        auto best_key = key_fn(best);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            auto value = detail::option_like_take_value(nxt);
+            auto key = key_fn(value);
+            if (!(key < best_key)) {
+                best = std::move(value);
+                best_key = std::move(key);
+            }
+        }
+        return next_result(std::move(best));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_max_by_key(std::forward<Range>(range).into_iter(),
+                               std::forward<KeyFn>(key_fn));
+    } else {
+        return iter_max_by_key(iter(std::forward<Range>(range)),
+                               std::forward<KeyFn>(key_fn));
+    }
+}
+
+template<typename Range, typename KeyFn>
+auto iter_min_by_key(Range&& range, KeyFn&& key_fn) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto best = detail::option_like_take_value(item);
+        auto best_key = key_fn(best);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            auto value = detail::option_like_take_value(nxt);
+            auto key = key_fn(value);
+            if (key < best_key) {
+                best = std::move(value);
+                best_key = std::move(key);
+            }
+        }
+        return next_result(std::move(best));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_min_by_key(std::forward<Range>(range).into_iter(),
+                               std::forward<KeyFn>(key_fn));
+    } else {
+        return iter_min_by_key(iter(std::forward<Range>(range)),
+                               std::forward<KeyFn>(key_fn));
+    }
+}
+
+// Rust `Iterator::reduce(f)` — fold seeded by the first item; None on an
+// empty iterator. The closure must return the item type (as in Rust).
+template<typename Range, typename Func>
+auto iter_reduce(Range&& range, Func&& func) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        using item_type = detail::next_item_t<decltype(it)>;
+        using next_result = rusty::Option<item_type>;
+        auto item = it.next();
+        if (!detail::option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        item_type acc = detail::option_like_take_value(item);
+        while (true) {
+            auto nxt = it.next();
+            if (!detail::option_like_has_value(nxt)) {
+                break;
+            }
+            acc = func(std::move(acc), detail::option_like_take_value(nxt));
+        }
+        return next_result(std::move(acc));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_reduce(std::forward<Range>(range).into_iter(),
+                           std::forward<Func>(func));
+    } else {
+        return iter_reduce(iter(std::forward<Range>(range)),
+                           std::forward<Func>(func));
+    }
+}
+
+// Rust `Iterator::take_while(pred)` / `::skip_while(pred)` — lazy adapters
+// (see detail::take_while_next_iter / skip_while_next_iter).
+template<typename Range, typename Pred>
+decltype(auto) take_while(Range&& range, Pred&& pred) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_take_while_next_iter(
+            std::forward<Range>(range), std::forward<Pred>(pred));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return take_while(std::forward<Range>(range).into_iter(),
+                          std::forward<Pred>(pred));
+    } else {
+        return take_while(iter(std::forward<Range>(range)),
+                          std::forward<Pred>(pred));
+    }
+}
+
+template<typename Range, typename Pred>
+decltype(auto) skip_while(Range&& range, Pred&& pred) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_skip_while_next_iter(
+            std::forward<Range>(range), std::forward<Pred>(pred));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return skip_while(std::forward<Range>(range).into_iter(),
+                          std::forward<Pred>(pred));
+    } else {
+        return skip_while(iter(std::forward<Range>(range)),
+                          std::forward<Pred>(pred));
+    }
 }
 
 template<typename Range, typename Acc, typename Func>

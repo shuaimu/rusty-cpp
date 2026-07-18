@@ -24227,6 +24227,35 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_iter_terminal_family_routes_to_free_fns() {
+    // Item-Option terminals -> rusty::iter_* free fns (no bogus member calls
+    // on the slice iterator type).
+    for (src, marker, forbidden) in [
+        ("pub fn f(v: &[i32]) -> Option<&i32> { v.iter().max() }", "rusty::iter_max(rusty::iter(v))", ".max()"),
+        ("pub fn f(v: &[i32]) -> Option<&i32> { v.iter().min() }", "rusty::iter_min(rusty::iter(v))", ".min()"),
+        ("pub fn f(v: &[i32]) -> Option<&i32> { v.iter().last() }", "rusty::iter_last(rusty::iter(v))", ".last()"),
+        ("pub fn f(v: &[i32]) -> Option<&i32> { v.iter().nth(2) }", "rusty::iter_nth(rusty::iter(v), 2)", ".nth("),
+        ("pub fn f(v: &[i32]) -> Option<&i32> { v.iter().max_by_key(|&&x| x) }", "rusty::iter_max_by_key(rusty::iter(v),", ".max_by_key("),
+        ("pub fn f(v: &[i32]) -> Option<&i32> { v.iter().min_by_key(|&&x| x) }", "rusty::iter_min_by_key(rusty::iter(v),", ".min_by_key("),
+        ("pub fn f(v: &[i32]) -> Option<i32> { v.iter().copied().reduce(|a, b| a + b) }", "rusty::iter_reduce(", ".reduce("),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+        assert!(!out.contains(forbidden), "member call {forbidden}: {out}");
+    }
+    // Lazy predicate adapters route to free fns AND are recognized as
+    // iterators (so .count() wraps in rusty::count).
+    for (src, marker) in [
+        ("pub fn f(v: &[i32]) -> usize { v.iter().skip_while(|&&x| x < 0).count() }", "rusty::skip_while(rusty::iter(v),"),
+        ("pub fn f(v: &[i32]) -> usize { v.iter().take_while(|&&x| x > 0).count() }", "rusty::take_while(rusty::iter(v),"),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "adapter {marker}: {out}");
+        assert!(out.contains("rusty::count("), "iterator recognition: {out}");
+    }
+}
+
+#[test]
 fn test_iter_product_routes_to_free_fn() {
     // `.product()` must route to rusty::product like `.sum()` -> rusty::sum,
     // not a bogus member call on the slice iterator type.

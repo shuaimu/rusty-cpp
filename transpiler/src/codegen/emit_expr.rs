@@ -7838,6 +7838,9 @@ impl CodeGen {
         if let Some(step_by_call) = self.try_emit_iter_step_by_call(mc) {
             return step_by_call;
         }
+        if let Some(terminal_call) = self.try_emit_iter_terminal_family_call(mc) {
+            return terminal_call;
+        }
         if let Some(flat_map_call) = self.try_emit_iter_flat_map_call(mc) {
             return flat_map_call;
         }
@@ -21607,6 +21610,46 @@ impl CodeGen {
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
         Some(format!("{}({})", fold_fn, receiver))
+    }
+
+    pub(super) fn try_emit_iter_terminal_family_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<String> {
+        // Iterator terminals returning the item Option, plus the lazy
+        // predicate adapters. The `iter_`-prefixed C++ names avoid clashes
+        // with the container helpers (rusty::last(container), rusty::max(a,b)).
+        let (cpp_fn, want_args) = match mc.method.to_string().as_str() {
+            "max" => ("rusty::iter_max", 0),
+            "min" => ("rusty::iter_min", 0),
+            "last" => ("rusty::iter_last", 0),
+            "nth" => ("rusty::iter_nth", 1),
+            "max_by" => ("rusty::iter_max_by", 1),
+            "min_by" => ("rusty::iter_min_by", 1),
+            "max_by_key" => ("rusty::iter_max_by_key", 1),
+            "min_by_key" => ("rusty::iter_min_by_key", 1),
+            "reduce" => ("rusty::iter_reduce", 1),
+            "skip_while" => ("rusty::skip_while", 1),
+            "take_while" => ("rusty::take_while", 1),
+            _ => return None,
+        };
+        if mc.args.len() != want_args {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        if want_args == 0 {
+            return Some(format!("{}({})", cpp_fn, receiver));
+        }
+        let arg = self.emit_expr_maybe_move(mc.args.first()?);
+        Some(format!("{}({}, {})", cpp_fn, receiver, arg))
     }
 
     pub(super) fn try_emit_iter_step_by_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
