@@ -24236,6 +24236,22 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_ordering_combinators_route_to_cmp_free_fns() {
+    // Ordering is a prelude enum class with no members — the combinators
+    // must lower to rusty::cmp:: free fns.
+    let t = transpile_str(
+        "pub fn f(a: i32, b: i32, c: i32, d: i32) -> bool { a.cmp(&b).then(c.cmp(&d)).is_lt() }",
+    );
+    assert!(t.contains("rusty::cmp::then("), "then routed: {t}");
+    assert!(t.contains("rusty::cmp::is_lt("), "is_lt routed: {t}");
+    let r = transpile_str("pub fn f(a: i32, b: i32) -> bool { a.cmp(&b).reverse().is_ge() }");
+    assert!(r.contains("rusty::cmp::reverse("), "reverse routed: {r}");
+    // Slice .reverse() is NOT hijacked (non-Ordering receiver).
+    let s = transpile_str("pub fn f(v: &mut [i32]) { v.reverse(); }");
+    assert!(!s.contains("rusty::cmp::reverse"), "slice reverse untouched: {s}");
+}
+
+#[test]
 fn test_u128_checked_and_bit_ops_transpile() {
     // 128-bit receivers route through the same helpers as narrower ints
     // (num.hpp now covers __int128: relaxed checked_* constraints + hi/lo

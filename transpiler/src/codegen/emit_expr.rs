@@ -6428,6 +6428,54 @@ impl CodeGen {
             };
             return format!("rusty::len({})", receiver);
         }
+        // cmp::Ordering combinators — Ordering is a prelude-emitted enum
+        // class with no members, so `a.cmp(&b).then(..)` etc. must lower to
+        // the rusty::cmp:: free fns. Guarded on an Ordering-typed receiver or
+        // a syntactic cmp/partial-cmp-shaped chain.
+        if matches!(
+            mc.method.to_string().as_str(),
+            "then" | "then_with" | "reverse" | "is_lt" | "is_le" | "is_gt" | "is_ge"
+                | "is_eq" | "is_ne"
+        ) {
+            let want_args = usize::from(matches!(
+                mc.method.to_string().as_str(),
+                "then" | "then_with"
+            ));
+            if mc.args.len() == want_args {
+                let receiver_is_ordering = self
+                    .infer_simple_expr_type(&mc.receiver)
+                    .as_ref()
+                    .is_some_and(|ty| {
+                        matches!(
+                            self.peel_reference_paren_group_type(ty),
+                            syn::Type::Path(tp)
+                                if tp.path.segments.last()
+                                    .is_some_and(|s| s.ident == "Ordering")
+                        )
+                    })
+                    || matches!(
+                        self.peel_paren_group_expr(&mc.receiver),
+                        syn::Expr::MethodCall(inner)
+                            if matches!(
+                                inner.method.to_string().as_str(),
+                                "cmp" | "total_cmp" | "then" | "then_with" | "reverse"
+                            )
+                    );
+                if receiver_is_ordering {
+                    let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                    let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                        format!("({})", raw_receiver)
+                    } else {
+                        raw_receiver
+                    };
+                    if want_args == 0 {
+                        return format!("rusty::cmp::{}({})", mc.method, receiver);
+                    }
+                    let arg = self.emit_expr_maybe_move(&mc.args[0]);
+                    return format!("rusty::cmp::{}({}, {})", mc.method, receiver, arg);
+                }
+            }
+        }
         if mc.method == "contains"
             && mc.args.len() == 1
             && self.expr_lowers_to_slice_or_span_view(&mc.receiver)

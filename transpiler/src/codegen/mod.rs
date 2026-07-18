@@ -45167,6 +45167,16 @@ fn runtime_path_fallback_helpers_text_for_local_token_module() -> String {
 namespace rusty {
 namespace cmp {
 enum class Ordering { Less, Equal, Greater };
+constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }
+template<typename F>
+Ordering then_with(Ordering a, F&& f) { return a == Ordering::Equal ? f() : a; }
+constexpr Ordering reverse(Ordering a) { return a == Ordering::Less ? Ordering::Greater : (a == Ordering::Greater ? Ordering::Less : Ordering::Equal); }
+constexpr bool is_lt(Ordering a) { return a == Ordering::Less; }
+constexpr bool is_gt(Ordering a) { return a == Ordering::Greater; }
+constexpr bool is_eq(Ordering a) { return a == Ordering::Equal; }
+constexpr bool is_ne(Ordering a) { return a != Ordering::Equal; }
+constexpr bool is_le(Ordering a) { return a != Ordering::Greater; }
+constexpr bool is_ge(Ordering a) { return a != Ordering::Less; }
 template<typename A, typename B>
 rusty::Option<Ordering> partial_cmp(const A& a, const B& b) {
     if constexpr (requires { a.partial_cmp(b); }) {
@@ -45685,6 +45695,14 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
 namespace rusty {\n\
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
+constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }\n\
+constexpr Ordering reverse(Ordering a) { return a == Ordering::Less ? Ordering::Greater : (a == Ordering::Greater ? Ordering::Less : Ordering::Equal); }\n\
+constexpr bool is_lt(Ordering a) { return a == Ordering::Less; }\n\
+constexpr bool is_gt(Ordering a) { return a == Ordering::Greater; }\n\
+constexpr bool is_eq(Ordering a) { return a == Ordering::Equal; }\n\
+constexpr bool is_ne(Ordering a) { return a != Ordering::Equal; }\n\
+constexpr bool is_le(Ordering a) { return a != Ordering::Greater; }\n\
+constexpr bool is_ge(Ordering a) { return a != Ordering::Less; }\n\
 template<typename T>\n\
 struct Reverse {\n\
     T _0;\n\
