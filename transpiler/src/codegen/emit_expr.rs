@@ -9559,6 +9559,29 @@ impl CodeGen {
                 receiver, args[0], args[1]
             );
         }
+        // `str::find(|c| ...)` — char-predicate form. The general find arm
+        // below excludes closures (iterator find takes them), so a closure
+        // arg on a STRING receiver needs its own routing to the predicate
+        // overload of str_runtime::find.
+        if method_name == "find"
+            && mc.args.len() == 1
+            && matches!(
+                self.peel_paren_group_expr(&mc.args[0]),
+                syn::Expr::Closure(_)
+            )
+            && self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
+                self.type_is_string_view_like(ty) || self.is_known_string_like_type(ty)
+            })
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let pred = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::str_runtime::find({}, {})", receiver, pred);
+        }
         if method_name == "find"
             && args.len() == 1
             && !matches!(
@@ -21655,6 +21678,9 @@ impl CodeGen {
             "min" => ("rusty::iter_min", 0),
             "last" => ("rusty::iter_last", 0),
             "peekable" => ("rusty::peekable", 0),
+            "fuse" => ("rusty::fuse", 0),
+            "inspect" => ("rusty::inspect", 1),
+            "position" => ("rusty::iter_position", 1),
             "nth" => ("rusty::iter_nth", 1),
             "max_by" => ("rusty::iter_max_by", 1),
             "min_by" => ("rusty::iter_min_by", 1),

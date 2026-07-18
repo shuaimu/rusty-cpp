@@ -49587,6 +49587,30 @@ inline rusty::Option<std::size_t> find(std::string_view s, const std::array<char
     }\n\
     return rusty::Option<std::size_t>(rusty::None);\n\
 }\n\
+template<typename Pred>\n\
+requires (!std::is_convertible_v<Pred, std::string_view> && !std::is_convertible_v<Pred, char32_t> && requires(Pred p) { p(char32_t{}); })\n\
+inline rusty::Option<std::size_t> find(std::string_view s, Pred&& pred) {\n\
+    /* Rust str::find(char predicate): byte index of the first char\n\
+       satisfying the predicate, walking UTF-8 sequences. */\n\
+    std::size_t i = 0;\n\
+    while (i < s.size()) {\n\
+        const unsigned char b = static_cast<unsigned char>(s[i]);\n\
+        std::size_t len = 1;\n\
+        char32_t c = b;\n\
+        if (b >= 0xF0) { len = 4; c = b & 0x07; }\n\
+        else if (b >= 0xE0) { len = 3; c = b & 0x0F; }\n\
+        else if (b >= 0xC0) { len = 2; c = b & 0x1F; }\n\
+        if (len > 1) {\n\
+            if (i + len > s.size()) { break; }\n\
+            for (std::size_t k = 1; k < len; ++k) {\n\
+                c = static_cast<char32_t>((c << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F));\n\
+            }\n\
+        }\n\
+        if (pred(c)) { return rusty::Option<std::size_t>(i); }\n\
+        i += len;\n\
+    }\n\
+    return rusty::Option<std::size_t>(rusty::None);\n\
+}\n\
 inline rusty::Option<std::size_t> rfind(std::string_view s, std::string_view needle) {\n\
     const auto pos = s.rfind(needle);\n\
     if (pos == std::string_view::npos) {\n\

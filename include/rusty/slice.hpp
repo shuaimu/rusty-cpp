@@ -728,6 +728,85 @@ auto make_skip_while_next_iter(Iter&& iter, Pred&& pred) {
         std::forward<Iter>(iter), std::forward<Pred>(pred));
 }
 
+// Rust `Iterator::inspect(f)` — passthrough adapter running f(&item) for
+// its side effect on every yielded item.
+template<typename Iter, typename Func>
+class inspect_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::inspect requires next() to return an Option/optional-like value"
+    );
+
+    inspect_next_iter(Iter iter, Func func)
+        : iter_(std::move(iter)), func_(std::move(func)) {}
+
+    inspect_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    rusty::Option<next_item_t<Iter>> next() {
+        using next_result = rusty::Option<next_item_t<Iter>>;
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        auto value = option_like_take_value(item);
+        func_(value);
+        return next_result(std::move(value));
+    }
+
+private:
+    Iter iter_;
+    Func func_;
+};
+
+template<typename Iter, typename Func>
+auto make_inspect_next_iter(Iter&& iter, Func&& func) {
+    return inspect_next_iter<std::remove_reference_t<Iter>,
+                             std::remove_reference_t<Func>>(
+        std::forward<Iter>(iter), std::forward<Func>(func));
+}
+
+// Rust `Iterator::fuse()` — once next() yields None, keep yielding None.
+template<typename Iter>
+class fuse_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::fuse requires next() to return an Option/optional-like value"
+    );
+
+    explicit fuse_next_iter(Iter iter) : iter_(std::move(iter)) {}
+
+    fuse_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    rusty::Option<next_item_t<Iter>> next() {
+        using next_result = rusty::Option<next_item_t<Iter>>;
+        if (done_) {
+            return next_result(rusty::None);
+        }
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            done_ = true;
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
+private:
+    Iter iter_;
+    bool done_ = false;
+};
+
+template<typename Iter>
+auto make_fuse_next_iter(Iter&& iter) {
+    return fuse_next_iter<std::remove_reference_t<Iter>>(
+        std::forward<Iter>(iter));
+}
+
 // Rust `Iterator::copied()` / `::cloned()` over ANY option-like-next
 // iterator whose items are references — materializes each item by value.
 // Runtime iterator types (slice_iter::Iter etc.) carry their own member
@@ -2704,6 +2783,69 @@ decltype(auto) peekable(Range&& range) {
         return peekable(std::forward<Range>(range).into_iter());
     } else {
         return peekable(iter(std::forward<Range>(range)));
+    }
+}
+
+// Rust `Iterator::inspect(f)` / `::fuse()` — lazy adapters (see
+// detail::inspect_next_iter / fuse_next_iter). Member spelling wins.
+template<typename Range, typename Func>
+decltype(auto) inspect(Range&& range, Func&& func) {
+    if constexpr (requires { std::forward<Range>(range).inspect(std::forward<Func>(func)); }) {
+        return std::forward<Range>(range).inspect(std::forward<Func>(func));
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_inspect_next_iter(
+            std::forward<Range>(range), std::forward<Func>(func));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return inspect(std::forward<Range>(range).into_iter(),
+                       std::forward<Func>(func));
+    } else {
+        return inspect(iter(std::forward<Range>(range)),
+                       std::forward<Func>(func));
+    }
+}
+
+template<typename Range>
+decltype(auto) fuse(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).fuse(); }) {
+        return std::forward<Range>(range).fuse();
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_fuse_next_iter(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return fuse(std::forward<Range>(range).into_iter());
+    } else {
+        return fuse(iter(std::forward<Range>(range)));
+    }
+}
+
+// Rust `Iterator::position(pred)` — index of the first matching item. The
+// member spelling wins (slice_iter::Iter carries an optimized one); other
+// option-like-next iterators (transpiled Chars etc.) use the generic loop.
+template<typename Range, typename Pred>
+auto iter_position(Range&& range, Pred&& pred) -> rusty::Option<size_t> {
+    if constexpr (requires {
+                      { std::forward<Range>(range).position(std::forward<Pred>(pred)) };
+                  }) {
+        return std::forward<Range>(range).position(std::forward<Pred>(pred));
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto it = std::forward<Range>(range);
+        size_t index = 0;
+        while (true) {
+            auto item = it.next();
+            if (!detail::option_like_has_value(item)) {
+                return rusty::Option<size_t>(rusty::None);
+            }
+            auto value = detail::option_like_take_value(item);
+            if (pred(value)) {
+                return rusty::Option<size_t>(index);
+            }
+            ++index;
+        }
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return iter_position(std::forward<Range>(range).into_iter(),
+                             std::forward<Pred>(pred));
+    } else {
+        return iter_position(iter(std::forward<Range>(range)),
+                             std::forward<Pred>(pred));
     }
 }
 

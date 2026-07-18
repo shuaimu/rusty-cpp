@@ -24227,6 +24227,24 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_inspect_fuse_position_find_closure_route() {
+    let i = transpile_str("pub fn f(v: &[i32]) -> usize { v.iter().inspect(|_| {}).count() }");
+    assert!(i.contains("rusty::inspect(rusty::iter(v),"), "inspect: {i}");
+    assert!(i.contains("rusty::count("), "count after inspect: {i}");
+    let fu = transpile_str("pub fn f(v: &[i32]) -> usize { v.iter().fuse().count() }");
+    assert!(fu.contains("rusty::fuse(rusty::iter(v))"), "fuse: {fu}");
+    // Option::inspect keeps the member call (not hijacked by the iterator route).
+    let oi = transpile_str("pub fn f(o: Option<i32>) -> Option<i32> { o.inspect(|_| {}) }");
+    assert!(oi.contains("o.inspect("), "Option::inspect member: {oi}");
+    // position on a non-slice iterator routes to the member-first free fn.
+    let p = transpile_str("pub fn f(s: &str) -> Option<usize> { s.chars().position(|c| c == 'x') }");
+    assert!(p.contains("rusty::iter_position("), "position free fn: {p}");
+    // str::find with a char predicate routes to the predicate overload.
+    let fc = transpile_str("pub fn f(s: &str) -> Option<usize> { s.find(|c: char| c.is_ascii_digit()) }");
+    assert!(fc.contains("rusty::str_runtime::find(s,"), "find-closure: {fc}");
+}
+
+#[test]
 fn test_slice_ends_with_and_contains_ptr_guard() {
     // .ends_with routes to the rusty::ends_with dispatcher (member-first, so
     // string receivers keep their member behavior).
