@@ -4145,6 +4145,22 @@ impl CodeGen {
                 lit: syn::Lit::Str(_),
                 ..
             }) => self.infer_simple_expr_type(expr),
+            // A SUFFIXED scalar literal pins the local's Rust type exactly
+            // (`let x = 3.14_f64;`, `let n = 7u8;`). Unsuffixed literals stay
+            // untyped by design — their type is context-dependent and owned by
+            // the usage-hint machinery.
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Float(f),
+                ..
+            }) if !f.suffix().is_empty() => syn::parse_str::<syn::Type>(f.suffix()).ok(),
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(i),
+                ..
+            }) if !i.suffix().is_empty() => syn::parse_str::<syn::Type>(i.suffix()).ok(),
+            // Negation preserves the operand's numeric type (`let y = -2.5_f64;`).
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => self
+                .infer_simple_expr_type(&u.expr)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&u.expr)),
             // `&*raw_ptr` is a reference reborrow in Rust. Keep reference shape in
             // local inference so downstream method/expected-type inference sees
             // the pointee type (not the raw pointer wrapper type).

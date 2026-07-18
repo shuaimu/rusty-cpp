@@ -6753,6 +6753,11 @@ impl CodeGen {
             let sep = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::join({}, {})", receiver, sep);
         }
+        // Rust `[str-slice].concat()` is `join` with an empty separator.
+        if mc.method == "concat" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::join({}, \"\")", receiver);
+        }
         // Rust float predicate methods are inherent scalar helpers.
         if mc.method == "is_finite" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);

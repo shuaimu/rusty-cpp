@@ -23655,6 +23655,16 @@ impl CodeGen {
                     // A non-numeric, non-empty arg reference is an inline capture.
                     return true;
                 }
+                // A precision spec without an explicit type char diverges
+                // between Rust (fixed notation for floats) and C++ (general
+                // notation) — route smart so float args gain the `f` char.
+                if let Some((_, spec)) = inner.split_once(':')
+                    && spec.contains('.')
+                    && !spec.contains('$')
+                    && !spec.ends_with(|c: char| c.is_ascii_alphabetic())
+                {
+                    return true;
+                }
                 i = j + 1;
                 continue;
             }
@@ -23796,7 +23806,16 @@ impl CodeGen {
                 self.format_literal_native_arg_conversions(&fmt_literal, arg_count);
             native_passthrough_arg_positions =
                 self.format_literal_native_passthrough_arg_positions(&fmt_literal, arg_count);
-            let rewritten = self.rewrite_rust_format_literal_for_cpp(&fmt_literal);
+            let float_arg_positions: HashSet<usize> = args
+                .iter()
+                .enumerate()
+                .filter(|(_, arg)| self.format_arg_is_known_float_like(arg))
+                .map(|(idx, _)| idx)
+                .collect();
+            let rewritten = self.rewrite_rust_format_literal_for_cpp_with_float_args(
+                &fmt_literal,
+                &float_arg_positions,
+            );
             let escaped = escape_cpp_string_literal_content(&rewritten);
             format!("\"{}\"", escaped)
         } else {
@@ -23926,9 +23945,18 @@ impl CodeGen {
     /// Normalize Rust-only debug spec suffixes inside a format literal so C++ std::format
     /// can consume the same placeholder structure.
     fn rewrite_rust_format_literal_for_cpp(&self, fmt: &str) -> String {
+        self.rewrite_rust_format_literal_for_cpp_with_float_args(fmt, &HashSet::new())
+    }
+
+    fn rewrite_rust_format_literal_for_cpp_with_float_args(
+        &self,
+        fmt: &str,
+        float_arg_positions: &HashSet<usize>,
+    ) -> String {
         let chars: Vec<char> = fmt.chars().collect();
         let mut out = String::with_capacity(chars.len());
         let mut i = 0usize;
+        let mut next_implicit_idx = 0usize;
         while i < chars.len() {
             if chars[i] == '{' {
                 if i + 1 < chars.len() && chars[i + 1] == '{' {
@@ -23947,13 +23975,35 @@ impl CodeGen {
                     continue;
                 }
                 let inner: String = chars[i + 1..j].iter().collect();
-                let rewritten_inner = if let Some(prefix) = inner.strip_suffix(":#?") {
+                let arg_part = inner.split(':').next().unwrap_or("");
+                let arg_idx = if arg_part.is_empty() {
+                    let idx = next_implicit_idx;
+                    next_implicit_idx += 1;
+                    idx
+                } else if arg_part.chars().all(|c| c.is_ascii_digit()) {
+                    arg_part.parse::<usize>().unwrap_or(usize::MAX)
+                } else {
+                    usize::MAX
+                };
+                let mut rewritten_inner = if let Some(prefix) = inner.strip_suffix(":#?") {
                     prefix.to_string()
                 } else if let Some(prefix) = inner.strip_suffix(":?") {
                     prefix.to_string()
                 } else {
                     inner
                 };
+                // Rust precision on a float means FIXED notation; C++ means
+                // general notation with N significant digits. Append the `f`
+                // type char for known-float args when the spec has a precision
+                // and no explicit type char already.
+                if float_arg_positions.contains(&arg_idx)
+                    && let Some((_, spec)) = rewritten_inner.split_once(':')
+                    && spec.contains('.')
+                    && !spec.contains('$')
+                    && !spec.ends_with(|c: char| c.is_ascii_alphabetic())
+                {
+                    rewritten_inner.push('f');
+                }
                 out.push('{');
                 out.push_str(&rewritten_inner);
                 out.push('}');
@@ -24226,6 +24276,40 @@ impl CodeGen {
 
     fn format_conversion_requires_numeric_bridge(&self, conversion: char) -> bool {
         matches!(conversion, 'x' | 'X' | 'o' | 'b' | 'B' | 'd')
+    }
+
+    /// True when a format arg is known float-typed (inferred type, float
+    /// literal, or an `as f32/f64` cast). Used to append the `f` type char to
+    /// precision specs: Rust `{:.2}` formats floats in FIXED notation, while
+    /// C++ `{:.2}` means 2 significant digits in general notation
+    /// (`100.0` → `1e+02`) — silent numeric corruption without the `f`.
+    fn format_arg_is_known_float_like(&self, token_expr: &str) -> bool {
+        let trimmed = token_expr.trim();
+        let parsed = if let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) {
+            Some(expr)
+        } else {
+            let normalized = normalize_token_text(trimmed.to_string());
+            if normalized != trimmed {
+                syn::parse_str::<syn::Expr>(&normalized).ok()
+            } else {
+                None
+            }
+        };
+        let Some(expr) = parsed else {
+            return false;
+        };
+        match &expr {
+            syn::Expr::Lit(lit) => matches!(&lit.lit, syn::Lit::Float(_)),
+            syn::Expr::Cast(cast) => matches!(
+                self.peel_paren_group_type(&cast.ty),
+                syn::Type::Path(tp) if tp.path.segments.last().is_some_and(|seg| {
+                    matches!(seg.ident.to_string().as_str(), "f32" | "f64")
+                })
+            ),
+            other => self
+                .infer_simple_expr_type(other)
+                .is_some_and(|ty| self.is_known_float_like_type(&ty)),
+        }
     }
 
     fn format_arg_is_known_integer_like(&self, token_expr: &str) -> bool {

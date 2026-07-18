@@ -14919,6 +14919,70 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_float_precision_specs_gain_fixed_notation_type_char() {
+    let out = transpile_str(
+        r#"
+        fn f() {
+            let x = 3.14159_f64;
+            let y: f64 = -2.5;
+            println!("{:08.3}", x);
+            println!("{:+.2}", y);
+            println!("{:.1}", 100.0_f64);
+        }
+        "#,
+    );
+    assert!(
+        out.contains("{:08.3f}") && out.contains("{:+.2f}") && out.contains("{:.1f}"),
+        "float precision specs must append 'f' (Rust fixed vs C++ general notation):\n{}",
+        out
+    );
+    assert!(
+        !out.contains("rusty::to_string(y)"),
+        "suffixed/negated float locals must infer as scalars, not to_string-wrap:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_slice_concat_routes_to_join_with_empty_separator() {
+    let out = transpile_str(
+        r#"
+        fn f(words: &[&str]) -> String {
+            words.concat()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::join(") && out.contains("\"\")"),
+        "concat() must lower to join with an empty separator:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_nested_tuple_let_destructure_avoids_nested_structured_binding() {
+    let out = transpile_str(
+        r#"
+        fn f() -> i32 {
+            let pair = (1, (2, 3));
+            let (a, (b, c)) = pair;
+            a + b + c
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("[a, [b, c]]"),
+        "nested structured bindings are ill-formed C++:\n{}",
+        out
+    );
+    assert!(
+        out.contains("_nested_tuple") && out.contains("std::get<1>"),
+        "nested destructure must bind through a temp with std::get chains:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_move_closure_local_and_captured_source_bind_non_const() {
     let out = transpile_str(
         r#"

@@ -3997,6 +3997,52 @@ impl CodeGen {
             }
             syn::Pat::Tuple(tuple) => {
                 // let (a, b) = expr; → auto [a, b] = expr;
+                // Nested destructure elements (`let (a, (b, c)) = …`) can't
+                // lower to a C++ structured binding — `auto [a, [b, c]]` is
+                // ill-formed. Bind a temp and destructure through the pattern
+                // binding machinery (std::get chains handle any nesting).
+                let has_nested_destructure = tuple.elems.iter().any(|p| {
+                    matches!(
+                        p,
+                        syn::Pat::Tuple(_)
+                            | syn::Pat::TupleStruct(_)
+                            | syn::Pat::Struct(_)
+                            | syn::Pat::Slice(_)
+                    )
+                });
+                if has_nested_destructure && let Some(init) = &local.init {
+                    let mut names = HashSet::new();
+                    for elem in &tuple.elems {
+                        self.collect_closure_param_names_from_pat(elem, &mut names);
+                    }
+                    for name in &names {
+                        self.push_in_progress_local_initializer(name);
+                    }
+                    let init_str = self.emit_expr_to_string(&init.expr);
+                    for _ in &names {
+                        self.pop_in_progress_local_initializer();
+                    }
+                    let temp = self.reserve_synthetic_cpp_name("_nested_tuple");
+                    let mut name_map = HashMap::new();
+                    for name in &names {
+                        let cpp = self.allocate_local_cpp_name(name);
+                        name_map.insert(name.clone(), cpp);
+                    }
+                    let mut binding_stmts = Vec::new();
+                    let pat_clone = syn::Pat::Tuple(tuple.clone());
+                    if self.collect_pattern_binding_stmts_with_cpp_name_map(
+                        &pat_clone,
+                        &temp,
+                        &mut binding_stmts,
+                        &mut name_map,
+                    ) {
+                        self.writeln(&format!("auto&& {} = {};", temp, init_str));
+                        for line in &binding_stmts {
+                            self.writeln(line);
+                        }
+                        return;
+                    }
+                }
                 // Special case: if the init is an if-let expression with ?/return,
                 // emit as a statement block instead of an expression (since the
                 // IIFE approach can't propagate ? to the outer function).
