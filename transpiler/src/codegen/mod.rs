@@ -23715,7 +23715,18 @@ impl CodeGen {
             | syn::Expr::Reference(_)
             | syn::Expr::Call(_)
             | syn::Expr::Try(_)
-            | syn::Expr::Await(_) => true,
+            | syn::Expr::Await(_)
+            // Control-flow / block expressions can't survive the dumb
+            // pass-through — `if c { a } else { b }` etc. must lower to a
+            // ternary/IIFE via emit_expr.
+            | syn::Expr::If(_)
+            | syn::Expr::Match(_)
+            | syn::Expr::Block(_)
+            | syn::Expr::Closure(_)
+            | syn::Expr::Loop(_)
+            | syn::Expr::While(_)
+            | syn::Expr::ForLoop(_)
+            | syn::Expr::Unsafe(_) => true,
             syn::Expr::Binary(b) => {
                 Self::format_expr_needs_smart_lowering(&b.left)
                     || Self::format_expr_needs_smart_lowering(&b.right)

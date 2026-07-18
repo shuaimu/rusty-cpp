@@ -24218,6 +24218,12 @@ fn test_format_arg_cast_lowers_via_smart_path() {
     // Reference arg (`&x`) must not format a pointer — the smart path peels it.
     let r = transpile_str("pub fn f(x: i32) -> String { format!(\"{}\", &x) }");
     assert!(!r.contains("\" , & x"), "reference not passed as pointer: {r}");
+    // if-expr arg must lower to a ternary, not leak Rust `if { } else { }`.
+    let i = transpile_str(
+        "pub fn f(x: i32) -> String { format!(\"{}\", if x > 0 { \"p\" } else { \"n\" }) }",
+    );
+    assert!(i.contains("? \"p\" : \"n\""), "if-expr lowered to ternary: {i}");
+    assert!(!i.contains("if x > 0 {"), "no raw Rust if-expr: {i}");
 }
 
 #[test]
