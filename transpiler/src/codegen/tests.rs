@@ -14923,6 +14923,52 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_shadowed_local_in_println_uses_live_binding() {
+    let out = transpile_str(
+        r#"
+        fn f() {
+            let x = 1;
+            let x = x + 1;
+            println!("{}", x);
+            let s = format!("{}", x);
+            let _ = s;
+        }
+        "#,
+    );
+    let shadow = out
+        .find("x_shadow1")
+        .expect("shadow rename missing entirely");
+    let _ = shadow;
+    assert!(
+        !out.contains(", x);") && !out.contains(", x)"),
+        "macro args must reference the live shadow binding, not the stale original:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_option_and_bool_debug_display_in_prelude() {
+    let out = transpile_str(
+        r#"
+        fn f(a: u8, b: u8) {
+            println!("{:?}", a.checked_add(b));
+            println!("{}", a.checked_sub(b).is_none());
+        }
+        "#,
+    );
+    assert!(
+        out.contains("return \"None\";") && out.contains("\"Some(\""),
+        "prelude to_debug_string must render Option as Some(..)/None:\n{}",
+        out
+    );
+    assert!(
+        out.contains("return value ? \"true\" : \"false\";"),
+        "prelude to_string must render bool as true/false, not 1/0:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_generic_fn_trait_bound_emits_no_phantom_facade_requires() {
     let out = transpile_str(
         r#"
@@ -32395,8 +32441,10 @@ fn test_leaf4154448_to_string_emits_rusty_to_string() {
         out.contains("rusty::to_string("),
         ".to_string() should emit rusty::to_string()\nGot: {out}"
     );
+    // Target the call-site form specifically: the emitted runtime prelude's
+    // own to_string dispatch legitimately contains `value.to_string()`.
     assert!(
-        !out.contains(".to_string()"),
+        !out.contains("x.to_string()"),
         "should not emit .to_string() member call\nGot: {out}"
     );
 }

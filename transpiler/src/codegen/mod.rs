@@ -23717,6 +23717,17 @@ impl CodeGen {
         {
             return true;
         }
+        // Shadow-renamed locals (`let x = 1; let x = x + 1;` → x_shadow1) are
+        // invisible to the dumb token pass-through, which would emit the STALE
+        // original name — the print silently shows the pre-shadow value. Route
+        // through emit_expr, which resolves the current binding.
+        if parts
+            .iter()
+            .skip(1)
+            .any(|arg| self.format_arg_mentions_shadow_renamed_local(arg))
+        {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
@@ -24297,6 +24308,36 @@ impl CodeGen {
 
     fn format_conversion_requires_numeric_bridge(&self, conversion: char) -> bool {
         matches!(conversion, 'x' | 'X' | 'o' | 'b' | 'B' | 'd')
+    }
+
+    /// True when a format arg expression mentions a local whose current C++
+    /// binding name differs from its plain escaped form — i.e. a shadowed
+    /// rebind (`x` → `x_shadow1`). Such args must take the smart path so
+    /// emit_expr substitutes the live binding.
+    fn format_arg_mentions_shadow_renamed_local(&self, arg: &str) -> bool {
+        let Ok(expr) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+            return false;
+        };
+        struct ShadowScan<'a> {
+            cg: &'a CodeGen,
+            hit: bool,
+        }
+        impl<'ast> Visit<'ast> for ShadowScan<'_> {
+            fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+                if !self.hit && p.qself.is_none() && p.path.segments.len() == 1 {
+                    let name = p.path.segments[0].ident.to_string();
+                    if let Some(cpp) = self.cg.lookup_local_binding_cpp_name(&name) {
+                        if cpp != escape_cpp_keyword(&name) {
+                            self.hit = true;
+                        }
+                    }
+                }
+                visit::visit_expr_path(self, p);
+            }
+        }
+        let mut scan = ShadowScan { cg: self, hit: false };
+        scan.visit_expr(&expr);
+        scan.hit
     }
 
     /// True when a format arg is known float-typed (inferred type, float
@@ -45200,6 +45241,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         // structs emit a rusty_debug_string() member calling to_debug_string.
         // Without markers the emissions referenced undefined helpers.
         "rusty::to_debug_string",
+        "rusty::to_string(",
         "rusty::detail::escape_debug_string(",
         "rusty::detail::escape_default_",
         "rusty::detail::pretty_debug_string(",
@@ -45465,6 +45507,9 @@ std::string to_string(const T& value) {
             out.push_back(static_cast<char>(c));
         }
         return out;
+    } else if constexpr (std::is_same_v<V, bool>) {
+        // Rust Display for bool; std::to_string would integer-promote to "1"/"0".
+        return value ? "true" : "false";
     } else if constexpr (std::is_arithmetic_v<V>) {
         return std::to_string(value);
     } else if constexpr (requires { value.to_string(); }) {
@@ -45662,6 +45707,18 @@ std::string to_debug_string(const T& value) {
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;
     if constexpr (requires { value.rusty_debug_string(); }) {
         return value.rusty_debug_string();
+    } else if constexpr (requires { value.is_some(); value.unwrap(); }) {
+        // Rust Debug for Option: Some(<dbg>) / None.
+        if (value.is_some()) {
+            return std::string("Some(") + rusty::to_debug_string(value.unwrap()) + ")";
+        }
+        return "None";
+    } else if constexpr (requires { value.is_ok(); value.unwrap(); value.unwrap_err(); }) {
+        // Rust Debug for Result: Ok(<dbg>) / Err(<dbg>).
+        if (value.is_ok()) {
+            return std::string("Ok(") + rusty::to_debug_string(value.unwrap()) + ")";
+        }
+        return std::string("Err(") + rusty::to_debug_string(value.unwrap_err()) + ")";
     } else if constexpr (std::is_convertible_v<T, std::string_view>) {
         return std::string("\"")
             + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
@@ -49012,6 +49069,16 @@ std::string to_debug_string(const T& value) {\n\
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
     if constexpr (requires { value.rusty_debug_string(); }) {\n\
         return value.rusty_debug_string();\n\
+    } else if constexpr (requires { value.is_some(); value.unwrap(); }) {\n\
+        if (value.is_some()) {\n\
+            return std::string(\"Some(\") + rusty::to_debug_string(value.unwrap()) + \")\";\n\
+        }\n\
+        return \"None\";\n\
+    } else if constexpr (requires { value.is_ok(); value.unwrap(); value.unwrap_err(); }) {\n\
+        if (value.is_ok()) {\n\
+            return std::string(\"Ok(\") + rusty::to_debug_string(value.unwrap()) + \")\";\n\
+        }\n\
+        return std::string(\"Err(\") + rusty::to_debug_string(value.unwrap_err()) + \")\";\n\
     } else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {\n\
         return std::to_string(static_cast<int>(value));\n\
     } else if constexpr (std::is_same_v<Value, char>\n\
