@@ -24233,6 +24233,17 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_string_pop_option_chain_transpiles() {
+    // String::pop now returns Option<char>, so Rust's idiomatic
+    // `.pop().map(..)`/`unwrap_or` chains type-check against the runtime.
+    let out = transpile_str(
+        "pub fn f(s: &mut String) -> u32 { s.pop().map(|c| c as u32).unwrap_or(0) }",
+    );
+    assert!(out.contains(".pop()"), "pop member: {out}");
+    assert!(out.contains(".unwrap_or("), "option chain: {out}");
+}
+
+#[test]
 fn test_char_from_digit_routes() {
     // char::from_digit was mis-lowered to `char_::from_digit` (bogus owner
     // from the keyword escape); it now routes to the char_runtime helper.

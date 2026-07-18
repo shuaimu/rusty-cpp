@@ -634,6 +634,24 @@ public:
         return Option<std::tuple<T, U>>(None);
     }
 
+    // Rust parity: Option::iter() — a 0/1-item iterator of &T (pointer
+    // items, matching the slice-iterator convention).
+    struct RefIter {
+        const T* ptr_;
+        RefIter into_iter() const { return *this; }
+        Option<const T*> next() {
+            if (ptr_ == nullptr) {
+                return Option<const T*>(None);
+            }
+            const T* current = ptr_;
+            ptr_ = nullptr;
+            return Option<const T*>(current);
+        }
+    };
+    RefIter iter() const {
+        return RefIter{has_value ? &value : nullptr};
+    }
+
     // Rust parity: Option<Option<U>>::flatten(self) -> Option<U>. Here T is the
     // inner Option type, so the return type is simply T.
     T flatten() {

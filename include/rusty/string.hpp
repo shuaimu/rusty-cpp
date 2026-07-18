@@ -417,14 +417,83 @@ public:
         return fmt::Result::Ok({});
     }
 
-    // Pop character from end
-    char pop() {
+    // Rust parity: String::pop() -> Option<char>. Pops the LAST CHAR
+    // (walking back over UTF-8 continuation bytes), None on empty. (Was a
+    // byte-wise `char` return that threw on empty — both semantically wrong
+    // for Rust call sites, which always treat the result as an Option, and
+    // corrupting for multibyte tails.)
+    Option<char32_t> pop() {
         if (len_ == 0) {
-            throw std::out_of_range("pop from empty String");
+            return Option<char32_t>(None);
         }
-        char ch = data_[--len_];
+        size_t start = len_ - 1;
+        while (start > 0
+               && (static_cast<unsigned char>(data_[start]) & 0xC0) == 0x80) {
+            --start;
+        }
+        const unsigned char lead = static_cast<unsigned char>(data_[start]);
+        char32_t c = lead;
+        size_t seq_len = 1;
+        if (lead >= 0xF0) { seq_len = 4; c = lead & 0x07; }
+        else if (lead >= 0xE0) { seq_len = 3; c = lead & 0x0F; }
+        else if (lead >= 0xC0) { seq_len = 2; c = lead & 0x1F; }
+        if (seq_len > 1 && start + seq_len <= len_) {
+            for (size_t k = 1; k < seq_len; ++k) {
+                c = static_cast<char32_t>(
+                    (c << 6)
+                    | (static_cast<unsigned char>(data_[start + k]) & 0x3F));
+            }
+        }
+        len_ = start;
         ensure_null_terminated();
-        return ch;
+        return Option<char32_t>(c);
+    }
+
+    // Rust parity: String::insert_str(idx, s) — byte-index insertion.
+    void insert_str(size_t idx, std::string_view s) {
+        if (idx > len_) {
+            throw std::out_of_range("insert_str index out of bounds");
+        }
+        grow(len_ + s.size() + 1);
+        std::memmove(data_ + idx + s.size(), data_ + idx, len_ - idx);
+        std::memcpy(data_ + idx, s.data(), s.size());
+        len_ += s.size();
+        ensure_null_terminated();
+    }
+
+    // Rust parity: String::retain(pred) — keep chars where pred(ch) holds,
+    // walking UTF-8 sequences.
+    template<typename Pred>
+    void retain(Pred&& pred) {
+        size_t read = 0;
+        size_t write = 0;
+        while (read < len_) {
+            const unsigned char lead = static_cast<unsigned char>(data_[read]);
+            size_t seq_len = 1;
+            char32_t c = lead;
+            if (lead >= 0xF0) { seq_len = 4; c = lead & 0x07; }
+            else if (lead >= 0xE0) { seq_len = 3; c = lead & 0x0F; }
+            else if (lead >= 0xC0) { seq_len = 2; c = lead & 0x1F; }
+            if (read + seq_len > len_) {
+                seq_len = 1;
+                c = lead;
+            } else {
+                for (size_t k = 1; k < seq_len; ++k) {
+                    c = static_cast<char32_t>(
+                        (c << 6)
+                        | (static_cast<unsigned char>(data_[read + k]) & 0x3F));
+                }
+            }
+            if (pred(c)) {
+                if (write != read) {
+                    std::memmove(data_ + write, data_ + read, seq_len);
+                }
+                write += seq_len;
+            }
+            read += seq_len;
+        }
+        len_ = write;
+        ensure_null_terminated();
     }
 
     // Remove and return one byte at index. This mirrors common transpiled
