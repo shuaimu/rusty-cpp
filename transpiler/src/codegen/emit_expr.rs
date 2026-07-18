@@ -9487,7 +9487,7 @@ impl CodeGen {
         }
         if matches!(
             method_name.as_str(),
-            "trim_start_matches" | "trim_end_matches"
+            "trim_start_matches" | "trim_end_matches" | "trim_matches"
         ) && args.len() == 1
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -9541,6 +9541,23 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::str_runtime::find({}, {})", receiver, args[0]);
+        }
+        if method_name == "rfind"
+            && args.len() == 1
+            && !matches!(
+                self.peel_paren_group_expr(&mc.args[0]),
+                syn::Expr::Closure(_)
+            )
+            && !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::str_runtime::rfind({}, {})", receiver, args[0]);
         }
         if method_name == "split_at" && args.len() == 1 {
             if self
@@ -9619,6 +9636,37 @@ impl CodeGen {
                     raw_receiver
                 };
                 return format!("rusty::str_runtime::split({}, {})", receiver, args[0]);
+            }
+        }
+        if method_name == "rsplit" && args.len() == 1 {
+            // `str::rsplit(delim)` reverse-order iterator. Route by receiver
+            // type (same stringish detection as `split`) so a user method
+            // named `rsplit` on a non-string type isn't hijacked.
+            let receiver_ty = self
+                .infer_hint_type_from_expr(&mc.receiver)
+                .or_else(|| self.infer_simple_expr_type(&mc.receiver));
+            let mapped_receiver = receiver_ty.as_ref().map(|ty| self.map_type(ty));
+            let receiver_is_stringish = mapped_receiver
+                .as_ref()
+                .map(|mapped| {
+                    mapped.contains("string_view")
+                        || mapped.contains("rusty::String")
+                        || mapped.contains("StrView")
+                        || *mapped == "std::string"
+                })
+                .unwrap_or(false);
+            let receiver_chain_ends_in_as_str = matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::MethodCall(inner) if inner.method == "as_str" && inner.args.is_empty()
+            );
+            if receiver_is_stringish || receiver_chain_ends_in_as_str {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("rusty::str_runtime::rsplit({}, {})", receiver, args[0]);
             }
         }
         if method_name == "hash"

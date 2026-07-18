@@ -49417,6 +49417,13 @@ inline std::string_view trim_end_matches(std::string_view s, char32_t ch) {\n\
     while (end > 0 && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;\n\
     return s.substr(0, end);\n\
 }\n\
+inline std::string_view trim_matches(std::string_view s, char32_t ch) {\n\
+    size_t start = 0;\n\
+    while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;\n\
+    size_t end = s.size();\n\
+    while (end > start && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;\n\
+    return s.substr(start, end - start);\n\
+}\n\
 inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {\n\
     if (s.starts_with(prefix)) {\n\
         return rusty::Option<std::string_view>(s.substr(prefix.size()));\n\
@@ -49481,6 +49488,32 @@ inline rusty::Option<std::size_t> find(std::string_view s, char32_t ch) {\n\
 template<std::size_t N>\n\
 inline rusty::Option<std::size_t> find(std::string_view s, const std::array<char32_t, N>& any_char) {\n\
     for (std::size_t i = 0; i < s.size(); ++i) {\n\
+        const auto cur = static_cast<char32_t>(static_cast<unsigned char>(s[i]));\n\
+        for (const auto ch : any_char) {\n\
+            if (cur == ch) {\n\
+                return rusty::Option<std::size_t>(i);\n\
+            }\n\
+        }\n\
+    }\n\
+    return rusty::Option<std::size_t>(rusty::None);\n\
+}\n\
+inline rusty::Option<std::size_t> rfind(std::string_view s, std::string_view needle) {\n\
+    const auto pos = s.rfind(needle);\n\
+    if (pos == std::string_view::npos) {\n\
+        return rusty::Option<std::size_t>(rusty::None);\n\
+    }\n\
+    return rusty::Option<std::size_t>(pos);\n\
+}\n\
+inline rusty::Option<std::size_t> rfind(std::string_view s, char32_t ch) {\n\
+    const auto pos = s.rfind(static_cast<char>(ch));\n\
+    if (pos == std::string_view::npos) {\n\
+        return rusty::Option<std::size_t>(rusty::None);\n\
+    }\n\
+    return rusty::Option<std::size_t>(pos);\n\
+}\n\
+template<std::size_t N>\n\
+inline rusty::Option<std::size_t> rfind(std::string_view s, const std::array<char32_t, N>& any_char) {\n\
+    for (std::size_t i = s.size(); i-- > 0; ) {\n\
         const auto cur = static_cast<char32_t>(static_cast<unsigned char>(s[i]));\n\
         for (const auto ch : any_char) {\n\
             if (cur == ch) {\n\
@@ -49590,6 +49623,43 @@ inline SplitIter split(const S& value, char32_t delim) {\n\
         return split(*value, delim);\n\
     } else {\n\
         return SplitIter{std::string_view{}, delim, true};\n\
+    }\n\
+}\n\
+struct RSplitIter {\n\
+    std::string_view remaining;\n\
+    char32_t delim;\n\
+    bool done = false;\n\
+    rusty::Option<std::string_view> next() {\n\
+        if (done) return rusty::Option<std::string_view>(rusty::None);\n\
+        auto pos = remaining.rfind(static_cast<char>(delim));\n\
+        if (pos == std::string_view::npos) {\n\
+            done = true;\n\
+            return rusty::Option<std::string_view>(remaining);\n\
+        }\n\
+        auto piece = remaining.substr(pos + 1);\n\
+        remaining = remaining.substr(0, pos);\n\
+        return rusty::Option<std::string_view>(piece);\n\
+    }\n\
+    rusty::Option<std::string_view> nth(std::size_t n) {\n\
+        for (std::size_t i = 0; i < n; ++i) {\n\
+            if (next().is_none()) {\n\
+                return rusty::Option<std::string_view>(rusty::None);\n\
+            }\n\
+        }\n\
+        return next();\n\
+    }\n\
+};\n\
+inline RSplitIter rsplit(std::string_view s, char32_t delim) {\n\
+    return RSplitIter{s, delim};\n\
+}\n\
+template<typename S>\n\
+inline RSplitIter rsplit(const S& value, char32_t delim) {\n\
+    if constexpr (std::is_convertible_v<S, std::string_view>) {\n\
+        return rsplit(std::string_view(value), delim);\n\
+    } else if constexpr (requires { value.as_str(); }) {\n\
+        return rsplit(std::string_view(value.as_str()), delim);\n\
+    } else {\n\
+        return RSplitIter{std::string_view{}, delim, true};\n\
     }\n\
 }\n\
 inline bool is_ascii_ws(char c) { return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f' || c == '\\v'; }\n\

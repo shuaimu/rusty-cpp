@@ -2561,11 +2561,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     | "is_char_boundary"
                     | "parse"
                     | "trim"
+                    | "trim_matches"
                     | "trim_start_matches"
                     | "trim_end_matches"
                     | "strip_prefix"
                     | "strip_suffix"
                     | "split"
+                    | "rsplit"
                     | "split_once"
                     | "rsplit_once"
                     | "split_whitespace"
@@ -2578,6 +2580,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     | "to_ascii_uppercase"
                     | "to_ascii_lowercase"
                     | "find"
+                    | "rfind"
             )
         {
             let mut resolved = vec!["rusty".to_string(), "str_runtime".to_string()];

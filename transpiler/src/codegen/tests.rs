@@ -24194,6 +24194,31 @@ fn test_float_total_cmp_lowers_to_bit_ordering() {
 }
 
 #[test]
+fn test_str_rfind_rsplit_trim_matches_route() {
+    // rfind -> str_runtime::rfind returning Option (parallel to find). The
+    // negative patterns target the broken member-call-with-char-literal form
+    // (`s.rfind(U'.')`) — the str_runtime prelude legitimately uses `s.rfind`
+    // internally, so a bare substring check would false-positive on it.
+    let rf = transpile_str("pub fn f(s: &str) -> Option<usize> { s.rfind('.') }");
+    assert!(rf.contains("rusty::str_runtime::rfind(s,"), "rfind: {rf}");
+    assert!(!rf.contains("s.rfind(U'"), "no member rfind: {rf}");
+    // trim_matches -> str_runtime::trim_matches.
+    let tm = transpile_str("pub fn f(s: &str) -> &str { s.trim_matches('x') }");
+    assert!(tm.contains("rusty::str_runtime::trim_matches(s,"), "trim_matches: {tm}");
+    assert!(!tm.contains("s.trim_matches(U'"), "no member trim_matches: {tm}");
+    // rsplit -> str_runtime::rsplit iterator; .count() routes to rusty::count.
+    let rs = transpile_str("pub fn f(s: &str) -> usize { s.rsplit('.').count() }");
+    assert!(rs.contains("rusty::str_runtime::rsplit(s,"), "rsplit: {rs}");
+    assert!(rs.contains("rusty::count("), "rsplit is an iterator: {rs}");
+    assert!(!rs.contains("s.rsplit(U'"), "no member rsplit: {rs}");
+    // char_indices is now recognized as an iterator, so .count() wraps in
+    // rusty::count instead of calling a nonexistent CharIndices::count member.
+    let ci = transpile_str("pub fn f(s: &str) -> usize { s.char_indices().count() }");
+    assert!(ci.contains("rusty::count(rusty::str_runtime::char_indices(s))"), "char_indices iterator: {ci}");
+    assert!(!ci.contains("char_indices(s).count()"), "no member count on CharIndices: {ci}");
+}
+
+#[test]
 fn test_option_zip_routes_to_member_not_iterator_adapter() {
     // On an Option receiver, `.zip(other)` is the Option member returning
     // Option<(T,U)>, NOT the iterator adapter rusty::zip.
