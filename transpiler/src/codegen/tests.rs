@@ -24194,6 +24194,37 @@ fn test_float_total_cmp_lowers_to_bit_ordering() {
 }
 
 #[test]
+fn test_float_rest_and_int_bytes_lower() {
+    // Float methods with no <cmath> counterpart.
+    for (src, marker, call) in [
+        ("pub fn f(x: f64) -> f64 { x.next_up() }", "std::nextafter(__v, std::numeric_limits", "x.next_up()"),
+        ("pub fn f(x: f64) -> f64 { x.next_down() }", "-std::numeric_limits", "x.next_down()"),
+        ("pub fn f(x: f64) -> f64 { x.abs_sub(1.0) }", "std::fdim(x, 1.0)", "x.abs_sub("),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+        assert!(!out.contains(call), "member call {call}: {out}");
+    }
+    // to_int_unchecked::<I>() -> a plain cast to the turbofish target.
+    let ti = transpile_str("pub fn f(x: f64) -> i32 { unsafe { x.to_int_unchecked::<i32>() } }");
+    assert!(ti.contains("static_cast<int32_t>(x)"), "to_int_unchecked: {ti}");
+    assert!(!ti.contains("to_int_unchecked<"), "no member call: {ti}");
+
+    // Integer byte-array conversions + ilog(base) + checked_next_multiple_of.
+    for (src, marker, call) in [
+        ("pub fn f(x: u32) -> [u8; 4] { x.to_ne_bytes() }", "std::bit_cast<std::array<uint8_t, sizeof(__v)>>(__v)", "x.to_ne_bytes()"),
+        ("pub fn f(x: u32) -> [u8; 4] { x.to_le_bytes() }", "std::endian::little", "x.to_le_bytes()"),
+        ("pub fn f(x: u32) -> [u8; 4] { x.to_be_bytes() }", "std::endian::big", "x.to_be_bytes()"),
+        ("pub fn f(x: u32) -> u32 { x.ilog(3) }", "__v /= __base", "x.ilog("),
+        ("pub fn f(x: u32) -> Option<u32> { x.checked_next_multiple_of(8) }", "rusty::checked_next_multiple_of(x,", "x.checked_next_multiple_of("),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+        assert!(!out.contains(call), "member call {call}: {out}");
+    }
+}
+
+#[test]
 fn test_bool_then_int_midpoint_u8_ascii_lower() {
     let ts = transpile_str("pub fn f(b: bool) -> Option<i32> { b.then_some(7) }");
     assert!(ts.contains("rusty::Option<__T>(__tv)") && !ts.contains("b.then_some("), "then_some: {ts}");

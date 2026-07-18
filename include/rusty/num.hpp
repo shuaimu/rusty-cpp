@@ -438,6 +438,34 @@ inline Option<std::size_t> checked_next_power_of_two_usize(std::size_t value) {
     return checked_next_power_of_two<std::size_t>(value);
 }
 
+// Smallest multiple of `rhs` that is >= self, or None on rhs==0 / overflow.
+// Mirrors Rust's checked_next_multiple_of for both signed and unsigned.
+template<typename T>
+requires(std::is_integral_v<T>)
+Option<T> checked_next_multiple_of(T value, T rhs) {
+    if (rhs == static_cast<T>(0)) {
+        return Option<T>(rusty::None);
+    }
+    T r = static_cast<T>(value % rhs);
+    if (r == static_cast<T>(0)) {
+        return Option<T>(value);
+    }
+    // For signed types Rust rounds toward +inf: if the remainder has the
+    // opposite sign of rhs, the next multiple is value + (rhs - r) after
+    // normalizing r into rhs's sign domain.
+    if constexpr (std::is_signed_v<T>) {
+        if ((r < 0) != (rhs < 0)) {
+            r = static_cast<T>(r + rhs);
+        }
+    }
+    T delta = static_cast<T>(rhs - r);
+    T sum;
+    if (__builtin_add_overflow(value, delta, &sum)) {
+        return Option<T>(rusty::None);
+    }
+    return Option<T>(sum);
+}
+
 // Integer square root (floor) via integer Newton's method — no FP rounding.
 template<typename U>
 requires(std::is_integral_v<U> && std::is_unsigned_v<U>)

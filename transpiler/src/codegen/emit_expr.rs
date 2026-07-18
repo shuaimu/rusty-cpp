@@ -6807,6 +6807,21 @@ impl CodeGen {
                     // Round half-to-even (banker's rounding). std::nearbyint
                     // uses the default FE_TONEAREST mode = round-to-even.
                     "round_ties_even" => return format!("std::nearbyint({})", receiver),
+                    // Next/previous representable float toward ±infinity. Evaluate
+                    // the receiver once so decltype picks up f32 vs f64 and the
+                    // right std::nextafter overload / infinity() width is used.
+                    "next_up" => {
+                        return format!(
+                            "([&]() {{ auto __v = {}; return std::nextafter(__v, std::numeric_limits<decltype(__v)>::infinity()); }}())",
+                            receiver
+                        );
+                    }
+                    "next_down" => {
+                        return format!(
+                            "([&]() {{ auto __v = {}; return std::nextafter(__v, -std::numeric_limits<decltype(__v)>::infinity()); }}())",
+                            receiver
+                        );
+                    }
                     // (sin, cos) tuple.
                     "sin_cos" => {
                         return format!(
@@ -6816,9 +6831,33 @@ impl CodeGen {
                     }
                     _ => {}
                 }
+                // `x.to_int_unchecked::<I>()` — Rust does a raw (UB-on-overflow)
+                // float→int truncation; the C++ equivalent is a plain cast to the
+                // turbofish target type. Empty value-args but a single type arg.
+                if method == "to_int_unchecked"
+                    && let Some(turbofish) = &mc.turbofish
+                {
+                    let mapped: Vec<String> = turbofish
+                        .args
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                            _ => None,
+                        })
+                        .collect();
+                    if mapped.len() == 1 && mapped[0] != "auto" {
+                        return format!("static_cast<{}>({})", mapped[0], receiver);
+                    }
+                }
             }
             if mc.args.len() == 1 {
                 match method.as_str() {
+                    // Positive difference: max(self - other, 0). std::fdim is
+                    // exactly this (and NaN-propagating like Rust's f{32,64}).
+                    "abs_sub" => {
+                        let other = self.emit_expr_to_string(&mc.args[0]);
+                        return format!("std::fdim({}, {})", receiver, other);
+                    }
                     "rem_euclid" => {
                         let n = self.emit_expr_to_string(&mc.args[0]);
                         return format!(
@@ -7036,6 +7075,43 @@ impl CodeGen {
                     return format!(
                         "([&]() {{ auto __a = {}; decltype(__a) __b = static_cast<decltype(__a)>({}); return static_cast<decltype(__a)>(((__a ^ __b) >> 1) + (__a & __b)); }}())",
                         receiver, arg
+                    );
+                }
+                // Byte-array conversions: reinterpret the integer's object
+                // representation as std::array<uint8_t, sizeof(T)>. `to_ne_bytes`
+                // is native order; le/be pick the ordering via std::endian and
+                // std::byteswap (C++23).
+                if is_int && mc.args.is_empty() && method == "to_ne_bytes" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; return std::bit_cast<std::array<uint8_t, sizeof(__v)>>(__v); }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "to_le_bytes" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; using __A = std::array<uint8_t, sizeof(__v)>; if constexpr (std::endian::native == std::endian::little) {{ return std::bit_cast<__A>(__v); }} else {{ return std::bit_cast<__A>(std::byteswap(__v)); }} }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.is_empty() && method == "to_be_bytes" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; using __A = std::array<uint8_t, sizeof(__v)>; if constexpr (std::endian::native == std::endian::big) {{ return std::bit_cast<__A>(__v); }} else {{ return std::bit_cast<__A>(std::byteswap(__v)); }} }}())",
+                        receiver
+                    );
+                }
+                if is_int && mc.args.len() == 1 && method == "ilog" {
+                    // floor(log_base(self)); Rust requires self > 0 and base >= 2.
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __v = {}; decltype(__v) __base = static_cast<decltype(__v)>({}); uint32_t __r = 0; while (__v >= __base) {{ __v /= __base; ++__r; }} return __r; }}())",
+                        receiver, arg
+                    );
+                }
+                if is_int && mc.args.len() == 1 && method == "checked_next_multiple_of" {
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "rusty::checked_next_multiple_of({}, static_cast<std::remove_cvref_t<decltype({})>>({}))",
+                        receiver, receiver, arg
                     );
                 }
             }
