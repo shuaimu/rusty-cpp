@@ -24186,6 +24186,14 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_float_total_cmp_lowers_to_bit_ordering() {
+    let out = transpile_str("pub fn f(x: f64, y: f64) -> std::cmp::Ordering { x.total_cmp(&y) }");
+    assert!(out.contains("std::bit_cast<__I>"), "bit trick: {out}");
+    assert!(out.contains("rusty::cmp::Ordering::Less"), "Ordering: {out}");
+    assert!(!out.contains("x.total_cmp("), "no member call: {out}");
+}
+
+#[test]
 fn test_bool_then_int_midpoint_u8_ascii_lower() {
     let ts = transpile_str("pub fn f(b: bool) -> Option<i32> { b.then_some(7) }");
     assert!(ts.contains("rusty::Option<__T>(__tv)") && !ts.contains("b.then_some("), "then_some: {ts}");

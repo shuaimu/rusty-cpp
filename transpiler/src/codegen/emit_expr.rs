@@ -6837,6 +6837,20 @@ impl CodeGen {
                         let n = self.emit_expr_to_string(&mc.args[0]);
                         return format!("(({} + {}) / 2)", receiver, n);
                     }
+                    "total_cmp" => {
+                        // Rust f{32,64}::total_cmp: total order over the bit
+                        // pattern (NaN/±0 consistent). Flip the sign-biased bits
+                        // to make them monotonic, then compare. The arg is
+                        // `&other`; peel the ref.
+                        let mut other = self.emit_expr_to_string(&mc.args[0]);
+                        if let Some(stripped) = other.strip_prefix('&') {
+                            other = stripped.trim_start().to_string();
+                        }
+                        return format!(
+                            "([&]() {{ auto __fa = {}; auto __fb = {}; using __F = decltype(__fa); using __I = std::conditional_t<sizeof(__F) == 8, std::int64_t, std::int32_t>; using __U = std::make_unsigned_t<__I>; __I __a = std::bit_cast<__I>(__fa); __I __b = std::bit_cast<__I>(__fb); constexpr int __sh = static_cast<int>(sizeof(__F) * 8 - 1); __a ^= static_cast<__I>(static_cast<__U>(__a >> __sh) >> 1); __b ^= static_cast<__I>(static_cast<__U>(__b >> __sh) >> 1); return __a < __b ? rusty::cmp::Ordering::Less : (__a > __b ? rusty::cmp::Ordering::Greater : rusty::cmp::Ordering::Equal); }}())",
+                            receiver, other
+                        );
+                    }
                     _ => {}
                 }
             }
