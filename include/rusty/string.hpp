@@ -182,6 +182,75 @@ public:
         return s;
     }
 
+    // Rust `FromIterator for String` — the `collect::<String>()` target.
+    // Accepts char iterators (each scalar is UTF-8 encoded) and string-piece
+    // iterators (each piece appended). Works over next()-style iterators and
+    // plain begin/end ranges.
+    template<typename Range>
+    static String from_iter(Range&& range) {
+        std::string buf;
+        auto append_item = [&buf](auto&& item) {
+            using Item = std::remove_cvref_t<decltype(item)>;
+            if constexpr (std::is_convertible_v<Item, std::string_view>) {
+                const std::string_view sv(item);
+                buf.append(sv.data(), sv.size());
+            } else if constexpr (requires { item.as_str(); }) {
+                const std::string_view sv(item.as_str());
+                buf.append(sv.data(), sv.size());
+            } else {
+                const char32_t c = static_cast<char32_t>(item);
+                if (c < 0x80) {
+                    buf.push_back(static_cast<char>(c));
+                } else if (c < 0x800) {
+                    buf.push_back(static_cast<char>(0xC0 | (c >> 6)));
+                    buf.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+                } else if (c < 0x10000) {
+                    buf.push_back(static_cast<char>(0xE0 | (c >> 12)));
+                    buf.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+                    buf.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+                } else {
+                    buf.push_back(static_cast<char>(0xF0 | (c >> 18)));
+                    buf.push_back(static_cast<char>(0x80 | ((c >> 12) & 0x3F)));
+                    buf.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+                    buf.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+                }
+            }
+        };
+        auto append_maybe_deref = [&append_item](auto&& value) {
+            if constexpr (std::is_pointer_v<std::remove_cvref_t<decltype(value)>>) {
+                append_item(*value);
+            } else {
+                append_item(std::forward<decltype(value)>(value));
+            }
+        };
+        if constexpr (requires { range.next(); }) {
+            auto it = std::forward<Range>(range);
+            while (true) {
+                auto item = it.next();
+                const bool has = [&] {
+                    if constexpr (requires { item.is_some(); }) {
+                        return item.is_some();
+                    } else {
+                        return static_cast<bool>(item);
+                    }
+                }();
+                if (!has) {
+                    break;
+                }
+                if constexpr (requires { item.unwrap(); }) {
+                    append_maybe_deref(item.unwrap());
+                } else {
+                    append_maybe_deref(*std::move(item));
+                }
+            }
+        } else {
+            for (auto&& item : range) {
+                append_maybe_deref(item);
+            }
+        }
+        return String::from(std::string_view(buf));
+    }
+
     // Rust-like lossy UTF-8 decode helper used by expanded crates.
     // Current runtime keeps a byte-preserving fallback to maintain compile parity.
     static String from_utf8_lossy(std::span<const uint8_t> bytes) {

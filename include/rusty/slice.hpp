@@ -17,6 +17,7 @@
 
 #include "rusty/option.hpp"
 #include "rusty/dispatch.hpp"
+#include "rusty/peekable.hpp"
 
 namespace rusty {
 
@@ -74,6 +75,13 @@ public:
     Iter into_iter() const { return *this; }
     Iter& by_ref() { return *this; }
     const Iter& by_ref() const { return *this; }
+
+    // Rust `Iterator::peekable()` — consume into the caching wrapper. Also
+    // satisfies the transpiler's type-position spelling
+    // `decltype(std::declval<Iter>().peekable())`.
+    rusty::iter_adapters::Peekable<Iter> peekable() const {
+        return rusty::iter_adapters::Peekable<Iter>(*this);
+    }
 
     rusty::Option<pointer> next() {
         if (cur_ == end_) {
@@ -2679,6 +2687,23 @@ decltype(auto) skip_while(Range&& range, Pred&& pred) {
     } else {
         return skip_while(iter(std::forward<Range>(range)),
                           std::forward<Pred>(pred));
+    }
+}
+
+// Rust `Iterator::peekable()` — the member spelling wins (slice_iter::Iter
+// carries one); any other option-like-next iterator wraps in the generic
+// iter_adapters::Peekable.
+template<typename Range>
+decltype(auto) peekable(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).peekable(); }) {
+        return std::forward<Range>(range).peekable();
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return iter_adapters::Peekable<std::remove_reference_t<Range>>(
+            std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return peekable(std::forward<Range>(range).into_iter());
+    } else {
+        return peekable(iter(std::forward<Range>(range)));
     }
 }
 

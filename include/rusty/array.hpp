@@ -2411,6 +2411,126 @@ auto chunks_exact(Container& container, Size chunk_size) {
     return chunks_exact(slice_full(container), chunk_size);
 }
 
+// Rust `slice::windows(n)` — overlapping subslices of length n; empty when
+// the slice is shorter than n. Same begin/end-range shape as ChunksExact.
+template<typename Elem, std::size_t Extent = std::dynamic_extent>
+class Windows {
+public:
+    using Span = std::span<Elem, std::dynamic_extent>;
+
+    class iterator {
+    public:
+        using value_type = Span;
+        using difference_type = std::ptrdiff_t;
+
+        iterator(Span span, size_t window, size_t index)
+            : span_(span), window_(window), index_(index) {}
+
+        value_type operator*() const {
+            return span_.subspan(index_, window_);
+        }
+
+        iterator& operator++() {
+            ++index_;
+            return *this;
+        }
+
+        bool operator!=(const iterator& other) const {
+            return index_ != other.index_;
+        }
+
+    private:
+        Span span_;
+        size_t window_;
+        size_t index_;
+    };
+
+    Windows(std::span<Elem, Extent> span, size_t window)
+        : span_(span.data(), span.size()), window_(window == 0 ? 1 : window) {}
+
+    iterator begin() const { return iterator(span_, window_, 0); }
+    iterator end() const {
+        const size_t n =
+            span_.size() >= window_ ? span_.size() - window_ + 1 : 0;
+        return iterator(span_, window_, n);
+    }
+
+private:
+    Span span_;
+    size_t window_;
+};
+
+template<typename Elem, std::size_t Extent, typename Size>
+auto windows(std::span<Elem, Extent> span, Size window) {
+    return Windows<Elem, Extent>(span, static_cast<size_t>(window));
+}
+
+template<typename Container, typename Size>
+auto windows(Container& container, Size window) {
+    return windows(slice_full(container), window);
+}
+
+// Rust `slice::chunks(n)` — non-overlapping subslices of length n; the
+// final chunk may be shorter (unlike chunks_exact, which drops it).
+template<typename Elem, std::size_t Extent = std::dynamic_extent>
+class Chunks {
+public:
+    using Span = std::span<Elem, std::dynamic_extent>;
+
+    class iterator {
+    public:
+        using value_type = Span;
+        using difference_type = std::ptrdiff_t;
+
+        iterator(Span span, size_t chunk_size, size_t index)
+            : span_(span), chunk_size_(chunk_size), index_(index) {}
+
+        value_type operator*() const {
+            const size_t start = index_ * chunk_size_;
+            const size_t len = std::min(chunk_size_, span_.size() - start);
+            return span_.subspan(start, len);
+        }
+
+        iterator& operator++() {
+            ++index_;
+            return *this;
+        }
+
+        bool operator!=(const iterator& other) const {
+            return index_ != other.index_;
+        }
+
+    private:
+        Span span_;
+        size_t chunk_size_;
+        size_t index_;
+    };
+
+    Chunks(std::span<Elem, Extent> span, size_t chunk_size)
+        : span_(span.data(), span.size()),
+          chunk_size_(chunk_size == 0 ? 1 : chunk_size) {}
+
+    iterator begin() const { return iterator(span_, chunk_size_, 0); }
+    iterator end() const {
+        const size_t n = (span_.size() + chunk_size_ - 1) / chunk_size_;
+        return iterator(span_, chunk_size_, n);
+    }
+
+private:
+    Span span_;
+    size_t chunk_size_;
+};
+
+template<typename Elem, std::size_t Extent, typename Size>
+auto chunks(std::span<Elem, Extent> span, Size chunk_size) {
+    return Chunks<Elem, Extent>(span, static_cast<size_t>(chunk_size));
+}
+
+template<typename Container, typename Size>
+auto chunks(Container& container, Size chunk_size) {
+    return chunks(slice_full(container), chunk_size);
+}
+
 namespace memchr_runtime {
 
 inline Option<size_t> memchr(uint8_t needle, std::span<const uint8_t> haystack) {

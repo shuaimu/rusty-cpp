@@ -24227,6 +24227,25 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_windows_chunks_peekable_route_to_free_fns() {
+    // Slice windows/chunks -> rusty:: range helpers; recognized as iterators
+    // so .count() wraps in rusty::count.
+    for (src, marker) in [
+        ("pub fn f(v: &[i32]) -> usize { v.windows(2).count() }", "rusty::windows(v, 2)"),
+        ("pub fn f(v: &[i32]) -> usize { v.chunks(3).count() }", "rusty::chunks(v, 3)"),
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains(marker), "marker {marker}: {out}");
+        assert!(out.contains("rusty::count("), "iterator recognition: {out}");
+    }
+    // .peekable() on an iterator -> rusty::peekable free fn (constructs
+    // iter_adapters::Peekable), not a bogus member call.
+    let p = transpile_str("pub fn f(v: &[i32]) -> usize { v.iter().peekable().count() }");
+    assert!(p.contains("rusty::peekable(rusty::iter(v))"), "peekable: {p}");
+    assert!(!p.contains(").peekable()"), "no member call: {p}");
+}
+
+#[test]
 fn test_iter_terminal_family_routes_to_free_fns() {
     // Item-Option terminals -> rusty::iter_* free fns (no bogus member calls
     // on the slice iterator type).

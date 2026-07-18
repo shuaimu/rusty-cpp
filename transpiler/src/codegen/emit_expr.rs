@@ -9142,6 +9142,21 @@ impl CodeGen {
             };
             return format!("rusty::chunks_exact({}, {})", receiver, args[0]);
         }
+        // Rust slice `.windows(n)` / `.chunks(n)` — std::span has no such
+        // members; route to the rusty:: range helpers (same shape as
+        // chunks_exact above).
+        if matches!(method_name.as_str(), "windows" | "chunks")
+            && args.len() == 1
+            && !self.receiver_has_inherent_method_named(&mc.receiver, &method_name)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
+        }
         // Rust slice methods `.first()` and `.get(n)` on std::span.
         // In Rust, &[T]::first() -> Option<&T> and &[T]::get(n) -> Option<&T>.
         // In C++, std::span has no such methods, so we emit equivalent expressions.
@@ -21623,6 +21638,7 @@ impl CodeGen {
             "max" => ("rusty::iter_max", 0),
             "min" => ("rusty::iter_min", 0),
             "last" => ("rusty::iter_last", 0),
+            "peekable" => ("rusty::peekable", 0),
             "nth" => ("rusty::iter_nth", 1),
             "max_by" => ("rusty::iter_max_by", 1),
             "min_by" => ("rusty::iter_min_by", 1),
