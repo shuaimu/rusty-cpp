@@ -7014,6 +7014,86 @@ impl CodeGen {
                         receiver
                     );
                 }
+                if is_int && mc.args.len() == 1 && method == "midpoint" {
+                    // Overflow-safe midpoint rounding toward -inf. The `>>` is
+                    // logical for unsigned, arithmetic for signed — matching Rust
+                    // for both. (Hacker's Delight branchless average.)
+                    let arg = self.emit_expr_to_string(&mc.args[0]);
+                    return format!(
+                        "([&]() {{ auto __a = {}; decltype(__a) __b = static_cast<decltype(__a)>({}); return static_cast<decltype(__a)>(((__a ^ __b) >> 1) + (__a & __b)); }}())",
+                        receiver, arg
+                    );
+                }
+            }
+        }
+        // `bool::then(closure)` / `bool::then_some(value)` -> Option. C++ bool has
+        // no such member. Gated on a bool receiver.
+        if mc.args.len() == 1
+            && matches!(mc.method.to_string().as_str(), "then" | "then_some")
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.map_type(ty) == "bool")
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let cond = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            if mc.method == "then_some" {
+                let arg = self.emit_expr_to_string(&mc.args[0]);
+                return format!(
+                    "([&]() {{ auto __tv = {}; using __T = std::remove_cvref_t<decltype(__tv)>; return ({}) ? rusty::Option<__T>(__tv) : rusty::Option<__T>(rusty::None); }}())",
+                    arg, cond
+                );
+            }
+            // then(closure): the closure runs only when the condition holds.
+            let closure = self.emit_expr_to_string(&mc.args[0]);
+            return format!(
+                "([&]() {{ using __T = std::remove_cvref_t<decltype(({})())>; return ({}) ? rusty::Option<__T>(({})()) : rusty::Option<__T>(rusty::None); }}())",
+                closure, cond, closure
+            );
+        }
+        // u8 ASCII methods (byte-level). Gated precisely on a u8 receiver so char
+        // (char32_t) and larger integers aren't hijacked.
+        if mc.args.is_empty()
+            && self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
+                let m = self.map_type(ty);
+                m == "uint8_t" || m == "std::uint8_t"
+            })
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let recv = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let u8_method = mc.method.to_string();
+            {
+                match u8_method.as_str() {
+                    "is_ascii" => return format!("(({}) <= 0x7F)", recv),
+                    // Only the ASCII predicates NOT already handled by a
+                    // top-level rusty:: helper (is_ascii_digit etc. stay on their
+                    // existing path). char_runtime's predicates take char32_t; u8
+                    // widens.
+                    "is_ascii_uppercase" | "is_ascii_lowercase" => {
+                        return format!("rusty::char_runtime::{}({})", u8_method, recv);
+                    }
+                    "to_ascii_uppercase" => {
+                        return format!(
+                            "([&]() {{ auto __c = {}; return static_cast<decltype(__c)>((__c >= 'a' && __c <= 'z') ? __c - 32 : __c); }}())",
+                            recv
+                        );
+                    }
+                    "to_ascii_lowercase" => {
+                        return format!(
+                            "([&]() {{ auto __c = {}; return static_cast<decltype(__c)>((__c >= 'A' && __c <= 'Z') ? __c + 32 : __c); }}())",
+                            recv
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
         if mc.method == "deref" && mc.args.is_empty() {

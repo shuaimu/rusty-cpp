@@ -24186,6 +24186,22 @@ fn test_char_classifier_alone_emits_char_runtime_block() {
 }
 
 #[test]
+fn test_bool_then_int_midpoint_u8_ascii_lower() {
+    let ts = transpile_str("pub fn f(b: bool) -> Option<i32> { b.then_some(7) }");
+    assert!(ts.contains("rusty::Option<__T>(__tv)") && !ts.contains("b.then_some("), "then_some: {ts}");
+    let th = transpile_str("pub fn f(c: bool) -> Option<i32> { c.then(|| 5) }");
+    assert!(th.contains("rusty::Option<__T>") && !th.contains("c.then("), "then: {th}");
+    let mp = transpile_str("pub fn f(x: u32) -> u32 { x.midpoint(10) }");
+    assert!(mp.contains("(__a & __b)") && !mp.contains("x.midpoint("), "midpoint: {mp}");
+    let ia = transpile_str("pub fn f(x: u8) -> bool { x.is_ascii() }");
+    assert!(ia.contains("<= 0x7F") && !ia.contains("x.is_ascii()"), "is_ascii: {ia}");
+    let iu = transpile_str("pub fn f(x: u8) -> bool { x.is_ascii_uppercase() }");
+    assert!(iu.contains("rusty::char_runtime::is_ascii_uppercase") && !iu.contains("x.is_ascii_uppercase()"), "u8 is_ascii_uppercase: {iu}");
+    let tu = transpile_str("pub fn f(x: u8) -> u8 { x.to_ascii_uppercase() }");
+    assert!(tu.contains("__c - 32") && !tu.contains("x.to_ascii_uppercase()"), "u8 to_ascii_uppercase: {tu}");
+}
+
+#[test]
 fn test_str_iterator_methods_route_and_are_iterators() {
     // The str iterator methods lower to str_runtime constructors...
     for (src, ctor) in [
