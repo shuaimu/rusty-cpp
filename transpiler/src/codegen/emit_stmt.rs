@@ -3043,6 +3043,11 @@ impl CodeGen {
                                 | "deref_mut"
                                 | "into_mut"
                                 | "reborrow"
+                                // Option's &mut T-returning inserters — a
+                                // value binding would mutate a copy.
+                                | "get_or_insert"
+                                | "get_or_insert_with"
+                                | "get_or_insert_default"
                         ) || method.ends_with("_mut");
                     }
                     if let Some(syn::Expr::Call(call)) = peeled

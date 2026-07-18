@@ -669,17 +669,24 @@ public:
         return result;
     }
     
-    // Replace the value
-    void replace(T new_value) {
-        if (has_value) {
-            value = std::move(new_value);
-        } else {
-            // @unsafe
-            {
-                new (&value) T(std::move(new_value));
-            }
+    // Rust parity: Option::replace(&mut self, value) -> Option<T>. Installs
+    // the new value and returns the PREVIOUS one (was `void`, which both
+    // broke `.replace(x).unwrap_or(..)` chains and silently dropped the old
+    // value's Rust meaning).
+    Option<T> replace(T new_value) {
+        Option<T> old = std::move(*this);
+        *this = Option<T>(std::move(new_value));
+        return old;
+    }
+
+    // Rust parity: Option::get_or_insert_default() -> &mut T (1.83). Only
+    // instantiated when called, so T needs default-construction only then.
+    T& get_or_insert_default() {
+        if (!has_value) {
+            new (&value) T();
             has_value = true;
         }
+        return value;
     }
 
     // Convert to Option<T&> without consuming the value

@@ -10312,7 +10312,8 @@ impl CodeGen {
         }
         if matches!(method_name.as_str(), "rotate_right" | "rotate_left")
             && args.len() == 1
-            && self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
+            && (self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
+                || self.receiver_is_fixed_array_like_expr(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {

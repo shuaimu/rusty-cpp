@@ -30040,6 +30040,14 @@ impl CodeGen {
         ) {
             return true;
         }
+        // Option's &mut T-returning inserters — same sink shape as the
+        // entry API above.
+        if matches!(
+            method.as_str(),
+            "get_or_insert" | "get_or_insert_with" | "get_or_insert_default"
+        ) {
+            return true;
+        }
         if matches!(
             method.as_str(),
             "as_ref" | "as_mut" | "deref" | "deref_mut" | "borrow" | "borrow_mut"
@@ -45083,6 +45091,14 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         // the same helper block). write!/writeln! and fmt::write lower to it.
         "rusty::write_fmt(",
         "rusty::is_empty(",
+        // Slice-algorithm helpers emitted in this block: without their own
+        // markers, a module whose ONLY block reference is one of these calls
+        // (array receiver, no panicking/str_runtime hit) referenced an
+        // undefined helper.
+        "rusty::partition_point(",
+        "rusty::binary_search",
+        "rusty::sort",
+        "rusty::reverse(",
         "rusty::deref_ref(",
         "rusty::deref_mut(",
         "rusty::addr_of_temp(",

@@ -15507,7 +15507,13 @@ fn test_leaf4154333333352_zip_method_call_lowers_to_runtime_zip_helper() {
 #[test]
 fn test_leaf4154333333352_array_literal_expr_lowers_to_std_array_instead_of_unreachable() {
     let out = transpile_str("fn f() { let chars = ['a', 'b']; }");
-    assert!(out.contains("std::array{U'a', U'b'}"));
+    // Char-array locals are now typed [char; N] by the initializer, so the
+    // emission carries the explicit element type (was CTAD `std::array{...}`).
+    assert!(
+        out.contains("std::array<char32_t, 2>{U'a', U'b'}")
+            || out.contains("std::array{U'a', U'b'}"),
+        "array literal lowering: {out}"
+    );
     assert!(!out.contains("rusty::intrinsics::unreachable()"));
 }
 
@@ -24224,6 +24230,25 @@ fn test_format_arg_cast_lowers_via_smart_path() {
     );
     assert!(i.contains("? \"p\" : \"n\""), "if-expr lowered to ternary: {i}");
     assert!(!i.contains("if x > 0 {"), "no raw Rust if-expr: {i}");
+}
+
+#[test]
+fn test_option_replace_insert_array_rotate() {
+    // Array-literal locals with unambiguous element types are typed [T; N],
+    // so fixed-array routing (rotate_left -> rusty::rotate_left) sees
+    // through the binding. (Unsuffixed numeric literals stay untyped — the
+    // usage-hint machinery owns their element type.)
+    let r = transpile_str(
+        "pub fn f() -> i32 { let mut w = [1i32, 2, 3, 4]; w.rotate_left(1); w[0] }",
+    );
+    assert!(r.contains("rusty::rotate_left(w, 1)"), "rotate routed: {r}");
+    assert!(!r.contains("w.rotate_left("), "no member call: {r}");
+    // get_or_insert_default binds as a REFERENCE so mutation reaches the
+    // Option (a value binding would silently mutate a copy).
+    let g = transpile_str(
+        "pub fn f() -> i32 { let mut o: Option<i32> = None; let b = o.get_or_insert_default(); *b += 9; o.unwrap_or(0) }",
+    );
+    assert!(g.contains("auto& b = o.get_or_insert_default()"), "ref binding: {g}");
 }
 
 #[test]

@@ -4205,6 +4205,34 @@ impl CodeGen {
                 }
                 None
             }
+            // A bare array literal types the local as `[T; N]` (`let w =
+            // ['a', 'b'];`) so fixed-array-receiver routing (rotate_left,
+            // windows, ...) sees through the binding. UNSUFFIXED numeric
+            // literals stay untyped: their Rust type is context-dependent
+            // (`let a = [1]; Buf::from(a)` with only a `From<[u8; N]>` impl
+            // makes them u8, not i32) and the usage-hint machinery must keep
+            // picking the element type.
+            syn::Expr::Array(array_expr) => {
+                let first = array_expr.elems.first()?;
+                if let syn::Expr::Lit(lit) = self.peel_paren_group_expr(first) {
+                    let ambiguous = match &lit.lit {
+                        syn::Lit::Int(i) => i.suffix().is_empty(),
+                        syn::Lit::Float(f) => f.suffix().is_empty(),
+                        _ => false,
+                    };
+                    if ambiguous {
+                        return None;
+                    }
+                }
+                let elem_ty = self
+                    .infer_simple_expr_type(first)
+                    .or_else(|| self.infer_local_binding_type_from_initializer(first))?;
+                let len_lit = syn::LitInt::new(
+                    &array_expr.elems.len().to_string(),
+                    proc_macro2::Span::call_site(),
+                );
+                syn::parse2::<syn::Type>(quote!([#elem_ty; #len_lit])).ok()
+            }
             syn::Expr::Struct(struct_expr) => {
                 if let Some(last) = struct_expr.path.segments.last() {
                     let last_name = last.ident.to_string();
