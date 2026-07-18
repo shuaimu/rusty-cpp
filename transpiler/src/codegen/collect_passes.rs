@@ -8950,6 +8950,40 @@ impl CodeGen {
         for stmt in stmts {
             visitor.visit_stmt(stmt);
         }
+        // `S { f: …, ..base }` moves the remaining fields out of `base` — a
+        // `const auto` binding would turn the emitted `std::move(base.field)`
+        // pulls into deleted copies for move-only field types.
+        struct StructUpdateRestLocals<'a> {
+            result: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for StructUpdateRestLocals<'_> {
+            fn visit_expr_struct(&mut self, st: &'ast syn::ExprStruct) {
+                if let Some(rest) = st.rest.as_deref() {
+                    let mut root = rest;
+                    loop {
+                        match root {
+                            syn::Expr::Field(f) => root = &f.base,
+                            syn::Expr::Paren(p) => root = &p.expr,
+                            _ => break,
+                        }
+                    }
+                    if let syn::Expr::Path(path) = root
+                        && path.qself.is_none()
+                        && path.path.segments.len() == 1
+                    {
+                        self.result
+                            .insert(path.path.segments[0].ident.to_string());
+                    }
+                }
+                visit::visit_expr_struct(self, st);
+            }
+        }
+        let mut rest_visitor = StructUpdateRestLocals {
+            result: &mut result,
+        };
+        for stmt in stmts {
+            rest_visitor.visit_stmt(stmt);
+        }
         result
     }
 

@@ -14919,6 +14919,97 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_struct_update_call_base_evaluates_once() {
+    let out = transpile_str(
+        r#"
+        struct Cfg { a: i32, b: i32, c: i32 }
+        fn mk() -> Cfg { Cfg { a: 10, b: 20, c: 30 } }
+        fn f() -> Cfg {
+            Cfg { a: 1, ..mk() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto&& _rest_base = ::mk()"),
+        "call base must be materialized once:\n{}",
+        out
+    );
+    assert_eq!(
+        out.matches("::mk()").count(),
+        1,
+        "base call must not be re-emitted per pulled field:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_struct_update_designators_follow_decl_order() {
+    let out = transpile_str(
+        r#"
+        struct Cfg { a: i32, b: i32, c: i32 }
+        fn mk() -> Cfg { Cfg { a: 10, b: 20, c: 30 } }
+        fn f() -> Cfg {
+            Cfg { c: 7, a: 1, ..mk() }
+        }
+        "#,
+    );
+    let a = out.find(".a = ").expect("missing .a designator");
+    let b = out.find(".b = ").expect("missing .b designator");
+    let c = out.rfind(".c = ").expect("missing .c designator");
+    assert!(
+        a < b && b < c,
+        "designators must follow declaration order (a<b<c):\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_struct_update_bare_default_resolves_through_target() {
+    let out = transpile_str(
+        r#"
+        #[derive(Default)]
+        struct Cfg { a: i32, b: i32 }
+        fn f() -> Cfg {
+            Cfg { b: 5, ..Default::default() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::default_value<Cfg>()"),
+        "bare Default::default() base must resolve through the target type:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Default::default_()"),
+        "must not leak a bogus Default:: owner:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_struct_update_place_base_local_binds_non_const() {
+    let out = transpile_str(
+        r#"
+        struct Named { id: i32, name: String }
+        fn f() -> Named {
+            let base = Named { id: 1, name: String::from("alice") };
+            Named { id: 2, ..base }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("auto&& _rest_base"),
+        "place base must not be re-materialized:\n{}",
+        out
+    );
+    assert!(
+        out.contains("auto base = Named{") && !out.contains("const auto base = Named{"),
+        "a local consumed by ..base must not bind const (std::move would copy):\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_slice_statement_match_lowers_to_runtime_if_chain() {
     let out = transpile_str(
         r#"

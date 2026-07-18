@@ -7535,6 +7535,7 @@ impl CodeGen {
         // value-initialized, which fails to compile for fields whose
         // type has no default constructor (e.g. NonNull<T>, NodeRef<…>).
         let mut all_fields = fields;
+        let mut rest_base_prelude: Option<String> = None;
         if let Some(rest_expr) = struct_expr.rest.as_deref() {
             let explicit_members: std::collections::HashSet<String> = struct_expr
                 .fields
@@ -7555,7 +7556,22 @@ impl CodeGen {
                     self.lookup_struct_field_order(bare)
                 });
             if let Some(field_order) = field_order {
-                let rest_str = self.emit_expr_to_string(rest_expr);
+                // Bare `..Default::default()` has no Self in C++ — resolve it
+                // through the target type instead of leaking `Default::default_()`.
+                let base_str = if Self::struct_update_rest_is_bare_default_call(rest_expr) {
+                    format!("rusty::default_value<{}>()", target_name)
+                } else {
+                    self.emit_expr_to_string(rest_expr)
+                };
+                // Rust evaluates `..base` exactly once; repeating a non-place
+                // base (call/method/...) per pulled field duplicates side
+                // effects. Materialize it once and pull from the temp.
+                let rest_str = if Self::struct_update_base_is_place_expr(rest_expr) {
+                    base_str
+                } else {
+                    rest_base_prelude = Some(base_str);
+                    "_rest_base".to_string()
+                };
                 for missing in field_order
                     .iter()
                     .filter(|name| !explicit_members.contains(*name))
@@ -7570,9 +7586,38 @@ impl CodeGen {
                         cpp_name, rest_str, cpp_name
                     ));
                 }
+                // Designated initializers must follow declaration order; the
+                // pulled fields interleave with the explicit ones, so re-sort
+                // the merged list rather than appending.
+                let cpp_rank: HashMap<String, usize> = field_order
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, name)| {
+                        let cpp = resolved_struct_name
+                            .as_ref()
+                            .and_then(|sn| self.lookup_struct_field_cpp_name(sn, name))
+                            .unwrap_or_else(|| escape_cpp_keyword(name));
+                        (cpp, idx)
+                    })
+                    .collect();
+                all_fields.sort_by_key(|entry| {
+                    entry
+                        .strip_prefix('.')
+                        .and_then(|tail| tail.split(" =").next())
+                        .and_then(|name| cpp_rank.get(name.trim()).copied())
+                        .unwrap_or(usize::MAX)
+                });
             }
         }
-        let emitted = format!("{}{{{}}}", target_name, all_fields.join(", "));
+        let body = format!("{}{{{}}}", target_name, all_fields.join(", "));
+        let emitted = if let Some(base) = rest_base_prelude {
+            format!(
+                "[&]() {{ auto&& _rest_base = {}; return {}; }}()",
+                base, body
+            )
+        } else {
+            body
+        };
         if let Some(expected_ty) = expected_ty
             && is_variant_struct_literal_target
             && let Some(wrapped) =
@@ -7581,6 +7626,44 @@ impl CodeGen {
             return wrapped;
         }
         emitted
+    }
+
+    /// True when a struct-update base (`..base`) is a place expression whose
+    /// per-field re-emission cannot duplicate side effects (paths, field
+    /// chains, derefs). Calls/method calls/etc. must be materialized once.
+    fn struct_update_base_is_place_expr(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Path(_) => true,
+            syn::Expr::Field(f) => Self::struct_update_base_is_place_expr(&f.base),
+            syn::Expr::Paren(p) => Self::struct_update_base_is_place_expr(&p.expr),
+            syn::Expr::Reference(r) => Self::struct_update_base_is_place_expr(&r.expr),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                Self::struct_update_base_is_place_expr(&u.expr)
+            }
+            _ => false,
+        }
+    }
+
+    /// Detects `..Default::default()` (optionally `std::`/`core::`-qualified):
+    /// the trait path carries no Self type, so it must resolve through the
+    /// literal's target type.
+    fn struct_update_rest_is_bare_default_call(expr: &syn::Expr) -> bool {
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        if !call.args.is_empty() {
+            return false;
+        }
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return false;
+        };
+        let segs: Vec<String> = p
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        matches!(segs.as_slice(), [.., d, f] if d == "Default" && f == "default")
     }
 
     pub(super) fn emit_method_call_template_args(
