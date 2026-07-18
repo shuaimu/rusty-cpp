@@ -24236,6 +24236,21 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_slice_rest_binding_binds_span_by_value() {
+    // `[head, rest @ ..]` produces a rusty::slice(...) prvalue; binding it
+    // through deref_if_pointer dangled (ASan stack-use-after-scope). The
+    // subslice must bind BY VALUE.
+    let out = transpile_str(
+        "pub fn f(v: &[i32]) -> i32 { match v { [_h, rest @ ..] => rest.iter().sum(), [] => -1 } }",
+    );
+    assert!(out.contains("auto rest = rusty::slice("), "by-value span bind: {out}");
+    assert!(
+        !out.contains("deref_if_pointer(rusty::slice("),
+        "no dangling deref wrap: {out}"
+    );
+}
+
+#[test]
 fn test_char_indices_prelude_advances_by_utf8_len() {
     // Rust char_indices yields BYTE offsets; the prelude iterator must
     // advance by each char's UTF-8 length, not by one per char.

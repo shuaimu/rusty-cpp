@@ -1041,7 +1041,10 @@ size_t len(const Container& container) {
 
 template<typename T, typename U>
 constexpr auto saturating_add(T lhs, U rhs) {
-    using R = std::common_type_t<T, U>;
+    /* Rust's rhs is always Self — compute in the RECEIVER type. The old
+       common_type promotion made narrow saturations silently wrap
+       (0u8.saturating_sub(1) came out 255 with an int literal rhs). */
+    using R = T;
     static_assert(std::is_integral_v<R>, "rusty::saturating_add requires integral operands");
     const R a = static_cast<R>(lhs);
     const R b = static_cast<R>(rhs);
@@ -1066,7 +1069,10 @@ constexpr auto saturating_add(T lhs, U rhs) {
 
 template<typename T, typename U>
 constexpr auto saturating_sub(T lhs, U rhs) {
-    using R = std::common_type_t<T, U>;
+    /* Rust's rhs is always Self — compute in the RECEIVER type. The old
+       common_type promotion made narrow saturations silently wrap
+       (0u8.saturating_sub(1) came out 255 with an int literal rhs). */
+    using R = T;
     static_assert(std::is_integral_v<R>, "rusty::saturating_sub requires integral operands");
     const R a = static_cast<R>(lhs);
     const R b = static_cast<R>(rhs);
@@ -1090,7 +1096,10 @@ constexpr auto saturating_sub(T lhs, U rhs) {
 
 template<typename T, typename U>
 constexpr auto saturating_mul(T lhs, U rhs) {
-    using R = std::common_type_t<T, U>;
+    /* Rust's rhs is always Self — compute in the RECEIVER type. The old
+       common_type promotion made narrow saturations silently wrap
+       (0u8.saturating_sub(1) came out 255 with an int literal rhs). */
+    using R = T;
     static_assert(std::is_integral_v<R>, "rusty::saturating_mul requires integral operands");
     const R a = static_cast<R>(lhs);
     const R b = static_cast<R>(rhs);

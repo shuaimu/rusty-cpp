@@ -9192,15 +9192,26 @@ impl CodeGen {
                         // tests/btree_port_iter_remove_movonly_test.cpp.
                         "auto&&"
                     };
-                    let binding_source = if pi.by_ref.is_none() {
-                        format!("rusty::detail::deref_if_pointer({})", source_expr)
+                    // Subslice rest-bindings (`[head, rest @ ..]`) produce a
+                    // rusty::slice(...) PRVALUE (a std::span view). Routing it
+                    // through deref_if_pointer returns a reference INTO the
+                    // full-expression temporary — `auto&&` does not lifetime-
+                    // extend through the call, so the binding dangled (ASan
+                    // stack-use-after-scope). Spans are trivially copyable
+                    // views: bind by value.
+                    if pi.by_ref.is_none() && source_expr.starts_with("rusty::slice(") {
+                        out.push(format!("auto {} = {};", cpp_name, source_expr));
                     } else {
-                        source_expr.to_string()
-                    };
-                    out.push(format!(
-                        "{} {} = {};",
-                        binding_prefix, cpp_name, binding_source
-                    ));
+                        let binding_source = if pi.by_ref.is_none() {
+                            format!("rusty::detail::deref_if_pointer({})", source_expr)
+                        } else {
+                            source_expr.to_string()
+                        };
+                        out.push(format!(
+                            "{} {} = {};",
+                            binding_prefix, cpp_name, binding_source
+                        ));
+                    }
                 }
                 if let Some((_, subpat)) = &pi.subpat {
                     let mut sub_bindings = Vec::new();
@@ -10314,20 +10325,29 @@ impl CodeGen {
                         // and avoids a hidden copy of move-only values.
                         "auto&&"
                     };
-                    let binding_source = if pi.by_ref.is_none() {
-                        let derefed = format!("rusty::detail::deref_if_pointer({})", source_expr);
-                        if by_value_mut {
-                            format!("std::move({})", derefed)
-                        } else {
-                            derefed
-                        }
+                    // Subslice rest-bindings (`[head, rest @ ..]`) produce a
+                    // rusty::slice(...) PRVALUE (a std::span view); see the
+                    // twin comment in collect_pattern_binding_stmts — routing
+                    // it through deref_if_pointer dangles. Bind by value.
+                    if pi.by_ref.is_none() && source_expr.starts_with("rusty::slice(") {
+                        out.push(format!("auto {} = {};", cpp_name, source_expr));
                     } else {
-                        source_expr.to_string()
-                    };
-                    out.push(format!(
-                        "{} {} = {};",
-                        binding_prefix, cpp_name, binding_source
-                    ));
+                        let binding_source = if pi.by_ref.is_none() {
+                            let derefed =
+                                format!("rusty::detail::deref_if_pointer({})", source_expr);
+                            if by_value_mut {
+                                format!("std::move({})", derefed)
+                            } else {
+                                derefed
+                            }
+                        } else {
+                            source_expr.to_string()
+                        };
+                        out.push(format!(
+                            "{} {} = {};",
+                            binding_prefix, cpp_name, binding_source
+                        ));
+                    }
                 }
                 if let Some((_, subpat)) = &pi.subpat {
                     let mut sub_bindings = Vec::new();
