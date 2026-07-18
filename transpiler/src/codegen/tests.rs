@@ -24227,6 +24227,16 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_split_terminator_rsplitn_route() {
+    let st = transpile_str("pub fn f(s: &str) -> usize { s.split_terminator(',').count() }");
+    assert!(st.contains("rusty::str_runtime::split_terminator(s,"), "split_terminator: {st}");
+    assert!(st.contains("rusty::count("), "iterator recognition: {st}");
+    let rn = transpile_str("pub fn f(s: &str) -> usize { s.rsplitn(2, '.').count() }");
+    assert!(rn.contains("rusty::str_runtime::rsplitn(s, 2,"), "rsplitn: {rn}");
+    assert!(rn.contains("rusty::count("), "iterator recognition: {rn}");
+}
+
+#[test]
 fn test_windows_chunks_peekable_route_to_free_fns() {
     // Slice windows/chunks -> rusty:: range helpers; recognized as iterators
     // so .count() wraps in rusty::count.

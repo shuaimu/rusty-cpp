@@ -9483,15 +9483,19 @@ impl CodeGen {
                 && matches!(
                     method_name.as_str(),
                     "strip_suffix" | "split_once" | "rsplit_once" | "matches"
+                        | "split_terminator"
                 )
             {
                 let arg = self.emit_expr_to_string(&mc.args[0]);
                 return format!("rusty::str_runtime::{}({}, {})", method_name, receiver, arg);
             }
-            if method_name == "splitn" && args.len() == 2 {
+            if matches!(method_name.as_str(), "splitn" | "rsplitn") && args.len() == 2 {
                 let n = self.emit_expr_to_string(&mc.args[0]);
                 let delim = self.emit_expr_to_string(&mc.args[1]);
-                return format!("rusty::str_runtime::splitn({}, {}, {})", receiver, n, delim);
+                return format!(
+                    "rusty::str_runtime::{}({}, {}, {})",
+                    method_name, receiver, n, delim
+                );
             }
             if method_name == "replacen" && args.len() == 3 {
                 let a0 = self.emit_expr_to_string(&mc.args[0]);

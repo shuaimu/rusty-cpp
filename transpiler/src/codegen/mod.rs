@@ -49793,6 +49793,37 @@ struct SplitNIter {\n\
     }\n\
 };\n\
 inline SplitNIter splitn(std::string_view s, std::size_t n, char32_t delim) { return SplitNIter{s, delim, n, n == 0}; }\n\
+struct RSplitNIter {\n\
+    std::string_view remaining;\n\
+    char32_t delim;\n\
+    std::size_t remaining_count;\n\
+    bool done = false;\n\
+    rusty::Option<std::string_view> next() {\n\
+        if (done) return rusty::Option<std::string_view>(rusty::None);\n\
+        if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
+        auto pos = remaining.rfind(static_cast<char>(delim));\n\
+        if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
+        auto piece = remaining.substr(pos + 1);\n\
+        remaining = remaining.substr(0, pos);\n\
+        --remaining_count;\n\
+        return rusty::Option<std::string_view>(piece);\n\
+    }\n\
+    rusty::Option<std::string_view> nth(std::size_t n) {\n\
+        for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);\n\
+        return next();\n\
+    }\n\
+};\n\
+inline RSplitNIter rsplitn(std::string_view s, std::size_t n, char32_t delim) { return RSplitNIter{s, delim, n, n == 0}; }\n\
+inline SplitIter split_terminator(std::string_view s, char32_t delim) {\n\
+    /* Rust str::split_terminator: like split, but a trailing delimiter does\n\
+       not produce a final empty piece. Strip one trailing delimiter, then\n\
+       plain-split; an empty input yields no pieces at all. */\n\
+    if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == delim) {\n\
+        s = s.substr(0, s.size() - 1);\n\
+        return SplitIter{s, delim};\n\
+    }\n\
+    return SplitIter{s, delim, s.empty()};\n\
+}\n\
 struct LinesIter {\n\
     std::string_view remaining;\n\
     bool done = false;\n\
