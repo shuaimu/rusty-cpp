@@ -268,6 +268,19 @@ size_t checked_index(Index idx) {
     return static_cast<size_t>(idx);
 }
 
+// Rust str::get returns None unless BOTH range ends land on UTF-8 char
+// boundaries (a position is a boundary iff it's at either end or the byte
+// there is not a continuation byte).
+inline bool str_is_char_boundary(std::string_view s, size_t pos) {
+    if (pos == 0 || pos == s.size()) {
+        return true;
+    }
+    if (pos > s.size()) {
+        return false;
+    }
+    return (static_cast<unsigned char>(s[pos]) & 0xC0) != 0x80;
+}
+
 template<typename SpanLike>
 void validate_slice_bounds(const SpanLike& span, size_t start, size_t end) {
     if (start > end || end > span.size()) {
@@ -1683,7 +1696,9 @@ auto get(std::string_view container, const range<T>& idx) {
     const size_t start_index = detail::checked_index(idx.start);
     const size_t end_index = detail::checked_index(idx.end_value());
     using Opt = Option<std::string_view>;
-    if (start_index > end_index || end_index > container.size()) {
+    if (start_index > end_index || end_index > container.size()
+        || !detail::str_is_char_boundary(container, start_index)
+        || !detail::str_is_char_boundary(container, end_index)) {
         return Opt(None);
     }
     return Opt(container.substr(start_index, end_index - start_index));
@@ -1694,7 +1709,9 @@ auto get(std::string_view container, const range_inclusive<T>& idx) {
     const size_t start_index = detail::checked_index(idx.start);
     const size_t end_index = detail::checked_index(idx.end_value());
     using Opt = Option<std::string_view>;
-    if (start_index > end_index || end_index >= container.size()) {
+    if (start_index > end_index || end_index >= container.size()
+        || !detail::str_is_char_boundary(container, start_index)
+        || !detail::str_is_char_boundary(container, end_index + 1)) {
         return Opt(None);
     }
     return Opt(container.substr(start_index, end_index - start_index + 1));

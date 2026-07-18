@@ -14919,6 +14919,34 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_escape_default_routes_to_detail_helper() {
+    let out = transpile_str(
+        r#"
+        fn f(s: &str, c: char) -> usize {
+            let esc: String = s.escape_default().collect();
+            let ec: String = c.escape_default().collect();
+            esc.len() + ec.len()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::detail::escape_default_string(std::string(s))"),
+        "str escape_default must route to the detail helper:\n{}",
+        out
+    );
+    assert!(
+        out.contains("rusty::detail::escape_default_char("),
+        "char escape_default must route to the char helper:\n{}",
+        out
+    );
+    assert!(
+        out.contains("inline std::string escape_default_string"),
+        "module prelude must define the helper:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_derive_debug_emits_real_field_repr() {
     let out = transpile_str(
         r#"

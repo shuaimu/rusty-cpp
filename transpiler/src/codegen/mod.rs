@@ -45180,6 +45180,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         // Without markers the emissions referenced undefined helpers.
         "rusty::to_debug_string",
         "rusty::detail::escape_debug_string(",
+        "rusty::detail::escape_default_",
         "rusty::detail::pretty_debug_string(",
         // Slice-algorithm helpers emitted in this block: without their own
         // markers, a module whose ONLY block reference is one of these calls
@@ -45480,6 +45481,45 @@ inline std::string escape_debug_string(std::string_view input) {
             case '\t': out += "\\t"; break;
             default: out.push_back(ch); break;
         }
+    }
+    return out;
+}
+// Rust escape_default: printable ASCII stays, common escapes get two-char
+// forms, everything else (incl. non-ASCII scalars) becomes \u{hex}.
+inline std::string escape_default_char(char32_t code) {
+    switch (code) {
+        case U'\\': return "\\\\";
+        case U'"': return "\\\"";
+        case U'\'': return "\\'";
+        case U'\n': return "\\n";
+        case U'\r': return "\\r";
+        case U'\t': return "\\t";
+        default: break;
+    }
+    if (code >= 0x20 && code < 0x7F) {
+        return std::string(1, static_cast<char>(code));
+    }
+    return std::format("\\u{{{:x}}}", static_cast<std::uint32_t>(code));
+}
+inline std::string escape_default_string(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    std::size_t i = 0;
+    while (i < input.size()) {
+        const unsigned char b = static_cast<unsigned char>(input[i]);
+        char32_t code = b;
+        std::size_t len = 1;
+        if ((b & 0xE0) == 0xC0) { code = b & 0x1F; len = 2; }
+        else if ((b & 0xF0) == 0xE0) { code = b & 0x0F; len = 3; }
+        else if ((b & 0xF8) == 0xF0) { code = b & 0x07; len = 4; }
+        if (len > 1) {
+            if (i + len > input.size()) { break; }
+            for (std::size_t k = 1; k < len; ++k) {
+                code = (code << 6) | (static_cast<unsigned char>(input[i + k]) & 0x3F);
+            }
+        }
+        out += escape_default_char(code);
+        i += len;
     }
     return out;
 }
@@ -48718,6 +48758,43 @@ inline std::string escape_debug_string(std::string_view input) {\n\
             case '\\t': out += \"\\\\t\"; break;\n\
             default: out.push_back(ch); break;\n\
         }\n\
+    }\n\
+    return out;\n\
+}\n\
+inline std::string escape_default_char(char32_t code) {\n\
+    switch (code) {\n\
+        case U'\\\\': return \"\\\\\\\\\";\n\
+        case U'\"': return \"\\\\\\\"\";\n\
+        case U'\\'': return \"\\\\'\";\n\
+        case U'\\n': return \"\\\\n\";\n\
+        case U'\\r': return \"\\\\r\";\n\
+        case U'\\t': return \"\\\\t\";\n\
+        default: break;\n\
+    }\n\
+    if (code >= 0x20 && code < 0x7F) {\n\
+        return std::string(1, static_cast<char>(code));\n\
+    }\n\
+    return std::format(\"\\\\u{{{:x}}}\", static_cast<std::uint32_t>(code));\n\
+}\n\
+inline std::string escape_default_string(std::string_view input) {\n\
+    std::string out;\n\
+    out.reserve(input.size());\n\
+    std::size_t i = 0;\n\
+    while (i < input.size()) {\n\
+        const unsigned char b = static_cast<unsigned char>(input[i]);\n\
+        char32_t code = b;\n\
+        std::size_t len = 1;\n\
+        if ((b & 0xE0) == 0xC0) { code = b & 0x1F; len = 2; }\n\
+        else if ((b & 0xF0) == 0xE0) { code = b & 0x0F; len = 3; }\n\
+        else if ((b & 0xF8) == 0xF0) { code = b & 0x07; len = 4; }\n\
+        if (len > 1) {\n\
+            if (i + len > input.size()) { break; }\n\
+            for (std::size_t k = 1; k < len; ++k) {\n\
+                code = (code << 6) | (static_cast<unsigned char>(input[i + k]) & 0x3F);\n\
+            }\n\
+        }\n\
+        out += escape_default_char(code);\n\
+        i += len;\n\
     }\n\
     return out;\n\
 }\n\

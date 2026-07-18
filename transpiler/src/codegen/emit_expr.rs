@@ -9508,6 +9508,24 @@ impl CodeGen {
                 receiver
             );
         }
+        if method_name == "escape_default" && args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            if self.expr_is_char_like(&mc.receiver) {
+                return format!(
+                    "rusty::detail::escape_default_char(static_cast<char32_t>({}))",
+                    receiver
+                );
+            }
+            return format!(
+                "rusty::detail::escape_default_string(std::string({}))",
+                receiver
+            );
+        }
         // Rust string methods that don't exist on std::string_view
         if method_name == "trim" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
