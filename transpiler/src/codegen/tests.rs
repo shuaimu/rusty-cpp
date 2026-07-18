@@ -24210,6 +24210,14 @@ fn test_format_arg_cast_lowers_via_smart_path() {
     // a behavior change (still lowers correctly either way).
     let s = transpile_str("pub fn f(x: &str) -> String { format!(\"{}\", x) }");
     assert!(s.contains("std::format"), "plain arg still formats: {s}");
+    // Method-call arg (`v.len()`) must be lowered (rusty::len), not left as a
+    // raw member call on a std::span (which has no `len`).
+    let m = transpile_str("pub fn f(v: &[i32]) -> String { format!(\"{}\", v.len()) }");
+    assert!(m.contains("rusty::len(v)"), "method-call arg lowered: {m}");
+    assert!(!m.contains("v . len"), "no dumb pass-through: {m}");
+    // Reference arg (`&x`) must not format a pointer — the smart path peels it.
+    let r = transpile_str("pub fn f(x: i32) -> String { format!(\"{}\", &x) }");
+    assert!(!r.contains("\" , & x"), "reference not passed as pointer: {r}");
 }
 
 #[test]

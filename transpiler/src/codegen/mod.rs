@@ -23674,11 +23674,16 @@ impl CodeGen {
         let Some(fmt_expr) = parts.first() else {
             return false;
         };
-        // A cast argument (`x as f64`) must go through the smart path — the dumb
-        // pass-through emits Rust `as` syntax verbatim, which is a C++ syntax
-        // error. `.as_str()` / identifiers like `class` are not casts, so key on
-        // a standalone `as` token, not the substring.
-        if parts.iter().skip(1).any(|arg| Self::expr_text_contains_cast(arg)) {
+        // The dumb pass-through only reproduces trivially-C++-compatible args
+        // (identifiers, literals, arithmetic). Args that need real lowering —
+        // casts (`x as f64` → static_cast), method calls (`v.len()` → rusty::len),
+        // references (`&x`, which would format a pointer), and free calls — must
+        // go through the smart path, which lowers each arg via emit_expr.
+        if parts
+            .iter()
+            .skip(1)
+            .any(|arg| Self::format_arg_needs_smart_lowering(arg))
+        {
             return true;
         }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
@@ -23686,6 +23691,45 @@ impl CodeGen {
             return false;
         };
         self.format_literal_needs_smart_lowering(&lit.value())
+    }
+
+    /// True when a format argument must be lowered through emit_expr rather
+    /// than the byte-for-byte dumb pass-through. Parse the arg and look for
+    /// nodes the dumb path can't reproduce: casts, method calls, references,
+    /// and free calls (all need real lowering). Plain idents, literals,
+    /// arithmetic, indexing and field access are left on the dumb path.
+    fn format_arg_needs_smart_lowering(arg: &str) -> bool {
+        let trimmed = arg.trim();
+        match syn::parse_str::<syn::Expr>(trimmed) {
+            Ok(expr) => Self::format_expr_needs_smart_lowering(&expr),
+            // Unparseable (e.g. `x = expr` named-arg fragments) — fall back to
+            // the cheap textual cast probe so at least casts are caught.
+            Err(_) => Self::expr_text_contains_cast(trimmed),
+        }
+    }
+
+    fn format_expr_needs_smart_lowering(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Cast(_)
+            | syn::Expr::MethodCall(_)
+            | syn::Expr::Reference(_)
+            | syn::Expr::Call(_)
+            | syn::Expr::Try(_)
+            | syn::Expr::Await(_) => true,
+            syn::Expr::Binary(b) => {
+                Self::format_expr_needs_smart_lowering(&b.left)
+                    || Self::format_expr_needs_smart_lowering(&b.right)
+            }
+            syn::Expr::Unary(u) => Self::format_expr_needs_smart_lowering(&u.expr),
+            syn::Expr::Paren(p) => Self::format_expr_needs_smart_lowering(&p.expr),
+            syn::Expr::Group(g) => Self::format_expr_needs_smart_lowering(&g.expr),
+            syn::Expr::Index(i) => {
+                Self::format_expr_needs_smart_lowering(&i.expr)
+                    || Self::format_expr_needs_smart_lowering(&i.index)
+            }
+            syn::Expr::Field(f) => Self::format_expr_needs_smart_lowering(&f.base),
+            _ => false,
+        }
     }
 
     /// True when `text` contains a standalone `as` cast keyword (bounded by
@@ -23783,7 +23827,15 @@ impl CodeGen {
     fn convert_format_arg_expr(&self, token_expr: &str) -> String {
         let trimmed = token_expr.trim();
         if let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) {
-            self.emit_expr_to_string(&expr)
+            // Rust's Display/Debug auto-deref through references, so
+            // `format!("{}", &x)` formats the referent. Peel leading `&`/`&mut`
+            // — std::format has no formatter for `T*`, so passing the address
+            // is both wrong and a hard error.
+            let mut peeled = &expr;
+            while let syn::Expr::Reference(r) = peeled {
+                peeled = &r.expr;
+            }
+            self.emit_expr_to_string(peeled)
         } else if let Some(lowered_self) = self.try_lower_format_arg_self_member_chain(trimmed) {
             lowered_self
         } else {
