@@ -24236,6 +24236,19 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_char_indices_prelude_advances_by_utf8_len() {
+    // Rust char_indices yields BYTE offsets; the prelude iterator must
+    // advance by each char's UTF-8 length, not by one per char.
+    let out = transpile_str(
+        "pub fn f(s: &str) -> usize { s.char_indices().count() }",
+    );
+    assert!(
+        out.contains("code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4"),
+        "byte-length advance present in prelude: {out}"
+    );
+}
+
+#[test]
 fn test_ordering_combinators_route_to_cmp_free_fns() {
     // Ordering is a prelude enum class with no members — the combinators
     // must lower to rusty::cmp:: free fns.

@@ -49435,12 +49435,17 @@ struct CharIndices {\n\
     std::size_t index = 0;\n\
 \n\
     rusty::Option<Item> next() {\n\
+        /* Rust str::char_indices yields BYTE offsets, not char counts —\n\
+           advance by each char's UTF-8 encoded length. */\n\
         auto next_ch = iter.next();\n\
         if (next_ch.is_none()) {\n\
             return rusty::Option<Item>(rusty::None);\n\
         }\n\
-        auto value = std::make_tuple(index++, next_ch.unwrap());\n\
-        return rusty::Option<Item>(std::move(value));\n\
+        const char32_t ch = next_ch.unwrap();\n\
+        const std::size_t at = index;\n\
+        const auto code = static_cast<uint32_t>(ch);\n\
+        index += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n\
+        return rusty::Option<Item>(std::make_tuple(at, ch));\n\
     }\n\
 };\n\
 inline CharIndices char_indices(std::string_view text) {\n\
