@@ -21587,7 +21587,14 @@ impl CodeGen {
     }
 
     pub(super) fn try_emit_iter_sum_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
-        if mc.method != "sum" || !mc.args.is_empty() {
+        // Both `Iterator::sum()` and `Iterator::product()` are fold reductions
+        // over the whole range; route them to the matching rusty:: free fn.
+        let fold_fn = match mc.method.to_string().as_str() {
+            "sum" => "rusty::sum",
+            "product" => "rusty::product",
+            _ => return None,
+        };
+        if !mc.args.is_empty() {
             return None;
         }
         if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
@@ -21599,7 +21606,7 @@ impl CodeGen {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
-        Some(format!("rusty::sum({})", receiver))
+        Some(format!("{}({})", fold_fn, receiver))
     }
 
     pub(super) fn try_emit_iter_step_by_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {

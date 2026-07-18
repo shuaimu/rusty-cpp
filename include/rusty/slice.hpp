@@ -2250,6 +2250,20 @@ auto sum(Range&& range) {
     return acc;
 }
 
+// `Iterator::product()` — the multiplicative identity (1) times every item.
+// The transpiler lowers `.product()` to this (parallel to sum()).
+template<typename Range>
+auto product(Range&& range) {
+    auto range_for = for_in(std::forward<Range>(range));
+    using Item = std::remove_cvref_t<decltype(detail::deref_if_pointer_like(
+        *std::begin(range_for)))>;
+    Item acc = static_cast<Item>(1);
+    for (auto&& item : range_for) {
+        acc *= detail::deref_if_pointer_like(item);
+    }
+    return acc;
+}
+
 template<typename Range, typename Acc, typename Func>
 auto fold(Range&& range, Acc init, Func&& func) {
     auto acc = std::move(init);

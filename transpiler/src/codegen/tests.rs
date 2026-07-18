@@ -24227,6 +24227,18 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_iter_product_routes_to_free_fn() {
+    // `.product()` must route to rusty::product like `.sum()` -> rusty::sum,
+    // not a bogus member call on the slice iterator type.
+    let p = transpile_str("pub fn f(v: &[i32]) -> i32 { v.iter().product() }");
+    assert!(p.contains("rusty::product(rusty::iter(v))"), "product free fn: {p}");
+    assert!(!p.contains(".product()"), "no member call: {p}");
+    // Still works through an adapter chain.
+    let m = transpile_str("pub fn f(v: &[i32]) -> i32 { v.iter().map(|x| x * 2).product() }");
+    assert!(m.contains("rusty::product(rusty::map("), "product after map: {m}");
+}
+
+#[test]
 fn test_str_rfind_rsplit_trim_matches_route() {
     // rfind -> str_runtime::rfind returning Option (parallel to find). The
     // negative patterns target the broken member-call-with-char-literal form
