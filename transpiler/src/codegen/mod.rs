@@ -49911,6 +49911,18 @@ inline rusty::Option<char32_t> from_u32(uint32_t value) {\n\
     }\n\
     return rusty::Option<char32_t>(static_cast<char32_t>(value));\n\
 }\n\
+/* Rust char::from_digit(num, radix): digit -> char in the given radix\n\
+   (lowercase letters for 10..). Panics in Rust when radix > 36; None when\n\
+   num is not a digit in that radix. */\n\
+inline rusty::Option<char32_t> from_digit(uint32_t num, uint32_t radix) {\n\
+    if (radix > 36 || num >= radix) {\n\
+        return rusty::Option<char32_t>(rusty::None);\n\
+    }\n\
+    const char32_t ch = num < 10\n\
+        ? static_cast<char32_t>(U'0' + num)\n\
+        : static_cast<char32_t>(U'a' + (num - 10));\n\
+    return rusty::Option<char32_t>(ch);\n\
+}\n\
 inline std::size_t len_utf8(char32_t ch) {\n\
     const auto code = static_cast<uint32_t>(ch);\n\
     if (code < 0x80) return 1;\n\

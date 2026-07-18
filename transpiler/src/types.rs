@@ -744,6 +744,10 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         | "core::char::from_u32"
         | "char::from_u32"
         | "char32_t::from_u32" => Some("rusty::char_runtime::from_u32"),
+        "std::char::from_digit"
+        | "core::char::from_digit"
+        | "char::from_digit"
+        | "char32_t::from_digit" => Some("rusty::char_runtime::from_digit"),
         "std::char::encode_utf8_raw_unchecked"
         | "core::char::encode_utf8_raw_unchecked"
         | "char::encode_utf8_raw_unchecked"

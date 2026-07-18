@@ -24233,6 +24233,17 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_char_from_digit_routes() {
+    // char::from_digit was mis-lowered to `char_::from_digit` (bogus owner
+    // from the keyword escape); it now routes to the char_runtime helper.
+    let out = transpile_str(
+        "pub fn f(d: u32) -> char { char::from_digit(d, 10).unwrap_or('?') }",
+    );
+    assert!(out.contains("rusty::char_runtime::from_digit("), "from_digit: {out}");
+    assert!(!out.contains("char_::from_digit"), "no bogus owner: {out}");
+}
+
+#[test]
 fn test_iter_constructors_and_mem_take_route() {
     // Terminals on call-form iterator constructors route to the rusty::
     // free fns (the constructors are recognized as iterator receivers).
