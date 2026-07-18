@@ -6439,9 +6439,13 @@ impl CodeGen {
             // comparison first, then a pointer-peeled needle — without the
             // peel both `requires` arms fail and the loop constant-folds to
             // false (indexmap's get_disjoint_opt_mut overlap check never
-            // fired, letting duplicate indices through).
+            // fired, letting duplicate indices through). The raw arms are
+            // additionally gated on MATCHING pointer-ness: clang accepts a
+            // pointer-vs-integer comparison inside `requires` (C-compat
+            // parse) and then hard-errors on the real one, so `int item` vs
+            // `int* needle` must fall through to the peeled arms.
             return format!(
-                "[&]() {{ auto&& _haystack = {}; auto&& _needle = {}; for (const auto& _item : _haystack) {{ if constexpr (requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} else if constexpr (requires {{ _item == rusty::detail::deref_if_pointer(_needle); }}) {{ if (_item == rusty::detail::deref_if_pointer(_needle)) return true; }} else if constexpr (requires {{ rusty::detail::deref_if_pointer(_needle) == _item; }}) {{ if (rusty::detail::deref_if_pointer(_needle) == _item) return true; }} }} return false; }}()",
+                "[&]() {{ auto&& _haystack = {}; auto&& _needle = {}; constexpr bool _ptr_match = std::is_pointer_v<std::remove_cvref_t<decltype(_needle)>> == std::is_pointer_v<std::remove_cvref_t<decltype(*std::begin(_haystack))>>; for (const auto& _item : _haystack) {{ if constexpr (_ptr_match && requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (_ptr_match && requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} else if constexpr (requires {{ _item == rusty::detail::deref_if_pointer(_needle); }}) {{ if (_item == rusty::detail::deref_if_pointer(_needle)) return true; }} else if constexpr (requires {{ rusty::detail::deref_if_pointer(_needle) == _item; }}) {{ if (rusty::detail::deref_if_pointer(_needle) == _item) return true; }} }} return false; }}()",
                 receiver, needle
             );
         }
@@ -6454,6 +6458,14 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let prefix = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::starts_with({}, {})", receiver, prefix);
+        }
+        if mc.method == "ends_with"
+            && mc.args.len() == 1
+            && !self.receiver_has_inherent_method_named(&mc.receiver, "ends_with")
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let suffix = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::ends_with({}, {})", receiver, suffix);
         }
         if mc.method == "next_token" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <span>
 #include <string_view>
 #include <tuple>
@@ -535,6 +536,85 @@ bool starts_with(const Value& value, const Prefix& prefix) {
         return value.starts_with(prefix);
     } else if constexpr (std::is_convertible_v<Value, std::string_view>) {
         return starts_with(std::string_view(value), prefix);
+    } else if constexpr (std::is_pointer_v<std::remove_cvref_t<Prefix>>) {
+        // addr_of_temp-carried prefix (`v.starts_with(&[1])`): peel and retry.
+        return starts_with(value, *prefix);
+    } else if constexpr (requires {
+                             std::begin(value);
+                             std::end(value);
+                             std::begin(prefix);
+                             std::end(prefix);
+                         }) {
+        // Rust slice::starts_with — element-wise prefix compare. This branch
+        // used to fall into the permissive `return false`, silently answering
+        // wrong for spans.
+        auto vit = std::begin(value);
+        const auto vend = std::end(value);
+        auto pit = std::begin(prefix);
+        const auto pend = std::end(prefix);
+        for (; pit != pend; ++pit, ++vit) {
+            if (vit == vend || !(*vit == *pit)) {
+                return false;
+            }
+        }
+        return true;
+    } else {
+        return false;
+    }
+}
+
+inline bool ends_with(std::string_view value, std::string_view suffix) {
+    return value.size() >= suffix.size()
+        && value.substr(value.size() - suffix.size()) == suffix;
+}
+
+template<std::size_t N>
+bool ends_with(std::string_view value, const std::array<char32_t, N>& any_suffix) {
+    if (value.empty()) {
+        return false;
+    }
+    const auto back = static_cast<unsigned char>(value.back());
+    for (const auto ch : any_suffix) {
+        if (back == static_cast<unsigned char>(ch)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Rust `slice::ends_with` / `str::ends_with` — sibling of the starts_with
+// dispatcher above (member-first, string_view, pointer-peel, range suffix).
+template<typename Value, typename Suffix>
+bool ends_with(const Value& value, const Suffix& suffix) {
+    if constexpr (requires { value.ends_with(suffix); }) {
+        return value.ends_with(suffix);
+    } else if constexpr (std::is_convertible_v<Value, std::string_view>) {
+        return ends_with(std::string_view(value), suffix);
+    } else if constexpr (std::is_pointer_v<std::remove_cvref_t<Suffix>>) {
+        return ends_with(value, *suffix);
+    } else if constexpr (requires {
+                             std::begin(value);
+                             std::end(value);
+                             std::begin(suffix);
+                             std::end(suffix);
+                         }) {
+        const auto vn = static_cast<std::size_t>(
+            std::distance(std::begin(value), std::end(value)));
+        const auto sn = static_cast<std::size_t>(
+            std::distance(std::begin(suffix), std::end(suffix)));
+        if (sn > vn) {
+            return false;
+        }
+        auto vit = std::begin(value);
+        std::advance(vit, static_cast<std::ptrdiff_t>(vn - sn));
+        auto sit = std::begin(suffix);
+        const auto send = std::end(suffix);
+        for (; sit != send; ++sit, ++vit) {
+            if (!(*vit == *sit)) {
+                return false;
+            }
+        }
+        return true;
     } else {
         return false;
     }

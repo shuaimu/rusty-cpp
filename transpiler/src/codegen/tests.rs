@@ -24227,6 +24227,19 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_slice_ends_with_and_contains_ptr_guard() {
+    // .ends_with routes to the rusty::ends_with dispatcher (member-first, so
+    // string receivers keep their member behavior).
+    let ew = transpile_str("pub fn f(v: &[i32]) -> bool { v.ends_with(&[5]) }");
+    assert!(ew.contains("rusty::ends_with(v,"), "ends_with routed: {ew}");
+    // The slice-contains IIFE gates its raw comparison arms on matching
+    // pointer-ness so an addr_of_temp needle (int*) can't hit clang's
+    // pointer-vs-integer requires quirk against int items.
+    let ct = transpile_str("pub fn f(v: &[i32]) -> bool { v.contains(&3) }");
+    assert!(ct.contains("_ptr_match"), "ptr guard present: {ct}");
+}
+
+#[test]
 fn test_split_terminator_rsplitn_route() {
     let st = transpile_str("pub fn f(s: &str) -> usize { s.split_terminator(',').count() }");
     assert!(st.contains("rusty::str_runtime::split_terminator(s,"), "split_terminator: {st}");
