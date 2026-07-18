@@ -24236,6 +24236,17 @@ fn test_format_arg_cast_lowers_via_smart_path() {
 }
 
 #[test]
+fn test_u128_checked_and_bit_ops_transpile() {
+    // 128-bit receivers route through the same helpers as narrower ints
+    // (num.hpp now covers __int128: relaxed checked_* constraints + hi/lo
+    // split bit-count overloads).
+    let c = transpile_str("pub fn f(y: i128) -> Option<i128> { y.checked_mul(2) }");
+    assert!(c.contains("rusty::checked_mul("), "checked_mul routed: {c}");
+    let l = transpile_str("pub fn f(x: u128) -> u32 { x.leading_zeros() }");
+    assert!(l.contains("rusty::leading_zeros(x)"), "leading_zeros routed: {l}");
+}
+
+#[test]
 fn test_wrapping_ops_route_to_width_correct_helpers() {
     // wrapping_* must compute in the receiver's own width — the old size_t
     // detour truncated u128 and failed to wrap narrow types.

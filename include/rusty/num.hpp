@@ -270,8 +270,31 @@ inline bool is_sign_positive(T value) {
     return !std::signbit(static_cast<std::remove_cvref_t<T>>(value));
 }
 
+// Unsigned-counterpart picker that also covers __int128, which
+// std::make_unsigned does NOT handle under strict -std=c++23 (libstdc++
+// guards the 128-bit specializations behind GNU mode).
 template<typename T>
-requires std::is_integral_v<T>
+struct wrapping_unsigned {
+    using type = std::make_unsigned_t<T>;
+};
+template<>
+struct wrapping_unsigned<__int128> {
+    using type = unsigned __int128;
+};
+template<>
+struct wrapping_unsigned<unsigned __int128> {
+    using type = unsigned __int128;
+};
+template<typename T>
+using wrapping_unsigned_t = typename wrapping_unsigned<T>::type;
+
+template<typename T>
+inline constexpr bool wrapping_integral_v = std::is_integral_v<T>
+    || std::is_same_v<T, __int128>
+    || std::is_same_v<T, unsigned __int128>;
+
+template<typename T>
+requires wrapping_integral_v<T>
 Option<T> checked_add(T a, T b) {
     T result;
     if (__builtin_add_overflow(a, b, &result)) {
@@ -291,7 +314,7 @@ auto checked_add(A a, B b) {
 }
 
 template<typename T>
-requires std::is_integral_v<T>
+requires wrapping_integral_v<T>
 Option<T> checked_sub(T a, T b) {
     T result;
     if (__builtin_sub_overflow(a, b, &result)) {
@@ -311,7 +334,7 @@ auto checked_sub(A a, B b) {
 }
 
 template<typename T>
-requires std::is_integral_v<T>
+requires wrapping_integral_v<T>
 Option<T> checked_mul(T a, T b) {
     T result;
     if (__builtin_mul_overflow(a, b, &result)) {
@@ -682,29 +705,6 @@ constexpr T saturating_sub_unsigned(T a, std::make_unsigned_t<T> b) {
     return r > a ? std::numeric_limits<T>::min() : r;
 }
 
-// Unsigned-counterpart picker that also covers __int128, which
-// std::make_unsigned does NOT handle under strict -std=c++23 (libstdc++
-// guards the 128-bit specializations behind GNU mode).
-template<typename T>
-struct wrapping_unsigned {
-    using type = std::make_unsigned_t<T>;
-};
-template<>
-struct wrapping_unsigned<__int128> {
-    using type = unsigned __int128;
-};
-template<>
-struct wrapping_unsigned<unsigned __int128> {
-    using type = unsigned __int128;
-};
-template<typename T>
-using wrapping_unsigned_t = typename wrapping_unsigned<T>::type;
-
-template<typename T>
-inline constexpr bool wrapping_integral_v = std::is_integral_v<T>
-    || std::is_same_v<T, __int128>
-    || std::is_same_v<T, unsigned __int128>;
-
 // Rust wrapping_{add,sub,mul,div,rem}: modular arithmetic in the operand's
 // own width. Computed in the unsigned counterpart (well-defined wrap) and
 // cast back. div/rem never wrap (only /0, which traps in Rust too).
@@ -835,6 +835,45 @@ constexpr std::uint32_t count_zeros(T value) {
 template<typename T>
 constexpr std::uint32_t count_zeros(const num::NonZero<T>& value) {
     return count_zeros(value.get());
+}
+
+// 128-bit overloads: std::countl_zero/countr_zero/popcount do not accept
+// unsigned __int128; split into 64-bit halves.
+constexpr std::uint32_t leading_zeros(unsigned __int128 value) {
+    const std::uint64_t hi = static_cast<std::uint64_t>(value >> 64);
+    if (hi != 0) {
+        return static_cast<std::uint32_t>(std::countl_zero(hi));
+    }
+    const std::uint64_t lo = static_cast<std::uint64_t>(value);
+    return 64u + static_cast<std::uint32_t>(std::countl_zero(lo));
+}
+constexpr std::uint32_t leading_zeros(__int128 value) {
+    return leading_zeros(static_cast<unsigned __int128>(value));
+}
+constexpr std::uint32_t trailing_zeros(unsigned __int128 value) {
+    const std::uint64_t lo = static_cast<std::uint64_t>(value);
+    if (lo != 0) {
+        return static_cast<std::uint32_t>(std::countr_zero(lo));
+    }
+    const std::uint64_t hi = static_cast<std::uint64_t>(value >> 64);
+    return 64u + static_cast<std::uint32_t>(std::countr_zero(hi));
+}
+constexpr std::uint32_t trailing_zeros(__int128 value) {
+    return trailing_zeros(static_cast<unsigned __int128>(value));
+}
+constexpr std::uint32_t count_ones(unsigned __int128 value) {
+    const std::uint64_t hi = static_cast<std::uint64_t>(value >> 64);
+    const std::uint64_t lo = static_cast<std::uint64_t>(value);
+    return static_cast<std::uint32_t>(std::popcount(hi) + std::popcount(lo));
+}
+constexpr std::uint32_t count_ones(__int128 value) {
+    return count_ones(static_cast<unsigned __int128>(value));
+}
+constexpr std::uint32_t count_zeros(unsigned __int128 value) {
+    return 128u - count_ones(value);
+}
+constexpr std::uint32_t count_zeros(__int128 value) {
+    return 128u - count_ones(value);
 }
 
 // Rust `iN/uN::swap_bytes(self) -> Self` — reverse the byte order.
