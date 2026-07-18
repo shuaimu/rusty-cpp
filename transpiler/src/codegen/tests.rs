@@ -16413,9 +16413,11 @@ fn test_leaf4154410_wrapping_sub_on_integer_emits_plain_subtraction() {
         }
         "#,
     );
+    // Now routes through the width-correct num.hpp helper (the old size_t
+    // detour truncated u128 and failed to wrap narrow widths).
     assert!(
-        out.contains("static_cast<size_t>(a) -"),
-        "wrapping_sub on integer should emit plain arithmetic, got: {}",
+        out.contains("rusty::wrapping_sub(a,"),
+        "wrapping_sub routes to the helper, got: {}",
         out
     );
 }
@@ -16429,9 +16431,10 @@ fn test_leaf4154410_wrapping_add_on_integer_emits_plain_addition() {
         }
         "#,
     );
+    // Now routes through the width-correct num.hpp helper (see above).
     assert!(
-        out.contains("static_cast<size_t>(a) +"),
-        "wrapping_add on integer should emit plain arithmetic, got: {}",
+        out.contains("rusty::wrapping_add(a,"),
+        "wrapping_add routes to the helper, got: {}",
         out
     );
 }
@@ -24230,6 +24233,17 @@ fn test_format_arg_cast_lowers_via_smart_path() {
     );
     assert!(i.contains("? \"p\" : \"n\""), "if-expr lowered to ternary: {i}");
     assert!(!i.contains("if x > 0 {"), "no raw Rust if-expr: {i}");
+}
+
+#[test]
+fn test_wrapping_ops_route_to_width_correct_helpers() {
+    // wrapping_* must compute in the receiver's own width — the old size_t
+    // detour truncated u128 and failed to wrap narrow types.
+    let out = transpile_str("pub fn f(x: u8) -> u8 { x.wrapping_add(1) }");
+    assert!(out.contains("rusty::wrapping_add(x,"), "helper routed: {out}");
+    assert!(!out.contains("static_cast<size_t>(x) +"), "no size_t detour: {out}");
+    let m = transpile_str("pub fn f(x: u128) -> u128 { x.wrapping_mul(3) }");
+    assert!(m.contains("rusty::wrapping_mul(x,"), "u128 helper: {m}");
 }
 
 #[test]

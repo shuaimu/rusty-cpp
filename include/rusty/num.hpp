@@ -682,6 +682,65 @@ constexpr T saturating_sub_unsigned(T a, std::make_unsigned_t<T> b) {
     return r > a ? std::numeric_limits<T>::min() : r;
 }
 
+// Unsigned-counterpart picker that also covers __int128, which
+// std::make_unsigned does NOT handle under strict -std=c++23 (libstdc++
+// guards the 128-bit specializations behind GNU mode).
+template<typename T>
+struct wrapping_unsigned {
+    using type = std::make_unsigned_t<T>;
+};
+template<>
+struct wrapping_unsigned<__int128> {
+    using type = unsigned __int128;
+};
+template<>
+struct wrapping_unsigned<unsigned __int128> {
+    using type = unsigned __int128;
+};
+template<typename T>
+using wrapping_unsigned_t = typename wrapping_unsigned<T>::type;
+
+template<typename T>
+inline constexpr bool wrapping_integral_v = std::is_integral_v<T>
+    || std::is_same_v<T, __int128>
+    || std::is_same_v<T, unsigned __int128>;
+
+// Rust wrapping_{add,sub,mul,div,rem}: modular arithmetic in the operand's
+// own width. Computed in the unsigned counterpart (well-defined wrap) and
+// cast back. div/rem never wrap (only /0, which traps in Rust too).
+template<typename T>
+requires wrapping_integral_v<T>
+constexpr T wrapping_add(T a, T b) {
+    using U = wrapping_unsigned_t<T>;
+    return static_cast<T>(static_cast<U>(a) + static_cast<U>(b));
+}
+
+template<typename T>
+requires wrapping_integral_v<T>
+constexpr T wrapping_sub(T a, T b) {
+    using U = wrapping_unsigned_t<T>;
+    return static_cast<T>(static_cast<U>(a) - static_cast<U>(b));
+}
+
+template<typename T>
+requires wrapping_integral_v<T>
+constexpr T wrapping_mul(T a, T b) {
+    using U = wrapping_unsigned_t<T>;
+    return static_cast<T>(static_cast<U>(a) * static_cast<U>(b));
+}
+
+template<typename T>
+requires wrapping_integral_v<T>
+constexpr T wrapping_div(T a, T b) {
+    return static_cast<T>(a / b);
+}
+
+template<typename T>
+requires wrapping_integral_v<T>
+constexpr T wrapping_rem(T a, T b) {
+    return static_cast<T>(a % b);
+}
+
 template<typename T>
 requires std::is_integral_v<T>
 constexpr T wrapping_pow(T base, std::uint32_t exp) {

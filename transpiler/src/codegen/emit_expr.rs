@@ -10438,20 +10438,14 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            let op = match method_name.as_str() {
-                "wrapping_add" => "+",
-                "wrapping_sub" => "-",
-                "wrapping_mul" => "*",
-                // Unsigned division/remainder never wrap (no overflow except /0,
-                // which traps in Rust too), so the plain operators are exact.
-                "wrapping_div" => "/",
-                "wrapping_rem" => "%",
-                _ => unreachable!(),
-            };
-            // C++ unsigned arithmetic wraps naturally; cast to size_t to ensure unsigned
+            // Route to the num.hpp helpers, which compute in the RECEIVER'S
+            // OWN unsigned width (incl. __int128) and cast back. The old
+            // size_t detour was wrong at both ends: u128 receivers TRUNCATED
+            // to 64 bits, and narrow receivers didn't wrap
+            // (255u8.wrapping_add(1) came out 256, not 0).
             return format!(
-                "(static_cast<size_t>({}) {} static_cast<size_t>({}))",
-                receiver, op, args[0]
+                "rusty::{}({}, static_cast<std::remove_cvref_t<decltype({})>>({}))",
+                method_name, receiver, receiver, args[0]
             );
         }
         if matches!(method_name.as_str(), "wrapping_shr" | "wrapping_shl")
