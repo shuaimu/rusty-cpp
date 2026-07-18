@@ -23674,11 +23674,38 @@ impl CodeGen {
         let Some(fmt_expr) = parts.first() else {
             return false;
         };
+        // A cast argument (`x as f64`) must go through the smart path — the dumb
+        // pass-through emits Rust `as` syntax verbatim, which is a C++ syntax
+        // error. `.as_str()` / identifiers like `class` are not casts, so key on
+        // a standalone `as` token, not the substring.
+        if parts.iter().skip(1).any(|arg| Self::expr_text_contains_cast(arg)) {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
         };
         self.format_literal_needs_smart_lowering(&lit.value())
+    }
+
+    /// True when `text` contains a standalone `as` cast keyword (bounded by
+    /// non-identifier characters), ignoring `as` embedded in identifiers
+    /// (`as_str`, `class`) or the middle of words.
+    fn expr_text_contains_cast(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0;
+        while let Some(pos) = text[i..].find("as") {
+            let start = i + pos;
+            let end = start + 2;
+            let before_ok = start == 0 || !is_word(bytes[start - 1]);
+            let after_ok = end >= bytes.len() || !is_word(bytes[end]);
+            if before_ok && after_ok {
+                return true;
+            }
+            i = end;
+        }
+        false
     }
 
     /// Lower a `format!`/`format_args!` token stream to a `std::format(...)` /

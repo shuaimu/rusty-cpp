@@ -24194,6 +24194,25 @@ fn test_float_total_cmp_lowers_to_bit_ordering() {
 }
 
 #[test]
+fn test_format_arg_cast_lowers_via_smart_path() {
+    // A cast arg (`v as f64`) must route to the smart format lowering so it
+    // becomes static_cast, not the dumb pass-through that leaves Rust `as`
+    // syntax (a C++ syntax error). Covers both plain `{}` and spec `{:e}`.
+    for src in [
+        "pub fn f(v: i32) -> String { format!(\"{}\", v as f64) }",
+        "pub fn f(v: i32) -> String { format!(\"{:e}\", v as f64) }",
+    ] {
+        let out = transpile_str(src);
+        assert!(out.contains("static_cast<double>(v)"), "cast lowered: {out}");
+        assert!(!out.contains("v as f64"), "no raw Rust cast: {out}");
+    }
+    // `.as_str()` is NOT a cast — must not falsely trip the cast detector into
+    // a behavior change (still lowers correctly either way).
+    let s = transpile_str("pub fn f(x: &str) -> String { format!(\"{}\", x) }");
+    assert!(s.contains("std::format"), "plain arg still formats: {s}");
+}
+
+#[test]
 fn test_str_rfind_rsplit_trim_matches_route() {
     // rfind -> str_runtime::rfind returning Option (parallel to find). The
     // negative patterns target the broken member-call-with-char-literal form
