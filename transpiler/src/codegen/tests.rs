@@ -14919,6 +14919,39 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_slice_statement_match_lowers_to_runtime_if_chain() {
+    let out = transpile_str(
+        r#"
+        fn f(v: &[i32]) -> i32 {
+            let mut acc = 0;
+            match v {
+                [] => {
+                    acc += 1;
+                }
+                [first, rest @ ..] => {
+                    acc += *first;
+                    acc += rest.len() as i32;
+                }
+            }
+            acc
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("std::visit(overloaded {"),
+        "slice statement match should not lower to std::visit:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("// TODO: unhandled match pattern"),
+        "slice statement match arms must not be dropped:\n{}",
+        out
+    );
+    assert!(out.contains("rusty::len("), "{out}");
+    assert!(out.contains("auto rest = rusty::slice("), "{out}");
+}
+
+#[test]
 fn test_leaf5197_tuple_statement_match_lowers_to_runtime_if_chain() {
     let out = transpile_str(
         r#"

@@ -1413,6 +1413,24 @@ impl CodeGen {
                         arm_match_var
                     }
                 }
+                // Slice-pattern arms (`[] =>`, `[h, rest @ ..] =>`) in statement
+                // position: route through the runtime condition collector like the
+                // Ident-subpat case. Without this the match sinks to the std::visit
+                // fallback, whose TODO lambdas silently drop every arm body.
+                syn::Pat::Slice(_) => {
+                    let Some(cond) = self
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                            &arm.pat,
+                            "_m",
+                            &mut arm_binding_lines,
+                            &mut arm_binding_map,
+                            variant_ctx,
+                        )
+                    else {
+                        return false;
+                    };
+                    cond.unwrap_or_else(|| "true".to_string())
+                }
                 _ => return false,
             };
             let mut arm_binding_types = HashMap::new();
