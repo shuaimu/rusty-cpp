@@ -6466,7 +6466,17 @@ impl CodeGen {
         let mut return_type = mapped_return_type.clone();
         let mut can_use_mapped_auto_trailing_return = false;
         let mut softened_dependent_assoc_return = false;
-        if !deduced_return_aliases.is_empty() {
+        // Only degrade to `auto` when the return type NAMES an aliased
+        // param (the alias lives in the body, so the decl can't spell it).
+        // A void/unrelated return must keep its spelling: an auto-returning
+        // method "cannot be used before it is defined", and the in-class
+        // decl always precedes the out-of-line def (dedup_by_key<F, K>
+        // returning unit).
+        if !deduced_return_aliases.is_empty()
+            && deduced_return_alias_names
+                .iter()
+                .any(|name| Self::cpp_type_expr_mentions_identifier(&return_type, name))
+        {
             return_type = "auto".to_string();
         }
         let method_has_type_template_params = method

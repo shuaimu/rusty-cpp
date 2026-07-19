@@ -5060,7 +5060,12 @@ struct Vec {
         }
         rusty::mem::forget(std::move(g));
     }
-    template<typename F, typename K>
+    // K dropped from the template head: it appeared only in the Rust
+    // where-clause (F: FnMut(&mut T) -> K) and the body never names it,
+    // so no call site could deduce it — every dedup_by_key call was
+    // ill-formed. The current emitter drops such params; this checked-in
+    // port predates that.
+    template<typename F>
     void dedup_by_key(F key) {
         this->dedup_by([&](auto&& a, auto&& b) { return key(std::move(a)) == key(std::move(b)); });
     }
