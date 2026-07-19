@@ -23912,6 +23912,15 @@ impl CodeGen {
         }) {
             return true;
         }
+        // char args (std::format prints char32_t as a number) and
+        // generic-param args (concrete type unknowable) must dispatch
+        // through rusty::to_string.
+        if parts.iter().skip(1).enumerate().any(|(idx, arg)| {
+            default_positions.contains(&idx)
+                && self.format_arg_needs_to_string_dispatch(arg.trim())
+        }) {
+            return true;
+        }
         // Integer args under radix specs must route smart: Rust {:x}/{:o}/
         // {:b} print negative signed values as two's-complement bits, C++
         // as sign-magnitude — the smart path casts to unsigned bits.
@@ -24065,6 +24074,7 @@ impl CodeGen {
         let mut radix_bits_arg_positions: HashSet<usize> = HashSet::new();
         let mut alt_radix_arg_positions: HashMap<usize, (u32, bool, usize)> = HashMap::new();
         let mut sci_arg_positions: HashMap<usize, (bool, i32)> = HashMap::new();
+        let mut to_string_dispatch_positions: HashSet<usize> = HashSet::new();
         // Explicit trailing args; inline captures are appended after being
         // pulled out of the literal.
         let mut args: Vec<String> = parts.iter().skip(1).map(|s| s.trim().to_string()).collect();
@@ -24095,9 +24105,20 @@ impl CodeGen {
             // std::format ('nan' vs 'NaN'; scientific for large magnitudes
             // where Rust always prints positionally) — wrap them in the
             // Rust-style helper.
-            float_display_arg_positions = self
-                .format_literal_default_spec_arg_positions(&fmt_literal, args.len())
+            let default_spec_positions =
+                self.format_literal_default_spec_arg_positions(&fmt_literal, args.len());
+            float_display_arg_positions = default_spec_positions
                 .intersection(&float_arg_positions)
+                .copied()
+                .collect();
+            // Rust char / generic-param args under bare `{}` — dispatch
+            // through rusty::to_string (UTF-8 chars, Rust-style floats).
+            to_string_dispatch_positions = default_spec_positions
+                .iter()
+                .filter(|idx| {
+                    args.get(**idx)
+                        .is_some_and(|a| self.format_arg_needs_to_string_dispatch(a.trim()))
+                })
                 .copied()
                 .collect();
             // Radix/scientific spec divergences (helper-wrapped args):
@@ -24181,6 +24202,8 @@ impl CodeGen {
                         format!("rusty::to_debug_string({})", lowered)
                     } else if float_display_arg_positions.contains(&arg_idx) {
                         format!("rusty::detail::float_display_string({})", lowered)
+                    } else if to_string_dispatch_positions.contains(&arg_idx) {
+                        format!("rusty::to_string({})", lowered)
                     } else if let Some((base, upper, zero_w)) =
                         alt_radix_arg_positions.get(&arg_idx).copied()
                     {
@@ -24851,6 +24874,30 @@ impl CodeGen {
                 .infer_simple_expr_type(other)
                 .is_some_and(|ty| self.is_known_float_like_type(&ty)),
         }
+    }
+
+    /// True when a format arg is a Rust `char` (C++ char32_t — std::format
+    /// would print the numeric code point) or types as an in-scope GENERIC
+    /// PARAM (the concrete type is unknowable at transpile time — route
+    /// through rusty::to_string, which dispatches char/float/bool at C++
+    /// compile time).
+    fn format_arg_needs_to_string_dispatch(&self, token_expr: &str) -> bool {
+        let trimmed = token_expr.trim();
+        let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) else {
+            return false;
+        };
+        if self.expr_is_char_like(&expr) {
+            return true;
+        }
+        self.infer_simple_expr_type(&expr).is_some_and(|ty| {
+            matches!(
+                self.peel_reference_paren_group_type(&ty),
+                syn::Type::Path(tp)
+                    if tp.qself.is_none()
+                        && tp.path.segments.len() == 1
+                        && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+            )
+        })
     }
 
     fn format_arg_is_known_integer_like(&self, token_expr: &str) -> bool {
@@ -32930,6 +32977,26 @@ impl CodeGen {
 
 
     fn expr_is_char_like(&self, expr: &syn::Expr) -> bool {
+        let peeled = self.peel_paren_group_expr(expr);
+        // Shapes the simple-type inference misses: `x as char` casts (no
+        // Cast arm there), char literals, and `char::from(..)`-style calls.
+        if let syn::Expr::Cast(c) = peeled
+            && self.type_is_char_like(&c.ty)
+        {
+            return true;
+        }
+        if let syn::Expr::Lit(l) = peeled
+            && matches!(l.lit, syn::Lit::Char(_))
+        {
+            return true;
+        }
+        if let syn::Expr::Call(call) = peeled
+            && let syn::Expr::Path(p) = call.func.as_ref()
+            && p.path.segments.len() >= 2
+            && p.path.segments[p.path.segments.len() - 2].ident == "char"
+        {
+            return true;
+        }
         self.infer_simple_expr_type(expr)
             .is_some_and(|ty| self.type_is_char_like(&ty))
     }
@@ -46140,6 +46207,30 @@ std::string to_string(const T& value) {
     } else if constexpr (std::is_same_v<V, bool>) {
         // Rust Display for bool; std::to_string would integer-promote to "1"/"0".
         return value ? "true" : "false";
+    } else if constexpr (std::is_same_v<V, char32_t> || std::is_same_v<V, char16_t>
+        || std::is_same_v<V, wchar_t>) {
+        // Rust char Display — UTF-8 encode, not the numeric code point.
+        char32_t cp = static_cast<char32_t>(value);
+        std::string out;
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+        return out;
+    } else if constexpr (std::is_floating_point_v<V>) {
+        // Rust float Display — shortest round-trip digits, never scientific.
+        return rusty::detail::float_display_string(value);
     } else if constexpr (std::is_arithmetic_v<V>) {
         return std::to_string(value);
     } else if constexpr (requires { value.to_string(); }) {
@@ -49668,6 +49759,8 @@ std::string to_string(const T& value) {\n\
             return formatter.str();\n\
         }\n\
         return \"<fmt-error>\";\n\
+    } else if constexpr (std::is_floating_point_v<Value>) {\n\
+        return rusty::detail::float_display_string(value);\n\
     } else if constexpr (requires { std::to_string(value); }) {\n\
         return std::to_string(value);\n\
     } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {\n\
@@ -50585,11 +50678,28 @@ rusty::Result<T, rusty::String> parse(const Input& input) {\n\
         T value{};\n\
         const auto* begin = text.data();\n\
         const auto* end = begin + text.size();\n\
+        if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }\n\
         const auto [ptr, ec] = std::from_chars(begin, end, value);\n\
         if (ec == std::errc() && ptr == end) {\n\
             return rusty::Result<T, rusty::String>::Ok(value);\n\
         }\n\
         return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"invalid digit found in string\"));\n\
+    }\n\
+    if constexpr (std::is_floating_point_v<T>) {\n\
+        T value{};\n\
+        const auto* begin = text.data();\n\
+        const auto* end = begin + text.size();\n\
+        if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }\n\
+        const auto [ptr, ec] = std::from_chars(begin, end, value, std::chars_format::general);\n\
+        if (ec == std::errc() && ptr == end) {\n\
+            return rusty::Result<T, rusty::String>::Ok(value);\n\
+        }\n\
+        return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"invalid float literal\"));\n\
+    }\n\
+    if constexpr (std::is_same_v<T, bool>) {\n\
+        if (text == \"true\") { return rusty::Result<T, rusty::String>::Ok(true); }\n\
+        if (text == \"false\") { return rusty::Result<T, rusty::String>::Ok(false); }\n\
+        return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"provided string was not `true` or `false`\"));\n\
     }\n\
     return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"unsupported parse target\"));\n\
 }\n\

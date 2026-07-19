@@ -7796,7 +7796,7 @@ impl CodeGen {
                 || self.is_probably_iterator_receiver_expr(&mc.receiver))
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
-            let predicate = self.emit_expr_maybe_move(&mc.args[0]);
+            let predicate = self.emit_chars_aware_closure_arg(&mc.receiver, &mc.args[0]);
             return format!("rusty::filter({}, {})", receiver, predicate);
         }
         if mc.method == "filter_map"
@@ -7804,7 +7804,7 @@ impl CodeGen {
             && !self.receiver_is_option_or_result_like_expr(&mc.receiver)
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
-            let mapper = self.emit_expr_maybe_move(&mc.args[0]);
+            let mapper = self.emit_chars_aware_closure_arg(&mc.receiver, &mc.args[0]);
             return format!("rusty::filter_map({}, {})", receiver, mapper);
         }
         if let Some(enumerate_call) = self.try_emit_iter_enumerate_call(mc) {
@@ -22887,6 +22887,25 @@ impl CodeGen {
     /// Emit a closure expression as a C++ lambda.
     pub(super) fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
         self.emit_closure_to_string_with_param_scopes(closure, None, None, None)
+    }
+
+    /// Closure-arg emission that types untyped params as CHAR when the
+    /// receiver is a chars() iterator source — `chars().filter(|c|
+    /// c.is_alphabetic())` otherwise emits a member call on char32_t.
+    pub(super) fn emit_chars_aware_closure_arg(
+        &self,
+        receiver: &syn::Expr,
+        arg: &syn::Expr,
+    ) -> String {
+        if self.expr_is_chars_iterator_source(receiver)
+            && let syn::Expr::Closure(closure) = self.peel_paren_group_expr(arg)
+        {
+            let scope = self.collect_closure_param_names_for_scope(closure);
+            if !scope.is_empty() {
+                return self.emit_closure_to_string_with_char_predicate_context(closure, scope);
+            }
+        }
+        self.emit_expr_maybe_move(arg)
     }
 
     pub(super) fn emit_closure_to_string_with_iterator_map_context(

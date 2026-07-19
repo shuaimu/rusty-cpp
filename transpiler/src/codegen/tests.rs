@@ -15360,6 +15360,60 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_char_and_generic_format_args_dispatch_through_to_string() {
+    // std::format prints char32_t as the numeric code point; char args and
+    // generic-param args (concrete type unknowable) must dispatch through
+    // rusty::to_string, whose char branch UTF-8-encodes.
+    let out = transpile_str("pub fn f() { let d = 'x'; println!(\"{}\", d); }");
+    assert!(
+        out.contains("rusty::to_string(d)"),
+        "char local format arg must dispatch through to_string:\n{out}"
+    );
+    let out2 = transpile_str(
+        "pub fn show<T: std::fmt::Display>(t: T) { println!(\"{}\", t); }",
+    );
+    assert!(
+        out2.contains("rusty::to_string(t)"),
+        "generic-param format arg must dispatch through to_string:\n{out2}"
+    );
+    // Integers stay on the dumb path.
+    let out3 = transpile_str("pub fn g(x: i32) { println!(\"{}\", x); }");
+    assert!(
+        !out3.contains("rusty::to_string(x)"),
+        "integer args must not be wrapped:\n{out3}"
+    );
+}
+
+#[test]
+fn test_char_methods_route_on_nonliteral_receivers() {
+    // Cast receivers, char-typed locals, and chars() closure params all
+    // emitted member calls on char32_t.
+    let out = transpile_str("pub fn f() -> bool { (b'z' as char).is_alphabetic() }");
+    assert!(
+        out.contains("char_runtime::is_alphabetic("),
+        "cast receiver must route to char_runtime:\n{out}"
+    );
+    let out2 = transpile_str(
+        "pub fn g(s: &str) -> usize { s.chars().filter(|c| c.is_alphabetic()).count() }",
+    );
+    assert!(
+        out2.contains("char_runtime::is_alphabetic("),
+        "chars() closure param must route to char_runtime:\n{out2}"
+    );
+}
+
+#[test]
+fn test_parse_f64_routes_to_str_runtime() {
+    let out = transpile_str(
+        "pub fn f(s: &str) -> f64 { s.parse::<f64>().unwrap() }",
+    );
+    assert!(
+        out.contains("str_runtime::parse<"),
+        "parse::<f64> must route to the runtime parse helper:\n{out}"
+    );
+}
+
+#[test]
 fn test_let_else_emits_guard_and_diverge_block() {
     // `let Some(x) = a else { return -1; };` — the else block was silently
     // DROPPED (the None path aborted through an unguarded unwrap) and the

@@ -2585,6 +2585,19 @@ impl CodeGen {
         {
             return;
         }
+        // Char-typed locals (`let d = 'x';`, `let d = 66u8 as char;`,
+        // `char::from(..)`) are unambiguously char (the numeric-literal
+        // untyped-by-design rule doesn't apply) — record the type so
+        // char-method routing and format-arg dispatch see it.
+        if let syn::Pat::Ident(pi) = pat
+            && let Some(init) = &local.init
+            && self.expr_is_char_like(&init.expr)
+        {
+            self.register_local_binding(
+                pi.ident.to_string(),
+                syn::parse_str::<syn::Type>("char").ok(),
+            );
+        }
         // `let (k1, k2) = (&mut 1, other);` — the blanket registration types
         // tuple-destructured bindings as None. When the initializer is a
         // matching-arity tuple literal, type each ident binding from its own
