@@ -3061,6 +3061,19 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 args,
             })
         }
+        EntityKind::InitListExpr => {
+            let mut children = entity
+                .get_children()
+                .into_iter()
+                .filter_map(|child| extract_expression(&child));
+            let first = children.next()?;
+
+            Some(children.fold(first, |left, right| Expression::BinaryOp {
+                left: Box::new(left),
+                op: ",".to_string(),
+                right: Box::new(right),
+            }))
+        }
         EntityKind::CallExpr => {
             // Extract function call as expression
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
