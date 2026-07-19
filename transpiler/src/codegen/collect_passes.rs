@@ -2785,6 +2785,11 @@ impl CodeGen {
                         let scoped = self.scoped_type_key(&type_name);
                         self.copy_derived_types.insert(scoped);
                     }
+                    if trait_name.as_deref() == Some("Display") {
+                        self.display_impl_types.insert(type_name.clone());
+                        let scoped = self.scoped_type_key(&type_name);
+                        self.display_impl_types.insert(scoped);
+                    }
                     let op_name = trait_name
                         .as_ref()
                         .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));

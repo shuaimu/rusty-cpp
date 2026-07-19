@@ -1047,6 +1047,12 @@ pub struct CodeGen {
     /// Used to avoid duplicate full C-like enum definitions from the global
     /// recursive forward-declaration pass.
     pub(crate) module_body_forward_decl_pass: bool,
+    /// Types with a manual `impl fmt::Display`. Format args of these types
+    /// must take the smart lowering path (wrapped in rusty::to_string, whose
+    /// fmt-dispatch branch calls the emitted `fmt(Formatter&)` member) —
+    /// the dumb pass-through would hand them to std::format, which has no
+    /// formatter specialization for them.
+    pub(crate) display_impl_types: HashSet<String>,
     /// Output position of the first top-level function DEFINITION. Local
     /// trait-adapter explicit specializations are relocated here: C++
     /// requires an explicit specialization to be defined before its first
@@ -1921,6 +1927,7 @@ impl CodeGen {
             forward_emitted_c_like_enums: HashSet::new(),
             forward_emitted_consts: HashSet::new(),
             module_body_forward_decl_pass: false,
+            display_impl_types: HashSet::new(),
             local_adapter_insert_pos: None,
             type_arg_nesting: std::cell::Cell::new(0),
             unwrap_tmp_counter: std::cell::Cell::new(0),
@@ -20224,6 +20231,50 @@ impl CodeGen {
     /// the bitflags const-exception would force their consuming-self methods
     /// const. Unknown fields (cross-crate wrappers) keep the operator-based
     /// classification.
+    /// All fields of the current struct are known Copy scalars. Moving one
+    /// out of `self` on a const `*this` degrades to a copy — behavior-
+    /// identical — so a consuming-self OPERATOR method can stay const and
+    /// remain callable on `const auto` operands (`a + b`).
+    fn current_struct_fields_are_all_copy_scalars(&self) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let scoped_name = self.scoped_type_key(struct_name);
+        for key in [struct_name.as_str(), scoped_name.as_str()] {
+            if let Some(fields) = self.struct_field_order.get(key) {
+                return !fields.is_empty()
+                    && fields.iter().all(|f| {
+                        self.lookup_struct_field_type(key, f).is_some_and(|ty| {
+                            self.is_known_integer_like_type(&ty)
+                                || self.is_known_float_like_type(&ty)
+                                || matches!(&ty, syn::Type::Path(tp)
+                                    if tp.path.segments.last().is_some_and(|seg| matches!(
+                                        seg.ident.to_string().as_str(),
+                                        "bool" | "char"
+                                    )))
+                        })
+                    });
+            }
+        }
+        false
+    }
+
+    /// True when `method` is an operator-trait impl method (Add/Sub/Neg/…)
+    /// on the current struct — its Rust name is registered for an operator
+    /// rename.
+    fn method_is_operator_impl_on_current_struct(&self, method: &syn::ImplItemFn) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let rust_name = method.sig.ident.to_string();
+        let scoped_name = self.scoped_type_key(struct_name);
+        self.operator_renames
+            .contains_key(&(struct_name.clone(), rust_name.clone()))
+            || self
+                .operator_renames
+                .contains_key(&(scoped_name, rust_name))
+    }
+
     fn current_struct_fields_are_single_primitive(&self) -> bool {
         let Some(struct_name) = self.current_struct.as_ref() else {
             return false;
@@ -23728,6 +23779,16 @@ impl CodeGen {
         {
             return true;
         }
+        // Args of types with a manual Display impl must be wrapped in
+        // rusty::to_string (whose fmt-dispatch branch calls the emitted
+        // fmt(Formatter&) member) — std::format has no formatter for them.
+        if parts
+            .iter()
+            .skip(1)
+            .any(|arg| self.format_arg_is_display_impl_type(arg))
+        {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
@@ -23780,7 +23841,13 @@ impl CodeGen {
                 Self::format_expr_needs_smart_lowering(&i.expr)
                     || Self::format_expr_needs_smart_lowering(&i.index)
             }
-            syn::Expr::Field(f) => Self::format_expr_needs_smart_lowering(&f.base),
+            // Tuple-index fields (`b.0`) can't survive the dumb token
+            // pass-through: the struct field is mangled to `_0`, but the raw
+            // tokens render as `b . 0` — ill-formed C++.
+            syn::Expr::Field(f) => {
+                matches!(f.member, syn::Member::Unnamed(_))
+                    || Self::format_expr_needs_smart_lowering(&f.base)
+            }
             _ => false,
         }
     }
@@ -24308,6 +24375,25 @@ impl CodeGen {
 
     fn format_conversion_requires_numeric_bridge(&self, conversion: char) -> bool {
         matches!(conversion, 'x' | 'X' | 'o' | 'b' | 'B' | 'd')
+    }
+
+    /// True when a format arg's inferred type has a manual Display impl —
+    /// such args need the rusty::to_string wrap from the smart path.
+    fn format_arg_is_display_impl_type(&self, arg: &str) -> bool {
+        if self.display_impl_types.is_empty() {
+            return false;
+        }
+        let Ok(expr) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+            return false;
+        };
+        let Some(ty) = self.infer_simple_expr_type(&expr) else {
+            return false;
+        };
+        let peeled = self.peel_reference_paren_group_type(&ty);
+        matches!(peeled, syn::Type::Path(tp)
+            if tp.path.segments.last().is_some_and(|seg| {
+                self.display_impl_types.contains(&seg.ident.to_string())
+            }))
     }
 
     /// True when a format arg expression mentions a local whose current C++

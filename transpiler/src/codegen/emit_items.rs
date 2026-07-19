@@ -6515,6 +6515,12 @@ impl CodeGen {
                 } else if Self::body_moves_out_self_field(&method.block)
                     && !self.current_struct_is_bitflags_like()
                     && !self.current_struct_is_copy()
+                    // Operator impls (Add/Sub/Neg/…) on all-scalar structs
+                    // stay const: `std::move(this->x)` on a const *this is
+                    // just a copy for Copy scalars, and non-const operators
+                    // make `a + b` on `const auto` operands ill-formed.
+                    && !(self.method_is_operator_impl_on_current_struct(method)
+                        && self.current_struct_fields_are_all_copy_scalars())
                 {
                     // `fn foo(self)` whose body moves a non-Copy field
                     // out of `self` (e.g. `Foo { kv: self.kv, ... }`

@@ -14923,6 +14923,92 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_arithmetic_operator_impls_on_scalar_structs_emit_const() {
+    let out = transpile_str(
+        r#"
+        struct Vec2 { x: f64, y: f64 }
+        impl std::ops::Add for Vec2 {
+            type Output = Vec2;
+            fn add(self, o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } }
+        }
+        impl std::ops::Neg for Vec2 {
+            type Output = Vec2;
+            fn neg(self) -> Vec2 { Vec2 { x: -self.x, y: -self.y } }
+        }
+        fn f(a: Vec2, b: Vec2) -> f64 {
+            let c = a + b;
+            let d = -c;
+            d.x
+        }
+        "#,
+    );
+    assert!(
+        out.contains("operator+(") && out.contains(") const"),
+        "operator+ must be const-callable on const operands:\n{}",
+        out
+    );
+    let plus = out.find("operator+(").expect("operator+ missing");
+    let after = &out[plus..out[plus..].find('{').map(|i| plus + i).unwrap_or(out.len())];
+    assert!(
+        after.contains("const"),
+        "operator+ signature must carry const:\n{}",
+        after
+    );
+}
+
+#[test]
+fn test_tuple_index_field_in_println_routes_smart() {
+    let out = transpile_str(
+        r#"
+        struct Flags(u8);
+        fn f() {
+            let b = Flags(9);
+            println!("{}", b.0);
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("b . 0") && !out.contains("b.0"),
+        "tuple index must not leak raw `.0` tokens:\n{}",
+        out
+    );
+    assert!(
+        out.contains("__t._0") || out.contains("b._0"),
+        "expected mangled tuple-field access (direct or via accessor lambda):\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_display_impl_type_format_arg_routes_through_to_string() {
+    let out = transpile_str(
+        r#"
+        use std::fmt;
+        struct Point { x: i64, y: i64 }
+        impl fmt::Display for Point {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "({}, {})", self.x, self.y)
+            }
+        }
+        fn f() {
+            let p = Point { x: 3, y: 4 };
+            println!("{}", p);
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::to_string(p)"),
+        "Display-impl args must wrap in rusty::to_string (fmt dispatch):\n{}",
+        out
+    );
+    assert!(
+        !out.contains("std::println(\"{}\" , p)"),
+        "dumb pass-through would hit a missing std::formatter:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_shadowed_local_in_println_uses_live_binding() {
     let out = transpile_str(
         r#"

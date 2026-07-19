@@ -97,8 +97,12 @@ template<typename T>
 constexpr auto rust_not(T v) {
     if constexpr (std::is_same_v<std::remove_cvref_t<T>, bool>) {
         return !v;
-    } else {
+    } else if constexpr (std::is_integral_v<std::remove_cvref_t<T>>) {
         return ~v;
+    } else {
+        // User `impl Not` types emit their own operator! — dispatch to it
+        // instead of applying `~` (which such class types don't define).
+        return !v;
     }
 }
 
