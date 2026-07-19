@@ -368,6 +368,14 @@ public:
         return Option<T>(None);
     }
 
+    // Const fallback for read-only Result bindings (copies the Ok value).
+    Option<T> ok() const {
+        if (is_ok_value) {
+            return Option<T>(ok_ref());
+        }
+        return Option<T>(None);
+    }
+
     // Convert Result<T, E> into Option<E> by discarding Ok.
     Option<E> err() {
         if (is_ok_value) {

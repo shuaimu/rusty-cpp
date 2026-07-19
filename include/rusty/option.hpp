@@ -334,6 +334,22 @@ public:
         return default_value;
     }
 
+    // Const fallback for read-only Option bindings (copies the value),
+    // mirroring the const unwrap_or below/above family.
+    template<typename F>
+    T unwrap_or_else(F&& default_fn) const {
+        if (has_value) {
+            return value;
+        }
+        using fallback_result_t = std::invoke_result_t<F&&>;
+        if constexpr (std::is_void_v<fallback_result_t>) {
+            std::forward<F>(default_fn)();
+            std::abort();
+        } else {
+            return std::forward<F>(default_fn)();
+        }
+    }
+
     // Lazily compute fallback value only for None.
     template<typename F>
     T unwrap_or_else(F&& default_fn) {
@@ -659,6 +675,22 @@ public:
             return std::move(value);
         }
         return T(None);
+    }
+
+    // Const fallback for read-only Option bindings (copies out).
+    template<typename Q = T>
+    auto transpose() const -> Result<Option<option_result_ok_t<Q>>, option_result_err_t<Q>>
+    requires option_is_result_v<Q> {
+        using InnerOk = option_result_ok_t<Q>;
+        using InnerErr = option_result_err_t<Q>;
+        if (!has_value) {
+            return Result<Option<InnerOk>, InnerErr>::Ok(Option<InnerOk>(None));
+        }
+        auto inner = value;
+        if (inner.is_ok()) {
+            return Result<Option<InnerOk>, InnerErr>::Ok(Option<InnerOk>(inner.unwrap()));
+        }
+        return Result<Option<InnerOk>, InnerErr>::Err(inner.unwrap_err());
     }
 
     // Rust parity: Option<Result<T, E>>::transpose(self) -> Result<Option<T>, E>

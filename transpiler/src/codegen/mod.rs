@@ -1052,6 +1052,10 @@ pub struct CodeGen {
     /// crate-Iterator/IntoIterator inferred type, the local must not bind
     /// const (into_iter takes self — a non-const member).
     pub(crate) for_loop_iterated_bare_locals: HashSet<String>,
+    /// Fresh-name counter for `let ... else` scrutinee temporaries — they
+    /// live in the ENCLOSING scope (the bindings must survive the guard),
+    /// so repeated let-else in one block need distinct names.
+    pub(crate) let_else_counter: std::cell::Cell<usize>,
     /// Crate types with a user `impl Iterator` — adapter/terminal method
     /// calls on values of these types route to the rusty:: free-function
     /// family instead of (nonexistent) members.
@@ -1941,6 +1945,7 @@ impl CodeGen {
             forward_emitted_consts: HashSet::new(),
             module_body_forward_decl_pass: false,
             for_loop_iterated_bare_locals: HashSet::new(),
+            let_else_counter: std::cell::Cell::new(0),
             crate_iterator_impl_types: HashSet::new(),
             crate_intoiter_impl_types: HashSet::new(),
             display_impl_types: HashSet::new(),

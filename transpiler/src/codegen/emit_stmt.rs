@@ -1652,6 +1652,62 @@ impl CodeGen {
         Some(out)
     }
 
+    /// Lower `let PAT = EXPR else { DIVERGE };`. Returns false when the
+    /// pattern shape isn't supported by the runtime-match binding collector
+    /// (the caller falls through to the legacy — unguarded — lowering).
+    fn try_emit_let_else(
+        &mut self,
+        local: &syn::Local,
+        init_expr: &syn::Expr,
+        diverge_expr: &syn::Expr,
+    ) -> bool {
+        let variant_ctx = self.infer_variant_type_context_from_expr(init_expr);
+        let n = self.let_else_counter.get();
+        let scrutinee_var = format!("_let_else_scrutinee_{}", n);
+        let mut binding_stmts = Vec::new();
+        let mut binding_map = HashMap::new();
+        let Some(cond_opt) = self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+            &local.pat,
+            &scrutinee_var,
+            &mut binding_stmts,
+            &mut binding_map,
+            variant_ctx.as_ref(),
+        ) else {
+            return false;
+        };
+        self.let_else_counter.set(n + 1);
+        let cond = cond_opt.unwrap_or_else(|| "true".to_string());
+        let scrutinee_cpp = self.emit_expr_to_string(init_expr);
+        self.writeln(&format!("auto&& {} = {};", scrutinee_var, scrutinee_cpp));
+        self.writeln(&format!("if (!({})) {{", cond));
+        self.indent += 1;
+        if let syn::Expr::Block(b) = self.peel_paren_group_expr(diverge_expr) {
+            // A no-semicolon diverging tail (`else { return -100 }`) must
+            // emit as a STATEMENT, not be return-wrapped by the block's
+            // value-tail handling.
+            self.emit_control_flow_with_return_scope(false, |this| {
+                this.emit_block(&b.block);
+            });
+        } else {
+            self.emit_arm_body(diverge_expr);
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        for stmt in binding_stmts {
+            self.writeln(&stmt);
+        }
+        // The bindings live in the ENCLOSING scope — merge any renamed cpp
+        // names into the current binding scope rather than pushing one.
+        if !binding_map.is_empty()
+            && let Some(scope) = self.local_cpp_bindings.last_mut()
+        {
+            for (k, v) in &binding_map {
+                scope.insert(k.clone(), v.clone());
+            }
+        }
+        true
+    }
+
     pub(super) fn emit_arm_body(&mut self, body: &syn::Expr) {
         // If the body is a block, emit its statements.
         // Statement-level arm bodies must not tail-return: a block whose
@@ -2516,6 +2572,19 @@ impl CodeGen {
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         self.register_local_binding_pattern(pat);
+        // `let PAT = EXPR else { DIVERGE };` — the diverge block was silently
+        // DROPPED (the None path aborted through an unguarded unwrap) and the
+        // matched-path bindings dangled (auto&& over an unwrap() prvalue).
+        // Lower through the runtime-match machinery: bind a NAMED scrutinee
+        // in the enclosing scope, guard on the pattern condition with the
+        // else block on the failing side, then bind against the living
+        // scrutinee lvalue.
+        if let Some(init) = &local.init
+            && let Some((_, diverge_expr)) = &init.diverge
+            && self.try_emit_let_else(local, &init.expr, diverge_expr)
+        {
+            return;
+        }
         // `let (k1, k2) = (&mut 1, other);` — the blanket registration types
         // tuple-destructured bindings as None. When the initializer is a
         // matching-arity tuple literal, type each ident binding from its own

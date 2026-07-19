@@ -15360,6 +15360,36 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_let_else_emits_guard_and_diverge_block() {
+    // `let Some(x) = a else { return -1; };` — the else block was silently
+    // DROPPED (the None path aborted through an unguarded unwrap) and the
+    // matched-path binding dangled (auto&& over an unwrap() prvalue).
+    let out = transpile_str(
+        "pub fn f(a: Option<i32>) -> i32 { let Some(x) = a else { return -1; }; x }",
+    );
+    assert!(
+        out.contains("_let_else_scrutinee_0"),
+        "let-else must bind a named scrutinee:\n{out}"
+    );
+    assert!(
+        out.contains("if (!("),
+        "let-else must guard on the pattern condition:\n{out}"
+    );
+    assert!(
+        out.matches("return").count() >= 2,
+        "the diverging else body must survive:\n{out}"
+    );
+    // No-semicolon diverging tail must not be return-wrapped.
+    let out2 = transpile_str(
+        "pub fn g(a: Option<i32>) -> i32 { let Some(x) = a else { return -7 }; x }",
+    );
+    assert!(
+        !out2.contains("return return"),
+        "diverging tail must emit as a statement:\n{out2}"
+    );
+}
+
+#[test]
 fn test_signed_radix_args_cast_to_unsigned_bits() {
     // Rust {:x}/{:o}/{:b} print negative signed ints as two's-complement
     // bits (i32 -255 → ffffff01); C++ std::format prints '-ff'.
