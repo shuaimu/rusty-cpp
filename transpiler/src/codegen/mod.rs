@@ -24013,8 +24013,10 @@ impl CodeGen {
             // `*rx` on a reference-lowered binding must peel through
             // emit_expr — the dumb pass-through leaks a literal `*` onto an
             // int lvalue.
+            // `!a` must go through emit_expr: Rust `!` is BITWISE on
+            // integers, and the raw `! a` splice collapses to a 0/1 bool.
             syn::Expr::Unary(u) => {
-                matches!(u.op, syn::UnOp::Deref(_))
+                matches!(u.op, syn::UnOp::Deref(_) | syn::UnOp::Not(_))
                     || Self::format_expr_needs_smart_lowering(&u.expr)
             }
             syn::Expr::Paren(p) => Self::format_expr_needs_smart_lowering(&p.expr),
@@ -24043,6 +24045,8 @@ impl CodeGen {
             syn::Expr::Lit(l) => match &l.lit {
                 syn::Lit::Int(i) => !i.suffix().is_empty(),
                 syn::Lit::Float(f) => !f.suffix().is_empty(),
+                // b"abc" splices as the ill-formed tokens `b "abc"`.
+                syn::Lit::ByteStr(_) | syn::Lit::Byte(_) => true,
                 _ => false,
             },
             _ => false,
@@ -40835,7 +40839,26 @@ impl CodeGen {
                 }
                 digits.to_string()
             }
-            syn::Lit::Float(f) => f.base10_digits().to_string(),
+            syn::Lit::Float(f) => {
+                let digits = f.base10_digits().to_string();
+                // f32-suffixed literals must stay FLOAT: dropping the
+                // suffix ran the arithmetic (and Display) at f64
+                // precision — 1.0f32/3.0f32 printed 16 digits (r7
+                // float_display). `1f` is ill-formed C++, so ensure a
+                // decimal point before appending.
+                if f.suffix() == "f32" {
+                    if digits.contains('.')
+                        || digits.contains('e')
+                        || digits.contains('E')
+                    {
+                        format!("{}f", digits)
+                    } else {
+                        format!("{}.0f", digits)
+                    }
+                } else {
+                    digits
+                }
+            }
             syn::Lit::Bool(b) => if b.value { "true" } else { "false" }.to_string(),
             syn::Lit::Str(s) => {
                 let value = s.value();

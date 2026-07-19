@@ -10540,12 +10540,15 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
+            // Width-correct helpers: routing through size_t rotated at 64
+            // bits — silently wrong for every sub-64 width (u16 0x8001
+            // rotate_left(4) printed 524304 where Rust prints 24).
             let cpp_fn = if method_name == "rotate_right" {
-                "std::rotr"
+                "rusty::int_rotate_right"
             } else {
-                "std::rotl"
+                "rusty::int_rotate_left"
             };
-            return format!("{}(static_cast<size_t>({}), {})", cpp_fn, receiver, args[0]);
+            return format!("{}({}, {})", cpp_fn, receiver, args[0]);
         }
         if matches!(
             method_name.as_str(),
@@ -20701,7 +20704,20 @@ impl CodeGen {
                         } else {
                             self.emit_expr_to_string(&un.expr)
                         };
-                        format!("~{}", operand)
+                        // Sub-int widths promote: `~u8` is an int with 24
+                        // extra set bits (!0xF0u8 must be 15, not
+                        // 0xFFFFFF0F). Truncate back to the operand type.
+                        let mapped = operand_ty.as_ref().map(|ty| self.map_type(ty));
+                        if let Some(mapped) = mapped.as_deref()
+                            && matches!(
+                                mapped,
+                                "uint8_t" | "uint16_t" | "int8_t" | "int16_t"
+                            )
+                        {
+                            format!("static_cast<{}>(~{})", mapped, operand)
+                        } else {
+                            format!("~{}", operand)
+                        }
                     } else if operand_ty.as_ref().is_some_and(|ty| {
                         matches!(
                             self.peel_reference_paren_group_type(ty),

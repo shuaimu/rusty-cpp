@@ -17775,7 +17775,8 @@ fn test_leaf415449_unary_not_integer_uses_bitwise_operator() {
         }
         "#,
     );
-    assert!(out.contains("return ~v;"));
+    // Sub-int widths truncate back after promotion (#84): !0xF0u8 is 15.
+    assert!(out.contains("static_cast<uint8_t>(~v)"), "{out}");
     assert!(!out.contains("return !v;"));
 }
 
@@ -17884,9 +17885,11 @@ fn test_leaf4154410_rotate_right_on_integer_emits_std_rotr() {
         }
         "#,
     );
+    // Width-correct helper (#84): the std::rotr size_t detour rotated
+    // every sub-64 width at 64 bits.
     assert!(
-        out.contains("std::rotr("),
-        "rotate_right should emit std::rotr, got: {}",
+        out.contains("rusty::int_rotate_right("),
+        "rotate_right should emit the width-correct helper, got: {}",
         out
     );
 }

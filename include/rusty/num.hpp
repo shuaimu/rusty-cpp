@@ -293,6 +293,36 @@ inline constexpr bool wrapping_integral_v = std::is_integral_v<T>
     || std::is_same_v<T, __int128>
     || std::is_same_v<T, unsigned __int128>;
 
+// Width-correct integer rotates: Rust u16::rotate_left(4) rotates the 16
+// bits of the operand. Routing through `std::rotl(static_cast<size_t>..)`
+// rotated at 64 bits — silently wrong for every sub-64 width and for
+// signed operands. Manual shift form so __int128 works too.
+template<typename T>
+    requires wrapping_integral_v<T>
+constexpr T int_rotate_left(T value, uint32_t n) {
+    using U = wrapping_unsigned_t<T>;
+    constexpr uint32_t BITS = sizeof(T) * 8;
+    const U u = static_cast<U>(value);
+    const uint32_t r = n % BITS;
+    if (r == 0) {
+        return static_cast<T>(u);
+    }
+    return static_cast<T>(static_cast<U>((u << r) | (u >> (BITS - r))));
+}
+
+template<typename T>
+    requires wrapping_integral_v<T>
+constexpr T int_rotate_right(T value, uint32_t n) {
+    using U = wrapping_unsigned_t<T>;
+    constexpr uint32_t BITS = sizeof(T) * 8;
+    const U u = static_cast<U>(value);
+    const uint32_t r = n % BITS;
+    if (r == 0) {
+        return static_cast<T>(u);
+    }
+    return static_cast<T>(static_cast<U>((u >> r) | (u << (BITS - r))));
+}
+
 template<typename T>
 requires wrapping_integral_v<T>
 Option<T> checked_add(T a, T b) {
