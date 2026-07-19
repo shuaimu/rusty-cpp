@@ -52464,6 +52464,10 @@ fn escape_cpp_char_literal_content(value: char) -> String {
 }
 
 fn escape_cpp_keyword(name: &str) -> String {
+    // Rust raw identifiers (`r#match`, `r#type`) stringify WITH the prefix —
+    // `#` is not valid in a C++ identifier. Strip it, then keyword-escape
+    // the bare name as usual (`r#match` → `match`; `r#try` → `try_`).
+    let name = name.strip_prefix("r#").unwrap_or(name);
     match name {
         "alignas" | "alignof" | "and" | "and_eq" | "asm" | "assert" | "auto" | "bitand"
         | "bitor" | "bool" | "break" | "case" | "catch" | "char" | "char8_t" | "char16_t"

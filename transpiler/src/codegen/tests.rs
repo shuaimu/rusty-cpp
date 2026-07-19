@@ -15360,6 +15360,56 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_raw_identifiers_strip_r_prefix() {
+    // `r#match` stringifies WITH the prefix — `#` is not a valid C++
+    // identifier character; it leaked into decls, definitions and calls.
+    let out = transpile_str(
+        "struct W { id: i32 } impl W { fn r#match(&self, o: i32) -> bool { self.id == o } } pub fn f(w: &W) -> bool { w.r#match(42) }",
+    );
+    assert!(
+        !out.contains("r#"),
+        "raw-identifier prefix leaked into C++:\n{out}"
+    );
+    assert!(
+        out.contains("match(") || out.contains("match ("),
+        "the bare identifier must survive:\n{out}"
+    );
+    // A raw identifier that IS a C++ keyword still gets the escape.
+    let out2 = transpile_str(
+        "struct W { id: i32 } impl W { fn r#try(&self) -> i32 { self.id } } pub fn g(w: &W) -> i32 { w.r#try() }",
+    );
+    assert!(
+        !out2.contains("r#") && out2.contains("try_("),
+        "r#try must escape to try_:\n{out2}"
+    );
+}
+
+#[test]
+fn test_use_fn_and_const_renames_do_not_emit_type_aliases() {
+    // C++ `using X = Y;` is a TYPE alias — `use fn as alias` / `use const
+    // as alias` emitted ill-formed aliases to a function/variable.
+    let out = transpile_str(
+        "mod math { pub fn add(a: i32, b: i32) -> i32 { a + b } pub const K: i32 = 11; } use math::add as plus; use math::K as KONST; pub fn f() -> i32 { plus(KONST, 1) }",
+    );
+    assert!(
+        !out.contains("\nusing plus = ") && !out.contains("\nusing KONST = "),
+        "fn/const renames must not emit type aliases:\n{out}"
+    );
+    assert!(
+        out.contains("constexpr const auto& KONST = math::K"),
+        "const renames bind a reference alias:\n{out}"
+    );
+    // Type renames keep the (valid) using alias.
+    let out2 = transpile_str(
+        "mod inner { pub struct P { pub v: i32 } } use inner::P as Point; pub fn g(p: Point) -> i32 { p.v }",
+    );
+    assert!(
+        out2.contains("using Point = inner::P") || out2.contains("using Point ="),
+        "type renames keep the using alias:\n{out2}"
+    );
+}
+
+#[test]
 fn test_contains_iife_uses_generic_lambda_params() {
     // The requires/discarded-if-constexpr dispatch is only dependent inside
     // a templated entity — with captured locals in a plain lambda (directly

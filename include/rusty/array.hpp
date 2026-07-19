@@ -2379,6 +2379,17 @@ auto split_at(std::span<Elem, Extent> span, Mid mid) {
     return std::make_tuple(span.first(mid_index), span.subspan(mid_index));
 }
 
+// Rust `<[T; N]>::map` — element-wise transform to a NEW fixed array
+// (std::array has no such member).
+template<typename T, std::size_t N, typename F>
+auto array_map(const std::array<T, N>& a, F f) {
+    std::array<std::invoke_result_t<F&, const T&>, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = f(a[i]);
+    }
+    return out;
+}
+
 // Rust `[T]::split_at_mut` — same split, mutable halves. The span element
 // type already carries mutability; the separate name exists for the
 // container overload and call-site parity.

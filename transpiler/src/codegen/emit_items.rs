@@ -5592,6 +5592,52 @@ impl CodeGen {
                                     escape_cpp_keyword(leaf),
                                     ut
                                 ));
+                            } else if let Some((alias, target)) = split_use_import_alias(ut) {
+                                // `use fn as alias` / `use const as alias`:
+                                // C++ `using X = Y;` is a TYPE alias — a
+                                // function or constexpr-variable target is
+                                // ill-formed. Consts bind a reference alias;
+                                // fn renames rely on the alias map resolving
+                                // call sites (nothing to declare).
+                                let leaf = target.rsplit("::").next().unwrap_or(target).trim();
+                                let target_norm = target.trim().trim_start_matches("::");
+                                // ALL-CAPS single letters can be types too
+                                // (`struct P`) — only treat as const/fn when
+                                // the target is NOT a declared type.
+                                let target_is_declared_type = self
+                                    .local_declared_types
+                                    .contains(target_norm)
+                                    || self.local_declared_types.contains(leaf)
+                                    || self.type_alias_targets.contains_key(leaf);
+                                let leaf_is_const_like = !target_is_declared_type
+                                    && !leaf.is_empty()
+                                    && leaf.chars().any(|c| c.is_ascii_uppercase())
+                                    && leaf.chars().all(|c| {
+                                        c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'
+                                    });
+                                let leaf_is_fn_like = !target_is_declared_type
+                                    && leaf
+                                        .chars()
+                                        .next()
+                                        .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+                                if leaf_is_const_like {
+                                    self.writeln(&format!(
+                                        "{}constexpr const auto& {} = {};",
+                                        export_prefix,
+                                        escape_cpp_keyword(alias.trim()),
+                                        target.trim()
+                                    ));
+                                } else if leaf_is_fn_like {
+                                    self.writeln(&format!(
+                                        "// Rust-only fn rename (call sites resolve the alias): using {};",
+                                        resolved_path
+                                    ));
+                                } else {
+                                    self.writeln(&format!(
+                                        "{}using {};",
+                                        export_prefix, using_path
+                                    ));
+                                }
                             } else {
                                 self.writeln(&format!("{}using {};", export_prefix, using_path));
                             }
