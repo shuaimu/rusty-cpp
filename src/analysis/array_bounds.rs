@@ -250,6 +250,21 @@ fn analyze_statement_bounds(
                 tracker.exit_scope();
             }
         }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            if !in_unsafe {
+                check_expr_bounds(condition, tracker, func_name, errors);
+            }
+
+            for case in cases {
+                tracker.enter_scope();
+                for stmt in &case.statements {
+                    analyze_statement_bounds(stmt, tracker, func_name, errors, in_unsafe);
+                }
+                tracker.exit_scope();
+            }
+        }
 
         // EnterLoop/ExitLoop markers are handled through scope tracking
         Statement::EnterLoop => {

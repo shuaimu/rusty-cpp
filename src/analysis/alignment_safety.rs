@@ -267,6 +267,21 @@ fn analyze_statement_alignment(
                 tracker.exit_scope();
             }
         }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            if !in_unsafe {
+                check_expr_alignment(condition, tracker, func_name, errors);
+            }
+
+            for case in cases {
+                tracker.enter_scope();
+                for stmt in &case.statements {
+                    analyze_statement_alignment(stmt, tracker, func_name, errors, in_unsafe);
+                }
+                tracker.exit_scope();
+            }
+        }
 
         Statement::Block(stmts) => {
             tracker.enter_scope();

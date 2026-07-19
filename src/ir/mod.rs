@@ -348,6 +348,9 @@ pub enum IrStatement {
         then_branch: Vec<IrStatement>,
         else_branch: Option<Vec<IrStatement>>,
     },
+    Switch {
+        cases: Vec<Vec<IrStatement>>,
+    },
     // Safety markers
     EnterUnsafe,
     ExitUnsafe,
@@ -708,6 +711,7 @@ fn get_statement_line(stmt: &crate::parser::Statement) -> Option<u32> {
         Statement::ReferenceBinding { location, .. } => Some(location.line),
         Statement::FunctionCall { location, .. } => Some(location.line),
         Statement::If { location, .. } => Some(location.line),
+        Statement::Switch { location, .. } => Some(location.line),
         Statement::ExpressionStatement { location, .. } => Some(location.line),
         _ => None,
     }
@@ -960,6 +964,10 @@ fn convert_statement(
             Statement::If { condition, .. } => {
                 debug_println!("DEBUG IR:   If condition: {:?}", condition);
                 "If"
+            }
+            Statement::Switch { condition, .. } => {
+                debug_println!("DEBUG IR:   Switch condition: {:?}", condition);
+                "Switch"
             }
             _ => "Other",
         }
@@ -2393,6 +2401,56 @@ fn convert_statement(
                 then_branch: then_ir,
                 else_branch: else_ir,
             });
+            Ok(Some(result))
+        }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            let mut condition_ir = Vec::new();
+
+            match condition {
+                crate::parser::Expression::FunctionCall { name, args } => {
+                    let is_method_call = name.contains("::") || name.starts_with("operator");
+
+                    for (i, arg) in args.iter().enumerate() {
+                        if let crate::parser::Expression::Variable(var) = arg {
+                            if is_method_call && i == 0 {
+                                condition_ir.push(IrStatement::UseVariable {
+                                    var: var.clone(),
+                                    operation: format!("call method '{}' in switch condition", name),
+                                });
+                            }
+                        }
+                    }
+                }
+                crate::parser::Expression::Variable(var) => {
+                    condition_ir.push(IrStatement::UseVariable {
+                        var: var.clone(),
+                        operation: "use in switch condition".to_string(),
+                    });
+                }
+                _ => {}
+            }
+
+            let mut case_ir = Vec::new();
+            for case in cases {
+                let mut statements = Vec::new();
+                for stmt in &case.statements {
+                    if let Some(ir_stmts) = convert_statement(
+                        stmt,
+                        variables,
+                        current_scope_level,
+                        user_defined_raii_types,
+                        types_with_ref_members,
+                    )? {
+                        statements.extend(ir_stmts);
+                    }
+                }
+                case_ir.push(statements);
+            }
+
+            let mut result = condition_ir;
+            result.push(IrStatement::Switch { cases: case_ir });
             Ok(Some(result))
         }
         Statement::ExpressionStatement { expr, .. } => {

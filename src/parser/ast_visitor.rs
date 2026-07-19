@@ -506,6 +506,13 @@ pub struct Variable {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+pub struct SwitchCase {
+    pub label: Option<Expression>,
+    pub statements: Vec<Statement>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Statement {
     VariableDecl(Variable),
     Assignment {
@@ -540,6 +547,11 @@ pub enum Statement {
         condition: Expression,
         then_branch: Vec<Statement>,
         else_branch: Option<Vec<Statement>>,
+        location: SourceLocation,
+    },
+    Switch {
+        condition: Expression,
+        cases: Vec<SwitchCase>,
         location: SourceLocation,
     },
     // Expression statements (e.g., standalone dereference, method calls)
@@ -2249,6 +2261,9 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     location: extract_location(&child),
                 });
             }
+            EntityKind::SwitchStmt => {
+                statements.push(extract_switch_statement(&child));
+            }
             EntityKind::UnaryOperator => {
                 // Handle standalone dereference operations
                 if let Some(expr) = extract_expression(&child) {
@@ -2355,6 +2370,82 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     }
 
     statements
+}
+
+fn extract_switch_statement(entity: &Entity) -> Statement {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    let condition = children
+        .iter()
+        .find(|child| child.get_kind() != EntityKind::CompoundStmt)
+        .and_then(extract_expression)
+        .unwrap_or_else(|| Expression::Literal("true".to_string()));
+
+    let mut cases = Vec::new();
+    if let Some(body) = children
+        .iter()
+        .find(|child| child.get_kind() == EntityKind::CompoundStmt)
+    {
+        let mut current_case: Option<SwitchCase> = None;
+
+        for child in body.get_children() {
+            match child.get_kind() {
+                EntityKind::CaseStmt => {
+                    if let Some(case) = current_case.take() {
+                        cases.push(case);
+                    }
+
+                    let case_children: Vec<Entity> = child.get_children().into_iter().collect();
+                    let label = case_children.first().and_then(extract_expression);
+                    let mut statements = Vec::new();
+                    for stmt_child in case_children.iter().skip(1) {
+                        statements.extend(extract_switch_body_statement(stmt_child));
+                    }
+
+                    current_case = Some(SwitchCase { label, statements });
+                }
+                EntityKind::DefaultStmt => {
+                    if let Some(case) = current_case.take() {
+                        cases.push(case);
+                    }
+
+                    let mut statements = Vec::new();
+                    for stmt_child in child.get_children() {
+                        statements.extend(extract_switch_body_statement(&stmt_child));
+                    }
+
+                    current_case = Some(SwitchCase {
+                        label: None,
+                        statements,
+                    });
+                }
+                EntityKind::BreakStmt => {}
+                _ => {
+                    if let Some(case) = &mut current_case {
+                        case.statements
+                            .extend(extract_switch_body_statement(&child));
+                    }
+                }
+            }
+        }
+
+        if let Some(case) = current_case {
+            cases.push(case);
+        }
+    }
+
+    Statement::Switch {
+        condition,
+        cases,
+        location: extract_location(entity),
+    }
+}
+
+fn extract_switch_body_statement(entity: &Entity) -> Vec<Statement> {
+    match entity.get_kind() {
+        EntityKind::BreakStmt => Vec::new(),
+        EntityKind::CompoundStmt => extract_compound_statement(entity),
+        _ => extract_single_statement(entity),
+    }
 }
 
 // Extract one statement cursor used where C++ allows an unbraced substatement,

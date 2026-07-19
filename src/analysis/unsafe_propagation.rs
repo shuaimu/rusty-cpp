@@ -207,6 +207,37 @@ fn check_statements_with_unsafe_tracking(
                     ));
                 }
             }
+            Statement::Switch {
+                condition,
+                cases,
+                location,
+            } if !in_unsafe_scope => {
+                if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                    condition,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ) {
+                    errors.push(format!(
+                        "Calling unsafe function '{}' in switch condition at line {} requires unsafe context",
+                        unsafe_func, location.line
+                    ));
+                }
+
+                for case in cases {
+                    errors.extend(check_statements_with_unsafe_tracking(
+                        &case.statements,
+                        safety_context,
+                        known_safe_functions,
+                        external_annotations,
+                        template_params,
+                        callable_params,
+                        0,
+                    ));
+                }
+            }
             Statement::Block(statements) if !in_unsafe_scope => {
                 errors.extend(check_statements_with_unsafe_tracking(
                     statements,
@@ -400,6 +431,40 @@ fn check_statement_for_unsafe_calls_with_external(
                 );
                 if !else_errors.is_empty() {
                     return Some(else_errors.into_iter().next().unwrap());
+                }
+            }
+        }
+        Statement::Switch {
+            condition,
+            cases,
+            location,
+        } => {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                condition,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ) {
+                return Some(format!(
+                    "Calling unsafe function '{}' in switch condition at line {} requires unsafe context",
+                    unsafe_func, location.line
+                ));
+            }
+
+            for case in cases {
+                let case_errors = check_statements_with_unsafe_tracking(
+                    &case.statements,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                    0,
+                );
+                if !case_errors.is_empty() {
+                    return Some(case_errors.into_iter().next().unwrap());
                 }
             }
         }

@@ -232,6 +232,16 @@ fn collect_lambdas_and_escapes(
                     collect_lambdas_and_escapes(else_stmts, function_name, ctx, unsafe_depth);
                 }
             }
+            Statement::Switch { cases, .. } => {
+                for case in cases {
+                    collect_lambdas_and_escapes(
+                        &case.statements,
+                        function_name,
+                        ctx,
+                        unsafe_depth,
+                    );
+                }
+            }
             Statement::Block(inner_stmts) => {
                 collect_lambdas_and_escapes(inner_stmts, function_name, ctx, unsafe_depth);
             }
@@ -289,6 +299,16 @@ fn check_this_captures_errors(
                 check_this_captures_errors(then_branch, function_name, errors, unsafe_depth);
                 if let Some(else_stmts) = else_branch {
                     check_this_captures_errors(else_stmts, function_name, errors, unsafe_depth);
+                }
+            }
+            Statement::Switch { cases, .. } => {
+                for case in cases {
+                    check_this_captures_errors(
+                        &case.statements,
+                        function_name,
+                        errors,
+                        unsafe_depth,
+                    );
                 }
             }
             Statement::Block(inner_stmts) => {
