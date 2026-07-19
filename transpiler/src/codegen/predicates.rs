@@ -3085,6 +3085,21 @@ impl CodeGen {
 
     pub(super) fn is_probably_iterator_receiver_expr(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
+        // A value whose inferred type has a user `impl Iterator` IS an
+        // iterator receiver regardless of syntactic shape (struct literal,
+        // constructor call, plain local) — its struct carries no
+        // map/filter/count members, and state fields (`count`) would even
+        // shadow the trait method under member emission.
+        if !self.crate_iterator_impl_types.is_empty()
+            && self.infer_simple_expr_type(expr).is_some_and(|ty| {
+                matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Path(tp)
+                    if tp.path.segments.last().is_some_and(|seg| {
+                        self.crate_iterator_impl_types.contains(&seg.ident.to_string())
+                    }))
+            })
+        {
+            return true;
+        }
         match expr {
             syn::Expr::MethodCall(mc) => {
                 let method = mc.method.to_string();

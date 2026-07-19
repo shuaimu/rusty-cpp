@@ -14929,6 +14929,78 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_user_iterator_adapters_route_to_free_fns() {
+    let out = transpile_str(
+        r#"
+        struct Counter { count: u32 }
+        impl Counter {
+            fn new() -> Counter { Counter { count: 0 } }
+        }
+        impl Iterator for Counter {
+            type Item = u32;
+            fn next(&mut self) -> Option<u32> {
+                if self.count < 5 { self.count += 1; Some(self.count) } else { None }
+            }
+        }
+        fn f() -> u32 {
+            let total: u32 = Counter::new().map(|x| x * 3).filter(|x| x % 2 == 0).sum();
+            let n = Counter { count: 0 }.count();
+            total + (n as u32)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::map(") && out.contains("rusty::filter("),
+        "adapters on a user Iterator value must route to free fns:\n{}",
+        out
+    );
+    assert!(
+        out.contains("rusty::count("),
+        "Iterator::count must not resolve to the `count` state FIELD:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("}.count()"),
+        "member-call count on the struct literal is the field, not the trait method:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_for_loop_over_intoiter_local_binds_non_const() {
+    let out = transpile_str(
+        r#"
+        struct Grid { w: i32, h: i32 }
+        struct GridIter { g: Grid, i: i32 }
+        impl Iterator for GridIter {
+            type Item = i32;
+            fn next(&mut self) -> Option<i32> {
+                if self.i < self.g.w * self.g.h { self.i += 1; Some(self.i) } else { None }
+            }
+        }
+        impl IntoIterator for Grid {
+            type Item = i32;
+            type IntoIter = GridIter;
+            fn into_iter(self) -> GridIter { GridIter { g: self, i: 0 } }
+        }
+        fn f() -> i32 {
+            let g = Grid { w: 3, h: 2 };
+            let mut s = 0;
+            for v in g {
+                s += v;
+            }
+            s
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto g ="),
+        "a for-consumed IntoIterator local must not bind const (into_iter takes self):\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_rc_refcell_composed_constructor_type() {
     let out = transpile_str(
         r#"

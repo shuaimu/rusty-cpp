@@ -598,6 +598,7 @@ impl CodeGen {
         let consuming =
             self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
+        let for_iterated = Self::collect_for_loop_iterated_bare_locals(&block.stmts);
         let mutable_pointer_aliased = collect_mutable_pointer_aliased_locals(&block.stmts);
         block_profile_mark("collect_mutable_pointer_aliased_locals");
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
@@ -693,6 +694,8 @@ impl CodeGen {
         let prev_deref_assigned =
             std::mem::replace(&mut self.deref_assigned_vars, deref_assigned);
         let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
+        let prev_for_iterated =
+            std::mem::replace(&mut self.for_loop_iterated_bare_locals, for_iterated);
         let prev_mutable_pointer_aliased = std::mem::replace(
             &mut self.mutable_pointer_aliased_vars,
             mutable_pointer_aliased,
@@ -993,6 +996,7 @@ impl CodeGen {
         self.reassigned_vars = prev;
         self.deref_assigned_vars = prev_deref_assigned;
         self.consuming_method_receiver_vars = prev_consuming;
+        self.for_loop_iterated_bare_locals = prev_for_iterated;
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;
@@ -7720,13 +7724,15 @@ impl CodeGen {
         }
         if mc.method == "by_ref"
             && mc.args.is_empty()
-            && self.is_iterator_like_receiver_expr(&mc.receiver)
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
         {
             return self.emit_expr_to_string(&mc.receiver);
         }
         if mc.method == "take"
             && mc.args.len() == 1
-            && self.is_iterator_like_receiver_expr(&mc.receiver)
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let count = self.emit_expr_maybe_move(&mc.args[0]);

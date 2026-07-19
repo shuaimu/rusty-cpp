@@ -1047,6 +1047,19 @@ pub struct CodeGen {
     /// Used to avoid duplicate full C-like enum definitions from the global
     /// recursive forward-declaration pass.
     pub(crate) module_body_forward_decl_pass: bool,
+    /// Bare locals iterated by a `for` loop (`for x in local`) in the
+    /// current function. Rust MOVES the iterable; combined with a
+    /// crate-Iterator/IntoIterator inferred type, the local must not bind
+    /// const (into_iter takes self — a non-const member).
+    pub(crate) for_loop_iterated_bare_locals: HashSet<String>,
+    /// Crate types with a user `impl Iterator` — adapter/terminal method
+    /// calls on values of these types route to the rusty:: free-function
+    /// family instead of (nonexistent) members.
+    pub(crate) crate_iterator_impl_types: HashSet<String>,
+    /// Crate types with a user `impl IntoIterator` — a `for` loop over a
+    /// bare local of one of these consumes it (into_iter takes self), so
+    /// the local must not bind const.
+    pub(crate) crate_intoiter_impl_types: HashSet<String>,
     /// Types with a manual `impl fmt::Display`. Format args of these types
     /// must take the smart lowering path (wrapped in rusty::to_string, whose
     /// fmt-dispatch branch calls the emitted `fmt(Formatter&)` member) —
@@ -1927,6 +1940,9 @@ impl CodeGen {
             forward_emitted_c_like_enums: HashSet::new(),
             forward_emitted_consts: HashSet::new(),
             module_body_forward_decl_pass: false,
+            for_loop_iterated_bare_locals: HashSet::new(),
+            crate_iterator_impl_types: HashSet::new(),
+            crate_intoiter_impl_types: HashSet::new(),
             display_impl_types: HashSet::new(),
             local_adapter_insert_pos: None,
             type_arg_nesting: std::cell::Cell::new(0),

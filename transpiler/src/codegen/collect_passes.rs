@@ -2790,6 +2790,21 @@ impl CodeGen {
                         let scoped = self.scoped_type_key(&type_name);
                         self.display_impl_types.insert(scoped);
                     }
+                    // Types with a user `impl Iterator` are iterator
+                    // receivers: adapter/terminal calls on them must route to
+                    // the rusty:: free-function family (the struct has no
+                    // `map`/`filter`/`count` members — and state fields like
+                    // `count` would even SHADOW the trait method).
+                    if trait_name.as_deref() == Some("Iterator") {
+                        self.crate_iterator_impl_types.insert(type_name.clone());
+                        let scoped = self.scoped_type_key(&type_name);
+                        self.crate_iterator_impl_types.insert(scoped);
+                    }
+                    if trait_name.as_deref() == Some("IntoIterator") {
+                        self.crate_intoiter_impl_types.insert(type_name.clone());
+                        let scoped = self.scoped_type_key(&type_name);
+                        self.crate_intoiter_impl_types.insert(scoped);
+                    }
                     let op_name = trait_name
                         .as_ref()
                         .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
@@ -9060,6 +9075,36 @@ impl CodeGen {
             iflet_visitor.visit_stmt(stmt);
         }
         result
+    }
+
+    /// Bare single-segment locals iterated by a `for` loop (`for x in v`).
+    /// Rust moves the iterable; the emit-side qualifier decision combines
+    /// this NAME set with a crate-Iterator/IntoIterator TYPE gate so plain
+    /// slice/Vec loops keep their existing const emission.
+    pub(super) fn collect_for_loop_iterated_bare_locals(stmts: &[syn::Stmt]) -> HashSet<String> {
+        struct ForIterables {
+            result: HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for ForIterables {
+            fn visit_expr_for_loop(&mut self, fl: &'ast syn::ExprForLoop) {
+                if let syn::Expr::Path(p) = fl.expr.as_ref() {
+                    if p.qself.is_none()
+                        && p.path.segments.len() == 1
+                        && p.path.segments[0].ident != "self"
+                    {
+                        self.result.insert(p.path.segments[0].ident.to_string());
+                    }
+                }
+                visit::visit_expr_for_loop(self, fl);
+            }
+        }
+        let mut visitor = ForIterables {
+            result: HashSet::new(),
+        };
+        for stmt in stmts {
+            visitor.visit_stmt(stmt);
+        }
+        visitor.result
     }
 
     pub(super) fn collect_value_call_argument_locals_in_stmt(

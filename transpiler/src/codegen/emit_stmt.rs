@@ -3391,10 +3391,29 @@ impl CodeGen {
                         syn::Expr::Closure(c) if c.capture.is_some()
                     )
                 });
+                // `for x in local` MOVES the iterable; when the local's type
+                // has a user Iterator/IntoIterator impl, the emitted
+                // into_iter()/next() members are non-const, so a const
+                // binding makes the loop ill-formed. Type-gated so plain
+                // slice/Vec loops keep their existing emission.
+                let for_consumed_iterable = self
+                    .for_loop_iterated_bare_locals
+                    .contains(&name_str)
+                    && inferred_binding_ty.as_ref().is_some_and(|ty| {
+                        matches!(
+                            self.peel_reference_paren_group_type(ty),
+                            syn::Type::Path(tp) if tp.path.segments.last().is_some_and(|seg| {
+                                let name = seg.ident.to_string();
+                                self.crate_intoiter_impl_types.contains(&name)
+                                    || self.crate_iterator_impl_types.contains(&name)
+                            })
+                        )
+                    });
                 let qualifier = if emits_ref_binding {
                     if is_mut { "" } else { "const " }
                 } else if is_mut
                     || is_consumed
+                    || for_consumed_iterable
                     || init_is_move_closure
                     || init_is_ptr_read
                     || local.init.as_ref().is_some_and(|init| {
