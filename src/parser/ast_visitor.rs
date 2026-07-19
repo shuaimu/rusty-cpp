@@ -450,7 +450,9 @@ pub enum MethodQualifier {
 #[derive(Debug, Clone)]
 pub struct MemberInitializer {
     pub member_name: String,
+    pub initializer: Expression,
     pub is_nullptr: bool, // Quick check if initialized to nullptr
+    pub location: SourceLocation,
 }
 
 #[derive(Debug, Clone)]
@@ -721,18 +723,26 @@ fn extract_member_initializers(entity: &Entity) -> Vec<MemberInitializer> {
             let member_name = child.get_name().unwrap_or_default();
 
             // Get the next sibling as the initialization expression
-            let init_expr = if i + 1 < children.len() {
+            let (init_expr, init_location) = if i + 1 < children.len() {
                 let next = &children[i + 1];
                 let next_kind = next.get_kind();
                 // Skip if next is another MemberRef or the body - means no initializer
                 if next_kind != EntityKind::MemberRef && next_kind != EntityKind::CompoundStmt {
                     i += 1; // Consume the expression
-                    extract_expression_from_entity(next)
+                    let expr = extract_expression(next)
+                        .unwrap_or_else(|| extract_expression_from_entity(next));
+                    (expr, extract_location(next))
                 } else {
-                    Expression::Literal("unknown".to_string())
+                    (
+                        Expression::Literal("unknown".to_string()),
+                        extract_location(child),
+                    )
                 }
             } else {
-                Expression::Literal("unknown".to_string())
+                (
+                    Expression::Literal("unknown".to_string()),
+                    extract_location(child),
+                )
             };
 
             // Check if the initializer is nullptr
@@ -744,7 +754,9 @@ fn extract_member_initializers(entity: &Entity) -> Vec<MemberInitializer> {
 
             initializers.push(MemberInitializer {
                 member_name,
+                initializer: init_expr,
                 is_nullptr,
+                location: init_location,
             });
         }
 

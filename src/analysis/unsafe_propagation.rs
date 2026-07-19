@@ -22,6 +22,22 @@ pub fn check_unsafe_propagation_with_external(
     let callable_params =
         get_callable_parameters(&function.parameters, &function.template_parameters);
 
+    for initializer in &function.member_initializers {
+        if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+            &initializer.initializer,
+            safety_context,
+            known_safe_functions,
+            external_annotations,
+            &function.template_parameters,
+            &callable_params,
+        ) {
+            errors.push(format!(
+                "In function '{}': Calling unsafe function '{}' in constructor initializer for '{}' at line {} requires unsafe context",
+                function.name, unsafe_func, initializer.member_name, initializer.location.line
+            ));
+        }
+    }
+
     for error in check_statements_with_unsafe_tracking(
         &function.body,
         safety_context,
