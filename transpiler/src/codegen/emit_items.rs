@@ -331,7 +331,18 @@ impl CodeGen {
             &f.sig.generics,
             &f.sig.inputs,
             &f.sig.output,
-        );
+        )
+        .filter(|param_name| {
+            // Only drop the param when the BODY never names it — a body
+            // referencing T (`rusty::default_like<T>()`, `T::from(..)`)
+            // needs the template head; call sites pass it explicitly
+            // (`zero<uint32_t>()`), so keeping it is always valid.
+            use quote::ToTokens;
+            let body_text = f.block.to_token_stream().to_string();
+            !body_text
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == param_name)
+        });
         let has_explicit_return_hint = undeduced_return_type_param.is_none();
         let mut emitted_generics = f.sig.generics.clone();
         if let Some(param_name) = undeduced_return_type_param.as_deref() {

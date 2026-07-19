@@ -23991,18 +23991,21 @@ impl CodeGen {
             }
             // Tuple-index fields (`b.0`) can't survive the dumb token
             // pass-through: the struct field is mangled to `_0`, but the raw
-            // tokens render as `b . 0` — ill-formed C++.
+            // tokens render as `b . 0` — ill-formed C++. `self.x` needs the
+            // receiver rewrite (`this->x`) only emit_expr applies.
             syn::Expr::Field(f) => {
                 matches!(f.member, syn::Member::Unnamed(_))
+                    || matches!(&*f.base, syn::Expr::Path(p) if p.path.is_ident("self"))
                     || Self::format_expr_needs_smart_lowering(&f.base)
             }
             // Macros (matches!/format!/…) in arg position are raw Rust token
             // soup under the dumb pass-through — they need real lowering.
             syn::Expr::Macro(_) => true,
             // Qualified paths leak Rust spellings verbatim (`f64 :: MIN`,
-            // `i32 :: MAX` — no such C++ names), and suffix-typed literals
-            // leak Rust suffixes (`0u32`, `2.5f64` — invalid C++ literals).
-            syn::Expr::Path(p) => p.path.segments.len() >= 2,
+            // `i32 :: MAX` — no such C++ names), suffix-typed literals leak
+            // Rust suffixes (`0u32`, `2.5f64`), and bare `self` needs the
+            // receiver rewrite.
+            syn::Expr::Path(p) => p.path.segments.len() >= 2 || p.path.is_ident("self"),
             syn::Expr::Lit(l) => match &l.lit {
                 syn::Lit::Int(i) => !i.suffix().is_empty(),
                 syn::Lit::Float(f) => !f.suffix().is_empty(),

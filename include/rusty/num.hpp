@@ -921,6 +921,19 @@ constexpr std::remove_cvref_t<T> wrapping_abs(T value) {
     }
 }
 
+// `T::from(x)` on a generic type param: primitives have no static from —
+// dispatch the member when present, else convert. Mirrors default_like.
+template<typename T, typename V>
+constexpr T from_like(V&& v) {
+    if constexpr (requires { T::from(std::forward<V>(v)); }) {
+        return T::from(std::forward<V>(v));
+    } else if constexpr (requires { T::from_(std::forward<V>(v)); }) {
+        return T::from_(std::forward<V>(v));
+    } else {
+        return static_cast<T>(std::forward<V>(v));
+    }
+}
+
 // Rust float→int `as` cast: SATURATES (out-of-range clamps to the target's
 // MIN/MAX, NaN → 0) where a bare static_cast is UB on both. The range bound
 // 2^(bits[-1]) is an exact power of two in any float format; every value at

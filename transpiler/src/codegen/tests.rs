@@ -15360,6 +15360,48 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_self_field_format_args_rewrite_receiver() {
+    // `format!("{}", self.x)` leaked literal `self . x` through the dumb
+    // pass-through — any method printing its own fields failed to compile.
+    let out = transpile_str(
+        "struct P { x: i32 } impl P { fn show(&self) -> String { format!(\"{}\", self.x) } }",
+    );
+    assert!(
+        !out.contains("self . x"),
+        "self.field must not leak raw tokens into format args:\n{out}"
+    );
+    assert!(
+        out.contains("this->x"),
+        "the receiver rewrite must apply:\n{out}"
+    );
+}
+
+#[test]
+fn test_return_only_type_param_keeps_template_header_when_body_names_it() {
+    // `fn zero<T: Default>() -> T` dropped `template<typename T>` from the
+    // emission while the body still referenced T — undefined identifier.
+    let out = transpile_str(
+        "pub fn zero<T: Default>() -> T { T::default() } pub fn f() -> u32 { zero::<u32>() }",
+    );
+    assert!(
+        out.contains("template<typename T>") || out.contains("template <typename T>"),
+        "return-only T must keep the template header when the body names it:\n{out}"
+    );
+}
+
+#[test]
+fn test_type_param_from_routes_to_from_like_helper() {
+    // `T::from(x)` emitted verbatim — primitives have no static from.
+    let out = transpile_str(
+        "pub fn twice<T: From<u8> + std::ops::Add<Output = T>>(x: T) -> T { x + T::from(2u8) }",
+    );
+    assert!(
+        out.contains("rusty::from_like<T>("),
+        "T::from on a type param must route through the dispatch helper:\n{out}"
+    );
+}
+
+#[test]
 fn test_char_and_generic_format_args_dispatch_through_to_string() {
     // std::format prints char32_t as the numeric code point; char args and
     // generic-param args (concrete type unknowable) must dispatch through

@@ -2905,6 +2905,17 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         if let Some(rendered) = self.try_emit_trait_default_const_path(path) {
             return rendered;
         }
+        // `T::from(x)` on a generic type param: primitives have no static
+        // `from` member — route through the dispatching helper (member when
+        // present, else a conversion).
+        if path.segments.len() == 2
+            && path.segments[1].ident == "from"
+            && matches!(path.segments[1].arguments, syn::PathArguments::None)
+            && matches!(path.segments[0].arguments, syn::PathArguments::None)
+            && self.is_type_param_in_scope(&path.segments[0].ident.to_string())
+        {
+            return format!("rusty::from_like<{}>", path.segments[0].ident);
+        }
         let joined = path
             .segments
             .iter()
