@@ -15036,6 +15036,34 @@ fn test_inner_field_as_ref_with_resolvable_type_skips_string_view_hack() {
 }
 
 #[test]
+fn test_tuple_struct_path_value_binds_ctor_lambda() {
+    // `let ctor = Meters;` — a tuple-struct path in value position is
+    // the constructor FUNCTION. `Meters{}` zero-inits and isn't
+    // callable; the emission must be a ctor lambda (which also converts
+    // to a fn pointer for `apply(Meters, 9)` shapes).
+    let out = transpile_str(
+        r#"
+        struct Meters(i32);
+        fn f() -> i32 {
+            let ctor = Meters;
+            let a = ctor(5);
+            a.0
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("ctor = Meters{}"),
+        "tuple-struct path value must not emit a zero-init value:\n{}",
+        out
+    );
+    assert!(
+        out.contains("return Meters{std::forward<decltype(_a)>(_a)...};"),
+        "expected the variadic ctor lambda:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_dynamic_width_specs_normalize_to_nested_braces() {
     // Rust `{:>w$}` / `{:>1$}` / `{:.p$}` are ill-formed C++ — they must
     // normalize to nested-brace MANUAL indexing (C++ forbids mixing

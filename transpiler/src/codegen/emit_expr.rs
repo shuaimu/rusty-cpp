@@ -12974,6 +12974,24 @@ impl CodeGen {
         if !self.expected_type_matches_struct_literal_path(expected_ty, &path_expr.path) {
             return None;
         }
+        // `let f = Meters;` — a TUPLE-struct path in value position is the
+        // constructor FUNCTION (fn(T0, ..) -> S), not a value. `Meters{}`
+        // zero-inits the fields and isn't callable; emit a ctor lambda.
+        if let Some(tail) = path_expr.path.segments.last() {
+            let name = tail.ident.to_string();
+            let scoped = self.scoped_type_key(&name);
+            let arity = self
+                .tuple_struct_arities
+                .get(&name)
+                .or_else(|| self.tuple_struct_arities.get(&scoped))
+                .copied();
+            if arity.is_some_and(|a| a > 0) {
+                return Some(format!(
+                    "[](auto&&... _a) {{ return {}{{std::forward<decltype(_a)>(_a)...}}; }}",
+                    self.map_type(expected_ty)
+                ));
+            }
+        }
         Some(format!("{}{{}}", self.map_type(expected_ty)))
     }
 
