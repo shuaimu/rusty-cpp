@@ -3496,11 +3496,60 @@ impl CodeGen {
                             })
                         )
                     });
+                // `local.method()` where a crate impl declares `method(self)`
+                // BY VALUE consumes the local: the emitted member is
+                // non-const and moves out of *this, so a `const auto`
+                // binding is ill-formed. TYPE-GATED via
+                // impl_method_receiver_kinds (kind 2/3 = by-value self) —
+                // name-only marking regressed btree generics (#58).
+                let by_value_method_receiver = self
+                    .by_value_method_call_pairs
+                    .get(&name_str)
+                    .is_some_and(|methods| {
+                        // Type tail: from the inferred binding type, or —
+                        // tuple-struct ctor initializers (`let w = W(7);`)
+                        // infer to None — from the ctor path itself.
+                        let type_tail = inferred_binding_ty
+                            .as_ref()
+                            .and_then(|ty| match self.peel_reference_paren_group_type(ty) {
+                                syn::Type::Path(tp) => tp
+                                    .path
+                                    .segments
+                                    .last()
+                                    .map(|seg| seg.ident.to_string()),
+                                _ => None,
+                            })
+                            .or_else(|| {
+                                let init = local.init.as_ref()?;
+                                let syn::Expr::Call(call) =
+                                    self.peel_paren_group_expr(&init.expr)
+                                else {
+                                    return None;
+                                };
+                                let syn::Expr::Path(fp) = call.func.as_ref() else {
+                                    return None;
+                                };
+                                let tail = fp.path.segments.last()?.ident.to_string();
+                                self.tuple_struct_arities
+                                    .contains_key(&tail)
+                                    .then_some(tail)
+                            });
+                        type_tail.is_some_and(|tail| {
+                            self.impl_method_receiver_kinds.get(&tail).is_some_and(
+                                |kinds| {
+                                    methods.iter().any(|m| {
+                                        kinds.get(m).is_some_and(|kind| matches!(kind, 2 | 3))
+                                    })
+                                },
+                            )
+                        })
+                    });
                 let qualifier = if emits_ref_binding {
                     if is_mut { "" } else { "const " }
                 } else if is_mut
                     || is_consumed
                     || for_consumed_iterable
+                    || by_value_method_receiver
                     || init_is_move_closure
                     || init_is_ptr_read
                     || local.init.as_ref().is_some_and(|init| {

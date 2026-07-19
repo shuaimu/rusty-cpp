@@ -8577,8 +8577,10 @@ fn test_leaf8_variant_constructor_callable_recovers_owner_generics_for_crate_pat
         "#,
     );
 
+    // Iterator-bounded generic receivers route map through the free-fn
+    // spelling (#74); both routings must recover the callable wrapper.
     assert!(
-        out.contains("map([](auto&& _v)"),
+        out.contains("map([](auto&& _v)") || out.contains("map(inner, [](auto&& _v)"),
         "variant constructor callable should recover owner generics, got:\n{}",
         out
     );
@@ -14999,6 +15001,78 @@ fn test_for_loop_over_intoiter_local_binds_non_const() {
     assert!(
         !out.contains("const auto g ="),
         "a for-consumed IntoIterator local must not bind const (into_iter takes self):\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_by_value_self_method_receiver_binds_non_const() {
+    let out = transpile_str(
+        r#"
+        struct Pair { a: i32, b: i32 }
+        impl Pair {
+            fn swap(self) -> Pair { Pair { a: self.b, b: self.a } }
+            fn describe(&self) -> i32 { self.a }
+        }
+        fn f() -> i32 {
+            let p = Pair { a: 1, b: 2 };
+            let q = p.swap();
+            q.describe()
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto p ="),
+        "a local consumed by a by-value fn(self) method must not bind const:\n{}",
+        out
+    );
+    assert!(
+        out.contains("const auto q ="),
+        "a local touched only through &self methods keeps its const binding:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_by_value_self_method_in_macro_args_binds_non_const() {
+    // Two twists over the plain-statement case: the consuming call hides
+    // inside println! tokens (opaque to syn::visit), and the local's
+    // initializer is a tuple-struct ctor (binding-type inference is None —
+    // the type tail comes from the ctor path).
+    let out = transpile_str(
+        r#"
+        struct W(i32);
+        impl W {
+            fn take_value(self) -> i32 { self.0 }
+        }
+        fn f() {
+            let w = W(7);
+            println!("{}", w.take_value());
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto w ="),
+        "a by-value fn(self) call inside macro args still consumes the local:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_iterator_bounded_generic_param_routes_free_fn_adapters() {
+    let out = transpile_str(
+        r#"
+        fn total<I: Iterator<Item = i32>>(it: I) -> i32 {
+            it.map(|x| x * 2).sum()
+        }
+        fn f() -> i32 {
+            total(vec![1, 2, 3].into_iter())
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::map("),
+        "adapters on an Iterator-bounded generic param must route to free fns:\n{}",
         out
     );
 }

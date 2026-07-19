@@ -3100,6 +3100,23 @@ impl CodeGen {
         {
             return true;
         }
+        // A generic param bounded by Iterator (`fn total<I: Iterator>(it:
+        // I)` / where-clauses): runtime adapters have no map/filter members
+        // — route the free-fn spellings. Iterator ONLY: an IntoIterator
+        // bound is not yet an iterator, and its `.into_iter()` must keep
+        // routing through the rusty::iter bridge (leaf5157).
+        if self.infer_simple_expr_type(expr).is_some_and(|ty| {
+            matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && {
+                        let name = tp.path.segments[0].ident.to_string();
+                        self.is_type_param_in_scope(&name)
+                            && self.type_param_has_trait_bound(&name, "Iterator")
+                    })
+        }) {
+            return true;
+        }
         match expr {
             syn::Expr::MethodCall(mc) => {
                 let method = mc.method.to_string();

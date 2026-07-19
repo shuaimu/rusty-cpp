@@ -599,6 +599,7 @@ impl CodeGen {
             self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
         let for_iterated = Self::collect_for_loop_iterated_bare_locals(&block.stmts);
+        let method_pairs = Self::collect_bare_local_method_call_pairs(&block.stmts);
         let mutable_pointer_aliased = collect_mutable_pointer_aliased_locals(&block.stmts);
         block_profile_mark("collect_mutable_pointer_aliased_locals");
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
@@ -696,6 +697,8 @@ impl CodeGen {
         let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
         let prev_for_iterated =
             std::mem::replace(&mut self.for_loop_iterated_bare_locals, for_iterated);
+        let prev_method_pairs =
+            std::mem::replace(&mut self.by_value_method_call_pairs, method_pairs);
         let prev_mutable_pointer_aliased = std::mem::replace(
             &mut self.mutable_pointer_aliased_vars,
             mutable_pointer_aliased,
@@ -997,6 +1000,7 @@ impl CodeGen {
         self.deref_assigned_vars = prev_deref_assigned;
         self.consuming_method_receiver_vars = prev_consuming;
         self.for_loop_iterated_bare_locals = prev_for_iterated;
+        self.by_value_method_call_pairs = prev_method_pairs;
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;

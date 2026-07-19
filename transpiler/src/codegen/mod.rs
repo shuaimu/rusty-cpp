@@ -1052,6 +1052,11 @@ pub struct CodeGen {
     /// crate-Iterator/IntoIterator inferred type, the local must not bind
     /// const (into_iter takes self — a non-const member).
     pub(crate) for_loop_iterated_bare_locals: HashSet<String>,
+    /// Per-fn map: bare-local receiver name → method names called on it.
+    /// Joined with `impl_method_receiver_kinds` (kind 2/3 = by-value self)
+    /// for TYPE-GATED consuming-receiver detection at let-emission —
+    /// name-only marking regressed btree generics (#58).
+    pub(crate) by_value_method_call_pairs: HashMap<String, HashSet<String>>,
     /// Fresh-name counter for `let ... else` scrutinee temporaries — they
     /// live in the ENCLOSING scope (the bindings must survive the guard),
     /// so repeated let-else in one block need distinct names.
@@ -1945,6 +1950,7 @@ impl CodeGen {
             forward_emitted_consts: HashSet::new(),
             module_body_forward_decl_pass: false,
             for_loop_iterated_bare_locals: HashSet::new(),
+            by_value_method_call_pairs: HashMap::new(),
             let_else_counter: std::cell::Cell::new(0),
             crate_iterator_impl_types: HashSet::new(),
             crate_intoiter_impl_types: HashSet::new(),

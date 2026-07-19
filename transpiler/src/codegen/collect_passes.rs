@@ -9106,6 +9106,51 @@ impl CodeGen {
     /// Rust moves the iterable; the emit-side qualifier decision combines
     /// this NAME set with a crate-Iterator/IntoIterator TYPE gate so plain
     /// slice/Vec loops keep their existing const emission.
+    /// Bare-local method-call pairs (`w.into_inner()` → w → {into_inner}) —
+    /// consumed by the type-gated consuming-receiver check at emit_local.
+    pub(super) fn collect_bare_local_method_call_pairs(
+        stmts: &[syn::Stmt],
+    ) -> HashMap<String, HashSet<String>> {
+        struct Pairs {
+            result: HashMap<String, HashSet<String>>,
+        }
+        impl<'ast> Visit<'ast> for Pairs {
+            fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                if let syn::Expr::Path(p) = mc.receiver.as_ref()
+                    && p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && p.path.segments[0].ident != "self"
+                {
+                    self.result
+                        .entry(p.path.segments[0].ident.to_string())
+                        .or_default()
+                        .insert(mc.method.to_string());
+                }
+                visit::visit_expr_method_call(self, mc);
+            }
+            // Macro tokens are opaque to Visit, but format-like macros get
+            // their args re-parsed and lowered as real exprs at emit time —
+            // `println!("{}", w.into_inner())` consumes `w` just as surely.
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                use syn::punctuated::Punctuated;
+                if let Ok(args) = mac.parse_body_with(
+                    Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                ) {
+                    for arg in &args {
+                        self.visit_expr(arg);
+                    }
+                }
+            }
+        }
+        let mut visitor = Pairs {
+            result: HashMap::new(),
+        };
+        for stmt in stmts {
+            visitor.visit_stmt(stmt);
+        }
+        visitor.result
+    }
+
     pub(super) fn collect_for_loop_iterated_bare_locals(stmts: &[syn::Stmt]) -> HashSet<String> {
         struct ForIterables {
             result: HashSet<String>,
