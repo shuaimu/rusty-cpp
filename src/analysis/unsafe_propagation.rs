@@ -23,6 +23,19 @@ pub fn check_unsafe_propagation_with_external(
         get_callable_parameters(&function.parameters, &function.template_parameters);
 
     for initializer in &function.member_initializers {
+        errors.extend(
+            collect_lambda_body_unsafe_errors_in_expression(
+                &initializer.initializer,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                &function.template_parameters,
+                &callable_params,
+            )
+            .into_iter()
+            .map(|error| format!("In function '{}': {}", function.name, error)),
+        );
+
         if let Some(unsafe_func) = find_unsafe_function_call_with_external(
             &initializer.initializer,
             safety_context,
@@ -38,6 +51,19 @@ pub fn check_unsafe_propagation_with_external(
         }
     }
 
+    errors.extend(
+        collect_lambda_body_unsafe_errors_in_statements(
+            &function.body,
+            safety_context,
+            known_safe_functions,
+            external_annotations,
+            &function.template_parameters,
+            &callable_params,
+        )
+        .into_iter()
+        .map(|error| format!("In function '{}': {}", function.name, error)),
+    );
+
     for error in check_statements_with_unsafe_tracking(
         &function.body,
         safety_context,
@@ -48,6 +74,244 @@ pub fn check_unsafe_propagation_with_external(
         0,
     ) {
         errors.push(format!("In function '{}': {}", function.name, error));
+    }
+
+    errors
+}
+
+fn collect_lambda_body_unsafe_errors_in_statements(
+    statements: &[Statement],
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+    template_params: &[String],
+    callable_params: &HashSet<String>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for stmt in statements {
+        match stmt {
+            Statement::Assignment { lhs, rhs, .. } => {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    lhs,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    rhs,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
+            Statement::ReferenceBinding { target, .. } => {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    target,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
+            Statement::Return(Some(expr)) | Statement::ExpressionStatement { expr, .. } => {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    expr,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
+            Statement::FunctionCall { args, .. } => {
+                for arg in args {
+                    errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                        arg,
+                        safety_context,
+                        known_safe_functions,
+                        external_annotations,
+                        template_params,
+                        callable_params,
+                    ));
+                }
+            }
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    condition,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+                errors.extend(collect_lambda_body_unsafe_errors_in_statements(
+                    then_branch,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+                if let Some(else_branch) = else_branch {
+                    errors.extend(collect_lambda_body_unsafe_errors_in_statements(
+                        else_branch,
+                        safety_context,
+                        known_safe_functions,
+                        external_annotations,
+                        template_params,
+                        callable_params,
+                    ));
+                }
+            }
+            Statement::Switch {
+                condition, cases, ..
+            } => {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    condition,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+                for case in cases {
+                    errors.extend(collect_lambda_body_unsafe_errors_in_statements(
+                        &case.statements,
+                        safety_context,
+                        known_safe_functions,
+                        external_annotations,
+                        template_params,
+                        callable_params,
+                    ));
+                }
+            }
+            Statement::Block(inner) => {
+                errors.extend(collect_lambda_body_unsafe_errors_in_statements(
+                    inner,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    errors
+}
+
+fn collect_lambda_body_unsafe_errors_in_expression(
+    expr: &Expression,
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+    template_params: &[String],
+    callable_params: &HashSet<String>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    match expr {
+        Expression::Lambda { body, .. } => {
+            for error in check_statements_with_unsafe_tracking(
+                body,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+                0,
+            ) {
+                errors.push(format!("In lambda body: {}", error));
+            }
+
+            errors.extend(collect_lambda_body_unsafe_errors_in_statements(
+                body,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+        }
+        Expression::FunctionCall { args, .. } => {
+            for arg in args {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    arg,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                left,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+            errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                right,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+        }
+        Expression::Move { inner, .. }
+        | Expression::Dereference(inner)
+        | Expression::AddressOf(inner)
+        | Expression::Cast { inner, .. }
+        | Expression::MemberAccess { object: inner, .. }
+        | Expression::New(inner)
+        | Expression::Delete(inner)
+        | Expression::PointerArithmetic { pointer: inner, .. } => {
+            errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                inner,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+        }
+        Expression::ArraySubscript { array, index } => {
+            errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                array,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+            errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                index,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+        }
+        _ => {}
     }
 
     errors

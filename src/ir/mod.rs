@@ -1800,7 +1800,7 @@ fn convert_statement(
                     }]))
                 }
                 // Lambda expression: generate LambdaCapture statement for safety checking
-                crate::parser::Expression::Lambda { captures } => {
+                crate::parser::Expression::Lambda { captures, .. } => {
                     debug_println!("DEBUG IR: Lambda assignment: {} = [captures]", lhs_var);
                     let capture_infos: Vec<LambdaCaptureInfo> = captures
                         .iter()

@@ -649,6 +649,7 @@ pub enum Expression {
     // Lambda expression with captures
     Lambda {
         captures: Vec<LambdaCaptureKind>,
+        body: Vec<Statement>,
     },
     // C++ cast expression (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
     // Some casts are unsafe operations in @safe code
@@ -3840,6 +3841,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             debug_println!("DEBUG LAMBDA PARSER: Found LambdaExpr!");
 
             let mut captures = Vec::new();
+            let mut body = Vec::new();
 
             // Collect all VariableRef entries (these are the captured variables)
             let mut var_refs: Vec<String> = Vec::new();
@@ -3857,6 +3859,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     child.get_name()
                 );
                 match child.get_kind() {
+                    EntityKind::CompoundStmt => {
+                        body = extract_compound_statement(&child);
+                    }
                     EntityKind::VariableRef => {
                         has_explicit_captures = true;
                         if let Some(var_name) = child.get_name() {
@@ -4023,7 +4028,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 captures
             );
 
-            Some(Expression::Lambda { captures })
+            Some(Expression::Lambda { captures, body })
         }
         EntityKind::ArraySubscriptExpr => {
             // Array subscript: arr[i], data[idx], ptr[n], etc.
