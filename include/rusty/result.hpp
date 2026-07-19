@@ -376,6 +376,40 @@ public:
         return Option<T>(None);
     }
 
+    // Rust `collect::<Result<C, E>>()` over an iterator of Result<U, E>
+    // items: collect Ok payloads into C, short-circuiting on the first
+    // Err. The collect dispatcher probes `Target::from_iter(...)` via
+    // requires — this member makes Result targets satisfy it.
+    template<typename I>
+    requires requires(I it) {
+        { it.next() };
+    }
+    static Result from_iter(I iter) {
+        T out = []() {
+            if constexpr (requires { T::new_(); }) {
+                return T::new_();
+            } else {
+                return T{};
+            }
+        }();
+        while (true) {
+            auto item_opt = iter.next();
+            if (item_opt.is_none()) {
+                break;
+            }
+            auto item = item_opt.unwrap();
+            if (item.is_err()) {
+                return Result::Err(item.unwrap_err());
+            }
+            if constexpr (requires(T& c) { c.push(item.unwrap()); }) {
+                out.push(item.unwrap());
+            } else {
+                out.push_back(item.unwrap());
+            }
+        }
+        return Result::Ok(std::move(out));
+    }
+
     // Convert Result<T, E> into Option<E> by discarding Ok.
     Option<E> err() {
         if (is_ok_value) {

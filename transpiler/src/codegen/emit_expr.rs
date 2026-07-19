@@ -7794,6 +7794,10 @@ impl CodeGen {
         if mc.method == "filter"
             && mc.args.len() == 1
             && !self.receiver_is_option_or_result_like_expr(&mc.receiver)
+            // `opt.map(f).filter(p)` — Option-preserving chains keep the
+            // Option MEMBER filter; the iterator-adapter free fn has no
+            // Option branch.
+            && !self.method_chain_stays_option_like(&mc.receiver)
             && (self.is_iterator_like_receiver_expr(&mc.receiver)
                 || self.is_probably_iterator_receiver_expr(&mc.receiver))
         {
@@ -22889,6 +22893,26 @@ impl CodeGen {
     /// Emit a closure expression as a C++ lambda.
     pub(super) fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
         self.emit_closure_to_string_with_param_scopes(closure, None, None, None)
+    }
+
+    /// True when a method chain is rooted at an Option/Result-like value
+    /// through Option-PRESERVING combinators — `opt.map(f).filter(p)` must
+    /// keep the Option MEMBER methods, not the iterator adapters.
+    pub(super) fn method_chain_stays_option_like(&self, expr: &syn::Expr) -> bool {
+        let peeled = self.peel_paren_group_expr(expr);
+        if self.receiver_is_option_or_result_like_expr(peeled) {
+            return true;
+        }
+        if let syn::Expr::MethodCall(mc) = peeled
+            && matches!(
+                mc.method.to_string().as_str(),
+                "map" | "filter" | "and_then" | "or_else" | "xor" | "cloned" | "copied"
+                    | "flatten" | "inspect"
+            )
+        {
+            return self.method_chain_stays_option_like(&mc.receiver);
+        }
+        false
     }
 
     /// Closure-arg emission that types untyped params as CHAR when the

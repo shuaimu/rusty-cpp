@@ -15360,6 +15360,27 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_option_filter_after_map_chain_keeps_member_call() {
+    // `opt.map(f).filter(p)` mis-routed to the iterator-adapter free fn
+    // rusty::filter, which has no Option branch.
+    let out = transpile_str(
+        "pub fn f(o: Option<i32>) -> Option<i32> { o.map(|x| x * 2).filter(|x| *x > 2) }",
+    );
+    assert!(
+        !out.contains("rusty::filter("),
+        "Option-preserving chains must keep the member filter:\n{out}"
+    );
+    // Iterator chains keep the adapter.
+    let out2 = transpile_str(
+        "pub fn g(v: &[i32]) -> usize { v.iter().map(|x| x * 2).filter(|x| *x > 2).count() }",
+    );
+    assert!(
+        out2.contains("rusty::filter("),
+        "iterator chains must keep the adapter routing:\n{out2}"
+    );
+}
+
+#[test]
 fn test_entry_or_insert_with_default_ctor_lowers_to_or_default() {
     // The old rewrite dropped or_insert_with entirely (bare entry() — the
     // port Entry is LAZY, so nothing was inserted; silent-wrong) and left
