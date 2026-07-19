@@ -9011,6 +9011,54 @@ impl CodeGen {
         for stmt in stmts {
             capture_visitor.visit_stmt(stmt);
         }
+        // `if let Some(v) = local` (and Ok/Err) MOVES `local` in Rust: the
+        // payload is consumed into `v` and dropped at the body's end. The
+        // emitted lowering uses the destructive lvalue `unwrap()` — which
+        // needs a NON-const local; a `const auto local` binding silently
+        // degrades to the borrowing const overload, keeping the payload
+        // alive past the if-let (observable drop-timing divergence:
+        // Rc::strong_count read 2 where Rust reads 1). Precise AST shape
+        // only — a `&`-borrowed scrutinee or a `ref` binding is skipped.
+        struct ConsumingIfLetScrutinees<'a> {
+            result: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for ConsumingIfLetScrutinees<'_> {
+            fn visit_expr_if(&mut self, if_expr: &'ast syn::ExprIf) {
+                if let syn::Expr::Let(let_expr) = if_expr.cond.as_ref() {
+                    let by_value_binding = match let_expr.pat.as_ref() {
+                        syn::Pat::TupleStruct(ts) => {
+                            ts.path.segments.last().is_some_and(|s| {
+                                matches!(
+                                    s.ident.to_string().as_str(),
+                                    "Some" | "Ok" | "Err"
+                                )
+                            }) && ts.elems.iter().all(|elem| {
+                                !matches!(elem, syn::Pat::Ident(pi) if pi.by_ref.is_some())
+                            })
+                        }
+                        _ => false,
+                    };
+                    if by_value_binding {
+                        if let syn::Expr::Path(p) = let_expr.expr.as_ref() {
+                            if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && p.path.segments[0].ident != "self"
+                            {
+                                self.result
+                                    .insert(p.path.segments[0].ident.to_string());
+                            }
+                        }
+                    }
+                }
+                visit::visit_expr_if(self, if_expr);
+            }
+        }
+        let mut iflet_visitor = ConsumingIfLetScrutinees {
+            result: &mut result,
+        };
+        for stmt in stmts {
+            iflet_visitor.visit_stmt(stmt);
+        }
         result
     }
 

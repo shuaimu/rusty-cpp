@@ -2066,8 +2066,12 @@ fn test_leaf5146_rc_new_omitted_owner_recovers_value_type() {
         }
         "#,
     );
+    // The payload type may be spelled concretely OR deduced via decltype
+    // (unevaluated, composes nested generics like Rc<RefCell<T>>).
     assert!(
-        out.contains("Rc<int32_t>::new_(1)") || out.contains("rusty::Rc<int32_t>::new_(1)"),
+        out.contains("Rc<int32_t>::new_(")
+            || out.contains("rusty::Rc<int32_t>::new_(")
+            || out.contains("rusty::Rc<std::remove_cvref_t<decltype("),
         "Rc::new with omitted owner should recover template arg from payload type, got:\n{}",
         out
     );
@@ -2089,7 +2093,9 @@ fn test_leaf5146_rc_new_placeholder_owner_recovers_value_type() {
         "#,
     );
     assert!(
-        out.contains("Rc<int32_t>::new_(1)") || out.contains("rusty::Rc<int32_t>::new_(1)"),
+        out.contains("Rc<int32_t>::new_(")
+            || out.contains("rusty::Rc<int32_t>::new_(")
+            || out.contains("rusty::Rc<std::remove_cvref_t<decltype("),
         "Rc::<_>::new should recover template arg from payload type, got:\n{}",
         out
     );
@@ -14920,6 +14926,70 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
     assert!(out.contains("struct OnceCell"), "{out}");
     assert!(out.contains("void init("), "{out}");
     assert!(out.contains("cell.init("), "{out}");
+}
+
+#[test]
+fn test_rc_refcell_composed_constructor_type() {
+    let out = transpile_str(
+        r#"
+        use std::rc::Rc;
+        use std::cell::RefCell;
+        fn f() -> i32 {
+            let a = Rc::new(RefCell::new(10));
+            *a.borrow_mut() += 5;
+            *a.borrow()
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("Rc<rusty::RefCell>::"),
+        "Rc's payload type must not collapse to the bare RefCell template:\n{}",
+        out
+    );
+    assert!(
+        out.contains("a->borrow"),
+        "borrow through the Rc handle must auto-deref (a->borrow...):\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_refcell_guard_chain_method_routes_arrow() {
+    let out = transpile_str(
+        r#"
+        use std::cell::RefCell;
+        fn f() -> bool {
+            let d = RefCell::new(Some(4u8));
+            let w = d.borrow_mut().take();
+            w.is_some()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("borrow_mut()->take()"),
+        "guard-chained methods must deref through the guard:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_consuming_if_let_scrutinee_binds_non_const() {
+    let out = transpile_str(
+        r#"
+        fn f(x: Option<i32>) -> i32 {
+            let up = x;
+            if let Some(v) = up {
+                return v;
+            }
+            0
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto up"),
+        "an if-let-consumed Option local must not bind const (destructive unwrap):\n{}",
+        out
+    );
 }
 
 #[test]

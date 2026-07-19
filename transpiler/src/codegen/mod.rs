@@ -23789,6 +23789,18 @@ impl CodeGen {
         {
             return true;
         }
+        // Field access through a smart-pointer/guard base (`rc.field`) needs
+        // the explicit-deref emission — the dumb token pass-through would
+        // emit `rc . field` on the handle itself.
+        if parts.iter().skip(1).any(|arg| {
+            let Ok(expr) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+                return false;
+            };
+            matches!(&expr, syn::Expr::Field(f)
+                if self.expr_base_needs_explicit_deref_for_field_access(&f.base))
+        }) {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
@@ -31444,6 +31456,64 @@ impl CodeGen {
             .is_some_and(|seg| seg.ident == "Arc")
     }
 
+    /// The receiver types as RefCell<T>, directly or through one Rc/Arc
+    /// handle layer (`rc.borrow()` auto-derefs in Rust).
+    pub(crate) fn receiver_types_as_refcell_like(&self, receiver: &syn::Expr) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let mut ty = self.peel_reference_paren_group_type(&receiver_ty);
+        if let syn::Type::Path(tp) = ty
+            && let Some(last) = tp.path.segments.last()
+            && matches!(last.ident.to_string().as_str(), "Rc" | "Arc")
+            && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+            && let Some(inner) = args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+        {
+            ty = self.peel_reference_paren_group_type(inner);
+        }
+        matches!(ty, syn::Type::Path(tp)
+            if tp.path.segments.last().is_some_and(|seg| seg.ident == "RefCell"))
+    }
+
+    fn receiver_is_rc_wrapper_type(&self, receiver: &syn::Expr) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        tp.path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Rc")
+    }
+
+    /// Inherent Rc surface (rc_port + include/rusty): everything else on an
+    /// Rc handle is a Rust auto-deref into the pointee and must lower to
+    /// `(*rc).method(...)`.
+    fn rc_wrapper_method_is_inherent(method_name: &str) -> bool {
+        matches!(
+            method_name,
+            "clone"
+                | "new"
+                | "new_"
+                | "get"
+                | "is_valid"
+                | "strong_count"
+                | "weak_count"
+                | "get_mut"
+                | "as_ptr"
+                | "ptr_eq"
+                | "downgrade"
+                | "try_unwrap"
+                | "into_inner"
+        )
+    }
+
     fn receiver_is_lazy_wrapper_type(&self, receiver: &syn::Expr) -> bool {
         let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
             return false;
@@ -31814,6 +31884,8 @@ impl CodeGen {
     ) -> bool {
         self.receiver_is_arc_wrapper_type(receiver)
             && !Self::arc_wrapper_method_is_inherent(method_name)
+            || (self.receiver_is_rc_wrapper_type(receiver)
+                && !Self::rc_wrapper_method_is_inherent(method_name))
             || ((self.receiver_is_box_wrapper_type(receiver)
                 || self.receiver_maps_to_box_wrapper_cpp_type(receiver))
                 && !Self::box_wrapper_method_is_inherent(method_name))

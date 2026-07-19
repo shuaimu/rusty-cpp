@@ -6454,7 +6454,12 @@ impl CodeGen {
             && !self.receiver_declares_inherent_method(&mc.receiver, "len")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.receiver_is_lazy_wrapper_type(&mc.receiver) {
+            // Rust auto-derefs len() through smart-pointer handles; the free
+            // fn needs the pointee.
+            let receiver = if self.receiver_is_lazy_wrapper_type(&mc.receiver)
+                || self.receiver_is_rc_wrapper_type(&mc.receiver)
+                || self.receiver_is_arc_wrapper_type(&mc.receiver)
+            {
                 if self.method_receiver_needs_parentheses(&mc.receiver) {
                     format!("(*({}))", raw_receiver)
                 } else {
@@ -9864,6 +9869,10 @@ impl CodeGen {
             // helper member-prefers, so String's Borrow<str> port keeps its
             // member dispatch.
             && !self.receiver_has_inherent_method_named(&mc.receiver, "borrow")
+            // RefCell borrows (incl. through an Rc/Arc handle) must stay
+            // member calls — rusty::borrow's identity fallback would return
+            // the handle itself (silent-wrong downstream).
+            && !self.receiver_types_as_refcell_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -18019,6 +18028,37 @@ impl CodeGen {
             let arg = self.emit_expr_maybe_move(&call.args[0]);
             return format!(
                 "rusty::Cell<std::remove_cvref_t<decltype({})>>::new_({})",
+                arg, arg
+            );
+        }
+        // Rc/Arc constructors deduce their payload from the argument —
+        // the inference-driven owner-arg path drops nested generics
+        // (`Rc<rusty::RefCell>` bare template for Rc::new(RefCell::new(x))).
+        // decltype is unevaluated, so the duplicated arg text is side-effect
+        // free. Skipped when the crate declares its own Rc/Arc (rc_port).
+        if matches!(
+            func.as_str(),
+            "Rc::new_" | "rusty::Rc::new_" | "rc::Rc::new_" | "rusty::rc::Rc::new_"
+        ) && call.args.len() == 1
+            && !self.struct_field_order.contains_key("Rc")
+            && !self.declared_type_params.contains_key("Rc")
+        {
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!(
+                "rusty::Rc<std::remove_cvref_t<decltype(({}))>>::new_({})",
+                arg, arg
+            );
+        }
+        if matches!(
+            func.as_str(),
+            "Arc::new_" | "rusty::Arc::new_" | "sync::Arc::new_" | "rusty::sync::Arc::new_"
+        ) && call.args.len() == 1
+            && !self.struct_field_order.contains_key("Arc")
+            && !self.declared_type_params.contains_key("Arc")
+        {
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!(
+                "rusty::Arc<std::remove_cvref_t<decltype(({}))>>::new_({})",
                 arg, arg
             );
         }

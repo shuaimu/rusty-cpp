@@ -4128,6 +4128,101 @@ impl CodeGen {
             && matches!(hint_last.arguments, syn::PathArguments::AngleBracketed(_))
     }
 
+    /// Compose wrapper-constructor types the plain owner-inference path
+    /// drops: `Rc::new(RefCell::new(x))` must type as `Rc<RefCell<X>>` (the
+    /// bare `Rc<rusty::RefCell>` template is ill-formed), `Some(x)` as
+    /// `Option<X>`, `Rc::clone(&a)` as a's own type, and a non-generic
+    /// data-enum variant ctor as its enum. Only trusts CONCRETE payload
+    /// types — in generic bodies (btree's marker-typed methods) payload
+    /// inference can pick an imprecise instantiation, and applying it as the
+    /// binding's expected type forces wrong conversions where plain `auto`
+    /// deduction was correct.
+    fn infer_composed_wrapper_ctor_type(&self, call: &syn::ExprCall) -> Option<syn::Type> {
+        let syn::Expr::Path(p) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        let segs: Vec<String> = p
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        let payload_is_concrete = |inner: &syn::Type| -> bool {
+            let mapped = self.map_type(inner);
+            !mapped.trim().is_empty()
+                && mapped != "auto"
+                && !self.cpp_type_mentions_in_scope_type_param(&mapped)
+        };
+        if segs.last().map(String::as_str) == Some("Some") && call.args.len() == 1 {
+            let inner = self
+                .infer_simple_expr_type(&call.args[0])
+                .or_else(|| self.infer_local_binding_type_from_initializer(&call.args[0]))?;
+            if payload_is_concrete(&inner) {
+                return syn::parse2::<syn::Type>(quote!(Option<#inner>)).ok();
+            }
+            return None;
+        }
+        if segs.len() >= 2
+            && segs[segs.len() - 1] == "new"
+            && matches!(
+                segs[segs.len() - 2].as_str(),
+                "Box" | "Rc" | "Arc" | "RefCell" | "Cell"
+            )
+            && call.args.len() == 1
+        {
+            let owner = segs[segs.len() - 2].clone();
+            let inner = self
+                .infer_simple_expr_type(&call.args[0])
+                .or_else(|| self.infer_local_binding_type_from_initializer(&call.args[0]))?;
+            if payload_is_concrete(&inner) {
+                let owner_ident = syn::Ident::new(&owner, proc_macro2::Span::call_site());
+                return syn::parse2::<syn::Type>(quote!(#owner_ident<#inner>)).ok();
+            }
+            return None;
+        }
+        if segs.len() >= 2
+            && segs[segs.len() - 1] == "clone"
+            && matches!(segs[segs.len() - 2].as_str(), "Rc" | "Arc")
+            && call.args.len() == 1
+        {
+            let mut arg = &call.args[0];
+            if let syn::Expr::Reference(r) = self.peel_paren_group_expr(arg) {
+                arg = &r.expr;
+            }
+            let inner = self
+                .infer_simple_expr_type(arg)
+                .or_else(|| self.infer_local_binding_type_from_initializer(arg))?;
+            if payload_is_concrete(&inner) {
+                return Some(inner);
+            }
+            return None;
+        }
+        // Data-enum variant constructor: `Level::Info(5)` types the local as
+        // the ENUM so the emitted initializer wraps the member struct —
+        // a bare `Level_Info` scrutinee breaks match/matches! lowerings.
+        // Generic enums are skipped (the unparameterized name is incomplete).
+        if segs.len() >= 2 {
+            let variant = self.canonical_variant_name(&segs[segs.len() - 1]).to_string();
+            let owner = &segs[segs.len() - 2];
+            let is_data_enum_variant = self
+                .data_enum_variants_by_enum
+                .get(owner.as_str())
+                .is_some_and(|vs| vs.contains(&variant))
+                || self.data_enum_variants_by_enum.iter().any(|(k, vs)| {
+                    k.rsplit("::").next() == Some(owner.as_str()) && vs.contains(&variant)
+                });
+            let enum_is_generic = self
+                .declared_type_params
+                .get(owner.as_str())
+                .is_some_and(|params| !params.is_empty());
+            if is_data_enum_variant && !enum_is_generic {
+                let ident = syn::Ident::new(owner, proc_macro2::Span::call_site());
+                return Some(parse_quote!(#ident));
+            }
+        }
+        None
+    }
+
     pub(super) fn infer_local_binding_type_from_initializer(
         &self,
         init_expr: &syn::Expr,
@@ -4274,6 +4369,9 @@ impl CodeGen {
             syn::Expr::Call(call) => {
                 if let Some(ptr_ty) = self.infer_pointer_type_from_call_expr(call) {
                     return Some(ptr_ty);
+                }
+                if let Some(composed) = self.infer_composed_wrapper_ctor_type(call) {
+                    return Some(composed);
                 }
                 if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                     let joined = path_expr
@@ -5177,7 +5275,20 @@ impl CodeGen {
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
             {
-                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+                let mut receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+                // Rust auto-derefs `rc.borrow()` through Rc<RefCell<T>>/
+                // Arc<RefCell<T>> — peel the handle so the guard still types.
+                if let syn::Type::Path(tp) = receiver_ty
+                    && let Some(last) = tp.path.segments.last()
+                    && matches!(last.ident.to_string().as_str(), "Rc" | "Arc")
+                    && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                    && let Some(inner) = args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    })
+                {
+                    receiver_ty = self.peel_reference_paren_group_type(inner);
+                }
                 if let syn::Type::Path(tp) = receiver_ty
                     && let Some(last) = tp.path.segments.last()
                     && last.ident == "RefCell"
@@ -5528,6 +5639,17 @@ impl CodeGen {
                     && tp.path.segments.len() == 1
                     && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
                     && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+                {
+                    return Some(peeled.clone());
+                }
+                // `rc.clone()` on an Rc/Arc handle keeps the handle type —
+                // without this a clone-bound local loses its wrapper-ness and
+                // both assoc-fn calls (strong_count) and auto-deref routing
+                // mislower. Scoped to Rc/Arc to avoid crate-wide clone churn.
+                if let syn::Type::Path(tp) = peeled
+                    && tp.path.segments.last().is_some_and(|seg| {
+                        matches!(seg.ident.to_string().as_str(), "Rc" | "Arc")
+                    })
                 {
                     return Some(peeled.clone());
                 }
@@ -6414,10 +6536,31 @@ impl CodeGen {
                     syn::Member::Unnamed(index) => index.index.to_string(),
                 };
                 let base_ty = self.infer_simple_expr_type(&field.base)?;
-                let struct_ty = self
+                let mut struct_ty = self
                     .extract_pointer_pointee_info_from_type(&base_ty)
                     .map(|(pointee, _)| pointee)
                     .unwrap_or_else(|| self.peel_reference_paren_group_type(&base_ty).clone());
+                // Rust auto-derefs field access through smart-pointer handles
+                // and cell guards: `guard.field` / `rc.field` project into the
+                // pointee. Peel one wrapper layer so the field lookup finds
+                // the real struct (nested `outer.inner.v` chains where
+                // `inner: Rc<Inner>`).
+                if let syn::Type::Path(tp) = &struct_ty
+                    && let Some(last) = tp.path.segments.last()
+                    && matches!(
+                        last.ident.to_string().as_str(),
+                        "Rc" | "Arc" | "Box" | "Ref" | "RefMut"
+                            | "MutexGuard" | "SpinMutexGuard"
+                            | "RwLockReadGuard" | "RwLockWriteGuard"
+                    )
+                    && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                    && let Some(inner) = args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                {
+                    struct_ty = self.peel_reference_paren_group_type(&inner).clone();
+                }
                 // Tuple field `t.0`/`t.1`: return the i-th element type. (This
                 // arm must preserve the prior tuple-field inference that
                 // downstream match-arm / pattern-binding typing relies on —
