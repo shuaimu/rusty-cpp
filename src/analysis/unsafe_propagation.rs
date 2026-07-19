@@ -224,7 +224,35 @@ fn collect_lambda_body_unsafe_errors_in_expression(
     let mut errors = Vec::new();
 
     match expr {
-        Expression::Lambda { body, .. } => {
+        Expression::Lambda {
+            capture_initializers,
+            body,
+            ..
+        } => {
+            for initializer in capture_initializers {
+                if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                    initializer,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ) {
+                    errors.push(format!(
+                        "In lambda capture initializer: Calling unsafe function '{}' requires unsafe context",
+                        unsafe_func
+                    ));
+                }
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    initializer,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
+
             for error in check_statements_with_unsafe_tracking(
                 body,
                 safety_context,

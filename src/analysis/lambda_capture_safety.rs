@@ -445,6 +445,7 @@ mod tests {
     fn test_this_capture_in_safe_is_error() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::This],
+            capture_initializers: Vec::new(),
             body: Vec::new(),
         };
 
@@ -459,6 +460,7 @@ mod tests {
     fn test_copy_capture_in_safe_is_ok() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::ByCopy("x".to_string())],
+            capture_initializers: Vec::new(),
             body: Vec::new(),
         };
 
@@ -472,6 +474,7 @@ mod tests {
     fn test_default_copy_capture_in_safe_is_ok() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::DefaultCopy],
+            capture_initializers: Vec::new(),
             body: Vec::new(),
         };
 
@@ -486,6 +489,7 @@ mod tests {
             captures: vec![LambdaCaptureKind::Init {
                 name: "y".to_string(),
             }],
+            capture_initializers: Vec::new(),
             body: Vec::new(),
         };
 
@@ -498,6 +502,7 @@ mod tests {
     fn test_ref_capture_extraction() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::ByRef("x".to_string())],
+            capture_initializers: Vec::new(),
             body: Vec::new(),
         };
 
@@ -510,6 +515,7 @@ mod tests {
     fn test_default_ref_capture_extraction() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::DefaultRef],
+            capture_initializers: Vec::new(),
             body: Vec::new(),
         };
 

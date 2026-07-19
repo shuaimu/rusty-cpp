@@ -649,6 +649,7 @@ pub enum Expression {
     // Lambda expression with captures
     Lambda {
         captures: Vec<LambdaCaptureKind>,
+        capture_initializers: Vec<Expression>,
         body: Vec<Statement>,
     },
     // C++ cast expression (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
@@ -2992,6 +2993,59 @@ fn extract_cast_expression(entity: &Entity, kind: CastKind) -> Option<Expression
     })
 }
 
+fn extract_lambda_capture_tokens(entity: &Entity) -> Vec<String> {
+    let Some(range) = entity.get_range() else {
+        return Vec::new();
+    };
+
+    let mut capture_tokens = Vec::new();
+    let mut in_capture_list = false;
+
+    for token in safe_tokenize(&range) {
+        let spelling = token.get_spelling();
+        if spelling == "[" {
+            in_capture_list = true;
+            continue;
+        }
+        if spelling == "]" {
+            break;
+        }
+        if in_capture_list {
+            capture_tokens.push(spelling);
+        }
+    }
+
+    capture_tokens
+}
+
+fn extract_lambda_capture_initializer(
+    entity: &Entity,
+    capture_tokens: &[String],
+) -> Option<Expression> {
+    if entity.get_kind() == EntityKind::UnexposedExpr {
+        if let Some(ref_entity) = entity.get_reference() {
+            if matches!(
+                ref_entity.get_kind(),
+                EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor
+            ) {
+                if let Some(name) = ref_entity.get_name() {
+                    let has_call_syntax = capture_tokens
+                        .windows(2)
+                        .any(|window| window[0] == name && window[1] == "(");
+                    if has_call_syntax {
+                        return Some(Expression::FunctionCall {
+                            name,
+                            args: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    extract_expression(entity)
+}
+
 fn extract_expression(entity: &Entity) -> Option<Expression> {
     match entity.get_kind() {
         EntityKind::DeclRefExpr => {
@@ -3846,7 +3900,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             debug_println!("DEBUG LAMBDA PARSER: Found LambdaExpr!");
 
             let mut captures = Vec::new();
+            let mut capture_initializers = Vec::new();
             let mut body = Vec::new();
+            let capture_tokens = extract_lambda_capture_tokens(entity);
 
             // Collect all VariableRef entries (these are the captured variables)
             let mut var_refs: Vec<String> = Vec::new();
@@ -3878,6 +3934,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         if let Some(var_name) = child.get_name() {
                             decl_refs.insert(var_name);
                         }
+                        if let Some(expr) = extract_expression(&child) {
+                            capture_initializers.push(expr);
+                        }
                     }
                     EntityKind::CallExpr => {
                         // CallExpr with 'move' indicates a move capture [y = std::move(x)]
@@ -3885,6 +3944,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             if name == "move" {
                                 has_move_call = true;
                             }
+                        }
+                        if let Some(expr) = extract_expression(&child) {
+                            capture_initializers.push(expr);
+                        }
+                    }
+                    EntityKind::UnexposedExpr => {
+                        if let Some(expr) =
+                            extract_lambda_capture_initializer(&child, &capture_tokens)
+                        {
+                            capture_initializers.push(expr);
                         }
                     }
                     EntityKind::ThisExpr => {
@@ -4033,7 +4102,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 captures
             );
 
-            Some(Expression::Lambda { captures, body })
+            Some(Expression::Lambda {
+                captures,
+                capture_initializers,
+                body,
+            })
         }
         EntityKind::ArraySubscriptExpr => {
             // Array subscript: arr[i], data[idx], ptr[n], etc.
