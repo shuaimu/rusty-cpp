@@ -10608,6 +10608,23 @@ impl CodeGen {
                     // it through deref_if_pointer dangles. Bind by value.
                     if pi.by_ref.is_none() && source_expr.starts_with("rusty::slice(") {
                         out.push(format!("auto {} = {};", cpp_name, source_expr));
+                    } else if pi.by_ref.is_none()
+                        && !by_value_mut
+                        && source_expr.contains(".unwrap")
+                    {
+                        // The source ends in an unwrap-family call that can
+                        // return BY VALUE (non-const unwrap on guard-free
+                        // arms after the as_const strip). Binding that
+                        // temporary THROUGH deref_if_pointer gets no
+                        // lifetime extension — stack-use-after-scope (r7
+                        // match_tuple_options, ASan-caught). Materialize the
+                        // intermediate: a direct `auto&&` bind extends a
+                        // prvalue and is a plain reference to an lvalue.
+                        out.push(format!("auto&& {}_bind_tmp = {};", cpp_name, source_expr));
+                        out.push(format!(
+                            "{} {} = rusty::detail::deref_if_pointer({}_bind_tmp);",
+                            binding_prefix, cpp_name, cpp_name
+                        ));
                     } else {
                         let binding_source = if pi.by_ref.is_none() {
                             let derefed =
