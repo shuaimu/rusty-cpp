@@ -2200,6 +2200,7 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 statements.push(Statement::ExitLoop);
             }
             EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
+                statements.extend(extract_loop_control_statements(&child));
                 statements.push(Statement::EnterLoop);
 
                 let loop_children: Vec<Entity> = child.get_children().into_iter().collect();
@@ -2385,6 +2386,41 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     }
 
     statements
+}
+
+fn extract_loop_control_statements(entity: &Entity) -> Vec<Statement> {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    if children.is_empty() {
+        return Vec::new();
+    }
+
+    let control_children = match entity.get_kind() {
+        EntityKind::ForStmt | EntityKind::WhileStmt => {
+            children.split_last().map(|(_, control)| control)
+        }
+        EntityKind::DoStmt => children.split_first().map(|(_, control)| control),
+        _ => None,
+    };
+
+    control_children
+        .into_iter()
+        .flatten()
+        .flat_map(extract_loop_control_statement)
+        .collect()
+}
+
+fn extract_loop_control_statement(entity: &Entity) -> Vec<Statement> {
+    match entity.get_kind() {
+        EntityKind::DeclStmt | EntityKind::CallExpr => extract_single_statement(entity),
+        EntityKind::BinaryOperator | EntityKind::UnaryOperator | EntityKind::UnexposedExpr => {
+            if let Some(expr) = extract_expression(entity) {
+                vec![expression_to_statement(expr, extract_location(entity))]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn extract_range_for_control_statements(entity: &Entity) -> Vec<Statement> {
