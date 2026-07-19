@@ -2654,6 +2654,19 @@ void clone_from_slice(std::span<DstElem, DstExtent> dst, std::span<SrcElem, SrcE
     }
 }
 
+// str-typed slice overloads (declared ahead of the generics so their
+// as_str() branches can call them; defined below).
+template<typename Start>
+std::string_view slice_from(std::string_view container, Start start);
+template<typename End>
+std::string_view slice_to(std::string_view container, End end);
+template<typename End>
+std::string_view slice_to_inclusive(std::string_view container, End end);
+template<typename Start, typename End>
+std::string_view slice(std::string_view container, Start start, End end);
+template<typename Start, typename End>
+std::string_view slice_inclusive(std::string_view container, Start start, End end);
+
 template<typename Container, typename End>
 decltype(auto) slice_to(Container& container, End end) {
     const size_t end_index = detail::checked_index(end);
@@ -2667,7 +2680,12 @@ decltype(auto) slice_to(Container& container, End end) {
         return container[range_to<size_t>{end_index}];
     } else
 #endif
-    {
+    if constexpr (requires {
+                      { container.as_str() } -> std::convertible_to<std::string_view>;
+                  }) {
+        // Rust `&String[..b]` is &str — see slice above.
+        return slice_to(std::string_view(container.as_str()), end_index);
+    } else {
         auto span = slice_full(container);
         detail::validate_slice_bounds(span, 0, end_index);
         return span.first(end_index);
@@ -2690,10 +2708,33 @@ decltype(auto) slice_to_inclusive(Container& container, End end) {
 }
 
 template<typename Start>
-auto slice_from(std::string_view container, Start start) {
+std::string_view slice_from(std::string_view container, Start start) {
     const size_t start_index = detail::checked_index(start);
     detail::validate_slice_bounds(container, start_index, container.size());
     return container.substr(start_index);
+}
+
+// Rust `&str[..end]` is &str — keep str-ness (substr), don't decay to a
+// char span like the generic container path would.
+template<typename End>
+std::string_view slice_to(std::string_view container, End end) {
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(container, 0, end_index);
+    return container.substr(0, end_index);
+}
+
+template<typename End>
+std::string_view slice_to_inclusive(std::string_view container, End end) {
+    const size_t end_index = detail::checked_index(end);
+    return slice_to(container, end_index + 1);
+}
+
+template<typename Start, typename End>
+std::string_view slice_inclusive(std::string_view container, Start start, End end) {
+    const size_t start_index = detail::checked_index(start);
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(container, start_index, end_index + 1);
+    return container.substr(start_index, end_index + 1 - start_index);
 }
 
 template<typename Container, typename Start>
@@ -2707,7 +2748,12 @@ decltype(auto) slice_from(Container& container, Start start) {
         return container[range_from<size_t>{start_index}];
     } else
 #endif
-    {
+    if constexpr (requires {
+                      { container.as_str() } -> std::convertible_to<std::string_view>;
+                  }) {
+        // Rust `&String[a..]` is &str — see slice above.
+        return slice_from(std::string_view(container.as_str()), start_index);
+    } else {
         auto span = slice_full(container);
         detail::validate_slice_bounds(span, start_index, span.size());
         // str slices lower to std::string_view, which spells the tail
@@ -2732,7 +2778,14 @@ decltype(auto) slice(Container& container, Start start, End end) {
         return container[range<size_t>(start_index, end_index)];
     } else
 #endif
-    {
+    if constexpr (requires {
+                      { container.as_str() } -> std::convertible_to<std::string_view>;
+                  }) {
+        // Rust `&String[a..b]` is &str — keep str-ness (substr over the
+        // UTF-8 bytes) instead of decaying to a byte span.
+        return slice(
+            std::string_view(container.as_str()), start_index, end_index);
+    } else {
         auto span = slice_full(container);
         detail::validate_slice_bounds(span, start_index, end_index);
         if constexpr (std::is_same_v<std::remove_cvref_t<Container>, std::string_view>) {
@@ -2744,7 +2797,7 @@ decltype(auto) slice(Container& container, Start start, End end) {
 }
 
 template<typename Start, typename End>
-auto slice(std::string_view container, Start start, End end) {
+std::string_view slice(std::string_view container, Start start, End end) {
     const size_t start_index = detail::checked_index(start);
     const size_t end_index = detail::checked_index(end);
     detail::validate_slice_bounds(container, start_index, end_index);

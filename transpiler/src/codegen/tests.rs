@@ -15357,6 +15357,73 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_mut_ref_arg_usage_hint_strips_reference_layer() {
+    // `let mut v = 1; bump(&mut v);` took the parameter's FULL `&mut i32`
+    // type as the local's hint — `int32_t& v = static_cast<int32_t>(1);`
+    // bound a reference to a prvalue (ill-formed).
+    let out = transpile_str(
+        "fn bump(x: &mut i32) { *x += 10; } pub fn f() { let mut v = 1; bump(&mut v); let _ = v; }",
+    );
+    assert!(
+        !out.contains("int32_t& v ="),
+        "&mut-arg hint must not declare the local as a reference:\n{out}"
+    );
+    assert!(
+        out.contains("int32_t v =") || out.contains("auto v = static_cast<int32_t>(1)"),
+        "the local must get the peeled value type:\n{out}"
+    );
+}
+
+#[test]
+fn test_deref_of_reference_binding_in_format_arg_lowers() {
+    // `println!(\"{}\", *rx)` on a reference-lowered binding leaked the
+    // literal `*` through the dumb pass-through — `*` on an int lvalue.
+    let out = transpile_str(
+        "fn get(p: &i32) -> &i32 { p } pub fn f() { let p = 5; let rx = get(&p); println!(\"{}\", *rx); }",
+    );
+    assert!(
+        !out.contains("* rx"),
+        "deref arg must lower through emit_expr, not leak `* rx`:\n{out}"
+    );
+}
+
+#[test]
+fn test_str_range_index_keeps_string_view_base() {
+    // `&r[1..3]` on a &str emitted the generic byte-span slice — the result
+    // lost str-ness (no == with literals). The base is now wrapped so the
+    // string_view overloads (substr) apply.
+    let out = transpile_str("pub fn f(r: &str) { let p = &r[1..3]; let _ = p; }");
+    assert!(
+        out.contains("rusty::slice(std::string_view(r), 1, 3)"),
+        "str range-index base must wrap as string_view:\n{out}"
+    );
+    // Non-string bases keep the plain slice emission.
+    let out2 = transpile_str("pub fn g(v: &[i32]) { let p = &v[1..3]; let _ = p; }");
+    assert!(
+        out2.contains("rusty::slice(v, 1, 3)"),
+        "slice bases must stay unwrapped:\n{out2}"
+    );
+}
+
+#[test]
+fn test_rebind_reference_binding_comparison_and_format_single_deref() {
+    // Reassignable `&` bindings lower to pointer storage; `v > max` emitted
+    // `*((*max))` (double deref) and `println!(\"{}\", max)` passed the raw
+    // pointer to std::format.
+    let out = transpile_str(
+        "pub fn f() { let arr = [3, 9, 4]; let mut max = &arr[0]; for v in arr.iter() { if v > max { max = v; } } println!(\"{}\", max); }",
+    );
+    assert!(
+        !out.contains("*((*"),
+        "pointer-lowered binding deref'd twice in the comparison:\n{out}"
+    );
+    assert!(
+        !out.contains("\" , max"),
+        "raw pointer passed to the format call:\n{out}"
+    );
+}
+
+#[test]
 fn test_float_to_int_as_cast_saturates() {
     // Rust float→int `as` casts saturate (clamp to MIN/MAX, NaN → 0); a bare
     // static_cast is UB on out-of-range and NaN inputs.
@@ -31035,6 +31102,9 @@ fn test_leaf5182_tuple_mut_ref_rebind_uses_pointer_alias_semantics() {
         || out.contains("if (*((*len)) == cap)")
         || out.contains(
             "if (rusty::detail::deref_if_pointer_like(*len) == rusty::detail::deref_if_pointer_like(cap))",
+        )
+        || out.contains(
+            "if (rusty::detail::deref_if_pointer_like((*len)) == rusty::detail::deref_if_pointer_like(cap))",
         )
         || out.contains(
             "if (*((*len)) == rusty::detail::deref_if_pointer_like(cap))",

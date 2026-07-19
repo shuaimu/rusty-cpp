@@ -8814,6 +8814,29 @@ impl CodeGen {
         }
     }
 
+    /// A hint harvested from a `&v` / `&mut v` argument carries the
+    /// parameter's FULL type including the reference — but the local `v`
+    /// itself has the pointee type (`bump(&mut v)` on `let mut v = 1;` was
+    /// declaring `int32_t& v = <prvalue>`, ill-formed). Peel one
+    /// `Type::Reference` layer per `Expr::Reference` layer on the arg.
+    fn peel_hint_reference_layers_for_arg(arg: &syn::Expr, mut ty: syn::Type) -> syn::Type {
+        let mut cur = arg;
+        loop {
+            cur = match cur {
+                syn::Expr::Paren(p) => &p.expr,
+                syn::Expr::Group(g) => &g.expr,
+                syn::Expr::Reference(r) => {
+                    if let syn::Type::Reference(tr) = ty {
+                        ty = (*tr.elem).clone();
+                    }
+                    &r.expr
+                }
+                _ => break,
+            };
+        }
+        ty
+    }
+
     pub(super) fn collect_uninitialized_local_type_hints_from_call(
         &self,
         call: &syn::ExprCall,
@@ -8836,6 +8859,7 @@ impl CodeGen {
             let Some(expected_ty) = expected_ty else {
                 continue;
             };
+            let expected_ty = Self::peel_hint_reference_layers_for_arg(arg, expected_ty);
             if !self.type_is_concrete_hint_candidate(&expected_ty) {
                 continue;
             }
@@ -8872,6 +8896,7 @@ impl CodeGen {
             let Some(expected_ty) = expected_ty else {
                 continue;
             };
+            let expected_ty = Self::peel_hint_reference_layers_for_arg(arg, expected_ty);
             if !self.type_is_concrete_hint_candidate(&expected_ty) {
                 continue;
             }

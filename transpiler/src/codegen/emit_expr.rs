@@ -11988,6 +11988,21 @@ impl CodeGen {
 
         if let syn::Expr::Range(range) = self.peel_paren_group_expr(index_expr) {
             let base = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
+            // Rust `&str[a..b]` / `&String[a..b]` is &str — route the base to
+            // the string_view slice overloads (substr), not the generic
+            // byte-span path, so the result keeps str semantics.
+            let base = if self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                .as_ref()
+                .is_some_and(|ty| {
+                    self.is_known_string_like_type(ty)
+                        || self.map_type(ty) == "std::string_view"
+                }) {
+                format!("std::string_view({})", base)
+            } else {
+                base
+            };
             let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e));
             let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e));
             let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
@@ -22092,6 +22107,20 @@ impl CodeGen {
     ) -> Option<String> {
         if let syn::Expr::Range(range) = self.peel_paren_group_expr(&idx.index) {
             let base = self.emit_expr_to_string_with_expected(&idx.expr, expected_ty);
+            // Rust `&str[a..b]` / `&String[a..b]` is &str — see the method-call
+            // twin above.
+            let base = if self
+                .infer_simple_expr_type(&idx.expr)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&idx.expr))
+                .as_ref()
+                .is_some_and(|ty| {
+                    self.is_known_string_like_type(ty)
+                        || self.map_type(ty) == "std::string_view"
+                }) {
+                format!("std::string_view({})", base)
+            } else {
+                base
+            };
             let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e));
             let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e));
             let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));

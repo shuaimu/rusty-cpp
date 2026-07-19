@@ -23824,6 +23824,24 @@ impl CodeGen {
         }) {
             return true;
         }
+        // Pointer-lowered reference bindings (`let mut max = &arr[0];`) as
+        // args must deref for Display — the dumb pass-through would pass the
+        // raw pointer (a formatter error, or an address if one existed).
+        if parts.iter().skip(1).any(|arg| {
+            let Ok(expr) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+                return false;
+            };
+            let mut peeled = &expr;
+            while let syn::Expr::Reference(r) = peeled {
+                peeled = &r.expr;
+            }
+            matches!(self.peel_paren_group_expr(peeled), syn::Expr::Path(p)
+                if p.path.segments.len() == 1
+                    && self.is_reference_binding_lowered_to_pointer_storage(
+                        &p.path.segments[0].ident.to_string()))
+        }) {
+            return true;
+        }
         // Float `%` needs the std::fmod lowering — the dumb pass-through
         // would emit the raw operator, ill-formed C++ on doubles.
         if parts.iter().skip(1).any(|arg| {
@@ -23890,7 +23908,13 @@ impl CodeGen {
                 Self::format_expr_needs_smart_lowering(&b.left)
                     || Self::format_expr_needs_smart_lowering(&b.right)
             }
-            syn::Expr::Unary(u) => Self::format_expr_needs_smart_lowering(&u.expr),
+            // `*rx` on a reference-lowered binding must peel through
+            // emit_expr — the dumb pass-through leaks a literal `*` onto an
+            // int lvalue.
+            syn::Expr::Unary(u) => {
+                matches!(u.op, syn::UnOp::Deref(_))
+                    || Self::format_expr_needs_smart_lowering(&u.expr)
+            }
             syn::Expr::Paren(p) => Self::format_expr_needs_smart_lowering(&p.expr),
             syn::Expr::Group(g) => Self::format_expr_needs_smart_lowering(&g.expr),
             syn::Expr::Index(i) => {
@@ -24069,7 +24093,23 @@ impl CodeGen {
             while let syn::Expr::Reference(r) = peeled {
                 peeled = &r.expr;
             }
-            self.emit_expr_to_string(peeled)
+            let emitted = self.emit_expr_to_string(peeled);
+            // Same auto-deref for pointer-lowered reference bindings — unless
+            // the path emission already deref'd the carrier.
+            if let syn::Expr::Path(p) = self.peel_paren_group_expr(peeled)
+                && p.path.segments.len() == 1
+            {
+                let name = p.path.segments[0].ident.to_string();
+                let already_deref = emitted
+                    .trim_start()
+                    .trim_start_matches('(')
+                    .trim_start()
+                    .starts_with('*');
+                if self.is_reference_binding_lowered_to_pointer_storage(&name) && !already_deref {
+                    return format!("*({})", emitted);
+                }
+            }
+            emitted
         } else if let Some(lowered_self) = self.try_lower_format_arg_self_member_chain(trimmed) {
             lowered_self
         } else {
@@ -34368,9 +34408,15 @@ impl CodeGen {
             && path.path.segments.len() == 1
         {
             let name = path.path.segments[0].ident.to_string();
-            if self.is_reference_binding_lowered_to_pointer_storage(&name)
-                && !emitted.trim_start().starts_with('*')
-            {
+            // The path emission may have already deref'd the pointer carrier
+            // AND parenthesized it (`(*max)`) — peel parens before testing
+            // for the leading `*`, else the operand is deref'd twice.
+            let already_deref = emitted
+                .trim_start()
+                .trim_start_matches('(')
+                .trim_start()
+                .starts_with('*');
+            if self.is_reference_binding_lowered_to_pointer_storage(&name) && !already_deref {
                 return format!("*({})", emitted);
             }
         }
