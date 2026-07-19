@@ -6436,10 +6436,12 @@ impl CodeGen {
                     && entry_mc.args.len() == 1
                     && self.expr_is_default_constructor_callable(&mc.args[0])
                 {
-                    // `map.entry(k).or_insert_with(Vec::new_)` is equivalent
-                    // to `map.entry(k)` on rusty::HashMap, which inserts a
-                    // default-constructed value for missing keys.
-                    return self.emit_method_call_expr_to_string(entry_mc, None);
+                    // The port Entry is LAZY — the old bare-entry() rewrite
+                    // inserted NOTHING (silent-wrong; and no member to chain
+                    // .push through). or_default() is exactly
+                    // or_insert_with(<default ctor>) and returns V&.
+                    let entry_cpp = self.emit_method_call_expr_to_string(entry_mc, None);
+                    return format!("{}.or_default()", entry_cpp);
                 }
             }
         }

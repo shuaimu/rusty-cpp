@@ -15360,6 +15360,25 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_entry_or_insert_with_default_ctor_lowers_to_or_default() {
+    // The old rewrite dropped or_insert_with entirely (bare entry() — the
+    // port Entry is LAZY, so nothing was inserted; silent-wrong) and left
+    // nothing to chain .push through. or_default() is exactly
+    // or_insert_with(<default ctor>).
+    let out = transpile_str(
+        "use std::collections::BTreeMap; pub fn f() { let mut m: BTreeMap<i32, i32> = BTreeMap::new(); m.entry(5).or_insert_with(i32::default); let _ = m.len(); }",
+    );
+    assert!(
+        out.contains(".or_default()"),
+        "default-ctor or_insert_with must lower to or_default:\n{out}"
+    );
+    assert!(
+        !out.contains("or_insert_with(i32"),
+        "the raw path callable must not survive:\n{out}"
+    );
+}
+
+#[test]
 fn test_self_field_format_args_rewrite_receiver() {
     // `format!("{}", self.x)` leaked literal `self . x` through the dumb
     // pass-through — any method printing its own fields failed to compile.
