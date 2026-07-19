@@ -10510,10 +10510,20 @@ impl CodeGen {
             let rhs = format!("rusty::detail::deref_if_pointer({})", args[0]);
             return format!("rusty::{}({}, {})", method_name, receiver, rhs);
         }
+        // Also route UNRESOLVED non-integer bare-local receivers: a typed
+        // array local whose binding inference came back empty emitted a
+        // member call std::array lacks. Crate types with their own
+        // rotate members resolve and skip this arm.
+        let rotate_unresolved_receiver = matches!(
+            self.peel_paren_group_expr(&mc.receiver),
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1
+        ) && self.infer_simple_expr_type(&mc.receiver).is_none()
+            && !self.should_lower_integer_rotate_method_call(&mc.receiver);
         if matches!(method_name.as_str(), "rotate_right" | "rotate_left")
             && args.len() == 1
             && (self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
-                || self.receiver_is_fixed_array_like_expr(&mc.receiver))
+                || self.receiver_is_fixed_array_like_expr(&mc.receiver)
+                || rotate_unresolved_receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -10527,6 +10537,25 @@ impl CodeGen {
                 "rusty::rotate_left"
             };
             return format!("{}({}, {})", helper, receiver, args[0]);
+        }
+        // slice::select_nth_unstable — nth_element + (before, pivot&,
+        // after) triple via the runtime helper (std::array has no such
+        // member).
+        if method_name == "select_nth_unstable"
+            && args.len() == 1
+            && (self.receiver_is_fixed_array_like_expr(&mc.receiver)
+                || rotate_unresolved_receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!(
+                "rusty::select_nth_unstable({}, static_cast<size_t>({}))",
+                receiver, args[0]
+            );
         }
         // Rust integer intrinsic methods → C++ equivalents
         if matches!(method_name.as_str(), "rotate_right" | "rotate_left")

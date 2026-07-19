@@ -587,6 +587,25 @@ public:
         return std::span<T>(values_.data(), values_.size());
     }
 
+    // std::array surface parity for repeat-literal locals ([v; N] binds
+    // this wrapper): fill/rotate mirror the members the emitter's
+    // member-call path expects.
+    void fill(const T& v) { std::fill(values_.begin(), values_.end(), v); }
+    void rotate_left(size_t mid) {
+        if (values_.empty()) return;
+        mid %= values_.size();
+        std::rotate(values_.begin(),
+                    values_.begin() + static_cast<std::ptrdiff_t>(mid), values_.end());
+    }
+    void rotate_right(size_t k) {
+        if (values_.empty()) return;
+        k %= values_.size();
+        if (k == 0) return;
+        std::rotate(values_.begin(),
+                    values_.begin() + static_cast<std::ptrdiff_t>(values_.size() - k),
+                    values_.end());
+    }
+
     operator std::span<const T>() const noexcept {
         return as_slice();
     }
@@ -673,6 +692,18 @@ void rotate_left(Range&& range, size_t mid) {
     }
     mid %= len;
     std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(mid)), last);
+}
+
+/// Rust slice::select_nth_unstable — nth_element then the
+/// (before, pivot&, after) triple. Printing the pivot binding works
+/// through deref_if_pointer-free T& semantics.
+template<typename Range>
+auto select_nth_unstable(Range&& range, size_t n) {
+    std::span view{range};
+    std::nth_element(view.begin(), view.begin() + static_cast<std::ptrdiff_t>(n), view.end());
+    using T = std::remove_reference_t<decltype(view[0])>;
+    return std::tuple<std::span<T>, T&, std::span<T>>(
+        view.first(n), view[n], view.subspan(n + 1));
 }
 
 template<typename Range>
