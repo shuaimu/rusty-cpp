@@ -3571,6 +3571,27 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             }
             None
         }
+        EntityKind::ConditionalOperator => {
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if children.len() == 3 {
+                if let (Some(condition), Some(true_expr), Some(false_expr)) = (
+                    extract_expression(&children[0]),
+                    extract_expression(&children[1]),
+                    extract_expression(&children[2]),
+                ) {
+                    return Some(Expression::BinaryOp {
+                        left: Box::new(condition),
+                        op: "?:".to_string(),
+                        right: Box::new(Expression::BinaryOp {
+                            left: Box::new(true_expr),
+                            op: ":".to_string(),
+                            right: Box::new(false_expr),
+                        }),
+                    });
+                }
+            }
+            None
+        }
         EntityKind::IntegerLiteral => {
             // IntegerLiterals often have name=None, try display_name or tokens
             if let Some(name) = entity.get_name() {
@@ -3582,6 +3603,15 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 // need the actual value for ownership/borrow checking
                 Some(Expression::Literal("0".to_string()))
             }
+        }
+        EntityKind::BoolLiteralExpr => {
+            if let Some(range) = entity.get_range() {
+                let tokens = safe_tokenize(&range);
+                if let Some(token) = tokens.first() {
+                    return Some(Expression::Literal(token.get_spelling()));
+                }
+            }
+            Some(Expression::Literal("bool".to_string()))
         }
         EntityKind::StringLiteral => {
             // String literals ("hello", L"wide", u8"utf8", etc.) have static lifetime
