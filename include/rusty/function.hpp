@@ -287,6 +287,14 @@ public:
         *this = std::move(tmp);
     }
 
+    // Hidden friend, NOT a namespace-scope function: rusty::swap is a
+    // function object (see rusty.hpp), so a free rusty::swap overload
+    // would redeclare that name as a different kind of symbol. ADL
+    // still finds this friend for Function arguments.
+    friend void swap(Function& lhs, Function& rhs) noexcept {
+        lhs.swap(rhs);
+    }
+
     // @safe - Check if using inline storage (SBO)
     bool is_inline() const noexcept {
         return vtable_ && vtable_->is_inline;
@@ -428,17 +436,20 @@ public:
         *this = std::move(tmp);
     }
 
+    // Hidden friend, NOT a namespace-scope function: rusty::swap is a
+    // function object (see rusty.hpp), so a free rusty::swap overload
+    // would redeclare that name as a different kind of symbol. ADL
+    // still finds this friend for Function arguments.
+    friend void swap(Function& lhs, Function& rhs) noexcept {
+        lhs.swap(rhs);
+    }
+
     // @safe - Check if using inline storage (SBO)
     bool is_inline() const noexcept {
         return vtable_ && vtable_->is_inline;
     }
 };
 
-// Non-member swap
-template<typename Sig>
-void swap(Function<Sig>& lhs, Function<Sig>& rhs) noexcept {
-    lhs.swap(rhs);
-}
 
 // Comparison with nullptr
 template<typename Sig>

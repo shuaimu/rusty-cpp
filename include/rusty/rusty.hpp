@@ -158,11 +158,29 @@ namespace rusty {
         return old;
     }
 
-    template<typename T>
-    constexpr void swap(T& lhs, T& rhs) noexcept(noexcept(std::swap(lhs, rhs))) {
-        using std::swap;
-        swap(lhs, rhs);
+    namespace detail {
+        template<typename T>
+        constexpr void swap_impl(T& lhs, T& rhs)
+            noexcept(noexcept(std::swap(lhs, rhs))) {
+            using std::swap;
+            swap(lhs, rhs);
+        }
     }
+
+    // Function OBJECT, not a function template: a free `rusty::swap(T&,
+    // T&)` is found by ADL for EVERY type in namespace rusty and is
+    // ambiguous against std::swap inside libstdc++'s two-step iter_swap
+    // (`using std::swap; swap(*a, *b)`) — std::sort over rusty::String
+    // hard-errored. ADL ignores variables, so the niebloid keeps
+    // qualified rusty::swap(a, b) working without ever joining ADL
+    // candidate sets.
+    inline constexpr struct swap_fn {
+        template<typename T>
+        constexpr void operator()(T& lhs, T& rhs) const
+            noexcept(noexcept(detail::swap_impl(lhs, rhs))) {
+            detail::swap_impl(lhs, rhs);
+        }
+    } swap{};
 
     // Common Result types
     template<typename T>
