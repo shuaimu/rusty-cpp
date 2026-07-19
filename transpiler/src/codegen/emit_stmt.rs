@@ -3544,10 +3544,25 @@ impl CodeGen {
                             )
                         })
                     });
+                // Soft-consuming combinators (unwrap_or/flatten/transpose/
+                // …) take self by value: a SINGLE-USE local must be
+                // non-const so the emitted move fires (a const binding
+                // degrades it to a copy — deleted for move-only payloads).
+                // A MULTI-USE local implies a Copy payload in Rust and must
+                // stay const: the destructive move overload would corrupt
+                // later reads.
+                let soft_consumed_single_use = self
+                    .by_value_method_call_pairs
+                    .get(&name_str)
+                    .is_some_and(|methods| {
+                        methods.iter().any(|m| is_soft_consuming_method_name(m))
+                    })
+                    && !self.multi_use_vars.contains(&name_str);
                 let qualifier = if emits_ref_binding {
                     if is_mut { "" } else { "const " }
                 } else if is_mut
                     || is_consumed
+                    || soft_consumed_single_use
                     || for_consumed_iterable
                     || by_value_method_receiver
                     || init_is_move_closure
@@ -4628,8 +4643,36 @@ impl CodeGen {
                     let is_consumed = self
                         .consuming_method_receiver_vars
                         .contains(&name.to_string());
+                    // Mirror the un-annotated chain: soft-consuming
+                    // combinators on a single-use local, and crate methods
+                    // taking self BY VALUE (the annotated type resolves the
+                    // receiver directly).
+                    let soft_consumed_single_use = self
+                        .by_value_method_call_pairs
+                        .get(&name_str)
+                        .is_some_and(|methods| {
+                            methods.iter().any(|m| is_soft_consuming_method_name(m))
+                        })
+                        && !self.multi_use_vars.contains(&name_str);
+                    let by_value_method_receiver = self
+                        .by_value_method_call_pairs
+                        .get(&name_str)
+                        .is_some_and(|methods| {
+                            matches!(
+                                self.peel_reference_paren_group_type(&resolved_ty),
+                                syn::Type::Path(tp) if tp.path.segments.last().is_some_and(|seg| {
+                                    self.impl_method_receiver_kinds
+                                        .get(&seg.ident.to_string())
+                                        .is_some_and(|kinds| methods.iter().any(|m| {
+                                            kinds.get(m).is_some_and(|kind| matches!(kind, 2 | 3))
+                                        }))
+                                })
+                            )
+                        });
                     let qualifier = if is_mut
                         || is_consumed
+                        || soft_consumed_single_use
+                        || by_value_method_receiver
                         || self.mutable_pointer_aliased_vars.contains(&name_str)
                         || resolved_mut_reference_binding
                         || ty.trim_start().starts_with("const ")

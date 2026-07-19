@@ -594,6 +594,18 @@ public:
             return Result<NewT, E>::Err(std::move(err_ref()));
         }
     }
+
+    // Const fallback for read-only Result bindings (copies out),
+    // mirroring the const unwrap_or family.
+    template<typename F>
+    auto map(F f) const -> Result<decltype(f(std::declval<T>())), E> {
+        using NewT = decltype(f(std::declval<T>()));
+        if (is_ok_value) {
+            return Result<NewT, E>::Ok(f(ok_ref()));
+        } else {
+            return Result<NewT, E>::Err(err_ref());
+        }
+    }
     
     // Map over Err value
     template<typename F>
@@ -603,6 +615,17 @@ public:
             return Result<T, NewE>::Ok(std::move(ok_ref()));
         } else {
             return Result<T, NewE>::Err(f(std::move(err_ref())));
+        }
+    }
+
+    // Const fallback (copies out).
+    template<typename F>
+    auto map_err(F f) const -> Result<T, decltype(f(std::declval<E>()))> {
+        using NewE = decltype(f(std::declval<E>()));
+        if (is_ok_value) {
+            return Result<T, NewE>::Ok(ok_ref());
+        } else {
+            return Result<T, NewE>::Err(f(err_ref()));
         }
     }
 
@@ -620,6 +643,21 @@ public:
         }
         return Option<Result<Inner, E>>(Result<Inner, E>::Err(std::move(err_ref())));
     }
+
+    // Const fallback (copies out).
+    template<typename Q = T>
+    auto transpose() const -> Option<Result<result_option_value_t<Q>, E>>
+    requires result_is_option_v<Q> {
+        using Inner = result_option_value_t<Q>;
+        if (is_ok_value) {
+            auto inner = ok_ref();
+            if (inner.is_some()) {
+                return Option<Result<Inner, E>>(Result<Inner, E>::Ok(inner.unwrap()));
+            }
+            return Option<Result<Inner, E>>(None);
+        }
+        return Option<Result<Inner, E>>(Result<Inner, E>::Err(err_ref()));
+    }
     
     // Chain operations that return Result
     template<typename F>
@@ -629,6 +667,17 @@ public:
             return f(std::move(ok_ref()));
         } else {
             return ReturnType::Err(std::move(err_ref()));
+        }
+    }
+
+    // Const fallback (copies out).
+    template<typename F>
+    auto and_then(F f) const -> decltype(f(std::declval<T>())) {
+        using ReturnType = decltype(f(std::declval<T>()));
+        if (is_ok_value) {
+            return f(ok_ref());
+        } else {
+            return ReturnType::Err(err_ref());
         }
     }
     

@@ -53188,7 +53188,25 @@ fn count_var_uses_in_stmt(stmt: &syn::Stmt, counts: &mut std::collections::HashM
                 count_var_uses_in_expr(&init.expr, counts);
             }
         }
+        syn::Stmt::Macro(stmt_macro) => count_var_uses_in_macro(&stmt_macro.mac, counts),
         _ => {}
+    }
+}
+
+/// Macro tokens (println!/format! args) are real uses at emit time —
+/// without this, a local consumed AND reread inside macros counted as
+/// single-use.
+fn count_var_uses_in_macro(
+    mac: &syn::Macro,
+    counts: &mut std::collections::HashMap<String, usize>,
+) {
+    use syn::punctuated::Punctuated;
+    if let Ok(args) =
+        mac.parse_body_with(Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
+    {
+        for arg in &args {
+            count_var_uses_in_expr(arg, counts);
+        }
     }
 }
 
@@ -55486,7 +55504,27 @@ fn collect_consuming_method_receivers_in_stmt(
             }
         }
         syn::Stmt::Expr(expr, _) => collect_consuming_method_receivers_in_expr(expr, result),
+        syn::Stmt::Macro(stmt_macro) => {
+            collect_consuming_method_receivers_in_macro(&stmt_macro.mac, result);
+        }
         _ => {}
+    }
+}
+
+/// Macro tokens are opaque to the expr walk, but format-like macros get
+/// their args re-parsed and lowered as real exprs at emit time —
+/// `println!("[{}]", s.unwrap_or_default())` consumes `s` just as surely.
+fn collect_consuming_method_receivers_in_macro(
+    mac: &syn::Macro,
+    result: &mut std::collections::HashSet<String>,
+) {
+    use syn::punctuated::Punctuated;
+    if let Ok(args) =
+        mac.parse_body_with(Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
+    {
+        for arg in &args {
+            collect_consuming_method_receivers_in_expr(arg, result);
+        }
     }
 }
 
@@ -55595,6 +55633,7 @@ fn collect_consuming_method_receivers_in_expr(
         }
         syn::Expr::Paren(p) => collect_consuming_method_receivers_in_expr(&p.expr, result),
         syn::Expr::Group(g) => collect_consuming_method_receivers_in_expr(&g.expr, result),
+        syn::Expr::Macro(m) => collect_consuming_method_receivers_in_macro(&m.mac, result),
         syn::Expr::Array(arr) => {
             for elem in &arr.elems {
                 if let Some(name) = extract_direct_local_ident(elem) {
@@ -55761,6 +55800,20 @@ fn is_consuming_method_name(method: &str) -> bool {
             | "map"
             | "filter_map"
     ) || method.starts_with("into_")
+}
+
+/// Consuming combinators that are marked non-const ONLY when the local is
+/// used once: they take self by value in Rust (a const binding turns the
+/// emitted move into a copy — deleted for move-only payloads), but a
+/// MULTI-USE local implies a Copy payload in Rust, and destroying it on
+/// the first call would corrupt later reads (flatten_basic printed false
+/// where Rust prints true). Joined with by_value_method_call_pairs +
+/// multi_use_vars at the let-qualifier.
+fn is_soft_consuming_method_name(method: &str) -> bool {
+    matches!(
+        method,
+        "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "flatten" | "transpose"
+    )
         // `sorted*` adapters (itertools' trait defaults AND indexmap's
         // inherent sorted_by/sorted_by_key/sorted_unstable_*) take self by
         // value and return an owning iterator — the in-place siblings are

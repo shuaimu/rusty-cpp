@@ -364,6 +364,35 @@ public:
         data_[len_++] = ch;
         ensure_null_terminated();
     }
+
+    // Rust char is char32_t at the C++ level — pushing one must UTF-8
+    // encode it. The plain-char overload above stays the ASCII fast
+    // path; without this overload the char32_t silently TRUNCATED to
+    // one byte ('é' became a lone 0xE9).
+    void push(char32_t c) {
+        char buf[4];
+        size_t n;
+        if (c < 0x80) {
+            buf[0] = static_cast<char>(c);
+            n = 1;
+        } else if (c < 0x800) {
+            buf[0] = static_cast<char>(0xC0 | (c >> 6));
+            buf[1] = static_cast<char>(0x80 | (c & 0x3F));
+            n = 2;
+        } else if (c < 0x10000) {
+            buf[0] = static_cast<char>(0xE0 | (c >> 12));
+            buf[1] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            buf[2] = static_cast<char>(0x80 | (c & 0x3F));
+            n = 3;
+        } else {
+            buf[0] = static_cast<char>(0xF0 | (c >> 18));
+            buf[1] = static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+            buf[2] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            buf[3] = static_cast<char>(0x80 | (c & 0x3F));
+            n = 4;
+        }
+        push_str(std::string_view(buf, n));
+    }
     
     // Push a string slice
     void push_str(const char* str) {
@@ -1226,5 +1255,26 @@ namespace std {
         }
     };
 }
+
+// Rust Display under std::format: a bare String (or str) format arg is
+// extremely common (`println!("{}", s)`) and reaches std::format
+// directly whenever the smart-lowering can't resolve the arg's type
+// (loop bindings, match payloads). Delegate to the string_view
+// formatter so width/fill/precision specs also work.
+template<>
+struct std::formatter<rusty::String, char> : std::formatter<std::string_view, char> {
+    template<typename FormatContext>
+    auto format(const rusty::String& s, FormatContext& ctx) const {
+        return std::formatter<std::string_view, char>::format(s.as_str(), ctx);
+    }
+};
+
+template<>
+struct std::formatter<rusty::str, char> : std::formatter<std::string_view, char> {
+    template<typename FormatContext>
+    auto format(const rusty::str& s, FormatContext& ctx) const {
+        return std::formatter<std::string_view, char>::format(s.as_str(), ctx);
+    }
+};
 
 #endif // RUSTY_STRING_HPP

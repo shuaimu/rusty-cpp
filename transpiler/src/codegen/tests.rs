@@ -15036,6 +15036,42 @@ fn test_inner_field_as_ref_with_resolvable_type_skips_string_view_hack() {
 }
 
 #[test]
+fn test_soft_consuming_combinator_qualifier_by_use_count() {
+    // unwrap_or_default takes self by value: a SINGLE-USE local must be
+    // non-const (const degrades the move to a deleted copy for
+    // move-only payloads), while a MULTI-USE local implies Copy in Rust
+    // and must stay const (the destructive move would corrupt later
+    // reads — r7 flatten_basic regression).
+    let single = transpile_str(
+        r#"
+        fn f() {
+            let s: Option<String> = None;
+            println!("[{}]", s.unwrap_or_default());
+        }
+        "#,
+    );
+    assert!(
+        !single.contains("const rusty::Option<rusty::String> s"),
+        "single-use soft-consumed local must not bind const:\n{}",
+        single
+    );
+    let multi = transpile_str(
+        r#"
+        fn f() {
+            let a: Option<Option<i32>> = Some(Some(7));
+            println!("{}", a.flatten().unwrap_or(-1));
+            println!("{}", a.flatten().is_some());
+        }
+        "#,
+    );
+    assert!(
+        multi.contains("const rusty::Option<rusty::Option<int32_t>> a"),
+        "multi-use (Copy-implying) local keeps const so flatten copies:\n{}",
+        multi
+    );
+}
+
+#[test]
 fn test_tuple_struct_path_value_binds_ctor_lambda() {
     // `let ctor = Meters;` — a tuple-struct path in value position is
     // the constructor FUNCTION. `Meters{}` zero-inits and isn't

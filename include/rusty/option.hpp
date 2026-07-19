@@ -677,6 +677,15 @@ public:
         return T(None);
     }
 
+    // Const fallback for read-only Option bindings (copies the inner
+    // Option out), mirroring the const unwrap_or family.
+    T flatten() const {
+        if (has_value) {
+            return value;
+        }
+        return T(None);
+    }
+
     // Const fallback for read-only Option bindings (copies out).
     template<typename Q = T>
     auto transpose() const -> Result<Option<option_result_ok_t<Q>>, option_result_err_t<Q>>

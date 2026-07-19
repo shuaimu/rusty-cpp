@@ -1459,6 +1459,24 @@ struct bound_unbounded_t {
 };
 inline constexpr bound_unbounded_t bound_unbounded{};
 
+/// Member-call `.rev()` support for ranges with VARIABLE bounds — the
+/// emitter's free-fn rewrite only recognizes literal-bound receivers, so
+/// `(a..b).rev()` reaches the member surface. Self-contained (the free
+/// rusty::rev adapter lives in slice.hpp, included after this header).
+template<typename R>
+struct range_rev_adapter {
+    R inner;
+    auto next() { return inner.next_back(); }
+    auto next_back() { return inner.next(); }
+    size_t count() {
+        size_t n = 0;
+        while (next().is_some()) {
+            ++n;
+        }
+        return n;
+    }
+};
+
 template<typename T>
 class range {
 public:
@@ -1539,6 +1557,10 @@ public:
             ++n;
         }
         return n;
+    }
+
+    range_rev_adapter<range> rev() const {
+        return range_rev_adapter<range>{*this};
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
@@ -1671,6 +1693,10 @@ public:
             --end_;
         }
         return rusty::Option<T>(current);
+    }
+
+    range_rev_adapter<range_inclusive> rev() const {
+        return range_rev_adapter<range_inclusive>{*this};
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
