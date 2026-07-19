@@ -23916,11 +23916,26 @@ impl CodeGen {
         }) {
             return true;
         }
+        // Named args (`w = w`) are ill-formed C++ as-is (assignment exprs
+        // in the arg list) — the smart path strips them positionally.
+        if parts.iter().skip(1).any(|arg| {
+            matches!(
+                syn::parse_str::<syn::Expr>(arg.trim()),
+                Ok(syn::Expr::Assign(_))
+            )
+        }) {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
         };
         let fmt_literal = lit.value();
+        // Dynamic width/precision specs (`{:>w$}`, `{:>1$}`, `{:.p$}`)
+        // must normalize to C++ nested-brace manual indexing.
+        if Self::format_literal_has_dynamic_spec(&fmt_literal) {
+            return true;
+        }
         // Bare-`{}` float args must route through the smart path so they can
         // be wrapped in the Rust-style float Display helper ('NaN', never
         // scientific notation).
@@ -24134,6 +24149,16 @@ impl CodeGen {
         let mut args: Vec<String> = parts.iter().skip(1).map(|s| s.trim().to_string()).collect();
         let fmt_cpp = if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr) {
             let mut fmt_literal = lit.value();
+            // Named args (`w = w`) strip to plain value exprs; the
+            // literal's named VALUE refs go positional (C++ std::format
+            // has no named args). Must run before inline-capture
+            // extraction so `{w}` resolves to the named arg, not a
+            // same-named scope local.
+            let named_format_args = Self::strip_named_format_args(&mut args);
+            if !named_format_args.is_empty() {
+                fmt_literal =
+                    Self::rewrite_named_format_value_refs(&fmt_literal, &named_format_args);
+            }
             if let Some((rewritten, captures)) =
                 self.extract_inline_format_captures(&fmt_literal, args.len())
             {
@@ -24237,6 +24262,20 @@ impl CodeGen {
                 &float_arg_positions,
                 &stripped_spec_positions,
             );
+            // Dynamic width/precision (`{:>w$}`, `{:.p$}`, `{:>1$}`)
+            // normalize LAST, on the final literal: every field goes
+            // explicit-indexed and the `$` token becomes a nested `{K}`
+            // (C++ forbids mixing automatic and manual indexing).
+            let rewritten = if Self::format_literal_has_dynamic_spec(&rewritten) {
+                Self::rewrite_dynamic_spec_literal(
+                    &rewritten,
+                    &named_format_args,
+                    &mut args,
+                    &float_arg_positions,
+                )
+            } else {
+                rewritten
+            };
             let escaped = escape_cpp_string_literal_content(&rewritten);
             format!("\"{}\"", escaped)
         } else {
@@ -24489,6 +24528,282 @@ impl CodeGen {
 
     /// Spec strings (the text after `:`) keyed by referenced arg position.
     /// Positions referenced by bare placeholders are absent.
+    /// Does any replacement field's spec carry a Rust dynamic width or
+    /// precision (`{:>w$}`, `{:.p$}`, `{:>1$}`)? Those spellings are
+    /// ill-formed C++ and must normalize to nested-brace manual indexing.
+    fn format_literal_has_dynamic_spec(fmt: &str) -> bool {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                if let Some((_, spec)) = inner.split_once(':')
+                    && spec.contains('$')
+                {
+                    return true;
+                }
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Strip Rust named format args (`w = w`) down to their value exprs,
+    /// returning name → arg index. C++ std::format has no named args, so
+    /// the literal's references get rewritten positionally.
+    fn strip_named_format_args(args: &mut [String]) -> HashMap<String, usize> {
+        let mut named = HashMap::new();
+        for (idx, arg) in args.iter_mut().enumerate() {
+            let Ok(syn::Expr::Assign(assign)) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+                continue;
+            };
+            let syn::Expr::Path(p) = assign.left.as_ref() else {
+                continue;
+            };
+            if p.qself.is_some() || p.path.segments.len() != 1 {
+                continue;
+            }
+            let name = p.path.segments[0].ident.to_string();
+            if let Some((_, rhs)) = arg.split_once('=') {
+                *arg = rhs.trim().to_string();
+                named.insert(name, idx);
+            }
+        }
+        named
+    }
+
+    /// Replace named VALUE references (`{w}` / `{w:>4}`) with the named
+    /// arg's positional index. Spec text is preserved.
+    fn rewrite_named_format_value_refs(fmt: &str, named: &HashMap<String, usize>) -> String {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    out.push_str("{{");
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    out.extend(&chars[i..]);
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let (arg_part, spec) = match inner.split_once(':') {
+                    Some((a, s)) => (a.trim().to_string(), Some(s.to_string())),
+                    None => (inner.trim().to_string(), None),
+                };
+                let rewritten_arg = named
+                    .get(&arg_part)
+                    .map(|idx| idx.to_string())
+                    .unwrap_or(arg_part);
+                out.push('{');
+                out.push_str(&rewritten_arg);
+                if let Some(spec) = spec {
+                    out.push(':');
+                    out.push_str(&spec);
+                }
+                out.push('}');
+                i = j + 1;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Normalize Rust dynamic width/precision specs to C++ nested-brace
+    /// manual indexing: `[{:>1$}]` → `[{0:>{1}}]`, `{:>w$}` (named or
+    /// scope-captured w) → `{0:>{K}}`. C++ forbids mixing automatic and
+    /// manual indexing, so once any nested index is explicit EVERY field
+    /// gets an explicit value index. Scope-captured width names are
+    /// appended to `args`.
+    fn rewrite_dynamic_spec_literal(
+        fmt: &str,
+        named: &HashMap<String, usize>,
+        args: &mut Vec<String>,
+        float_positions: &HashSet<usize>,
+    ) -> String {
+        // Bail (leave untouched) if any value ref is still a NAME — those
+        // should have been resolved by the named-ref/capture passes, and
+        // guessing here would corrupt indexing.
+        struct Field {
+            arg_part: String,
+            spec: Option<String>,
+        }
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut fields: Vec<Field> = Vec::new();
+        {
+            let mut i = 0usize;
+            while i < chars.len() {
+                if chars[i] == '{' {
+                    if i + 1 < chars.len() && chars[i + 1] == '{' {
+                        i += 2;
+                        continue;
+                    }
+                    let mut j = i + 1;
+                    while j < chars.len() && chars[j] != '}' {
+                        j += 1;
+                    }
+                    if j >= chars.len() {
+                        break;
+                    }
+                    let inner: String = chars[i + 1..j].iter().collect();
+                    let (arg_part, spec) = match inner.split_once(':') {
+                        Some((a, s)) => (a.trim().to_string(), Some(s.to_string())),
+                        None => (inner.trim().to_string(), None),
+                    };
+                    fields.push(Field { arg_part, spec });
+                    i = j + 1;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+        if fields
+            .iter()
+            .any(|f| !f.arg_part.is_empty() && !f.arg_part.chars().all(|c| c.is_ascii_digit()))
+        {
+            return fmt.to_string();
+        }
+
+        // Rewrite `TOKEN$` inside one spec; returns None on an unresolvable
+        // named width (bail — better verbatim than corrupt).
+        let rewrite_spec = |spec: &str, args: &mut Vec<String>| -> Option<String> {
+            let mut out = String::new();
+            let sc: Vec<char> = spec.chars().collect();
+            let mut i = 0usize;
+            while i < sc.len() {
+                if sc[i] == '$' {
+                    // Longest ident/digit run ending here is the token.
+                    let mut start = out.len();
+                    while start > 0
+                        && out[..start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        start -= out[..start].chars().next_back().map_or(0, |c| c.len_utf8());
+                    }
+                    let token = out[start..].to_string();
+                    if token.is_empty() {
+                        out.push('$');
+                        i += 1;
+                        continue;
+                    }
+                    let idx = if token.chars().all(|c| c.is_ascii_digit()) {
+                        token.parse::<usize>().ok()?
+                    } else if let Some(idx) = named.get(&token) {
+                        *idx
+                    } else {
+                        // Scope-captured width variable — append as an arg.
+                        args.push(token.clone());
+                        args.len() - 1
+                    };
+                    out.truncate(start);
+                    out.push('{');
+                    out.push_str(&idx.to_string());
+                    out.push('}');
+                    i += 1;
+                    continue;
+                }
+                out.push(sc[i]);
+                i += 1;
+            }
+            Some(out)
+        };
+
+        let mut out = String::new();
+        let mut next_auto = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    out.push_str("{{");
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    out.extend(&chars[i..]);
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let (arg_part, spec) = match inner.split_once(':') {
+                    Some((a, s)) => (a.trim().to_string(), Some(s.to_string())),
+                    None => (inner.trim().to_string(), None),
+                };
+                let value_idx = if arg_part.is_empty() {
+                    let idx = next_auto;
+                    next_auto += 1;
+                    idx
+                } else {
+                    arg_part.parse::<usize>().unwrap_or(0)
+                };
+                let new_spec = match &spec {
+                    Some(s) if s.contains('$') => match rewrite_spec(s, args) {
+                        Some(mut ns) => {
+                            // Dynamic PRECISION on a float arg: C++ `.{K}`
+                            // general format means significant digits; Rust
+                            // means digits after the point. Append 'f'
+                            // (fixed) — mirrors the static `{:.N}` fix.
+                            // Only when the spec carries no explicit type
+                            // (it ends with the `$` token).
+                            let dynamic_precision = s
+                                .rsplit('.')
+                                .next()
+                                .is_some_and(|tail| tail.contains('$'))
+                                && s.contains('.');
+                            if dynamic_precision
+                                && s.trim_end().ends_with('$')
+                                && float_positions.contains(&value_idx)
+                            {
+                                ns.push('f');
+                            }
+                            Some(ns)
+                        }
+                        None => return fmt.to_string(),
+                    },
+                    other => other.clone(),
+                };
+                out.push('{');
+                out.push_str(&value_idx.to_string());
+                if let Some(s) = new_spec {
+                    out.push(':');
+                    out.push_str(&s);
+                }
+                out.push('}');
+                i = j + 1;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
     fn format_literal_spec_strings(
         &self,
         fmt: &str,

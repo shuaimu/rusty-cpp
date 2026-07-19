@@ -15036,6 +15036,45 @@ fn test_inner_field_as_ref_with_resolvable_type_skips_string_view_hack() {
 }
 
 #[test]
+fn test_dynamic_width_specs_normalize_to_nested_braces() {
+    // Rust `{:>w$}` / `{:>1$}` / `{:.p$}` are ill-formed C++ — they must
+    // normalize to nested-brace MANUAL indexing (C++ forbids mixing
+    // automatic and manual), with named args stripped positionally and
+    // dynamic float precision forced to fixed ('f') per Rust semantics.
+    let out = transpile_str(
+        r#"
+        fn f() {
+            let w = 8usize;
+            let s = format!("{:>w$}", 42, w = w);
+            println!("[{:>1$}]", 7, 5);
+            println!("[{:.1$}]", 3.14159f64, 3usize);
+            let _ = s;
+        }
+        "#,
+    );
+    assert!(
+        out.contains("\"{0:>{1}}\""),
+        "named dynamic width must become nested-brace manual indexing:\n{}",
+        out
+    );
+    assert!(
+        out.contains("\"[{0:>{1}}]\""),
+        "positional 1$ width must become nested-brace manual indexing:\n{}",
+        out
+    );
+    assert!(
+        out.contains("\"[{0:.{1}f}]\""),
+        "dynamic float precision must append 'f' (Rust fixed semantics):\n{}",
+        out
+    );
+    assert!(
+        !out.contains("w = w") && !out.contains('$'),
+        "named-arg assignment and `$` specs must not leak into C++:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_unresolved_local_field_read_in_format_args_routes_smart() {
     // `let m = it.max_by_key(..).unwrap()` binds a pointer Item from
     // rusty::iter — the dumb format splice `m . a` is field access on a
