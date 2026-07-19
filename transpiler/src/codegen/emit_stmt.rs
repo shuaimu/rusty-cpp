@@ -1664,6 +1664,11 @@ impl CodeGen {
             });
         } else if self.try_emit_control_flow(body, false) {
             // Control flow handled
+        } else if let syn::Expr::Macro(mac_expr) = body {
+            // Expression-form arm `Some(v) => println!(...)`: the expression
+            // converter has no statement lowering for the println family and
+            // would drop the call as a `/* ... */` comment.
+            self.emit_macro_stmt(&mac_expr.mac);
         } else {
             let body_str = self.emit_expr_to_string(body);
             self.writeln(&format!("{};", body_str));

@@ -36907,6 +36907,33 @@ fn test_data_enum_derive_partial_eq_emits_variant_operator_eq() {
 }
 
 #[test]
+fn test_expression_form_match_arm_println_emits_statement() {
+    // `Some(v) => println!("some {}", v)` (expression-form arm, no braces) was
+    // routed through the expression converter, whose fallback stringified the
+    // macro into a `/* println!(…) */` comment — the match ran but printed
+    // NOTHING (silent-wrong across integer/Option/Result/slice matches).
+    let out = transpile_str(
+        "pub fn f(a: Option<i32>) { match a { Some(v) => println!(\"some {}\", v), None => println!(\"none\") } }",
+    );
+    assert!(
+        !out.contains("/* println!"),
+        "expression-form arm println! commented out:\n{out}"
+    );
+    assert!(
+        out.matches("std::println(").count() >= 2,
+        "both arm println! bodies must lower to std::println:\n{out}"
+    );
+    // Integer scrutinee via the if-chain lowering, zero-arg println!.
+    let out2 = transpile_str(
+        "pub fn g(x: i32) { match x { 3 => println!(\"three\"), _ => println!(\"other\") } }",
+    );
+    assert!(
+        !out2.contains("/* println!") && out2.contains("std::println(\"three\");"),
+        "integer-match expression-form arm println! not lowered:\n{out2}"
+    );
+}
+
+#[test]
 fn test_matches_macro_lowers_to_boolean() {
     // `matches!(e, pat)` was unhandled and emitted a `/* matches!(…) */` comment
     // (a void expression). It now expands to a match and reuses the ordinary

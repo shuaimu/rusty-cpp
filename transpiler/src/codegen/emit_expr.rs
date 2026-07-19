@@ -2288,7 +2288,15 @@ impl CodeGen {
                 }
             }
             _ => {
-                self.writeln(&format!("// TODO: {}!(...)", macro_name));
+                // Macros the statement path doesn't know (write!, vec!, …)
+                // may still have an expression lowering — emit that as an
+                // expression-statement rather than dropping the call.
+                let lowered = self.emit_macro_expr(mac);
+                if lowered.starts_with("/*") {
+                    self.writeln(&format!("// TODO: {}!(...)", macro_name));
+                } else {
+                    self.writeln(&format!("{};", lowered));
+                }
             }
         }
     }

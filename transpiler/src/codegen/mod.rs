@@ -23183,6 +23183,13 @@ impl CodeGen {
         if self.try_emit_control_flow(body, false) {
             return;
         }
+        if let syn::Expr::Macro(mac_expr) = body {
+            // Expression-form arm `Some(v) => println!(...)`: the expression
+            // converter would comment the call out; route through the
+            // statement-macro emitter instead.
+            self.emit_macro_stmt(&mac_expr.mac);
+            return;
+        }
         let body_str = self.emit_expr_to_string(body);
         if body_str.contains("entered unreachable code") {
             self.writeln(&format!("return {};", body_str));
