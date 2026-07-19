@@ -23848,6 +23848,9 @@ impl CodeGen {
                 matches!(f.member, syn::Member::Unnamed(_))
                     || Self::format_expr_needs_smart_lowering(&f.base)
             }
+            // Macros (matches!/format!/…) in arg position are raw Rust token
+            // soup under the dumb pass-through — they need real lowering.
+            syn::Expr::Macro(_) => true,
             _ => false,
         }
     }
@@ -45805,6 +45808,11 @@ std::string to_debug_string(const T& value) {
             return std::string("Ok(") + rusty::to_debug_string(value.unwrap()) + ")";
         }
         return std::string("Err(") + rusty::to_debug_string(value.unwrap_err()) + ")";
+    } else if constexpr (requires { std::visit([](const auto&) {}, value); }) {
+        // Data-enum std::variant: delegate to the active alternative's repr.
+        return std::visit([](const auto& alt) -> std::string {
+            return rusty::to_debug_string(alt);
+        }, value);
     } else if constexpr (std::is_convertible_v<T, std::string_view>) {
         return std::string("\"")
             + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
@@ -49165,6 +49173,10 @@ std::string to_debug_string(const T& value) {\n\
             return std::string(\"Ok(\") + rusty::to_debug_string(value.unwrap()) + \")\";\n\
         }\n\
         return std::string(\"Err(\") + rusty::to_debug_string(value.unwrap_err()) + \")\";\n\
+    } else if constexpr (requires { std::visit([](const auto&) {}, value); }) {\n\
+        return std::visit([](const auto& alt) -> std::string {\n\
+            return rusty::to_debug_string(alt);\n\
+        }, value);\n\
     } else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {\n\
         return std::to_string(static_cast<int>(value));\n\
     } else if constexpr (std::is_same_v<Value, char>\n\

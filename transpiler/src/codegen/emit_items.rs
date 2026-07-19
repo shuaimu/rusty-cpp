@@ -2355,6 +2355,10 @@ impl CodeGen {
             .extract_derives(&e.attrs)
             .iter()
             .any(|d| d == "PartialEq" || d == "Eq");
+        let enum_derives_debug = self
+            .extract_derives(&e.attrs)
+            .iter()
+            .any(|d| d == "Debug");
         let template_prefix = if has_generics {
             format!(
                 "template<{}>",
@@ -2497,6 +2501,37 @@ impl CodeGen {
                                 name, vname
                             ));
                         }
+                        if enum_derives_debug {
+                            // Rust Debug repr for a struct variant:
+                            // `VariantName { field: <dbg>, … }` (variant name
+                            // only — the enum name is not printed).
+                            let pieces: Vec<String> = fields
+                                .named
+                                .iter()
+                                .filter_map(|field| field.ident.as_ref())
+                                .map(|ident| {
+                                    let rust_name = ident.to_string();
+                                    let cpp_name = escape_cpp_keyword(&rust_name);
+                                    format!(
+                                        "\"{}: \" + rusty::to_debug_string(this->{})",
+                                        rust_name, cpp_name
+                                    )
+                                })
+                                .collect();
+                            self.writeln("std::string rusty_debug_string() const {");
+                            self.indent += 1;
+                            if pieces.is_empty() {
+                                self.writeln(&format!("return std::string(\"{}\");", vname));
+                            } else {
+                                self.writeln(&format!(
+                                    "return std::string(\"{} {{ \") + {} + \" }}\";",
+                                    vname,
+                                    pieces.join(" + \", \" + ")
+                                ));
+                            }
+                            self.indent -= 1;
+                            self.writeln("}");
+                        }
                         self.indent -= 1;
                         self.writeln("};");
                     }
@@ -2534,6 +2569,25 @@ impl CodeGen {
                                 name, vname
                             ));
                         }
+                        if enum_derives_debug {
+                            // Tuple variant: `VariantName(<dbg>, …)`.
+                            let pieces: Vec<String> = (0..fields.unnamed.len())
+                                .map(|i| format!("rusty::to_debug_string(this->_{})", i))
+                                .collect();
+                            self.writeln("std::string rusty_debug_string() const {");
+                            self.indent += 1;
+                            if pieces.is_empty() {
+                                self.writeln(&format!("return std::string(\"{}\");", vname));
+                            } else {
+                                self.writeln(&format!(
+                                    "return std::string(\"{}(\") + {} + \")\";",
+                                    vname,
+                                    pieces.join(" + \", \" + ")
+                                ));
+                            }
+                            self.indent -= 1;
+                            self.writeln("}");
+                        }
                         self.indent -= 1;
                         self.writeln("};");
                     }
@@ -2542,11 +2596,21 @@ impl CodeGen {
                         // enum's std::variant comparison (an empty struct has no
                         // implicit `==` in C++). A defaulted one on an empty
                         // struct always compares equal.
+                        let unit_debug = if enum_derives_debug {
+                            format!(
+                                " std::string rusty_debug_string() const {{ return std::string(\"{}\"); }}",
+                                vname
+                            )
+                        } else {
+                            String::new()
+                        };
                         let unit_body = if enum_derives_eq {
                             format!(
-                                "{{ bool operator==(const {}_{}&) const = default; }};",
-                                name, vname
+                                "{{ bool operator==(const {}_{}&) const = default;{} }};",
+                                name, vname, unit_debug
                             )
+                        } else if enum_derives_debug {
+                            format!("{{{} }};", unit_debug)
                         } else {
                             "{};".to_string()
                         };

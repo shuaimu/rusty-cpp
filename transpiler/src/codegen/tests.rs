@@ -14923,6 +14923,34 @@ fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
 }
 
 #[test]
+fn test_data_enum_derive_debug_emits_variant_reprs() {
+    let out = transpile_str(
+        r#"
+        #[derive(Debug)]
+        enum Cmd { Go(i32, i32), Stop { hard: bool }, Wait }
+        fn f(c: Cmd) {
+            println!("{:?}", c);
+        }
+        "#,
+    );
+    assert!(
+        out.contains("\"Go(\"") && out.contains("\"Stop { \"") && out.contains("\"Wait\""),
+        "each variant struct must carry its Rust Debug repr:\n{}",
+        out
+    );
+    assert!(
+        out.contains("rusty_debug_string"),
+        "variant structs must emit the repr member:\n{}",
+        out
+    );
+    assert!(
+        out.contains("std::visit("),
+        "prelude to_debug_string must dispatch variants via std::visit:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_arithmetic_operator_impls_on_scalar_structs_emit_const() {
     let out = transpile_str(
         r#"
@@ -26060,7 +26088,10 @@ fn test_leaf5153_slice_pattern_match_expr_uses_runtime_conditions() {
     "#,
     );
     assert!(out.contains("rusty::len(") && out.contains(">= 2"), "{out}");
-    assert!(!out.contains("std::visit"), "{out}");
+    // Target the match-lowering visit form specifically — the emitted
+    // runtime prelude's to_debug_string legitimately uses std::visit for
+    // data-enum variants.
+    assert!(!out.contains("std::visit(overloaded"), "{out}");
 }
 
 #[test]
