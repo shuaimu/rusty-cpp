@@ -2400,6 +2400,22 @@ auto split_at_mut(std::span<Elem, Extent> span, Mid mid) {
     return std::make_tuple(span.first(mid_index), span.subspan(mid_index));
 }
 
+// Rust `[T]::swap(i, j)` — member-first (port types spell their own),
+// else swap through the mutable span view. Named slice_swap so it can
+// never collide with the generic rusty::swap(T&, T&) in ADL.
+template<typename Container, typename I, typename J>
+void slice_swap(Container& container, I i, J j) {
+    if constexpr (requires {
+                      container.swap(static_cast<size_t>(i), static_cast<size_t>(j));
+                  }) {
+        container.swap(static_cast<size_t>(i), static_cast<size_t>(j));
+    } else {
+        auto span = slice_full(container);
+        std::swap(
+            span[detail::checked_index(i)], span[detail::checked_index(j)]);
+    }
+}
+
 template<typename Container, typename Mid>
 requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
 auto split_at_mut(Container& container, Mid mid) {
@@ -2511,6 +2527,12 @@ public:
         iterator& operator++() {
             ++index_;
             return *this;
+        }
+
+        // Both comparison directions: iterator-adapter chains synthesize
+        // `==` from ranges machinery, which needs the explicit operator.
+        bool operator==(const iterator& other) const {
+            return index_ == other.index_;
         }
 
         bool operator!=(const iterator& other) const {

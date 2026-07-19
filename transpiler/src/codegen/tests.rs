@@ -15360,6 +15360,39 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_vec_macro_elements_are_expression_lowered() {
+    // vec! elements were raw-token spliced — Rust literal suffixes (104u8)
+    // and unlowered exprs (String::from(..)) leaked into C++.
+    let out = transpile_str("pub fn f() { let v = vec![104u8, 105, 33]; let _ = v.len(); }");
+    assert!(
+        !out.contains("104u8"),
+        "vec! element suffixes must not leak:\n{out}"
+    );
+    assert!(
+        out.contains("static_cast<uint8_t>(104)"),
+        "vec! elements must lower as real expressions:\n{out}"
+    );
+}
+
+#[test]
+fn test_slice_swap_routes_to_free_fn() {
+    // Typed arrays keep the existing bounds-checked IIFE lowering; the
+    // broken shape was UNRESOLVED receivers (repeat arrays, Vec locals)
+    // falling through to a nonexistent member call.
+    let out = transpile_str(
+        "pub fn f() { let mut v = [0i32; 4]; v.swap(0, 3); let _ = v; }",
+    );
+    assert!(
+        out.contains("rusty::slice_swap(") || out.contains("rusty::mem::swap("),
+        "slice swap must route to a real lowering:\n{out}"
+    );
+    assert!(
+        !out.contains("v.swap("),
+        "no member call on the array carrier:\n{out}"
+    );
+}
+
+#[test]
 fn test_option_filter_after_map_chain_keeps_member_call() {
     // `opt.map(f).filter(p)` mis-routed to the iterator-adapter free fn
     // rusty::filter, which has no Option branch.

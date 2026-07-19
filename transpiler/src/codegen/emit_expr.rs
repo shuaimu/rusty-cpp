@@ -2368,10 +2368,22 @@ impl CodeGen {
             "writeln" => self.lower_write_macro(&tokens, true),
             "dbg" => self.lower_dbg_macro(&tokens),
             "vec" => {
-                // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}
-                // We can't infer T at this level, so use initializer list
-                let items = self.convert_macro_tokens(&tokens);
-                format!("rusty::Vec{{{}}}", items)
+                // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}. Elements are
+                // parsed and lowered as REAL expressions — the raw token
+                // pass-through leaked Rust literal suffixes (104u8) and
+                // unlowered element exprs (String::from(..)).
+                if let Ok(arr) = syn::parse_str::<syn::ExprArray>(&format!("[{}]", tokens)) {
+                    let items: Vec<String> = arr
+                        .elems
+                        .iter()
+                        .map(|e| self.emit_expr_maybe_move(e))
+                        .collect();
+                    format!("rusty::Vec{{{}}}", items.join(", "))
+                } else {
+                    // Repeat form / unparseable — keep the legacy path.
+                    let items = self.convert_macro_tokens(&tokens);
+                    format!("rusty::Vec{{{}}}", items)
+                }
             }
             "String::from" => {
                 format!(
@@ -9768,6 +9780,26 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::str_runtime::rfind({}, {})", receiver, args[0]);
+        }
+        // Rust `[T]::swap(i, j)` — std::array/span have no such member.
+        // Two-arg gate keeps RefCell::swap(&other) and mem-swap shapes out.
+        if method_name == "swap"
+            && args.len() == 2
+            && (self.should_lower_slice_deref_method_call(&mc.receiver)
+                || self
+                    .infer_simple_expr_type(&mc.receiver)
+                    .as_ref()
+                    .map(|ty| self.peel_reference_paren_group_type(ty))
+                    .is_some_and(|ty| matches!(ty, syn::Type::Array(_)))
+                || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::slice_swap({}, {}, {})", receiver, args[0], args[1]);
         }
         if matches!(method_name.as_str(), "split_at" | "split_at_mut") && args.len() == 1 {
             if method_name == "split_at"
