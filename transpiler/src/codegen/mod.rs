@@ -23788,6 +23788,18 @@ impl CodeGen {
                 {
                     return true;
                 }
+                // Rust {:e}/{:E} (LowerExp — bare exponent, shortest
+                // mantissa) and the {:#o}/{:#X} alternate prefixes have no
+                // std::format equivalent — route smart for the helper wraps.
+                if let Some((_, spec)) = inner.split_once(':')
+                    && !spec.contains('$')
+                    && (spec.ends_with('e')
+                        || spec.ends_with('E')
+                        || (spec.contains('#')
+                            && (spec.ends_with('o') || spec.ends_with('X'))))
+                {
+                    return true;
+                }
                 i = j + 1;
                 continue;
             }
@@ -23892,6 +23904,20 @@ impl CodeGen {
             .format_literal_default_spec_arg_positions(&fmt_literal, parts.len().saturating_sub(1));
         if parts.iter().skip(1).enumerate().any(|(idx, arg)| {
             default_positions.contains(&idx) && self.format_arg_is_known_float_like(arg.trim())
+        }) {
+            return true;
+        }
+        // Integer args under radix specs must route smart: Rust {:x}/{:o}/
+        // {:b} print negative signed values as two's-complement bits, C++
+        // as sign-magnitude — the smart path casts to unsigned bits.
+        let spec_strings = self
+            .format_literal_spec_strings(&fmt_literal, parts.len().saturating_sub(1));
+        if spec_strings.iter().any(|(idx, spec)| {
+            !spec.contains('$')
+                && matches!(spec.chars().last(), Some('x' | 'X' | 'o' | 'b'))
+                && parts
+                    .get(idx + 1)
+                    .is_some_and(|arg| self.format_arg_is_known_integer_like(arg.trim()))
         }) {
             return true;
         }
@@ -24031,6 +24057,9 @@ impl CodeGen {
         let mut native_arg_conversions: HashMap<usize, char> = HashMap::new();
         let mut native_passthrough_arg_positions: HashSet<usize> = HashSet::new();
         let mut float_display_arg_positions: HashSet<usize> = HashSet::new();
+        let mut radix_bits_arg_positions: HashSet<usize> = HashSet::new();
+        let mut alt_radix_arg_positions: HashMap<usize, (u32, bool, usize)> = HashMap::new();
+        let mut sci_arg_positions: HashMap<usize, (bool, i32)> = HashMap::new();
         // Explicit trailing args; inline captures are appended after being
         // pulled out of the literal.
         let mut args: Vec<String> = parts.iter().skip(1).map(|s| s.trim().to_string()).collect();
@@ -24066,9 +24095,67 @@ impl CodeGen {
                 .intersection(&float_arg_positions)
                 .copied()
                 .collect();
+            // Radix/scientific spec divergences (helper-wrapped args):
+            // signed radix needs two's-complement bits; {:#o}/{:#X} need
+            // Rust's prefixes; {:e}/{:E} need the bare-exponent form.
+            let spec_strings = self.format_literal_spec_strings(&fmt_literal, args.len());
+            for (idx, spec) in &spec_strings {
+                if spec.contains('$') {
+                    continue;
+                }
+                match spec.chars().last() {
+                    Some(ty @ ('x' | 'X' | 'o' | 'b')) => {
+                        if !args
+                            .get(*idx)
+                            .is_some_and(|a| self.format_arg_is_known_integer_like(a.trim()))
+                        {
+                            continue;
+                        }
+                        if spec.contains('#') && matches!(ty, 'o' | 'X') {
+                            let base = if ty == 'o' { 8u32 } else { 16u32 };
+                            // Zero-pad width from the `#0N` shape — the pad
+                            // goes between prefix and digits.
+                            let zero_w = spec
+                                .split('#')
+                                .nth(1)
+                                .and_then(|rest| rest.strip_prefix('0'))
+                                .map(|rest| {
+                                    rest.chars()
+                                        .take_while(|c| c.is_ascii_digit())
+                                        .collect::<String>()
+                                })
+                                .and_then(|d| d.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            alt_radix_arg_positions.insert(*idx, (base, ty == 'X', zero_w));
+                        } else {
+                            radix_bits_arg_positions.insert(*idx);
+                        }
+                    }
+                    Some(ty @ ('e' | 'E')) => {
+                        let prec = spec
+                            .split('.')
+                            .nth(1)
+                            .map(|rest| {
+                                rest.chars()
+                                    .take_while(|c| c.is_ascii_digit())
+                                    .collect::<String>()
+                            })
+                            .and_then(|d| d.parse::<i32>().ok())
+                            .unwrap_or(-1);
+                        sci_arg_positions.insert(*idx, (ty == 'E', prec));
+                    }
+                    _ => {}
+                }
+            }
+            let stripped_spec_positions: HashSet<usize> = alt_radix_arg_positions
+                .keys()
+                .chain(sci_arg_positions.keys())
+                .copied()
+                .collect();
             let rewritten = self.rewrite_rust_format_literal_for_cpp_with_float_args(
                 &fmt_literal,
                 &float_arg_positions,
+                &stripped_spec_positions,
             );
             let escaped = escape_cpp_string_literal_content(&rewritten);
             format!("\"{}\"", escaped)
@@ -24089,6 +24176,20 @@ impl CodeGen {
                         format!("rusty::to_debug_string({})", lowered)
                     } else if float_display_arg_positions.contains(&arg_idx) {
                         format!("rusty::detail::float_display_string({})", lowered)
+                    } else if let Some((base, upper, zero_w)) =
+                        alt_radix_arg_positions.get(&arg_idx).copied()
+                    {
+                        format!(
+                            "rusty::detail::alt_radix_string({}, {}, {}, {})",
+                            lowered, base, upper, zero_w
+                        )
+                    } else if let Some((upper, prec)) = sci_arg_positions.get(&arg_idx).copied() {
+                        format!(
+                            "rusty::detail::scientific_string({}, {}, {})",
+                            lowered, upper, prec
+                        )
+                    } else if radix_bits_arg_positions.contains(&arg_idx) {
+                        format!("rusty::detail::to_unsigned_bits({})", lowered)
                     } else if let Some(conversion) = native_arg_conversions.get(&arg_idx).copied() {
                         if self.format_conversion_requires_numeric_bridge(conversion)
                             && !self.format_arg_is_known_integer_like(arg.trim())
@@ -24217,13 +24318,18 @@ impl CodeGen {
     /// Normalize Rust-only debug spec suffixes inside a format literal so C++ std::format
     /// can consume the same placeholder structure.
     fn rewrite_rust_format_literal_for_cpp(&self, fmt: &str) -> String {
-        self.rewrite_rust_format_literal_for_cpp_with_float_args(fmt, &HashSet::new())
+        self.rewrite_rust_format_literal_for_cpp_with_float_args(
+            fmt,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
     }
 
     fn rewrite_rust_format_literal_for_cpp_with_float_args(
         &self,
         fmt: &str,
         float_arg_positions: &HashSet<usize>,
+        stripped_spec_positions: &HashSet<usize>,
     ) -> String {
         let chars: Vec<char> = fmt.chars().collect();
         let mut out = String::with_capacity(chars.len());
@@ -24261,6 +24367,11 @@ impl CodeGen {
                     prefix.to_string()
                 } else if let Some(prefix) = inner.strip_suffix(":?") {
                     prefix.to_string()
+                } else if stripped_spec_positions.contains(&arg_idx) {
+                    // The arg is helper-wrapped ({:#o}/{:#X}/{:e}) — the
+                    // helper reproduces the whole formatting, so the spec
+                    // must not apply again to its string result.
+                    inner.split(':').next().unwrap_or("").to_string()
                 } else {
                     inner
                 };
@@ -24292,6 +24403,58 @@ impl CodeGen {
             i += 1;
         }
         out
+    }
+
+    /// Spec strings (the text after `:`) keyed by referenced arg position.
+    /// Positions referenced by bare placeholders are absent.
+    fn format_literal_spec_strings(
+        &self,
+        fmt: &str,
+        arg_count: usize,
+    ) -> HashMap<usize, String> {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut specs = HashMap::new();
+        let mut next_implicit_idx = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let arg_part = inner.split(':').next().unwrap_or("").trim();
+                let arg_idx = if arg_part.is_empty() {
+                    let idx = next_implicit_idx;
+                    next_implicit_idx += 1;
+                    Some(idx)
+                } else if arg_part.chars().all(|c| c.is_ascii_digit()) {
+                    arg_part.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                if let Some((_, spec)) = inner.split_once(':')
+                    && arg_idx.is_some_and(|idx| idx < arg_count)
+                {
+                    specs.insert(arg_idx.expect("checked is_some"), spec.to_string());
+                }
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        specs
     }
 
     /// Arg positions referenced by a BARE placeholder (`{}`, `{0}` — no `:`

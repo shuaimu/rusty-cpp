@@ -15360,6 +15360,44 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_signed_radix_args_cast_to_unsigned_bits() {
+    // Rust {:x}/{:o}/{:b} print negative signed ints as two's-complement
+    // bits (i32 -255 → ffffff01); C++ std::format prints '-ff'.
+    let out = transpile_str(
+        "pub fn f() { let i: i32 = -255; println!(\"{:x} {:b}\", i, i); }",
+    );
+    assert!(
+        out.contains("rusty::detail::to_unsigned_bits("),
+        "signed radix args must cast to unsigned bits:\n{out}"
+    );
+}
+
+#[test]
+fn test_alt_radix_and_scientific_specs_route_to_helpers() {
+    // {:#X} must keep a lowercase '0x' prefix with uppercase digits and
+    // {:#o} needs Rust's '0o' prefix ('0o0' for zero) — std::format
+    // uppercases the prefix and emits bare-'0' octal.
+    let out = transpile_str(
+        "pub fn f() { let u: u32 = 255; println!(\"{:#X} {:#o}\", u, u); }",
+    );
+    assert!(
+        out.contains("rusty::detail::alt_radix_string("),
+        "{{:#X}}/{{:#o}} must route to the prefix helper:\n{out}"
+    );
+    // {:e} is Rust LowerExp — shortest mantissa, bare exponent.
+    let out2 = transpile_str("pub fn g(a: f64) { println!(\"{:e} {:.2E}\", a, a); }");
+    assert!(
+        out2.contains("rusty::detail::scientific_string(") && out2.contains(", true, 2)"),
+        "{{:e}}/{{:.2E}} must route to the scientific helper with precision:\n{out2}"
+    );
+    // Plain {:x} on unsigned keeps the native spec (no helper string).
+    assert!(
+        !out.contains("scientific_string"),
+        "radix-only case must not touch the scientific helper:\n{out}"
+    );
+}
+
+#[test]
 fn test_raw_identifiers_strip_r_prefix() {
     // `r#match` stringifies WITH the prefix — `#` is not a valid C++
     // identifier character; it leaked into decls, definitions and calls.
@@ -16636,8 +16674,19 @@ fn test_leaf105405_format_args_hex_spec_uses_native_numeric_argument() {
         }
         "#,
     );
-    assert!(out.contains("std::format(\"{0:X}\", v)"));
-    assert!(out.contains("std::format(\"{0:x}\", v)"));
+    // The unsigned-bits wrap is identity for usize (added for the Rust
+    // two's-complement semantics of SIGNED radix args) — accept either form;
+    // what matters is the native spec survives and no to_string stringifies.
+    assert!(
+        out.contains("std::format(\"{0:X}\", v)")
+            || out.contains("std::format(\"{0:X}\", rusty::detail::to_unsigned_bits(v))"),
+        "{out}"
+    );
+    assert!(
+        out.contains("std::format(\"{0:x}\", v)")
+            || out.contains("std::format(\"{0:x}\", rusty::detail::to_unsigned_bits(v))"),
+        "{out}"
+    );
     assert!(!out.contains("std::format(\"{0:X}\", rusty::to_string(v))"));
     assert!(!out.contains("std::format(\"{0:x}\", rusty::to_string(v))"));
 }

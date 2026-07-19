@@ -448,6 +448,86 @@ namespace rusty {
             }
             return neg ? "-" + out : out;
         }
+
+        // Two's-complement bits for Rust radix specs on signed ints: Rust
+        // {:x}/{:o}/{:b} reinterpret the bits as the same-width unsigned
+        // (i32 -255 → ffffff01); C++ std::format prints a minus sign (-ff).
+        template<typename T>
+        requires std::is_integral_v<std::remove_cvref_t<T>>
+        inline auto to_unsigned_bits(T v) {
+            return static_cast<std::make_unsigned_t<std::remove_cvref_t<T>>>(v);
+        }
+
+        // Rust `{:#o}` / `{:#X}` alternate forms: '0o' prefix (C++ emits a
+        // bare leading '0', and '0' — not '0o0' — for zero), and a lowercase
+        // '0x' prefix with UPPERCASE digits for {:#X} (C++ uppercases the
+        // prefix too). Zero-pad width ({:#06X}) inserts BETWEEN prefix and
+        // digits, as in Rust.
+        template<typename T>
+        requires std::is_integral_v<std::remove_cvref_t<T>>
+        inline std::string alt_radix_string(
+            T v, unsigned base, bool upper, std::size_t zero_pad_width) {
+            using U = std::make_unsigned_t<std::remove_cvref_t<T>>;
+            U u = static_cast<U>(v);
+            const char* prefix = base == 8 ? "0o" : base == 2 ? "0b" : "0x";
+            std::string digits;
+            if (u == 0) {
+                digits = "0";
+            }
+            while (u != 0) {
+                unsigned d = static_cast<unsigned>(u % base);
+                digits.push_back(
+                    d < 10 ? char('0' + d) : char((upper ? 'A' : 'a') + (d - 10)));
+                u = static_cast<U>(u / base);
+            }
+            std::reverse(digits.begin(), digits.end());
+            std::string out = prefix;
+            if (zero_pad_width > out.size() + digits.size()) {
+                out.append(zero_pad_width - out.size() - digits.size(), '0');
+            }
+            out += digits;
+            return out;
+        }
+
+        // Rust `{:e}`/`{:E}` (LowerExp/UpperExp): shortest (or given-
+        // precision) mantissa and a BARE exponent — no '+', no zero padding
+        // ('1.2345e3', '-3e0'). std::to_chars' scientific form is exactly
+        // this shape; C++ '%e' always signs and pads the exponent.
+        template<typename F>
+        requires std::is_floating_point_v<std::remove_cvref_t<F>>
+        inline std::string scientific_string(F value_in, bool upper, int precision) {
+            auto value = static_cast<std::remove_cvref_t<F>>(value_in);
+            char buf[64];
+            auto res = precision < 0
+                ? std::to_chars(buf, buf + sizeof(buf), value,
+                                std::chars_format::scientific)
+                : std::to_chars(buf, buf + sizeof(buf), value,
+                                std::chars_format::scientific, precision);
+            std::string s(buf, res.ptr);
+            // Normalize the exponent to Rust's bare form: this stdlib's
+            // to_chars emits printf-style 'e+03' — drop the '+' and the
+            // leading zeros (keeping at least one digit).
+            auto epos = s.find('e');
+            if (epos != std::string::npos) {
+                std::size_t k = epos + 1;
+                const bool exp_neg = k < s.size() && s[k] == '-';
+                std::size_t digits_start =
+                    k + ((exp_neg || (k < s.size() && s[k] == '+')) ? 1 : 0);
+                std::size_t z = digits_start;
+                while (z + 1 < s.size() && s[z] == '0') {
+                    ++z;
+                }
+                s = s.substr(0, epos + 1) + (exp_neg ? "-" : "") + s.substr(z);
+            }
+            if (upper) {
+                for (char& c : s) {
+                    if (c == 'e') {
+                        c = 'E';
+                    }
+                }
+            }
+            return s;
+        }
     } // namespace detail
 
     // String-view compatibility helper for transpiled Rust `&str` coercions.
