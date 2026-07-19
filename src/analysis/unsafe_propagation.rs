@@ -282,8 +282,7 @@ fn collect_lambda_body_unsafe_errors_in_expression(
         | Expression::Cast { inner, .. }
         | Expression::MemberAccess { object: inner, .. }
         | Expression::New(inner)
-        | Expression::Delete(inner)
-        | Expression::PointerArithmetic { pointer: inner, .. } => {
+        | Expression::Delete(inner) => {
             errors.extend(collect_lambda_body_unsafe_errors_in_expression(
                 inner,
                 safety_context,
@@ -292,6 +291,28 @@ fn collect_lambda_body_unsafe_errors_in_expression(
                 template_params,
                 callable_params,
             ));
+        }
+        Expression::PointerArithmetic {
+            pointer, offset, ..
+        } => {
+            errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                pointer,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ));
+            if let Some(offset) = offset {
+                errors.extend(collect_lambda_body_unsafe_errors_in_expression(
+                    offset,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ));
+            }
         }
         Expression::ArraySubscript { array, index } => {
             errors.extend(collect_lambda_body_unsafe_errors_in_expression(
@@ -965,6 +986,28 @@ fn find_unsafe_function_call_with_external(
                 return Some(unsafe_func);
             }
         }
+        Expression::ArraySubscript { array, index } => {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                array,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ) {
+                return Some(unsafe_func);
+            }
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                index,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ) {
+                return Some(unsafe_func);
+            }
+        }
         Expression::Move { inner, .. }
         | Expression::Dereference(inner)
         | Expression::AddressOf(inner)
@@ -980,6 +1023,32 @@ fn find_unsafe_function_call_with_external(
                 callable_params,
             ) {
                 return Some(unsafe_func);
+            }
+        }
+        Expression::PointerArithmetic {
+            pointer, offset, ..
+        } => {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                pointer,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ) {
+                return Some(unsafe_func);
+            }
+            if let Some(offset) = offset {
+                if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                    offset,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ) {
+                    return Some(unsafe_func);
+                }
             }
         }
         _ => {}

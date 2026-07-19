@@ -672,6 +672,7 @@ pub enum Expression {
     PointerArithmetic {
         pointer: Box<Expression>,
         op: String,
+        offset: Option<Box<Expression>>,
     },
     /// Array subscript expression (arr[i], data[idx])
     /// Used for tracking array bounds checking
@@ -3559,6 +3560,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(left),
                                 op: op.clone(),
+                                offset: Some(Box::new(right)),
                             });
                         }
                         // n + p (right is pointer, only for + operator)
@@ -3572,6 +3574,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(right),
                                 op: op.clone(),
+                                offset: Some(Box::new(left)),
                             });
                         }
                         // p - q (pointer difference)
@@ -3584,6 +3587,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(left),
                                 op: "pointer difference".to_string(),
+                                offset: Some(Box::new(right)),
                             });
                         }
                     }
@@ -3719,6 +3723,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 return Some(Expression::PointerArithmetic {
                                     pointer: Box::new(inner),
                                     op: "++/--".to_string(),
+                                    offset: None,
                                 });
                             }
                             // Otherwise, it's a non-pointer unary operator (!, ~, -, +)
@@ -4050,6 +4055,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(array),
                                 op: "[]".to_string(),
+                                offset: Some(Box::new(index)),
                             });
                         }
                     }

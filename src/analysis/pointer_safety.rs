@@ -1480,6 +1480,7 @@ mod tests {
         let expr = Expression::PointerArithmetic {
             pointer: Box::new(Expression::Variable("ptr".to_string())),
             op: "+".to_string(),
+            offset: None,
         };
         assert_eq!(
             contains_pointer_operation(&expr, &empty_safe_vars()),
@@ -1494,6 +1495,7 @@ mod tests {
             expr: Expression::PointerArithmetic {
                 pointer: Box::new(Expression::Variable("ptr".to_string())),
                 op: "++".to_string(),
+                offset: None,
             },
             location: SourceLocation {
                 file: "test.cpp".to_string(),
@@ -1516,6 +1518,7 @@ mod tests {
             expr: Expression::PointerArithmetic {
                 pointer: Box::new(Expression::Variable("ptr".to_string())),
                 op: "++".to_string(),
+                offset: None,
             },
             location: SourceLocation {
                 file: "test.cpp".to_string(),
