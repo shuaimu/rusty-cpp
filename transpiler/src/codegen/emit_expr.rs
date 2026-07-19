@@ -7110,6 +7110,12 @@ impl CodeGen {
                         receiver, arg, builtin
                     );
                 }
+                if is_int
+                    && mc.args.is_empty()
+                    && matches!(method.as_str(), "overflowing_neg" | "overflowing_abs")
+                {
+                    return format!("rusty::{}({})", method, receiver);
+                }
                 if is_int && mc.args.len() == 1 && method == "abs_diff" {
                     // Returns the UNSIGNED absolute difference; compute in the
                     // unsigned domain to avoid signed overflow.

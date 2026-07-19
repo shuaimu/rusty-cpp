@@ -15357,6 +15357,111 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_float_to_int_as_cast_saturates() {
+    // Rust float→int `as` casts saturate (clamp to MIN/MAX, NaN → 0); a bare
+    // static_cast is UB on out-of-range and NaN inputs.
+    let out = transpile_str("pub fn f(x: f64) -> i32 { x as i32 }");
+    assert!(
+        out.contains("rusty::float_to_int_cast<int32_t>("),
+        "float→int cast must route through the saturating helper:\n{out}"
+    );
+    // Int→int casts keep the plain static_cast.
+    let out2 = transpile_str("pub fn g(x: i64) -> i32 { x as i32 }");
+    assert!(
+        out2.contains("static_cast<int32_t>(") && !out2.contains("float_to_int_cast"),
+        "int→int casts must stay static_cast:\n{out2}"
+    );
+}
+
+#[test]
+fn test_overflowing_neg_abs_and_const_path_receivers() {
+    // overflowing_abs/neg had no lowering at all (member call on a primitive),
+    // and the overflowing_add family skipped assoc-const receivers because
+    // `i32::MAX` did not infer as i32.
+    let out = transpile_str(
+        "pub fn f() { let x: i32 = -5; let a = x.overflowing_neg(); let b = x.overflowing_abs(); }",
+    );
+    assert!(
+        out.contains("rusty::overflowing_neg(") && out.contains("rusty::overflowing_abs("),
+        "overflowing_neg/abs must route to the num.hpp helpers:\n{out}"
+    );
+    let out2 = transpile_str("pub fn g() { let r = i32::MAX.overflowing_add(1); }");
+    assert!(
+        out2.contains("__builtin_add_overflow"),
+        "const-path receiver must reach the overflowing_add lowering:\n{out2}"
+    );
+}
+
+#[test]
+fn test_format_args_with_const_paths_and_suffixed_literals_lower() {
+    // The dumb token pass-through leaked `f64 :: MIN` / `0u32` / `2.5f64`
+    // verbatim into the C++ format call — no such C++ spellings.
+    let out = transpile_str(
+        "pub fn f(e: f64) { println!(\"{}\", e < f64::MIN); println!(\"{}\", i32::MAX); }",
+    );
+    assert!(
+        !out.contains("f64 :: MIN") && !out.contains("i32 :: MAX"),
+        "const paths leaked into format args:\n{out}"
+    );
+    assert!(
+        out.contains("std::numeric_limits<double>::lowest()"),
+        "f64::MIN must lower to numeric_limits:\n{out}"
+    );
+    let out2 = transpile_str("pub fn g() { println!(\"{:x}\", 255u32); println!(\"{}\", 2.5f64); }");
+    assert!(
+        !out2.contains("255u32") && !out2.contains("2.5f64"),
+        "Rust literal suffixes leaked into format args:\n{out2}"
+    );
+}
+
+#[test]
+fn test_float_rem_in_format_arg_routes_to_fmod() {
+    let out = transpile_str(
+        "pub fn f() { let e: f64 = 10.0; let f2: f64 = 3.0; println!(\"{}\", e % f2); }",
+    );
+    assert!(
+        out.contains("std::fmod("),
+        "float % in a format arg must lower to std::fmod:\n{out}"
+    );
+}
+
+#[test]
+fn test_i128_min_decimal_literal_routes_through_parse_helper() {
+    // i128::MIN spelled as a decimal literal exceeds every C++ literal width;
+    // verbatim emission was 'integer literal is too large'.
+    let out = transpile_str(
+        "pub fn f() { let c: i128 = -170141183460469231731687303715884105728; let _ = c; }",
+    );
+    assert!(
+        out.contains("parse_decimal_int_literal<unsigned __int128>(\"170141183460469231731687303715884105728\")"),
+        "i128::MIN magnitude must route through the parse helper:\n{out}"
+    );
+}
+
+#[test]
+fn test_bare_float_display_arg_wraps_rust_style_helper() {
+    // std::format prints 'nan' and switches to scientific for large floats;
+    // Rust Display prints 'NaN' and never uses scientific notation.
+    let out = transpile_str("pub fn f(x: f64) { println!(\"{}\", x); }");
+    assert!(
+        out.contains("rusty::detail::float_display_string("),
+        "bare-{{}} float args must wrap the Rust-style Display helper:\n{out}"
+    );
+    // Precision-spec'd floats keep the numeric path (the 'f' type char).
+    let out2 = transpile_str("pub fn g(x: f64) { println!(\"{:.2}\", x); }");
+    assert!(
+        !out2.contains("float_display_string"),
+        "spec'd float args must not wrap the Display helper:\n{out2}"
+    );
+    // Integer args stay on the dumb path entirely.
+    let out3 = transpile_str("pub fn h(x: i32) { println!(\"{}\", x); }");
+    assert!(
+        !out3.contains("float_display_string"),
+        "integer args must not wrap the float helper:\n{out3}"
+    );
+}
+
+#[test]
 fn test_float_precision_specs_gain_fixed_notation_type_char() {
     let out = transpile_str(
         r#"

@@ -906,7 +906,7 @@ template<typename T>
 requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
 constexpr std::remove_cvref_t<T> wrapping_neg(T value) {
     using Raw = std::remove_cvref_t<T>;
-    using Unsigned = std::make_unsigned_t<Raw>;
+    using Unsigned = wrapping_unsigned_t<Raw>;
     return static_cast<Raw>(Unsigned(0) - static_cast<Unsigned>(value));
 }
 
@@ -914,10 +914,85 @@ template<typename T>
 requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
 constexpr std::remove_cvref_t<T> wrapping_abs(T value) {
     using Raw = std::remove_cvref_t<T>;
-    if constexpr (std::is_signed_v<Raw>) {
+    if constexpr (std::is_signed_v<Raw> || std::is_same_v<Raw, __int128>) {
         return value < static_cast<Raw>(0) ? wrapping_neg(value) : static_cast<Raw>(value);
     } else {
         return static_cast<Raw>(value);
+    }
+}
+
+// Rust float→int `as` cast: SATURATES (out-of-range clamps to the target's
+// MIN/MAX, NaN → 0) where a bare static_cast is UB on both. The range bound
+// 2^(bits[-1]) is an exact power of two in any float format; every value at
+// or above it (or below the signed lower bound) is out of range, and every
+// value strictly inside truncates in range (floats in (MIN-1, MIN] truncate
+// to MIN). For float→u128 the bound 2^128 overflows to +inf, which still
+// classifies correctly: no finite float exceeds u128::MAX. Target MIN/MAX
+// are computed bitwise so __int128 works without numeric_limits.
+template<typename To, typename From>
+requires(
+    std::is_floating_point_v<std::remove_cvref_t<From>>
+    && num::is_nonzero_integral_v<To>)
+constexpr To float_to_int_cast(From value_in) {
+    using F = std::remove_cvref_t<From>;
+    F value = static_cast<F>(value_in);
+    if (value != value) {
+        return To(0);
+    }
+    using U = wrapping_unsigned_t<To>;
+    constexpr bool to_signed = std::is_signed_v<To> || std::is_same_v<To, __int128>;
+    constexpr To to_max = to_signed ? To(U(~U(0)) >> 1) : To(~U(0));
+    constexpr To to_min = to_signed ? To(To(0) - to_max - To(1)) : To(0);
+    constexpr int bound_bits =
+        to_signed ? int(sizeof(To) * 8) - 1 : int(sizeof(To) * 8);
+    F upper = F(1);
+    for (int i = 0; i < bound_bits; ++i) {
+        upper *= F(2);
+    }
+    if (value >= upper) {
+        return to_max;
+    }
+    if constexpr (to_signed) {
+        if (value < -upper) {
+            return to_min;
+        }
+    } else {
+        if (value < F(0)) {
+            return To(0);
+        }
+    }
+    return static_cast<To>(value);
+}
+
+// Rust `overflowing_neg` — (wrapping_neg(self), overflowed). Signed types
+// overflow only at MIN (the one value whose wrapped negation is itself);
+// unsigned types overflow for every nonzero value. std::is_signed_v is
+// false for __int128 under strict C++23, so it is special-cased.
+template<typename T>
+requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
+constexpr auto overflowing_neg(T value) {
+    using Raw = std::remove_cvref_t<T>;
+    Raw wrapped = wrapping_neg(value);
+    bool overflowed;
+    if constexpr (std::is_signed_v<Raw> || std::is_same_v<Raw, __int128>) {
+        overflowed = value != Raw(0) && wrapped == value;
+    } else {
+        overflowed = value != Raw(0);
+    }
+    return std::make_tuple(wrapped, overflowed);
+}
+
+// Rust `overflowing_abs` — (wrapping_abs(self), self == MIN). Only MIN's
+// wrapped absolute value stays negative, so that is the overflow test.
+template<typename T>
+requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
+constexpr auto overflowing_abs(T value) {
+    using Raw = std::remove_cvref_t<T>;
+    if constexpr (std::is_signed_v<Raw> || std::is_same_v<Raw, __int128>) {
+        Raw wrapped = wrapping_abs(value);
+        return std::make_tuple(wrapped, wrapped < Raw(0));
+    } else {
+        return std::make_tuple(static_cast<Raw>(value), false);
     }
 }
 

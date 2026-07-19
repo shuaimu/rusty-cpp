@@ -380,6 +380,74 @@ namespace rusty {
                 return static_cast<__int128>(value);
             }
         }
+
+        // Rust Display for floats: shortest round-trip digits, NEVER
+        // scientific notation, and NaN spelled 'NaN'. std::to_chars'
+        // shortest form switches to exponent notation for large/small
+        // magnitudes ('1e+21') and std::format spells 'nan'; expand the
+        // exponent form positionally from the shortest digits.
+        template<typename F>
+        requires std::is_floating_point_v<std::remove_cvref_t<F>>
+        inline std::string float_display_string(F value_in) {
+            auto value = static_cast<std::remove_cvref_t<F>>(value_in);
+            if (std::isnan(value)) {
+                return "NaN";
+            }
+            if (std::isinf(value)) {
+                return std::signbit(value) ? "-inf" : "inf";
+            }
+            char buf[64];
+            auto res = std::to_chars(buf, buf + sizeof(buf), value);
+            std::string s(buf, res.ptr);
+            auto epos = s.find('e');
+            if (epos == std::string::npos) {
+                return s;
+            }
+            std::string mant = s.substr(0, epos);
+            int exp = 0;
+            bool exp_neg = false;
+            for (std::size_t k = epos + 1; k < s.size(); ++k) {
+                if (s[k] == '-') {
+                    exp_neg = true;
+                } else if (s[k] != '+') {
+                    exp = exp * 10 + (s[k] - '0');
+                }
+            }
+            if (exp_neg) {
+                exp = -exp;
+            }
+            bool neg = !mant.empty() && mant[0] == '-';
+            if (neg) {
+                mant.erase(0, 1);
+            }
+            std::string digits;
+            int frac_len = 0;
+            bool saw_dot = false;
+            for (char c : mant) {
+                if (c == '.') {
+                    saw_dot = true;
+                    continue;
+                }
+                digits.push_back(c);
+                if (saw_dot) {
+                    ++frac_len;
+                }
+            }
+            const int shift = exp - frac_len; // value == digits * 10^shift
+            std::string out;
+            if (shift >= 0) {
+                out = digits + std::string(static_cast<std::size_t>(shift), '0');
+            } else {
+                const int point = static_cast<int>(digits.size()) + shift;
+                if (point > 0) {
+                    out = digits.substr(0, static_cast<std::size_t>(point)) + "."
+                        + digits.substr(static_cast<std::size_t>(point));
+                } else {
+                    out = "0." + std::string(static_cast<std::size_t>(-point), '0') + digits;
+                }
+            }
+            return neg ? "-" + out : out;
+        }
     } // namespace detail
 
     // String-view compatibility helper for transpiled Rust `&str` coercions.

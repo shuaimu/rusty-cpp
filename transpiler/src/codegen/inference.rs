@@ -6316,6 +6316,41 @@ impl CodeGen {
                 if path.path.segments.is_empty() {
                     return None;
                 }
+                // Primitive associated consts type as their owner (`i32::MAX`
+                // → i32) so receiver-type-gated method lowerings (overflowing_*,
+                // clamp, signum, …) fire on const-path receivers too. BITS-like
+                // counts are u32 and the exponent bounds are i32, as in Rust.
+                if path.path.segments.len() == 2 {
+                    let owner = path.path.segments[0].ident.to_string();
+                    let member = path.path.segments[1].ident.to_string();
+                    if matches!(
+                        owner.as_str(),
+                        "i8" | "i16"
+                            | "i32"
+                            | "i64"
+                            | "i128"
+                            | "isize"
+                            | "u8"
+                            | "u16"
+                            | "u32"
+                            | "u64"
+                            | "u128"
+                            | "usize"
+                            | "f32"
+                            | "f64"
+                    ) {
+                        let ty_name: Option<&str> = match member.as_str() {
+                            "MAX" | "MIN" | "INFINITY" | "NEG_INFINITY" | "NAN" | "EPSILON"
+                            | "MIN_POSITIVE" => Some(owner.as_str()),
+                            "BITS" | "DIGITS" | "MANTISSA_DIGITS" | "MAX_DIGITS10" => Some("u32"),
+                            "MIN_10_EXP" | "MAX_10_EXP" | "MIN_EXP" | "MAX_EXP" => Some("i32"),
+                            _ => None,
+                        };
+                        if let Some(name) = ty_name {
+                            return syn::parse_str::<syn::Type>(name).ok();
+                        }
+                    }
+                }
                 if path.path.segments.len() >= 2 {
                     let owner_segments: Vec<String> = path
                         .path

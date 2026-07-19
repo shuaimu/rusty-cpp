@@ -695,13 +695,26 @@ void rotate_right(Range&& range, size_t k) {
 template<typename A, typename B>
 constexpr auto min(A&& a, B&& b) {
     using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
-    return std::min(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
+    if constexpr (std::is_floating_point_v<C>) {
+        // Float-typed calls only ever come from f64::/f32::min (floats are
+        // not Ord, so cmp::min never instantiates with them). Rust's min
+        // ignores a one-sided NaN (IEEE minNum); std::min would return the
+        // NaN whenever it is the FIRST argument.
+        return std::fmin(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
+    } else {
+        return std::min(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
+    }
 }
 
 template<typename A, typename B>
 constexpr auto max(A&& a, B&& b) {
     using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
-    return std::max(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
+    if constexpr (std::is_floating_point_v<C>) {
+        // See min above — Rust f64::max is IEEE maxNum (NaN-ignoring).
+        return std::fmax(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
+    } else {
+        return std::max(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
+    }
 }
 
 template<typename T, typename Alloc>

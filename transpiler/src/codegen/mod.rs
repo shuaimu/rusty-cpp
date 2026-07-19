@@ -23824,11 +23824,32 @@ impl CodeGen {
         }) {
             return true;
         }
+        // Float `%` needs the std::fmod lowering — the dumb pass-through
+        // would emit the raw operator, ill-formed C++ on doubles.
+        if parts.iter().skip(1).any(|arg| {
+            let Ok(expr) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+                return false;
+            };
+            self.expr_tree_contains_float_rem(&expr)
+        }) {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
         };
-        self.format_literal_needs_smart_lowering(&lit.value())
+        let fmt_literal = lit.value();
+        // Bare-`{}` float args must route through the smart path so they can
+        // be wrapped in the Rust-style float Display helper ('NaN', never
+        // scientific notation).
+        let default_positions = self
+            .format_literal_default_spec_arg_positions(&fmt_literal, parts.len().saturating_sub(1));
+        if parts.iter().skip(1).enumerate().any(|(idx, arg)| {
+            default_positions.contains(&idx) && self.format_arg_is_known_float_like(arg.trim())
+        }) {
+            return true;
+        }
+        self.format_literal_needs_smart_lowering(&fmt_literal)
     }
 
     /// True when a format argument must be lowered through emit_expr rather
@@ -23886,6 +23907,40 @@ impl CodeGen {
             // Macros (matches!/format!/…) in arg position are raw Rust token
             // soup under the dumb pass-through — they need real lowering.
             syn::Expr::Macro(_) => true,
+            // Qualified paths leak Rust spellings verbatim (`f64 :: MIN`,
+            // `i32 :: MAX` — no such C++ names), and suffix-typed literals
+            // leak Rust suffixes (`0u32`, `2.5f64` — invalid C++ literals).
+            syn::Expr::Path(p) => p.path.segments.len() >= 2,
+            syn::Expr::Lit(l) => match &l.lit {
+                syn::Lit::Int(i) => !i.suffix().is_empty(),
+                syn::Lit::Float(f) => !f.suffix().is_empty(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// True when the expression tree contains a `%` whose operands infer as
+    /// float — that `%` must lower through std::fmod, which only emit_expr
+    /// does.
+    fn expr_tree_contains_float_rem(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Binary(b) => {
+                (matches!(b.op, syn::BinOp::Rem(_))
+                    && (self
+                        .infer_simple_expr_type(&b.left)
+                        .as_ref()
+                        .is_some_and(|ty| self.is_known_float_like_type(ty))
+                        || self
+                            .infer_simple_expr_type(&b.right)
+                            .as_ref()
+                            .is_some_and(|ty| self.is_known_float_like_type(ty))))
+                    || self.expr_tree_contains_float_rem(&b.left)
+                    || self.expr_tree_contains_float_rem(&b.right)
+            }
+            syn::Expr::Paren(p) => self.expr_tree_contains_float_rem(&p.expr),
+            syn::Expr::Group(g) => self.expr_tree_contains_float_rem(&g.expr),
+            syn::Expr::Unary(u) => self.expr_tree_contains_float_rem(&u.expr),
             _ => false,
         }
     }
@@ -23923,6 +23978,7 @@ impl CodeGen {
         let mut pretty_debug_arg_positions = HashSet::new();
         let mut native_arg_conversions: HashMap<usize, char> = HashMap::new();
         let mut native_passthrough_arg_positions: HashSet<usize> = HashSet::new();
+        let mut float_display_arg_positions: HashSet<usize> = HashSet::new();
         // Explicit trailing args; inline captures are appended after being
         // pulled out of the literal.
         let mut args: Vec<String> = parts.iter().skip(1).map(|s| s.trim().to_string()).collect();
@@ -23949,6 +24005,15 @@ impl CodeGen {
                 .filter(|(_, arg)| self.format_arg_is_known_float_like(arg))
                 .map(|(idx, _)| idx)
                 .collect();
+            // Bare-`{}` float args diverge from Rust Display under
+            // std::format ('nan' vs 'NaN'; scientific for large magnitudes
+            // where Rust always prints positionally) — wrap them in the
+            // Rust-style helper.
+            float_display_arg_positions = self
+                .format_literal_default_spec_arg_positions(&fmt_literal, args.len())
+                .intersection(&float_arg_positions)
+                .copied()
+                .collect();
             let rewritten = self.rewrite_rust_format_literal_for_cpp_with_float_args(
                 &fmt_literal,
                 &float_arg_positions,
@@ -23970,6 +24035,8 @@ impl CodeGen {
                         format!("rusty::to_debug_string_pretty({})", lowered)
                     } else if debug_arg_positions.contains(&arg_idx) {
                         format!("rusty::to_debug_string({})", lowered)
+                    } else if float_display_arg_positions.contains(&arg_idx) {
+                        format!("rusty::detail::float_display_string({})", lowered)
                     } else if let Some(conversion) = native_arg_conversions.get(&arg_idx).copied() {
                         if self.format_conversion_requires_numeric_bridge(conversion)
                             && !self.format_arg_is_known_integer_like(arg.trim())
@@ -24157,6 +24224,58 @@ impl CodeGen {
             i += 1;
         }
         out
+    }
+
+    /// Arg positions referenced by a BARE placeholder (`{}`, `{0}` — no `:`
+    /// spec at all). Used to pick the args whose formatting is Rust Display
+    /// with no modifiers.
+    fn format_literal_default_spec_arg_positions(
+        &self,
+        fmt: &str,
+        arg_count: usize,
+    ) -> HashSet<usize> {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut positions = HashSet::new();
+        let mut next_implicit_idx = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let is_default_spec = !inner.contains(':');
+                let arg_part = inner.split(':').next().unwrap_or("").trim();
+                let arg_idx = if arg_part.is_empty() {
+                    let idx = next_implicit_idx;
+                    next_implicit_idx += 1;
+                    Some(idx)
+                } else if arg_part.chars().all(|c| c.is_ascii_digit()) {
+                    arg_part.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                if is_default_spec && arg_idx.is_some_and(|idx| idx < arg_count) {
+                    positions.insert(arg_idx.expect("checked is_some"));
+                }
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        positions
     }
 
     fn format_literal_debug_arg_positions(&self, fmt: &str, arg_count: usize) -> HashSet<usize> {
@@ -38497,6 +38616,18 @@ impl CodeGen {
                 "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
                 ty, expr
             )
+        } else if target_is_numeric_scalar
+            && !matches!(target_normalized, "float" | "double")
+            && self
+                .infer_simple_expr_type(&cast.expr)
+                .as_ref()
+                .is_some_and(|src_ty| {
+                    self.is_known_float_like_type(self.peel_reference_paren_group_type(src_ty))
+                })
+        {
+            // Rust float→int `as` casts SATURATE (out-of-range clamps to the
+            // target's MIN/MAX, NaN → 0); a bare static_cast is UB on both.
+            format!("rusty::float_to_int_cast<{}>({})", target_normalized, expr)
         } else {
             format!("static_cast<{}>({})", ty, expr)
         }
@@ -39980,7 +40111,26 @@ impl CodeGen {
                 {
                     return self.emit_typed_integer_literal(mapped, i.base10_digits());
                 }
-                i.base10_digits().to_string()
+                let digits = i.base10_digits();
+                // A decimal magnitude beyond unsigned long long cannot be
+                // spelled as a C++ literal ('integer literal is too large');
+                // route through the 128-bit parse helper. The unsigned pick
+                // is only reachable as the magnitude of -i128::MIN (2^127) or
+                // a u128 value above i128::MAX — unsigned negation plus the
+                // C++20 modular conversion back to __int128 lands on MIN
+                // without UB.
+                if digits.len() > 19 && digits.parse::<u64>().is_err() {
+                    let ty = if digits.parse::<i128>().is_ok() {
+                        "__int128"
+                    } else {
+                        "unsigned __int128"
+                    };
+                    return format!(
+                        "rusty::detail::parse_decimal_int_literal<{}>(\"{}\")",
+                        ty, digits
+                    );
+                }
+                digits.to_string()
             }
             syn::Lit::Float(f) => f.base10_digits().to_string(),
             syn::Lit::Bool(b) => if b.value { "true" } else { "false" }.to_string(),
