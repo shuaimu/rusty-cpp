@@ -15006,6 +15006,36 @@ fn test_for_loop_over_intoiter_local_binds_non_const() {
 }
 
 #[test]
+fn test_inner_field_as_ref_with_resolvable_type_skips_string_view_hack() {
+    // The name-keyed `self.inner` → to_string_view fallback exists for
+    // UFCS/generic bodies where the field type is unrecoverable; a user
+    // struct whose `inner` field type IS known must emit a plain member
+    // as_ref() call (#76).
+    let out = transpile_str(
+        r#"
+        struct Outer {
+            inner: Option<i32>,
+        }
+        impl Outer {
+            fn get(&self) -> Option<&i32> {
+                self.inner.as_ref()
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("rusty::to_string_view(this->inner)"),
+        "resolvable non-Cow `inner` field must not route through to_string_view:\n{}",
+        out
+    );
+    assert!(
+        out.contains("this->inner.as_ref()"),
+        "expected a plain member as_ref() on the inner field:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_by_value_self_method_receiver_binds_non_const() {
     let out = transpile_str(
         r#"

@@ -31415,7 +31415,32 @@ impl CodeGen {
         let syn::Expr::Path(base_path) = self.peel_paren_group_expr(&field_expr.base) else {
             return false;
         };
-        base_path.path.is_ident("self") || base_path.path.is_ident("self_")
+        if !(base_path.path.is_ident("self") || base_path.path.is_ident("self_")) {
+            return false;
+        }
+        // TYPE GATE (#76): this name-keyed fallback exists for UFCS/generic
+        // bodies where the field's concrete type can't be known (serde_yaml's
+        // Cow-holding `inner`, io Cursor<T: AsRef<[u8]>> — whose emission
+        // the docs/rusty patcher then rewrites). When the type resolves to a
+        // CONCRETE type it must NOT fire — any user struct with a field
+        // literally named `inner` (`inner: Option<Inner>`) got routed
+        // through to_string_view. A bare in-scope generic param still
+        // counts as unknown. The concrete-and-cow-like case is already
+        // handled by the expr_is_known_cow_like arm at the call site.
+        match self.lookup_field_type_for_expr_base(&field_expr.base, "inner") {
+            None => true,
+            Some(ty) => match self.peel_reference_paren_group_type(&ty) {
+                syn::Type::Path(tp) => {
+                    tp.qself.is_none()
+                        && tp.path.segments.len() == 1
+                        && tp.path.segments[0].arguments.is_none()
+                        && self.is_type_param_in_scope(
+                            &tp.path.segments[0].ident.to_string(),
+                        )
+                }
+                _ => false,
+            },
+        }
     }
 
 
