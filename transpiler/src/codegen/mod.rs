@@ -16316,8 +16316,12 @@ impl CodeGen {
             AdapterStorageKind::MutRef => format!("{}& value_;", self_storage_base),
         };
         let ctor_decl = match kind {
+            // Non-explicit: Rust's unsizing coercion (`Box::new(Sq{..})` as
+            // Box<dyn Shape>) relies on the payload implicitly converting to
+            // the owning adapter at the rewritten construction site. Ref
+            // adapters stay explicit — implicit reference capture is unsafe.
             AdapterStorageKind::Owning => format!(
-                "explicit {}{}({} v) : value_(std::move(v)) {{}}",
+                "{}{}({} v) : value_(std::move(v)) {{}}",
                 trait_name, suffix, self_storage_base
             ),
             AdapterStorageKind::ConstRef => format!(
@@ -16350,6 +16354,16 @@ impl CodeGen {
         self.writeln("public:");
         self.indent += 1;
         self.writeln(&ctor_decl);
+        if matches!(kind, AdapterStorageKind::Owning) {
+            // The interface base deletes copy AND move, which suppresses the
+            // adapter's implicit move ctor — but Box/Rc::new_ take the value
+            // BY VALUE and must move it into place. Default-construct the
+            // (protected-default) base and move the payload.
+            self.writeln(&format!(
+                "{}{}({}{}&& other) : value_(std::move(other.value_)) {{}}",
+                trait_name, suffix, trait_name, suffix
+            ));
+        }
 
         for method in methods {
             // Mirror the trait class's skip for by-value `self` methods.
@@ -16483,8 +16497,12 @@ impl CodeGen {
             AdapterStorageKind::MutRef => format!("{}& value_;", self_storage_base),
         };
         let ctor_decl = match kind {
+            // Non-explicit: Rust's unsizing coercion (`Box::new(Sq{..})` as
+            // Box<dyn Shape>) relies on the payload implicitly converting to
+            // the owning adapter at the rewritten construction site. Ref
+            // adapters stay explicit — implicit reference capture is unsafe.
             AdapterStorageKind::Owning => format!(
-                "explicit {}{}({} v) : value_(std::move(v)) {{}}",
+                "{}{}({} v) : value_(std::move(v)) {{}}",
                 trait_name, suffix, self_storage_base
             ),
             AdapterStorageKind::ConstRef => format!(
@@ -16522,6 +16540,16 @@ impl CodeGen {
         self.writeln("public:");
         self.indent += 1;
         self.writeln(&ctor_decl);
+        if matches!(kind, AdapterStorageKind::Owning) {
+            // The interface base deletes copy AND move, which suppresses the
+            // adapter's implicit move ctor — but Box/Rc::new_ take the value
+            // BY VALUE and must move it into place. Default-construct the
+            // (protected-default) base and move the payload.
+            self.writeln(&format!(
+                "{}{}({}{}&& other) : value_(std::move(other.value_)) {{}}",
+                trait_name, suffix, trait_name, suffix
+            ));
+        }
 
         for method in methods {
             // See the matching skip in `emit_one_foreign_adapter` for
@@ -44063,6 +44091,9 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
                     }
                     let after_open_paren = &after_args[suffix.len()..];
                     let inner = sniff_leading_type_ident(after_open_paren);
+                    let arg_already_adapter = after_open_paren
+                        .trim_start()
+                        .starts_with(&format!("{}Adapter", trait_name));
                     if let Some(inner) = inner {
                         let adapter_args = match trait_args {
                             Some(args) => format!("{}, {}", args, inner),
@@ -44072,8 +44103,27 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
                             "rusty::{}<{}Adapter<{}>>::{}(",
                             owner, trait_name, adapter_args, method
                         ));
+                    } else if !arg_already_adapter
+                        && let Some(arg_len) = balanced_call_arg_len(after_open_paren)
+                        && !after_open_paren[..arg_len].trim().is_empty()
+                    {
+                        // Variable payload (`Box::new(v)`): the concrete type
+                        // isn't spellable from text — deduce it. Constructing
+                        // rusty::Box of the ABSTRACT interface class was
+                        // ill-formed; the adapter's non-explicit owning ctor
+                        // converts the payload.
+                        let arg = after_open_paren[..arg_len].trim();
+                        let deduced = format!("std::remove_cvref_t<decltype({})>", arg);
+                        let adapter_args = match trait_args {
+                            Some(args) => format!("{}, {}", args, deduced),
+                            None => deduced,
+                        };
+                        acc.push_str(&format!(
+                            "rusty::{}<{}Adapter<{}>>::{}(",
+                            owner, trait_name, adapter_args, method
+                        ));
                     } else {
-                        // Could not infer inner — leave the original.
+                        // Empty or already-adapter arg — leave the original.
                         match trait_args {
                             Some(args) => acc.push_str(&format!(
                                 "rusty::{}<{}<{}>>::{}(",
@@ -44093,6 +44143,34 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
         }
     }
     result
+}
+
+/// Length of the balanced call-argument text starting right after an open
+/// paren — i.e. the index of the matching `)`. Tracks paren/brace/bracket
+/// depth and skips string/char literals. None when unbalanced.
+fn balanced_call_arg_len(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' if depth == 0 => return Some(i),
+            b')' | b']' | b'}' => depth -= 1,
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Best-effort: extract the leading C++ identifier (the constructed type)
@@ -45617,6 +45695,10 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         // the same helper block). write!/writeln! and fmt::write lower to it.
         "rusty::write_fmt(",
         "rusty::is_empty(",
+        // .into()/From conversions lower to this helper; without the marker
+        // a module whose only block reference is a user-type conversion
+        // called an undefined rusty::from_into.
+        "rusty::from_into<",
         // Debug-format family: {:?}/{:#?} lower to these, and derive(Debug)
         // structs emit a rusty_debug_string() member calling to_debug_string.
         // Without markers the emissions referenced undefined helpers.

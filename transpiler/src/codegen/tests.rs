@@ -7520,8 +7520,11 @@ fn test_interface_traits_local_impl_emits_adapter_specialization() {
         "{out}"
     );
     assert!(out.contains("Dog value_;"), "{out}");
+    // Non-explicit since the Box<dyn> unsizing rewrite relies on the payload
+    // implicitly converting to the owning adapter.
     assert!(
-        out.contains("explicit AnimalAdapter(Dog v) : value_(std::move(v))"),
+        out.contains("AnimalAdapter(Dog v) : value_(std::move(v))")
+            && !out.contains("explicit AnimalAdapter(Dog v)"),
         "{out}"
     );
     // Override delegates via the UFCS free function.
@@ -15353,6 +15356,50 @@ fn test_derive_debug_emits_real_field_repr() {
         out.contains("rusty::detail::pretty_debug_string("),
         "module prelude must define the pretty helper the {{:#?}} lowering calls:\n{}",
         out
+    );
+}
+
+#[test]
+fn test_from_into_marker_emits_helper_block() {
+    // `.into()` on a user type lowers to rusty::from_into<Target>, but the
+    // marker list lacked the spelling — a module whose only helper-block
+    // reference was a conversion called an undefined function.
+    let out = transpile_str(
+        "struct A { n: i32 } struct B { m: i32 } impl From<A> for B { fn from(a: A) -> B { B { m: a.n } } } pub fn f(a: A) -> B { a.into() }",
+    );
+    if out.contains("rusty::from_into<") {
+        assert!(
+            out.contains("Target from_into(Input&& input)"),
+            "from_into emission must pull in the helper definition:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn test_box_dyn_trait_wraps_adapter_and_adapter_is_movable() {
+    // `let b: Box<dyn Shape> = Box::new(Sq{..})` — the vtable adapter was
+    // emitted but the payload never converted: the adapter ctor was
+    // explicit and the interface base deletes move, so Box::new_'s by-value
+    // move could not compile. Variable payloads skipped the adapter rewrite
+    // entirely (Box of the abstract class).
+    let out = transpile_str(
+        "trait Shape { fn area(&self) -> i32; } struct Sq { s: i32 } impl Shape for Sq { fn area(&self) -> i32 { self.s * self.s } } pub fn f() -> i32 { let b: Box<dyn Shape> = Box::new(Sq { s: 3 }); b.area() }",
+    );
+    assert!(
+        out.contains("ShapeAdapter(Sq v)") && !out.contains("explicit ShapeAdapter(Sq v)"),
+        "owning adapter ctor must be non-explicit:\n{out}"
+    );
+    assert!(
+        out.contains("ShapeAdapter(ShapeAdapter&& other) : value_(std::move(other.value_))"),
+        "owning adapter needs its own move ctor (base deletes move):\n{out}"
+    );
+    // Variable payload: deduce the adapter arg via decltype.
+    let out2 = transpile_str(
+        "trait Shape { fn area(&self) -> i32; } struct Sq { s: i32 } impl Shape for Sq { fn area(&self) -> i32 { self.s } } pub fn g(v: Sq) -> i32 { let b: Box<dyn Shape> = Box::new(v); b.area() }",
+    );
+    assert!(
+        out2.contains("ShapeAdapter<std::remove_cvref_t<decltype("),
+        "variable payload must deduce the adapter specialization:\n{out2}"
     );
 }
 
