@@ -2184,6 +2184,21 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
 
                 statements.push(Statement::ExitScope);
             }
+            EntityKind::ForRangeStmt => {
+                statements.extend(extract_range_for_control_statements(&child));
+                statements.push(Statement::EnterLoop);
+
+                let loop_children: Vec<Entity> = child.get_children().into_iter().collect();
+                if let Some(loop_body) = loop_children.last() {
+                    if loop_body.get_kind() == EntityKind::CompoundStmt {
+                        statements.extend(extract_compound_statement(loop_body));
+                    } else {
+                        statements.extend(extract_single_statement(loop_body));
+                    }
+                }
+
+                statements.push(Statement::ExitLoop);
+            }
             EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
                 statements.push(Statement::EnterLoop);
 
@@ -2370,6 +2385,271 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     }
 
     statements
+}
+
+fn extract_range_for_control_statements(entity: &Entity) -> Vec<Statement> {
+    let mut statements = Vec::new();
+
+    // Clang exposes C++ range-for roughly as:
+    //   null, DeclStmt(__range = <user range expr>), DeclStmt(__begin),
+    //   DeclStmt(__end), condition, increment, DeclStmt(loop var), body.
+    // Only the __range initializer came from the user's range expression.
+    // The begin/end/iterator pieces are compiler desugaring and should not
+    // make ordinary range-for syntax look unsafe.
+    for child in entity.get_children() {
+        if child.get_kind() != EntityKind::DeclStmt {
+            continue;
+        }
+
+        for decl_child in child.get_children() {
+            if decl_child.get_kind() != EntityKind::VarDecl {
+                continue;
+            }
+
+            let name = decl_child.get_name().unwrap_or_default();
+            if !name.starts_with("__range") {
+                continue;
+            }
+
+            for init_child in decl_child.get_children() {
+                if let Some(expr) = extract_expression(&init_child) {
+                    let location = extract_location(&init_child);
+                    statements.push(expression_to_statement(expr, location));
+                    return statements;
+                }
+            }
+        }
+    }
+
+    if let Some(stmt) = extract_range_for_expression_from_tokens(entity) {
+        statements.push(stmt);
+    }
+
+    statements
+}
+
+fn expression_to_statement(expr: Expression, location: SourceLocation) -> Statement {
+    match expr {
+        Expression::FunctionCall { name, args } => Statement::FunctionCall {
+            name,
+            args,
+            location,
+        },
+        expr => Statement::ExpressionStatement { expr, location },
+    }
+}
+
+fn extract_range_for_expression_from_tokens(entity: &Entity) -> Option<Statement> {
+    let range = entity.get_range()?;
+    let tokens = safe_tokenize(&range);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut colon_idx = None;
+    let mut paren_depth = 0usize;
+
+    for (idx, token) in tokens.iter().enumerate() {
+        match token.get_spelling().as_str() {
+            "(" => paren_depth += 1,
+            ")" => paren_depth = paren_depth.saturating_sub(1),
+            ":" if paren_depth == 1 => {
+                colon_idx = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let colon_idx = colon_idx?;
+    let mut end_idx = tokens.len();
+    paren_depth = 1;
+
+    for (idx, token) in tokens.iter().enumerate().skip(colon_idx + 1) {
+        match token.get_spelling().as_str() {
+            "(" => paren_depth += 1,
+            ")" => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 {
+                    end_idx = idx;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if end_idx <= colon_idx + 1 {
+        return None;
+    }
+
+    let range_tokens: Vec<String> = tokens[colon_idx + 1..end_idx]
+        .iter()
+        .map(|token| token.get_spelling())
+        .collect();
+    let location = extract_location(entity);
+
+    extract_function_call_from_tokens(&range_tokens)
+        .map(|expr| expression_to_statement(expr, location.clone()))
+        .or_else(|| {
+            extract_variable_from_tokens(&range_tokens).map(|name| Statement::ExpressionStatement {
+                expr: Expression::Variable(name),
+                location,
+            })
+        })
+}
+
+fn extract_function_call_from_tokens(tokens: &[String]) -> Option<Expression> {
+    let mut idx = 0;
+    while idx + 1 < tokens.len() {
+        if tokens[idx + 1] == "(" && is_cpp_identifier(&tokens[idx]) {
+            let name = collect_qualified_name_before(tokens, idx);
+            if !name.is_empty() && !is_builtin_cast_name(&name) {
+                return Some(Expression::FunctionCall {
+                    name,
+                    args: Vec::new(),
+                });
+            }
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn collect_qualified_name_before(tokens: &[String], name_idx: usize) -> String {
+    let mut parts = vec![tokens[name_idx].clone()];
+    let mut idx = name_idx;
+
+    while idx >= 2 && tokens[idx - 1] == "::" && is_cpp_identifier(&tokens[idx - 2]) {
+        parts.push(tokens[idx - 2].clone());
+        idx -= 2;
+    }
+
+    parts.reverse();
+    parts.join("::")
+}
+
+fn extract_variable_from_tokens(tokens: &[String]) -> Option<String> {
+    tokens
+        .iter()
+        .find(|token| is_cpp_identifier(token) && !is_cpp_keyword(token))
+        .cloned()
+}
+
+fn is_cpp_identifier(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_cpp_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "alignas"
+            | "alignof"
+            | "and"
+            | "and_eq"
+            | "asm"
+            | "auto"
+            | "bitand"
+            | "bitor"
+            | "bool"
+            | "break"
+            | "case"
+            | "catch"
+            | "char"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "class"
+            | "compl"
+            | "concept"
+            | "const"
+            | "consteval"
+            | "constexpr"
+            | "constinit"
+            | "const_cast"
+            | "continue"
+            | "co_await"
+            | "co_return"
+            | "co_yield"
+            | "decltype"
+            | "default"
+            | "delete"
+            | "do"
+            | "double"
+            | "dynamic_cast"
+            | "else"
+            | "enum"
+            | "explicit"
+            | "export"
+            | "extern"
+            | "false"
+            | "float"
+            | "for"
+            | "friend"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "mutable"
+            | "namespace"
+            | "new"
+            | "noexcept"
+            | "not"
+            | "not_eq"
+            | "nullptr"
+            | "operator"
+            | "or"
+            | "or_eq"
+            | "private"
+            | "protected"
+            | "public"
+            | "register"
+            | "reinterpret_cast"
+            | "requires"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "static_assert"
+            | "static_cast"
+            | "struct"
+            | "switch"
+            | "template"
+            | "this"
+            | "thread_local"
+            | "throw"
+            | "true"
+            | "try"
+            | "typedef"
+            | "typeid"
+            | "typename"
+            | "union"
+            | "unsigned"
+            | "using"
+            | "virtual"
+            | "void"
+            | "volatile"
+            | "wchar_t"
+            | "while"
+            | "xor"
+            | "xor_eq"
+    )
+}
+
+fn is_builtin_cast_name(name: &str) -> bool {
+    matches!(
+        name,
+        "static_cast" | "dynamic_cast" | "reinterpret_cast" | "const_cast"
+    )
 }
 
 fn extract_switch_statement(entity: &Entity) -> Statement {

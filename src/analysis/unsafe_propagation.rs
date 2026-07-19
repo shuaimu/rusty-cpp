@@ -383,6 +383,21 @@ fn check_statement_for_unsafe_calls_with_external(
                 ));
             }
         }
+        Statement::ExpressionStatement { expr, location } => {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                expr,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ) {
+                return Some(format!(
+                    "Calling unsafe function '{}' in expression at line {} requires unsafe context",
+                    unsafe_func, location.line
+                ));
+            }
+        }
         Statement::If {
             condition,
             then_branch,
