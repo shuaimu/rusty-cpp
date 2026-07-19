@@ -87,6 +87,115 @@ struct HashSet {
     stl_iter_t end() { return stl_iter_t(this->map.end()); }
 
     HashSet<T, S> clone() const { return HashSet<T, S>(this->map.clone()); }
+
+    // ── Set algebra ────────────────────────────────────────────────
+    // Rust's union/intersection/difference/symmetric_difference return
+    // BORROWING lazy iterators. Modeled as a filtering STL range over
+    // the backing set(s) — consumable by rusty::count / rusty::for_in.
+    // Both operands are borrowed: const&. (The emitter spells Rust
+    // `a.union(&b)` as `a.union_(b)` — `union` is a C++ keyword.)
+    struct set_algebra_view_t {
+        // 0=union, 1=intersection, 2=difference, 3=symmetric_difference
+        const HashSet* a;
+        const HashSet* b;
+        int mode;
+
+        struct iter_t {
+            const HashSet* a;
+            const HashSet* b;
+            int mode;
+            int phase;  // 0: walking a; 1: walking b (union/symdiff leg 2)
+            stl_iter_t cur;
+            stl_iter_t cur_end;
+
+            // begin()/end() on the facade are non-const (the raw-table
+            // find path isn't const-correct) — traversal mutates nothing.
+            static stl_iter_t set_begin(const HashSet* s) {
+                return const_cast<HashSet*>(s)->begin();
+            }
+            static stl_iter_t set_end(const HashSet* s) {
+                return const_cast<HashSet*>(s)->end();
+            }
+
+            void advance_to_valid() {
+                for (;;) {
+                    if (cur == cur_end) {
+                        if (phase == 0 && (mode == 0 || mode == 3)) {
+                            phase = 1;
+                            cur = set_begin(b);
+                            cur_end = set_end(b);
+                            continue;
+                        }
+                        return;  // exhausted
+                    }
+                    const T& v = *cur;
+                    bool keep;
+                    if (phase == 0) {
+                        switch (mode) {
+                            case 0: keep = true; break;               // union: all of a
+                            case 1: keep = b->contains(v); break;     // intersection
+                            default: keep = !b->contains(v); break;   // difference / symdiff leg 1
+                        }
+                    } else {
+                        keep = !a->contains(v);  // union / symdiff leg 2
+                    }
+                    if (keep) return;
+                    ++cur;
+                }
+            }
+
+            iter_t& operator++() {
+                ++cur;
+                advance_to_valid();
+                return *this;
+            }
+            const T& operator*() { return *cur; }
+            bool operator==(const iter_t& o) const {
+                return phase == o.phase && cur == o.cur;
+            }
+            bool operator!=(const iter_t& o) const { return !(*this == o); }
+        };
+
+        iter_t begin() const {
+            iter_t it{a, b, mode, 0, iter_t::set_begin(a), iter_t::set_end(a)};
+            it.advance_to_valid();
+            // A fully-filtered/empty walk may have rolled to phase 1.
+            return it;
+        }
+        iter_t end() const {
+            const bool two_legs = mode == 0 || mode == 3;
+            const HashSet* last = two_legs ? b : a;
+            return iter_t{a, b, mode, two_legs ? 1 : 0,
+                          iter_t::set_end(last), iter_t::set_end(last)};
+        }
+    };
+
+    set_algebra_view_t union_(const HashSet& other) const {
+        return set_algebra_view_t{this, &other, 0};
+    }
+    set_algebra_view_t intersection(const HashSet& other) const {
+        return set_algebra_view_t{this, &other, 1};
+    }
+    set_algebra_view_t difference(const HashSet& other) const {
+        return set_algebra_view_t{this, &other, 2};
+    }
+    set_algebra_view_t symmetric_difference(const HashSet& other) const {
+        return set_algebra_view_t{this, &other, 3};
+    }
+
+    bool is_disjoint(const HashSet& other) const {
+        for (const T& v : *const_cast<HashSet*>(this)) {
+            if (other.contains(v)) return false;
+        }
+        return true;
+    }
+    bool is_subset(const HashSet& other) const {
+        for (const T& v : *const_cast<HashSet*>(this)) {
+            if (!other.contains(v)) return false;
+        }
+        return true;
+    }
+    bool is_superset(const HashSet& other) const { return other.is_subset(*this); }
 };
 
 } // namespace rusty::port::collections::hashbrown
