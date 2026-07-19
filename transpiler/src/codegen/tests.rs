@@ -15360,6 +15360,39 @@ fn test_derive_debug_emits_real_field_repr() {
 }
 
 #[test]
+fn test_contains_iife_uses_generic_lambda_params() {
+    // The requires/discarded-if-constexpr dispatch is only dependent inside
+    // a templated entity — with captured locals in a plain lambda (directly
+    // in main), clang type-checks every branch and hard-errors on the
+    // mismatched pointer arms.
+    let out = transpile_str(
+        "pub fn f() -> bool { let a = [2i32, 4, 6]; a.contains(&6) }",
+    );
+    assert!(
+        out.contains("[&](auto&& _haystack, auto&& _needle)"),
+        "contains dispatch must be a generic lambda:\n{out}"
+    );
+}
+
+#[test]
+fn test_split_at_mut_and_plain_array_copy_from_slice_route_to_free_fns() {
+    let out = transpile_str(
+        "pub fn f() { let mut b = [1i32, 2, 3, 4]; let (l, r) = b.split_at_mut(2); let _ = (l, r); }",
+    );
+    assert!(
+        out.contains("rusty::split_at_mut("),
+        "split_at_mut must route to the free fn:\n{out}"
+    );
+    let out2 = transpile_str(
+        "pub fn g() { let src = [1i32, 2]; let mut dst = [0i32; 2]; dst.copy_from_slice(&src); let _ = dst; }",
+    );
+    assert!(
+        out2.contains("rusty::clone_from_slice("),
+        "plain-array copy_from_slice must route to the free fn:\n{out2}"
+    );
+}
+
+#[test]
 fn test_from_into_marker_emits_helper_block() {
     // `.into()` on a user type lowers to rusty::from_into<Target>, but the
     // marker list lacked the spelling — a module whose only helper-block

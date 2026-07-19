@@ -503,6 +503,15 @@ public:
         return std::move(default_value);
     }
 
+    // Const fallback for read-only Result bindings (copies the Ok value),
+    // mirroring the const unwrap_err above.
+    T unwrap_or(T default_value) const {
+        if (is_ok_value) {
+            return ok_ref();
+        }
+        return std::move(default_value);
+    }
+
     template<typename F>
     T unwrap_or_else(F f) {
         if (is_ok_value) {
@@ -516,7 +525,23 @@ public:
             return f(std::move(err_ref()));
         }
     }
-    
+
+    // Const fallback for read-only Result bindings (copies out of the
+    // Result), mirroring the const unwrap_err above.
+    template<typename F>
+    T unwrap_or_else(F f) const {
+        if (is_ok_value) {
+            return ok_ref();
+        }
+        using FReturn = decltype(f(err_ref()));
+        if constexpr (std::is_void_v<FReturn>) {
+            f(err_ref());
+            std::abort();
+        } else {
+            return f(err_ref());
+        }
+    }
+
     // Map over Ok value
     template<typename F>
     auto map(F f) -> Result<decltype(f(std::declval<T>())), E> {

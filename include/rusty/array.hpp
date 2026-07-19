@@ -2379,6 +2379,27 @@ auto split_at(std::span<Elem, Extent> span, Mid mid) {
     return std::make_tuple(span.first(mid_index), span.subspan(mid_index));
 }
 
+// Rust `[T]::split_at_mut` — same split, mutable halves. The span element
+// type already carries mutability; the separate name exists for the
+// container overload and call-site parity.
+template<typename Elem, std::size_t Extent, typename Mid>
+auto split_at_mut(std::span<Elem, Extent> span, Mid mid) {
+    const size_t mid_index = detail::checked_index(mid);
+    detail::validate_slice_bounds(span, 0, mid_index);
+    return std::make_tuple(span.first(mid_index), span.subspan(mid_index));
+}
+
+template<typename Container, typename Mid>
+requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
+auto split_at_mut(Container& container, Mid mid) {
+    // A container spelling its own split_at_mut (port types) wins.
+    if constexpr (requires { container.split_at_mut(static_cast<size_t>(mid)); }) {
+        return container.split_at_mut(static_cast<size_t>(mid));
+    } else {
+        return split_at_mut(slice_full(container), std::forward<Mid>(mid));
+    }
+}
+
 // Split a span into `(first, rest)` where `first` is a borrowed element.
 // Mirrors Rust `[T]::split_first`.
 template<typename Elem, std::size_t Extent>
@@ -2434,6 +2455,13 @@ public:
 
     iterator begin() const { return iterator(span_, chunk_size_, 0); }
     iterator end() const { return iterator(span_, chunk_size_, span_.size() / chunk_size_); }
+
+    // Rust `ChunksExact::remainder()` — the trailing elements that don't
+    // fill a whole chunk. Independent of iteration progress, like Rust.
+    Span remainder() const {
+        const size_t full = (span_.size() / chunk_size_) * chunk_size_;
+        return span_.subspan(full);
+    }
 
 private:
     Span span_;

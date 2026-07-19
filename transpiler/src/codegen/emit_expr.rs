@@ -6546,8 +6546,13 @@ impl CodeGen {
             // pointer-vs-integer comparison inside `requires` (C-compat
             // parse) and then hard-errors on the real one, so `int item` vs
             // `int* needle` must fall through to the peeled arms.
+            // The operands are GENERIC LAMBDA PARAMETERS, not captured
+            // locals: only inside a templated entity are the requires/
+            // discarded-if-constexpr branches dependent — in a plain lambda
+            // (e.g. directly in main) clang fully type-checks every branch
+            // and hard-errors on the mismatched arms.
             return format!(
-                "[&]() {{ auto&& _haystack = {}; auto&& _needle = {}; constexpr bool _ptr_match = std::is_pointer_v<std::remove_cvref_t<decltype(_needle)>> == std::is_pointer_v<std::remove_cvref_t<decltype(*std::begin(_haystack))>>; for (const auto& _item : _haystack) {{ if constexpr (_ptr_match && requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (_ptr_match && requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} else if constexpr (requires {{ _item == rusty::detail::deref_if_pointer(_needle); }}) {{ if (_item == rusty::detail::deref_if_pointer(_needle)) return true; }} else if constexpr (requires {{ rusty::detail::deref_if_pointer(_needle) == _item; }}) {{ if (rusty::detail::deref_if_pointer(_needle) == _item) return true; }} }} return false; }}()",
+                "[&](auto&& _haystack, auto&& _needle) {{ constexpr bool _ptr_match = std::is_pointer_v<std::remove_cvref_t<decltype(_needle)>> == std::is_pointer_v<std::remove_cvref_t<decltype(*std::begin(_haystack))>>; for (const auto& _item : _haystack) {{ if constexpr (_ptr_match && requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (_ptr_match && requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} else if constexpr (requires {{ _item == rusty::detail::deref_if_pointer(_needle); }}) {{ if (_item == rusty::detail::deref_if_pointer(_needle)) return true; }} else if constexpr (requires {{ rusty::detail::deref_if_pointer(_needle) == _item; }}) {{ if (rusty::detail::deref_if_pointer(_needle) == _item) return true; }} }} return false; }}({}, {})",
                 receiver, needle
             );
         }
@@ -8577,7 +8582,16 @@ impl CodeGen {
         }
         if matches!(method_name.as_str(), "clone_from_slice" | "copy_from_slice")
             && args.len() == 1
-            && self.should_lower_slice_deref_method_call(&mc.receiver)
+            && (self.should_lower_slice_deref_method_call(&mc.receiver)
+                // Plain fixed-array locals (incl. deliberately-untyped repeat
+                // arrays) fell through to a nonexistent member call on
+                // std::array; range-indexed receivers already routed here.
+                || self
+                    .infer_simple_expr_type(&mc.receiver)
+                    .as_ref()
+                    .map(|ty| self.peel_reference_paren_group_type(ty))
+                    .is_some_and(|ty| matches!(ty, syn::Type::Array(_)))
+                || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -9749,11 +9763,12 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::rfind({}, {})", receiver, args[0]);
         }
-        if method_name == "split_at" && args.len() == 1 {
-            if self
-                .infer_simple_expr_type(&mc.receiver)
-                .as_ref()
-                .is_some_and(|ty| self.is_known_string_like_type(ty))
+        if matches!(method_name.as_str(), "split_at" | "split_at_mut") && args.len() == 1 {
+            if method_name == "split_at"
+                && self
+                    .infer_simple_expr_type(&mc.receiver)
+                    .as_ref()
+                    .is_some_and(|ty| self.is_known_string_like_type(ty))
             {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
                 let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -9776,14 +9791,20 @@ impl CodeGen {
                 // Known slice-shaped owners view through as_slice; an
                 // unknown receiver passes through raw so the member-prefer
                 // container overload can dispatch an inherent split_at.
-                let split_receiver = if !slice_shaped
+                // The mutable split keeps the raw receiver — as_slice would
+                // const-qualify the halves.
+                let split_receiver = if method_name == "split_at_mut"
+                    || !slice_shaped
                     || self.expr_lowers_to_slice_or_span_view(&mc.receiver)
                 {
                     receiver
                 } else {
                     format!("rusty::as_slice({})", receiver)
                 };
-                return format!("rusty::split_at({}, {})", split_receiver, args[0]);
+                return format!(
+                    "rusty::{}({}, {})",
+                    method_name, split_receiver, args[0]
+                );
             }
         }
         if method_name == "split" && args.len() == 1 {
