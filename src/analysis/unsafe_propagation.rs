@@ -285,7 +285,11 @@ fn check_statement_for_unsafe_calls_with_external(
     }
 
     match stmt {
-        Statement::FunctionCall { name, location, .. } => {
+        Statement::FunctionCall {
+            name,
+            args,
+            location,
+        } => {
             // Check if this is a template type parameter (not a real function call)
             // Phase 1: Enhanced check for variadic pack parameters
             if is_template_parameter_like(name, template_params) {
@@ -347,6 +351,22 @@ fn check_statement_for_unsafe_calls_with_external(
                     return Some(format!(
                         "Calling non-safe function '{}' at line {} requires @unsafe {{ }} block",
                         name, location.line
+                    ));
+                }
+            }
+
+            for arg in args {
+                if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                    arg,
+                    safety_context,
+                    known_safe_functions,
+                    external_annotations,
+                    template_params,
+                    callable_params,
+                ) {
+                    return Some(format!(
+                        "Calling unsafe function '{}' in argument at line {} requires unsafe context",
+                        unsafe_func, location.line
                     ));
                 }
             }
