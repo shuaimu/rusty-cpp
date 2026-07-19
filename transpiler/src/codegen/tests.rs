@@ -15036,6 +15036,34 @@ fn test_inner_field_as_ref_with_resolvable_type_skips_string_view_hack() {
 }
 
 #[test]
+fn test_unresolved_local_field_read_in_format_args_routes_smart() {
+    // `let m = it.max_by_key(..).unwrap()` binds a pointer Item from
+    // rusty::iter — the dumb format splice `m . a` is field access on a
+    // raw pointer. The smart path's per-field dispatch tolerates both
+    // value and pointer receivers (#77).
+    let out = transpile_str(
+        r#"
+        struct S { a: i32 }
+        fn f() {
+            let v = [S { a: 3 }, S { a: 9 }];
+            let m = v.iter().max_by_key(|s| s.a).unwrap();
+            println!("{}", m.a);
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("m . a"),
+        "field read on an unresolved local must not raw-splice into format args:\n{}",
+        out
+    );
+    assert!(
+        out.contains("(*__r).a"),
+        "expected the pointer-tolerant per-field dispatch around the format arg:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_by_value_self_method_receiver_binds_non_const() {
     let out = transpile_str(
         r#"

@@ -23903,6 +23903,19 @@ impl CodeGen {
         }) {
             return true;
         }
+        // Field reads on a local whose binding type is UNRESOLVED (`let m =
+        // it.max_by_key(..).unwrap(); "{}", m.a`) may sit on a pointer Item
+        // (rusty::iter yields element pointers) — the dumb `m . a` splice
+        // is ill-formed there. Route smart so emit_expr's per-field
+        // pointer-tolerant dispatch applies.
+        if parts.iter().skip(1).any(|arg| {
+            let Ok(expr) = syn::parse_str::<syn::Expr>(arg.trim()) else {
+                return false;
+            };
+            self.expr_tree_contains_unresolved_local_field_read(&expr)
+        }) {
+            return true;
+        }
         let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr.trim()) else {
             // Non-literal format string — can't analyze; keep the dumb path.
             return false;
@@ -24019,6 +24032,38 @@ impl CodeGen {
             },
             _ => false,
         }
+    }
+
+    /// True when the tree reads a NAMED field off a bare local that is
+    /// registered but whose binding type never resolved — the shape
+    /// `field_access_through_user_deref`'s unknown-local dispatch exists
+    /// for. Mirrors that arm's condition exactly.
+    fn expr_tree_contains_unresolved_local_field_read(&self, expr: &syn::Expr) -> bool {
+        use syn::visit::Visit;
+        struct V<'a> {
+            cg: &'a CodeGen,
+            found: bool,
+        }
+        impl<'ast, 'a> Visit<'ast> for V<'a> {
+            fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
+                if !self.found
+                    && matches!(f.member, syn::Member::Named(_))
+                    && matches!(self.cg.peel_paren_group_expr(&f.base), syn::Expr::Path(p)
+                        if p.path.segments.len() == 1
+                            && {
+                                let name = p.path.segments[0].ident.to_string();
+                                self.cg.lookup_local_binding_cpp_name(&name).is_some()
+                                    && self.cg.lookup_local_binding_type(&name).is_none()
+                            })
+                {
+                    self.found = true;
+                }
+                syn::visit::visit_expr_field(self, f);
+            }
+        }
+        let mut v = V { cg: self, found: false };
+        v.visit_expr(expr);
+        v.found
     }
 
     /// True when the expression tree contains a `%` whose operands infer as
