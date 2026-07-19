@@ -687,7 +687,8 @@ fn find_unsafe_function_call_with_external(
         }
         Expression::Move { inner, .. }
         | Expression::Dereference(inner)
-        | Expression::AddressOf(inner) => {
+        | Expression::AddressOf(inner)
+        | Expression::Cast { inner, .. } => {
             // Check inner expression
             if let Some(unsafe_func) = find_unsafe_function_call_with_external(
                 inner,
