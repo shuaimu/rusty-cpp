@@ -2254,9 +2254,18 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let mut then_branch = Vec::new();
                 let mut else_branch = None;
 
+                let mut start_index = 0;
+                if children
+                    .first()
+                    .is_some_and(|child| child.get_kind() == EntityKind::DeclStmt)
+                {
+                    statements.extend(extract_single_statement(&children[0]));
+                    start_index = 1;
+                }
+
                 // Parse the if statement structure
                 let mut condition_seen = false;
-                let mut i = 0;
+                let mut i = start_index;
                 while i < children.len() {
                     let child_kind = children[i].get_kind();
 
@@ -2293,6 +2302,7 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 });
             }
             EntityKind::SwitchStmt => {
+                statements.extend(extract_switch_init_statements(&child));
                 statements.push(extract_switch_statement(&child));
             }
             EntityKind::TryStmt => {
@@ -2719,6 +2729,7 @@ fn extract_switch_statement(entity: &Entity) -> Statement {
     let children: Vec<Entity> = entity.get_children().into_iter().collect();
     let condition = children
         .iter()
+        .skip_while(|child| child.get_kind() == EntityKind::DeclStmt)
         .find(|child| child.get_kind() != EntityKind::CompoundStmt)
         .and_then(extract_expression)
         .unwrap_or_else(|| Expression::Literal("true".to_string()));
@@ -2789,6 +2800,91 @@ fn extract_switch_body_statement(entity: &Entity) -> Vec<Statement> {
         EntityKind::CompoundStmt => extract_compound_statement(entity),
         _ => extract_single_statement(entity),
     }
+}
+
+fn extract_switch_init_statements(entity: &Entity) -> Vec<Statement> {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    if children
+        .first()
+        .is_some_and(|child| child.get_kind() == EntityKind::DeclStmt)
+    {
+        extract_single_statement(&children[0])
+    } else {
+        extract_switch_init_calls_from_tokens(entity)
+    }
+}
+
+fn extract_switch_init_calls_from_tokens(entity: &Entity) -> Vec<Statement> {
+    let Some(range) = entity.get_range() else {
+        return Vec::new();
+    };
+
+    let tokens = safe_tokenize(&range);
+    let open_idx = match tokens.iter().position(|token| token.get_spelling() == "(") {
+        Some(idx) => idx,
+        None => return Vec::new(),
+    };
+
+    let mut paren_depth = 0usize;
+    let mut semicolon_idx = None;
+    for (idx, token) in tokens.iter().enumerate().skip(open_idx) {
+        match token.get_spelling().as_str() {
+            "(" => paren_depth += 1,
+            ")" => paren_depth = paren_depth.saturating_sub(1),
+            ";" if paren_depth == 1 => {
+                semicolon_idx = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let Some(semicolon_idx) = semicolon_idx else {
+        return Vec::new();
+    };
+
+    let init_tokens: Vec<String> = tokens[open_idx + 1..semicolon_idx]
+        .iter()
+        .map(|token| token.get_spelling())
+        .collect();
+
+    let mut statements = Vec::new();
+    for (idx, spelling) in init_tokens.iter().enumerate() {
+        if !is_possible_call_token(spelling) {
+            continue;
+        }
+
+        if init_tokens.get(idx + 1).is_some_and(|next| next == "(") {
+            statements.push(Statement::FunctionCall {
+                name: qualified_call_name_from_tokens(&init_tokens, idx),
+                args: Vec::new(),
+                location: extract_location(entity),
+            });
+        }
+    }
+
+    statements
+}
+
+fn is_possible_call_token(token: &str) -> bool {
+    token
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && !is_cpp_keyword(token)
+}
+
+fn qualified_call_name_from_tokens(tokens: &[String], name_idx: usize) -> String {
+    let mut start_idx = name_idx;
+    while start_idx >= 2 && tokens[start_idx - 1] == "::" {
+        let qualifier = &tokens[start_idx - 2];
+        if !is_possible_call_token(qualifier) {
+            break;
+        }
+        start_idx -= 2;
+    }
+
+    tokens[start_idx..=name_idx].join("")
 }
 
 fn extract_try_statement(entity: &Entity) -> Vec<Statement> {
