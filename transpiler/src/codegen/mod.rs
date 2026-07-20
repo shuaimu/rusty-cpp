@@ -46704,6 +46704,7 @@ inline std::string escape_debug_string(std::string_view input) {
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
+            case '\0': out += "\\0"; break;
             default: out.push_back(ch); break;
         }
     }
@@ -46883,6 +46884,31 @@ std::string to_debug_string(const T& value) {
         return std::visit([](const auto& alt) -> std::string {
             return rusty::to_debug_string(alt);
         }, value);
+    } else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
+        return std::to_string(static_cast<int>(value));
+    } else if constexpr (std::is_same_v<Value, char>
+        || std::is_same_v<Value, signed char>
+        || std::is_same_v<Value, unsigned char>
+        || std::is_same_v<Value, wchar_t>
+        || std::is_same_v<Value, char16_t>
+        || std::is_same_v<Value, char32_t>) {
+        const auto ch = static_cast<char32_t>(value);
+        switch (ch) {
+            case U'\0': return "'\\0'";
+            case U'\\': return "'\\\\'";
+            case U'\'': return "'\\''";
+            case U'\n': return "'\\n'";
+            case U'\r': return "'\\r'";
+            case U'\t': return "'\\t'";
+            default: break;
+        }
+        return std::string("'") + rusty::detail::utf8_from_char32(ch) + "'";
+    } else if constexpr (std::is_pointer_v<Value>
+        && !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {
+        if (value == nullptr) {
+            return "<null>";
+        }
+        return rusty::to_debug_string(*value);
     } else if constexpr (std::is_convertible_v<T, std::string_view>) {
         return std::string("\"")
             + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
@@ -46897,6 +46923,29 @@ std::string to_debug_string(const T& value) {
             return std::string("\"")
                 + rusty::detail::escape_debug_string(std::string(s))
                 + "\"";
+        }
+    } else if constexpr (std::is_floating_point_v<Value>) {
+        std::string s = rusty::to_string(value);
+        if (s.find_first_of(".eEin") == std::string::npos) {
+            s += ".0";
+        }
+        return s;
+    } else if constexpr (requires { std::tuple_size<Value>::value; }
+        && !requires { std::begin(value); std::end(value); }) {
+        if constexpr (std::tuple_size_v<Value> == 0) {
+            return "()";
+        } else {
+            std::string out = "(";
+            bool first = true;
+            std::apply([&](const auto&... elems) {
+                ((out += (first ? "" : ", "), first = false,
+                  out += rusty::to_debug_string(elems)), ...);
+            }, value);
+            if constexpr (std::tuple_size_v<Value> == 1) {
+                out += ",";
+            }
+            out += ")";
+            return out;
         }
     } else if constexpr (!std::is_arithmetic_v<Value> && requires { std::begin(value); std::end(value); }) {
         std::string out = "[";
@@ -49998,6 +50047,7 @@ inline std::string escape_debug_string(std::string_view input) {\n\
             case '\\n': out += \"\\\\n\"; break;\n\
             case '\\r': out += \"\\\\r\"; break;\n\
             case '\\t': out += \"\\\\t\"; break;\n\
+            case '\\0': out += \"\\\\0\"; break;\n\
             default: out.push_back(ch); break;\n\
         }\n\
     }\n\
@@ -50258,10 +50308,22 @@ std::string to_debug_string(const T& value) {\n\
         || std::is_same_v<Value, char16_t>\n\
         || std::is_same_v<Value, char32_t>) {\n\
         const auto ch = static_cast<char32_t>(value);\n\
-        if (ch == U'\\0') {\n\
-            return \"'\\\\0'\";\n\
+        switch (ch) {\n\
+            case U'\\0': return \"'\\\\0'\";\n\
+            case U'\\\\': return \"'\\\\\\\\'\";\n\
+            case U'\\'': return \"'\\\\''\";\n\
+            case U'\\n': return \"'\\\\n'\";\n\
+            case U'\\r': return \"'\\\\r'\";\n\
+            case U'\\t': return \"'\\\\t'\";\n\
+            default: break;\n\
         }\n\
         return std::string(\"'\") + rusty::detail::utf8_from_char32(ch) + \"'\";\n\
+    } else if constexpr (std::is_pointer_v<Value>\n\
+        && !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {\n\
+        if (value == nullptr) {\n\
+            return \"<null>\";\n\
+        }\n\
+        return rusty::to_debug_string(*value);\n\
     } else if constexpr (std::is_convertible_v<T, std::string_view>) {\n\
         return std::string(\"\\\"\")\n\
             + rusty::detail::escape_debug_string(std::string(std::string_view(value)))\n\
@@ -50276,6 +50338,29 @@ std::string to_debug_string(const T& value) {\n\
         return std::string(\"\\\"\")\n\
             + rusty::detail::escape_debug_string(std::string(s))\n\
             + \"\\\"\";\n\
+        }\n\
+    } else if constexpr (std::is_floating_point_v<Value>) {\n\
+        std::string s = rusty::to_string(value);\n\
+        if (s.find_first_of(\".eEin\") == std::string::npos) {\n\
+            s += \".0\";\n\
+        }\n\
+        return s;\n\
+    } else if constexpr (requires { std::tuple_size<Value>::value; }\n\
+        && !requires { std::begin(value); std::end(value); }) {\n\
+        if constexpr (std::tuple_size_v<Value> == 0) {\n\
+            return \"()\";\n\
+        } else {\n\
+            std::string out = \"(\";\n\
+            bool first = true;\n\
+            std::apply([&](const auto&... elems) {\n\
+                ((out += (first ? \"\" : \", \"), first = false,\n\
+                  out += rusty::to_debug_string(elems)), ...);\n\
+            }, value);\n\
+            if constexpr (std::tuple_size_v<Value> == 1) {\n\
+                out += \",\";\n\
+            }\n\
+            out += \")\";\n\
+            return out;\n\
         }\n\
     } else if constexpr (requires { std::begin(value); std::end(value); }) {\n\
         std::string out = \"[\";\n\

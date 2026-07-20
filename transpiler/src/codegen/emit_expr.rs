@@ -9278,6 +9278,63 @@ impl CodeGen {
             };
             return format!("rusty::char_runtime::is_whitespace({})", receiver);
         }
+        // `u8` ASCII classifiers/transforms (`b'a'.is_ascii_alphabetic()`,
+        // `b.to_ascii_uppercase()`) — uint8_t has no methods; ascii.hpp's
+        // rusty:: free fns take and return uint8_t (so to_ascii_* keeps u8
+        // Display semantics, printing 65 not 'A').
+        if args.is_empty()
+            && (method_name.starts_with("is_ascii") || method_name.starts_with("to_ascii"))
+            && matches!(
+                method_name.as_str(),
+                "is_ascii"
+                    | "is_ascii_alphabetic"
+                    | "is_ascii_alphanumeric"
+                    | "is_ascii_digit"
+                    | "is_ascii_octdigit"
+                    | "is_ascii_hexdigit"
+                    | "is_ascii_uppercase"
+                    | "is_ascii_lowercase"
+                    | "is_ascii_whitespace"
+                    | "is_ascii_control"
+                    | "is_ascii_graphic"
+                    | "is_ascii_punctuation"
+                    | "to_ascii_uppercase"
+                    | "to_ascii_lowercase"
+            )
+        {
+            let receiver_is_u8 = self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                .as_ref()
+                .map(|t| self.peel_reference_paren_group_type(t))
+                .is_some_and(|t| matches!(t, syn::Type::Path(tp)
+                    if tp.qself.is_none()
+                        && tp.path.segments.len() == 1
+                        && tp.path.segments[0].ident == "u8"));
+            // Boolean is_ascii_* classifiers give identical answers for u8
+            // and char, so UNRESOLVED receivers (for-loop byte bindings)
+            // route through char_runtime's char32_t overloads — u8 promotes
+            // safely, and a genuinely-char receiver keeps full width.
+            // to_ascii_* stays u8-only (its return type differs by receiver).
+            // digit/hexdigit keep their older unconditional rusty:: routes
+            // below (pinned by leaf2114); octdigit has no char_runtime fn.
+            let unresolved_bool_classifier = method_name.starts_with("is_ascii")
+                && !matches!(
+                    method_name.as_str(),
+                    "is_ascii_octdigit" | "is_ascii_digit" | "is_ascii_hexdigit"
+                )
+                && self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver);
+            if receiver_is_u8 || unresolved_bool_classifier {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                let ns = if receiver_is_u8 { "rusty" } else { "rusty::char_runtime" };
+                return format!("{}::{}({})", ns, method_name, receiver);
+            }
+        }
         // Remaining `char` classifiers / ASCII transforms. C++ `char32_t` is a
         // primitive with no methods, so `c.is_alphabetic()` etc. must lower to
         // the `char_runtime` free functions. Gated on a char-like receiver (or a

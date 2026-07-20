@@ -4252,6 +4252,12 @@ impl CodeGen {
                 lit: syn::Lit::Int(i),
                 ..
             }) if !i.suffix().is_empty() => syn::parse_str::<syn::Type>(i.suffix()).ok(),
+            // Byte literals are always u8 (`let b = b'a';`) — unambiguous,
+            // unlike unsuffixed ints.
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Byte(_),
+                ..
+            }) => syn::parse_str::<syn::Type>("u8").ok(),
             // Negation preserves the operand's numeric type (`let y = -2.5_f64;`).
             syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => self
                 .infer_simple_expr_type(&u.expr)

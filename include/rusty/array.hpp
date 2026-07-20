@@ -1519,6 +1519,16 @@ public:
     constexpr range(T start_value, T end_value)
         : start(std::move(start_value)), end_(std::move(end_value)) {}
 
+    // Rust Debug for ranges is `start..end`, not an element list — the
+    // debug formatter prefers this member over generic iteration.
+    std::string rusty_debug_string() const {
+        if constexpr (std::is_arithmetic_v<T>) {
+            return std::format("{}..{}", start, end_);
+        } else {
+            return "..";
+        }
+    }
+
     template<typename U>
     constexpr range(const range<U>& other)
     requires std::is_convertible_v<U, T>
@@ -1663,6 +1673,15 @@ public:
 
     constexpr range_inclusive(T start_value, T end_value)
         : start(std::move(start_value)), end_(std::move(end_value)) {}
+
+    // Rust Debug: `start..=end` (see range::rusty_debug_string).
+    std::string rusty_debug_string() const {
+        if constexpr (std::is_arithmetic_v<T>) {
+            return std::format("{}..={}", start, end_);
+        } else {
+            return "..=";
+        }
+    }
 
     template<typename U>
     constexpr range_inclusive(const range_inclusive<U>& other)
