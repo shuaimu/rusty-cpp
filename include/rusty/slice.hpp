@@ -1340,6 +1340,38 @@ public:
         return next_result(option_like_take_value(item));
     }
 
+    // DoubleEnded support (Rust's Chain is DoubleEndedIterator when both
+    // halves are): drain the RIGHT half from the back first, then the
+    // left. Only instantiated when both inners have next_back —
+    // chain().enumerate().rev() hard-errored without it.
+    auto next_back()
+        requires requires {
+            std::declval<std::remove_reference_t<LeftIter>&>().next_back();
+            std::declval<std::remove_reference_t<RightIter>&>().next_back();
+        }
+    {
+        using left_item_raw = decltype(option_like_take_value(
+            std::declval<next_result_t<std::remove_reference_t<LeftIter>>&>()));
+        using item_type = std::conditional_t<
+            std::is_lvalue_reference_v<left_item_raw>,
+            left_item_raw,
+            std::decay_t<left_item_raw>>;
+        using next_result = rusty::Option<item_type>;
+
+        if (!right_done_back_) {
+            auto item = right_.next_back();
+            if (option_like_has_value(item)) {
+                return next_result(option_like_take_value(item));
+            }
+            right_done_back_ = true;
+        }
+        auto item = left_.next_back();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         if constexpr (requires { left_.size_hint(); right_.size_hint(); }) {
             auto left_hint = left_.size_hint();
@@ -1364,6 +1396,7 @@ private:
     LeftIter left_;
     RightIter right_;
     bool left_done_;
+    bool right_done_back_ = false;
 };
 
 template<typename Range>
