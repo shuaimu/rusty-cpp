@@ -5266,6 +5266,39 @@ impl CodeGen {
             return Some(ret_ty);
         }
 
+        // `x.unwrap_or(v)` returns exactly its argument's type for both
+        // Option<T> and Result<T, E> — infer through the argument when the
+        // receiver's own type is out of reach (adapter chains like
+        // `s.chars().next().unwrap_or('?')`).
+        if method == "unwrap_or"
+            && mc.args.len() == 1
+            && let Some(arg_ty) = self.infer_simple_expr_type(&mc.args[0])
+        {
+            // `&LITERAL` args are constant-promoted to 'static in Rust; the
+            // C++ temporary is expression-scoped, so a reference-typed local
+            // would dangle — type those by value instead.
+            let arg = self.peel_paren_group_expr(&mc.args[0]);
+            let ref_to_literal = matches!(
+                arg,
+                syn::Expr::Reference(r) if matches!(
+                    self.peel_paren_group_expr(&r.expr),
+                    syn::Expr::Lit(_)
+                ) || matches!(
+                    self.peel_paren_group_expr(&r.expr),
+                    syn::Expr::Unary(u) if matches!(
+                        self.peel_paren_group_expr(&u.expr),
+                        syn::Expr::Lit(_)
+                    )
+                )
+            );
+            if ref_to_literal
+                && let syn::Type::Reference(r) = self.peel_paren_group_type(&arg_ty)
+            {
+                return Some((*r.elem).clone());
+            }
+            return Some(arg_ty);
+        }
+
         // `RefCell::borrow()` / `borrow_mut()` return `Ref<T>` / `RefMut<T>`
         // BY VALUE. Track the wrapper type on the local so downstream
         // method calls on the guard route through wrapper-deref handling

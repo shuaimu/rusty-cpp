@@ -2261,36 +2261,52 @@ auto get_mut(Container& container, Index idx) {
 
 template<typename Container>
 auto first(const Container& container) {
-    return get(container, size_t{0});
+    if constexpr (requires { container.first(); }) {
+        return container.first();
+    } else {
+        return get(container, size_t{0});
+    }
 }
 
 template<typename Container>
 auto first_mut(Container& container) {
-    return get_mut(container, size_t{0});
+    if constexpr (requires { container.first_mut(); }) {
+        return container.first_mut();
+    } else {
+        return get_mut(container, size_t{0});
+    }
 }
 
 template<typename Container>
 auto last(const Container& container) {
-    const auto span = slice_full(container);
-    using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
-    using Opt = Option<Elem&>;
-    if (rusty::len(span) == 0) {
-        return Opt(None);
+    if constexpr (requires { container.last(); }) {
+        return container.last();
+    } else {
+        const auto span = slice_full(container);
+        using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
+        using Opt = Option<Elem&>;
+        if (rusty::len(span) == 0) {
+            return Opt(None);
+        }
+        const size_t last_index = rusty::len(span) - 1;
+        return Opt(*(rusty::as_ptr(span) + last_index));
     }
-    const size_t last_index = rusty::len(span) - 1;
-    return Opt(*(rusty::as_ptr(span) + last_index));
 }
 
 template<typename Container>
 auto last_mut(Container& container) {
-    auto span = slice_full(container);
-    using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
-    using Opt = Option<Elem&>;
-    if (rusty::len(span) == 0) {
-        return Opt(None);
+    if constexpr (requires { container.last_mut(); }) {
+        return container.last_mut();
+    } else {
+        auto span = slice_full(container);
+        using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
+        using Opt = Option<Elem&>;
+        if (rusty::len(span) == 0) {
+            return Opt(None);
+        }
+        const size_t last_index = rusty::len(span) - 1;
+        return Opt(*(rusty::as_ptr(span) + last_index));
     }
-    const size_t last_index = rusty::len(span) - 1;
-    return Opt(*(rusty::as_ptr(span) + last_index));
 }
 
 // std::span accessor counterparts — spans are borrowed views, so rvalue

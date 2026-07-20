@@ -9453,7 +9453,11 @@ impl CodeGen {
             method_name.as_str(),
             "first" | "first_mut" | "last" | "last_mut"
         ) && args.is_empty()
-            && self.should_lower_slice_deref_method_call(&mc.receiver)
+            && (self.should_lower_slice_deref_method_call(&mc.receiver)
+                // Unresolved receivers (deliberately-untyped array-literal
+                // locals) route too — the rusty:: helpers member-prefer, so
+                // a receiver that owns the member still dispatches to it.
+                || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {

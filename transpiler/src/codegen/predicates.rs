@@ -2302,6 +2302,11 @@ impl CodeGen {
         if self.type_is_slice_or_span_like(receiver_ty) {
             return true;
         }
+        // Fixed arrays deref to slices in Rust — `arr.first()`, `arr.get(i)`,
+        // `arr.sort()` are all slice methods std::array doesn't have.
+        if matches!(receiver_ty, syn::Type::Array(_)) {
+            return true;
+        }
 
         let syn::Type::Path(tp) = receiver_ty else {
             return false;
