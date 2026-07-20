@@ -850,11 +850,14 @@ public:
         if (!data_ && !other.data_) return false;
         if (!data_) return true;
         if (!other.data_) return false;
-        
+
         int cmp = std::memcmp(data_, other.data_, std::min(len_, other.len_));
         if (cmp != 0) return cmp < 0;
         return len_ < other.len_;
     }
+    bool operator>(const String& other) const { return other < *this; }
+    bool operator<=(const String& other) const { return !(other < *this); }
+    bool operator>=(const String& other) const { return !(*this < other); }
     
     // String concatenation
     // @lifetime: owned

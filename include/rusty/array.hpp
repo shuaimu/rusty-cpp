@@ -1993,6 +1993,15 @@ template<typename Q>
 concept equivalence_key_like = !is_range_bounds_like_v<Q>;
 } // namespace detail
 
+// The C++ mirror of Rust's `T: Clone` bound. std::copyable alone rejects
+// the rusty ports (String/Vec delete their copy ctors and expose .clone()
+// instead), so a member clone() satisfies the bound too.
+template<typename T>
+concept clone_like = std::copyable<T>
+    || requires(const T& t) {
+           { t.clone() } -> std::convertible_to<T>;
+       };
+
 
 template<typename T, std::size_t N>
 auto slice_full(std::array<T, N>&& container) {

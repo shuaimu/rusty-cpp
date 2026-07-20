@@ -2931,7 +2931,10 @@ impl CodeGen {
                 // However, `auto` cannot appear inside type arguments like
                 // `SafeFn<uint64_t(auto)>`.  When inside a generic argument
                 // context, fall through to the facade/concept path instead.
-                if self.module_name.is_some() && self.type_arg_nesting.get() == 0 {
+                // Single-file outputs take this path too (Fn bounds already
+                // returned through try_map_fn_trait above) — without it
+                // `impl Display` leaked the bound name as a C++ type.
+                if self.type_arg_nesting.get() == 0 {
                     // Check if any bound is a mutable trait (e.g., fmt::Write,
                     // io::Write) — these need `auto&` not `const auto&`.
                     // `FnMut`/`FnOnce` too: their call requires non-const access

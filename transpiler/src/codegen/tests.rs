@@ -8173,19 +8173,19 @@ fn test_trait_bound() {
     let out = transpile_str("fn f<T: Clone>(x: T) {}");
     assert!(out.contains("template<typename T>"));
     assert!(out.contains("requires"));
-    // Clone lowers to std::copyable — the C++ concept that matches
-    // Rust's Clone bound for the value-copy use case.
-    assert!(out.contains("std::copyable<T>"));
+    // Clone lowers to rusty::clone_like — std::copyable OR a member
+    // clone() (the rusty ports delete their copy ctors).
+    assert!(out.contains("rusty::clone_like<T>"));
 }
 
 #[test]
 fn test_multiple_bounds() {
-    // Clone maps to the std::copyable concept; Send has no C++ analog and
+    // Clone maps to rusty::clone_like; Send has no C++ analog and
     // emits NO constraint (the old `SendFacade::is_satisfied_by<T>()` was an
     // unbound identifier — no Facade type is ever generated).
     let out = transpile_str("fn f<T: Clone + Send>(x: T) {}");
     assert!(out.contains("requires"));
-    assert!(out.contains("std::copyable<T>"));
+    assert!(out.contains("rusty::clone_like<T>"));
     assert!(!out.contains("Facade::is_satisfied_by"));
 }
 
@@ -8194,7 +8194,7 @@ fn test_where_clause() {
     let out = transpile_str("fn f<T>(x: T) where T: Clone {}");
     assert!(out.contains("template<typename T>"));
     assert!(out.contains("requires"));
-    assert!(out.contains("std::copyable<T>"));
+    assert!(out.contains("rusty::clone_like<T>"));
 }
 
 #[test]
@@ -8216,7 +8216,7 @@ fn test_allocator_plus_clone_bound_emits_concept_pair() {
         "use core::alloc::Allocator; fn f<A: Allocator + Clone>(_a: A) {}",
     );
     assert!(out.contains("rusty::alloc::Allocator<A>"));
-    assert!(out.contains("std::copyable<A>"));
+    assert!(out.contains("rusty::clone_like<A>"));
 }
 
 #[test]

@@ -46291,7 +46291,10 @@ fn well_known_concept_for_trait_path(path: &syn::Path) -> Option<&'static str> {
         | "core::alloc::Allocator"
         | "std::alloc::Allocator"
         | "alloc::alloc::Allocator" => Some("rusty::alloc::Allocator"),
-        "Clone" | "core::clone::Clone" | "std::clone::Clone" => Some("std::copyable"),
+        // std::copyable alone rejects the rusty ports (String/Vec delete
+        // their copy ctors and expose .clone()); rusty::clone_like admits
+        // either shape.
+        "Clone" | "core::clone::Clone" | "std::clone::Clone" => Some("rusty::clone_like"),
         // Rust's Equivalent/Comparable key bounds exclude range shapes;
         // the concept keeps range subscripts off the greedy Q-key template
         // (indexmap's Index<(Bound, Bound)> vs Index<&Q> overloads).
@@ -53353,7 +53356,14 @@ fn escape_cpp_keyword(name: &str) -> String {
         | "switch" | "template" | "this" | "thread_local" | "throw" | "true" | "try"
         | "typedef" | "typename" | "union" | "unsigned" | "using" | "virtual" | "void"
         | "volatile" | "wchar_t" | "while" | "write" | "_MM_SHUFFLE" | "NAN" | "INFINITY"
-        | "NULL" | "xor" | "xor_eq" => {
+        | "NULL" | "xor" | "xor_eq"
+        // libc globals with int-friendly signatures: a user fn of the same
+        // name loses overload resolution to the C library's non-template
+        // exact match (`::dup(5)` duplicated FILE DESCRIPTOR 5 and returned
+        // -1; `::pause()` would block forever). Kept to RARE identifiers —
+        // common ones (index/abs/close/div/exit) appear as variables and
+        // methods throughout the ports and renaming them breaks pins.
+        | "dup" | "sleep" | "raise" | "kill" | "pause" => {
             format!("{}_", name)
         }
         _ => name.to_string(),
