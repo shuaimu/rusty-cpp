@@ -5357,6 +5357,40 @@ impl CodeGen {
     /// Statement-level lowering for `place = if cond { ...?...; val_a } else { val_b };`.
     ///
     /// When a branch of the RHS if-expression contains `?` or an early
+    /// `(x, y) = (y, x);` — Rust destructuring assignment. Lower the LHS
+    /// through std::tie (reference tuple; `_` → std::ignore) so the RHS
+    /// materializes first and the assignment lands in the real places —
+    /// emitting the LHS as std::make_tuple assigned into a TEMPORARY made
+    /// the whole statement a silent no-op. Flat place lists only; nested
+    /// destructuring assignment bails to the historical emission.
+    pub(super) fn try_emit_tuple_destructuring_assign(
+        &mut self,
+        assign: &syn::ExprAssign,
+    ) -> bool {
+        let syn::Expr::Tuple(lhs) = self.peel_paren_group_expr(&assign.left) else {
+            return false;
+        };
+        if lhs.elems.is_empty() {
+            return false;
+        }
+        let mut places = Vec::new();
+        for elem in &lhs.elems {
+            match self.peel_paren_group_expr(elem) {
+                syn::Expr::Infer(_) => places.push("std::ignore".to_string()),
+                syn::Expr::Path(_)
+                | syn::Expr::Field(_)
+                | syn::Expr::Index(_)
+                | syn::Expr::Unary(_) => {
+                    places.push(self.emit_expr_to_string(elem));
+                }
+                _ => return false,
+            }
+        }
+        let rhs = self.emit_expr_to_string(&assign.right);
+        self.writeln(&format!("std::tie({}) = {};", places.join(", "), rhs));
+        true
+    }
+
     /// `return`, the default expression path can only wrap it in an IIFE — but
     /// that traps the control flow inside the lambda instead of escaping to the
     /// enclosing function, so the emitter degrades to a `/* TODO: if-expression

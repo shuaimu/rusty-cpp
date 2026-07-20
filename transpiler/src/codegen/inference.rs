@@ -4258,6 +4258,31 @@ impl CodeGen {
                 lit: syn::Lit::Byte(_),
                 ..
             }) => syn::parse_str::<syn::Type>("u8").ok(),
+            // Tuple literals type elementwise when every element infers —
+            // rest-pattern lets need the arity, and Debug/format dispatch
+            // needs the element types. Reference elements (`(&e, &Right(2))`)
+            // are excluded: typing those tuples as reference tuples binds
+            // C++ temporaries that die at the end of the full expression
+            // (Rust's let-position temporary lifetime extension has no C++
+            // equivalent) — the assertion-context machinery owns that shape.
+            syn::Expr::Tuple(tuple_init)
+                if !tuple_init.elems.is_empty()
+                    && tuple_init.elems.iter().all(|e| {
+                        !matches!(self.peel_paren_group_expr(e), syn::Expr::Reference(_))
+                    }) => {
+                let elem_tys: Option<syn::punctuated::Punctuated<syn::Type, syn::Token![,]>> =
+                    tuple_init
+                        .elems
+                        .iter()
+                        .map(|e| self.infer_simple_expr_type(e))
+                        .collect();
+                elem_tys.map(|elems| {
+                    syn::Type::Tuple(syn::TypeTuple {
+                        paren_token: Default::default(),
+                        elems,
+                    })
+                })
+            }
             // Negation preserves the operand's numeric type (`let y = -2.5_f64;`).
             syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => self
                 .infer_simple_expr_type(&u.expr)

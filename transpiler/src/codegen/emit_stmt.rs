@@ -300,6 +300,12 @@ impl CodeGen {
             if self.try_emit_assign_if_return_statement_level(&assign.left, &assign.right) {
                 return;
             }
+            // Destructuring assignment `(x, y) = (y, x)`: the LHS tuple must
+            // be a REFERENCE tuple — emitting it as std::make_tuple assigned
+            // into a temporary, making the whole statement a silent no-op.
+            if self.try_emit_tuple_destructuring_assign(assign) {
+                return;
+            }
         }
         match stmt {
             syn::Stmt::Local(local) => self.emit_local(local),
@@ -4406,6 +4412,78 @@ impl CodeGen {
                 }
             }
             syn::Pat::Tuple(tuple) => {
+                // Rest patterns (`let (a, ..) = t;`) can't lower to a
+                // structured binding — the name count must match the tuple
+                // arity exactly. Emit std::get bindings against a temp, with
+                // the arity read from the init (tuple literal or inferred
+                // tuple type). Bails to the historical path when the arity
+                // is unknowable or an element is itself a destructure.
+                let rest_pos = tuple.elems.iter().position(|p| {
+                    matches!(self.peel_pat_type_ref_paren(p), syn::Pat::Rest(_))
+                });
+                if let (Some(rest_pos), Some(init)) = (rest_pos, &local.init) {
+                    let init_peeled = self.peel_paren_group_expr(&init.expr);
+                    let total = if let syn::Expr::Tuple(init_tuple) = init_peeled {
+                        Some(init_tuple.elems.len())
+                    } else {
+                        self.infer_simple_expr_type(&init.expr)
+                            .or_else(|| {
+                                self.infer_local_binding_type_from_initializer(&init.expr)
+                            })
+                            .as_ref()
+                            .map(|t| self.peel_reference_paren_group_type(t))
+                            .and_then(|t| match t {
+                                syn::Type::Tuple(tt) => Some(tt.elems.len()),
+                                _ => None,
+                            })
+                    };
+                    let names_simple = tuple.elems.iter().all(|p| {
+                        matches!(
+                            self.peel_pat_type_ref_paren(p),
+                            syn::Pat::Ident(_) | syn::Pat::Wild(_) | syn::Pat::Rest(_)
+                        )
+                    });
+                    let after = tuple.elems.len() - rest_pos - 1;
+                    if let Some(total) = total
+                        && names_simple
+                        && rest_pos + after <= total
+                    {
+                        let init_str = self.emit_expr_to_string(&init.expr);
+                        let temp = self.reserve_synthetic_cpp_name("_nested_tuple");
+                        self.writeln(&format!("auto&& {} = {};", temp, init_str));
+                        let init_ty = self.infer_simple_expr_type(&init.expr);
+                        let elem_tys: Option<&syn::TypeTuple> = init_ty
+                            .as_ref()
+                            .map(|t| self.peel_reference_paren_group_type(t))
+                            .and_then(|t| match t {
+                                syn::Type::Tuple(tt) => Some(tt),
+                                _ => None,
+                            });
+                        for (i, elem) in tuple.elems.iter().enumerate() {
+                            let syn::Pat::Ident(pi) = self.peel_pat_type_ref_paren(elem)
+                            else {
+                                continue;
+                            };
+                            if pi.ident == "_" {
+                                continue;
+                            }
+                            let idx = if i < rest_pos { i } else { total - (tuple.elems.len() - i) };
+                            let rust_name = pi.ident.to_string();
+                            let cpp = self.allocate_local_cpp_name(&rust_name);
+                            self.writeln(&format!(
+                                "auto&& {} = rusty::detail::deref_if_pointer(std::get<{}>(rusty::detail::deref_if_pointer({})));",
+                                cpp, idx, temp
+                            ));
+                            if let Some(tt) = elem_tys
+                                && let Some(ty) = tt.elems.iter().nth(idx)
+                                && let Some(scope) = self.local_bindings.last_mut()
+                            {
+                                scope.insert(rust_name, Some(ty.clone()));
+                            }
+                        }
+                        return;
+                    }
+                }
                 // let (a, b) = expr; → auto [a, b] = expr;
                 // Nested destructure elements (`let (a, (b, c)) = …`) can't
                 // lower to a C++ structured binding — `auto [a, [b, c]]` is
@@ -4449,6 +4527,23 @@ impl CodeGen {
                         self.writeln(&format!("auto&& {} = {};", temp, init_str));
                         for line in &binding_stmts {
                             self.writeln(line);
+                        }
+                        // The std::get bindings are untyped auto&& — record
+                        // structurally-inferred element types so downstream
+                        // format/method dispatch sees them (a char binding
+                        // printed 97 without this).
+                        if let Some(init_ty) = self.infer_simple_expr_type(&init.expr) {
+                            let mut binding_types = HashMap::new();
+                            self.bind_pattern_types_into_env(
+                                &pat_clone,
+                                &init_ty,
+                                &mut binding_types,
+                            );
+                            if let Some(scope) = self.local_bindings.last_mut() {
+                                for (name, ty) in binding_types {
+                                    scope.insert(name, Some(ty));
+                                }
+                            }
                         }
                         return;
                     }

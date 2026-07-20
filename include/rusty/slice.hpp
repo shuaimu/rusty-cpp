@@ -332,7 +332,16 @@ using next_item_t =
 
 template<typename T>
 constexpr decltype(auto) deref_if_pointer(T&& value) {
-    if constexpr (std::is_pointer_v<std::remove_reference_t<T>>) {
+    using deref_value_type = std::remove_reference_t<T>;
+    if constexpr (std::is_pointer_v<deref_value_type>
+                  && std::is_same_v<
+                         std::remove_cv_t<std::remove_pointer_t<deref_value_type>>,
+                         char>) {
+        // Same rule as deref_if_pointer_like below: a plain-char pointer is
+        // a STR carrier (Rust `&str`), never a reference-to-char — peeling
+        // it read the FIRST CHARACTER (`t.0` on ("bye", 'z') gave 'b').
+        return std::forward<T>(value);
+    } else if constexpr (std::is_pointer_v<deref_value_type>) {
         return *std::forward<T>(value);
     } else {
         return std::forward<T>(value);

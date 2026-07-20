@@ -24006,6 +24006,10 @@ impl CodeGen {
             | syn::Expr::While(_)
             | syn::Expr::ForLoop(_)
             | syn::Expr::Unsafe(_) => true,
+            // Tuple literals must lower to std::make_tuple — the dumb
+            // pass-through leaks them as C++ COMMA expressions, so
+            // `(2, 0) > (1, 99)` silently compared 0 > 99.
+            syn::Expr::Tuple(_) => true,
             syn::Expr::Binary(b) => {
                 Self::format_expr_needs_smart_lowering(&b.left)
                     || Self::format_expr_needs_smart_lowering(&b.right)
