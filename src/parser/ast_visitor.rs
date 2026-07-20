@@ -1684,7 +1684,7 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                 }
             }
-            EntityKind::BinaryOperator => {
+            EntityKind::BinaryOperator | EntityKind::CompoundAssignOperator => {
                 // Handle assignments
                 let children: Vec<Entity> = child.get_children().into_iter().collect();
                 debug_println!("DEBUG STMT: BinaryOperator has {} children", children.len());
@@ -2449,7 +2449,10 @@ fn extract_loop_control_statements(entity: &Entity) -> Vec<Statement> {
 fn extract_loop_control_statement(entity: &Entity) -> Vec<Statement> {
     match entity.get_kind() {
         EntityKind::DeclStmt | EntityKind::CallExpr => extract_single_statement(entity),
-        EntityKind::BinaryOperator | EntityKind::UnaryOperator | EntityKind::UnexposedExpr => {
+        EntityKind::BinaryOperator
+        | EntityKind::CompoundAssignOperator
+        | EntityKind::UnaryOperator
+        | EntityKind::UnexposedExpr => {
             if let Some(expr) = extract_expression(entity) {
                 vec![expression_to_statement(expr, extract_location(entity))]
             } else {
@@ -2951,7 +2954,7 @@ fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
 
             statements
         }
-        EntityKind::BinaryOperator => {
+        EntityKind::BinaryOperator | EntityKind::CompoundAssignOperator => {
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if children.len() == 2 {
                 if let (Some(lhs), Some(rhs)) = (
@@ -3668,7 +3671,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             debug_println!("  DEBUG EXTRACT: Returning None");
             None
         }
-        EntityKind::BinaryOperator => {
+        EntityKind::BinaryOperator | EntityKind::CompoundAssignOperator => {
             // Extract binary operation (e.g., i < 2, x == 0)
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             debug_println!(
