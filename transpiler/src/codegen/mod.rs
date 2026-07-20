@@ -25861,7 +25861,28 @@ impl CodeGen {
         };
         if let Some(ctx) = variant_ctx {
             if !ctx.template_args.is_empty() {
-                return false;
+                // Generic enum at a CONCRETE instantiation: moving the
+                // payload is safe unless a type arg instantiates to a
+                // reference/pointer (Either<L, R> at L = int& — std::move
+                // would turn the lvalue an Option<int&>-style
+                // reconstruction needs into a prvalue). Wrap<String>'s
+                // by-value match arms must move — `=> s` copied a deleted
+                // String (r7 enum_string).
+                let tail =
+                    ctx.enum_name.rsplit("::").next().unwrap_or(&ctx.enum_name);
+                return self.declared_item_names.contains(tail)
+                    && ctx.template_args.iter().all(|a| {
+                        let a = a.trim();
+                        !a.contains('&')
+                            && !a.contains('*')
+                            && a != "auto"
+                            && !a.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(a)
+                            // A bare in-scope type param (Option<R> at R)
+                            // may still instantiate to a reference — the
+                            // exact case the original gate protected.
+                            && !self.is_type_param_in_scope(a)
+                    });
             }
             let tail = ctx.enum_name.rsplit("::").next().unwrap_or(&ctx.enum_name);
             return declared_and_param_free(tail);

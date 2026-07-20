@@ -2641,6 +2641,19 @@ impl CodeGen {
                     expected_ty,
                 )
             };
+            // A bare `=> s` tail returning a by-value payload binding of
+            // the consumed scrutinee must MOVE — returning the named
+            // binding copies (deleted for String payloads). The
+            // move-at-use predicate only hooks call-arg positions.
+            let body = if pushed_movable_frame
+                && self
+                    .should_move_local_binding_for_owned_expected_value(arm_value_expr, expected_ty)
+                && !body.trim_start().starts_with("std::move(")
+            {
+                format!("std::move({})", body)
+            } else {
+                body
+            };
             if pushed_movable_frame {
                 self.movable_match_binding_scopes.borrow_mut().pop();
             }
@@ -19943,6 +19956,95 @@ impl CodeGen {
             .collect();
         let args =
             self.wrap_data_enum_variant_tuple_constructor_args(enum_name, variant_name, args);
+
+        // GENERIC enum with no expected type in sight: the bare
+        // alternative aggregate (`Wrap_One{5}`) binds the ALTERNATIVE
+        // type — the methods live on the Wrap<T> wrapper, so
+        // `let a = Wrap::One(5); a.get()` hard-errored. Recover the
+        // owner's params from the payload args and construct through the
+        // emitted static factory (`Wrap<int32_t>::One(5)`).
+        // Wrapper-form enums only (data enum + impls → `struct Wrap :
+        // std::variant` WITH static factories). The alias form emits
+        // FREE factory fns and its bare alternative converts through
+        // std::variant's converting ctor, so the old emission stands —
+        // and there are no members to miss.
+        if (self.has_impls_for_type(enum_name)
+            || self.impl_method_self_tys.contains_key(enum_name)
+            || self.impl_method_receiver_kinds.contains_key(enum_name))
+            && let Some(params) = self
+                .declared_type_key_for_path(&enum_path)
+                .and_then(|key| self.declared_type_params.get(&key))
+                .filter(|p| !p.is_empty())
+                .cloned()
+        {
+            let mut recovered: HashMap<String, String> = HashMap::new();
+            let mut viable = true;
+            for (idx, arg) in call.args.iter().enumerate() {
+                let Some(field_ty) = self.lookup_data_enum_variant_arg_expected_type(
+                    &enum_path,
+                    enum_name,
+                    variant_name,
+                    idx,
+                ) else {
+                    viable = false;
+                    break;
+                };
+                let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&field_ty)
+                else {
+                    continue;
+                };
+                if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                    continue;
+                }
+                let pname = tp.path.segments[0].ident.to_string();
+                if !params.contains(&pname) {
+                    continue;
+                }
+                let arg_ty = self.infer_simple_expr_type(arg).map(|ty| self.map_type(&ty));
+                // Unsuffixed literals stay untyped by design — apply
+                // Rust's own defaulting (i32 / f64), which is exactly
+                // what rustc infers here absent other constraints.
+                let arg_ty = arg_ty.or_else(|| {
+                    match self.peel_paren_group_expr(arg) {
+                        syn::Expr::Lit(l) => match &l.lit {
+                            syn::Lit::Int(i) if i.suffix().is_empty() => {
+                                Some("int32_t".to_string())
+                            }
+                            syn::Lit::Float(f) if f.suffix().is_empty() => {
+                                Some("double".to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                });
+                match arg_ty {
+                    Some(t)
+                        if t != "auto"
+                            && !t.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(&t) =>
+                    {
+                        recovered.entry(pname).or_insert(t);
+                    }
+                    _ => {
+                        viable = false;
+                        break;
+                    }
+                }
+            }
+            if viable && recovered.len() == params.len() {
+                let owner_cpp = self.emit_path_to_string(&enum_path);
+                let targs: Vec<String> =
+                    params.iter().map(|p| recovered[p].clone()).collect();
+                return Some(format!(
+                    "{}<{}>::{}({})",
+                    owner_cpp,
+                    targs.join(", "),
+                    escape_cpp_keyword(variant_name),
+                    args.join(", ")
+                ));
+            }
+        }
 
         if args.is_empty() {
             Some(format!("{}{{}}", cpp_variant_struct))
