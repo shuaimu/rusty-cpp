@@ -5297,6 +5297,17 @@ impl CodeGen {
             return Some(ret_ty);
         }
 
+        // `s.parse::<T>()` is Result<T, _> — the turbofish names the Ok type
+        // exactly, so downstream .unwrap() locals type as T (a parsed char
+        // printed 55 instead of 7 without this).
+        if method == "parse"
+            && mc.args.is_empty()
+            && let Some(t) = self.method_call_single_turbofish_type(mc)
+        {
+            let t = t.clone();
+            return Some(parse_quote!(Result<#t, String>));
+        }
+
         // `x.unwrap_or(v)` returns exactly its argument's type for both
         // Option<T> and Result<T, E> — infer through the argument when the
         // receiver's own type is out of reach (adapter chains like

@@ -24147,6 +24147,7 @@ impl CodeGen {
         let mut pretty_debug_arg_positions = HashSet::new();
         let mut native_arg_conversions: HashMap<usize, char> = HashMap::new();
         let mut native_passthrough_arg_positions: HashSet<usize> = HashSet::new();
+        let mut width_arg_positions: HashSet<usize> = HashSet::new();
         let mut float_display_arg_positions: HashSet<usize> = HashSet::new();
         let mut radix_bits_arg_positions: HashSet<usize> = HashSet::new();
         let mut alt_radix_arg_positions: HashMap<usize, (u32, bool, usize)> = HashMap::new();
@@ -24280,10 +24281,15 @@ impl CodeGen {
                     &named_format_args,
                     &mut args,
                     &float_arg_positions,
+                    &mut width_arg_positions,
                 )
             } else {
                 rewritten
             };
+            // Width/precision args must reach std::format as raw INTEGERS —
+            // a to_string wrap aborts with "argument used for width or
+            // precision must be a non-negative integer".
+            native_passthrough_arg_positions.extend(width_arg_positions.iter().copied());
             let escaped = escape_cpp_string_literal_content(&rewritten);
             format!("\"{}\"", escaped)
         } else {
@@ -24650,6 +24656,7 @@ impl CodeGen {
         named: &HashMap<String, usize>,
         args: &mut Vec<String>,
         float_positions: &HashSet<usize>,
+        width_positions: &mut HashSet<usize>,
     ) -> String {
         // Bail (leave untouched) if any value ref is still a NAME — those
         // should have been resolved by the named-ref/capture passes, and
@@ -24696,12 +24703,13 @@ impl CodeGen {
 
         // Rewrite `TOKEN$` inside one spec; returns None on an unresolvable
         // named width (bail — better verbatim than corrupt).
-        let rewrite_spec = |spec: &str, args: &mut Vec<String>| -> Option<String> {
+        let mut rewrite_spec = |spec: &str, args: &mut Vec<String>| -> Option<String> {
             let mut out = String::new();
             let sc: Vec<char> = spec.chars().collect();
             let mut i = 0usize;
             while i < sc.len() {
                 if sc[i] == '$' {
+                    // (every resolved index below is a width/precision arg)
                     // Longest ident/digit run ending here is the token.
                     let mut start = out.len();
                     while start > 0
@@ -24727,6 +24735,7 @@ impl CodeGen {
                         args.push(token.clone());
                         args.len() - 1
                     };
+                    width_positions.insert(idx);
                     out.truncate(start);
                     out.push('{');
                     out.push_str(&idx.to_string());
@@ -51201,7 +51210,31 @@ rusty::Result<T, rusty::String> parse(const Input& input) {\n\
     } else {\n\
         return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"unsupported parse input\"));\n\
     }\n\
-    if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {\n\
+    if constexpr (std::is_same_v<T, char32_t>) {\n\
+        // Rust str parse::<char>() — exactly one UTF-8 scalar or Err.\n\
+        if (text.empty()) {\n\
+            return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"cannot parse char from empty string\"));\n\
+        }\n\
+        const unsigned char lead = static_cast<unsigned char>(text[0]);\n\
+        size_t len = lead < 0x80 ? 1 : (lead >> 5) == 0x6 ? 2 : (lead >> 4) == 0xE ? 3 : (lead >> 3) == 0x1E ? 4 : 0;\n\
+        if (len == 0 || text.size() != len) {\n\
+            return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"too many characters in char\"));\n\
+        }\n\
+        char32_t code = 0;\n\
+        if (len == 1) { code = lead; }\n\
+        else {\n\
+            code = lead & (0x7F >> len);\n\
+            for (size_t k = 1; k < len; ++k) {\n\
+                const unsigned char cont = static_cast<unsigned char>(text[k]);\n\
+                if ((cont & 0xC0) != 0x80) {\n\
+                    return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"too many characters in char\"));\n\
+                }\n\
+                code = (code << 6) | (cont & 0x3F);\n\
+            }\n\
+        }\n\
+        return rusty::Result<T, rusty::String>::Ok(static_cast<T>(code));\n\
+    }\n\
+    if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char32_t>) {\n\
         T value{};\n\
         const auto* begin = text.data();\n\
         const auto* end = begin + text.size();\n\
