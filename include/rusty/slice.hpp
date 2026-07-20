@@ -2491,6 +2491,43 @@ auto sum(Range&& range) {
     return acc;
 }
 
+namespace detail {
+// One-element append for unzip targets: the rusty ports expose `push`
+// (Vec, String); std containers expose `push_back`.
+template<typename C, typename V>
+void unzip_append(C& c, V&& v) {
+    if constexpr (requires { c.push(std::forward<V>(v)); }) {
+        c.push(std::forward<V>(v));
+    } else {
+        c.push_back(std::forward<V>(v));
+    }
+}
+} // namespace detail
+
+// `Iterator::unzip()` — split an iterator of pairs into two collections.
+// The target types come from the surrounding let annotation; the
+// transpiler lowers `.unzip()` to `rusty::unzip_collect<A, B>(it)`.
+// Owned (non-pointer) items are moved out fieldwise — Rust's unzip
+// consumes Item=(A, B) pairs, so nothing else aliases them.
+template<typename A, typename B, typename Range>
+std::tuple<A, B> unzip_collect(Range&& range) {
+    A first{};
+    B second{};
+    auto range_for = for_in(std::forward<Range>(range));
+    for (auto&& item : range_for) {
+        auto&& pair = detail::deref_if_pointer_like(item);
+        if constexpr (!std::is_pointer_v<std::remove_cvref_t<decltype(item)>>
+                      && std::is_rvalue_reference_v<decltype(item)>) {
+            detail::unzip_append(first, std::move(std::get<0>(pair)));
+            detail::unzip_append(second, std::move(std::get<1>(pair)));
+        } else {
+            detail::unzip_append(first, std::get<0>(pair));
+            detail::unzip_append(second, std::get<1>(pair));
+        }
+    }
+    return {std::move(first), std::move(second)};
+}
+
 // `Iterator::product()` — the multiplicative identity (1) times every item.
 // The transpiler lowers `.product()` to this (parallel to sum()).
 template<typename Range>

@@ -7816,6 +7816,37 @@ impl CodeGen {
             let pred = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::find({}, {})", receiver, pred);
         }
+        // `it.unzip()` — the pair-splitting terminal. No member exists on the
+        // adapter types; lower to `rusty::unzip_collect<A, B>(it)` with the
+        // target collections read from the expected tuple type (the let
+        // annotation) or a `::<(A, B)>` turbofish.
+        if mc.method == "unzip"
+            && mc.args.is_empty()
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
+        {
+            let tuple_ty = self
+                .method_call_single_turbofish_type(mc)
+                .or(expected_ty)
+                .map(|t| self.peel_reference_paren_group_type(t))
+                .and_then(|t| match t {
+                    syn::Type::Tuple(tt) if tt.elems.len() == 2 => Some(tt.clone()),
+                    _ => None,
+                });
+            if let Some(tt) = tuple_ty {
+                let a = self.map_type(&tt.elems[0]);
+                let b = self.map_type(&tt.elems[1]);
+                let usable = |t: &str| {
+                    t != "auto"
+                        && !t.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(t)
+                };
+                if usable(&a) && usable(&b) {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!("rusty::unzip_collect<{}, {}>({})", a, b, receiver);
+                }
+            }
+        }
         if mc.method == "collect" && mc.args.is_empty() {
             // For unresolved generic receivers, bridge `.into_iter()` through
             // `rusty::iter(...)` since concrete C++ method surfaces may not exist.
