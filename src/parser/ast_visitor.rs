@@ -2331,6 +2331,15 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     });
                 }
             }
+            EntityKind::ThrowExpr => {
+                // Handle throw expressions so unsafe operands are still checked.
+                if let Some(expr) = extract_expression(&child) {
+                    statements.push(Statement::ExpressionStatement {
+                        expr,
+                        location: extract_location(&child),
+                    });
+                }
+            }
             EntityKind::PackExpansionExpr => {
                 // Handle pack expansion at statement level (direct fold expressions)
                 if let Some(pack_stmt) = extract_pack_expansion(&child) {
@@ -2884,7 +2893,8 @@ fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
         EntityKind::UnexposedExpr
         | EntityKind::UnaryOperator
         | EntityKind::NewExpr
-        | EntityKind::DeleteExpr => {
+        | EntityKind::DeleteExpr
+        | EntityKind::ThrowExpr => {
             if let Some(expr) = extract_expression(entity) {
                 vec![Statement::ExpressionStatement { expr, location }]
             } else {
@@ -4215,6 +4225,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 "ptr".to_string(),
             ))))
         }
+        EntityKind::ThrowExpr => entity
+            .get_children()
+            .into_iter()
+            .find_map(|child| extract_expression(&child)),
         _ => None,
     }
 }
