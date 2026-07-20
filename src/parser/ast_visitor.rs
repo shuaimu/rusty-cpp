@@ -2295,6 +2295,9 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             EntityKind::SwitchStmt => {
                 statements.push(extract_switch_statement(&child));
             }
+            EntityKind::TryStmt => {
+                statements.extend(extract_try_statement(&child));
+            }
             EntityKind::UnaryOperator => {
                 // Handle standalone dereference operations
                 if let Some(expr) = extract_expression(&child) {
@@ -2779,6 +2782,28 @@ fn extract_switch_body_statement(entity: &Entity) -> Vec<Statement> {
     }
 }
 
+fn extract_try_statement(entity: &Entity) -> Vec<Statement> {
+    let mut statements = Vec::new();
+
+    for child in entity.get_children() {
+        match child.get_kind() {
+            EntityKind::CompoundStmt => {
+                statements.extend(extract_compound_statement(&child));
+            }
+            EntityKind::CatchStmt => {
+                for catch_child in child.get_children() {
+                    if catch_child.get_kind() == EntityKind::CompoundStmt {
+                        statements.extend(extract_compound_statement(&catch_child));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    statements
+}
+
 // Extract one statement cursor used where C++ allows an unbraced substatement,
 // such as `if (x) f();` or `while (x) ++i;`. This helper intentionally takes
 // the already-selected branch/body cursor; callers must not pass a whole IfStmt
@@ -2788,6 +2813,7 @@ fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
 
     match entity.get_kind() {
         EntityKind::CompoundStmt => extract_compound_statement(entity),
+        EntityKind::TryStmt => extract_try_statement(entity),
         EntityKind::DeclStmt => {
             let mut statements = Vec::new();
 
