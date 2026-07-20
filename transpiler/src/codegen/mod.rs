@@ -51143,6 +51143,21 @@ inline std::string_view trim_matches(std::string_view s, char32_t ch) {\n\
     while (end > start && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;\n\
     return s.substr(start, end - start);\n\
 }\n\
+inline std::string_view trim_start_matches(std::string_view s, std::string_view pat) {\n\
+    if (!pat.empty()) { while (s.starts_with(pat)) s.remove_prefix(pat.size()); }\n\
+    return s;\n\
+}\n\
+inline std::string_view trim_end_matches(std::string_view s, std::string_view pat) {\n\
+    if (!pat.empty()) { while (s.ends_with(pat)) s.remove_suffix(pat.size()); }\n\
+    return s;\n\
+}\n\
+inline std::string_view trim_matches(std::string_view s, std::string_view pat) {\n\
+    if (!pat.empty()) {\n\
+        while (s.starts_with(pat)) s.remove_prefix(pat.size());\n\
+        while (s.ends_with(pat)) s.remove_suffix(pat.size());\n\
+    }\n\
+    return s;\n\
+}\n\
 inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {\n\
     if (s.starts_with(prefix)) {\n\
         return rusty::Option<std::string_view>(s.substr(prefix.size()));\n\
@@ -51179,6 +51194,23 @@ inline rusty::String replace(std::string_view s, std::string_view from, std::str
         pos += to.size();\n\
     }\n\
     return rusty::String::from(out);\n\
+}\n\
+template<typename To>\n\
+inline rusty::String replace(std::string_view s, char32_t from, To&& to) {\n\
+    char pat_buf[4]; size_t pat_n;\n\
+    if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }\n\
+    else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }\n\
+    else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }\n\
+    else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }\n\
+    return replace(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)));\n\
+}\n\
+template<typename S, typename To>\n\
+inline rusty::String replace(const S& value, char32_t from, To&& to) {\n\
+    if constexpr (requires { value.as_str(); }) {\n\
+        return replace(std::string_view(value.as_str()), from, std::forward<To>(to));\n\
+    } else {\n\
+        return replace(std::string_view(value), from, std::forward<To>(to));\n\
+    }\n\
 }\n\
 template<typename S, typename From, typename To>\n\
 inline rusty::String replace(const S& value, From&& from, To&& to) {\n\

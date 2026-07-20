@@ -1022,9 +1022,51 @@ impl CodeGen {
             self.emit_expr_to_string(&bin.left),
         );
         let op = self.emit_binop(&bin.op);
-        let right = self.emit_expr_to_string(&bin.right);
+        let right = self
+            .compound_add_assign_string_rhs(bin)
+            .unwrap_or_else(|| self.emit_expr_to_string(&bin.right));
         self.writeln(&format!("{} {} {};", left, op, right));
         true
+    }
+
+    /// `s += &format!(..)` / `s += &n.to_string()` — Rust's `String +=
+    /// &str` over an owned temporary. The general reference lowering
+    /// wraps the temp in addr_of_temp (a POINTER — no += overload);
+    /// append the value directly instead.
+    fn compound_add_assign_string_rhs(&self, bin: &syn::ExprBinary) -> Option<String> {
+        if !matches!(bin.op, syn::BinOp::AddAssign(_)) {
+            return None;
+        }
+        let syn::Expr::Reference(r) = self.peel_paren_group_expr(&bin.right) else {
+            return None;
+        };
+        if self.expr_is_owned_string_producer(&r.expr) {
+            Some(self.emit_expr_to_string(&r.expr))
+        } else {
+            None
+        }
+    }
+
+    /// to_string()/to_owned() calls, format! invocations, and
+    /// String-typed exprs — the leaves that mark a `+` chain as Rust
+    /// String concatenation.
+    fn expr_is_owned_string_producer(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::MethodCall(mc) => {
+                matches!(mc.method.to_string().as_str(), "to_string" | "to_owned")
+                    && mc.args.is_empty()
+            }
+            syn::Expr::Macro(m) => m
+                .mac
+                .path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "format"),
+            other => self
+                .infer_simple_expr_type(other)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_string_like_type(ty)),
+        }
     }
 
     /// Try to emit an expression as a control flow statement.
@@ -9616,6 +9658,39 @@ impl CodeGen {
             };
             return format!("rusty::String::from({}).{}()", receiver, method_name);
         }
+        // `as_str()` on an UNRESOLVED local: format!-bound locals are
+        // std::string (no as_str member). to_string_view handles both
+        // (String's as_str branch, std::string's view conversion).
+        if method_name == "as_str"
+            && args.is_empty()
+            && matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1
+                    && p.path.segments[0].ident != "self"
+            )
+            && self.infer_simple_expr_type(&mc.receiver).is_none()
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::to_string_view({})", receiver);
+        }
+        // UNRESOLVED receivers (closure params over split() items,
+        // chars()-loop vars) route through the header dispatchers:
+        // string-likes materialize a String; the ascii pair also accepts
+        // scalars via ASCII arithmetic.
+        if matches!(
+            method_name.as_str(),
+            "to_uppercase" | "to_lowercase" | "to_ascii_uppercase" | "to_ascii_lowercase"
+        ) && args.is_empty()
+            && matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1
+                    && p.path.segments[0].ident != "self"
+            )
+            && self.infer_simple_expr_type(&mc.receiver).is_none()
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::{}_dispatch({})", method_name, receiver);
+        }
         if method_name == "repeat"
             && args.len() == 1
             && self
@@ -14297,18 +14372,66 @@ impl CodeGen {
         ))
     }
 
+    /// A `+` chain whose LEFTMOST leaf produces an owned string
+    /// (`"a".to_string() + x + y`, `format!(..) + ..`): Rust String
+    /// concatenation. Flattened into rusty::str_concat — the C++
+    /// operator+ surface can't span the std::string/string_view/String
+    /// operand mix, and the chain's local needs the String surface.
+    fn string_concat_chain_operands<'a>(
+        &self,
+        expr: &'a syn::Expr,
+        out: &mut Vec<&'a syn::Expr>,
+    ) {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Binary(b) if matches!(b.op, syn::BinOp::Add(_)) => {
+                self.string_concat_chain_operands(&b.left, out);
+                out.push(&b.right);
+            }
+            leaf => out.push(leaf),
+        }
+    }
+
     pub(super) fn emit_binary_expr_to_string_with_expected(
         &self,
         bin: &syn::ExprBinary,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if matches!(bin.op, syn::BinOp::Add(_)) {
+            let mut operands = Vec::new();
+            let full: syn::Expr = syn::Expr::Binary(bin.clone());
+            self.string_concat_chain_operands(&full, &mut operands);
+            // Rust's only stringish `+` is `String + &str`: if ANY operand
+            // (after peeling the borrow) is an owned-string producer, the
+            // whole chain is String concatenation. `&`-wrapped operands
+            // append by value — the borrow must not become addr_of_temp.
+            let peeled: Vec<&syn::Expr> = operands
+                .iter()
+                .map(|op| match self.peel_paren_group_expr(op) {
+                    syn::Expr::Reference(r) => r.expr.as_ref(),
+                    other => other,
+                })
+                .collect();
+            if operands.len() >= 2
+                && peeled
+                    .iter()
+                    .any(|op| self.expr_is_owned_string_producer(op))
+            {
+                let parts: Vec<String> = peeled
+                    .iter()
+                    .map(|op| self.emit_expr_to_string(op))
+                    .collect();
+                return format!("rusty::str_concat({})", parts.join(", "));
+            }
+        }
         if Self::is_compound_assign_binop(&bin.op) {
             let left = self.autoderef_compound_assign_lhs_if_needed(
                 &bin.left,
                 self.emit_expr_to_string(&bin.left),
             );
             let op = self.emit_binop(&bin.op);
-            let right = self.emit_expr_to_string(&bin.right);
+            let right = self
+                .compound_add_assign_string_rhs(bin)
+                .unwrap_or_else(|| self.emit_expr_to_string(&bin.right));
             let assign_expr = format!("{} {} {}", left, op, right);
             // Rust assignment expressions always evaluate to unit `()`.
             return format!(
@@ -20718,6 +20841,21 @@ impl CodeGen {
             syn::Expr::Binary(bin) => self.emit_binary_expr_to_string_with_expected(bin, None),
             syn::Expr::Unary(un) => match un.op {
                 syn::UnOp::Neg(_) => {
+                    // Fold the minus INTO a suffixed int literal: emitting
+                    // `-static_cast<int8_t>(128)` wraps the cast to -128
+                    // and negation yields +128 (Rust -128i8 is a plain
+                    // negative literal).
+                    if let syn::Expr::Lit(l) = self.peel_paren_group_expr(&un.expr)
+                        && let syn::Lit::Int(i) = &l.lit
+                        && !i.suffix().is_empty()
+                        // MIN-magnitude literals (9223372036854775808i64)
+                        // overflow a C++ literal — keep the old path there.
+                        && i.base10_digits().parse::<i64>().is_ok()
+                        && let Ok(mapped) =
+                            syn::parse_str::<syn::Type>(i.suffix()).map(|t| self.map_type(&t))
+                    {
+                        return format!("static_cast<{}>(-{})", mapped, i.base10_digits());
+                    }
                     let operand = self.emit_expr_to_string(&un.expr);
                     format!("-{}", operand)
                 }

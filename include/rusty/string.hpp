@@ -394,6 +394,22 @@ public:
         push_str(std::string_view(buf, n));
     }
     
+    // Push a string slice (no NUL assumption). Constrained to EXACT
+    // string_view: a std::string arg must keep resolving through the
+    // String converting ctor as before (a plain string_view overload
+    // made that call ambiguous).
+    template<typename SV>
+        requires std::is_same_v<std::remove_cvref_t<SV>, std::string_view>
+    void push_str(SV sv) {
+        if (sv.empty()) return;
+        if (len_ + sv.size() >= capacity_) {
+            grow(len_ + sv.size() + 1);
+        }
+        std::memcpy(data_ + len_, sv.data(), sv.size());
+        len_ += sv.size();
+        ensure_null_terminated();
+    }
+
     // Push a string slice
     void push_str(const char* str) {
         if (!str) return;
@@ -862,6 +878,14 @@ public:
         return *this;
     }
     
+    template<typename SV>
+        requires(std::is_same_v<std::remove_cvref_t<SV>, std::string_view>
+                 || std::is_same_v<std::remove_cvref_t<SV>, std::string>)
+    String& operator+=(SV&& sv) {
+        push_str(std::string_view(sv));
+        return *this;
+    }
+
     String& operator+=(const char* cstr) {
         push_str(cstr);
         return *this;
@@ -1223,6 +1247,80 @@ inline bool operator==(const String& lhs, std::string_view rhs) { return lhs.as_
 // Factory functions (renamed from `string()` so the name doesn't
 // collide with the `rusty::string` namespace alias exported by the
 // `string_port` module).
+// Rust String `+` concatenation chains (`"a".to_string() + "b" + x`):
+// operands mix std::string, string_view, String, and char* — C++23 has
+// no operator+ for several of those pairs, and the chain's local must
+// carry the rusty::String surface. Flattened by the emitter into one
+// variadic append.
+template<typename... Parts>
+String str_concat(Parts&&... parts) {
+    std::string buf;
+    auto append_one = [&buf](auto&& part) {
+        using P = std::remove_cvref_t<decltype(part)>;
+        if constexpr (requires { part.as_str(); }) {
+            const std::string_view sv(part.as_str());
+            buf.append(sv.data(), sv.size());
+        } else if constexpr (std::is_convertible_v<P, std::string_view>) {
+            const std::string_view sv(part);
+            buf.append(sv.data(), sv.size());
+        } else {
+            buf.append(std::string(part));
+        }
+    };
+    (append_one(std::forward<Parts>(parts)), ...);
+    return String::from(std::string_view(buf));
+}
+
+// Case-method dispatch for receivers whose type the transpiler cannot
+// resolve (closure params over split() items, chars()-loop variables):
+// scalars get ASCII arithmetic, string-likes materialize a String.
+template<typename T>
+auto to_ascii_uppercase_dispatch(T&& v) {
+    using D = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<D, char32_t> || std::is_same_v<D, char>
+                  || std::is_same_v<D, uint8_t>) {
+        return static_cast<D>((v >= 'a' && v <= 'z') ? v - ('a' - 'A') : v);
+    } else if constexpr (requires { v.as_str(); }) {
+        return String::from(v.as_str()).to_uppercase();
+    } else {
+        return String::from(std::string_view(v)).to_uppercase();
+    }
+}
+
+template<typename T>
+auto to_ascii_lowercase_dispatch(T&& v) {
+    using D = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<D, char32_t> || std::is_same_v<D, char>
+                  || std::is_same_v<D, uint8_t>) {
+        return static_cast<D>((v >= 'A' && v <= 'Z') ? v + ('a' - 'A') : v);
+    } else if constexpr (requires { v.as_str(); }) {
+        return String::from(v.as_str()).to_lowercase();
+    } else {
+        return String::from(std::string_view(v)).to_lowercase();
+    }
+}
+
+// String-like only: Rust char::to_uppercase yields an ITERATOR (Unicode
+// tables — a known deferral); routing scalars here would be silently
+// wrong, so they stay a compile error.
+template<typename T>
+String to_uppercase_dispatch(T&& v) {
+    if constexpr (requires { v.as_str(); }) {
+        return String::from(v.as_str()).to_uppercase();
+    } else {
+        return String::from(std::string_view(v)).to_uppercase();
+    }
+}
+
+template<typename T>
+String to_lowercase_dispatch(T&& v) {
+    if constexpr (requires { v.as_str(); }) {
+        return String::from(v.as_str()).to_lowercase();
+    } else {
+        return String::from(std::string_view(v)).to_lowercase();
+    }
+}
+
 // @lifetime: owned
 inline String string_from(const char* s) {
     return String::from(s);

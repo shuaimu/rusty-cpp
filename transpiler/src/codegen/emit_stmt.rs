@@ -4068,11 +4068,47 @@ impl CodeGen {
                             // `auto right = ptr::read(&right)`), use a temporary
                             // to avoid C++ UB from reading an uninitialized variable.
                             let escaped_cpp = escape_cpp_keyword(&name_str);
+                            // The original probe shapes, but with a WORD
+                            // BOUNDARY after the name: the raw ", r"
+                            // substring false-positived on ", rusty::…"
+                            // for a local named `r`, forcing a const tmp +
+                            // std::move — a deleted copy for move-only
+                            // Strings. (Deliberately NOT any-occurrence:
+                            // inner match/closure bindings shadowing the
+                            // same name are not self-references.)
+                            // name_off = where the NAME starts inside the
+                            // pattern; both of the name's edges must sit on
+                            // non-identifier boundaries ("header," must not
+                            // match the `r,` probe; ", rusty::" must not
+                            // match ", r").
+                            let occurs_bounded =
+                                |hay: &str, pat: &str, name_off: usize, name_len: usize| -> bool {
+                                    hay.match_indices(pat).any(|(i, _)| {
+                                        let bytes = hay.as_bytes();
+                                        let ns = i + name_off;
+                                        let ne = ns + name_len;
+                                        let before_ok = ns == 0 || {
+                                            let c = bytes[ns - 1];
+                                            !c.is_ascii_alphanumeric() && c != b'_' && c != b':'
+                                        };
+                                        let after_ok = ne >= bytes.len() || {
+                                            let c = bytes[ne];
+                                            !c.is_ascii_alphanumeric() && c != b'_' && c != b':'
+                                        };
+                                        before_ok && after_ok
+                                    })
+                                };
+                            let nlen = escaped_cpp.len();
                             let self_ref = cpp_name == escaped_cpp
-                                && (expr_str.contains(&format!("&{}", escaped_cpp))
+                                && (occurs_bounded(&expr_str, &format!("&{}", escaped_cpp), 1, nlen)
                                     || expr_str.contains(&format!("({})", escaped_cpp))
-                                    || expr_str.contains(&format!("{},", escaped_cpp))
-                                    || expr_str.contains(&format!(", {}", escaped_cpp)));
+                                    || occurs_bounded(&expr_str, &format!("{},", escaped_cpp), 0, nlen)
+                                    || occurs_bounded(
+                                        &expr_str,
+                                        &format!(", {}", escaped_cpp),
+                                        2,
+                                        nlen,
+                                    ));
                             if self_ref {
                                 // Emit: auto _tmp = init; auto name = _tmp;
                                 let tmp_name = self.reserve_synthetic_cpp_name(&format!(
