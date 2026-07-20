@@ -20018,6 +20018,36 @@ impl CodeGen {
                         _ => None,
                     }
                 });
+                // Constructor-shaped calls (`String::from(..)`,
+                // `Vec::new()`) type as their owner even when general
+                // inference has no local context to lean on.
+                let arg_ty = arg_ty.or_else(|| {
+                    let syn::Expr::Call(c) = self.peel_paren_group_expr(arg) else {
+                        return None;
+                    };
+                    let syn::Expr::Path(fp) = self.peel_paren_group_expr(&c.func) else {
+                        return None;
+                    };
+                    if fp.qself.is_some() || fp.path.segments.len() != 2 {
+                        return None;
+                    }
+                    let owner = fp.path.segments[0].ident.to_string();
+                    let assoc = fp.path.segments[1].ident.to_string();
+                    if !matches!(
+                        assoc.as_str(),
+                        "from" | "new" | "with_capacity" | "default" | "from_str"
+                    ) || !owner.chars().next().is_some_and(|ch| ch.is_uppercase())
+                        || self.is_type_param_in_scope(&owner)
+                    {
+                        return None;
+                    }
+                    let ty = syn::parse_str::<syn::Type>(&owner).ok()?;
+                    let mapped = self.map_type(&ty);
+                    (mapped != "auto"
+                        && !mapped.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(&mapped))
+                    .then_some(mapped)
+                });
                 match arg_ty {
                     Some(t)
                         if t != "auto"

@@ -1208,6 +1208,40 @@ impl CodeGen {
                                 arm_expected_ty,
                             )
                         };
+                        // A bare `=> s` tail returning a by-value payload
+                        // binding of a CONSUMED scrutinee must MOVE — the
+                        // named binding copies on return (deleted for String
+                        // payloads). Only when ref-mode is off (owned
+                        // scrutinee, concrete non-reference instantiation)
+                        // and the arm is guard-free.
+                        let body = if !match_bindings_are_refs
+                            && arm.guard.is_none()
+                            && arm_expected_ty.is_some_and(|ty| {
+                                !matches!(
+                                    self.peel_reference_paren_group_type(ty),
+                                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                                ) && !self.is_known_scalar_like_type(ty)
+                            })
+                            && matches!(
+                                self.peel_paren_group_expr(
+                                    self.extract_value_expr(&arm.body).unwrap_or(&arm.body)
+                                ),
+                                syn::Expr::Path(p) if p.qself.is_none()
+                                    && p.path.segments.len() == 1
+                                    && {
+                                        let n = p.path.segments[0].ident.to_string();
+                                        binding_map.contains_key(&n)
+                                            || (n != "self"
+                                                && n.chars().next().is_some_and(|c| c.is_lowercase())
+                                                && !self.multi_use_vars.contains(&n))
+                                    }
+                            )
+                            && !body.trim_start().starts_with("std::move(")
+                        {
+                            format!("std::move({})", body)
+                        } else {
+                            body
+                        };
                         let diverging = self.is_expr_diverging(&arm.body);
                         let body_trimmed = body.trim_start();
                         let body_is_return_expr = body_trimmed.starts_with("return ");
@@ -1276,6 +1310,40 @@ impl CodeGen {
                             arm_expected_ty,
                         )
                     };
+                    // A bare `=> s` tail returning a by-value payload
+                    // binding of a CONSUMED scrutinee must MOVE — the
+                    // named binding copies on return (deleted for String
+                    // payloads). Only when ref-mode is off (owned
+                    // scrutinee, concrete non-reference instantiation)
+                    // and the arm is guard-free.
+                    let body = if !match_bindings_are_refs
+                        && arm.guard.is_none()
+                        && arm_expected_ty.is_some_and(|ty| {
+                            !matches!(
+                                self.peel_reference_paren_group_type(ty),
+                                syn::Type::Reference(_) | syn::Type::Ptr(_)
+                            ) && !self.is_known_scalar_like_type(ty)
+                        })
+                        && matches!(
+                            self.peel_paren_group_expr(
+                                self.extract_value_expr(&arm.body).unwrap_or(&arm.body)
+                            ),
+                            syn::Expr::Path(p) if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && {
+                                    let n = p.path.segments[0].ident.to_string();
+                                    binding_map.contains_key(&n)
+                                        || (n != "self"
+                                            && n.chars().next().is_some_and(|c| c.is_lowercase())
+                                            && !self.multi_use_vars.contains(&n))
+                                }
+                        )
+                        && !body.trim_start().starts_with("std::move(")
+                    {
+                        format!("std::move({})", body)
+                    } else {
+                        body
+                    };
                     let diverging = self.is_expr_diverging(&arm.body);
                     let body_trimmed = body.trim_start();
                     let body_is_return_expr = body_trimmed.starts_with("return ");
@@ -1316,6 +1384,40 @@ impl CodeGen {
                             emitted,
                             arm_expected_ty,
                         )
+                    };
+                    // A bare `=> s` tail returning a by-value payload
+                    // binding of a CONSUMED scrutinee must MOVE — the
+                    // named binding copies on return (deleted for String
+                    // payloads). Only when ref-mode is off (owned
+                    // scrutinee, concrete non-reference instantiation)
+                    // and the arm is guard-free.
+                    let body = if !match_bindings_are_refs
+                        && arm.guard.is_none()
+                        && arm_expected_ty.is_some_and(|ty| {
+                            !matches!(
+                                self.peel_reference_paren_group_type(ty),
+                                syn::Type::Reference(_) | syn::Type::Ptr(_)
+                            ) && !self.is_known_scalar_like_type(ty)
+                        })
+                        && matches!(
+                            self.peel_paren_group_expr(
+                                self.extract_value_expr(&arm.body).unwrap_or(&arm.body)
+                            ),
+                            syn::Expr::Path(p) if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && {
+                                    let n = p.path.segments[0].ident.to_string();
+                                    binding_map.contains_key(&n)
+                                        || (n != "self"
+                                            && n.chars().next().is_some_and(|c| c.is_lowercase())
+                                            && !self.multi_use_vars.contains(&n))
+                                }
+                        )
+                        && !body.trim_start().starts_with("std::move(")
+                    {
+                        format!("std::move({})", body)
+                    } else {
+                        body
                     };
                     let diverging = self.is_expr_diverging(&arm.body);
                     let body_trimmed = body.trim_start();
@@ -1455,6 +1557,40 @@ impl CodeGen {
                             arm_expected_ty,
                         )
                     };
+                    // A bare `=> s` tail returning a by-value payload
+                    // binding of a CONSUMED scrutinee must MOVE — the
+                    // named binding copies on return (deleted for String
+                    // payloads). Only when ref-mode is off (owned
+                    // scrutinee, concrete non-reference instantiation)
+                    // and the arm is guard-free.
+                    let body = if !match_bindings_are_refs
+                        && arm.guard.is_none()
+                        && arm_expected_ty.is_some_and(|ty| {
+                            !matches!(
+                                self.peel_reference_paren_group_type(ty),
+                                syn::Type::Reference(_) | syn::Type::Ptr(_)
+                            ) && !self.is_known_scalar_like_type(ty)
+                        })
+                        && matches!(
+                            self.peel_paren_group_expr(
+                                self.extract_value_expr(&arm.body).unwrap_or(&arm.body)
+                            ),
+                            syn::Expr::Path(p) if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && {
+                                    let n = p.path.segments[0].ident.to_string();
+                                    binding_map.contains_key(&n)
+                                        || (n != "self"
+                                            && n.chars().next().is_some_and(|c| c.is_lowercase())
+                                            && !self.multi_use_vars.contains(&n))
+                                }
+                        )
+                        && !body.trim_start().starts_with("std::move(")
+                    {
+                        format!("std::move({})", body)
+                    } else {
+                        body
+                    };
                     let diverging = self.is_expr_diverging(&arm.body);
                     let body_trimmed = body.trim_start();
                     let body_is_return_expr = body_trimmed.starts_with("return ");
@@ -1516,6 +1652,40 @@ impl CodeGen {
                             emitted,
                             arm_expected_ty,
                         )
+                    };
+                    // A bare `=> s` tail returning a by-value payload
+                    // binding of a CONSUMED scrutinee must MOVE — the
+                    // named binding copies on return (deleted for String
+                    // payloads). Only when ref-mode is off (owned
+                    // scrutinee, concrete non-reference instantiation)
+                    // and the arm is guard-free.
+                    let body = if !match_bindings_are_refs
+                        && arm.guard.is_none()
+                        && arm_expected_ty.is_some_and(|ty| {
+                            !matches!(
+                                self.peel_reference_paren_group_type(ty),
+                                syn::Type::Reference(_) | syn::Type::Ptr(_)
+                            ) && !self.is_known_scalar_like_type(ty)
+                        })
+                        && matches!(
+                            self.peel_paren_group_expr(
+                                self.extract_value_expr(&arm.body).unwrap_or(&arm.body)
+                            ),
+                            syn::Expr::Path(p) if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && {
+                                    let n = p.path.segments[0].ident.to_string();
+                                    binding_map.contains_key(&n)
+                                        || (n != "self"
+                                            && n.chars().next().is_some_and(|c| c.is_lowercase())
+                                            && !self.multi_use_vars.contains(&n))
+                                }
+                        )
+                        && !body.trim_start().starts_with("std::move(")
+                    {
+                        format!("std::move({})", body)
+                    } else {
+                        body
                     };
                     let diverging = self.is_expr_diverging(&arm.body);
                     let body_trimmed = body.trim_start();
@@ -1585,6 +1755,40 @@ impl CodeGen {
                             emitted,
                             arm_expected_ty,
                         )
+                    };
+                    // A bare `=> s` tail returning a by-value payload
+                    // binding of a CONSUMED scrutinee must MOVE — the
+                    // named binding copies on return (deleted for String
+                    // payloads). Only when ref-mode is off (owned
+                    // scrutinee, concrete non-reference instantiation)
+                    // and the arm is guard-free.
+                    let body = if !match_bindings_are_refs
+                        && arm.guard.is_none()
+                        && arm_expected_ty.is_some_and(|ty| {
+                            !matches!(
+                                self.peel_reference_paren_group_type(ty),
+                                syn::Type::Reference(_) | syn::Type::Ptr(_)
+                            ) && !self.is_known_scalar_like_type(ty)
+                        })
+                        && matches!(
+                            self.peel_paren_group_expr(
+                                self.extract_value_expr(&arm.body).unwrap_or(&arm.body)
+                            ),
+                            syn::Expr::Path(p) if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && {
+                                    let n = p.path.segments[0].ident.to_string();
+                                    binding_map.contains_key(&n)
+                                        || (n != "self"
+                                            && n.chars().next().is_some_and(|c| c.is_lowercase())
+                                            && !self.multi_use_vars.contains(&n))
+                                }
+                        )
+                        && !body.trim_start().starts_with("std::move(")
+                    {
+                        format!("std::move({})", body)
+                    } else {
+                        body
                     };
                     let diverging = self.is_expr_diverging(&arm.body);
                     let body_trimmed = body.trim_start();
