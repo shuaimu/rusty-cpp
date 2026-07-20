@@ -1232,6 +1232,41 @@ impl CodeGen {
         true
     }
 
+    /// Whether a payload sub-pattern can FAIL to match at runtime
+    /// (`Some(v)`, `None`, a literal, a nested variant) — as opposed to an
+    /// irrefutable binding or wildcard. Refutable payloads make two arms of
+    /// the same outer variant possible, which the std::visit lowering
+    /// cannot express.
+    fn payload_subpattern_is_refutable(
+        &self,
+        pat: &syn::Pat,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        match self.peel_pat_type_ref_paren(pat) {
+            syn::Pat::TupleStruct(_)
+            | syn::Pat::Lit(_)
+            | syn::Pat::Slice(_)
+            | syn::Pat::Or(_)
+            | syn::Pat::Struct(_)
+            | syn::Pat::Path(_)
+            | syn::Pat::Range(_) => true,
+            syn::Pat::Ident(pi) => {
+                pi.subpat
+                    .as_ref()
+                    .is_some_and(|(_, sp)| self.payload_subpattern_is_refutable(sp, variant_ctx))
+                    || self
+                        .runtime_ident_match_condition_method(pi, variant_ctx)
+                        .is_some()
+                    || self.pattern_ident_is_const_value(&pi.ident.to_string())
+            }
+            syn::Pat::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|e| self.payload_subpattern_is_refutable(e, variant_ctx)),
+            _ => false,
+        }
+    }
+
     pub(super) fn try_emit_runtime_match_stmt(
         &mut self,
         match_expr: &syn::ExprMatch,
@@ -1255,6 +1290,26 @@ impl CodeGen {
             HashMap<String, syn::Type>,
         )> = Vec::with_capacity(match_expr.arms.len());
 
+        // Data-enum arms with REFUTABLE payload sub-patterns
+        // (`Wrap::One(Some(v))` / `Wrap::One(None)`) cannot take the
+        // std::visit fallback: both arms lower to identical Wrap_One
+        // visitor overloads (ambiguous) and the loser's body is silently
+        // dropped. Route the whole match through the runtime condition
+        // collector instead — but only for that shape, so matches that
+        // compile today keep their historical lowering.
+        let data_enum_nested_payload = match_expr.arms.iter().any(|arm| {
+            let syn::Pat::TupleStruct(ts) = self.peel_pat_type_ref_paren(&arm.pat) else {
+                return false;
+            };
+            self.runtime_tuple_struct_match_methods(&ts.path, variant_ctx)
+                .is_none()
+                && self.path_is_known_data_enum_variant_with_ctx(&ts.path, variant_ctx)
+                && ts
+                    .elems
+                    .iter()
+                    .any(|e| self.payload_subpattern_is_refutable(e, variant_ctx))
+        });
+
         for (idx, arm) in match_expr.arms.iter().enumerate() {
             let mut arm_pre_lines = Vec::new();
             let mut arm_payload_condition = None;
@@ -1266,6 +1321,43 @@ impl CodeGen {
                     let Some((cond_method, unwrap_method)) =
                         self.runtime_tuple_struct_match_methods(&ts.path, variant_ctx)
                     else {
+                        if data_enum_nested_payload
+                            && self
+                                .path_is_known_data_enum_variant_with_ctx(&ts.path, variant_ctx)
+                        {
+                            let Some(cond) = self
+                                .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                    &arm.pat,
+                                    "_m",
+                                    &mut arm_binding_lines,
+                                    &mut arm_binding_map,
+                                    variant_ctx,
+                                )
+                            else {
+                                return false;
+                            };
+                            let arm_condition = cond.unwrap_or_else(|| "true".to_string());
+                            let mut arm_binding_types = HashMap::new();
+                            if let Some(scrutinee_ty) = match_scrutinee_ty.as_ref() {
+                                self.bind_pattern_types_into_env(
+                                    &arm.pat,
+                                    scrutinee_ty,
+                                    &mut arm_binding_types,
+                                );
+                                arm_binding_types
+                                    .retain(|name, _| arm_binding_map.contains_key(name));
+                            }
+                            arm_plans.push((
+                                arm_condition,
+                                arm_pre_lines,
+                                arm_payload_condition,
+                                arm_payload_setup_lines,
+                                arm_binding_lines,
+                                arm_binding_map,
+                                arm_binding_types,
+                            ));
+                            continue;
+                        }
                         return false;
                     };
                     if ts.elems.len() != 1 {
@@ -1304,12 +1396,28 @@ impl CodeGen {
                     format!("_m.{}()", cond_method)
                 }
                 syn::Pat::Path(pp) => {
-                    let Some(cond_method) =
+                    if let Some(cond_method) =
                         self.runtime_path_match_condition_method(&pp.path, variant_ctx)
-                    else {
+                    {
+                        format!("_m.{}()", cond_method)
+                    } else if data_enum_nested_payload
+                        && self.path_is_known_data_enum_variant_with_ctx(&pp.path, variant_ctx)
+                    {
+                        let Some(cond) = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                &arm.pat,
+                                "_m",
+                                &mut arm_binding_lines,
+                                &mut arm_binding_map,
+                                variant_ctx,
+                            )
+                        else {
+                            return false;
+                        };
+                        cond.unwrap_or_else(|| "true".to_string())
+                    } else {
                         return false;
-                    };
-                    format!("_m.{}()", cond_method)
+                    }
                 }
                 syn::Pat::Wild(_) => "true".to_string(),
                 syn::Pat::Ident(pi) => {
