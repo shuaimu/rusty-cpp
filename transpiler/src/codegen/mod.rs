@@ -51207,8 +51207,13 @@ struct Chars {\n\
         return static_cast<bool>(std::forward<Pred>(pred)(decoded[index]));\n\
     }\n\
 \n\
-    Chars as_str() const {\n\
-        return *this;\n\
+    std::string as_str() const {\n\
+        // Rust Chars::as_str — the UNITERATED remainder as a str.\n\
+        std::string out;\n\
+        for (std::size_t k = index; k < decoded.size(); ++k) {\n\
+            out += rusty::detail::utf8_from_char32(decoded[k]);\n\
+        }\n\
+        return out;\n\
     }\n\
 \n\
     Chars rev() const {\n\

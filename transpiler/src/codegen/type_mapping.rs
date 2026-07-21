@@ -1599,6 +1599,41 @@ impl CodeGen {
     }
 
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
+        // A bare C++ BUILTIN spelling can only appear when an already-mapped
+        // type string was parsed back into a syn::Type (template-arg
+        // substitution): pass it through verbatim. Without this, `double` /
+        // `char32_t` hit the Rust-identifier keyword escape and emitted
+        // `double_` inside std::array element types.
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+            && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+        {
+            let name = tp.path.segments[0].ident.to_string();
+            if matches!(
+                name.as_str(),
+                "double"
+                    | "float"
+                    | "char8_t"
+                    | "char16_t"
+                    | "char32_t"
+                    | "wchar_t"
+                    | "int8_t"
+                    | "int16_t"
+                    | "int32_t"
+                    | "int64_t"
+                    | "uint8_t"
+                    | "uint16_t"
+                    | "uint32_t"
+                    | "uint64_t"
+                    | "intptr_t"
+                    | "uintptr_t"
+                    | "ptrdiff_t"
+                    | "size_t"
+            ) {
+                return name;
+            }
+        }
         // `NonNull<[u8]>` is Rust's fat byte-pointer return from
         // `Allocator::allocate`: pointer + length. Map to the FAT carrier
         // (rusty::ptr::NonNullSlice<T>) — it mirrors the thin NonNull
