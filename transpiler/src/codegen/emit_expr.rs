@@ -1475,6 +1475,11 @@ impl CodeGen {
                         self.runtime_ident_match_condition_method(pi, variant_ctx)
                     {
                         format!("_m.{}()", cond_method)
+                    } else if pi.ident != "_"
+                        && self.pattern_ident_is_const_value(&pi.ident.to_string())
+                    {
+                        // Const-named patterns are VALUE tests, not bindings.
+                        self.const_value_ident_pattern_condition(&pi.ident, "_m", variant_ctx)
                     } else {
                         if pi.ident != "_" {
                             let rust_name = pi.ident.to_string();
@@ -3304,6 +3309,19 @@ impl CodeGen {
                                 bindings, arm_body_stmt
                             ));
                         }
+                    } else if self.pattern_ident_is_const_value(&pi.ident.to_string()) {
+                        // A const-named pattern (`ZERO =>`) is a VALUE test,
+                        // not a binding — binding made the first const arm
+                        // match everything.
+                        let cond = self.const_value_ident_pattern_condition(
+                            &pi.ident,
+                            "_m",
+                            variant_ctx,
+                        );
+                        out.push_str(&format!(
+                            "if (!_m_matched && ({})) {{ {} }} ",
+                            cond, arm_body_stmt
+                        ));
                     } else {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                         out.push_str(&format!(
