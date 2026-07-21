@@ -458,7 +458,9 @@ pub enum MethodQualifier {
 #[derive(Debug, Clone)]
 pub struct MemberInitializer {
     pub member_name: String,
+    pub initializer: Expression,
     pub is_nullptr: bool, // Quick check if initialized to nullptr
+    pub location: SourceLocation,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +516,13 @@ pub struct Variable {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+pub struct SwitchCase {
+    pub label: Option<Expression>,
+    pub statements: Vec<Statement>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Statement {
     VariableDecl(Variable),
     Assignment {
@@ -548,6 +557,11 @@ pub enum Statement {
         condition: Expression,
         then_branch: Vec<Statement>,
         else_branch: Option<Vec<Statement>>,
+        location: SourceLocation,
+    },
+    Switch {
+        condition: Expression,
+        cases: Vec<SwitchCase>,
         location: SourceLocation,
     },
     // Expression statements (e.g., standalone dereference, method calls)
@@ -643,6 +657,8 @@ pub enum Expression {
     // Lambda expression with captures
     Lambda {
         captures: Vec<LambdaCaptureKind>,
+        capture_initializers: Vec<Expression>,
+        body: Vec<Statement>,
     },
     // C++ cast expression (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
     // Some casts are unsafe operations in @safe code
@@ -665,6 +681,7 @@ pub enum Expression {
     PointerArithmetic {
         pointer: Box<Expression>,
         op: String,
+        offset: Option<Box<Expression>>,
     },
     /// Array subscript expression (arr[i], data[idx])
     /// Used for tracking array bounds checking
@@ -717,18 +734,26 @@ fn extract_member_initializers(entity: &Entity) -> Vec<MemberInitializer> {
             let member_name = child.get_name().unwrap_or_default();
 
             // Get the next sibling as the initialization expression
-            let init_expr = if i + 1 < children.len() {
+            let (init_expr, init_location) = if i + 1 < children.len() {
                 let next = &children[i + 1];
                 let next_kind = next.get_kind();
                 // Skip if next is another MemberRef or the body - means no initializer
                 if next_kind != EntityKind::MemberRef && next_kind != EntityKind::CompoundStmt {
                     i += 1; // Consume the expression
-                    extract_expression_from_entity(next)
+                    let expr = extract_expression(next)
+                        .unwrap_or_else(|| extract_expression_from_entity(next));
+                    (expr, extract_location(next))
                 } else {
-                    Expression::Literal("unknown".to_string())
+                    (
+                        Expression::Literal("unknown".to_string()),
+                        extract_location(child),
+                    )
                 }
             } else {
-                Expression::Literal("unknown".to_string())
+                (
+                    Expression::Literal("unknown".to_string()),
+                    extract_location(child),
+                )
             };
 
             // Check if the initializer is nullptr
@@ -740,7 +765,9 @@ fn extract_member_initializers(entity: &Entity) -> Vec<MemberInitializer> {
 
             initializers.push(MemberInitializer {
                 member_name,
+                initializer: init_expr,
                 is_nullptr,
+                location: init_location,
             });
         }
 
@@ -2182,11 +2209,38 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
 
                 statements.push(Statement::ExitScope);
             }
+            EntityKind::ForRangeStmt => {
+                statements.extend(extract_range_for_control_statements(&child));
+                statements.push(Statement::EnterLoop);
+
+                let loop_children: Vec<Entity> = child.get_children().into_iter().collect();
+                if let Some(loop_body) = loop_children.last() {
+                    if loop_body.get_kind() == EntityKind::CompoundStmt {
+                        statements.extend(extract_compound_statement(loop_body));
+                    } else {
+                        statements.extend(extract_single_statement(loop_body));
+                    }
+                }
+
+                statements.push(Statement::ExitLoop);
+            }
             EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
                 statements.extend(extract_loop_statement(&child));
             }
             EntityKind::IfStmt => {
+                // A C++17 if-init statement (`if (auto x = f(); cond)`) is a
+                // sibling of the condition/branches. `extract_if_statement`
+                // parses the condition and branches but skips the init, so
+                // emit the init separately to keep its unsafe calls checked.
+                statements.extend(extract_if_init_statements(&child));
                 statements.push(extract_if_statement(&child));
+            }
+            EntityKind::SwitchStmt => {
+                statements.extend(extract_switch_init_statements(&child));
+                statements.push(extract_switch_statement(&child));
+            }
+            EntityKind::TryStmt => {
+                statements.extend(extract_try_statement(&child));
             }
             EntityKind::UnaryOperator => {
                 // Handle standalone dereference operations
@@ -2214,6 +2268,15 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             }
             EntityKind::DeleteExpr => {
                 // Handle delete expressions (delete p; or delete[] arr;)
+                if let Some(expr) = extract_expression(&child) {
+                    statements.push(Statement::ExpressionStatement {
+                        expr,
+                        location: extract_location(&child),
+                    });
+                }
+            }
+            EntityKind::ThrowExpr => {
+                // Handle throw expressions so unsafe operands are still checked.
                 if let Some(expr) = extract_expression(&child) {
                     statements.push(Statement::ExpressionStatement {
                         expr,
@@ -2344,6 +2407,356 @@ fn extract_if_statement(entity: &Entity) -> Statement {
     }
 }
 
+/// Extract a C++17 if-init statement (`if (auto x = f(); cond)`). The init
+/// statement is a sibling of the condition; `extract_if_statement` parses the
+/// condition and branches but drops the init, so it is emitted separately here
+/// to keep its unsafe calls checked. Mirrors `extract_switch_init_statements`.
+fn extract_if_init_statements(entity: &Entity) -> Vec<Statement> {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    if children
+        .first()
+        .is_some_and(|child| child.get_kind() == EntityKind::DeclStmt)
+    {
+        extract_single_statement(&children[0])
+    } else {
+        Vec::new()
+    }
+}
+
+fn extract_range_for_control_statements(entity: &Entity) -> Vec<Statement> {
+    let mut statements = Vec::new();
+
+    // Clang exposes C++ range-for roughly as:
+    //   null, DeclStmt(__range = <user range expr>), DeclStmt(__begin),
+    //   DeclStmt(__end), condition, increment, DeclStmt(loop var), body.
+    // Only the __range initializer came from the user's range expression.
+    // The begin/end/iterator pieces are compiler desugaring and should not
+    // make ordinary range-for syntax look unsafe.
+    for child in entity.get_children() {
+        if child.get_kind() != EntityKind::DeclStmt {
+            continue;
+        }
+
+        for decl_child in child.get_children() {
+            if decl_child.get_kind() != EntityKind::VarDecl {
+                continue;
+            }
+
+            let name = decl_child.get_name().unwrap_or_default();
+            if !name.starts_with("__range") {
+                continue;
+            }
+
+            for init_child in decl_child.get_children() {
+                if let Some(expr) = extract_expression(&init_child) {
+                    let location = extract_location(&init_child);
+                    statements.push(expression_to_statement(expr, location));
+                    return statements;
+                }
+            }
+        }
+    }
+
+    if let Some(stmt) = extract_range_for_expression_from_tokens(entity) {
+        statements.push(stmt);
+    }
+
+    statements
+}
+
+fn expression_to_statement(expr: Expression, location: SourceLocation) -> Statement {
+    match expr {
+        Expression::FunctionCall { name, args } => Statement::FunctionCall {
+            name,
+            args,
+            location,
+        },
+        expr => Statement::ExpressionStatement { expr, location },
+    }
+}
+
+fn extract_range_for_expression_from_tokens(entity: &Entity) -> Option<Statement> {
+    let range = entity.get_range()?;
+    let tokens = safe_tokenize(&range);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut colon_idx = None;
+    let mut paren_depth = 0usize;
+
+    for (idx, token) in tokens.iter().enumerate() {
+        match token.get_spelling().as_str() {
+            "(" => paren_depth += 1,
+            ")" => paren_depth = paren_depth.saturating_sub(1),
+            ":" if paren_depth == 1 => {
+                colon_idx = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let colon_idx = colon_idx?;
+    let mut end_idx = tokens.len();
+    paren_depth = 1;
+
+    for (idx, token) in tokens.iter().enumerate().skip(colon_idx + 1) {
+        match token.get_spelling().as_str() {
+            "(" => paren_depth += 1,
+            ")" => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 {
+                    end_idx = idx;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if end_idx <= colon_idx + 1 {
+        return None;
+    }
+
+    let range_tokens: Vec<String> = tokens[colon_idx + 1..end_idx]
+        .iter()
+        .map(|token| token.get_spelling())
+        .collect();
+    let location = extract_location(entity);
+
+    extract_function_call_from_tokens(&range_tokens)
+        .map(|expr| expression_to_statement(expr, location.clone()))
+        .or_else(|| {
+            extract_variable_from_tokens(&range_tokens).map(|name| Statement::ExpressionStatement {
+                expr: Expression::Variable(name),
+                location,
+            })
+        })
+}
+
+fn extract_function_call_from_tokens(tokens: &[String]) -> Option<Expression> {
+    let mut idx = 0;
+    while idx + 1 < tokens.len() {
+        if tokens[idx + 1] == "(" && is_cpp_identifier(&tokens[idx]) {
+            let name = collect_qualified_name_before(tokens, idx);
+            if !name.is_empty() && !is_builtin_cast_name(&name) {
+                return Some(Expression::FunctionCall {
+                    name,
+                    args: Vec::new(),
+                });
+            }
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn collect_qualified_name_before(tokens: &[String], name_idx: usize) -> String {
+    let mut parts = vec![tokens[name_idx].clone()];
+    let mut idx = name_idx;
+
+    while idx >= 2 && tokens[idx - 1] == "::" && is_cpp_identifier(&tokens[idx - 2]) {
+        parts.push(tokens[idx - 2].clone());
+        idx -= 2;
+    }
+
+    parts.reverse();
+    parts.join("::")
+}
+
+fn extract_variable_from_tokens(tokens: &[String]) -> Option<String> {
+    tokens
+        .iter()
+        .find(|token| is_cpp_identifier(token) && !is_cpp_keyword(token))
+        .cloned()
+}
+
+fn is_cpp_identifier(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_cpp_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "alignas"
+            | "alignof"
+            | "and"
+            | "and_eq"
+            | "asm"
+            | "auto"
+            | "bitand"
+            | "bitor"
+            | "bool"
+            | "break"
+            | "case"
+            | "catch"
+            | "char"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "class"
+            | "compl"
+            | "concept"
+            | "const"
+            | "consteval"
+            | "constexpr"
+            | "constinit"
+            | "const_cast"
+            | "continue"
+            | "co_await"
+            | "co_return"
+            | "co_yield"
+            | "decltype"
+            | "default"
+            | "delete"
+            | "do"
+            | "double"
+            | "dynamic_cast"
+            | "else"
+            | "enum"
+            | "explicit"
+            | "export"
+            | "extern"
+            | "false"
+            | "float"
+            | "for"
+            | "friend"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "mutable"
+            | "namespace"
+            | "new"
+            | "noexcept"
+            | "not"
+            | "not_eq"
+            | "nullptr"
+            | "operator"
+            | "or"
+            | "or_eq"
+            | "private"
+            | "protected"
+            | "public"
+            | "register"
+            | "reinterpret_cast"
+            | "requires"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "static_assert"
+            | "static_cast"
+            | "struct"
+            | "switch"
+            | "template"
+            | "this"
+            | "thread_local"
+            | "throw"
+            | "true"
+            | "try"
+            | "typedef"
+            | "typeid"
+            | "typename"
+            | "union"
+            | "unsigned"
+            | "using"
+            | "virtual"
+            | "void"
+            | "volatile"
+            | "wchar_t"
+            | "while"
+            | "xor"
+            | "xor_eq"
+    )
+}
+
+fn is_builtin_cast_name(name: &str) -> bool {
+    matches!(
+        name,
+        "static_cast" | "dynamic_cast" | "reinterpret_cast" | "const_cast"
+    )
+}
+
+fn extract_switch_statement(entity: &Entity) -> Statement {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    let condition = children
+        .iter()
+        .skip_while(|child| child.get_kind() == EntityKind::DeclStmt)
+        .find(|child| child.get_kind() != EntityKind::CompoundStmt)
+        .and_then(extract_expression)
+        .unwrap_or_else(|| Expression::Literal("true".to_string()));
+
+    let mut cases = Vec::new();
+    if let Some(body) = children
+        .iter()
+        .find(|child| child.get_kind() == EntityKind::CompoundStmt)
+    {
+        let mut current_case: Option<SwitchCase> = None;
+
+        for child in body.get_children() {
+            match child.get_kind() {
+                EntityKind::CaseStmt => {
+                    if let Some(case) = current_case.take() {
+                        cases.push(case);
+                    }
+
+                    let case_children: Vec<Entity> = child.get_children().into_iter().collect();
+                    let label = case_children.first().and_then(extract_expression);
+                    let mut statements = Vec::new();
+                    for stmt_child in case_children.iter().skip(1) {
+                        statements.extend(extract_switch_body_statement(stmt_child));
+                    }
+
+                    current_case = Some(SwitchCase { label, statements });
+                }
+                EntityKind::DefaultStmt => {
+                    if let Some(case) = current_case.take() {
+                        cases.push(case);
+                    }
+
+                    let mut statements = Vec::new();
+                    for stmt_child in child.get_children() {
+                        statements.extend(extract_switch_body_statement(&stmt_child));
+                    }
+
+                    current_case = Some(SwitchCase {
+                        label: None,
+                        statements,
+                    });
+                }
+                EntityKind::BreakStmt => {}
+                _ => {
+                    if let Some(case) = &mut current_case {
+                        case.statements
+                            .extend(extract_switch_body_statement(&child));
+                    }
+                }
+            }
+        }
+
+        if let Some(case) = current_case {
+            cases.push(case);
+        }
+    }
+
+    Statement::Switch {
+        condition,
+        cases,
+        location: extract_location(entity),
+    }
+}
+
 /// Extract a For/While/Do cursor into `EnterLoop .. ExitLoop` statements.
 /// Shared by the braced and unbraced-substatement paths.
 ///
@@ -2428,6 +2841,136 @@ fn extract_loop_statement(entity: &Entity) -> Vec<Statement> {
     statements
 }
 
+fn extract_switch_body_statement(entity: &Entity) -> Vec<Statement> {
+    match entity.get_kind() {
+        EntityKind::BreakStmt => Vec::new(),
+        EntityKind::CompoundStmt => extract_compound_statement(entity),
+        // Stacked case/default labels (`case 1: case 2: foo();`) nest the
+        // inner label as a child of the outer CaseStmt. Recurse past the
+        // label expression so the shared body is still scanned for unsafe
+        // operations rather than dropped.
+        EntityKind::CaseStmt => entity
+            .get_children()
+            .into_iter()
+            .skip(1)
+            .flat_map(|child| extract_switch_body_statement(&child))
+            .collect(),
+        EntityKind::DefaultStmt => entity
+            .get_children()
+            .into_iter()
+            .flat_map(|child| extract_switch_body_statement(&child))
+            .collect(),
+        _ => extract_single_statement(entity),
+    }
+}
+
+fn extract_switch_init_statements(entity: &Entity) -> Vec<Statement> {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    if children
+        .first()
+        .is_some_and(|child| child.get_kind() == EntityKind::DeclStmt)
+    {
+        extract_single_statement(&children[0])
+    } else {
+        extract_switch_init_calls_from_tokens(entity)
+    }
+}
+
+fn extract_switch_init_calls_from_tokens(entity: &Entity) -> Vec<Statement> {
+    let Some(range) = entity.get_range() else {
+        return Vec::new();
+    };
+
+    let tokens = safe_tokenize(&range);
+    let open_idx = match tokens.iter().position(|token| token.get_spelling() == "(") {
+        Some(idx) => idx,
+        None => return Vec::new(),
+    };
+
+    let mut paren_depth = 0usize;
+    let mut semicolon_idx = None;
+    for (idx, token) in tokens.iter().enumerate().skip(open_idx) {
+        match token.get_spelling().as_str() {
+            "(" => paren_depth += 1,
+            ")" => paren_depth = paren_depth.saturating_sub(1),
+            ";" if paren_depth == 1 => {
+                semicolon_idx = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let Some(semicolon_idx) = semicolon_idx else {
+        return Vec::new();
+    };
+
+    let init_tokens: Vec<String> = tokens[open_idx + 1..semicolon_idx]
+        .iter()
+        .map(|token| token.get_spelling())
+        .collect();
+
+    let mut statements = Vec::new();
+    for (idx, spelling) in init_tokens.iter().enumerate() {
+        if !is_possible_call_token(spelling) {
+            continue;
+        }
+
+        if init_tokens.get(idx + 1).is_some_and(|next| next == "(") {
+            statements.push(Statement::FunctionCall {
+                name: qualified_call_name_from_tokens(&init_tokens, idx),
+                args: Vec::new(),
+                location: extract_location(entity),
+            });
+        }
+    }
+
+    statements
+}
+
+fn is_possible_call_token(token: &str) -> bool {
+    token
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && !is_cpp_keyword(token)
+}
+
+fn qualified_call_name_from_tokens(tokens: &[String], name_idx: usize) -> String {
+    let mut start_idx = name_idx;
+    while start_idx >= 2 && tokens[start_idx - 1] == "::" {
+        let qualifier = &tokens[start_idx - 2];
+        if !is_possible_call_token(qualifier) {
+            break;
+        }
+        start_idx -= 2;
+    }
+
+    tokens[start_idx..=name_idx].join("")
+}
+
+fn extract_try_statement(entity: &Entity) -> Vec<Statement> {
+    let mut statements = Vec::new();
+
+    for child in entity.get_children() {
+        match child.get_kind() {
+            EntityKind::CompoundStmt => {
+                statements.extend(extract_compound_statement(&child));
+            }
+            EntityKind::CatchStmt => {
+                for catch_child in child.get_children() {
+                    if catch_child.get_kind() == EntityKind::CompoundStmt {
+                        statements.extend(extract_compound_statement(&catch_child));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    statements
+}
+
 // Extract one statement cursor used where C++ allows an unbraced substatement,
 // such as `if (x) f();` or `while (x) ++i;`. This helper intentionally takes
 // the already-selected branch/body cursor; callers must not pass raw condition
@@ -2443,6 +2986,7 @@ fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
         EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
             extract_loop_statement(entity)
         }
+        EntityKind::TryStmt => extract_try_statement(entity),
         EntityKind::DeclStmt => {
             let mut statements = Vec::new();
 
@@ -2513,7 +3057,8 @@ fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
         EntityKind::UnexposedExpr
         | EntityKind::UnaryOperator
         | EntityKind::NewExpr
-        | EntityKind::DeleteExpr => {
+        | EntityKind::DeleteExpr
+        | EntityKind::ThrowExpr => {
             if let Some(expr) = extract_expression(entity) {
                 vec![Statement::ExpressionStatement { expr, location }]
             } else {
@@ -2648,6 +3193,59 @@ fn extract_cast_expression(entity: &Entity, kind: CastKind) -> Option<Expression
     })
 }
 
+fn extract_lambda_capture_tokens(entity: &Entity) -> Vec<String> {
+    let Some(range) = entity.get_range() else {
+        return Vec::new();
+    };
+
+    let mut capture_tokens = Vec::new();
+    let mut in_capture_list = false;
+
+    for token in safe_tokenize(&range) {
+        let spelling = token.get_spelling();
+        if spelling == "[" {
+            in_capture_list = true;
+            continue;
+        }
+        if spelling == "]" {
+            break;
+        }
+        if in_capture_list {
+            capture_tokens.push(spelling);
+        }
+    }
+
+    capture_tokens
+}
+
+fn extract_lambda_capture_initializer(
+    entity: &Entity,
+    capture_tokens: &[String],
+) -> Option<Expression> {
+    if entity.get_kind() == EntityKind::UnexposedExpr {
+        if let Some(ref_entity) = entity.get_reference() {
+            if matches!(
+                ref_entity.get_kind(),
+                EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor
+            ) {
+                if let Some(name) = ref_entity.get_name() {
+                    let has_call_syntax = capture_tokens
+                        .windows(2)
+                        .any(|window| window[0] == name && window[1] == "(");
+                    if has_call_syntax {
+                        return Some(Expression::FunctionCall {
+                            name,
+                            args: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    extract_expression(entity)
+}
+
 fn extract_expression(entity: &Entity) -> Option<Expression> {
     match entity.get_kind() {
         EntityKind::DeclRefExpr => {
@@ -2730,6 +3328,19 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 name: type_name,
                 args,
             })
+        }
+        EntityKind::InitListExpr => {
+            let mut children = entity
+                .get_children()
+                .into_iter()
+                .filter_map(|child| extract_expression(&child));
+            let first = children.next()?;
+
+            Some(children.fold(first, |left, right| Expression::BinaryOp {
+                left: Box::new(left),
+                op: ",".to_string(),
+                right: Box::new(right),
+            }))
         }
         EntityKind::CallExpr => {
             // Extract function call as expression
@@ -3125,7 +3736,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             debug_println!("  DEBUG EXTRACT: Returning None");
             None
         }
-        EntityKind::BinaryOperator => {
+        EntityKind::BinaryOperator | EntityKind::CompoundAssignOperator => {
             // Extract binary operation (e.g., i < 2, x == 0)
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             debug_println!(
@@ -3203,6 +3814,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(left),
                                 op: op.clone(),
+                                offset: Some(Box::new(right)),
                             });
                         }
                         // n + p (right is pointer, only for + operator)
@@ -3216,6 +3828,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(right),
                                 op: op.clone(),
+                                offset: Some(Box::new(left)),
                             });
                         }
                         // p - q (pointer difference)
@@ -3228,6 +3841,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(left),
                                 op: "pointer difference".to_string(),
+                                offset: Some(Box::new(right)),
                             });
                         }
                     }
@@ -3236,6 +3850,27 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         left: Box::new(left),
                         op,
                         right: Box::new(right),
+                    });
+                }
+            }
+            None
+        }
+        EntityKind::ConditionalOperator => {
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if children.len() == 3 {
+                if let (Some(condition), Some(true_expr), Some(false_expr)) = (
+                    extract_expression(&children[0]),
+                    extract_expression(&children[1]),
+                    extract_expression(&children[2]),
+                ) {
+                    return Some(Expression::BinaryOp {
+                        left: Box::new(condition),
+                        op: "?:".to_string(),
+                        right: Box::new(Expression::BinaryOp {
+                            left: Box::new(true_expr),
+                            op: ":".to_string(),
+                            right: Box::new(false_expr),
+                        }),
                     });
                 }
             }
@@ -3252,6 +3887,15 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 // need the actual value for ownership/borrow checking
                 Some(Expression::Literal("0".to_string()))
             }
+        }
+        EntityKind::BoolLiteralExpr => {
+            if let Some(range) = entity.get_range() {
+                let tokens = safe_tokenize(&range);
+                if let Some(token) = tokens.first() {
+                    return Some(Expression::Literal(token.get_spelling()));
+                }
+            }
+            Some(Expression::Literal("bool".to_string()))
         }
         EntityKind::StringLiteral => {
             // String literals ("hello", L"wide", u8"utf8", etc.) have static lifetime
@@ -3333,6 +3977,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 return Some(Expression::PointerArithmetic {
                                     pointer: Box::new(inner),
                                     op: "++/--".to_string(),
+                                    offset: None,
                                 });
                             }
                             // Otherwise, it's a non-pointer unary operator (!, ~, -, +)
@@ -3455,6 +4100,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             debug_println!("DEBUG LAMBDA PARSER: Found LambdaExpr!");
 
             let mut captures = Vec::new();
+            let mut capture_initializers = Vec::new();
+            let mut body = Vec::new();
+            let capture_tokens = extract_lambda_capture_tokens(entity);
 
             // Collect all VariableRef entries (these are the captured variables)
             let mut var_refs: Vec<String> = Vec::new();
@@ -3472,6 +4120,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     child.get_name()
                 );
                 match child.get_kind() {
+                    EntityKind::CompoundStmt => {
+                        body = extract_compound_statement(&child);
+                    }
                     EntityKind::VariableRef => {
                         has_explicit_captures = true;
                         if let Some(var_name) = child.get_name() {
@@ -3483,6 +4134,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         if let Some(var_name) = child.get_name() {
                             decl_refs.insert(var_name);
                         }
+                        if let Some(expr) = extract_expression(&child) {
+                            capture_initializers.push(expr);
+                        }
                     }
                     EntityKind::CallExpr => {
                         // CallExpr with 'move' indicates a move capture [y = std::move(x)]
@@ -3490,6 +4144,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             if name == "move" {
                                 has_move_call = true;
                             }
+                        }
+                        if let Some(expr) = extract_expression(&child) {
+                            capture_initializers.push(expr);
+                        }
+                    }
+                    EntityKind::UnexposedExpr => {
+                        if let Some(expr) =
+                            extract_lambda_capture_initializer(&child, &capture_tokens)
+                        {
+                            capture_initializers.push(expr);
                         }
                     }
                     EntityKind::ThisExpr => {
@@ -3638,7 +4302,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 captures
             );
 
-            Some(Expression::Lambda { captures })
+            Some(Expression::Lambda {
+                captures,
+                capture_initializers,
+                body,
+            })
         }
         EntityKind::ArraySubscriptExpr => {
             // Array subscript: arr[i], data[idx], ptr[n], etc.
@@ -3660,6 +4328,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(array),
                                 op: "[]".to_string(),
+                                offset: Some(Box::new(index)),
                             });
                         }
                     }
@@ -3720,12 +4389,26 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 "ptr".to_string(),
             ))))
         }
+        EntityKind::ThrowExpr => entity
+            .get_children()
+            .into_iter()
+            .find_map(|child| extract_expression(&child)),
         _ => None,
     }
 }
 
 fn extract_location(entity: &Entity) -> SourceLocation {
-    let location = entity.get_location().unwrap();
+    // Compiler-synthesized entities (e.g. the implicit member initializers of
+    // an implicit default constructor, or desugared range-for pieces) have no
+    // source location. Return a placeholder instead of panicking — several
+    // extraction paths now call this on entities that may be synthesized.
+    let Some(location) = entity.get_location() else {
+        return SourceLocation {
+            file: "unknown".to_string(),
+            line: 0,
+            column: 0,
+        };
+    };
     let file_location = location.get_file_location();
 
     SourceLocation {

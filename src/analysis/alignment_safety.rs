@@ -267,6 +267,21 @@ fn analyze_statement_alignment(
                 tracker.exit_scope();
             }
         }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            if !in_unsafe {
+                check_expr_alignment(condition, tracker, func_name, errors);
+            }
+
+            for case in cases {
+                tracker.enter_scope();
+                for stmt in &case.statements {
+                    analyze_statement_alignment(stmt, tracker, func_name, errors, in_unsafe);
+                }
+                tracker.exit_scope();
+            }
+        }
 
         Statement::Block(stmts) => {
             tracker.enter_scope();
@@ -308,7 +323,7 @@ fn update_alignment_from_expr(ptr: &str, expr: &Expression, tracker: &mut Alignm
             tracker.set_alignment(ptr, AlignmentInfo::aligned(8, "unknown".to_string()));
         }
 
-        Expression::PointerArithmetic { pointer, op: _ } => {
+        Expression::PointerArithmetic { pointer, op: _, .. } => {
             // Pointer arithmetic changes offset - but we don't know by how much without the offset
             // For now, mark as potentially misaligned (offset unknown) for char* arithmetic
             if let Some(source) = extract_var_name(pointer) {
@@ -457,7 +472,7 @@ fn check_arithmetic_alignment_in_cast(
     errors: &mut Vec<String>,
 ) {
     match expr {
-        Expression::PointerArithmetic { pointer, op: _ } => {
+        Expression::PointerArithmetic { pointer, op: _, .. } => {
             // Check if the arithmetic could cause misalignment
             if let Some(source) = extract_var_name(pointer) {
                 if let Some(info) = tracker.get_alignment(&source) {

@@ -202,6 +202,19 @@ fn analyze_statement_provenance(
                 tracker.exit_scope();
             }
         }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            check_expr_provenance(condition, tracker, func_name, errors);
+
+            for case in cases {
+                tracker.enter_scope();
+                for stmt in &case.statements {
+                    analyze_statement_provenance(stmt, tracker, func_name, errors);
+                }
+                tracker.exit_scope();
+            }
+        }
 
         Statement::Block(stmts) => {
             tracker.enter_scope();

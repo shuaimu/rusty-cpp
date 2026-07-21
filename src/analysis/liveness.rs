@@ -206,6 +206,15 @@ impl LivenessAnalyzer {
 
                 self.in_conditional_depth -= 1;
             }
+            IrStatement::Switch { cases } => {
+                self.in_conditional_depth += 1;
+
+                for case in cases {
+                    self.collect_uses(case);
+                }
+
+                self.in_conditional_depth -= 1;
+            }
 
             IrStatement::PackExpansion {
                 pack_name,

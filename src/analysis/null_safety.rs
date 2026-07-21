@@ -243,6 +243,24 @@ fn analyze_statement_null_safety(
                 tracker.merge_branch(&else_tracker);
             }
         }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            check_expr_null_safety(condition, tracker, func_name, errors);
+
+            let mut case_trackers = Vec::new();
+            for case in cases {
+                let mut case_tracker = tracker.snapshot();
+                for stmt in &case.statements {
+                    analyze_statement_null_safety(stmt, &mut case_tracker, func_name, errors);
+                }
+                case_trackers.push(case_tracker);
+            }
+
+            for case_tracker in &case_trackers {
+                tracker.merge_branch(case_tracker);
+            }
+        }
 
         Statement::Block(stmts) => {
             tracker.enter_scope();

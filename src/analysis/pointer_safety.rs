@@ -194,6 +194,30 @@ pub fn check_parsed_function_for_pointers(
                     }
                 }
             }
+            // `Statement::Block` is intentionally not handled here — main
+            // routes it through the `_` catch-all below.
+            Statement::Switch {
+                condition,
+                cases,
+                location,
+            } if !in_unsafe_scope => {
+                if let Some(op) = contains_pointer_operation(condition, &safe_pointer_vars) {
+                    errors.push(format!(
+                        "In function '{}': Unsafe pointer {} in switch condition at line {}: pointer operations require unsafe context",
+                        function.name, op, location.line
+                    ));
+                }
+
+                for case in cases {
+                    for error in check_statements_for_pointers_with_unsafe_tracking(
+                        &case.statements,
+                        0,
+                        &safe_pointer_vars,
+                    ) {
+                        errors.push(format!("In function '{}': {}", function.name, error));
+                    }
+                }
+            }
             _ => {
                 if let Some(error) = check_parsed_statement_for_pointers_with_return_type(
                     stmt,
@@ -406,6 +430,25 @@ fn check_statements_for_std_move_on_ref(
                     );
                 }
             }
+            Statement::Switch {
+                condition, cases, ..
+            } => {
+                if let Some(error) =
+                    check_expression_for_std_move_on_ref(condition, reference_vars, 0)
+                {
+                    errors.push(format!("In function '{}': {}", function_name, error));
+                }
+
+                for case in cases {
+                    check_statements_for_std_move_on_ref(
+                        &case.statements,
+                        function_name,
+                        reference_vars,
+                        unsafe_depth,
+                        errors,
+                    );
+                }
+            }
             Statement::Block(statements) => {
                 check_statements_for_std_move_on_ref(
                     statements,
@@ -529,6 +572,29 @@ fn check_statements_for_pointers_with_unsafe_tracking(
                 if let Some(else_stmts) = else_branch {
                     errors.extend(check_statements_for_pointers_with_unsafe_tracking(
                         else_stmts,
+                        0,
+                        safe_pointer_vars,
+                    ));
+                }
+            }
+            // `Statement::Block` is intentionally not handled here — main
+            // routes it through the `_` catch-all into
+            // `check_parsed_statement_for_pointers`.
+            Statement::Switch {
+                condition,
+                cases,
+                location,
+            } if !in_unsafe_scope => {
+                if let Some(op) = contains_pointer_operation(condition, safe_pointer_vars) {
+                    errors.push(format!(
+                        "Unsafe pointer {} in switch condition at line {}: pointer operations require unsafe context",
+                        op, location.line
+                    ));
+                }
+
+                for case in cases {
+                    errors.extend(check_statements_for_pointers_with_unsafe_tracking(
+                        &case.statements,
                         0,
                         safe_pointer_vars,
                     ));
@@ -797,6 +863,29 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
                 );
                 if !else_errors.is_empty() {
                     return Some(else_errors.into_iter().next().unwrap());
+                }
+            }
+        }
+        Statement::Switch {
+            condition,
+            cases,
+            location,
+        } => {
+            if let Some(op) = contains_pointer_operation(condition, safe_pointer_vars) {
+                return Some(format!(
+                    "Unsafe pointer {} in switch condition at line {}: pointer operations require unsafe context",
+                    op, location.line
+                ));
+            }
+
+            for case in cases {
+                let case_errors = check_statements_for_pointers_with_unsafe_tracking(
+                    &case.statements,
+                    0,
+                    safe_pointer_vars,
+                );
+                if !case_errors.is_empty() {
+                    return Some(case_errors.into_iter().next().unwrap());
                 }
             }
         }
@@ -1380,6 +1469,7 @@ mod tests {
         let expr = Expression::PointerArithmetic {
             pointer: Box::new(Expression::Variable("ptr".to_string())),
             op: "+".to_string(),
+            offset: None,
         };
         assert_eq!(
             contains_pointer_operation(&expr, &empty_safe_vars()),
@@ -1394,6 +1484,7 @@ mod tests {
             expr: Expression::PointerArithmetic {
                 pointer: Box::new(Expression::Variable("ptr".to_string())),
                 op: "++".to_string(),
+                offset: None,
             },
             location: SourceLocation {
                 file: "test.cpp".to_string(),
@@ -1416,6 +1507,7 @@ mod tests {
             expr: Expression::PointerArithmetic {
                 pointer: Box::new(Expression::Variable("ptr".to_string())),
                 op: "++".to_string(),
+                offset: None,
             },
             location: SourceLocation {
                 file: "test.cpp".to_string(),

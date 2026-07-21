@@ -384,6 +384,26 @@ fn check_statement_safety(
                 }
             }
         }
+        Statement::Switch {
+            condition, cases, ..
+        } => {
+            errors.extend(check_expression_safety(
+                condition,
+                method_name,
+                class_name,
+                interface_name,
+            ));
+            for case in cases {
+                for s in &case.statements {
+                    errors.extend(check_statement_safety(
+                        s,
+                        method_name,
+                        class_name,
+                        interface_name,
+                    ));
+                }
+            }
+        }
         Statement::Block(stmts) => {
             for s in stmts {
                 errors.extend(check_statement_safety(

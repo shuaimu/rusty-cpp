@@ -232,6 +232,16 @@ fn collect_lambdas_and_escapes(
                     collect_lambdas_and_escapes(else_stmts, function_name, ctx, unsafe_depth);
                 }
             }
+            Statement::Switch { cases, .. } => {
+                for case in cases {
+                    collect_lambdas_and_escapes(
+                        &case.statements,
+                        function_name,
+                        ctx,
+                        unsafe_depth,
+                    );
+                }
+            }
             Statement::Block(inner_stmts) => {
                 collect_lambdas_and_escapes(inner_stmts, function_name, ctx, unsafe_depth);
             }
@@ -291,6 +301,16 @@ fn check_this_captures_errors(
                     check_this_captures_errors(else_stmts, function_name, errors, unsafe_depth);
                 }
             }
+            Statement::Switch { cases, .. } => {
+                for case in cases {
+                    check_this_captures_errors(
+                        &case.statements,
+                        function_name,
+                        errors,
+                        unsafe_depth,
+                    );
+                }
+            }
             Statement::Block(inner_stmts) => {
                 check_this_captures_errors(inner_stmts, function_name, errors, unsafe_depth);
             }
@@ -306,7 +326,7 @@ fn check_expression_for_this_capture(
     errors: &mut Vec<String>,
 ) {
     match expr {
-        Expression::Lambda { captures } => {
+        Expression::Lambda { captures, .. } => {
             for capture in captures {
                 if matches!(capture, LambdaCaptureKind::This) {
                     errors.push(format!(
@@ -378,7 +398,7 @@ fn check_for_escape_via_call(expr: &Expression, ctx: &mut LambdaContext, functio
 
 fn extract_lambda_captures(expr: &Expression) -> Option<(Vec<String>, bool)> {
     match expr {
-        Expression::Lambda { captures } => {
+        Expression::Lambda { captures, .. } => {
             let mut ref_captures = Vec::new();
             let mut has_default_ref = false;
 
@@ -425,6 +445,8 @@ mod tests {
     fn test_this_capture_in_safe_is_error() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::This],
+            capture_initializers: Vec::new(),
+            body: Vec::new(),
         };
 
         let mut errors = Vec::new();
@@ -438,6 +460,8 @@ mod tests {
     fn test_copy_capture_in_safe_is_ok() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::ByCopy("x".to_string())],
+            capture_initializers: Vec::new(),
+            body: Vec::new(),
         };
 
         // Copy captures never cause errors
@@ -450,6 +474,8 @@ mod tests {
     fn test_default_copy_capture_in_safe_is_ok() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::DefaultCopy],
+            capture_initializers: Vec::new(),
+            body: Vec::new(),
         };
 
         let (ref_captures, has_default_ref) = extract_lambda_captures(&lambda).unwrap();
@@ -463,6 +489,8 @@ mod tests {
             captures: vec![LambdaCaptureKind::Init {
                 name: "y".to_string(),
             }],
+            capture_initializers: Vec::new(),
+            body: Vec::new(),
         };
 
         let (ref_captures, has_default_ref) = extract_lambda_captures(&lambda).unwrap();
@@ -474,6 +502,8 @@ mod tests {
     fn test_ref_capture_extraction() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::ByRef("x".to_string())],
+            capture_initializers: Vec::new(),
+            body: Vec::new(),
         };
 
         let (ref_captures, has_default_ref) = extract_lambda_captures(&lambda).unwrap();
@@ -485,6 +515,8 @@ mod tests {
     fn test_default_ref_capture_extraction() {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::DefaultRef],
+            capture_initializers: Vec::new(),
+            body: Vec::new(),
         };
 
         let (ref_captures, has_default_ref) = extract_lambda_captures(&lambda).unwrap();

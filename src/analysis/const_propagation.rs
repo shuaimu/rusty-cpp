@@ -212,6 +212,18 @@ fn check_function_for_const_violations(
                     errors.extend(else_errors);
                 }
             }
+            Statement::Switch { cases, .. } => {
+                for case in cases {
+                    let case_errors = check_statements_for_const_violations(
+                        &case.statements,
+                        const_vars,
+                        class_info,
+                        unsafe_depth,
+                        safe_functions,
+                    );
+                    errors.extend(case_errors);
+                }
+            }
             Statement::Block(stmts) => {
                 let block_errors = check_statements_for_const_violations(
                     stmts,

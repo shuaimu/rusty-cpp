@@ -626,6 +626,11 @@ fn collect_loop_local_vars(
                     collect_loop_local_vars(else_stmts, loop_local_vars);
                 }
             }
+            crate::ir::IrStatement::Switch { cases } => {
+                for case in cases {
+                    collect_loop_local_vars(case, loop_local_vars);
+                }
+            }
             _ => {}
         }
     }
@@ -703,6 +708,13 @@ fn check_loop_local_escape(
                 }
             }
         }
+        crate::ir::IrStatement::Switch { cases } => {
+            for case in cases {
+                for stmt in case {
+                    check_loop_local_escape(stmt, loop_local_vars, header_cache, errors);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -758,6 +770,18 @@ fn check_statement_for_loop_errors(
             }
             if let Some(else_stmts) = else_branch {
                 for stmt in else_stmts {
+                    check_statement_for_loop_errors(
+                        stmt,
+                        state_after_first,
+                        loop_local_vars,
+                        errors,
+                    );
+                }
+            }
+        }
+        crate::ir::IrStatement::Switch { cases } => {
+            for case in cases {
+                for stmt in case {
                     check_statement_for_loop_errors(
                         stmt,
                         state_after_first,
@@ -1775,6 +1799,44 @@ fn process_statement(
                 // No else branch: merge with original state
                 // Variable is moved if moved in then branch (aggressive approach)
                 ownership_tracker.merge_states(&state_after_then, &state_before_if);
+            }
+        }
+
+        crate::ir::IrStatement::Switch { cases } => {
+            if ownership_tracker.is_in_unsafe_block() {
+                return;
+            }
+
+            let state_before_switch = ownership_tracker.clone_state();
+            let mut merged_state: Option<TrackerState> = None;
+
+            for case in cases {
+                ownership_tracker.restore_state(&state_before_switch);
+
+                for stmt in case {
+                    process_statement(
+                        stmt,
+                        ownership_tracker,
+                        this_tracker,
+                        errors,
+                        header_cache,
+                        function,
+                    );
+                }
+
+                let state_after_case = ownership_tracker.clone_state();
+                if let Some(current_merged) = &merged_state {
+                    ownership_tracker.restore_state(current_merged);
+                    ownership_tracker.merge_states(current_merged, &state_after_case);
+                    merged_state = Some(ownership_tracker.clone_state());
+                } else {
+                    merged_state = Some(state_after_case);
+                }
+            }
+
+            if let Some(state_after_cases) = merged_state {
+                ownership_tracker.restore_state(&state_before_switch);
+                ownership_tracker.merge_states(&state_after_cases, &state_before_switch);
             }
         }
 

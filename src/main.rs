@@ -261,7 +261,16 @@ fn analyze_file(
 
     // Check for unsafe pointer operations and unsafe propagation in safe functions
     let mut violations = Vec::new();
-    debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
+    let parsed_functions: Vec<_> = ast
+        .functions
+        .iter()
+        .chain(ast.classes.iter().flat_map(|class| class.methods.iter()))
+        .collect();
+
+    debug_println!(
+        "DEBUG: Found {} functions/methods in AST",
+        parsed_functions.len()
+    );
 
     // Canonical path of the file being checked. Used to filter out function
     // bodies that libclang surfaced via imports/headers — those should be
@@ -271,7 +280,7 @@ fn analyze_file(
     // re-flags every @safe→@unsafe call in Reactor's methods).
     let main_file_canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
 
-    for function in &ast.functions {
+    for function in parsed_functions {
         // Skip system header functions - they shouldn't be analyzed internally
         if is_system_header_or_std(&function.location.file, &function.name) {
             debug_println!(
