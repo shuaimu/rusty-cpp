@@ -1577,13 +1577,15 @@ fn test_leaf5156_local_generic_drop_guard_struct_literal_recovers_owner_type_arg
     );
     assert!(
         out.contains("const auto guard = DropOnPanic<T>{")
-            || out.contains("const auto guard = DropOnPanic<T>("),
+            || out.contains("const auto guard = DropOnPanic<T>(")
+            || out.contains("auto guard = DropOnPanic<T>{")
+            || out.contains("auto guard = DropOnPanic<T>("),
         "local generic guard struct literal should recover explicit owner args, got:\n{}",
         out
     );
     assert!(
-        !out.contains("const auto guard = DropOnPanic{")
-            && !out.contains("const auto guard = DropOnPanic("),
+        !out.contains("auto guard = DropOnPanic{")
+            && !out.contains("auto guard = DropOnPanic("),
         "guard construction should not rely on unspecialized CTAD path, got:\n{}",
         out
     );
@@ -1666,18 +1668,18 @@ fn test_leaf5175_local_drop_guard_struct_literal_prefers_pointer_item_type_over_
         "#,
     );
     assert!(
-        out.contains("const auto guard = DropOnPanic<rusty::detail::associated_item_t<A>>{")
+        out.contains("auto guard = DropOnPanic<rusty::detail::associated_item_t<A>>{")
             || out.contains(
-                "const auto guard = DropOnPanic<rusty::detail::associated_item_t<A>>("
+                "auto guard = DropOnPanic<rusty::detail::associated_item_t<A>>("
             )
-            || out.contains("const auto guard = DropOnPanic<typename A::Item>{")
-            || out.contains("const auto guard = DropOnPanic<typename A::Item>("),
+            || out.contains("auto guard = DropOnPanic<typename A::Item>{")
+            || out.contains("auto guard = DropOnPanic<typename A::Item>("),
         "guard should recover item pointer payload type for local generic arg, got:\n{}",
         out
     );
     assert!(
-        !out.contains("const auto guard = DropOnPanic<A>{")
-            && !out.contains("const auto guard = DropOnPanic<A>("),
+        !out.contains("auto guard = DropOnPanic<A>{")
+            && !out.contains("auto guard = DropOnPanic<A>("),
         "guard should not recover owner type when pointer field indicates item type, got:\n{}",
         out
     );
@@ -10640,7 +10642,8 @@ fn test_leaf1053_try_style_runtime_next_shadow_loop_scope_avoids_self_reference_
     "#,
     );
     assert!(out.contains("auto rhs_shadow1 = rusty::str_runtime::split(rhs, U'.');"));
-    assert!(out.contains("const auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();"));
+    assert!(out.contains("const auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();")
+        || out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();"));
     assert!(!out.contains("const auto rhs_shadow1 = ({ auto&& _m = rhs_shadow1.next();"));
 }
 
@@ -20874,7 +20877,8 @@ fn test_leaf10534_empty_block_expr_lowers_to_unit_tuple_value() {
         }
         "#,
     );
-    assert!(out.contains("const auto got = std::make_tuple();"));
+    assert!(out.contains("const auto got = std::make_tuple();")
+        || out.contains("auto got = std::make_tuple();"));
     assert!(!out.contains("const auto got = rusty::intrinsics::unreachable();"));
 }
 
@@ -21110,7 +21114,10 @@ fn test_raw_pointer_to_slice_with_infer_falls_back_to_auto_local() {
         }
         "#,
     );
-    assert!(out.contains("const auto keys = "), "{out}");
+    assert!(
+        out.contains("const auto keys = ") || out.contains("auto keys = "),
+        "{out}"
+    );
     assert!(!out.contains("std::span<auto>"), "{out}");
     assert!(!out.contains("<auto>*"), "{out}");
     // Sanity-check that the narrower `*const _` (Type::Infer not nested

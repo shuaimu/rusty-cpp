@@ -8982,6 +8982,80 @@ impl CodeGen {
         for stmt in stmts {
             visitor.visit_stmt(stmt);
         }
+        // `let b = a;` moves `a` too — a const source turns the emitted
+        // std::move into a COPY: user Drop types dropped twice (both
+        // "halves" destruct) and move-only payloads hit deleted copies.
+        // Scalar-typed sources are excluded where inference can tell —
+        // copy and move coincide there and pinned emissions stay const.
+        struct LetInitRhsLocals<'a> {
+            candidates: &'a mut Vec<String>,
+        }
+        impl<'ast> Visit<'ast> for LetInitRhsLocals<'_> {
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if let Some(init) = &local.init
+                    && let syn::Expr::Path(path) = init.expr.as_ref()
+                    && path.qself.is_none()
+                    && path.path.segments.len() == 1
+                {
+                    self.candidates
+                        .push(path.path.segments[0].ident.to_string());
+                }
+                visit::visit_local(self, local);
+            }
+        }
+        let mut let_init_candidates = Vec::new();
+        let mut let_visitor = LetInitRhsLocals {
+            candidates: &mut let_init_candidates,
+        };
+        for stmt in stmts {
+            let_visitor.visit_stmt(stmt);
+        }
+        // Untyped-by-design locals (unsuffixed literal inits) are scalars
+        // too — collect their names so they stay const.
+        let mut literal_init_locals: HashSet<String> = HashSet::new();
+        struct LiteralInitLocals<'a> {
+            names: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for LiteralInitLocals<'_> {
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if let syn::Pat::Ident(pi) = &local.pat
+                    && let Some(init) = &local.init
+                {
+                    let mut inner = init.expr.as_ref();
+                    while let syn::Expr::Paren(p) = inner {
+                        inner = &p.expr;
+                    }
+                    if let syn::Expr::Unary(u) = inner {
+                        inner = &u.expr;
+                    }
+                    if matches!(inner, syn::Expr::Lit(_)) {
+                        self.names.insert(pi.ident.to_string());
+                    }
+                }
+                visit::visit_local(self, local);
+            }
+        }
+        let mut lit_visitor = LiteralInitLocals {
+            names: &mut literal_init_locals,
+        };
+        for stmt in stmts {
+            lit_visitor.visit_stmt(stmt);
+        }
+        for name in let_init_candidates {
+            if literal_init_locals.contains(&name) {
+                continue;
+            }
+            let scalar = syn::parse_str::<syn::Expr>(&name)
+                .ok()
+                .and_then(|e| {
+                    self.infer_simple_expr_type(&e)
+                        .or_else(|| self.infer_local_binding_type_from_initializer(&e))
+                })
+                .is_some_and(|ty| self.is_known_scalar_like_type(&ty));
+            if !scalar {
+                result.insert(name);
+            }
+        }
         // `S { f: …, ..base }` moves the remaining fields out of `base` — a
         // `const auto` binding would turn the emitted `std::move(base.field)`
         // pulls into deleted copies for move-only field types.
