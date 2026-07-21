@@ -2758,14 +2758,17 @@ auto iter_max_by_key(Range&& range, KeyFn&& key_fn) {
             return next_result(rusty::None);
         }
         auto best = detail::option_like_take_value(item);
-        auto best_key = key_fn(best);
+        // Slice iterators yield POINTERS; the emitted key closures are
+        // written against the item value (`|s| s.len()`), so feed them
+        // the pointee (identity for value items).
+        auto best_key = key_fn(detail::deref_if_pointer_like(best));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
                 break;
             }
             auto value = detail::option_like_take_value(nxt);
-            auto key = key_fn(value);
+            auto key = key_fn(detail::deref_if_pointer_like(value));
             if (!(key < best_key)) {
                 best = std::move(value);
                 best_key = std::move(key);
@@ -2792,14 +2795,15 @@ auto iter_min_by_key(Range&& range, KeyFn&& key_fn) {
             return next_result(rusty::None);
         }
         auto best = detail::option_like_take_value(item);
-        auto best_key = key_fn(best);
+        // See iter_max_by_key: key closures receive the pointee.
+        auto best_key = key_fn(detail::deref_if_pointer_like(best));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
                 break;
             }
             auto value = detail::option_like_take_value(nxt);
-            auto key = key_fn(value);
+            auto key = key_fn(detail::deref_if_pointer_like(value));
             if (key < best_key) {
                 best = std::move(value);
                 best_key = std::move(key);
