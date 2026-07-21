@@ -9750,7 +9750,12 @@ impl CodeGen {
             if !ty.contains('*')
                 && !ty.contains("std::span<")
                 && !expr_requires_runtime_storage
-                && Self::is_forward_constexpr_literal_expr(&c.expr)
+                && (Self::is_forward_constexpr_literal_expr(&c.expr)
+                    // Consts DERIVED from earlier consts (CELLS = ROWS *
+                    // COLS) must also define constexpr here — an `extern
+                    // const` is not a constant expression, so a static
+                    // array sized by CELLS failed its own forward decl.
+                    || Self::const_expr_combines_forward_consts(&c.expr, &emitted_consts))
             {
                 self.writeln(&format!(
                     "{}constexpr {} {} = {};",

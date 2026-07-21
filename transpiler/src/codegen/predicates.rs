@@ -54,6 +54,33 @@ impl CodeGen {
         )
     }
 
+    /// Literal predicate extended with references to consts ALREADY
+    /// forward-emitted as constexpr in this pass (`CELLS = ROWS * COLS`).
+    pub(super) fn const_expr_combines_forward_consts(
+        expr: &syn::Expr,
+        emitted: &std::collections::HashSet<String>,
+    ) -> bool {
+        match expr {
+            _ if Self::is_forward_constexpr_literal_expr(expr) => true,
+            syn::Expr::Binary(b) => {
+                Self::const_expr_combines_forward_consts(&b.left, emitted)
+                    && Self::const_expr_combines_forward_consts(&b.right, emitted)
+            }
+            syn::Expr::Paren(p) => Self::const_expr_combines_forward_consts(&p.expr, emitted),
+            syn::Expr::Group(g) => Self::const_expr_combines_forward_consts(&g.expr, emitted),
+            syn::Expr::Unary(u) => Self::const_expr_combines_forward_consts(&u.expr, emitted),
+            syn::Expr::Cast(c) => Self::const_expr_combines_forward_consts(&c.expr, emitted),
+            syn::Expr::Path(p) => {
+                p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && emitted.contains(&super::escape_cpp_keyword(
+                        &p.path.segments[0].ident.to_string(),
+                    ))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn is_forward_constexpr_literal_expr(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Lit(_) => true,
