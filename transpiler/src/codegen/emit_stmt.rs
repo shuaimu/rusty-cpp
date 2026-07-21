@@ -996,6 +996,15 @@ impl CodeGen {
         } else {
             runtime_match_return_annotation
         };
+        // Mixed String arms (format! → std::string, String::from →
+        // rusty::String) fail deduced returns — annotate from the first
+        // inferable non-reference arm body.
+        let runtime_match_return_annotation = if runtime_match_return_annotation.is_empty() {
+            self.match_arms_iife_tail_annotation(&match_expr.arms)
+                .unwrap_or_default()
+        } else {
+            runtime_match_return_annotation
+        };
         let scrutinee_borrows_payload =
             self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
         // deref_if_pointer is identity on non-pointers; an address-of
@@ -4032,7 +4041,56 @@ impl CodeGen {
                     }
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
                     if let syn::Expr::Loop(loop_expr) = init.expr.as_ref() {
-                        self.writeln(&format!("{} {} = [&]() {{", decl_type, cpp_name));
+                        // Mixed break-value types (format! → std::string,
+                        // String::from → rusty::String) fail deduced lambda
+                        // returns — annotate from the first inferable
+                        // break value (references stay deduced).
+                        struct BreakScan<'a> {
+                            values: Vec<&'a syn::Expr>,
+                        }
+                        impl<'a> syn::visit::Visit<'a> for BreakScan<'a> {
+                            fn visit_expr(&mut self, e: &'a syn::Expr) {
+                                match e {
+                                    syn::Expr::Loop(_)
+                                    | syn::Expr::While(_)
+                                    | syn::Expr::ForLoop(_)
+                                    | syn::Expr::Closure(_) => {}
+                                    syn::Expr::Break(b) => {
+                                        if let Some(v) = &b.expr {
+                                            self.values.push(v);
+                                        }
+                                    }
+                                    _ => syn::visit::visit_expr(self, e),
+                                }
+                            }
+                        }
+                        let mut scan = BreakScan { values: Vec::new() };
+                        syn::visit::visit_block(&mut scan, &loop_expr.body);
+                        let ret_annotation = scan.values.iter().find_map(|e| {
+                            if matches!(
+                                self.peel_paren_group_expr(e),
+                                syn::Expr::Reference(_)
+                            ) {
+                                return None;
+                            }
+                            let ty = self.infer_iife_tail_value_type(e)?;
+                            if matches!(
+                                self.peel_paren_group_type(&ty),
+                                syn::Type::Reference(_) | syn::Type::Ptr(_)
+                            ) {
+                                return None;
+                            }
+                            let mapped = self.map_type(&ty);
+                            (mapped != "auto"
+                                && !mapped.contains("/* TODO")
+                                && !type_string_has_auto_placeholder(&mapped))
+                            .then_some(mapped)
+                        });
+                        let lambda_head = match &ret_annotation {
+                            Some(ty) => format!("[&]() -> {} {{", ty),
+                            None => "[&]() {".to_string(),
+                        };
+                        self.writeln(&format!("{} {} = {}", decl_type, cpp_name, lambda_head));
                         self.indent += 1;
                         self.writeln("while (true) {");
                         self.indent += 1;
@@ -6080,13 +6138,123 @@ impl CodeGen {
 
     /// Lower an if-expression with multi-statement branches into a C++ IIFE
     /// (immediately-invoked function expression): `[&]() { if (...) { ... } else { ... } }()`.
+    /// Tail-type inference for IIFE return annotations ONLY: general
+    /// inference plus `format!` → String and conversion-shaped
+    /// `Owner::from(..)` calls. Deliberately NOT in infer_simple_expr_type —
+    /// typing ctor args there tipped bare-variant owner resolution into the
+    /// WRONG enum (`Left(String::from(..))` emitted Alignment::Left).
+    pub(super) fn infer_iife_tail_value_type(&self, e: &syn::Expr) -> Option<syn::Type> {
+        if let Some(t) = self.infer_simple_expr_type(e) {
+            return Some(t);
+        }
+        let peeled = self.peel_paren_group_expr(e);
+        if let syn::Expr::Macro(m) = peeled
+            && m.mac.path.segments.last().is_some_and(|s| s.ident == "format")
+        {
+            return syn::parse_str("String").ok();
+        }
+        if let syn::Expr::Call(c) = peeled
+            && let syn::Expr::Path(fp) = self.peel_paren_group_expr(&c.func)
+            && fp.qself.is_none()
+            && fp.path.segments.len() == 2
+        {
+            let owner = fp.path.segments[0].ident.to_string();
+            let assoc = fp.path.segments[1].ident.to_string();
+            if matches!(assoc.as_str(), "from" | "from_str")
+                && owner.chars().next().is_some_and(|ch| ch.is_uppercase())
+                && !self.is_type_param_in_scope(&owner)
+            {
+                return syn::parse_str(&owner).ok();
+            }
+        }
+        None
+    }
+
+    /// ` -> T` annotation for a deduced match-IIFE from the first
+    /// inferable non-reference arm body (see infer_iife_tail_value_type).
+    pub(super) fn match_arms_iife_tail_annotation(
+        &self,
+        arms: &[syn::Arm],
+    ) -> Option<String> {
+        arms.iter()
+            .filter(|arm| !self.is_expr_diverging(&arm.body))
+            .find_map(|arm| {
+                let body = self.extract_value_expr(&arm.body).unwrap_or(&arm.body);
+                if matches!(self.peel_paren_group_expr(body), syn::Expr::Reference(_)) {
+                    return None;
+                }
+                let ty = self.infer_iife_tail_value_type(body)?;
+                if matches!(
+                    self.peel_paren_group_type(&ty),
+                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                ) {
+                    return None;
+                }
+                let mapped = self.map_type(&ty);
+                (mapped != "auto"
+                    && !mapped.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&mapped))
+                .then(|| format!(" -> {}", mapped))
+            })
+    }
+
     pub(super) fn emit_if_expr_as_iife(
         &self,
         if_expr: &syn::ExprIf,
         expected_ty: Option<&syn::Type>,
     ) -> String {
         let mut parts = Vec::new();
-        parts.push("[&]() {".to_string());
+        // Annotate the lambda's return type when the expected type (or an
+        // inferable branch tail) names one: deduced returns fail when arms
+        // mix convertible-but-distinct types (format! yields std::string,
+        // String::from yields rusty::String — "return type must match
+        // previous return type"). Reference tails stay deduced.
+        let usable = |t: &str| {
+            t != "auto" && !t.contains("/* TODO") && !type_string_has_auto_placeholder(t)
+        };
+        let ret_annotation = expected_ty
+            .filter(|t| {
+                !matches!(
+                    self.peel_paren_group_type(t),
+                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                )
+            })
+            .map(|t| self.map_type(t))
+            .filter(|t| usable(t))
+            .or_else(|| {
+                let mut tails: Vec<&syn::Expr> = Vec::new();
+                if let Some(syn::Stmt::Expr(e, None)) = if_expr.then_branch.stmts.last() {
+                    tails.push(e);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    if let syn::Expr::Block(b) = self.peel_paren_group_expr(else_expr) {
+                        if let Some(syn::Stmt::Expr(e, None)) = b.block.stmts.last() {
+                            tails.push(e);
+                        }
+                    }
+                }
+                tails.iter().find_map(|e| {
+                    if matches!(
+                        self.peel_paren_group_expr(e),
+                        syn::Expr::Reference(_)
+                    ) {
+                        return None;
+                    }
+                    let ty = self.infer_iife_tail_value_type(e)?;
+                    if matches!(
+                        self.peel_paren_group_type(&ty),
+                        syn::Type::Reference(_) | syn::Type::Ptr(_)
+                    ) {
+                        return None;
+                    }
+                    let mapped = self.map_type(&ty);
+                    usable(&mapped).then_some(mapped)
+                })
+            });
+        parts.push(match &ret_annotation {
+            Some(ty) => format!("[&]() -> {} {{", ty),
+            None => "[&]() {".to_string(),
+        });
 
         // Emit the if condition
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {

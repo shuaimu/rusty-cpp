@@ -22953,6 +22953,13 @@ impl CodeGen {
             {
                 return_clause = format!(" -> {}", opt_ty);
             }
+            // Mixed String arms (format! vs String::from) fail deduced
+            // returns — annotate from the first inferable arm body.
+            if return_clause.is_empty() {
+                if let Some(ann) = self.match_arms_iife_tail_annotation(&match_expr.arms) {
+                    return_clause = ann;
+                }
+            }
             return format!(
                 "[&](){} {{ auto&& _m = {}; {} }}()",
                 return_clause, scrutinee, arms_text
