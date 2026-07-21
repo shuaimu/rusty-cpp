@@ -19846,6 +19846,40 @@ impl CodeGen {
                 let style = self
                     .lookup_function_arg_pass_style(&call.func, idx)
                     .or_else(|| self.associated_receiver_style_first_arg_pass_style(call, idx));
+                // Bare numeric literal in a generic `T`-position: cast to the
+                // type a sibling arg resolves `T` to, so the literal's default
+                // C++ type does not conflict with `T` bound elsewhere
+                // (`sum_slice(&c_u8, 0)`: `0` must be `uint8_t`). Only when the
+                // resolved type differs from the literal's natural default —
+                // keeps the common i32/f64 calls churn-free.
+                if matches!(style, None | Some(ArgPassStyle::Value))
+                    && let Some(resolved) = self.resolve_generic_literal_arg_type_param(call, idx)
+                {
+                    let cpp_ty = self.map_type(&resolved);
+                    let lit_expr = match self.peel_paren_group_expr(arg) {
+                        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => {
+                            self.peel_paren_group_expr(&u.expr)
+                        }
+                        other => other,
+                    };
+                    let natural = match lit_expr {
+                        syn::Expr::Lit(l) => match &l.lit {
+                            syn::Lit::Int(_) => "int32_t",
+                            syn::Lit::Float(_) => "double",
+                            _ => "",
+                        },
+                        _ => "",
+                    };
+                    if !cpp_ty.is_empty()
+                        && cpp_ty != natural
+                        && cpp_ty != "auto"
+                        && !cpp_ty.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(&cpp_ty)
+                    {
+                        let lit_cpp = self.emit_expr_to_string(arg);
+                        return format!("static_cast<{}>({})", cpp_ty, lit_cpp);
+                    }
+                }
                 let mut arg_expected_ty = self.lookup_function_arg_expected_type_for_call(
                     call,
                     idx,

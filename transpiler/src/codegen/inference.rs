@@ -5186,6 +5186,91 @@ impl CodeGen {
         Some(self.substitute_type_params_in_type(&ret_ty, &bindings))
     }
 
+    /// For a call argument that is a bare (unsuffixed) numeric literal in a
+    /// position typed as a bare generic type-param `T`, resolve `T`'s concrete
+    /// type from the OTHER arguments and return it — so the literal can be cast
+    /// instead of taking its default C++ type. `sum_slice(&c_u8, 0)` binds
+    /// `T = u8` from the slice, so the `0` must be `uint8_t`, not `int`
+    /// (otherwise C++ deduces conflicting `T`). Returns `None` unless the arg is
+    /// a bare numeric literal, its param is a bare type-param, and a sibling
+    /// resolves that param to a concrete (non-type-param) type.
+    pub(super) fn resolve_generic_literal_arg_type_param(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        // Bare unsuffixed numeric literal (optionally negated).
+        let arg = self.peel_paren_group_expr(call.args.get(arg_idx)?);
+        let lit_expr = match arg {
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => {
+                self.peel_paren_group_expr(&u.expr)
+            }
+            other => other,
+        };
+        let is_bare_numeric_lit = matches!(lit_expr, syn::Expr::Lit(l) if matches!(
+            &l.lit,
+            syn::Lit::Int(i) if i.suffix().is_empty()
+        ) || matches!(
+            &l.lit,
+            syn::Lit::Float(f) if f.suffix().is_empty()
+        ));
+        if !is_bare_numeric_lit {
+            return None;
+        }
+        let type_params = self
+            .lookup_function_type_param_names_with_import_fallback(call.func.as_ref())?
+            .clone();
+        if type_params.is_empty() {
+            return None;
+        }
+        // This arg's declared param must be exactly a bare type-param.
+        let declared = self
+            .lookup_function_arg_expected_type_with_import_fallback(call.func.as_ref(), arg_idx)?;
+        let param_name = match self.peel_reference_paren_group_type(&declared) {
+            syn::Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && matches!(tp.path.segments[0].arguments, syn::PathArguments::None) =>
+            {
+                let n = tp.path.segments[0].ident.to_string();
+                if type_params.contains(&n) {
+                    n
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        // Unify the SIBLING args to bind that param.
+        let mut bindings: HashMap<String, syn::Type> = HashMap::new();
+        for (i, other) in call.args.iter().enumerate() {
+            if i == arg_idx {
+                continue;
+            }
+            let Some(param_ty) = self
+                .lookup_function_arg_expected_type_with_import_fallback(call.func.as_ref(), i)
+            else {
+                continue;
+            };
+            let param_ty = param_ty.clone();
+            // Non-recursive infer only (see infer_call_return_type_...).
+            let Some(arg_ty) = self.infer_simple_expr_type(other) else {
+                continue;
+            };
+            self.unify_type_param_binding(&param_ty, &arg_ty, &type_params, &mut bindings);
+        }
+        let bound = bindings.get(&param_name)?.clone();
+        // Must resolve to a concrete type — never another type-param or a
+        // placeholder (casting to those is meaningless / re-breaks deduction).
+        if self.type_contains_in_scope_type_param(&bound)
+            || self.type_contains_infer(&bound)
+            || self.type_contains_unbound_single_letter_generic(&bound)
+        {
+            return None;
+        }
+        Some(bound)
+    }
+
     /// Structurally unify a callee's declared parameter type against a concrete
     /// argument type, recording `type_param -> concrete` bindings. Handles the
     /// common shapes: a bare type-param ident (`T` <- arg), references on either
@@ -5202,6 +5287,17 @@ impl CodeGen {
         // Peel references symmetrically (`&T` vs `&Inner`, `&mut T` vs `&mut X`).
         let param_inner = self.peel_reference_paren_group_type(param_ty);
         let arg_inner = self.peel_reference_paren_group_type(arg_ty);
+        // Slices/arrays: `[T]`/`&[T]` against `[X]`/`[X; N]` — unify element
+        // types (`sum_slice(&[u8], _)` binds `T = u8`).
+        let elem_of = |ty: &syn::Type| match ty {
+            syn::Type::Slice(s) => Some((*s.elem).clone()),
+            syn::Type::Array(a) => Some((*a.elem).clone()),
+            _ => None,
+        };
+        if let (Some(param_elem), Some(arg_elem)) = (elem_of(param_inner), elem_of(arg_inner)) {
+            self.unify_type_param_binding(&param_elem, &arg_elem, type_params, bindings);
+            return;
+        }
         if let (syn::Type::Path(param_tp), syn::Type::Path(arg_tp)) = (param_inner, arg_inner) {
             // A bare single-segment param that names a type param -> bind it.
             if param_tp.qself.is_none() && param_tp.path.segments.len() == 1 {
