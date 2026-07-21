@@ -1984,6 +1984,19 @@ decltype(auto) iter_mut(Range&& range) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return std::forward<Range>(range);
     } else if constexpr (requires {
+                             range.is_some();
+                             range.unwrap_mut();
+                         }) {
+        // Option<T>::iter_mut — 0/1 mutable item. Must come BEFORE the
+        // deref_call arm: Option's operator* returns the Option itself,
+        // so the consteval deref-reachability walk recursed to depth 512
+        // (a hard error inside the requires clause).
+        using opt_item_t = std::remove_reference_t<decltype(range.unwrap_mut())>;
+        if (range.is_some()) {
+            return std::span<opt_item_t>(&range.unwrap_mut(), 1);
+        }
+        return std::span<opt_item_t>();
+    } else if constexpr (requires {
         rusty::deref_call(std::forward<Range>(range),
             [](auto&& __r) -> decltype(__r.iter_mut()) { return __r.iter_mut(); });
     }) {
