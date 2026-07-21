@@ -24267,9 +24267,30 @@ impl CodeGen {
                     _ => {}
                 }
             }
+            // Width/fill/align/precision on USER Display impls: Rust ignores
+            // format params unless the impl calls f.pad() — strip the spec
+            // so C++ doesn't pad the pre-rendered to_string output
+            // (`[{:>8}]` on a user struct printed `[   (3, -7)]`, Rust
+            // prints it unpadded).
+            let mut user_display_spec_positions: HashSet<usize> = HashSet::new();
+            for (idx, spec) in &spec_strings {
+                let display_padding_spec = !spec.is_empty()
+                    && !matches!(
+                        spec.chars().last(),
+                        Some('?' | 'x' | 'X' | 'o' | 'b' | 'B' | 'e' | 'E')
+                    );
+                if display_padding_spec
+                    && args
+                        .get(*idx)
+                        .is_some_and(|a| self.format_arg_is_display_impl_type(a))
+                {
+                    user_display_spec_positions.insert(*idx);
+                }
+            }
             let stripped_spec_positions: HashSet<usize> = alt_radix_arg_positions
                 .keys()
                 .chain(sci_arg_positions.keys())
+                .chain(user_display_spec_positions.iter())
                 .copied()
                 .collect();
             let rewritten = self.rewrite_rust_format_literal_for_cpp_with_float_args(
