@@ -24010,6 +24010,9 @@ impl CodeGen {
             // pass-through leaks them as C++ COMMA expressions, so
             // `(2, 0) > (1, 99)` silently compared 0 > 99.
             syn::Expr::Tuple(_) => true,
+            // Range literals leak verbatim `..` through the dumb path
+            // (`(0..3) == (0..3)` was a C++ parse error).
+            syn::Expr::Range(_) => true,
             syn::Expr::Binary(b) => {
                 Self::format_expr_needs_smart_lowering(&b.left)
                     || Self::format_expr_needs_smart_lowering(&b.right)
@@ -24036,6 +24039,9 @@ impl CodeGen {
             syn::Expr::Field(f) => {
                 matches!(f.member, syn::Member::Unnamed(_))
                     || matches!(&*f.base, syn::Expr::Path(p) if p.path.is_ident("self"))
+                    // `r.end` must route to rusty::field_end (`end()` is the
+                    // iterator method); `r.start` rides along for symmetry.
+                    || matches!(&f.member, syn::Member::Named(id) if id == "end" || id == "start")
                     || Self::format_expr_needs_smart_lowering(&f.base)
             }
             // Macros (matches!/format!/…) in arg position are raw Rust token

@@ -1529,6 +1529,13 @@ public:
         }
     }
 
+    // Rust Range::is_empty — beats the prelude dispatcher's permissive
+    // false tail ((0..0).is_empty() silently answered false).
+    bool is_empty() const { return !(start < end_); }
+    bool operator==(const range& other) const {
+        return start == other.start && end_ == other.end_;
+    }
+
     template<typename U>
     constexpr range(const range<U>& other)
     requires std::is_convertible_v<U, T>
@@ -1681,6 +1688,12 @@ public:
         } else {
             return "..=";
         }
+    }
+
+    // Rust RangeInclusive::is_empty.
+    bool is_empty() const { return end_ < start; }
+    bool operator==(const range_inclusive& other) const {
+        return start == other.start && end_ == other.end_;
     }
 
     template<typename U>
