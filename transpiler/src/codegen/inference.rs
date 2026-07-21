@@ -5297,6 +5297,22 @@ impl CodeGen {
             return Some(ret_ty);
         }
 
+        // `s.chars()` / `s.char_indices()` locals type as their iterator so
+        // downstream `.next()` bindings resolve char payloads (marker types
+        // consumed by infer_unwrap_like_method_return_type_from_receiver_type).
+        if mc.args.is_empty()
+            && matches!(method.as_str(), "chars" | "char_indices")
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                .as_ref()
+                .map(|t| self.peel_reference_paren_group_type(t))
+                .is_some_and(|t| self.is_known_string_like_type(t))
+        {
+            let marker = if method == "chars" { "Chars" } else { "CharIndices" };
+            return syn::parse_str(marker).ok();
+        }
+
         // `s.parse::<T>()` is Result<T, _> — the turbofish names the Ok type
         // exactly, so downstream .unwrap() locals type as T (a parsed char
         // printed 55 instead of 7 without this).
@@ -5914,6 +5930,20 @@ impl CodeGen {
         receiver_ty: &syn::Type,
         method: &str,
     ) -> Option<syn::Type> {
+        // Chars/CharIndices iterators: `.next()` yields Option<char> /
+        // Option<(usize, char)> — while-let char bindings printed as
+        // integers without this.
+        if method == "next" {
+            if let syn::Type::Path(tp) = self.peel_reference_paren_group_type(receiver_ty) {
+                match tp.path.segments.last().map(|s| s.ident.to_string()).as_deref() {
+                    Some("Chars") => return syn::parse_str("Option<char>").ok(),
+                    Some("CharIndices") => {
+                        return syn::parse_str("Option<(usize, char)>").ok()
+                    }
+                    _ => {}
+                }
+            }
+        }
         let (owner, args) = self.option_or_result_type_args(receiver_ty)?;
         match owner.as_str() {
             "Option" if matches!(method, "unwrap" | "unwrap_unchecked" | "expect") => {

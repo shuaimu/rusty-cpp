@@ -27899,10 +27899,26 @@ impl CodeGen {
             self.emit_block(body);
         } else {
             self.local_cpp_bindings.push(binding_map.clone());
+            // Type the bindings from the scrutinee's payload — a char bound
+            // out of chars().next() printed as its code point without this.
+            let mut binding_types_env = HashMap::new();
+            if let Some(scrutinee_ty) = self
+                .infer_simple_expr_type(&let_expr.expr)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&let_expr.expr))
+            {
+                self.bind_pattern_types_into_env(
+                    &let_expr.pat,
+                    &scrutinee_ty,
+                    &mut binding_types_env,
+                );
+            }
             let mut local_types = HashMap::new();
             let mut local_consts = HashMap::new();
             for rust_name in binding_map.keys() {
-                local_types.insert(rust_name.clone(), None);
+                local_types.insert(
+                    rust_name.clone(),
+                    binding_types_env.get(rust_name).cloned(),
+                );
                 local_consts.insert(rust_name.clone(), false);
             }
             self.local_bindings.push(local_types);
@@ -28040,10 +28056,26 @@ impl CodeGen {
             self.emit_block(body);
         } else {
             self.local_cpp_bindings.push(binding_map.clone());
+            // Type the bindings from the scrutinee's payload — a char bound
+            // out of chars().next() printed as its code point without this.
+            let mut binding_types_env = HashMap::new();
+            if let Some(scrutinee_ty) = self
+                .infer_simple_expr_type(&let_expr.expr)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&let_expr.expr))
+            {
+                self.bind_pattern_types_into_env(
+                    &let_expr.pat,
+                    &scrutinee_ty,
+                    &mut binding_types_env,
+                );
+            }
             let mut local_types = HashMap::new();
             let mut local_consts = HashMap::new();
             for rust_name in binding_map.keys() {
-                local_types.insert(rust_name.clone(), None);
+                local_types.insert(
+                    rust_name.clone(),
+                    binding_types_env.get(rust_name).cloned(),
+                );
                 local_consts.insert(rust_name.clone(), false);
             }
             self.local_bindings.push(local_types);
