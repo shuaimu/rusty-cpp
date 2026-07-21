@@ -1949,6 +1949,7 @@ template<typename T>
 struct is_range_bounds_like<range_to_inclusive<T>> : std::true_type {};
 template<>
 struct is_range_bounds_like<range_full> : std::true_type {};
+
 template<typename T>
 inline constexpr bool is_range_bounds_like_v =
     is_range_bounds_like<std::remove_cvref_t<T>>::value;
@@ -2094,7 +2095,14 @@ decltype(auto) slice_full(const Container& container) {
         return container[range_full{}];
     } else
 #endif
-    if constexpr (requires { container.as_slice(); }) {
+    // String owners slice as STRINGS — Rust's `&s[..]` is &str, not a byte
+    // span (a span half has no formatter and fails string comparisons).
+    if constexpr (!std::is_same_v<Base, std::string_view>
+                  && requires {
+                         { container.as_str() } -> std::convertible_to<std::string_view>;
+                     }) {
+        return std::string_view(container.as_str());
+    } else if constexpr (requires { container.as_slice(); }) {
         using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_slice())>>;
         if constexpr (std::is_same_v<Slice, Base>) {
             using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(container))>;
@@ -2250,8 +2258,50 @@ auto get(const Container& container, Index idx) {
     return Opt(None);
 }
 
+// str::get over the open-range spellings — same char-boundary rules as
+// the closed-range overloads above.
+template<typename T>
+auto get(std::string_view container, const range_to<T>& idx) {
+    return get(container, range<size_t>(0, detail::checked_index(idx.end)));
+}
+
+template<typename T>
+auto get(std::string_view container, const range_from<T>& idx) {
+    return get(container,
+               range<size_t>(detail::checked_index(idx.start), container.size()));
+}
+
+inline auto get(std::string_view container, const range_full&) {
+    return Option<std::string_view>(container);
+}
+
+// String-like owners (as_str carriers) slice as STRINGS, not byte spans.
+// One concrete overload per range kind — arg2-exact, so these outrank
+// both the string_view overloads (conversion on arg1) and the generic
+// container get (less specialized arg2).
+#define RUSTY_STRING_OWNER_GET(RANGE_PARAM)                                        template<typename S, typename T>                                               requires (!std::is_same_v<std::remove_cvref_t<S>, std::string_view>)               && requires(const S& s) {                                                             { s.as_str() } -> std::convertible_to<std::string_view>;                   }                                                                       auto get(const S& s, const RANGE_PARAM& idx) {                                     return get(std::string_view(s.as_str()), idx);                             }
+RUSTY_STRING_OWNER_GET(range<T>)
+RUSTY_STRING_OWNER_GET(range_inclusive<T>)
+RUSTY_STRING_OWNER_GET(range_to<T>)
+RUSTY_STRING_OWNER_GET(range_from<T>)
+#undef RUSTY_STRING_OWNER_GET
+
+template<typename S>
+requires (!std::is_same_v<std::remove_cvref_t<S>, std::string_view>)
+    && requires(const S& s) {
+           { s.as_str() } -> std::convertible_to<std::string_view>;
+       }
+auto get(const S& s, const range_full& idx) {
+    return get(std::string_view(s.as_str()), idx);
+}
+
 // Rust `slice.get(range)` — the subslice when in bounds, None otherwise.
+// as_str carriers are excluded: String slices as a STRING (the adapter
+// overload above), not a byte span.
 template<typename Container, typename T>
+requires (!requires(const Container& c) {
+    { c.as_str() } -> std::convertible_to<std::string_view>;
+})
 auto get(const Container& container, const range<T>& idx) {
     auto span = slice_full(container);
     using Sub = decltype(span.subspan(size_t{0}, size_t{0}));
@@ -2807,6 +2857,14 @@ auto split_at(Container& container, Mid mid) {
     // over the generic span split.
     if constexpr (requires { container.split_at(static_cast<size_t>(mid)); }) {
         return container.split_at(static_cast<size_t>(mid));
+    } else if constexpr (requires {
+                             { container.as_str() } -> std::convertible_to<std::string_view>;
+                         }) {
+        // String owners split as STRINGS (string_view halves), not byte
+        // spans — a span<const uint8_t> pair has no formatter and loses
+        // str semantics.
+        return split_at(std::string_view(container.as_str()),
+                        detail::checked_index(mid));
     } else {
         return split_at(slice_full(container), std::forward<Mid>(mid));
     }

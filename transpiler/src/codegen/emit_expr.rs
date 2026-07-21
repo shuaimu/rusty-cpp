@@ -6800,8 +6800,31 @@ impl CodeGen {
                 }
             }
         }
+        // `s[10..].contains("fox")` is SUBSTRING search — an Index-range on
+        // a string-like base must not take the element-wise container arm
+        // (it compared each char against the needle &str: silently false).
+        let contains_receiver_is_string_slice = mc.method == "contains"
+            && {
+                if let syn::Expr::Index(idx) = self.peel_paren_group_expr(&mc.receiver)
+                    && matches!(
+                        self.peel_paren_group_expr(&idx.index),
+                        syn::Expr::Range(_)
+                    )
+                {
+                    self.infer_simple_expr_type(&idx.expr)
+                        .or_else(|| {
+                            self.infer_local_binding_type_from_initializer(&idx.expr)
+                        })
+                        .as_ref()
+                        .map(|t| self.peel_reference_paren_group_type(t))
+                        .is_some_and(|t| self.is_known_string_like_type(t))
+                } else {
+                    false
+                }
+            };
         if mc.method == "contains"
             && mc.args.len() == 1
+            && !contains_receiver_is_string_slice
             && self.expr_lowers_to_slice_or_span_view(&mc.receiver)
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -9585,7 +9608,21 @@ impl CodeGen {
         }
         if method_name == "get"
             && args.len() == 1
-            && self.should_lower_slice_deref_method_call(&mc.receiver)
+            && (self.should_lower_slice_deref_method_call(&mc.receiver)
+                // String owners: rusty::String has no get member — route to
+                // rusty::get, whose as_str adapter slices as a STRING.
+                || self
+                    .infer_simple_expr_type(&mc.receiver)
+                    .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                    .as_ref()
+                    .map(|t| self.peel_reference_paren_group_type(t))
+                    .is_some_and(|t| self.is_known_string_like_type(t))
+                // Unresolved receiver + RANGE arg: rusty::get's overload set
+                // dispatches container-vs-string correctly at C++ level.
+                || (matches!(
+                    self.peel_paren_group_expr(&mc.args[0]),
+                    syn::Expr::Range(_)
+                ) && self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
