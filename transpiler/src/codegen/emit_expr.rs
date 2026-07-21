@@ -14904,6 +14904,32 @@ impl CodeGen {
                         return format!("std::fmod({}, {})", left, right);
                     }
                 }
+                // Rust shift results have the LHS's type; C++ integer
+                // promotion widens sub-int operands to int, keeping bits
+                // Rust discards ((0x80u8 << 4) as u32 was 2048, Rust: 0).
+                // Truncate back to the operand type.
+                if matches!(bin.op, syn::BinOp::Shl(_) | syn::BinOp::Shr(_)) {
+                    if let Some(lhs_ty) = self
+                        .infer_simple_expr_type(&bin.left)
+                        .or_else(|| self.infer_local_binding_type_from_initializer(&bin.left))
+                        && let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&lhs_ty)
+                        && tp.path.segments.len() == 1
+                    {
+                        let name = tp.path.segments[0].ident.to_string();
+                        if matches!(name.as_str(), "u8" | "u16" | "i8" | "i16") {
+                            let cpp = match name.as_str() {
+                                "u8" => "uint8_t",
+                                "u16" => "uint16_t",
+                                "i8" => "int8_t",
+                                _ => "int16_t",
+                            };
+                            return format!(
+                                "static_cast<{}>({} {} {})",
+                                cpp, left, op, right
+                            );
+                        }
+                    }
+                }
                 format!("{} {} {}", left, op, right)
             }
         }

@@ -415,7 +415,13 @@ namespace rusty {
                 return std::signbit(value) ? "-inf" : "inf";
             }
             char buf[64];
-            auto res = std::to_chars(buf, buf + sizeof(buf), value);
+            // Shortest-SCIENTIFIC explicitly: the plain overload spells
+            // large integral doubles with their exact digits (2^64 printed
+            // ...551616 where Rust's shortest round-trip is ...552000); the
+            // scientific shortest always carries minimal digits, and the
+            // expansion below renders it positionally.
+            auto res = std::to_chars(buf, buf + sizeof(buf), value,
+                                     std::chars_format::scientific);
             std::string s(buf, res.ptr);
             auto epos = s.find('e');
             if (epos == std::string::npos) {

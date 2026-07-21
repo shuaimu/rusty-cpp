@@ -6757,6 +6757,11 @@ impl CodeGen {
                 })
             }
             syn::Expr::Range(range) => self.infer_range_expr_type(range),
+            // `x as T` — the target type is explicit. Format args needed
+            // this to keep cast results NUMERIC ({:5} left-aligned the
+            // pre-stringified form) and route char/float casts to their
+            // dispatch wrappers.
+            syn::Expr::Cast(cast) => Some((*cast.ty).clone()),
             syn::Expr::Tuple(tuple) => {
                 let mut elems = Vec::new();
                 for elem in &tuple.elems {

@@ -46723,6 +46723,27 @@ std::string to_string(const T& value) {
     } else if constexpr (std::is_floating_point_v<V>) {
         // Rust float Display — shortest round-trip digits, never scientific.
         return rusty::detail::float_display_string(value);
+    } else if constexpr (std::is_same_v<V, __int128>
+        || std::is_same_v<V, unsigned __int128>) {
+        // std::to_string has no 128-bit overloads; digits by division.
+        if (value == 0) { return "0"; }
+        unsigned __int128 mag;
+        bool neg = false;
+        if constexpr (std::is_same_v<V, __int128>) {
+            neg = value < 0;
+            mag = neg ? static_cast<unsigned __int128>(-(value + 1)) + 1
+                      : static_cast<unsigned __int128>(value);
+        } else {
+            mag = value;
+        }
+        std::string out;
+        while (mag != 0) {
+            out.push_back(static_cast<char>('0' + static_cast<int>(mag % 10)));
+            mag /= 10;
+        }
+        if (neg) { out.push_back('-'); }
+        std::reverse(out.begin(), out.end());
+        return out;
     } else if constexpr (std::is_arithmetic_v<V>) {
         return std::to_string(value);
     } else if constexpr (requires { value.to_string(); }) {
@@ -50303,6 +50324,27 @@ std::string to_string(const T& value) {\n\
         return \"<fmt-error>\";\n\
     } else if constexpr (std::is_floating_point_v<Value>) {\n\
         return rusty::detail::float_display_string(value);\n\
+    } else if constexpr (std::is_same_v<Value, __int128>\n\
+        || std::is_same_v<Value, unsigned __int128>) {\n\
+        // std::to_string has no 128-bit overloads; digits by division.\n\
+        if (value == 0) { return \"0\"; }\n\
+        unsigned __int128 mag;\n\
+        bool neg = false;\n\
+        if constexpr (std::is_same_v<Value, __int128>) {\n\
+            neg = value < 0;\n\
+            mag = neg ? static_cast<unsigned __int128>(-(value + 1)) + 1\n\
+                      : static_cast<unsigned __int128>(value);\n\
+        } else {\n\
+            mag = value;\n\
+        }\n\
+        std::string out;\n\
+        while (mag != 0) {\n\
+            out.push_back(static_cast<char>('0' + static_cast<int>(mag % 10)));\n\
+            mag /= 10;\n\
+        }\n\
+        if (neg) { out.push_back('-'); }\n\
+        std::reverse(out.begin(), out.end());\n\
+        return out;\n\
     } else if constexpr (requires { std::to_string(value); }) {\n\
         return std::to_string(value);\n\
     } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {\n\
