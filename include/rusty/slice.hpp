@@ -2961,14 +2961,32 @@ auto iter_position(Range&& range, Pred&& pred) -> rusty::Option<size_t> {
 
 template<typename Range, typename Acc, typename Func>
 auto fold(Range&& range, Acc init, Func&& func) {
-    auto acc = std::move(init);
-    for (auto&& item : for_in(std::forward<Range>(range))) {
-        acc = std::invoke(
-            func,
-            std::move(acc),
-            std::forward<decltype(item)>(item));
+    if constexpr (requires { typename Acc::rusty_ok_contextual_tag; }
+                  || requires { typename Acc::rusty_err_contextual_tag; }) {
+        // A bare `Ok(0)` seed is a contextual carrier — materialize the
+        // accumulator as the closure's return type (its annotated acc
+        // param converts the carrier on the first call).
+        auto range_for = for_in(std::forward<Range>(range));
+        using acc_t = std::remove_cvref_t<decltype(std::invoke(
+            func, std::move(init), *std::begin(range_for)))>;
+        acc_t acc = std::move(init);
+        for (auto&& item : range_for) {
+            acc = std::invoke(
+                func,
+                std::move(acc),
+                std::forward<decltype(item)>(item));
+        }
+        return acc;
+    } else {
+        auto acc = std::move(init);
+        for (auto&& item : for_in(std::forward<Range>(range))) {
+            acc = std::invoke(
+                func,
+                std::move(acc),
+                std::forward<decltype(item)>(item));
+        }
+        return acc;
     }
-    return acc;
 }
 
 template<typename Range, typename Acc, typename Func>

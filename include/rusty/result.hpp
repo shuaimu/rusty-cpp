@@ -418,6 +418,14 @@ public:
         return Option<E>(std::move(err_ref()));
     }
 
+    // Const fallback for read-only Result bindings (copies the Err value).
+    Option<E> err() const {
+        if (is_ok_value) {
+            return Option<E>(None);
+        }
+        return Option<E>(err_ref());
+    }
+
     // Borrow payload by pointer without moving the Result value.
     // Uses remove_reference_t to avoid forming pointer-to-reference
     // when T or E is a reference type (e.g., Result<const int&, Error>).
@@ -659,40 +667,105 @@ public:
         return Option<Result<Inner, E>>(Result<Inner, E>::Err(err_ref()));
     }
     
-    // Chain operations that return Result
+    // Chain operations that return Result. A closure returning a BARE
+    // `Ok(x)` yields the contextual carrier (its Err side is deferred) —
+    // resolve it against self's E so ReturnType::Err exists.
     template<typename F>
-    auto and_then(F f) -> decltype(f(std::declval<T>())) {
-        using ReturnType = decltype(f(std::declval<T>()));
-        if (is_ok_value) {
-            return f(std::move(ok_ref()));
-        } else {
+    auto and_then(F f) {
+        using RawReturn = std::remove_cvref_t<decltype(f(std::declval<T>()))>;
+        if constexpr (requires { typename RawReturn::rusty_ok_contextual_tag; }) {
+            using ReturnType = Result<typename RawReturn::stored_t, E>;
+            if (is_ok_value) {
+                return static_cast<ReturnType>(f(std::move(ok_ref())));
+            }
             return ReturnType::Err(std::move(err_ref()));
+        } else {
+            using ReturnType = RawReturn;
+            if (is_ok_value) {
+                return f(std::move(ok_ref()));
+            } else {
+                return ReturnType::Err(std::move(err_ref()));
+            }
         }
     }
 
     // Const fallback (copies out).
     template<typename F>
-    auto and_then(F f) const -> decltype(f(std::declval<T>())) {
-        using ReturnType = decltype(f(std::declval<T>()));
-        if (is_ok_value) {
-            return f(ok_ref());
-        } else {
+    auto and_then(F f) const {
+        using RawReturn = std::remove_cvref_t<decltype(f(std::declval<T>()))>;
+        if constexpr (requires { typename RawReturn::rusty_ok_contextual_tag; }) {
+            using ReturnType = Result<typename RawReturn::stored_t, E>;
+            if (is_ok_value) {
+                return static_cast<ReturnType>(f(ok_ref()));
+            }
             return ReturnType::Err(err_ref());
+        } else {
+            using ReturnType = RawReturn;
+            if (is_ok_value) {
+                return f(ok_ref());
+            } else {
+                return ReturnType::Err(err_ref());
+            }
         }
     }
     
-    // Provide alternative Result if this is Err
+    // Provide alternative Result if this is Err. Contextual closure
+    // returns (bare `Ok(x)` / `Err(e)`) resolve against self's params.
     template<typename F>
-    auto or_else(F f) -> decltype(f(std::declval<E>())) {
-        using ReturnType = decltype(f(std::declval<E>()));
-        if (is_ok_value) {
-            if constexpr (std::is_reference_v<T>) {
-                return ReturnType::Ok(ok_ref());
-            } else {
+    auto or_else(F f) {
+        using RawReturn = std::remove_cvref_t<decltype(f(std::declval<E>()))>;
+        if constexpr (requires { typename RawReturn::rusty_ok_contextual_tag; }) {
+            using ReturnType = Result<T, E>;
+            if (is_ok_value) {
                 return ReturnType::Ok(std::move(ok_ref()));
             }
+            return static_cast<ReturnType>(f(std::move(err_ref())));
+        } else if constexpr (requires {
+                                 typename RawReturn::rusty_err_contextual_tag;
+                             }) {
+            using ReturnType = Result<T, typename RawReturn::stored_t>;
+            if (is_ok_value) {
+                return ReturnType::Ok(std::move(ok_ref()));
+            }
+            return static_cast<ReturnType>(f(std::move(err_ref())));
         } else {
-            return f(std::move(err_ref()));
+            using ReturnType = RawReturn;
+            if (is_ok_value) {
+                if constexpr (std::is_reference_v<T>) {
+                    return ReturnType::Ok(ok_ref());
+                } else {
+                    return ReturnType::Ok(std::move(ok_ref()));
+                }
+            } else {
+                return f(std::move(err_ref()));
+            }
+        }
+    }
+
+    // Const fallback (copies out).
+    template<typename F>
+    auto or_else(F f) const {
+        using RawReturn = std::remove_cvref_t<decltype(f(std::declval<E>()))>;
+        if constexpr (requires { typename RawReturn::rusty_ok_contextual_tag; }) {
+            using ReturnType = Result<T, E>;
+            if (is_ok_value) {
+                return ReturnType::Ok(ok_ref());
+            }
+            return static_cast<ReturnType>(f(err_ref()));
+        } else if constexpr (requires {
+                                 typename RawReturn::rusty_err_contextual_tag;
+                             }) {
+            using ReturnType = Result<T, typename RawReturn::stored_t>;
+            if (is_ok_value) {
+                return ReturnType::Ok(ok_ref());
+            }
+            return static_cast<ReturnType>(f(err_ref()));
+        } else {
+            using ReturnType = RawReturn;
+            if (is_ok_value) {
+                return ReturnType::Ok(ok_ref());
+            }
+            return f(err_ref());
         }
     }
 
@@ -763,6 +836,49 @@ public:
             return Result<T, F2>::Ok(std::move(ok_ref()));
         }
         return res;
+    }
+
+    // Bare `Ok(x)` / `Err(e)` args are contextual carriers — resolve
+    // against self's params (`e.or(Ok(42))`, `r.and(Ok(9))`).
+    template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
+        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    Result or_(U&& res) {
+        if (is_ok_value) {
+            return Result::Ok(std::move(ok_ref()));
+        }
+        return static_cast<Result>(std::forward<U>(res));
+    }
+
+    template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
+        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    Result and_(U&& res) {
+        if (is_ok_value) {
+            return static_cast<Result>(std::forward<U>(res));
+        }
+        return Result::Err(std::move(err_ref()));
+    }
+
+    // Const fallbacks (copy out).
+    template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
+        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    Result or_(U&& res) const {
+        if (is_ok_value) {
+            return Result::Ok(ok_ref());
+        }
+        return static_cast<Result>(std::forward<U>(res));
+    }
+
+    template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
+        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    Result and_(U&& res) const {
+        if (is_ok_value) {
+            return static_cast<Result>(std::forward<U>(res));
+        }
+        return Result::Err(err_ref());
     }
 
     // Rust parity: Result<&T,E>::cloned()/copied() -> Result<T,E>. For a value
@@ -1144,6 +1260,7 @@ Result<T, E> Err(U&& error) {
 
 template<typename U>
 struct ok_contextual_value {
+    using rusty_ok_contextual_tag = void;
     using stored_t = std::decay_t<U>;
     stored_t value;
 
@@ -1170,6 +1287,7 @@ struct ok_contextual_value {
 
 template<typename U>
 struct err_contextual_value {
+    using rusty_err_contextual_tag = void;
     using stored_t = std::decay_t<U>;
     stored_t error;
 

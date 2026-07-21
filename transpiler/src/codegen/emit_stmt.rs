@@ -5333,6 +5333,39 @@ impl CodeGen {
             None
         };
         let expected_ty_for_branches = expected_ty.or(inferred_expected_ty.as_ref());
+        // Mixed Ok/Err ternaries whose payload types resist Rust-side
+        // inference (closure params): the contextual carriers have no
+        // common C++ type ("incompatible operand types"). Wrap both sides
+        // in a decltype-spelled Result — unevaluated, so args still run
+        // once (the Either machinery's decltype trick).
+        if expected_ty_for_branches.is_none() {
+            let result_pair = match (
+                self.extract_constructor_call_expr(then_expr),
+                self.extract_constructor_call_expr(else_expr),
+            ) {
+                (Some((tc, ta)), Some((ec, ea))) if tc == "Ok" && ec == "Err" => {
+                    Some((ta, ea))
+                }
+                (Some((tc, ta)), Some((ec, ea))) if tc == "Err" && ec == "Ok" => {
+                    Some((ea, ta))
+                }
+                _ => None,
+            };
+            if let Some((ok_arg, err_arg)) = result_pair {
+                let ok_cpp = self.emit_expr_to_string(ok_arg);
+                let err_cpp = self.emit_expr_to_string(err_arg);
+                let then_cpp = self.emit_expr_to_string(then_expr);
+                let else_cpp = self.emit_expr_to_string(else_expr);
+                let rty = format!(
+                    "rusty::Result<std::remove_cvref_t<decltype({})>, std::remove_cvref_t<decltype({})>>",
+                    ok_cpp, err_cpp
+                );
+                return format!(
+                    "({} ? static_cast<{}>({}) : static_cast<{}>({}))",
+                    cond, rty, then_cpp, rty, else_cpp
+                );
+            }
+        }
         // ctor_template_args feeds the inner-arm emit. When an
         // annotation is present (`let e: Either<i32, i32> = …`) the
         // expected_ty already carries concrete template args; prefer
