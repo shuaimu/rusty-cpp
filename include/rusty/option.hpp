@@ -638,12 +638,14 @@ public:
     }
     auto as_deref_mut() {
         if constexpr (requires { value.as_str(); }) {
-            using View = std::remove_cv_t<std::remove_reference_t<
-                decltype(std::string_view(value.as_str()))>>;
+            // String carrier: yield a MUTABLE reference to the payload
+            // itself — it exposes the `&mut str` surface (make_ascii_
+            // uppercase, etc.) and mutates in place. A string_view would be
+            // const, and String has no operator* for the *value path.
             if (has_value) {
-                return Option<View>(std::string_view(value.as_str()));
+                return Option<T&>(value);
             }
-            return Option<View>(None);
+            return Option<T&>(None);
         } else {
             using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
             if (has_value) {

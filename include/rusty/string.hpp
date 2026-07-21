@@ -647,6 +647,26 @@ public:
         return data_ ? std::string_view(data_, len_) : std::string_view();
     }
 
+    // Rust `str::make_ascii_uppercase(&mut self)` — in-place ASCII case
+    // fold (non-ASCII bytes untouched). Reached through as_deref_mut and
+    // direct `&mut String` receivers.
+    void make_ascii_uppercase() {
+        for (size_t i = 0; i < len_; ++i) {
+            char c = data_[i];
+            if (c >= 'a' && c <= 'z') {
+                data_[i] = static_cast<char>(c - ('a' - 'A'));
+            }
+        }
+    }
+    void make_ascii_lowercase() {
+        for (size_t i = 0; i < len_; ++i) {
+            char c = data_[i];
+            if (c >= 'A' && c <= 'Z') {
+                data_[i] = static_cast<char>(c + ('a' - 'A'));
+            }
+        }
+    }
+
     // Implicit conversion to string_view — enables passing String where
     // std::string_view is expected (mirrors Rust's Deref<Target=str>).
     operator std::string_view() const {
