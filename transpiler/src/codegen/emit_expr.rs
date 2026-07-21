@@ -16673,7 +16673,14 @@ impl CodeGen {
                         syn::Expr::Reference(reference) => {
                             self.emit_expr_to_string(&reference.expr)
                         }
-                        _ => self.emit_expr_maybe_move(arg),
+                        // Both operands are &mut PLACES — a maybe-move
+                        // turned ref bindings into rvalues ("expects an
+                        // lvalue"). deref_if_pointer peels pointer-carried
+                        // reference bindings; identity otherwise.
+                        _ => format!(
+                            "rusty::detail::deref_if_pointer({})",
+                            self.emit_expr_to_string(arg)
+                        ),
                     })
                     .collect();
                 return format!("{}({})", func, args.join(", "));

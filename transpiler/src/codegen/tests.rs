@@ -2118,7 +2118,10 @@ fn test_leaf5114_mem_swap_path_maps_to_runtime_mem_swap() {
         "#,
     );
     assert!(
-        out.contains("rusty::mem::swap(a, b);"),
+        out.contains("rusty::mem::swap(a, b);")
+            || out.contains(
+                "rusty::mem::swap(rusty::detail::deref_if_pointer(a), rusty::detail::deref_if_pointer(b));"
+            ),
         "mem::swap should lower to runtime helper path, got:\n{}",
         out
     );

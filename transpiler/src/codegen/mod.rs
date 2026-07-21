@@ -31186,6 +31186,20 @@ impl CodeGen {
         ) {
             return true;
         }
+        // Option::insert(v) -> &mut T. The bare name collides with map/Vec
+        // insert (by-value returns), so gate on an Option-typed receiver.
+        if method.as_str() == "insert"
+            && mc.args.len() == 1
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                .as_ref()
+                .map(|t| self.peel_reference_paren_group_type(t))
+                .is_some_and(|t| matches!(t, syn::Type::Path(tp)
+                    if tp.path.segments.last().is_some_and(|s| s.ident == "Option")))
+        {
+            return true;
+        }
         if matches!(
             method.as_str(),
             "as_ref" | "as_mut" | "deref" | "deref_mut" | "borrow" | "borrow_mut"
