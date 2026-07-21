@@ -24147,7 +24147,11 @@ fn test_leaf41543333333191_into_string_literal_lowers_via_string_from_in_typed_c
     assert!(
         out.contains("v.push(rusty::String::from(")
             || out.contains("v.push((\"a\").into())")
-            || out.contains("v.push(((\"a\")).into())"),
+            || out.contains("v.push(((\"a\")).into())")
+            // user/generic target with `impl From<&str>` routes through
+            // from_into (a bare `("a").into()` is a member call on a char
+            // array); resolves to `T::from(...)` at instantiation.
+            || out.contains("rusty::from_into<"),
         "{out}"
     );
 }

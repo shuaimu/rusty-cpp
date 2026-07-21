@@ -56162,6 +56162,11 @@ fn is_consuming_method_name(method: &str) -> bool {
             | "expect_right"
             | "map"
             | "filter_map"
+            // `Into::into(self)` consumes its receiver by value — a const
+            // local turns the emitted std::move into a copy, which is
+            // deleted for move-only conversion sources (`let b: B = a.into()`
+            // where A has a move-only field).
+            | "into"
     ) || method.starts_with("into_")
 }
 

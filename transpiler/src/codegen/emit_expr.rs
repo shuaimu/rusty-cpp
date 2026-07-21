@@ -15482,7 +15482,15 @@ impl CodeGen {
                 "std::string_view" => Some(format!("std::string_view({})", receiver)),
                 // Rust `&str` can lower to C-string receiver surfaces.
                 "char*" => Some(receiver),
-                _ => None,
+                // A user target with `impl From<&str>` (`let n: Name =
+                // "x".into()`): route through from_into so Target::from
+                // resolves — a bare `("x").into()` is a member call on a
+                // char array. The receiver goes in as a string_view so it
+                // matches the `from(&str)` param.
+                _ => Some(format!(
+                    "rusty::from_into<{}>(std::string_view({}))",
+                    target_cpp, receiver
+                )),
             },
             Some(IntoReceiverKind::ScalarLike) => {
                 if Self::is_scalar_into_target_cpp_type(&canonical_target) {
