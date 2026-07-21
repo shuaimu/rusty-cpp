@@ -1183,6 +1183,10 @@ pub struct CodeGen {
     /// Variables used more than once in the current block.
     /// std::move is skipped for these to avoid use-after-move errors.
     pub(crate) multi_use_vars: std::collections::HashSet<String>,
+    /// const fns whose FULL definitions were emitted during the forward
+    /// phase (constexpr globals need their bodies before the const item
+    /// phase); the item-phase definition pass skips these.
+    pub(crate) const_fns_defined_early: std::collections::HashSet<String>,
     /// Immutable local names in the current block that are consumed through
     /// by-value method/function calls or returned by value.
     /// Such bindings must not be emitted as `const auto`.
@@ -1985,6 +1989,7 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             deref_assigned_vars: std::collections::HashSet::new(),
             multi_use_vars: std::collections::HashSet::new(),
+            const_fns_defined_early: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
             repeat_elem_type_hints: HashMap::new(),
@@ -10115,6 +10120,31 @@ impl CodeGen {
             if self.emit_function_forward_decl(f, allow_non_unit_forward_decl) {
                 emitted_any = true;
             }
+        }
+        // const fns define FULLY here: the item phase batches const-item
+        // definitions before fn definitions, so `constexpr SQ = square(7)`
+        // needed square's body already visible (a constexpr call cannot use
+        // a forward declaration). constexpr fns are implicitly inline —
+        // early definition is safe; the item phase skips these.
+        for item in ordered_items.iter().copied() {
+            let syn::Item::Fn(f) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&f.attrs) || f.sig.constness.is_none() {
+                continue;
+            }
+            let rust_name = f.sig.ident.to_string();
+            let rust_path = if self.module_stack.is_empty() {
+                rust_name
+            } else {
+                format!("{}::{}", self.module_stack.join("::"), rust_name)
+            };
+            if self.const_fns_defined_early.contains(&rust_path) {
+                continue;
+            }
+            self.emit_function(f);
+            self.const_fns_defined_early.insert(rust_path);
+            emitted_any = true;
         }
         emitted_any
     }

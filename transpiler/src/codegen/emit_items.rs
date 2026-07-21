@@ -261,6 +261,21 @@ impl CodeGen {
     }
 
     pub(super) fn emit_function(&mut self, f: &syn::ItemFn) {
+        // const fns already fully defined in the forward phase must not
+        // define again (C++ redefinition error). The early pass inserts
+        // into the set AFTER its own emit_function call, so only the
+        // second (item-phase) visit hits this.
+        if f.sig.constness.is_some() {
+            let rust_name = f.sig.ident.to_string();
+            let rust_path = if self.module_stack.is_empty() {
+                rust_name
+            } else {
+                format!("{}::{}", self.module_stack.join("::"), rust_name)
+            };
+            if self.const_fns_defined_early.contains(&rust_path) {
+                return;
+            }
+        }
         // Skip #[cfg(test)] functions in non-test output
         // (they'll be emitted separately as test cases)
 
