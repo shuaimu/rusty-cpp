@@ -4367,7 +4367,65 @@ impl CodeGen {
                                     })
                                 };
                             let nlen = escaped_cpp.len();
+                            // The text probes can't see SHADOWING: a closure
+                            // param named like the let binding (`let acc =
+                            // …fold(seed, |acc, r| …)`) matched ", acc" and
+                            // forced a const tmp + std::move — a deleted copy
+                            // for move-only payloads. Confirm on the AST that
+                            // the name is used OUTSIDE closures rebinding it.
+                            let ast_self_ref = {
+                                struct Scan<'a> {
+                                    name: &'a str,
+                                    found: bool,
+                                }
+                                impl<'a, 'ast> syn::visit::Visit<'ast> for Scan<'a> {
+                                    fn visit_expr(&mut self, e: &'ast syn::Expr) {
+                                        if let syn::Expr::Closure(c) = e {
+                                            let shadows = c.inputs.iter().any(|p| {
+                                                let p = match p {
+                                                    syn::Pat::Type(pt) => &*pt.pat,
+                                                    other => other,
+                                                };
+                                                matches!(p, syn::Pat::Ident(pi) if pi.ident == self.name)
+                                            });
+                                            if shadows {
+                                                return;
+                                            }
+                                        }
+                                        // Any path ENDING in the name counts:
+                                        // `<dyn Error>::sources` emits as the
+                                        // bare free-fn name, which the new
+                                        // local would shadow in its own
+                                        // initializer without the tmp.
+                                        if let syn::Expr::Path(p) = e
+                                            && p.path
+                                                .segments
+                                                .last()
+                                                .is_some_and(|s| s.ident == self.name)
+                                        {
+                                            self.found = true;
+                                        }
+                                        // Macro tokens are opaque to the
+                                        // visitor — assume a textual hit
+                                        // inside one is a real use
+                                        // (conservative: keeps the tmp).
+                                        if let syn::Expr::Macro(m) = e
+                                            && m.mac.tokens.to_string().contains(self.name)
+                                        {
+                                            self.found = true;
+                                        }
+                                        syn::visit::visit_expr(self, e);
+                                    }
+                                }
+                                let mut scan = Scan {
+                                    name: &name_str,
+                                    found: false,
+                                };
+                                syn::visit::visit_expr(&mut scan, &init.expr);
+                                scan.found
+                            };
                             let self_ref = cpp_name == escaped_cpp
+                                && ast_self_ref
                                 && (occurs_bounded(&expr_str, &format!("&{}", escaped_cpp), 1, nlen)
                                     || expr_str.contains(&format!("({})", escaped_cpp))
                                     || occurs_bounded(&expr_str, &format!("{},", escaped_cpp), 0, nlen)
@@ -4379,13 +4437,21 @@ impl CodeGen {
                                     ));
                             if self_ref {
                                 // Emit: auto _tmp = init; auto name = _tmp;
+                                // The tmp is a STAGING value — never const,
+                                // or the hand-off std::move degrades to a
+                                // (possibly deleted) copy.
                                 let tmp_name = self.reserve_synthetic_cpp_name(&format!(
                                     "{}_self_ref_tmp",
                                     cpp_name
                                 ));
+                                let tmp_decl = decl_type
+                                    .trim_start()
+                                    .strip_prefix("const ")
+                                    .unwrap_or(decl_type.trim_start())
+                                    .to_string();
                                 self.writeln(&format!(
                                     "{} {} = {};",
-                                    decl_type, tmp_name, expr_str
+                                    tmp_decl, tmp_name, expr_str
                                 ));
                                 // For reference bindings (`auto&`,
                                 // `const auto&`, `T&`), binding the

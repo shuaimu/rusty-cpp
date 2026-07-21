@@ -244,7 +244,9 @@ def patch_rusty(path: Path) -> None:
     # under the void* dyn-Error erasure — truncate to the top error (a
     # dependent empty array keeps the loop body deferred).
     t = re.sub(
-        r"const auto sources_self_ref_tmp = rusty::flat_map\(rusty::iter\(.*"
+        # The staging tmp is emitted non-const since the #99b fix (a const
+        # tmp made the hand-off std::move a deleted copy) — accept both.
+        r"(?:const )?auto sources_self_ref_tmp = rusty::flat_map\(rusty::iter\(.*"
         r"std::move\(sources\)\);\n(\s*)const auto sources = "
         r"std::move\(sources_self_ref_tmp\);",
         r"\1// PATCH e2: source-chain walk truncated (void* dyn erasure)."

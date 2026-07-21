@@ -839,10 +839,11 @@ public:
     }
 
     // Bare `Ok(x)` / `Err(e)` args are contextual carriers — resolve
-    // against self's params (`e.or(Ok(42))`, `r.and(Ok(9))`).
+    // against self where the carrier leaves a side free. Rust's and()
+    // REPLACES the Ok type: an Ok carrier supplies it; or() replaces the
+    // Err type symmetrically. The undetermined side defaults to self's.
     template<typename U>
     requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
-        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
     Result or_(U&& res) {
         if (is_ok_value) {
             return Result::Ok(std::move(ok_ref()));
@@ -851,8 +852,27 @@ public:
     }
 
     template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    auto or_(U&& res) {
+        using ReturnType = Result<T, typename std::remove_cvref_t<U>::stored_t>;
+        if (is_ok_value) {
+            return ReturnType::Ok(std::move(ok_ref()));
+        }
+        return static_cast<ReturnType>(std::forward<U>(res));
+    }
+
+    template<typename U>
     requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
-        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    auto and_(U&& res) {
+        using ReturnType = Result<typename std::remove_cvref_t<U>::stored_t, E>;
+        if (is_ok_value) {
+            return static_cast<ReturnType>(std::forward<U>(res));
+        }
+        return ReturnType::Err(std::move(err_ref()));
+    }
+
+    template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
     Result and_(U&& res) {
         if (is_ok_value) {
             return static_cast<Result>(std::forward<U>(res));
@@ -863,7 +883,6 @@ public:
     // Const fallbacks (copy out).
     template<typename U>
     requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
-        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
     Result or_(U&& res) const {
         if (is_ok_value) {
             return Result::Ok(ok_ref());
@@ -872,8 +891,27 @@ public:
     }
 
     template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    auto or_(U&& res) const {
+        using ReturnType = Result<T, typename std::remove_cvref_t<U>::stored_t>;
+        if (is_ok_value) {
+            return ReturnType::Ok(ok_ref());
+        }
+        return static_cast<ReturnType>(std::forward<U>(res));
+    }
+
+    template<typename U>
     requires requires { typename std::remove_cvref_t<U>::rusty_ok_contextual_tag; }
-        || requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
+    auto and_(U&& res) const {
+        using ReturnType = Result<typename std::remove_cvref_t<U>::stored_t, E>;
+        if (is_ok_value) {
+            return static_cast<ReturnType>(std::forward<U>(res));
+        }
+        return ReturnType::Err(err_ref());
+    }
+
+    template<typename U>
+    requires requires { typename std::remove_cvref_t<U>::rusty_err_contextual_tag; }
     Result and_(U&& res) const {
         if (is_ok_value) {
             return static_cast<Result>(std::forward<U>(res));

@@ -1153,21 +1153,54 @@ impl CodeGen {
 
     pub(super) fn try_emit_runtime_tuple_match_stmt(&mut self, match_expr: &syn::ExprMatch) -> bool {
         let tuple_expr = self.peel_paren_group_expr(&match_expr.expr);
-        let syn::Expr::Tuple(tuple_scrutinee) = tuple_expr else {
-            return false;
+        // Tuple-TYPED places (`match p` where p: (Option<_>, Result<_,_>))
+        // take this path too — they previously sank to the visit fallback,
+        // which dropped every refutable arm to a TODO lambda. Gated on
+        // tuple-shaped arm patterns AND a tuple-inferred scrutinee type so
+        // nothing else is hijacked.
+        let direct_scrutinee = if matches!(tuple_expr, syn::Expr::Tuple(_)) {
+            None
+        } else {
+            let arms_tuple_shaped = match_expr.arms.iter().any(|arm| {
+                matches!(self.peel_pat_type_ref_paren(&arm.pat), syn::Pat::Tuple(_))
+            }) && match_expr.arms.iter().all(|arm| {
+                matches!(
+                    self.peel_pat_type_ref_paren(&arm.pat),
+                    syn::Pat::Tuple(_) | syn::Pat::Wild(_)
+                )
+            });
+            let scrutinee_is_tuple_typed = self
+                .infer_simple_expr_type(&match_expr.expr)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&match_expr.expr))
+                .as_ref()
+                .map(|t| self.peel_reference_paren_group_type(t))
+                .is_some_and(|t| matches!(t, syn::Type::Tuple(_)));
+            if !arms_tuple_shaped || !scrutinee_is_tuple_typed {
+                return false;
+            }
+            Some(self.emit_expr_to_string(&match_expr.expr))
         };
-        if tuple_scrutinee.elems.is_empty() {
-            return false;
-        }
-
-        let tuple_value_names: Vec<String> = (0..tuple_scrutinee.elems.len())
-            .map(|idx| format!("_m{}", idx))
-            .collect();
-        let tuple_value_exprs: Vec<String> = tuple_scrutinee
-            .elems
-            .iter()
-            .map(|elem| self.emit_match_visit_scrutinee(elem, None))
-            .collect();
+        let (tuple_value_names, tuple_value_exprs): (Vec<String>, Vec<String>) =
+            if direct_scrutinee.is_some() {
+                (Vec::new(), Vec::new())
+            } else {
+                let syn::Expr::Tuple(tuple_scrutinee) = tuple_expr else {
+                    return false;
+                };
+                if tuple_scrutinee.elems.is_empty() {
+                    return false;
+                }
+                (
+                    (0..tuple_scrutinee.elems.len())
+                        .map(|idx| format!("_m{}", idx))
+                        .collect(),
+                    tuple_scrutinee
+                        .elems
+                        .iter()
+                        .map(|elem| self.emit_match_visit_scrutinee(elem, None))
+                        .collect(),
+                )
+            };
 
         let mut arm_plans = Vec::with_capacity(match_expr.arms.len());
         for arm in &match_expr.arms {
@@ -1193,14 +1226,18 @@ impl CodeGen {
 
         self.writeln("{");
         self.indent += 1;
-        for (idx, elem_value) in tuple_value_exprs.iter().enumerate() {
-            let elem_name = &tuple_value_names[idx];
-            self.writeln(&format!("auto&& {} = {};", elem_name, elem_value));
+        if let Some(direct) = &direct_scrutinee {
+            self.writeln(&format!("auto&& _m_tuple = {};", direct));
+        } else {
+            for (idx, elem_value) in tuple_value_exprs.iter().enumerate() {
+                let elem_name = &tuple_value_names[idx];
+                self.writeln(&format!("auto&& {} = {};", elem_name, elem_value));
+            }
+            self.writeln(&format!(
+                "auto _m_tuple = std::forward_as_tuple({});",
+                tuple_value_names.join(", ")
+            ));
         }
-        self.writeln(&format!(
-            "auto _m_tuple = std::forward_as_tuple({});",
-            tuple_value_names.join(", ")
-        ));
         self.writeln("bool _m_matched = false;");
         for (arm, (arm_condition, arm_bindings, binding_map)) in
             match_expr.arms.iter().zip(arm_plans.into_iter())
