@@ -1312,10 +1312,18 @@ impl CodeGen {
         let match_scrutinee_ty = self
             .infer_simple_expr_type(&match_expr.expr)
             .or_else(|| self.infer_local_binding_type_from_initializer(&match_expr.expr));
-        let payload_source = if self.runtime_match_scrutinee_borrows_payload(&match_expr.expr) {
-            "std::as_const(_m)"
+        // `match &mut opt` payloads bind MUTABLY — as_const would break
+        // `*v += 5` through the binding.
+        let scrutinee_is_mut_borrow = matches!(
+            self.peel_paren_group_expr(&match_expr.expr),
+            syn::Expr::Reference(r) if r.mutability.is_some()
+        );
+        let payload_source = if self.runtime_match_scrutinee_borrows_payload(&match_expr.expr)
+            && !scrutinee_is_mut_borrow
+        {
+            "std::as_const(rusty::detail::deref_if_pointer(_m))"
         } else {
-            "_m"
+            "rusty::detail::deref_if_pointer(_m)"
         };
         let mut arm_plans: Vec<(
             String,
@@ -1417,26 +1425,39 @@ impl CodeGen {
                         || payload_condition.is_some()
                         || arm.guard.is_some();
                     if needs_payload_materialization {
-                        let payload_value_source =
-                            if payload_condition.is_some() || arm.guard.is_some() {
-                                "std::as_const(_m)"
-                            } else {
-                                payload_source
-                            };
+                        let payload_value_source = if (payload_condition.is_some()
+                            || arm.guard.is_some())
+                            && !scrutinee_is_mut_borrow
+                        {
+                            "std::as_const(rusty::detail::deref_if_pointer(_m))"
+                        } else {
+                            payload_source
+                        };
+                        // Mut-borrow scrutinees PEEK (unwrap_mut) — the
+                        // consuming unwrap() empties the matched Option.
+                        let effective_unwrap = if scrutinee_is_mut_borrow {
+                            match unwrap_method {
+                                "unwrap" => "unwrap_mut",
+                                "unwrap_err" => "unwrap_err_mut",
+                                other => other,
+                            }
+                        } else {
+                            unwrap_method
+                        };
                         arm_payload_setup_lines.push(format!(
                             "auto&& {} = {}.{}();",
-                            matched_value, payload_value_source, unwrap_method
+                            matched_value, payload_value_source, effective_unwrap
                         ));
                     }
                     arm_binding_lines.extend(binding_stmts);
                     arm_payload_condition = payload_condition;
-                    format!("_m.{}()", cond_method)
+                    format!("rusty::detail::deref_if_pointer(_m).{}()", cond_method)
                 }
                 syn::Pat::Path(pp) => {
                     if let Some(cond_method) =
                         self.runtime_path_match_condition_method(&pp.path, variant_ctx)
                     {
-                        format!("_m.{}()", cond_method)
+                        format!("rusty::detail::deref_if_pointer(_m).{}()", cond_method)
                     } else if data_enum_nested_payload
                         && self.path_is_known_data_enum_variant_with_ctx(&pp.path, variant_ctx)
                     {
@@ -1474,7 +1495,7 @@ impl CodeGen {
                     } else if let Some(cond_method) =
                         self.runtime_ident_match_condition_method(pi, variant_ctx)
                     {
-                        format!("_m.{}()", cond_method)
+                        format!("rusty::detail::deref_if_pointer(_m).{}()", cond_method)
                     } else if pi.ident != "_"
                         && self.pattern_ident_is_const_value(&pi.ident.to_string())
                     {
@@ -1554,7 +1575,7 @@ impl CodeGen {
                                 ) else {
                                     return false;
                                 };
-                                path_conditions.push(format!("_m.{}()", cond_method));
+                                path_conditions.push(format!("rusty::detail::deref_if_pointer(_m).{}()", cond_method));
                             }
                             syn::Pat::Wild(_) => {
                                 has_wild = true;
@@ -1568,7 +1589,7 @@ impl CodeGen {
                                 else {
                                     return false;
                                 };
-                                path_conditions.push(format!("_m.{}()", cond_method));
+                                path_conditions.push(format!("rusty::detail::deref_if_pointer(_m).{}()", cond_method));
                             }
                             _ => return false,
                         }

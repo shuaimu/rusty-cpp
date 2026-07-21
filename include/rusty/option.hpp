@@ -284,6 +284,16 @@ public:
         return result;
     }
 
+    // Mutable PEEK (no consume): `match &mut opt { Some(v) => *v += 5 }`
+    // binds through this — the value stays in the Option (the non-const
+    // unwrap() above MOVES OUT and clears has_value).
+    T& unwrap_mut() {
+        if (!has_value) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return value;
+    }
+
     // Const unwrap - returns const reference to inner value (for borrowed access)
     const T& unwrap() const {
         if (!has_value) {
@@ -608,20 +618,39 @@ public:
 
     // Rust parity: Option<T: Deref>::as_deref(&self) -> Option<&Target>.
     // Return type deduced from the body, so only instantiated when called
-    // (where T is a smart pointer / Deref type).
+    // (where T is a smart pointer / Deref type). String derefs to str —
+    // its C++ carrier has as_str(), not operator*.
     auto as_deref() const {
-        using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
-        if (has_value) {
-            return Option<const Tgt&>(*value);
+        if constexpr (requires { value.as_str(); }) {
+            using View = std::remove_cv_t<std::remove_reference_t<
+                decltype(std::string_view(value.as_str()))>>;
+            if (has_value) {
+                return Option<View>(std::string_view(value.as_str()));
+            }
+            return Option<View>(None);
+        } else {
+            using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
+            if (has_value) {
+                return Option<const Tgt&>(*value);
+            }
+            return Option<const Tgt&>(None);
         }
-        return Option<const Tgt&>(None);
     }
     auto as_deref_mut() {
-        using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
-        if (has_value) {
-            return Option<Tgt&>(*value);
+        if constexpr (requires { value.as_str(); }) {
+            using View = std::remove_cv_t<std::remove_reference_t<
+                decltype(std::string_view(value.as_str()))>>;
+            if (has_value) {
+                return Option<View>(std::string_view(value.as_str()));
+            }
+            return Option<View>(None);
+        } else {
+            using Tgt = std::remove_cv_t<std::remove_reference_t<decltype(*value)>>;
+            if (has_value) {
+                return Option<Tgt&>(*value);
+            }
+            return Option<Tgt&>(None);
         }
-        return Option<Tgt&>(None);
     }
 
     // Rust parity: Option<(A, B)>::unzip(self) -> (Option<A>, Option<B>).
@@ -894,6 +923,7 @@ public:
 
     // Unwrap the reference (panics if None)
     // @lifetime: (&'a) -> &'a T
+    T& unwrap_mut() { return unwrap(); }
     T& unwrap() {
         if (!ptr) {
             throw std::runtime_error("Called unwrap on None");

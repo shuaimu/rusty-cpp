@@ -1539,7 +1539,7 @@ fn test_leaf5113_local_match_none_break_initializer_lowers_as_statement_flow() {
     // Break guard may be single-line or multi-line.
     assert!(
         out.contains("if (_m.is_none()) { break; }")
-            || (out.contains("if (_m.is_none()) {") && out.contains("break;")),
+            || ((out.contains("if (_m.is_none()) {") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_none()) {")) && out.contains("break;")),
         "match-break local init should lower to statement break guard, got:\n{}",
         out
     );
@@ -2482,8 +2482,8 @@ fn test_leaf4153_result_match_statement_uses_runtime_conditionals() {
         "#,
     );
     assert!(out.contains("auto&& _m = x;"));
-    assert!(out.contains("if (_m.is_ok()) {"));
-    assert!(out.contains("if (_m.is_err()) {"));
+    assert!((out.contains("if (_m.is_ok()) {") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_ok()) {")));
+    assert!((out.contains("if (_m.is_err()) {") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {")));
     assert!(!out.contains("std::visit(overloaded {"));
     assert!(!out.contains("const Ok&"));
     assert!(!out.contains("const Err&"));
@@ -2540,11 +2540,12 @@ fn test_runtime_match_self_field_scrutinee_uses_const_unwrap() {
     // the field. With the fix, the binding extraction goes through
     // `std::as_const(_m).unwrap()`.
     assert!(
-        out.contains("std::as_const(_m).unwrap()"),
+        (out.contains("std::as_const(_m).unwrap()") || out.contains("std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()")),
         "expected `std::as_const(_m).unwrap()` for match on self field; got:\n{out}"
     );
     assert!(
-        !out.contains("auto&& _mv0 = _m.unwrap()"),
+        !out.contains("auto&& _mv0 = _m.unwrap()")
+        && !out.contains("auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap()"),
         "destructive `_m.unwrap()` for materialized binding regressed:\n{out}"
     );
 }
@@ -4775,7 +4776,7 @@ fn test_leaf10511_runtime_option_return_arm_if_expr_lowers_without_todo() {
         "#,
     );
     assert!(
-        out.contains("if (_m.is_some())"),
+        (out.contains("if (_m.is_some())") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_some())")),
         "runtime Option return-arm match should use is_some dispatch, got:\n{}",
         out
     );
@@ -4814,12 +4815,12 @@ fn test_leaf10527_runtime_option_none_ident_in_statement_match_uses_is_none_cond
         "#,
     );
     assert!(
-        out.contains("if (_m.is_none())"),
+        (out.contains("if (_m.is_none())") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_none())")),
         "runtime Option `None` ident pattern should lower to is_none condition in statement match, got:\n{}",
         out
     );
     assert!(
-        out.contains("if (_m.is_some())"),
+        (out.contains("if (_m.is_some())") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_some())")),
         "runtime Option `Some(...)` pattern should keep runtime is_some dispatch, got:\n{}",
         out
     );
@@ -4854,7 +4855,7 @@ fn test_leaf10527_runtime_option_none_ident_or_pattern_uses_is_none_in_runtime_s
         out
     );
     assert!(
-        out.contains("_m.is_none()"),
+        out.contains("_m.is_none()") || out.contains("deref_if_pointer(_m).is_none()"),
         "runtime OR lowering should include is_none() check for `None` ident arm case, got:\n{}",
         out
     );
@@ -9568,7 +9569,7 @@ fn test_leaf4154333333362_runtime_option_match_return_arm_uses_try_style_lowerin
     "#,
     );
     assert!(out.contains("({ auto&& _m = opt;"));
-    assert!(out.contains("if (_m.is_some())"));
+    assert!((out.contains("if (_m.is_some())") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_some())")));
     assert!(out.contains("return rusty::Option<char32_t>(rusty::None);"));
     assert!(!out.contains("return return"));
 }
@@ -17652,7 +17653,7 @@ fn test_leaf10534_runtime_result_err_wildcard_match_avoids_unwrap_side_effects()
         }
         "#,
     );
-    assert!(out.contains("if (_m.is_err()) {"));
+    assert!((out.contains("if (_m.is_err()) {") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {")));
     assert!(!out.contains("std::as_const(_m).unwrap_err()"));
     assert!(!out.contains("_m.unwrap_err()"));
 }
@@ -27862,7 +27863,7 @@ fn test_leaf41543333333151_result_match_stmt_with_nested_struct_pattern_uses_run
         }
     "#,
     );
-    assert!(out.contains("if (_m.is_err()) {"));
+    assert!((out.contains("if (_m.is_err()) {") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {")));
     assert!(!out.contains("unwrap_err()"));
     assert!(!out.contains("std::visit(overloaded {"));
     assert!(!out.contains("complex tuple-struct pattern binding"));

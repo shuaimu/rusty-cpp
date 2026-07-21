@@ -504,6 +504,18 @@ public:
     }
     
     // Unwrap Err value (panics if Ok)
+    T& unwrap_mut() {
+        if (!is_ok_value) {
+            throw std::runtime_error("Called unwrap_mut on Err");
+        }
+        return ok_ref();
+    }
+    E& unwrap_err_mut() {
+        if (is_ok_value) {
+            throw std::runtime_error("Called unwrap_err_mut on Ok");
+        }
+        return err_ref();
+    }
     E unwrap_err() {
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
