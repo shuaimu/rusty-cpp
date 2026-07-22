@@ -47087,7 +47087,11 @@ std::string to_debug_string(const T& value) {
         }
     } else if constexpr (std::is_floating_point_v<Value>) {
         std::string s = rusty::to_string(value);
-        if (s.find_first_of(".eEin") == std::string::npos) {
+        // Rust Debug always shows a decimal point on integral-valued floats
+        // (`3.0`), but NEVER on non-finite values — `{:?}` of NaN/inf is
+        // "NaN"/"inf"/"-inf", not "NaN.0". Gate the append on isfinite (the
+        // spelling check alone misses "NaN": no lowercase n/i in it).
+        if (std::isfinite(value) && s.find_first_of(".eEin") == std::string::npos) {
             s += ".0";
         }
         return s;
@@ -50525,7 +50529,7 @@ std::string to_debug_string(const T& value) {\n\
         }\n\
     } else if constexpr (std::is_floating_point_v<Value>) {\n\
         std::string s = rusty::to_string(value);\n\
-        if (s.find_first_of(\".eEin\") == std::string::npos) {\n\
+        if (std::isfinite(value) && s.find_first_of(\".eEin\") == std::string::npos) {\n\
             s += \".0\";\n\
         }\n\
         return s;\n\
