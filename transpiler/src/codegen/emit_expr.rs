@@ -23541,6 +23541,47 @@ impl CodeGen {
     }
 
     pub(super) fn try_emit_primitive_float_assoc_const_segments(segments: &[String]) -> Option<String> {
+        // `f64::consts::PI` / `std::f32::consts::E` — the math-constants module.
+        // The generic path emission maps `f64`->`double` then keyword-escapes it
+        // to a nonexistent `double_::consts::PI`; emit the IEEE-754 literal
+        // (which round-trips to the exact same double Rust uses).
+        if let Some(pos) = segments.iter().position(|s| s == "consts") {
+            if pos >= 1 && pos + 1 == segments.len() - 1 {
+                let owner = segments[pos - 1].as_str();
+                let member = segments[pos + 1].as_str();
+                if matches!(owner, "f32" | "f64") {
+                    let lit: Option<&str> = match member {
+                        "PI" => Some("3.141592653589793"),
+                        "TAU" => Some("6.283185307179586"),
+                        "E" => Some("2.718281828459045"),
+                        "SQRT_2" => Some("1.4142135623730951"),
+                        "FRAC_1_SQRT_2" => Some("0.7071067811865476"),
+                        "LN_2" => Some("0.6931471805599453"),
+                        "LN_10" => Some("2.302585092994046"),
+                        "LOG2_E" => Some("1.4426950408889634"),
+                        "LOG2_10" => Some("3.321928094887362"),
+                        "LOG10_E" => Some("0.4342944819032518"),
+                        "LOG10_2" => Some("0.3010299956639812"),
+                        "FRAC_PI_2" => Some("1.5707963267948966"),
+                        "FRAC_PI_3" => Some("1.0471975511965976"),
+                        "FRAC_PI_4" => Some("0.7853981633974483"),
+                        "FRAC_PI_6" => Some("0.5235987755982988"),
+                        "FRAC_PI_8" => Some("0.39269908169872414"),
+                        "FRAC_1_PI" => Some("0.3183098861837907"),
+                        "FRAC_2_PI" => Some("0.6366197723675814"),
+                        "FRAC_2_SQRT_PI" => Some("1.1283791670955126"),
+                        _ => None,
+                    };
+                    return lit.map(|l| {
+                        if owner == "f32" {
+                            format!("static_cast<float>({})", l)
+                        } else {
+                            l.to_string()
+                        }
+                    });
+                }
+            }
+        }
         let (owner, member) = match segments {
             [owner, member] => (owner.as_str(), member.as_str()),
             [root, owner, member] if matches!(root.as_str(), "std" | "core") => {

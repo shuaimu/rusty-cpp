@@ -25318,6 +25318,24 @@ impl CodeGen {
                     matches!(seg.ident.to_string().as_str(), "f32" | "f64")
                 })
             ),
+            // `std::f64::consts::PI` etc. — a math constant (emitted as a bare
+            // double literal). Precision specs (`{:.4}`) need it typed as float,
+            // else the arg is to_string'd and the spec truncates the string.
+            // Non-consts paths (float locals) still fall back to inference.
+            syn::Expr::Path(p) => {
+                let segs: Vec<String> =
+                    p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                let is_float_const = segs
+                    .iter()
+                    .position(|s| s == "consts")
+                    .is_some_and(|pos| {
+                        pos >= 1 && matches!(segs[pos - 1].as_str(), "f32" | "f64")
+                    });
+                is_float_const
+                    || self
+                        .infer_simple_expr_type(&expr)
+                        .is_some_and(|ty| self.is_known_float_like_type(&ty))
+            }
             // A float math method on a float receiver returns a float — but
             // infer_simple_expr_type doesn't type these method-call results, so
             // `{:.4}` on `x.sqrt()` fell to to_string and truncated the string.
