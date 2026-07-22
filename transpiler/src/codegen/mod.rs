@@ -3065,6 +3065,15 @@ impl CodeGen {
         // otherwise unnameable. Keyed on the transpiled sub-modules that exist
         // (see `transpiled/vec_port/`).
         self.output = inject_vec_port_member_imports(&self.output);
+        // Emit a namespace-scope `__mdisp_<name>` functor for every method
+        // dispatched via `rusty::deref_call` (issue #31, site 2). Runs after the
+        // import injections so it lands after the module's leading import block.
+        // Only the top-level output gets the functor block: a sub-codegen's
+        // output is merged into its parent, whose scan already covers the
+        // merged __mdisp_ uses — injecting here too would duplicate the defs.
+        if !self.is_sub_codegen {
+            self.output = inject_deref_dispatch_functors(&self.output);
+        }
         // Universal collapse of never-valid rusty-root mis/double-qualifications
         // (rusty::rusty::, std::rusty::, core::rusty::, alloc::rusty::). The
         // per-type collapse (used by map_type) only runs on type emission, so
@@ -33213,6 +33222,27 @@ impl CodeGen {
             // `pointer_call` is intentionally unused here; `deref_call`
             // covers the `->` case by recursing through `*r`.
             let _ = &pointer_call;
+            // Prefer a NAMESPACE-SCOPE method-dispatch functor + forwarded args
+            // over a generic lambda LOCAL to the enclosing function template:
+            // the local-lambda-across-a-module-boundary shape crashes clang's
+            // mangler (issue #31, site 2). Template-arg methods keep the lambda
+            // (the functor can't carry per-call template args); btree's
+            // deref_call sites have none.
+            if method_template_args.is_none() {
+                // The prelude functor (RUSTY_METHOD_DISPATCH) is emitted in a
+                // finalization pass that SCANS the output for these __mdisp_ uses
+                // (see inject_deref_dispatch_functors) — no registration needed
+                // here, so it works through sub-codegen boundaries too.
+                let args_tail = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", args.join(", "))
+                };
+                return format!(
+                    "rusty::deref_call({}, rusty::detail::__mdisp_{}{{}}{})",
+                    receiver, escaped_method_name, args_tail
+                );
+            }
             return format!(
                 "rusty::deref_call({}, [&](auto&& __recv) -> decltype({}) {{ return {}; }})",
                 receiver, object_call, object_call
@@ -44807,6 +44837,91 @@ const RUSTY_MODULE_TRIGGERS: &[&str] = &[
 /// the inject when no trigger types are referenced — `import rusty;`
 /// re-exports port-defined names (Drain, IntoIter, etc.) that can
 /// collide with user types of the same name (arrayvec::Drain, …).
+/// Emit `RUSTY_METHOD_DISPATCH(<name>)` (a namespace-scope `__mdisp_<name>`
+/// functor) for every method dispatched via `rusty::deref_call`, so the
+/// dispatcher is a namespace-scope functor rather than a generic lambda LOCAL
+/// to the enclosing function template — the shape that crashes clang's mangler
+/// across a module boundary (issue #31, site 2). The block goes in
+/// `namespace rusty::detail` after the module's leading import block (module
+/// output) or after the last top-level `#include` (single-file output), so the
+/// functors are visible to every method body below and legal in the purview.
+fn inject_deref_dispatch_functors(output: &str) -> String {
+    // SCAN the finished output for `rusty::detail::__mdisp_<name>` uses rather
+    // than trusting a collected set: cross-crate / bridge emission runs through
+    // SUB-CODEGEN instances whose registrations don't propagate to the parent,
+    // so a collected set silently misses `grow`/`shrink`/… Scanning the text is
+    // self-contained — every `__mdisp_<name>` that appears gets its functor.
+    const NEEDLE: &str = "rusty::detail::__mdisp_";
+    let mut methods: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let bytes = output.as_bytes();
+    let mut search_from = 0;
+    while let Some(rel) = output[search_from..].find(NEEDLE) {
+        let name_start = search_from + rel + NEEDLE.len();
+        let mut name_end = name_start;
+        while name_end < bytes.len() {
+            let c = bytes[name_end];
+            if c == b'_' || c.is_ascii_alphanumeric() {
+                name_end += 1;
+            } else {
+                break;
+            }
+        }
+        if name_end > name_start {
+            methods.insert(output[name_start..name_end].to_string());
+        }
+        search_from = name_end.max(search_from + rel + NEEDLE.len());
+    }
+    if methods.is_empty() {
+        return output.to_string();
+    }
+    let mut block = String::from("namespace rusty { namespace detail {\n");
+    for m in &methods {
+        block.push_str("RUSTY_METHOD_DISPATCH(");
+        block.push_str(m);
+        block.push_str(")\n");
+    }
+    block.push_str("} } // namespace rusty::detail (issue #31 deref_call dispatch)\n\n");
+
+    // Module output: after `export module X;` and its leading `import ...;`
+    // block (imports must precede other declarations in the purview).
+    let insert_at = if let Some(em) = output.find("\nexport module ") {
+        let mut pos = output[em + 1..]
+            .find('\n')
+            .map(|nl| em + 1 + nl + 1)
+            .unwrap_or(output.len());
+        loop {
+            let rest = &output[pos..];
+            let line_end = rest
+                .find('\n')
+                .map(|nl| pos + nl + 1)
+                .unwrap_or(output.len());
+            let trimmed = output[pos..line_end].trim_start();
+            if trimmed.starts_with("import ") || trimmed.is_empty() {
+                pos = line_end;
+                if line_end >= output.len() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Some(pos)
+    } else {
+        // Single-file output: after the last top-level `#include` line.
+        output.rfind("\n#include ").and_then(|inc| {
+            output[inc + 1..].find('\n').map(|nl| inc + 1 + nl + 1)
+        })
+    };
+    let Some(insert_at) = insert_at else {
+        return output.to_string();
+    };
+    let mut result = String::with_capacity(output.len() + block.len());
+    result.push_str(&output[..insert_at]);
+    result.push_str(&block);
+    result.push_str(&output[insert_at..]);
+    result
+}
+
 fn inject_rusty_module_import_if_needed(output: &str) -> String {
     if output.contains("\nimport rusty;\n") {
         return output.to_string();

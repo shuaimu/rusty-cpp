@@ -45,13 +45,15 @@ namespace detail {
 /// invocable, `deref_call`'s constraint fails — letting callers wrap
 /// the call in `requires { rusty::deref_call(r, f); }` to probe
 /// reachability without triggering a hard static_assert in the body.
-template<typename R, typename F>
+template<typename R, typename F, typename... A>
 consteval bool lambda_reachable_via_deref() {
-    if constexpr (requires(R&& r, F&& f) { static_cast<F&&>(f)(r); }) {
+    if constexpr (requires(R&& r, F&& f, A&&... a) {
+                      static_cast<F&&>(f)(r, static_cast<A&&>(a)...);
+                  }) {
         return true;
     } else if constexpr (requires(R&& r) { *r; }) {
         return lambda_reachable_via_deref<
-            decltype(*std::declval<R&&>()), F>();
+            decltype(*std::declval<R&&>()), F, A...>();
     } else {
         return false;
     }
@@ -224,19 +226,40 @@ Target deref_ptr_cast(V&& v) {
 // the lambda the caller passes, which is analyzed in the caller's own
 // @safe context. Marking it @bridge lets @safe callers invoke it
 // without an @unsafe block.
-template<typename R, typename F>
-    requires (detail::lambda_reachable_via_deref<R, F>())
-constexpr decltype(auto) deref_call(R&& r, F&& f) {
-    if constexpr (requires { f(r); }) {
-        return f(std::forward<R>(r));
+// Trailing args `a...` are forwarded to `f(r, a...)` at each deref step. This
+// lets the transpiler pass a NAMESPACE-SCOPE method-dispatch functor (see
+// RUSTY_METHOD_DISPATCH) plus the call's arguments, instead of a generic lambda
+// LOCAL to the enclosing function template that captures those arguments — the
+// local-lambda-across-a-module-boundary shape crashes clang's mangler (issue
+// #31, "site 2"). Callers that pass a nullary functor use the empty pack.
+template<typename R, typename F, typename... A>
+    requires (detail::lambda_reachable_via_deref<R, F, A...>())
+constexpr decltype(auto) deref_call(R&& r, F&& f, A&&... a) {
+    if constexpr (requires { f(r, a...); }) {
+        return f(std::forward<R>(r), std::forward<A>(a)...);
     } else {
         // Constraint guarantees one of the two branches applies; if
-        // `f(r)` is not callable, `*r` must be well-formed and the
+        // `f(r, a...)` is not callable, `*r` must be well-formed and the
         // recursion's reachability holds (consteval check threaded
         // through `lambda_reachable_via_deref`).
-        return deref_call(*std::forward<R>(r), std::forward<F>(f));
+        return deref_call(*std::forward<R>(r), std::forward<F>(f), std::forward<A>(a)...);
     }
 }
+
+/// Generate a namespace-scope method-dispatch functor `__mdisp_<name>` whose
+/// `operator()(recv, args...)` forwards to `recv.<name>(args...)` with a
+/// decltype-SFINAE return (so `deref_call` can probe reachability and recurse
+/// through `*recv`). The transpiler emits one of these per method name it
+/// dispatches via `deref_call`, at namespace scope, so the closure is NOT local
+/// to a function template — see issue #31.
+#define RUSTY_METHOD_DISPATCH(name)                                            \
+    struct __mdisp_##name {                                                    \
+        template<typename R, typename... A>                                    \
+        constexpr auto operator()(R&& r, A&&... a) const                       \
+            -> decltype(static_cast<R&&>(r).name(static_cast<A&&>(a)...)) {     \
+            return static_cast<R&&>(r).name(static_cast<A&&>(a)...);            \
+        }                                                                      \
+    };
 
 /// Rust `V::default()` for a TYPE-PARAM owner V. Struct emissions carry a
 /// `default_()` static member; a C-like enum-class cannot hold members, so

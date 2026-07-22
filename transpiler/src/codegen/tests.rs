@@ -34037,13 +34037,22 @@ fn test_uncertain_receiver_method_call_uses_rusty_deref_call() {
     // emit must walk the deref chain via `rusty::deref_call`. The
     // lambda's trailing return must use the SFINAE-friendly
     // expression-decltype, not `decltype(auto)`.
+    // The dispatcher is a NAMESPACE-SCOPE functor (`rusty::detail::__mdisp_bits`),
+    // not a generic lambda local to `extract<B>` — the local-lambda-across-a-
+    // module-boundary shape crashes clang's mangler (issue #31). The functor is
+    // declared in the prelude via RUSTY_METHOD_DISPATCH.
     assert!(
-        out.contains("rusty::deref_call(value, [&](auto&& __recv) -> decltype("),
-        "uncertain receiver should be lowered via rusty::deref_call\nGot: {out}"
+        out.contains("rusty::deref_call(value, rusty::detail::__mdisp_bits{})"),
+        "uncertain receiver should dispatch via a namespace-scope functor\nGot: {out}"
     );
     assert!(
-        out.contains(".bits()"),
-        "lambda body must invoke the requested method on __recv\nGot: {out}"
+        out.contains("RUSTY_METHOD_DISPATCH(bits)"),
+        "the __mdisp_bits functor must be emitted in the prelude\nGot: {out}"
+    );
+    // No local generic lambda should be passed to deref_call.
+    assert!(
+        !out.contains("rusty::deref_call(value, [&](auto&& __recv)"),
+        "deref_call must not receive a local generic lambda\nGot: {out}"
     );
     // Old hand-rolled two-arm dispatcher must not appear.
     assert!(
@@ -34076,7 +34085,8 @@ fn test_leaf1054010_unary_not_bits_method_lowers_to_bitwise_not() {
     assert!(
         out.contains("from_bits_truncate(~value.bits())")
             || (out.contains("from_bits_truncate(~")
-                && out.contains(".bits()")
+                // uncertain receiver dispatches via the namespace-scope functor
+                && (out.contains(".bits()") || out.contains("rusty::detail::__mdisp_bits"))
                 && !out.contains("from_bits_truncate(!")),
         "bitflags-style bits() unary-not should lower to bitwise-not\nGot: {out}"
     );
