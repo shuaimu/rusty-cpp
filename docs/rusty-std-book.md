@@ -86,10 +86,26 @@ Sibling docs:
   - [6.4 What's still on deck (Tier 2 → Tier 1 follow-up)](#64-whats-still-on-deck-tier-2--tier-1-follow-up)
   - [6.5 Recipe used across all three Tier-2 ports](#65-recipe-used-across-all-three-tier-2-ports)
   - [6.10 Iterator Rust → C++ impedance (case study)](#610-iterator-rust--c-impedance-case-study)
+- [Chapter 7 — Codegen correctness: recurring translation-semantics bug classes](#chapter-7--codegen-correctness-recurring-translation-semantics-bug-classes)
+  - [7.1 How to read this chapter](#71-how-to-read-this-chapter)
+  - [7.2 Class F1 — format-argument type recognition](#72-class-f1--format-argument-type-recognition)
+  - [7.3 Class F2 — Debug/Display of prelude & composite types](#73-class-f2--debugdisplay-of-prelude--composite-types)
+  - [7.4 Class I1 — slice iterators yield pointers](#74-class-i1--slice-iterators-yield-pointers)
+  - [7.5 Class I2 — iterator adapter / terminal lowering](#75-class-i2--iterator-adapter--terminal-lowering)
+  - [7.6 Class I3 — owned-inner lifetime in lazy adapters](#76-class-i3--owned-inner-lifetime-in-lazy-adapters)
+  - [7.7 Class N1 — integer promotion for u8/u16](#77-class-n1--integer-promotion-for-u8u16)
+  - [7.8 Class T1 — reference-containing tuples are not assignable](#78-class-t1--reference-containing-tuples-are-not-assignable)
+  - [7.9 Class C1 — const-bound locals and consuming methods](#79-class-c1--const-bound-locals-and-consuming-methods)
+  - [7.10 Class R1 — receiver-kind-specific method routing gaps](#710-class-r1--receiver-kind-specific-method-routing-gaps)
+  - [7.11 Class S1 — string/char UTF-8 semantics](#711-class-s1--stringchar-utf-8-semantics)
+  - [7.12 Cross-cutting traps](#712-cross-cutting-traps)
+  - [7.13 The verification harness](#713-the-verification-harness)
 
 Each completed port will graduate into its own chapter (parallel to
 Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
-priority queue.
+priority queue. Chapter 7 is transversal — it catalogues the
+*general* codegen bug classes surfaced by the self-paced probe grind,
+independent of any single port.
 
 ---
 
@@ -3926,4 +3942,532 @@ int sum(rusty::Vec<int> const& v) {
 overloads, `std::invoke`-shaped helpers, and the existing
 `rusty::iter` / `rusty::len` CPOs if they're migrated to a
 lambda-based shape.)
+
+---
+
+## Chapter 7 — Codegen correctness: recurring translation-semantics bug classes
+
+Chapters 1–6 are *port* stories: take one crate, get it to link and
+run. This chapter is transversal. It catalogues the **general codegen
+bug classes** that surfaced during the self-paced probe grind — a
+long-running loop that transpiles small standalone Rust programs,
+runs them under ASan/UBSan, and diffs stdout against `rustc -O` as an
+oracle (see §7.13). These bugs are *not* tied to any one crate; they
+recur every time a new Rust surface is translated, and recognising the
+class up front saves the diagnostic time.
+
+Each entry below has run to ground as a landed, gate-verified fix. The
+value here is the **pattern**, not the individual commit: when you see
+the symptom, jump to the class.
+
+### 7.1 How to read this chapter
+
+Class IDs group by theme: `F*` formatting, `I*` iterators, `N*`
+numeric, `T*` tuples, `C*` const-ness, `R*` routing, `S*` strings. Each
+entry follows the same shape:
+
+- **Symptom** — what compiles-but-is-wrong, or what fails to compile.
+- **Example** — Rust source → the *wrong* C++ → the *right* C++.
+- **Root cause** — the one sentence that explains it.
+- **Fix locus** — where in `transpiler/src/codegen/` or
+  `include/rusty/` the correction lives.
+- **Recognise it by** — the tell that lets you classify a new bug fast.
+
+Two words recur and are worth defining once:
+
+- **Silent-wrong** — the C++ compiles and runs but prints the wrong
+  answer. These are the dangerous ones; a compile-fail at least tells
+  you something is off. Roughly half of the grind's findings were
+  silent-wrong, and almost all of those were caught only because the
+  harness diffs against a `rustc` oracle (§7.13). *Compile-testing
+  alone would have shipped them.*
+- **Blast radius** — how much of the emitter a fix perturbs. A fix in a
+  runtime header or a format-local predicate is low-radius; a fix in
+  `infer_simple_expr_type` touches *every* expression the transpiler
+  types and is high-radius (see the §7.12 `#134` cautionary tale).
+
+### 7.2 Class F1 — format-argument type recognition
+
+**The single richest vein in the grind.** Rust's format machinery is
+type-directed: `{:.4}` on an `f64` means "four decimal places", but the
+same spec on a `&str` means "truncate to four characters". The
+transpiler lowers `println!`/`format!` by deciding, per argument,
+whether to (a) pass the value **raw** to `std::format` or (b) wrap it
+in `rusty::to_string(...)` first. Get that decision wrong for a float
+and the precision spec is applied to a *string*:
+
+```rust
+let f = 3.14159;
+println!("{:.2}", f);          // Rust: "3.14"
+```
+
+```cpp
+// WRONG — f not recognised as float, so it is stringified first
+std::format("{:.2}", rusty::to_string(f));   // "3." (truncates "3.14159")
+// RIGHT — f recognised as float; spec gains an 'f', value passes raw
+std::format("{:.2f}", f);                     // "3.14"
+```
+
+The recognition predicate is `format_arg_is_known_float_like`
+(`mod.rs`). It drives **two** downstream decisions that must always
+agree:
+
+1. the `.Nf` **suffix rewrite** on the format literal, and
+2. the **raw-vs-`to_string`** arg wrap (via
+   `format_arg_is_known_scalar_like`, since float ⊂ scalar).
+
+If only (1) fires, you emit `{:.2f}` but still wrap the arg in
+`to_string`, and `std::format` aborts at compile time with a consteval
+error (`.2f` on a string). This "half-recognised" state is a frequent
+intermediate bug while adding a new float entry point — always wire
+*both* predicates.
+
+Float values reach the formatter through **many syntactic doors**, and
+each door was a separate fix because the predicate only knew about the
+ones already enumerated:
+
+| Door | Rust | The fix taught the predicate to recognise… |
+|---|---|---|
+| Untyped float literal | `let f = 3.14159;` | record unsuffixed `Lit::Float` locals as `f64` at binding time (mirrors the existing char-literal special-case) |
+| Float **method** result | `x.sqrt()`, `x.ln()`, `x.powf(0.5)` | a float math method (`sqrt`/`ln`/`exp`/`floor`/`powi`/`hypot`/…) on a **float-like receiver** returns float — gate on the receiver so `.abs()`/`.round()`/`.max()` on *integers* stay int |
+| Math constant | `std::f64::consts::PI` | a path with a `consts` segment under an `f32`/`f64` owner is float |
+| Cast | `x as f64` | already handled — the `Cast` arm |
+
+The **char** analogue is the same shape with a different consequence.
+A Rust `char` is `char32_t` in C++, and `std::format("{}", char32_t)`
+prints the **numeric code point**, not the character:
+
+```rust
+for (i, c) in "héllo".char_indices() {
+    print!("{}:{} ", i, c);      // Rust: "0:h 1:é 3:l …"
+}
+```
+
+```cpp
+// WRONG — c not typed as char, printed raw
+std::print("{}:{} ", i, c);       // "0:104 1:233 3:108 …"
+// RIGHT — c dispatched through rusty::to_string (UTF-8 encodes the scalar)
+std::format("{}:{} ", i, rusty::to_string(c));   // "0:h 1:é …"
+```
+
+Here the gap was upstream of the formatter: the for-loop tuple binding
+`(i, c)` was left untyped because `infer_iter_item_type_from_expr` did
+not know `char_indices()` yields `(usize, char)` (nor that `chars()`
+yields `char`). Teaching the iterator-item inference those two shapes
+lets `c` type as `char`, after which the format dispatch already does
+the right thing. The same class covers `zip`-produced char tuples.
+
+**Recognise it by:** a `{:.N}` precision that prints too few digits, or
+a `char`/`f64` that prints as a number, or a consteval "not a constant
+expression" abort on a `{:...f}` literal. **Fix locus:**
+`format_arg_is_known_float_like` / `_scalar_like` /
+`format_arg_needs_to_string_dispatch` in `mod.rs`;
+`infer_iter_item_type_from_expr` in `inference.rs`; the untyped-literal
+binding registration in `emit_stmt.rs`. **Blast radius: low** — keep
+the recognition *format-local*; do not reach for `infer_simple_expr_type`
+(see §7.12).
+
+### 7.3 Class F2 — Debug/Display of prelude & composite types
+
+`{:?}` (Debug) is a second type-directed dispatch. `to_debug_string`
+(emitted as a prelude template) walks the value's shape: tuples,
+arrays, floats, strings, enums… If a type reaches the fall-through, it
+prints the literal string `"<unprintable>"`:
+
+```rust
+let o = a.cmp(&b);
+println!("{:?}", o);             // Rust: "Less"
+```
+
+```cpp
+// WRONG — the prelude `enum class Ordering` has no Debug branch
+rusty::to_debug_string(o);        // "<unprintable>"
+```
+
+The fix is a free `rusty_debug_string(Ordering)` next to the enum;
+`to_debug_string` already has an `is_enum_v && requires {
+rusty_debug_string(value) }` ADL branch (added for `#[derive(Debug)]`
+C-like enums), so it picks the new overload up automatically. Any
+`.cmp()` / `.partial_cmp()` result, `Option<Ordering>`, and
+`reverse()`/`then()` chains all format correctly afterward.
+
+Two adjacent Debug bugs worth calling out:
+
+- **Non-finite floats.** Rust Debug shows integral-valued floats with a
+  trailing `.0` (`3.0`, not `3`), but *never* on `NaN`/`inf`. The
+  `.0`-append guard was a spelling check (`find_first_of(".eEin")`) that
+  missed `"NaN"` (uppercase N, no lowercase n) → printed `"NaN.0"`.
+  Gate the append on `std::isfinite(value)` instead — finite floats
+  unchanged, non-finite keep their exact Rust spelling.
+- **`#[derive(Debug)]` on a C-like enum** originally dropped through to
+  `<unprintable>` because an `enum class` can't carry a member
+  function; the fix emits a free `rusty_debug_string(EnumType)` switch
+  (variant → name) after the enum body, which the same ADL branch
+  finds.
+
+**Recognise it by:** `<unprintable>` in output, a `.0` glued onto
+`NaN`/`inf`, or a derived-Debug enum printing garbage. **Fix locus:**
+the `to_debug_string` prelude in `mod.rs` (**both** copies — see §7.12)
+and the per-type `rusty_debug_string` overloads. **Blast radius: low.**
+
+### 7.4 Class I1 — slice iterators yield pointers
+
+This is the single most important structural fact about the iterator
+runtime, and the root of a whole family of silent-wrongs. A Rust slice
+iterator yields `&T` (a reference). The C++ `rusty::slice_iter::Iter`
+models `&T` as a **raw pointer** `const T*` — that is how it keeps
+reference identity without a reference member. So every closure the
+transpiler feeds into an iterator terminal receives a **pointer**,
+while the closure body was written against the **value**:
+
+```rust
+let m = a.iter().max_by(|x, y| x.cmp(y));   // Rust: compares the ints
+```
+
+```cpp
+// The closure lowers to: [&](auto&& x, auto&& y){ return rusty::cmp::cmp(x, y); }
+// WRONG — x, y are `const int*`; cmp ranks by ADDRESS
+rusty::iter_max_by(rusty::iter(a), cmp);        // returns an arbitrary element
+// RIGHT — deref the pointees before the comparator
+cmp(detail::deref_if_pointer_like(*best),
+    detail::deref_if_pointer_like(value));
+```
+
+The runtime terminals therefore all wrap items in
+`detail::deref_if_pointer_like(item)` before calling the user closure —
+identity for value items, one deref for pointer items. The grind found
+this missing in `iter_max_by`/`iter_min_by` (silent-wrong: ranked by
+address), in `flat_map`'s inner-iterable closure (`|s| s.chars()` got a
+pointer), and in `max_by_key`/`min_by_key`'s key function. The
+`by_key` variants had been fixed earlier; the plain `by` variants had
+not, and because they *compiled* the bug sat latent until a probe diffed
+the output.
+
+**Recognise it by:** an iterator terminal whose closure takes the item
+"by value" but returns a nonsensical result (min/max returns the wrong
+element, a key comparison is off). **Fix locus:** the terminal in
+`include/rusty/slice.hpp` — every `func(item)` call site needs
+`deref_if_pointer_like`. **Blast radius: low** (runtime header), but
+**always ASan + oracle-diff**, because the wrong version compiles.
+
+There is a *converse* trap: a value returned **from** a slice terminal
+is still a pointer (`iter_max` returns `Option<const T*>`, modelling
+Rust's `Option<&T>`). Printing that directly hits
+`std::formatter<const int*>` (deleted) — the downstream code is expected
+to deref it. Do **not** "fix" the terminal to return a value; other
+call sites (`itertools`' `*a.iter().min().unwrap()`) rely on the
+pointer to deref it themselves. This is a deferred, type-aware fix, not
+a runtime change.
+
+### 7.5 Class I2 — iterator adapter / terminal lowering
+
+Rust's `Iterator` trait has ~70 methods. The rusty adapter types
+(`slice_iter::Iter`, `Chars`, `Map`, `Filter`, …) implement only the
+ones wired so far. A call to an unwired method emits a **member call
+that does not exist**:
+
+```rust
+let n = words.iter().find_map(|s| s.parse::<i32>().ok());
+```
+
+```cpp
+// WRONG — no such member on the adapter
+words_iter.find_map(closure);   // error: no member named 'find_map'
+// RIGHT — routed to a runtime free-function terminal
+rusty::find_map(words_iter, closure);
+```
+
+The fix is always a **pair**: an emit-routing arm (gated on an
+iterator-like receiver, `is_iterator_like_receiver_expr` /
+`is_probably_iterator_receiver_expr`, so a same-named user method is
+not hijacked) plus a runtime terminal in `slice.hpp` that dispatches
+over `has_option_like_next` / `into_iter` / `iter`. `iter_position` is
+the canonical structural model for a new terminal. This class covers
+`find_map`, `flatten`, `windows`/`chunks`, `inspect`/`fuse`/`position`,
+`product`, `split_terminator`/`rsplitn`, `scan`/`take_while`, and more.
+
+Two routing subtleties bit repeatedly:
+
+- **Never map a bare `module::fn` spelling** (e.g. `"mem::take"`) in the
+  function-path table: the std-library ports declare *crate-local*
+  functions of the same name, and the bare mapping hijacks them
+  (`rusty::rusty::` mis-qualification). Qualified `std::`/`core::` forms
+  only.
+- **Name-based receiver guesses are risky for shared names.** `inspect`
+  exists on both `Iterator` and `Option`; a name-list route could
+  misdirect an `Option` chain. Prefer type-based recognition, and leave
+  genuinely ambiguous names out of the name lists.
+
+**Recognise it by:** "no member named 'X' in 'rusty::…::Iter'". **Fix
+locus:** `emit_expr.rs` routing + `slice.hpp` terminal. **Blast radius:
+low** (additive).
+
+### 7.6 Class I3 — owned-inner lifetime in lazy adapters
+
+A subtle one, and a lesson in itself. `flat_map`/`flatten` hold a
+*current inner iterator* and advance the outer one when it drains. If
+the closure returns an **owned** iterable — `|&x| [x, x*10]`, `|x|
+0..x`, `|x| vec![…]` — that value is a temporary. Building an iterator
+that *borrows* the temporary and stashing it across the next `.next()`
+call is a **use-after-free**:
+
+```rust
+let s: i32 = a.iter().flat_map(|&x| [x, x * 10]).sum();
+```
+
+```cpp
+// WRONG — iter() borrows the temporary array the closure returned
+inner_.emplace(iter(func_(deref_if_pointer_like(item))));   // dangles next round
+// RIGHT — materialise an owned inner, iterate THAT
+if constexpr (std::is_reference_v<InnerIterable>) {
+    inner_.emplace(iter(produced));            // borrowed inner lives in outer container
+} else {
+    inner_storage_.emplace(std::move(produced));   // owned inner kept alive
+    inner_.emplace(iter(*inner_storage_));
+}
+```
+
+Only *borrowed* inners (`|s| s.chars()`, whose data lives in the outer
+container) were safe, so the bug hid until `flatten` — a *separate* fix
+— made more owned-inner shapes reachable and ASan lit up
+(`stack-use-after-return`).
+
+**The meta-lesson is the important part:** *a compile-fix that makes a
+previously-uncompilable shape reachable can expose latent UB
+downstream.* Whenever you land a fix that lets new code compile, run the
+newly-compiling paths under ASan/UBSan before declaring victory.
+
+**Recognise it by:** ASan `stack-use-after-return` inside a lazy adapter
+after an unrelated "it compiles now" change. **Fix locus:**
+`flat_map_next_iter` in `slice.hpp`. **Blast radius: low** (runtime),
+but the diagnosis is subtle.
+
+### 7.7 Class N1 — integer promotion for u8/u16
+
+C++'s integer-promotion rule silently widens `uint8_t`/`uint16_t`
+operands to `int` in arithmetic. Rust's `u8`/`u16` arithmetic wraps at
+the type width. Any lowering that computes in the receiver's width
+without casting **back** is silent-wrong for the narrow unsigned types:
+
+```rust
+println!("{}", (-128i8).unsigned_abs());   // Rust: 128 (u8)
+```
+
+```cpp
+// WRONG — uint8_t(0) - uint8_t(128) promotes to int -128; the sign leaks back
+return (_v < 0) ? static_cast<_U>(0) - _u : _u;      // -128
+// RIGHT — truncate the subtraction back to the unsigned width
+return (_v < 0) ? static_cast<_U>(static_cast<_U>(0) - _u) : _u;   // 128
+```
+
+The general recipe is: **compute, then cast the whole expression back
+to the receiver's own width type** — a no-op for `u32`/`u64` (which do
+not promote), a correctness fix for `u8`/`u16`. The grind hit this in
+`unsigned_abs`, in the `wrapping_add`/`sub`/`mul` family (which had been
+routed through `size_t`, truncating `u128` *and* failing to wrap
+`u8`/`u16`), and in shift results on narrow LHS types. The
+width-correct helpers live in `include/rusty/num.hpp`.
+
+A related width trap: `std::make_unsigned` is **undefined for
+`__int128`** under strict `-std=c++23`, so the 128-bit paths need a
+hand-rolled `wrapping_unsigned_t` and `__builtin_*_overflow`-based
+helpers rather than the `<bit>` intrinsics (which also reject
+`__int128`).
+
+**Recognise it by:** a narrow-unsigned op whose result is negative or
+un-wrapped. **Fix locus:** the op lowering in `emit_expr.rs` or the
+helper in `num.hpp`. **Blast radius: low**, but easy to miss without an
+oracle — the 64-bit case is correct by coincidence.
+
+### 7.8 Class T1 — reference-containing tuples are not assignable
+
+`enumerate()` and `zip()` yield tuples that hold a **reference** —
+`std::tuple<size_t, const T&>` — modelling `(usize, &T)`. A tuple with
+a reference member has a **deleted `operator=`**, so any runtime that
+tracks a "running best" by assignment fails to compile:
+
+```rust
+let m = a.iter().enumerate().max_by_key(|(_, &v)| v);
+```
+
+```cpp
+// WRONG — best is a reference-tuple; `best = std::move(value)` is deleted
+auto best = take_value(item);
+best = std::move(value);      // error: overload resolution selected deleted operator '='
+// RIGHT — hold best in an optional and re-emplace (destroy + construct)
+std::optional<item_type> best;
+best.emplace(take_value(item));
+best.emplace(std::move(value));
+```
+
+The fix converted all six min/max reductions (`iter_max`, `iter_min`,
+`iter_max_by`, `iter_min_by`, `iter_max_by_key`, `iter_min_by_key`) to
+`std::optional` + `emplace` + `*best`. The pointer/value item cases (the
+common path) are unchanged; only the reference-tuple case needed it.
+
+**Recognise it by:** "overload resolution selected deleted operator '='"
+in a reduction, with an `enumerate`/`zip` receiver. **Fix locus:** the
+reduction in `slice.hpp`. **Blast radius: low.**
+
+### 7.9 Class C1 — const-bound locals and consuming methods
+
+The transpiler emits an immutable Rust `let` binding as a C++ `const`
+local. Rust methods that take `self` **by value** (consuming
+combinators like `Option::or`, `Option::xor`, `.into()`) then cannot
+bind their `this` to that const object if the C++ method is non-const:
+
+```rust
+let b: Option<i32> = None;
+println!("{:?}", b.or(Some(9)));      // Rust consumes b (fine — b unused after)
+```
+
+```cpp
+// WRONG — or_ moves the payload out; not marked const; b is const
+b.or_(rusty::Option<int32_t>(9));     // error: 'this' has type 'const Option<int>'
+// RIGHT — a const overload that COPIES the payload (mirrors const or_else)
+Option or_(Option other) const { return has_value ? Option(value) : other; }
+```
+
+Two complementary fixes exist for this class, chosen by blast radius:
+
+1. **Add a const overload** that copies instead of moves (runtime
+   header, low radius). Correct because non-const callers still prefer
+   the moving overload (better implicit-object match), and a move-only
+   payload that is genuinely consumed gets marked non-const by the
+   consuming-locals pass, so the copying overload never instantiates.
+2. **Mark the local non-const** via
+   `collect_consuming_method_receiver_vars_with_signature_hints` when a
+   method is known to consume its receiver — needed when the payload is
+   move-only (e.g. `rusty::String`) and copying is not an option.
+
+**Recognise it by:** "`this` argument … has type 'const …' but function
+is not marked const" on a consuming combinator. **Fix locus:** the
+runtime type's overloads (`option.hpp`, …) or the consuming-locals pass
+in `collect_passes.rs`.
+
+### 7.10 Class R1 — receiver-kind-specific method routing gaps
+
+A method is often lowered for one *kind* of receiver but not another
+that shares the name. The tell is a member call on a primitive/array
+type that has no such member:
+
+```rust
+"abc".eq_ignore_ascii_case("ABC")     // str receiver
+```
+
+```cpp
+// WRONG — eq_ignore_ascii_case routed only for CHAR receivers
+("abc").eq_ignore_ascii_case("ABC");  // error: no member on const char[4]
+// RIGHT — a string-receiver arm to a str_runtime free function
+rusty::str_runtime::eq_ignore_ascii_case("abc", "ABC");
+```
+
+Same shape recurred for `replacen` with a `char` pattern (only a
+`string_view`-pattern overload existed), `split_last` on arrays (only
+`split_first` was routed), and `first`/`get`/`sort`/`split_at` on
+fixed-size arrays (`should_lower_slice_deref_method_call` had to accept
+`syn::Type::Array` receivers). When adding a string arm, remember Rust's
+`&b` (where `b: String`) coerces to `&str`, so peel a leading `&` and
+lean on `String`'s implicit `operator std::string_view`.
+
+**Recognise it by:** "no member named 'X' in 'std::array<…>'" or "… in
+'const char[N]'". **Fix locus:** the routing arm in `emit_expr.rs` +
+(if new) a `str_runtime`/`array.hpp` helper.
+
+### 7.11 Class S1 — string/char UTF-8 semantics
+
+Rust strings are UTF-8 and Rust `char` is a Unicode scalar; naïve
+byte-wise C++ lowerings corrupt multibyte data or return byte offsets
+where Rust returns char offsets:
+
+- `String::pop` must decode the **last UTF-8 scalar** and return
+  `Option<char>`, not the last byte (byte-wise was silent multibyte
+  corruption).
+- `char_indices()` yields **byte** offsets, not char counts — the
+  index and the char must be tracked separately.
+- `char::from_digit`, `str::find(char)` returning a **byte** index, and
+  `parse::<char>` (single-scalar UTF-8 decode, and `char32_t` must be
+  *excluded* from the `from_chars` integer branch even though it is
+  `is_integral_v`).
+
+These live in the `str_runtime`/`char_runtime` preludes and
+`include/rusty/string.hpp`. **Recognise it by:** any string method that
+is right for ASCII and wrong for `"héllo"`. **Blast radius: low**, but
+the ASCII probe passes — always include a multibyte case.
+
+### 7.12 Cross-cutting traps
+
+These are not bug classes but process hazards that recur across every
+class above.
+
+**The two prelude copies.** Many runtime helpers are emitted as
+**prelude string literals** inside `mod.rs`, and several exist in *two*
+copies: a **raw** copy (used for module output) and an **escaped** copy
+(the `\n\`-continued string used for single-file output). They have
+*diverged* in places. `to_debug_string`, `to_string`, the `Ordering`
+namespace, and the `str_runtime` helpers all have this shape. **A fix
+that edits only one copy passes half your tests and fails the other
+half.** Always grep for both.
+
+**Local-type inference has enormous blast radius — resist it.** The most
+instructive failure of the grind: a *correct-looking* fix to make
+`impl Display` + `println!("{}", x)` work required typing tuple-struct
+fields (`t.0`) via `infer_simple_expr_type`'s `Field` arm. It passed
+1881 unit tests *and* the 285-probe corpus — then broke the `alloc`
+matrix crate, because the newly-resolved type of `self.0.alloc` steered
+`ManuallyDrop::take`'s static-method emission into spelling the bare
+template name `ManuallyDrop` without its `<T>` argument. It was
+reverted. **Lesson:** changing `infer_simple_expr_type` touches every
+expression the transpiler types. Prefer *format-local* predicates
+(§7.2) or narrowly-shaped special-cases (record a specific `let`-init
+shape at binding time) over general inference changes. And: **units +
+probe-corpus can both be green while a matrix crate regresses** — the
+ported crates are the only thing that exercises real static-method /
+template-argument emission. Never trust units alone for an inference
+change.
+
+**Compile-testing is not enough.** Restating §7.1 because it is the
+throughline: roughly half these bugs *compiled and ran*. Only a diff
+against a `rustc -O` oracle caught them. If your verification stops at
+"it builds," you will ship silent-wrongs.
+
+**Permissive fallbacks hide silent-wrongs.** Generic dispatchers with a
+`return false;` / `return {};` tail (e.g. the `winnow_stream` slice
+predicates) will *answer wrong* rather than fail to compile when a case
+falls through. When adding a slice op, grep for permissive tails and
+probe with runtime asserts, not just compilation.
+
+### 7.13 The verification harness
+
+Every fix above was gated by the same loop, and the loop is the reason
+the silent-wrongs were catchable:
+
+1. **Probe.** A small standalone `.rs` program exercising one surface.
+   Standalone probes must avoid `Vec`/`HashMap`/`Box`/`Rc`/`VecDeque`
+   (those are module-emitted; they fail to compile as a single file and
+   the failure is a *harness artifact*, not a bug). Use arrays, slices,
+   `Option`/`Result`, tuples, chars, and primitives.
+2. **Transpile** with the release `rusty-cpp-transpiler`.
+3. **Compile** the `.cppm` with `clang++ -std=c++23
+   -fsanitize=address,undefined`, so UB is a hard failure.
+4. **Diff** the program's stdout against `rustc -O` on the same source.
+   Exit codes must match too. This is what turns a silent-wrong into a
+   visible `PARITY DIFF`.
+5. **Gate.** Before landing: the full unit suite, the 7-crate parity
+   matrix (`alloc`/`rusty`/`vec`/`btree`/`smallvec`/`serde_core`/
+   `serde`), the `std::path` runtime test, and a fixed regression sweep
+   of the accumulated probe corpus — *all* green, run strictly serially
+   (concurrent clang compiles cause phantom failures under contention).
+
+A `rustc` oracle beats a hand-written expected-output file: it is
+always correct, it covers edge cases you did not think of (banker's
+rounding, `NaN` formatting, wrapping arithmetic), and it forces the
+probe to be *valid Rust* — several "transpiler bugs" turned out to be
+invalid probes the oracle rejected first (ambiguous numeric types,
+edition-2015 `into_iter` yielding references).
+
+**Where new findings belong.** A new codegen bug class → a new §7.x
+entry here, with the Rust→wrong→right triple and the fix locus. A
+port-specific quirk → the relevant port chapter. A runtime performance
+cliff → Chapter 1/2 bench sections.
 
