@@ -2609,6 +2609,23 @@ impl CodeGen {
     }
 
     pub(super) fn collect_impl_blocks(&mut self, items: &[syn::Item], module_path: &[String]) {
+        // Structs/enums with `#[derive(Copy)]`: in single-file input the
+        // derive stays an ATTRIBUTE and never becomes an `impl Copy` block
+        // (only cargo-expand produces those). Scan the attrs directly so
+        // current_struct_is_copy sees derived-Copy types — a by-value-self
+        // operator on a Copy struct is const-able (`-v` on `const auto v`).
+        for item in items {
+            let (ident, attrs) = match item {
+                syn::Item::Struct(s) => (s.ident.to_string(), &s.attrs),
+                syn::Item::Enum(e) => (e.ident.to_string(), &e.attrs),
+                _ => continue,
+            };
+            if self.extract_derives(attrs).iter().any(|d| d == "Copy") {
+                self.copy_derived_types.insert(ident.clone());
+                let scoped = self.scoped_type_key(&ident);
+                self.copy_derived_types.insert(scoped);
+            }
+        }
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
