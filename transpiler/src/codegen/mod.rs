@@ -46593,6 +46593,12 @@ fn runtime_path_fallback_helpers_text_for_local_token_module() -> String {
 namespace rusty {
 namespace cmp {
 enum class Ordering { Less, Equal, Greater };
+// Rust Debug for Ordering — `{:?}` of a `.cmp()` result. ADL-found by
+// to_debug_string's is_enum + rusty_debug_string branch (else the enum class
+// hit the "<unprintable>" fallback).
+inline std::string rusty_debug_string(Ordering o) {
+    return o == Ordering::Less ? "Less" : (o == Ordering::Greater ? "Greater" : "Equal");
+}
 constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }
 template<typename F>
 Ordering then_with(Ordering a, F&& f) { return a == Ordering::Equal ? f() : a; }
@@ -47442,6 +47448,9 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
 namespace rusty {\n\
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
+inline std::string rusty_debug_string(Ordering o) {\n\
+    return o == Ordering::Less ? \"Less\" : (o == Ordering::Greater ? \"Greater\" : \"Equal\");\n\
+}\n\
 constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }\n\
 constexpr Ordering reverse(Ordering a) { return a == Ordering::Less ? Ordering::Greater : (a == Ordering::Greater ? Ordering::Less : Ordering::Equal); }\n\
 constexpr bool is_lt(Ordering a) { return a == Ordering::Less; }\n\
