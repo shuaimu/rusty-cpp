@@ -51705,6 +51705,16 @@ inline rusty::String to_ascii_lowercase(std::string_view s) {\n\
     for (auto& c : out) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);\n\
     return rusty::String::from(out);\n\
 }\n\
+inline bool eq_ignore_ascii_case(std::string_view a, std::string_view b) {\n\
+    if (a.size() != b.size()) return false;\n\
+    for (std::size_t i = 0; i < a.size(); ++i) {\n\
+        char ca = a[i], cb = b[i];\n\
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + 32);\n\
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + 32);\n\
+        if (ca != cb) return false;\n\
+    }\n\
+    return true;\n\
+}\n\
 struct SplitIter {\n\
     std::string_view remaining;\n\
     char32_t delim;\n\

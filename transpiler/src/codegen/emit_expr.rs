@@ -10118,6 +10118,20 @@ impl CodeGen {
                 let arg = self.emit_expr_to_string(&mc.args[0]);
                 return format!("rusty::str_runtime::{}({}, {})", method_name, receiver, arg);
             }
+            // `s.eq_ignore_ascii_case(other)` — other is `&str`; Rust's arg is a
+            // reference (`&b` where b: String) that coerces to &str, so peel a
+            // leading `&` and let String's implicit string_view conversion (or a
+            // bare literal) satisfy the helper.
+            if method_name == "eq_ignore_ascii_case" && args.len() == 1 {
+                let mut arg = self.emit_expr_to_string(&mc.args[0]);
+                if let Some(stripped) = arg.strip_prefix('&') {
+                    arg = stripped.trim_start().to_string();
+                }
+                return format!(
+                    "rusty::str_runtime::eq_ignore_ascii_case({}, {})",
+                    receiver, arg
+                );
+            }
             if matches!(method_name.as_str(), "splitn" | "rsplitn") && args.len() == 2 {
                 let n = self.emit_expr_to_string(&mc.args[0]);
                 let delim = self.emit_expr_to_string(&mc.args[1]);
