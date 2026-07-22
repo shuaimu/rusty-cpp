@@ -12681,6 +12681,11 @@ impl CodeGen {
                             if matches!(
                                 method.to_string().as_str(),
                                 "map_err" | "ok_or" | "ok_or_else" | "transpose"
+                                    // `let x: i32 = s.parse()?` — the target
+                                    // type is only reachable through the `?`
+                                    // Result context (no turbofish); without it
+                                    // parse emitted a raw `.parse()` member call.
+                                    | "parse"
                             )
                     ) {
                         // Keep parse/ok_or chains typed through `?` in expression position.

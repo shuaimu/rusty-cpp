@@ -136,9 +136,20 @@ using FpCategory = std::variant<
 /// (serde_yaml threads ParseIntError through `from_str_radix` fn pointers
 /// without inspecting it).
 struct ParseIntError {
+    ParseIntError() = default;
+    // The parse runtime yields Result<T, String>; propagating `?` into a
+    // `Result<_, ParseIntError>` constructs this from that error message.
+    // Rust's ParseIntError is opaque, so the message is discarded.
+    template<typename S>
+        requires requires(S&& s) { std::string_view(std::forward<S>(s)); }
+    ParseIntError(S&&) noexcept {}
     constexpr bool operator==(const ParseIntError&) const noexcept { return true; }
 };
 struct ParseFloatError {
+    ParseFloatError() = default;
+    template<typename S>
+        requires requires(S&& s) { std::string_view(std::forward<S>(s)); }
+    ParseFloatError(S&&) noexcept {}
     constexpr bool operator==(const ParseFloatError&) const noexcept { return true; }
 };
 
