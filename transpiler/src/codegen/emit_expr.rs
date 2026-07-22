@@ -9682,7 +9682,7 @@ impl CodeGen {
             };
             return format!("rusty::{}({})", method_name, receiver);
         }
-        if method_name == "split_first"
+        if matches!(method_name.as_str(), "split_first" | "split_last")
             && args.is_empty()
             && self.should_lower_slice_deref_method_call(&mc.receiver)
         {
@@ -9692,11 +9692,11 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::split_first({})", receiver);
+            return format!("rusty::{}({})", method_name, receiver);
         }
-        if method_name == "split_first"
+        if matches!(method_name.as_str(), "split_first" | "split_last")
             && args.is_empty()
-            && !self.receiver_has_inherent_method_named(&mc.receiver, "split_first")
+            && !self.receiver_has_inherent_method_named(&mc.receiver, &method_name)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -9704,7 +9704,7 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::split_first({})", receiver);
+            return format!("rusty::{}({})", method_name, receiver);
         }
         if method_name == "chunks_exact"
             && args.len() == 1
@@ -9827,8 +9827,10 @@ impl CodeGen {
                     idx, receiver, opt_type, receiver, idx, opt_type
                 );
             }
-            if method_name == "split_first" && args.is_empty() {
-                return format!("rusty::split_first({})", receiver);
+            if matches!(method_name.as_str(), "split_first" | "split_last")
+                && args.is_empty()
+            {
+                return format!("rusty::{}({})", method_name, receiver);
             }
         }
         // Rust Vec/ArrayVec/SmallVec-style `.get(index)` fallback surface.

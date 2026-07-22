@@ -2711,20 +2711,28 @@ auto iter_max_by(Range&& range, Cmp&& cmp) {
         if (!detail::option_like_has_value(item)) {
             return next_result(rusty::None);
         }
-        auto best = detail::option_like_take_value(item);
+        // std::optional (emplace, not assign): enumerate() and zip() yield
+        // tuples holding a reference whose operator= is deleted, so a plain
+        // `best = std::move(value)` would not compile for those item types.
+        std::optional<item_type> best;
+        best.emplace(detail::option_like_take_value(item));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
                 break;
             }
             auto value = detail::option_like_take_value(nxt);
-            auto ord = cmp(best, value);
+            // Slice iterators yield POINTERS; the comparator closure
+            // compares VALUES (`|x, y| x.cmp(y)`), so feed it the
+            // pointees — else cmp ranks by address (silent-wrong).
+            auto ord = cmp(detail::deref_if_pointer_like(*best),
+                           detail::deref_if_pointer_like(value));
             using Ord = std::remove_cvref_t<decltype(ord)>;
             if (ord != Ord::Greater) {
-                best = std::move(value);
+                best.emplace(std::move(value));
             }
         }
-        return next_result(std::move(best));
+        return next_result(std::move(*best));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return iter_max_by(std::forward<Range>(range).into_iter(),
                            std::forward<Cmp>(cmp));
@@ -2746,20 +2754,25 @@ auto iter_min_by(Range&& range, Cmp&& cmp) {
         if (!detail::option_like_has_value(item)) {
             return next_result(rusty::None);
         }
-        auto best = detail::option_like_take_value(item);
+        std::optional<item_type> best;
+        best.emplace(detail::option_like_take_value(item));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
                 break;
             }
             auto value = detail::option_like_take_value(nxt);
-            auto ord = cmp(best, value);
+            // Slice iterators yield POINTERS; the comparator closure
+            // compares VALUES (`|x, y| x.cmp(y)`), so feed it the
+            // pointees — else cmp ranks by address (silent-wrong).
+            auto ord = cmp(detail::deref_if_pointer_like(*best),
+                           detail::deref_if_pointer_like(value));
             using Ord = std::remove_cvref_t<decltype(ord)>;
             if (ord == Ord::Greater) {
-                best = std::move(value);
+                best.emplace(std::move(value));
             }
         }
-        return next_result(std::move(best));
+        return next_result(std::move(*best));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return iter_min_by(std::forward<Range>(range).into_iter(),
                            std::forward<Cmp>(cmp));
@@ -2782,7 +2795,8 @@ auto iter_max(Range&& range) {
         if (!detail::option_like_has_value(item)) {
             return next_result(rusty::None);
         }
-        auto best = detail::option_like_take_value(item);
+        std::optional<item_type> best;
+        best.emplace(detail::option_like_take_value(item));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
@@ -2790,11 +2804,11 @@ auto iter_max(Range&& range) {
             }
             auto value = detail::option_like_take_value(nxt);
             if (!(detail::deref_if_pointer_like(value)
-                  < detail::deref_if_pointer_like(best))) {
-                best = std::move(value);
+                  < detail::deref_if_pointer_like(*best))) {
+                best.emplace(std::move(value));
             }
         }
-        return next_result(std::move(best));
+        return next_result(std::move(*best));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return iter_max(std::forward<Range>(range).into_iter());
     } else {
@@ -2812,7 +2826,8 @@ auto iter_min(Range&& range) {
         if (!detail::option_like_has_value(item)) {
             return next_result(rusty::None);
         }
-        auto best = detail::option_like_take_value(item);
+        std::optional<item_type> best;
+        best.emplace(detail::option_like_take_value(item));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
@@ -2820,11 +2835,11 @@ auto iter_min(Range&& range) {
             }
             auto value = detail::option_like_take_value(nxt);
             if (detail::deref_if_pointer_like(value)
-                < detail::deref_if_pointer_like(best)) {
-                best = std::move(value);
+                < detail::deref_if_pointer_like(*best)) {
+                best.emplace(std::move(value));
             }
         }
-        return next_result(std::move(best));
+        return next_result(std::move(*best));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return iter_min(std::forward<Range>(range).into_iter());
     } else {
@@ -2844,11 +2859,12 @@ auto iter_max_by_key(Range&& range, KeyFn&& key_fn) {
         if (!detail::option_like_has_value(item)) {
             return next_result(rusty::None);
         }
-        auto best = detail::option_like_take_value(item);
+        std::optional<item_type> best;
+        best.emplace(detail::option_like_take_value(item));
         // Slice iterators yield POINTERS; the emitted key closures are
         // written against the item value (`|s| s.len()`), so feed them
         // the pointee (identity for value items).
-        auto best_key = key_fn(detail::deref_if_pointer_like(best));
+        auto best_key = key_fn(detail::deref_if_pointer_like(*best));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
@@ -2857,11 +2873,11 @@ auto iter_max_by_key(Range&& range, KeyFn&& key_fn) {
             auto value = detail::option_like_take_value(nxt);
             auto key = key_fn(detail::deref_if_pointer_like(value));
             if (!(key < best_key)) {
-                best = std::move(value);
+                best.emplace(std::move(value));
                 best_key = std::move(key);
             }
         }
-        return next_result(std::move(best));
+        return next_result(std::move(*best));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return iter_max_by_key(std::forward<Range>(range).into_iter(),
                                std::forward<KeyFn>(key_fn));
@@ -2881,9 +2897,10 @@ auto iter_min_by_key(Range&& range, KeyFn&& key_fn) {
         if (!detail::option_like_has_value(item)) {
             return next_result(rusty::None);
         }
-        auto best = detail::option_like_take_value(item);
+        std::optional<item_type> best;
+        best.emplace(detail::option_like_take_value(item));
         // See iter_max_by_key: key closures receive the pointee.
-        auto best_key = key_fn(detail::deref_if_pointer_like(best));
+        auto best_key = key_fn(detail::deref_if_pointer_like(*best));
         while (true) {
             auto nxt = it.next();
             if (!detail::option_like_has_value(nxt)) {
@@ -2892,11 +2909,11 @@ auto iter_min_by_key(Range&& range, KeyFn&& key_fn) {
             auto value = detail::option_like_take_value(nxt);
             auto key = key_fn(detail::deref_if_pointer_like(value));
             if (key < best_key) {
-                best = std::move(value);
+                best.emplace(std::move(value));
                 best_key = std::move(key);
             }
         }
-        return next_result(std::move(best));
+        return next_result(std::move(*best));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return iter_min_by_key(std::forward<Range>(range).into_iter(),
                                std::forward<KeyFn>(key_fn));

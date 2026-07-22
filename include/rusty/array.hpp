@@ -2609,6 +2609,24 @@ auto split_first(Container& container) {
     return split_first(slice_full(container));
 }
 
+// Split a span into `(last, init)` where `last` is a borrowed element.
+// Mirrors Rust `[T]::split_last`.
+template<typename Elem, std::size_t Extent>
+auto split_last(std::span<Elem, Extent> span) {
+    using Init = std::span<Elem, std::dynamic_extent>;
+    using Pair = std::tuple<Elem&, Init>;
+    using Opt = Option<Pair>;
+    if (span.empty()) {
+        return Opt(None);
+    }
+    return Opt(Pair{span[span.size() - 1], Init(span.subspan(0, span.size() - 1))});
+}
+
+template<typename Container>
+auto split_last(Container& container) {
+    return split_last(slice_full(container));
+}
+
 template<typename Elem, std::size_t Extent = std::dynamic_extent>
 class ChunksExact {
 public:
