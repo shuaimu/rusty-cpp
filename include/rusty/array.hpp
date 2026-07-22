@@ -2149,6 +2149,18 @@ decltype(auto) as_slice(Container&& container) {
         return std::span(
             container.raw_cur(),
             static_cast<size_t>(container.raw_end() - container.raw_cur()));
+    } else if constexpr (requires {
+                             std::remove_cvref_t<Container>::extent;
+                             container.data();
+                             container.size();
+                         }) {
+        // Already a std::span — a non-owning view (the `&[literal]` emission
+        // builds one over a static temp). Return it as a DYNAMIC-extent span:
+        // a static-extent span won't match a generic `std::span<const T>`
+        // parameter, and the rvalue branch below would wrongly wrap the view
+        // in owned_container_slice (which isn't a std::span at all).
+        using Elem = typename std::remove_cvref_t<Container>::element_type;
+        return std::span<Elem>(container.data(), container.size());
     } else if constexpr (std::is_rvalue_reference_v<Container&&>) {
         return slice_full(std::forward<Container>(container));
     } else {
