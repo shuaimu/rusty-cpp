@@ -9032,6 +9032,22 @@ impl CodeGen {
                     }
                     return Some(parse_quote!(u8));
                 }
+                // `str::chars()` yields `char`, `str::char_indices()` yields
+                // `(usize, char)`. Without the item type a for-loop `(i, c)`
+                // binding leaves `c` untyped and prints it as its code point.
+                // Gate on a string-like (or unresolved) receiver so a
+                // user-defined method of the same name is unaffected.
+                if (method == "chars" || method == "char_indices") && mc.args.is_empty() {
+                    if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                        if !self.is_known_string_like_type(&receiver_ty) {
+                            return self.infer_iter_item_type_from_expr(&mc.receiver);
+                        }
+                    }
+                    if method == "chars" {
+                        return Some(parse_quote!(char));
+                    }
+                    return Some(parse_quote!((usize, char)));
+                }
                 self.infer_iter_item_type_from_expr(&mc.receiver)
             }
             syn::Expr::Call(call) => {

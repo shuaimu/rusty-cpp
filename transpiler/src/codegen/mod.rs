@@ -51668,6 +51668,33 @@ inline rusty::String replacen(std::string_view s, std::string_view from, std::st
     }\n\
     return rusty::String::from(out);\n\
 }\n\
+template<typename To>\n\
+inline rusty::String replacen(std::string_view s, char32_t from, To&& to, std::size_t count) {\n\
+    char pat_buf[4]; size_t pat_n;\n\
+    if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }\n\
+    else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }\n\
+    else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }\n\
+    else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }\n\
+    return replacen(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)), count);\n\
+}\n\
+template<typename S, typename To>\n\
+inline rusty::String replacen(const S& value, char32_t from, To&& to, std::size_t count) {\n\
+    if constexpr (requires { value.as_str(); }) {\n\
+        return replacen(std::string_view(value.as_str()), from, std::forward<To>(to), count);\n\
+    } else {\n\
+        return replacen(std::string_view(value), from, std::forward<To>(to), count);\n\
+    }\n\
+}\n\
+template<typename S, typename From, typename To>\n\
+inline rusty::String replacen(const S& value, From&& from, To&& to, std::size_t count) {\n\
+    if constexpr (requires { value.as_str(); }) {\n\
+        return replacen(std::string_view(value.as_str()), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);\n\
+    } else if constexpr (std::is_convertible_v<S, std::string_view>) {\n\
+        return replacen(std::string_view(value), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);\n\
+    } else {\n\
+        return rusty::String::from(\"\");\n\
+    }\n\
+}\n\
 inline rusty::String to_ascii_uppercase(std::string_view s) {\n\
     std::string out(s);\n\
     for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);\n\
