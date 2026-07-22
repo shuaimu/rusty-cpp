@@ -2817,6 +2817,30 @@ impl CodeGen {
                 syn::parse_str::<syn::Type>("char").ok(),
             );
         }
+        // Unsuffixed float-literal locals (`let f = 3.14159;`) are
+        // unambiguously f64 in Rust (float literals default to f64) and emit
+        // as C++ `double`. Record the type so format-arg dispatch (`{:.2}` →
+        // `.2f`, raw pass-through instead of a wrong to_string+truncate) and
+        // float-method routing see it. Unlike unsuffixed INTEGER literals —
+        // whose width is context-dependent and owned by the usage-hint
+        // machinery — a float literal is never anything but a float.
+        if let syn::Pat::Ident(pi) = pat
+            && pi.subpat.is_none()
+            && let Some(init) = &local.init
+            && init.diverge.is_none()
+            && matches!(
+                self.peel_paren_group_expr(&init.expr),
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Float(f),
+                    ..
+                }) if f.suffix().is_empty()
+            )
+        {
+            self.register_local_binding(
+                pi.ident.to_string(),
+                syn::parse_str::<syn::Type>("f64").ok(),
+            );
+        }
         // `let (k1, k2) = (&mut 1, other);` — the blanket registration types
         // tuple-destructured bindings as None. When the initializer is a
         // matching-arity tuple literal, type each ident binding from its own

@@ -7949,6 +7949,17 @@ impl CodeGen {
             let pred = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::find({}, {})", receiver, pred);
         }
+        // `it.find_map(|x| -> Option<B>)` — first Some the closure yields. No
+        // member on the adapter types; route to the runtime terminal.
+        if mc.method == "find_map"
+            && mc.args.len() == 1
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let func = self.emit_expr_to_string(&mc.args[0]);
+            return format!("rusty::find_map({}, {})", receiver, func);
+        }
         // `it.unzip()` — the pair-splitting terminal. No member exists on the
         // adapter types; lower to `rusty::unzip_collect<A, B>(it)` with the
         // target collections read from the expected tuple type (the let

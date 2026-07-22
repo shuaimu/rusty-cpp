@@ -2196,6 +2196,40 @@ decltype(auto) find(Range&& range, Pred&& pred) {
     }
 }
 
+// `find_map(f)`: f maps each item to an Option<B>; yield the first Some.
+// The closure's own result type IS the return type (already an Option).
+template<typename Range, typename Func>
+decltype(auto) find_map(Range&& range, Func&& func) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto iter = std::forward<Range>(range);
+        using iter_type = std::remove_reference_t<decltype(iter)>;
+        using item_type = detail::next_item_t<iter_type>;
+        using mapped_t = std::remove_cvref_t<decltype(std::invoke(
+            func,
+            detail::deref_if_pointer_like(std::declval<item_type&>())))>;
+        while (true) {
+            auto item = iter.next();
+            if (!detail::option_like_has_value(item)) {
+                return mapped_t(None);
+            }
+            item_type candidate = detail::option_like_take_value(item);
+            auto mapped = std::invoke(
+                func, detail::deref_if_pointer_like(candidate));
+            if (detail::option_like_has_value(mapped)) {
+                return mapped_t(std::move(mapped));
+            }
+        }
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return find_map(
+            std::forward<Range>(range).into_iter(),
+            std::forward<Func>(func));
+    } else {
+        return find_map(
+            iter(std::forward<Range>(range)),
+            std::forward<Func>(func));
+    }
+}
+
 template<typename Range>
 decltype(auto) enumerate(Range&& range) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
