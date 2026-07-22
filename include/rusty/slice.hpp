@@ -2346,7 +2346,11 @@ decltype(auto) skip(Range&& range, size_t remaining) {
 template<typename Iter, typename Func>
 class flat_map_next_iter {
     using OuterItem = detail::next_item_t<std::remove_reference_t<Iter>>;
-    using InnerIterable = std::invoke_result_t<Func&, OuterItem>;
+    // The closure receives the pointee (see next()), so compute the inner
+    // iterable from the deref'd item type.
+    using DerefOuterItem =
+        decltype(detail::deref_if_pointer_like(std::declval<OuterItem>()));
+    using InnerIterable = std::invoke_result_t<Func&, DerefOuterItem>;
     using InnerIter = std::remove_cvref_t<decltype(iter(std::declval<InnerIterable>()))>;
     using ItemType = detail::next_item_t<std::remove_reference_t<InnerIter>>;
 
@@ -2370,7 +2374,11 @@ public:
             if (!detail::option_like_has_value(outer)) {
                 return next_result(rusty::None);
             }
-            inner_.emplace(iter(func_(detail::option_like_take_value(outer))));
+            // Slice iterators yield POINTERS; the flat_map closure is written
+            // against the item value (`|s| s.chars()`), so feed it the
+            // pointee — identity for value items (mirrors max_by_key #98).
+            inner_.emplace(iter(func_(
+                detail::deref_if_pointer_like(detail::option_like_take_value(outer)))));
         }
     }
 
