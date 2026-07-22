@@ -2385,7 +2385,18 @@ class flat_map_next_iter {
     using DerefOuterItem =
         decltype(detail::deref_if_pointer_like(std::declval<OuterItem>()));
     using InnerIterable = std::invoke_result_t<Func&, DerefOuterItem>;
-    using InnerIter = std::remove_cvref_t<decltype(iter(std::declval<InnerIterable>()))>;
+    // An OWNED (rvalue) inner iterable — `|&x| [x, x*10]`, `|x| vec![..]` — is
+    // a temporary; building an iterator that borrows it and stashing that
+    // iterator dangles (stack-use-after-return). Materialize owned inners into
+    // inner_storage_ and iterate THAT. A REFERENCE inner — identity-flatten
+    // over `.iter()`, whose items live in the outer container — stays stable,
+    // so iterate it in place (no copy, works for move-only elements).
+    static constexpr bool inner_is_reference = std::is_reference_v<InnerIterable>;
+    using StoredInner = std::remove_cvref_t<InnerIterable>;
+    using InnerIter = std::remove_cvref_t<std::conditional_t<
+        inner_is_reference,
+        decltype(iter(std::declval<InnerIterable>())),
+        decltype(iter(std::declval<StoredInner&>()))>>;
     using ItemType = detail::next_item_t<std::remove_reference_t<InnerIter>>;
 
 public:
@@ -2403,6 +2414,7 @@ public:
                     return next_result(detail::option_like_take_value(item));
                 }
                 inner_.reset();
+                inner_storage_.reset();
             }
             auto outer = iter_.next();
             if (!detail::option_like_has_value(outer)) {
@@ -2411,14 +2423,21 @@ public:
             // Slice iterators yield POINTERS; the flat_map closure is written
             // against the item value (`|s| s.chars()`), so feed it the
             // pointee — identity for value items (mirrors max_by_key #98).
-            inner_.emplace(iter(func_(
-                detail::deref_if_pointer_like(detail::option_like_take_value(outer)))));
+            decltype(auto) produced = func_(
+                detail::deref_if_pointer_like(detail::option_like_take_value(outer)));
+            if constexpr (inner_is_reference) {
+                inner_.emplace(iter(produced));
+            } else {
+                inner_storage_.emplace(std::move(produced));
+                inner_.emplace(iter(*inner_storage_));
+            }
         }
     }
 
 private:
     Iter iter_;
     Func func_;
+    std::optional<StoredInner> inner_storage_;
     std::optional<InnerIter> inner_;
 };
 
@@ -2439,6 +2458,19 @@ decltype(auto) flat_map(Range&& range, Func&& func) {
     } else {
         return flat_map(iter(std::forward<Range>(range)), std::forward<Func>(func));
     }
+}
+
+// `Iterator::flatten()` — flatten an iterator whose items are themselves
+// iterable. Equivalent to `flat_map` with an identity mapping, so reuse its
+// lazy inner-iterator machinery (which already peels the pointer slice
+// iterators yield and handles the owned-vs-borrowed inner cases).
+template<typename Range>
+decltype(auto) flatten(Range&& range) {
+    return flat_map(
+        std::forward<Range>(range),
+        [](auto&& inner) -> decltype(auto) {
+            return std::forward<decltype(inner)>(inner);
+        });
 }
 
 // `Iterator::step_by(n)` — yields the first item then every n-th. (The range

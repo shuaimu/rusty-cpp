@@ -22740,7 +22740,12 @@ impl CodeGen {
     }
 
     pub(super) fn try_emit_iter_flat_map_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
-        if mc.method != "flat_map" || mc.args.len() != 1 {
+        let is_flat_map = mc.method == "flat_map" && mc.args.len() == 1;
+        // `it.flatten()` — flatten an iterator of iterables. No adapter member
+        // exists; route to the runtime (identity-flat_map). The Option/Result
+        // guard below leaves Option::flatten (nested Option) to its own path.
+        let is_flatten = mc.method == "flatten" && mc.args.is_empty();
+        if !is_flat_map && !is_flatten {
             return None;
         }
         if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
@@ -22752,6 +22757,9 @@ impl CodeGen {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
+        if is_flatten {
+            return Some(format!("rusty::flatten({})", receiver));
+        }
         let func = self.emit_expr_maybe_move(mc.args.first()?);
         Some(format!("rusty::flat_map({}, {})", receiver, func))
     }
