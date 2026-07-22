@@ -7117,7 +7117,7 @@ impl CodeGen {
                 raw_receiver
             };
             return format!(
-                "([&]() {{ auto&& _v = {recv}; using _V = std::remove_cv_t<std::remove_reference_t<decltype(_v)>>; using _U = std::make_unsigned_t<_V>; if constexpr (std::is_signed_v<_V>) {{ auto _u = static_cast<_U>(_v); return (_v < 0) ? static_cast<_U>(0) - _u : _u; }} else {{ return static_cast<_U>(_v); }} }})()",
+                "([&]() {{ auto&& _v = {recv}; using _V = std::remove_cv_t<std::remove_reference_t<decltype(_v)>>; using _U = std::make_unsigned_t<_V>; if constexpr (std::is_signed_v<_V>) {{ auto _u = static_cast<_U>(_v); return (_v < 0) ? static_cast<_U>(static_cast<_U>(0) - _u) : _u; }} else {{ return static_cast<_U>(_v); }} }})()",
                 recv = receiver
             );
         }
