@@ -24139,6 +24139,37 @@ impl CodeGen {
                     capture, params_str, lambda_mutability, lambda_return_annotation, body_str
                 )
             }
+            // A closure body that is a void statement-macro (`|| println!(..)`,
+            // print!/eprintln!/eprint!) returns (); the expression emitter
+            // comments it out (`/* println!(..) */`), so the closure silently
+            // did nothing. Emit the macro as a STATEMENT and return unit —
+            // mirrors the expression-form match-arm macro routing.
+            syn::Expr::Macro(mac_expr)
+                if mac_expr.mac.path.segments.last().is_some_and(|seg| {
+                    matches!(
+                        seg.ident.to_string().as_str(),
+                        "println" | "print" | "eprintln" | "eprint"
+                    )
+                }) =>
+            {
+                inner.return_value_scopes.clear();
+                inner.return_type_hints.clear();
+                inner.emit_macro_stmt(&mac_expr.mac);
+                let mut body_str = inner.into_output();
+                body_str.push_str("return std::make_tuple();\n");
+                if !closure_param_prelude.is_empty() {
+                    let mut prelude_str = String::new();
+                    for stmt in &closure_param_prelude {
+                        prelude_str.push_str(stmt);
+                        prelude_str.push('\n');
+                    }
+                    body_str = format!("{}{}", prelude_str, body_str);
+                }
+                format!(
+                    "[{}]({}){}{} {{\n{}}}",
+                    capture, params_str, lambda_mutability, lambda_return_annotation, body_str
+                )
+            }
             _ => {
                 // Single expression body → return it
                 // Push the explicit return type hint so Err/Ok inside can use it for qualification

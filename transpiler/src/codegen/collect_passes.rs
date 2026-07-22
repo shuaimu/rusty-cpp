@@ -12194,6 +12194,21 @@ impl CodeGen {
                     self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
                 }
             }
+            // Macro args are opaque to the AST walk, but a `move ||
+            // println!("{}", s)` closure genuinely references `s` — without
+            // scanning the tokens the capture emitted `[=]` (copying a
+            // move-only String) instead of `[s = std::move(s)]`. Re-parse the
+            // comma-separated args as exprs and recurse.
+            syn::Expr::Macro(mac_expr) => {
+                use syn::punctuated::Punctuated;
+                if let Ok(args) = mac_expr.mac.parse_body_with(
+                    Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                ) {
+                    for arg in &args {
+                        self.collect_path_local_names_for_move_capture(arg, out);
+                    }
+                }
+            }
             _ => {}
         }
     }
