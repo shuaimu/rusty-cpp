@@ -415,6 +415,16 @@ public:
         return other;
     }
 
+    // or() on a const Option (a `let` binding the transpiler emits `const`
+    // because it isn't consumed elsewhere): copy the payload out instead of
+    // moving, mirroring the const or_else above.
+    Option or_(Option other) const {
+        if (has_value) {
+            return Option(value);
+        }
+        return other;
+    }
+
     // Rust parity: Option::or_else(self, f) -> Option<T>
     template<typename F>
     Option or_else(F&& f) {
@@ -589,6 +599,15 @@ public:
     Option xor_(Option other) {
         if (has_value != other.has_value) {
             return has_value ? Option(std::move(value)) : std::move(other);
+        }
+        return Option(None);
+    }
+
+    // xor() on a const Option: copy the payload out instead of moving,
+    // mirroring the const or_ above (const `let` binding not consumed).
+    Option xor_(Option other) const {
+        if (has_value != other.has_value) {
+            return has_value ? Option(value) : std::move(other);
         }
         return Option(None);
     }
