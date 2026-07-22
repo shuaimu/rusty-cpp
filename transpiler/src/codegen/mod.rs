@@ -28449,11 +28449,24 @@ impl CodeGen {
         // and we'll inject the loop var names into it afterwards.
         let loop_var_names: Vec<String> = loop_binding_names.into_iter().collect();
         let mut loop_var_types = Vec::new();
-        if let syn::Pat::Ident(pat_ident) = for_expr.pat.as_ref()
-            && pat_ident.ident != "_"
-            && let Some(item_ty) = self.infer_iter_item_type_from_expr(&for_expr.expr)
-        {
-            loop_var_types.push((pat_ident.ident.to_string(), item_ty));
+        if let Some(item_ty) = self.infer_iter_item_type_from_expr(&for_expr.expr) {
+            match for_expr.pat.as_ref() {
+                syn::Pat::Ident(pat_ident) if pat_ident.ident != "_" => {
+                    loop_var_types.push((pat_ident.ident.to_string(), item_ty));
+                }
+                // Tuple destructure (`for (n, c) in a.iter().zip(b.iter())`):
+                // bind each element to its component of the (inferred) tuple
+                // item type — a zipped `char` printed as its code point
+                // without this (format smart-gate couldn't see the type).
+                tuple_pat @ syn::Pat::Tuple(_) => {
+                    let mut env = HashMap::new();
+                    self.bind_pattern_types_into_env(tuple_pat, &item_ty, &mut env);
+                    for (name, ty) in env {
+                        loop_var_types.push((name, ty));
+                    }
+                }
+                _ => {}
+            }
         }
         self.pending_loop_var_bindings = loop_var_names.clone();
         self.pending_loop_var_binding_types = loop_var_types;

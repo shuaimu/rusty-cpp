@@ -8964,6 +8964,24 @@ impl CodeGen {
                         .unwrap_or_else(|| parse_quote!(_));
                     return Some(parse_quote!((usize, #inner)));
                 }
+                // `.zip(other)` yields `(LeftItem, RightItem)` — needed to
+                // type for-loop tuple destructures (a zipped `char` printed
+                // as its code point without the binding type).
+                if method == "zip" && mc.args.len() == 1 {
+                    let left = self
+                        .infer_iter_item_type_from_expr(&mc.receiver)
+                        .unwrap_or_else(|| parse_quote!(_));
+                    let right = self
+                        .infer_iter_item_type_from_expr(&mc.args[0])
+                        .unwrap_or_else(|| parse_quote!(_));
+                    return Some(parse_quote!((#left, #right)));
+                }
+                // Item-preserving adapters: the item type passes through.
+                if mc.args.is_empty()
+                    && matches!(method.as_str(), "copied" | "cloned" | "rev" | "peekable" | "fuse")
+                {
+                    return self.infer_iter_item_type_from_expr(&mc.receiver);
+                }
                 if method == "filter_map" && mc.args.len() == 1 {
                     if let syn::Expr::Closure(closure) = self.peel_paren_group_expr(&mc.args[0]) {
                         if let Some(ret_ty) =
