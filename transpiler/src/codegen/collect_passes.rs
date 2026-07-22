@@ -9109,38 +9109,30 @@ impl CodeGen {
         }
         // A `move` closure init-captures its free variables by value via
         // `x = std::move(x)` — locals it references must not bind const, or
-        // the move decays to a (possibly deleted) copy.
-        struct MoveClosureCaptures<'a> {
-            result: &'a mut HashSet<String>,
+        // the move decays to a (possibly deleted) copy. Collect the move
+        // closures first, then resolve captures through the macro-aware
+        // helper (a var used only inside `println!("{}", x)` is invisible to
+        // a plain path walk).
+        let mut move_closures: Vec<&syn::ExprClosure> = Vec::new();
+        struct MoveClosures<'a, 'ast> {
+            closures: &'a mut Vec<&'ast syn::ExprClosure>,
         }
-        impl<'ast> Visit<'ast> for MoveClosureCaptures<'_> {
+        impl<'ast> Visit<'ast> for MoveClosures<'_, 'ast> {
             fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
                 if c.capture.is_some() {
-                    struct Idents<'a> {
-                        result: &'a mut HashSet<String>,
-                    }
-                    impl<'ast> Visit<'ast> for Idents<'_> {
-                        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
-                            if p.qself.is_none() && p.path.segments.len() == 1 {
-                                self.result
-                                    .insert(p.path.segments[0].ident.to_string());
-                            }
-                            visit::visit_expr_path(self, p);
-                        }
-                    }
-                    let mut idents = Idents {
-                        result: self.result,
-                    };
-                    idents.visit_expr(&c.body);
+                    self.closures.push(c);
                 }
                 visit::visit_expr_closure(self, c);
             }
         }
-        let mut capture_visitor = MoveClosureCaptures {
-            result: &mut result,
+        let mut capture_visitor = MoveClosures {
+            closures: &mut move_closures,
         };
         for stmt in stmts {
             capture_visitor.visit_stmt(stmt);
+        }
+        for closure in move_closures {
+            result.extend(self.collect_move_closure_captured_rust_names(closure));
         }
         // `if let Some(v) = local` (and Ok/Err) MOVES `local` in Rust: the
         // payload is consumed into `v` and dropped at the body's end. The
@@ -12059,6 +12051,26 @@ impl CodeGen {
         cpp_names.sort();
         cpp_names.dedup();
         cpp_names
+    }
+
+    /// RUST names of the outer locals a `move` closure captures (referenced in
+    /// the body, minus its own params and inner let-bindings). A move-capture
+    /// consumes these — a `const` source turns the emitted `std::move(x)` into
+    /// a copy, deleted for move-only payloads (see the consuming-locals pass).
+    pub(super) fn collect_move_closure_captured_rust_names(
+        &self,
+        closure: &syn::ExprClosure,
+    ) -> HashSet<String> {
+        let mut referenced = HashSet::new();
+        self.collect_path_local_names_for_move_capture(&closure.body, &mut referenced);
+        let mut params = HashSet::new();
+        for input in &closure.inputs {
+            self.collect_closure_param_names_from_pat(input, &mut params);
+        }
+        let mut inner_lets = HashSet::new();
+        self.collect_local_binding_names_in_expr_for_move_capture(&closure.body, &mut inner_lets);
+        referenced.retain(|n| !params.contains(n) && !inner_lets.contains(n) && n != "self");
+        referenced
     }
 
     pub(super) fn collect_path_local_names_for_move_capture(
