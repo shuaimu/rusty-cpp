@@ -1814,6 +1814,27 @@ entry_probe<Map> make_entry_probe(Map& map, Key&& key) {
     auto result = map.try_emplace(std::forward<Key>(key), mapped_type{});
     return entry_probe<Map>(map, result.first, result.second);
 }
+// Deref-chain dispatchers for the universal `iter`/`iter_mut` entry points.
+// These are NAMESPACE-SCOPE functors, deliberately NOT generic lambdas local
+// to `iter<Range>`/`iter_mut<Range>`: clang's Itanium mangler (21.x/22.x)
+// dereferences a bad pointer when it has to mangle a generic lambda whose
+// closure type is local to a function template and that closure is emitted
+// across a C++20 module (BMI) boundary — the `slice.hpp` iter dispatcher was
+// the trigger for the frontend SIGSEGV in issue #31. A functor's `operator()`
+// is a member of a namespace-scope class, which the mangler handles fine.
+struct iter_deref_dispatch {
+    template<typename R>
+    auto operator()(R&& __r) const -> decltype(static_cast<R&&>(__r).iter()) {
+        return static_cast<R&&>(__r).iter();
+    }
+};
+struct iter_mut_deref_dispatch {
+    template<typename R>
+    auto operator()(R&& __r) const -> decltype(static_cast<R&&>(__r).iter_mut()) {
+        return static_cast<R&&>(__r).iter_mut();
+    }
+};
+
 } // namespace detail
 
 template<typename Range>
@@ -1825,12 +1846,12 @@ decltype(auto) iter(Range&& range) {
     // design. Subsequent arms remain to adapt receivers that have no
     // `.iter()` anywhere in their chain (raw `data()`/`size()`, Rust-shape
     // `begin()` returning a pointer, STL `std::begin`/`std::end`).
+    // NB: the dispatcher is a namespace-scope functor, not a local generic
+    // lambda — see `detail::iter_deref_dispatch` and issue #31.
     if constexpr (requires {
-        rusty::deref_call(std::forward<Range>(range),
-            [](auto&& __r) -> decltype(__r.iter()) { return __r.iter(); });
+        rusty::deref_call(std::forward<Range>(range), detail::iter_deref_dispatch{});
     }) {
-        return rusty::deref_call(std::forward<Range>(range),
-            [](auto&& __r) -> decltype(__r.iter()) { return __r.iter(); });
+        return rusty::deref_call(std::forward<Range>(range), detail::iter_deref_dispatch{});
     } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::preserve_for_in_range(std::forward<Range>(range));
     } else if constexpr (requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }) {
@@ -1997,11 +2018,9 @@ decltype(auto) iter_mut(Range&& range) {
         }
         return std::span<opt_item_t>();
     } else if constexpr (requires {
-        rusty::deref_call(std::forward<Range>(range),
-            [](auto&& __r) -> decltype(__r.iter_mut()) { return __r.iter_mut(); });
+        rusty::deref_call(std::forward<Range>(range), detail::iter_mut_deref_dispatch{});
     }) {
-        return rusty::deref_call(std::forward<Range>(range),
-            [](auto&& __r) -> decltype(__r.iter_mut()) { return __r.iter_mut(); });
+        return rusty::deref_call(std::forward<Range>(range), detail::iter_mut_deref_dispatch{});
     } else if constexpr (requires { std::forward<Range>(range).as_mut_slice(); }) {
         return iter_mut(std::forward<Range>(range).as_mut_slice());
     } else if constexpr (requires { std::forward<Range>(range).deref_mut(); }) {
