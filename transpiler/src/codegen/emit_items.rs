@@ -3181,6 +3181,37 @@ impl CodeGen {
                 self.writeln(&variants.join(",\n    "));
                 self.indent -= 1;
                 self.writeln("};");
+                // `#[derive(Debug)]` on a C-like enum: an enum class can't
+                // carry a rusty_debug_string() member (structs/data-enums
+                // do), so emit a free ADL function mapping each value to its
+                // variant name — `{:?}` printed <unprintable> before. Gated on
+                // the derive ATTRIBUTE (single-file input; expanded crates
+                // turn it into an impl and are unaffected) and non-generic.
+                if e.generics.params.is_empty()
+                    && self.extract_derives(&e.attrs).iter().any(|d| d == "Debug")
+                {
+                    let enum_cpp = escape_cpp_keyword(&name.to_string());
+                    self.writeln(&format!(
+                        "inline std::string rusty_debug_string({} _v) {{",
+                        enum_cpp
+                    ));
+                    self.indent += 1;
+                    self.writeln("switch (_v) {");
+                    self.indent += 1;
+                    for variant in &e.variants {
+                        let vname = variant.ident.to_string();
+                        let vcpp = escape_cpp_keyword(&vname);
+                        self.writeln(&format!(
+                            "case {}::{}: return \"{}\";",
+                            enum_cpp, vcpp, vname
+                        ));
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln("return \"?\";");
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
                 if !is_local_scope {
                     let enum_cpp_name = escape_cpp_keyword(&name.to_string());
                     let type_params: Vec<String> = e

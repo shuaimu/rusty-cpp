@@ -47025,6 +47025,9 @@ std::string to_debug_string(const T& value) {
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;
     if constexpr (requires { value.rusty_debug_string(); }) {
         return value.rusty_debug_string();
+    } else if constexpr (std::is_enum_v<Value> && requires { rusty_debug_string(value); }) {
+        // C-like enum with a free ADL debug function (derive(Debug)).
+        return rusty_debug_string(value);
     } else if constexpr (requires { value.is_some(); value.unwrap(); }) {
         // Rust Debug for Option: Some(<dbg>) / None.
         if (value.is_some()) {
@@ -50464,6 +50467,8 @@ std::string to_debug_string(const T& value) {\n\
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
     if constexpr (requires { value.rusty_debug_string(); }) {\n\
         return value.rusty_debug_string();\n\
+    } else if constexpr (std::is_enum_v<Value> && requires { rusty_debug_string(value); }) {\n\
+        return rusty_debug_string(value);\n\
     } else if constexpr (requires { value.is_some(); value.unwrap(); }) {\n\
         if (value.is_some()) {\n\
             return std::string(\"Some(\") + rusty::to_debug_string(value.unwrap()) + \")\";\n\
