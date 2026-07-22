@@ -25318,6 +25318,27 @@ impl CodeGen {
                     matches!(seg.ident.to_string().as_str(), "f32" | "f64")
                 })
             ),
+            // A float math method on a float receiver returns a float — but
+            // infer_simple_expr_type doesn't type these method-call results, so
+            // `{:.4}` on `x.sqrt()` fell to to_string and truncated the string.
+            // Gate on a float-like receiver (`.abs()`/`.round()`/`.max()` also
+            // exist on integers, where they return int).
+            syn::Expr::MethodCall(mc)
+                if matches!(
+                    mc.method.to_string().as_str(),
+                    "sqrt" | "cbrt" | "sin" | "cos" | "tan" | "asin" | "acos"
+                        | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
+                        | "atanh" | "floor" | "ceil" | "round" | "trunc" | "exp"
+                        | "exp2" | "ln" | "log10" | "log2" | "ln_1p" | "exp_m1"
+                        | "abs" | "powi" | "powf" | "atan2" | "hypot" | "log"
+                        | "fract" | "recip" | "to_degrees" | "to_radians"
+                        | "signum" | "copysign" | "mul_add" | "max" | "min"
+                        | "clamp"
+                ) =>
+            {
+                self.infer_simple_expr_type(&mc.receiver)
+                    .is_some_and(|ty| self.is_known_float_like_type(&ty))
+            }
             other => self
                 .infer_simple_expr_type(other)
                 .is_some_and(|ty| self.is_known_float_like_type(&ty)),
@@ -25367,6 +25388,13 @@ impl CodeGen {
     }
 
     fn format_arg_is_known_scalar_like(&self, token_expr: &str) -> bool {
+        // Float ⊂ scalar. A float math method call (`x.sqrt()`) types as float
+        // via the float check's method-call arm but not via infer_simple_expr_type,
+        // so consult it first — else the arg would pass raw for the `.Nf` spec
+        // rewrite yet be wrapped in to_string here (a `.4f`-on-a-string abort).
+        if self.format_arg_is_known_float_like(token_expr) {
+            return true;
+        }
         let trimmed = token_expr.trim();
         let parsed = if let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) {
             Some(expr)
