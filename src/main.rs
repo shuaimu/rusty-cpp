@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 mod debug_macros;
 
 mod analysis;
+mod annotator;
 mod diagnostics;
 mod ir;
 mod parser;
@@ -52,6 +53,10 @@ struct Args {
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     format: String,
+
+    /// Edit the input file by inserting // @safe or // @unsafe above unannotated functions
+    #[arg(long)]
+    annotate_safety: bool,
 }
 
 #[derive(Debug, Default)]
@@ -64,10 +69,42 @@ struct CompileCommandConfig {
     compiler_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Default)]
+struct AnalysisConfig {
+    include_paths: Vec<PathBuf>,
+    extra_clang_args: Vec<String>,
+}
+
 fn main() {
     let args = Args::parse();
 
     println!("{}", "Rusty C++ Checker".bold().blue());
+    if args.annotate_safety {
+        println!("Annotating: {}", args.input.display());
+        match annotator::annotate_file(
+            &args.input,
+            &args.include_paths,
+            &args.defines,
+            args.compile_commands.as_ref(),
+        ) {
+            Ok(summary) => {
+                println!(
+                    "{}",
+                    format!(
+                        "✓ Annotated {} safe function(s), {} unsafe function(s); skipped {} already annotated function(s).",
+                        summary.safe_count, summary.unsafe_count, summary.skipped_count
+                    )
+                    .green()
+                );
+            }
+            Err(e) => {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     println!("Analyzing: {}", args.input.display());
 
     match analyze_file(
@@ -108,60 +145,9 @@ fn analyze_file(
     defines: &[String],
     compile_commands: Option<&PathBuf>,
 ) -> Result<Vec<String>, String> {
-    // Start with CLI-provided include paths
-    let mut all_include_paths = include_paths.to_vec();
-    let mut extra_clang_args: Vec<String> = Vec::new();
-    let mut should_auto_detect_clang_includes = true;
-
-    // Add include paths from environment variables
-    all_include_paths.extend(extract_include_paths_from_env());
-
-    // Extract additional include paths and compile flags from compile_commands.json if provided
-    let mut cc_compiler_path: Option<PathBuf> = None;
-    if let Some(cc_path) = compile_commands {
-        let extracted = extract_compile_config_from_compile_commands(cc_path, path)?;
-        // For module/libc++ builds we should trust compile_commands include paths.
-        // Injecting auto-detected STL paths can mix libstdc++ and libc++ and produce
-        // ambiguous declarations that break parsing.
-        should_auto_detect_clang_includes = !extracted.clang_args.iter().any(|arg| {
-            arg == "-stdlib"
-                || arg.starts_with("-stdlib=")
-                || arg == "-fmodules"
-                || arg == "-fmodules-ts"
-                || arg.starts_with("-fmodule-file=")
-                || arg.starts_with("-fmodule-map-file=")
-                || arg.starts_with("-fprebuilt-module-path=")
-        });
-        all_include_paths.extend(extracted.include_paths);
-        extra_clang_args.extend(extracted.clang_args);
-        cc_compiler_path = extracted.compiler_path;
-    }
-
-    // Auto-detect C++ standard library paths from clang installation when needed.
-    if should_auto_detect_clang_includes {
-        all_include_paths.extend(extract_include_paths_from_clang());
-    } else {
-        // Even when compile_commands.json owns the STL paths (libc++ / module
-        // builds), libclang needs to know where its builtin resource directory
-        // lives (for `stddef.h`, `stdarg.h`, intrinsics, etc.) so the
-        // wrapper-header dance with libc++ works. Use `-resource-dir=...`
-        // rather than `-I<resource-dir>/include` — passing the dir as a
-        // regular `-I` puts it ahead of libc++ on the search path and breaks
-        // `__has_include_next` patterns in libc++'s wrappers. With
-        // `-resource-dir=`, libclang slots the builtin headers into the
-        // canonical `-isystem` position and the libc++ wrappers resolve
-        // correctly.
-        //
-        // CRITICAL: the resource dir MUST come from the SAME toolchain that
-        // produced the PCM/BMI files in compile_commands.json. Mismatched
-        // resource dirs (e.g. clang-19 + libclang-22 + clang-22 BMIs) crash
-        // libclang during BMI deserialization. We pass the compile_commands
-        // compiler down so the resolver can query `-print-resource-dir`
-        // from that specific binary.
-        if let Some(dir) = find_libclang_resource_root_for(cc_compiler_path.as_deref()) {
-            extra_clang_args.push(format!("-resource-dir={}", dir.display()));
-        }
-    }
+    let analysis_config = build_analysis_config(path, include_paths, compile_commands)?;
+    let all_include_paths = analysis_config.include_paths;
+    let extra_clang_args = analysis_config.extra_clang_args;
 
     // Parse included headers for lifetime annotations
     let mut header_cache = parser::HeaderCache::new();
@@ -464,6 +450,72 @@ fn analyze_file(
     violations.extend(borrow_violations);
 
     Ok(violations)
+}
+
+fn build_analysis_config(
+    path: &PathBuf,
+    include_paths: &[PathBuf],
+    compile_commands: Option<&PathBuf>,
+) -> Result<AnalysisConfig, String> {
+    // Start with CLI-provided include paths
+    let mut all_include_paths = include_paths.to_vec();
+    let mut extra_clang_args: Vec<String> = Vec::new();
+    let mut should_auto_detect_clang_includes = true;
+
+    // Add include paths from environment variables
+    all_include_paths.extend(extract_include_paths_from_env());
+
+    // Extract additional include paths and compile flags from compile_commands.json if provided
+    let mut cc_compiler_path: Option<PathBuf> = None;
+    if let Some(cc_path) = compile_commands {
+        let extracted = extract_compile_config_from_compile_commands(cc_path, path)?;
+        // For module/libc++ builds we should trust compile_commands include paths.
+        // Injecting auto-detected STL paths can mix libstdc++ and libc++ and produce
+        // ambiguous declarations that break parsing.
+        should_auto_detect_clang_includes = !extracted.clang_args.iter().any(|arg| {
+            arg == "-stdlib"
+                || arg.starts_with("-stdlib=")
+                || arg == "-fmodules"
+                || arg == "-fmodules-ts"
+                || arg.starts_with("-fmodule-file=")
+                || arg.starts_with("-fmodule-map-file=")
+                || arg.starts_with("-fprebuilt-module-path=")
+        });
+        all_include_paths.extend(extracted.include_paths);
+        extra_clang_args.extend(extracted.clang_args);
+        cc_compiler_path = extracted.compiler_path;
+    }
+
+    // Auto-detect C++ standard library paths from clang installation when needed.
+    if should_auto_detect_clang_includes {
+        all_include_paths.extend(extract_include_paths_from_clang());
+    } else {
+        // Even when compile_commands.json owns the STL paths (libc++ / module
+        // builds), libclang needs to know where its builtin resource directory
+        // lives (for `stddef.h`, `stdarg.h`, intrinsics, etc.) so the
+        // wrapper-header dance with libc++ works. Use `-resource-dir=...`
+        // rather than `-I<resource-dir>/include` — passing the dir as a
+        // regular `-I` puts it ahead of libc++ on the search path and breaks
+        // `__has_include_next` patterns in libc++'s wrappers. With
+        // `-resource-dir=`, libclang slots the builtin headers into the
+        // canonical `-isystem` position and the libc++ wrappers resolve
+        // correctly.
+        //
+        // CRITICAL: the resource dir MUST come from the SAME toolchain that
+        // produced the PCM/BMI files in compile_commands.json. Mismatched
+        // resource dirs (e.g. clang-19 + libclang-22 + clang-22 BMIs) crash
+        // libclang during BMI deserialization. We pass the compile_commands
+        // compiler down so the resolver can query `-print-resource-dir`
+        // from that specific binary.
+        if let Some(dir) = find_libclang_resource_root_for(cc_compiler_path.as_deref()) {
+            extra_clang_args.push(format!("-resource-dir={}", dir.display()));
+        }
+    }
+
+    Ok(AnalysisConfig {
+        include_paths: all_include_paths,
+        extra_clang_args,
+    })
 }
 
 fn extract_compile_config_from_compile_commands(
