@@ -1,6 +1,7 @@
 #ifndef RUSTY_NUM_HPP
 #define RUSTY_NUM_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <bit>
 #include <compare>   // std::strong_ordering etc. for NonZero::operator<=> (~L73); relies otherwise on transitive leak
 #include <array>
@@ -1202,7 +1203,7 @@ constexpr std::remove_cvref_t<T> from_le_bytes(Bytes&& bytes) {
     auto&& view = std::forward<Bytes>(bytes);
     const size_t count = std::size(view);
     if (count < sizeof(RawT)) {
-        throw std::out_of_range("from_le_bytes input is too short");
+        rusty::panic::do_panic("from_le_bytes input is too short");
     }
     Unsigned value = 0;
     for (size_t i = 0; i < sizeof(RawT); ++i) {
@@ -1220,7 +1221,7 @@ constexpr std::remove_cvref_t<T> from_be_bytes(Bytes&& bytes) {
     auto&& view = std::forward<Bytes>(bytes);
     const size_t count = std::size(view);
     if (count < sizeof(RawT)) {
-        throw std::out_of_range("from_be_bytes input is too short");
+        rusty::panic::do_panic("from_be_bytes input is too short");
     }
     Unsigned value = 0;
     for (size_t i = 0; i < sizeof(RawT); ++i) {

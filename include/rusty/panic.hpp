@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "rusty/result.hpp"
+#include "rusty/panic_handler.hpp"  // rusty::panic::do_panic — the unified panic primitive
 
 namespace rusty {
 namespace panic {
@@ -65,16 +66,15 @@ auto catch_unwind(F&& callable) {
 
 template<typename... Args>
 [[noreturn]] inline void begin_panic(Args&&...) {
-    throw std::runtime_error("panic");
+    do_panic();
 }
 
 template<typename Message, typename... Args>
 [[noreturn]] inline void begin_panic(Message&& message, Args&&...) {
     if constexpr (std::is_convertible_v<Message, std::string_view>) {
-        throw std::runtime_error(
-            std::string(std::string_view(std::forward<Message>(message))));
+        do_panic(std::string_view(std::forward<Message>(message)));
     } else {
-        throw std::runtime_error("panic");
+        do_panic();
     }
 }
 

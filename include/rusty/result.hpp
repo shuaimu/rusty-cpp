@@ -1,6 +1,7 @@
 #ifndef RUSTY_RESULT_HPP
 #define RUSTY_RESULT_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <utility>
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <stdexcept>
@@ -163,9 +164,9 @@ private:
     template<typename Msg>
     [[noreturn]] static void throw_expect_failure(Msg&& msg) {
         if constexpr (std::is_convertible_v<Msg, std::string_view>) {
-            throw std::runtime_error(std::string(std::string_view(std::forward<Msg>(msg))));
+            rusty::panic::do_panic(std::string(std::string_view(std::forward<Msg>(msg))));
         } else {
-            throw std::runtime_error("Result expectation failed");
+            rusty::panic::do_panic("Result expectation failed");
         }
     }
     
@@ -456,7 +457,7 @@ public:
     // Unwrap Ok value (panics if Err)
     T unwrap() {
         if (!is_ok_value) {
-            throw std::runtime_error("Called unwrap on an Err value");
+            rusty::panic::do_panic("Called unwrap on an Err value");
         }
         if constexpr (std::is_reference_v<T>) {
             return ok_ref();
@@ -469,7 +470,7 @@ public:
     auto unwrap() const
         -> std::conditional_t<std::is_reference_v<T>, T, const std::remove_reference_t<T>&> {
         if (!is_ok_value) {
-            throw std::runtime_error("Called unwrap on an Err value");
+            rusty::panic::do_panic("Called unwrap on an Err value");
         }
         return ok_ref();
     }
@@ -507,19 +508,19 @@ public:
     // Unwrap Err value (panics if Ok)
     T& unwrap_mut() {
         if (!is_ok_value) {
-            throw std::runtime_error("Called unwrap_mut on Err");
+            rusty::panic::do_panic("Called unwrap_mut on Err");
         }
         return ok_ref();
     }
     E& unwrap_err_mut() {
         if (is_ok_value) {
-            throw std::runtime_error("Called unwrap_err_mut on Ok");
+            rusty::panic::do_panic("Called unwrap_err_mut on Ok");
         }
         return err_ref();
     }
     E unwrap_err() {
         if (is_ok_value) {
-            throw std::runtime_error("Called unwrap_err on an Ok value");
+            rusty::panic::do_panic("Called unwrap_err on an Ok value");
         }
         if constexpr (std::is_reference_v<E>) {
             return err_ref();
@@ -532,7 +533,7 @@ public:
     auto unwrap_err() const
         -> std::conditional_t<std::is_reference_v<E>, E, const std::remove_reference_t<E>&> {
         if (is_ok_value) {
-            throw std::runtime_error("Called unwrap_err on an Ok value");
+            rusty::panic::do_panic("Called unwrap_err on an Ok value");
         }
         return err_ref();
     }
@@ -1070,9 +1071,9 @@ private:
     template<typename Msg>
     [[noreturn]] static void throw_expect_failure(Msg&& msg) {
         if constexpr (std::is_convertible_v<Msg, std::string_view>) {
-            throw std::runtime_error(std::string(std::string_view(std::forward<Msg>(msg))));
+            rusty::panic::do_panic(std::string(std::string_view(std::forward<Msg>(msg))));
         } else {
-            throw std::runtime_error("Result expectation failed");
+            rusty::panic::do_panic("Result expectation failed");
         }
     }
     
@@ -1201,7 +1202,7 @@ public:
     // Unwrap Err value (panics if Ok)
     void unwrap() const {
         if (!is_ok_value) {
-            throw std::runtime_error("Called unwrap on an Err value");
+            rusty::panic::do_panic("Called unwrap on an Err value");
         }
     }
 
@@ -1218,7 +1219,7 @@ public:
     // Unwrap Err value (panics if Ok)
     E unwrap_err() {
         if (is_ok_value) {
-            throw std::runtime_error("Called unwrap_err on an Ok value");
+            rusty::panic::do_panic("Called unwrap_err on an Ok value");
         }
         if constexpr (std::is_reference_v<E>) {
             return err_ref();
@@ -1229,7 +1230,7 @@ public:
 
     E unwrap_err() const {
         if (is_ok_value) {
-            throw std::runtime_error("Called unwrap_err on an Ok value");
+            rusty::panic::do_panic("Called unwrap_err on an Ok value");
         }
         return err_ref();
     }

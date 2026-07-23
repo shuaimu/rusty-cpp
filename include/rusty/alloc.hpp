@@ -1,6 +1,7 @@
 #ifndef RUSTY_ALLOC_HPP
 #define RUSTY_ALLOC_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <concepts>
 #include <cstddef>
 #include <cstdlib>
@@ -220,7 +221,7 @@ inline std::uint8_t* realloc(
 }
 
 [[noreturn]] inline void handle_alloc_error(Layout) {
-    throw std::bad_alloc();
+    rusty::panic::do_panic("allocation failed");
 }
 
 // Allocator concept — faithful mirror of Rust's `unsafe trait Allocator`.

@@ -1,6 +1,7 @@
 #ifndef RUSTY_REFCELL_HPP
 #define RUSTY_REFCELL_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <memory>
 #include <stdexcept>
 #include <cassert>
@@ -47,7 +48,7 @@ private:
     void add_reader() const {
         int* state = borrow_state.get();
         if (*state < 0) {
-            throw std::runtime_error("RefCell<T>: already mutably borrowed");
+            rusty::panic::do_panic("RefCell<T>: already mutably borrowed");
         }
         (*state)++;
     }
@@ -62,9 +63,9 @@ private:
         int* state = borrow_state.get();
         if (*state != 0) {
             if (*state > 0) {
-                throw std::runtime_error("RefCell<T>: already immutably borrowed");
+                rusty::panic::do_panic("RefCell<T>: already immutably borrowed");
             } else {
-                throw std::runtime_error("RefCell<T>: already mutably borrowed");
+                rusty::panic::do_panic("RefCell<T>: already mutably borrowed");
             }
         }
         *state = -1;
@@ -126,7 +127,7 @@ public:
     // @lifetime: (&'a, T) -> T
     T replace(T new_value) const {
         if (*borrow_state.get_const() != 0) {
-            throw std::runtime_error("RefCell<T>: cannot replace while borrowed");
+            rusty::panic::do_panic("RefCell<T>: cannot replace while borrowed");
         }
         T* val_ptr = value.get();
         T old = std::move(*val_ptr);
@@ -138,7 +139,7 @@ public:
     // @lifetime: (&'a, &'a) -> void
     void swap(RefCell& other) const {
         if (*borrow_state.get_const() != 0 || *other.borrow_state.get_const() != 0) {
-            throw std::runtime_error("RefCell<T>: cannot swap while borrowed");
+            rusty::panic::do_panic("RefCell<T>: cannot swap while borrowed");
         }
         std::swap(*value.get(), *other.value.get());
     }

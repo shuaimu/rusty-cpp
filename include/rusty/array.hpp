@@ -1,6 +1,7 @@
 #ifndef RUSTY_ARRAY_HPP
 #define RUSTY_ARRAY_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <array>
 #include <vector>
 #include <cstddef>
@@ -265,7 +266,7 @@ template<typename Index>
 size_t checked_index(Index idx) {
     if constexpr (std::is_signed_v<Index>) {
         if (idx < 0) {
-            throw std::out_of_range("slice index cannot be negative");
+            rusty::panic::do_panic("slice index cannot be negative");
         }
     }
     return static_cast<size_t>(idx);
@@ -287,7 +288,7 @@ inline bool str_is_char_boundary(std::string_view s, size_t pos) {
 template<typename SpanLike>
 void validate_slice_bounds(const SpanLike& span, size_t start, size_t end) {
     if (start > end || end > span.size()) {
-        throw std::out_of_range("slice range out of bounds");
+        rusty::panic::do_panic("slice range out of bounds");
     }
 }
 
@@ -2909,7 +2910,7 @@ template<typename DstElem, std::size_t DstExtent, typename SrcElem, std::size_t 
 void clone_from_slice(std::span<DstElem, DstExtent> dst, std::span<SrcElem, SrcExtent> src) {
     static_assert(!std::is_const_v<DstElem>, "clone_from_slice destination must be mutable");
     if (dst.size() != src.size()) {
-        throw std::length_error("clone_from_slice length mismatch");
+        rusty::panic::do_panic("clone_from_slice length mismatch");
     }
     for (size_t i = 0; i < dst.size(); ++i) {
         if constexpr (requires(const SrcElem& value) { value.clone(); }) {

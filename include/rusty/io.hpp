@@ -14,6 +14,7 @@
 //   - io::Cursor<T>      — in-memory cursor over a buffer
 //   - io::stdin/stdout/stderr — standard stream handles
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <cstdint>
 #include <cstddef>
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
@@ -106,17 +107,17 @@ public:
     bool is_err() const { return !ok_; }
 
     T& unwrap() {
-        if (!ok_) throw std::runtime_error("io::Result::unwrap on Err: " + error_.to_string());
+        if (!ok_) rusty::panic::do_panic("io::Result::unwrap on Err: " + error_.to_string());
         return value_;
     }
 
     const T& unwrap() const {
-        if (!ok_) throw std::runtime_error("io::Result::unwrap on Err: " + error_.to_string());
+        if (!ok_) rusty::panic::do_panic("io::Result::unwrap on Err: " + error_.to_string());
         return value_;
     }
 
     Error& unwrap_err() {
-        if (ok_) throw std::runtime_error("io::Result::unwrap_err on Ok");
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err on Ok");
         return error_;
     }
 
@@ -172,11 +173,11 @@ public:
     bool is_err() const { return !ok_; }
 
     void unwrap() const {
-        if (!ok_) throw std::runtime_error("io::Result::unwrap on Err: " + error_.to_string());
+        if (!ok_) rusty::panic::do_panic("io::Result::unwrap on Err: " + error_.to_string());
     }
 
     Error& unwrap_err() {
-        if (ok_) throw std::runtime_error("io::Result::unwrap_err on Ok");
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err on Ok");
         return error_;
     }
 

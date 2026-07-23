@@ -1,6 +1,7 @@
 #ifndef RUSTY_HPP
 #define RUSTY_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -378,7 +379,7 @@ namespace rusty {
                     return *ptr;
                 }
             }
-            throw std::bad_variant_access();
+            rusty::panic::do_panic("bad variant access");
         }
 
         // Parse decimal literals into 128-bit integers without relying on host

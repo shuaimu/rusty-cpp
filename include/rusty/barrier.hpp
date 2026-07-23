@@ -1,5 +1,6 @@
 #pragma once
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <cstddef>
 #include <memory>
 #include <stdexcept>
@@ -57,7 +58,7 @@ public:
     explicit Barrier(std::size_t count)
         : state_(std::make_unique<State>(count)) {
         if (count == 0) {
-            throw std::invalid_argument("Barrier count must be greater than 0");
+            rusty::panic::do_panic("Barrier count must be greater than 0");
         }
     }
 

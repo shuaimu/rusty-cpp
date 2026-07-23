@@ -1,6 +1,7 @@
 #ifndef RUSTY_OPTION_HPP
 #define RUSTY_OPTION_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <optional>
 #include <utility>
 #include <stdexcept>
@@ -99,7 +100,7 @@ public:
     requires (!std::is_same_v<U, T> && !std::is_constructible_v<T, U&&>)
     Option(Option<U>&& other) : has_value(false), dummy(0) {
         if (other.is_some()) {
-            throw std::runtime_error("invalid Option conversion with value");
+            rusty::panic::do_panic("invalid Option conversion with value");
         }
     }
 
@@ -107,7 +108,7 @@ public:
     requires (!std::is_same_v<U, T> && !std::is_constructible_v<T, const U&>)
     Option(const Option<U>& other) : has_value(false), dummy(0) {
         if (other.is_some()) {
-            throw std::runtime_error("invalid Option conversion with value");
+            rusty::panic::do_panic("invalid Option conversion with value");
         }
     }
 
@@ -278,7 +279,7 @@ public:
     // @lifetime: owned
     T unwrap() {
         if (!has_value) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         T result = std::move(value);
         value.~T();
@@ -291,7 +292,7 @@ public:
     // unwrap() above MOVES OUT and clears has_value).
     T& unwrap_mut() {
         if (!has_value) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return value;
     }
@@ -299,7 +300,7 @@ public:
     // Const unwrap - returns const reference to inner value (for borrowed access)
     const T& unwrap() const {
         if (!has_value) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return value;
     }
@@ -315,7 +316,7 @@ public:
     // @lifetime: (&'a) -> &'a T
     const T& unwrap_unchecked() const {
         if (!has_value) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return value;
     }
@@ -324,7 +325,7 @@ public:
     // @lifetime: owned
     T expect(const char* msg) {
         if (!has_value) {
-            throw std::runtime_error(msg);
+            rusty::panic::do_panic(msg);
         }
         return unwrap();
     }
@@ -949,7 +950,7 @@ public:
     T& unwrap_mut() { return unwrap(); }
     T& unwrap() {
         if (!ptr) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return *ptr;
     }
@@ -957,7 +958,7 @@ public:
     // Const overload for borrowed Option references.
     T& unwrap() const {
         if (!ptr) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return *ptr;
     }
@@ -969,7 +970,7 @@ public:
     // @lifetime: (&'a) -> &'a T
     T& unwrap_unchecked() {
         if (!ptr) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return *ptr;
     }
@@ -978,7 +979,7 @@ public:
     // @lifetime: (&'a) -> &'a T
     T& unwrap_unchecked() const {
         if (!ptr) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return *ptr;
     }
@@ -987,14 +988,14 @@ public:
     // @lifetime: (&'a) -> &'a T
     T& expect(const char* msg) {
         if (!ptr) {
-            throw std::runtime_error(msg);
+            rusty::panic::do_panic(msg);
         }
         return *ptr;
     }
 
     T& expect(const char* msg) const {
         if (!ptr) {
-            throw std::runtime_error(msg);
+            rusty::panic::do_panic(msg);
         }
         return *ptr;
     }
@@ -1023,7 +1024,7 @@ public:
         }
         if constexpr (std::is_void_v<std::invoke_result_t<F>>) {
             std::forward<F>(f)();
-            throw std::runtime_error("Called unwrap_or_else on None");
+            rusty::panic::do_panic("Called unwrap_or_else on None");
         } else {
             return static_cast<T&>(std::forward<F>(f)());
         }
@@ -1037,7 +1038,7 @@ public:
         }
         if constexpr (std::is_void_v<std::invoke_result_t<F>>) {
             std::forward<F>(f)();
-            throw std::runtime_error("Called unwrap_or_else on None");
+            rusty::panic::do_panic("Called unwrap_or_else on None");
         } else {
             return static_cast<T&>(std::forward<F>(f)());
         }
@@ -1344,7 +1345,7 @@ public:
     // @lifetime: (&'a) -> &'a const T
     const T& unwrap() const {
         if (!ptr) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return *ptr;
     }
@@ -1356,7 +1357,7 @@ public:
     // @lifetime: (&'a) -> &'a const T
     const T& unwrap_unchecked() const {
         if (!ptr) {
-            throw std::runtime_error("Called unwrap on None");
+            rusty::panic::do_panic("Called unwrap on None");
         }
         return *ptr;
     }
@@ -1365,7 +1366,7 @@ public:
     // @lifetime: (&'a) -> &'a const T
     const T& expect(const char* msg) const {
         if (!ptr) {
-            throw std::runtime_error(msg);
+            rusty::panic::do_panic(msg);
         }
         return *ptr;
     }
@@ -1387,7 +1388,7 @@ public:
         }
         if constexpr (std::is_void_v<std::invoke_result_t<F>>) {
             std::forward<F>(f)();
-            throw std::runtime_error("Called unwrap_or_else on None");
+            rusty::panic::do_panic("Called unwrap_or_else on None");
         } else {
             return static_cast<const T&>(std::forward<F>(f)());
         }

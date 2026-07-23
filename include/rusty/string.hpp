@@ -1,6 +1,7 @@
 #ifndef RUSTY_STRING_HPP
 #define RUSTY_STRING_HPP
 
+#include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
@@ -116,7 +117,7 @@ private:
         
         char* new_data = static_cast<char*>(std::malloc(actual_cap));
         if (!new_data) {
-            throw std::bad_alloc();
+            rusty::panic::do_panic("allocation failed");
         }
         
         if (data_) {
@@ -499,7 +500,7 @@ public:
     // Rust parity: String::insert_str(idx, s) — byte-index insertion.
     void insert_str(size_t idx, std::string_view s) {
         if (idx > len_) {
-            throw std::out_of_range("insert_str index out of bounds");
+            rusty::panic::do_panic("insert_str index out of bounds");
         }
         grow(len_ + s.size() + 1);
         std::memmove(data_ + idx + s.size(), data_ + idx, len_ - idx);
@@ -547,7 +548,7 @@ public:
     // call sites that operate on ASCII punctuation.
     char remove(size_t idx) {
         if (idx >= len_) {
-            throw std::out_of_range("remove index out of bounds");
+            rusty::panic::do_panic("remove index out of bounds");
         }
         char ch = data_[idx];
         if (idx + 1 < len_) {
@@ -594,7 +595,7 @@ public:
     void insert(size_t idx, const char* str) {
         if (!str) return;
         if (idx > len_) {
-            throw std::out_of_range("insert index out of bounds");
+            rusty::panic::do_panic("insert index out of bounds");
         }
         
         size_t str_len = std::strlen(str);
@@ -616,7 +617,7 @@ public:
     // Remove range [start, end)
     void drain(size_t start, size_t end) {
         if (start > end || end > len_) {
-            throw std::out_of_range("drain range out of bounds");
+            rusty::panic::do_panic("drain range out of bounds");
         }
         
         size_t remove_len = end - start;
@@ -811,7 +812,7 @@ public:
     // @lifetime: (&'a) -> &'a
     const char& operator[](size_t idx) const {
         if (idx >= len_) {
-            throw std::out_of_range("index out of bounds");
+            rusty::panic::do_panic("index out of bounds");
         }
         return data_[idx];
     }
@@ -819,7 +820,7 @@ public:
     // @lifetime: (&'a mut) -> &'a mut
     char& operator[](size_t idx) {
         if (idx >= len_) {
-            throw std::out_of_range("index out of bounds");
+            rusty::panic::do_panic("index out of bounds");
         }
         return data_[idx];
     }
@@ -828,7 +829,7 @@ public:
     // @lifetime: (&'a) -> &'a
     std::string_view slice(size_t start, size_t end) const {
         if (start > end || end > len_) {
-            throw std::out_of_range("slice range out of bounds");
+            rusty::panic::do_panic("slice range out of bounds");
         }
         return std::string_view(data_ + start, end - start);
     }
@@ -930,7 +931,7 @@ public:
 
         // Guard size computation before allocation/copy.
         if (count > (std::numeric_limits<size_t>::max() - 1) / len_) {
-            throw std::length_error("String::repeat overflow");
+            rusty::panic::do_panic("String::repeat overflow");
         }
 
         const size_t total_len = len_ * count;
@@ -1198,7 +1199,7 @@ public:
     // @lifetime: (&'a) -> &'a
     const char& operator[](size_t idx) const {
         if (idx >= len_) {
-            throw std::out_of_range("index out of bounds");
+            rusty::panic::do_panic("index out of bounds");
         }
         return data_[idx];
     }
@@ -1247,12 +1248,12 @@ inline bool is_ascii_digit(uint8_t byte) {
 // same boundary check for borrowed UTF-8 string views.
 inline std::tuple<std::string_view, std::string_view> split_at(std::string_view sv, size_t mid) {
     if (mid > sv.size()) {
-        throw std::out_of_range("split_at index out of bounds");
+        rusty::panic::do_panic("split_at index out of bounds");
     }
     if (mid < sv.size()) {
         const auto byte = static_cast<unsigned char>(sv[mid]);
         if ((byte & 0xC0u) == 0x80u) {
-            throw std::out_of_range("split_at index is not a UTF-8 character boundary");
+            rusty::panic::do_panic("split_at index is not a UTF-8 character boundary");
         }
     }
     return std::make_tuple(sv.substr(0, mid), sv.substr(mid));

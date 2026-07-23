@@ -129,7 +129,7 @@ void test_string_repeat() {
     bool overflow_threw = false;
     try {
         (void)seed.repeat(std::numeric_limits<size_t>::max());
-    } catch (const std::length_error&) {
+    } catch (const std::runtime_error&) {   // repeat-overflow now panics via rusty::panic::do_panic
         overflow_threw = true;
     }
     assert(overflow_threw);
