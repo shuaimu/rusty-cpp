@@ -25,7 +25,6 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
-#include <sstream>
 #include <span>
 #include <type_traits>
 #include <tuple>
