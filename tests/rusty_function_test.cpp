@@ -11,6 +11,13 @@
 #include "../include/rusty/function.hpp"
 #include "../include/rusty/box.hpp"
 #include "../include/rusty/arc.hpp"
+// Regression guard for the swap-niebloid collision (8434a0bb): pulling in
+// rusty.hpp puts the `rusty::swap` function object in scope alongside
+// rusty::Function. If a hidden-friend `swap` is ever re-added to Function,
+// instantiating it below fails to compile ("redefinition of 'swap' as
+// different kind of symbol"). CI missed the original regression because no
+// compiled TU both saw the CPO and used Function.
+#include "../include/rusty/rusty.hpp"
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -362,8 +369,10 @@ void test_swap() {
     assert(fn1() == 2);
     assert(fn2() == 1);
 
-    // Also test non-member swap
-    swap(fn1, fn2);
+    // Also test non-member swap via the rusty::swap niebloid (the supported
+    // idiom; bare ADL `swap(fn1, fn2)` intentionally no longer participates —
+    // see the no-friend note in function.hpp).
+    rusty::swap(fn1, fn2);
 
     assert(fn1() == 1);
     assert(fn2() == 2);

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>   // std::abort (empty-call path); not pulled transitively under `import std`
 #include <memory>
 #include <new>
 #include <type_traits>
@@ -280,19 +281,20 @@ public:
         return vtable_ == nullptr;
     }
 
-    // @safe - Swap with another Function
+    // @safe - Swap with another Function.
+    //
+    // Deliberately NO hidden-friend `swap`: `rusty::swap` is a niebloid
+    // (a function OBJECT / variable, rusty.hpp), so a friend `swap` here
+    // would inject a namespace-scope `rusty::swap` FUNCTION that collides
+    // with that variable — "redefinition of 'swap' as different kind of
+    // symbol" on *any* Function instantiation while rusty.hpp is in scope
+    // (regression 8434a0bb). Function is movable, so the niebloid's
+    // `using std::swap; swap(a, b)` move-based fallback is correct; no
+    // ADL customization is needed. Do not re-add a friend swap.
     void swap(Function& other) noexcept {
         Function tmp(std::move(other));
         other = std::move(*this);
         *this = std::move(tmp);
-    }
-
-    // Hidden friend, NOT a namespace-scope function: rusty::swap is a
-    // function object (see rusty.hpp), so a free rusty::swap overload
-    // would redeclare that name as a different kind of symbol. ADL
-    // still finds this friend for Function arguments.
-    friend void swap(Function& lhs, Function& rhs) noexcept {
-        lhs.swap(rhs);
     }
 
     // @safe - Check if using inline storage (SBO)
@@ -429,19 +431,20 @@ public:
         return vtable_ == nullptr;
     }
 
-    // @safe - Swap with another Function
+    // @safe - Swap with another Function.
+    //
+    // Deliberately NO hidden-friend `swap`: `rusty::swap` is a niebloid
+    // (a function OBJECT / variable, rusty.hpp), so a friend `swap` here
+    // would inject a namespace-scope `rusty::swap` FUNCTION that collides
+    // with that variable — "redefinition of 'swap' as different kind of
+    // symbol" on *any* Function instantiation while rusty.hpp is in scope
+    // (regression 8434a0bb). Function is movable, so the niebloid's
+    // `using std::swap; swap(a, b)` move-based fallback is correct; no
+    // ADL customization is needed. Do not re-add a friend swap.
     void swap(Function& other) noexcept {
         Function tmp(std::move(other));
         other = std::move(*this);
         *this = std::move(tmp);
-    }
-
-    // Hidden friend, NOT a namespace-scope function: rusty::swap is a
-    // function object (see rusty.hpp), so a free rusty::swap overload
-    // would redeclare that name as a different kind of symbol. ADL
-    // still finds this friend for Function arguments.
-    friend void swap(Function& lhs, Function& rhs) noexcept {
-        lhs.swap(rhs);
     }
 
     // @safe - Check if using inline storage (SBO)

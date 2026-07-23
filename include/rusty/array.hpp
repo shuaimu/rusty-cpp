@@ -12,6 +12,7 @@
 #include <optional>
 #include <cstring>
 #include <limits>
+#include <cmath>        // std::fmin / std::fmax (rusty::min/max, ~L734/745); not pulled by <algorithm>
 #include <span>
 #include <stdexcept>
 #include <tuple>

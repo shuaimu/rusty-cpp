@@ -30,6 +30,7 @@
 #include <utility>
 #include <iterator>
 #include "rusty/result.hpp"
+#include "rusty/box.hpp"    // rusty::Box (DynWrite downcast, ~line 806); not otherwise reachable
 
 namespace rusty {
 namespace io {

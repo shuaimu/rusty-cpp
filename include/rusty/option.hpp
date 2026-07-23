@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <iterator>
 #include <type_traits>
+#include <tuple>        // std::tuple / std::make_tuple (zip); not pulled by <optional> under `import std`
+#include <string_view>  // std::string_view (as_deref/str views); ditto
 
 // Option<T> - Represents an optional value
 // Equivalent to Rust's Option<T>
