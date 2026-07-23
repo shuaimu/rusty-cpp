@@ -28,8 +28,10 @@
 /// "don't know" case.
 
 #include <array>
+#include <span>       // std::span (despan_const, ~L115); not pulled by <array> under libc++
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>    // std::abort (~L132); not pulled transitively under libc++
 #include <memory>
 #include <type_traits>
 #include <utility>

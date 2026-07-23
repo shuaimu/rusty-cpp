@@ -14,6 +14,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <rusty/option.hpp>  // rusty::Option / rusty::None (NonZero::new_, ~L49); cycle-free
 
 namespace rusty::num {
 
