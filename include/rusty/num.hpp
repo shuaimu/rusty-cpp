@@ -2,9 +2,12 @@
 #define RUSTY_NUM_HPP
 
 #include <bit>
+#include <compare>   // std::strong_ordering etc. for NonZero::operator<=> (~L73); relies otherwise on transitive leak
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
+#include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <cmath>
 #include <limits>
 #include <span>

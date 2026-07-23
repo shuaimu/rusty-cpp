@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 
 namespace rusty {
 

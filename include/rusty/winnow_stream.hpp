@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <iterator>
 #include <span>
 #include <string_view>

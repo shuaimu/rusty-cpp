@@ -2,6 +2,7 @@
 #define RUSTY_RESULT_HPP
 
 #include <utility>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <stdexcept>
 #include <new>
 #include <type_traits>

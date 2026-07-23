@@ -3,6 +3,7 @@
 
 #include <concepts>
 #include <cstddef>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <format>
 #include <string>
 #include <string_view>

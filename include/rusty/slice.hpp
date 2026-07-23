@@ -4,6 +4,7 @@
 #include <array>
 #include <algorithm>
 #include <cstddef>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <functional>
 #include <iterator>
 #include <limits>

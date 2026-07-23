@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <utility>
 #include "option.hpp"  // For Option<T&> and SomeRef()
 

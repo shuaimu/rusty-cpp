@@ -5,6 +5,8 @@
 #include <vector>
 #include <cstddef>
 #include <cstdint>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
+#include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <algorithm>
 #include <iterator>
 #include <type_traits>

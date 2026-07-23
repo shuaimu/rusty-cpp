@@ -16,6 +16,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
+#include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <cstring>
 #include <string>
 #include <string_view>

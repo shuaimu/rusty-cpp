@@ -6,6 +6,8 @@
 #include <charconv>
 #include <concepts>
 #include <cstddef>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
+#include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <cmath>
 #include <limits>
 #include <span>

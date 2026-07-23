@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <chrono>
 #include <utility>
 #include <atomic>
