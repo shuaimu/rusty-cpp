@@ -3666,6 +3666,31 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module btree_port.btree.btree_internal;
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(as_leaf_dying)
+RUSTY_METHOD_DISPATCH(as_leaf_mut)
+RUSTY_METHOD_DISPATCH(ascend)
+RUSTY_METHOD_DISPATCH(awaken)
+RUSTY_METHOD_DISPATCH(cast_to_leaf_unchecked)
+RUSTY_METHOD_DISPATCH(correct_childrens_parent_links)
+RUSTY_METHOD_DISPATCH(deallocate)
+RUSTY_METHOD_DISPATCH(deallocate_and_ascend)
+RUSTY_METHOD_DISPATCH(dormant)
+RUSTY_METHOD_DISPATCH(edge_area_mut)
+RUSTY_METHOD_DISPATCH(force)
+RUSTY_METHOD_DISPATCH(forget_type)
+RUSTY_METHOD_DISPATCH(into_key_val_mut_at)
+RUSTY_METHOD_DISPATCH(into_leaf)
+RUSTY_METHOD_DISPATCH(into_leaf_mut)
+RUSTY_METHOD_DISPATCH(key_area_mut)
+RUSTY_METHOD_DISPATCH(len_mut)
+RUSTY_METHOD_DISPATCH(next)
+RUSTY_METHOD_DISPATCH(peekable)
+RUSTY_METHOD_DISPATCH(reborrow)
+RUSTY_METHOD_DISPATCH(reborrow_mut)
+RUSTY_METHOD_DISPATCH(val_area_mut)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace btree_port::btree::btree_internal {
 // Cluster A completion: __TemplateArgs primary template (specializations at file end)
 template<typename T> struct __TemplateArgs;
@@ -3907,7 +3932,7 @@ struct DedupSortedIter {
     decltype(std::declval<I>().peekable()) iter;
 
     static DedupSortedIter<K, V, I> new_(I iter) {
-        return DedupSortedIter<K, V, I>{.iter = rusty::deref_call(iter, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).peekable()) { return std::forward<decltype(__recv)>(__recv).peekable(); })};
+        return DedupSortedIter<K, V, I>{.iter = rusty::deref_call(iter, rusty::detail::__mdisp_peekable{})};
     }
     rusty::Option<std::tuple<K, V>> next() {
         while (true) {
@@ -3985,7 +4010,7 @@ struct MergeIterInner {
                     if (rusty::detail::deref_if_pointer(_mv0).index() == 0) {
                         auto&& next = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0);
                         a_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);
-                        b_next = rusty::deref_call(this->b, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
+                        b_next = rusty::deref_call(this->b, rusty::detail::__mdisp_next{});
                         _m_matched = true;
                     }
                 }
@@ -3996,15 +4021,15 @@ struct MergeIterInner {
                     if (rusty::detail::deref_if_pointer(_mv1).index() == 1) {
                         auto&& next = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0);
                         b_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);
-                        a_next = rusty::deref_call(this->a, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
+                        a_next = rusty::deref_call(this->a, rusty::detail::__mdisp_next{});
                         _m_matched = true;
                     }
                 }
             }
             if (!_m_matched) {
                 if (_m.is_none()) {
-                    a_next = rusty::deref_call(this->a, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
-                    b_next = rusty::deref_call(this->b, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
+                    a_next = rusty::deref_call(this->a, rusty::detail::__mdisp_next{});
+                    b_next = rusty::deref_call(this->b, rusty::detail::__mdisp_next{});
                     _m_matched = true;
                 }
             }
@@ -4459,7 +4484,7 @@ struct NodeRef {
         auto ret = this->ascend().ok();
         // @unsafe
         {
-            rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate(node.cast(), (rusty::detail::deref_if_pointer_like(height) > 0 ? Layout::new_<InternalNode<K, V>>() : Layout::new_<LeafNode<K, V>>()))) { return std::forward<decltype(__recv)>(__recv).deallocate(node.cast(), (rusty::detail::deref_if_pointer_like(height) > 0 ? Layout::new_<InternalNode<K, V>>() : Layout::new_<LeafNode<K, V>>())); });
+            rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, node.cast(), (rusty::detail::deref_if_pointer_like(height) > 0 ? Layout::new_<InternalNode<K, V>>() : Layout::new_<LeafNode<K, V>>()));
         }
         return std::move(ret);
     }
@@ -4601,7 +4626,7 @@ struct NodeRef {
         this->clear_parent_link();
         // @unsafe
         {
-            rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate(top.cast(), Layout::new_<InternalNode<K, V>>())) { return std::forward<decltype(__recv)>(__recv).deallocate(top.cast(), Layout::new_<InternalNode<K, V>>()); });
+            rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, top.cast(), Layout::new_<InternalNode<K, V>>());
         }
     }
     NodeRef<marker::Mut, K, V, Type> borrow_mut() {
@@ -5451,16 +5476,16 @@ struct Handle {
         return rusty::cmp::eq(node, &other.node) && (rusty::detail::deref_if_pointer_like(idx) == rusty::detail::deref_if_pointer_like(other.idx_field));
     }
     Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> reborrow() const {
-        return Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).reborrow()) { return std::forward<decltype(__recv)>(__recv).reborrow(); }), this->idx_field, rusty::PhantomData<Type>{});
+        return Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_reborrow{}), this->idx_field, rusty::PhantomData<Type>{});
     }
     Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> reborrow_mut() {
-        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).reborrow_mut()) { return std::forward<decltype(__recv)>(__recv).reborrow_mut(); }), this->idx_field, rusty::PhantomData<Type>{});
+        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_reborrow_mut{}), this->idx_field, rusty::PhantomData<Type>{});
     }
     Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> dormant() const {
-        return Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).dormant()) { return std::forward<decltype(__recv)>(__recv).dormant(); }), this->idx_field, rusty::PhantomData<Type>{});
+        return Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_dormant{}), this->idx_field, rusty::PhantomData<Type>{});
     }
     Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> awaken() {
-        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).awaken()) { return std::forward<decltype(__recv)>(__recv).awaken(); }), std::move(this->idx_field), rusty::PhantomData<Type>{});
+        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_awaken{}), std::move(this->idx_field), rusty::PhantomData<Type>{});
     }
     static Handle<Node, Type> new_edge(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> node, size_t idx) {
         assert((rusty::detail::deref_if_pointer_like(idx) <= rusty::len(node)));
@@ -5485,9 +5510,9 @@ struct Handle {
         const auto new_len = rusty::len(this->node) + 1;
         // @unsafe
         {
-            slice_insert(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range_to(new_len))) { return std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range_to(new_len)); }), std::move(this->idx_field), std::move(key));
-            slice_insert(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range_to(new_len))) { return std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range_to(new_len)); }), std::move(this->idx_field), std::move(val));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).len_mut()) { return std::forward<decltype(__recv)>(__recv).len_mut(); })) = static_cast<uint16_t>(new_len);
+            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(new_len)), std::move(this->idx_field), std::move(key));
+            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(new_len)), std::move(this->idx_field), std::move(val));
+            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(new_len);
             return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), std::move(this->idx_field));
         }
     }
@@ -5518,11 +5543,11 @@ struct Handle {
         const auto new_len = rusty::len(this->node) + 1;
         // @unsafe
         {
-            slice_insert(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range_to(new_len))) { return std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range_to(new_len)); }), this->idx_field, std::move(key));
-            slice_insert(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range_to(new_len))) { return std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range_to(new_len)); }), this->idx_field, std::move(val));
-            slice_insert(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(new_len) + 1))) { return std::forward<decltype(__recv)>(__recv).edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(new_len) + 1)); }), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1), std::move(edge.node));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).len_mut()) { return std::forward<decltype(__recv)>(__recv).len_mut(); })) = static_cast<uint16_t>(new_len);
-            rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, rusty::detail::deref_if_pointer_like(new_len) + 1))) { return std::forward<decltype(__recv)>(__recv).correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, rusty::detail::deref_if_pointer_like(new_len) + 1)); });
+            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(new_len)), this->idx_field, std::move(key));
+            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(new_len)), this->idx_field, std::move(val));
+            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_edge_area_mut{}, rusty::range_to(rusty::detail::deref_if_pointer_like(new_len) + 1)), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1), std::move(edge.node));
+            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(new_len);
+            rusty::deref_call(this->node, rusty::detail::__mdisp_correct_childrens_parent_links{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, rusty::detail::deref_if_pointer_like(new_len) + 1));
         }
     }
     template<typename A>
@@ -5611,7 +5636,7 @@ struct Handle {
         // pipeline (which holds a `const auto kv = ...` from Cluster B)
         // call into_kv() without a const-mismatch.
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf()) { return std::forward<decltype(__recv)>(__recv).into_leaf(); });
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf{});
         auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.keys, this->idx_field).assume_init_ref();
         auto& v_self_ref_tmp = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.vals, this->idx_field).assume_init_ref();
         auto& v = v_self_ref_tmp;
@@ -5620,12 +5645,12 @@ struct Handle {
     typename __TemplateArgs<Node>::arg_1& key_mut() {
         // @unsafe
         {
-            return rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(this->idx_field)) { return std::forward<decltype(__recv)>(__recv).key_area_mut(this->idx_field); }).assume_init_mut();
+            return rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_mut();
         }
     }
     typename __TemplateArgs<Node>::arg_2& into_val_mut() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf_mut()) { return std::forward<decltype(__recv)>(__recv).into_leaf_mut(); });
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf_mut{});
         // @unsafe
         {
             return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
@@ -5633,7 +5658,7 @@ struct Handle {
     }
     std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_mut() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf_mut()) { return std::forward<decltype(__recv)>(__recv).into_leaf_mut(); });
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf_mut{});
         auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_mut();
         auto& v_self_ref_tmp = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
         auto& v = v_self_ref_tmp;
@@ -5642,14 +5667,14 @@ struct Handle {
     std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() {
         // @unsafe
         {
-            return rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_key_val_mut_at(std::move(this->idx_field))) { return std::forward<decltype(__recv)>(__recv).into_key_val_mut_at(std::move(this->idx_field)); });
+            return rusty::deref_call(this->node, rusty::detail::__mdisp_into_key_val_mut_at{}, std::move(this->idx_field));
         }
     }
     std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> kv_mut() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
         // @unsafe
         {
-            auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).as_leaf_mut()) { return std::forward<decltype(__recv)>(__recv).as_leaf_mut(); });
+            auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_mut{});
             auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, this->idx_field).assume_init_mut();
             auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, this->idx_field).assume_init_mut();
             return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{key, val};
@@ -5663,7 +5688,7 @@ struct Handle {
     }
     std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> into_key_val() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).as_leaf_dying()) { return std::forward<decltype(__recv)>(__recv).as_leaf_dying(); });
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_dying{});
         // @unsafe
         {
             auto key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_read();
@@ -5703,7 +5728,7 @@ struct Handle {
     };
     void drop_key_val() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).as_leaf_dying()) { return std::forward<decltype(__recv)>(__recv).as_leaf_dying(); });
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_dying{});
         // @unsafe
         {
             auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field));
@@ -5720,11 +5745,11 @@ struct Handle {
         new_node_shadow1->len = static_cast<uint16_t>(new_len);
         // @unsafe
         {
-            auto k = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(this->idx_field)) { return std::forward<decltype(__recv)>(__recv).key_area_mut(this->idx_field); }).assume_init_read();
-            auto v = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(this->idx_field)) { return std::forward<decltype(__recv)>(__recv).val_area_mut(this->idx_field); }).assume_init_read();
-            move_to_slice(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))) { return std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len)); }), rusty::slice_to(new_node_shadow1->keys, new_len));
-            move_to_slice(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))) { return std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len)); }), rusty::slice_to(new_node_shadow1->vals, new_len));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).len_mut()) { return std::forward<decltype(__recv)>(__recv).len_mut(); })) = static_cast<uint16_t>(this->idx_field);
+            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_read();
+            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init_read();
+            move_to_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len)), rusty::slice_to(new_node_shadow1->keys, new_len));
+            move_to_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len)), rusty::slice_to(new_node_shadow1->vals, new_len));
+            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(this->idx_field);
             return std::make_tuple(std::move(k), std::move(v));
         }
     }
@@ -5787,9 +5812,9 @@ struct Handle {
         const auto old_len = rusty::len(this->node);
         // @unsafe
         {
-            auto k = slice_remove(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range_to(old_len))) { return std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range_to(old_len)); }), std::move(this->idx_field));
-            auto v = slice_remove(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range_to(old_len))) { return std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range_to(old_len)); }), std::move(this->idx_field));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).len_mut()) { return std::forward<decltype(__recv)>(__recv).len_mut(); })) = static_cast<uint16_t>((rusty::detail::deref_if_pointer_like(old_len) - 1));
+            auto k = slice_remove(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(old_len)), std::move(this->idx_field));
+            auto v = slice_remove(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(old_len)), std::move(this->idx_field));
+            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>((rusty::detail::deref_if_pointer_like(old_len) - 1));
             return std::make_tuple(std::make_tuple(std::move(k), std::move(v)), this->left_edge());
         }
     }
@@ -5801,7 +5826,7 @@ struct Handle {
     Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type> forget_node_type() {
         // @unsafe
         {
-            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>::new_edge(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }), std::move(this->idx_field));
+            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>::new_edge(rusty::deref_call(this->node, rusty::detail::__mdisp_forget_type{}), std::move(this->idx_field));
         }
     }
     // btree_port port: Handle::force hand-ported by post_transpile_patch.py
@@ -5855,7 +5880,7 @@ struct Handle {
         };
     }
     Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type> cast_to_leaf_unchecked() {
-        auto node_self_ref_tmp = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).cast_to_leaf_unchecked()) { return std::forward<decltype(__recv)>(__recv).cast_to_leaf_unchecked(); });
+        auto node_self_ref_tmp = rusty::deref_call(this->node, rusty::detail::__mdisp_cast_to_leaf_unchecked{});
         auto node = std::move(node_self_ref_tmp);
         return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{});
     }
@@ -5877,13 +5902,13 @@ struct Handle {
             assert((rusty::len(right_node) == 0));
             assert((rusty::detail::deref_if_pointer_like(left_node.height_field) == rusty::detail::deref_if_pointer_like(right_node.height_field)));
             if (rusty::detail::deref_if_pointer_like(new_right_len) > 0) {
-                rusty::detail::deref_if_pointer_like(rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).len_mut()) { return std::forward<decltype(__recv)>(__recv).len_mut(); })) = static_cast<uint16_t>(new_left_len);
+                rusty::detail::deref_if_pointer_like(rusty::deref_call(left_node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(new_left_len);
                 rusty::detail::deref_if_pointer_like(right_node.len_mut()) = static_cast<uint16_t>(new_right_len);
-                move_to_slice(rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range(new_left_len, old_left_len))) { return std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range(new_left_len, old_left_len)); }), right_node.key_area_mut(rusty::range_to(new_right_len)));
-                move_to_slice(rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range(new_left_len, old_left_len))) { return std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range(new_left_len, old_left_len)); }), right_node.val_area_mut(rusty::range_to(new_right_len)));
+                move_to_slice(rusty::deref_call(left_node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(new_left_len, old_left_len)), right_node.key_area_mut(rusty::range_to(new_right_len)));
+                move_to_slice(rusty::deref_call(left_node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(new_left_len, old_left_len)), right_node.val_area_mut(rusty::range_to(new_right_len)));
                 // Tuple match: (left_node.force(), right_node.force()).
                 // Both ForceResult<...Leaf, ...Internal> variants. Index 0 = Leaf, 1 = Internal.
-                auto __lf = rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).force()) { return std::forward<decltype(__recv)>(__recv).force(); });
+                auto __lf = rusty::deref_call(left_node, rusty::detail::__mdisp_force{});
                 auto __rf = right_node.force();
                 if (__lf.index() == 1 && __rf.index() == 1) {
                     auto& __left  = std::get<1>(__lf)._0;   // NodeRef<Mut, K, V, Internal>
@@ -6017,7 +6042,7 @@ struct Handle {
     void deallocating_end(A alloc) {
         auto edge = this->forget_node_type();
         while (true) {
-            auto&& _whilelet = rusty::deref_call(edge.into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate_and_ascend(rusty::clone(alloc))) { return std::forward<decltype(__recv)>(__recv).deallocate_and_ascend(rusty::clone(alloc)); });
+            auto&& _whilelet = rusty::deref_call(edge.into_node(), rusty::detail::__mdisp_deallocate_and_ascend{}, rusty::clone(alloc));
             if (!(_whilelet.is_some())) { break; }
             auto parent_edge = _whilelet.unwrap();
             edge = parent_edge.forget_node_type();
@@ -6154,7 +6179,7 @@ return next_internal_edge.descend().last_leaf_edge(); }(); } rusty::intrinsics::
         const auto len = rusty::len(pos.reborrow().into_node());
         if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             auto idx = pos.idx();
-            auto&& new_pos = [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { auto&& _m = rusty::deref_call(pos.into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)>&>(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+            auto&& new_pos = [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { auto&& _m = rusty::deref_call(pos.into_node(), rusty::detail::__mdisp_forget_type{}).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)>&>(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
 if (left_parent_kv.can_merge()) {
     return left_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Right<size_t>{std::move(idx)}}, rusty::clone(alloc));
 } else {
@@ -6168,7 +6193,7 @@ if (right_parent_kv.can_merge()) {
     return right_parent_kv.steal_right(std::move(idx));
 } }(); } } if (_m.is_err()) { auto&& _mv2 = _m.unwrap_err(); auto&& pos = rusty::detail::deref_if_pointer(_mv2); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((pos))>, marker::Edge>, F>::new_edge(std::move(pos), std::move(idx)); } return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { rusty::intrinsics::unreachable(); }(); }();
             pos = new_pos.cast_to_leaf_unchecked();
-            if (auto&& _iflet_scrutinee = rusty::deref_call(pos.reborrow_mut().into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).ascend()) { return std::forward<decltype(__recv)>(__recv).ascend(); }); _iflet_scrutinee.is_ok()) {
+            if (auto&& _iflet_scrutinee = rusty::deref_call(pos.reborrow_mut().into_node(), rusty::detail::__mdisp_ascend{}); _iflet_scrutinee.is_ok()) {
                 decltype(auto) parent = _iflet_scrutinee.unwrap();
                 if (!parent.into_node().forget_type().fix_node_and_affected_ancestors(std::move(alloc))) {
                     handle_emptied_internal_root();
@@ -6245,9 +6270,9 @@ struct BalancingContext {
                 auto right_node_shadow1 = right_node.cast_to_internal_unchecked();
                 move_to_slice(right_node_shadow1.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(right_len) + 1)), left_node_shadow1.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1)));
                 left_node_shadow1.correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1));
-                rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate(right_node_shadow1.node.cast(), Layout::new_<InternalNode<K, V>>())) { return std::forward<decltype(__recv)>(__recv).deallocate(right_node_shadow1.node.cast(), Layout::new_<InternalNode<K, V>>()); });
+                rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, right_node_shadow1.node.cast(), Layout::new_<InternalNode<K, V>>());
             } else {
-                rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate(right_node.node.cast(), Layout::new_<LeafNode<K, V>>())) { return std::forward<decltype(__recv)>(__recv).deallocate(right_node.node.cast(), Layout::new_<LeafNode<K, V>>()); });
+                rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, right_node.node.cast(), Layout::new_<LeafNode<K, V>>());
             }
         }
         return result(std::move(parent_node), std::move(left_node));

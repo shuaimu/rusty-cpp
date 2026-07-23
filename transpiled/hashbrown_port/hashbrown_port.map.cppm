@@ -3674,6 +3674,11 @@ import hashbrown_port.raw;
 import hashbrown_port.hasher;
 
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(clone_from)
+RUSTY_METHOD_DISPATCH(hash_one)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace test_map {}
 namespace test_map_with_mmap_allocations {}
 
@@ -4681,7 +4686,7 @@ struct HashMap {
     }
     void clone_from(const HashMap<K, V, S, A>& source) {
         this->table.clone_from(source.table);
-        rusty::deref_call(this->hash_builder, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).clone_from(source.hash_builder)) { return std::forward<decltype(__recv)>(__recv).clone_from(source.hash_builder); });
+        rusty::deref_call(this->hash_builder, rusty::detail::__mdisp_clone_from{}, source.hash_builder);
     }
     static HashMap<K, V, S, A> new_() {
         return HashMap<K, V, S, A>::default_();
@@ -5319,7 +5324,7 @@ const auto& equivalent(const Q& k) {
 
 export template<typename Q, typename S>
 uint64_t make_hash(const S& hash_builder, const Q& val) {
-    return rusty::deref_call(hash_builder, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).hash_one(val)) { return std::forward<decltype(__recv)>(__recv).hash_one(val); });
+    return rusty::deref_call(hash_builder, rusty::detail::__mdisp_hash_one{}, val);
 }
 
 void assert_covariance() {

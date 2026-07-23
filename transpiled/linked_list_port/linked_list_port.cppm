@@ -3662,6 +3662,10 @@ export module linked_list_port;
 import vec_port.vec;  // patcher-injected for ::Vec
 import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(write_length_prefix)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace rusty::port::collections::linked_list {
 
 template<typename T>
@@ -4289,7 +4293,7 @@ return iter.tail;
     }
     template<typename H>
     void hash(H& state) const {
-        rusty::deref_call(state, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this)))) { return std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this))); });
+        rusty::deref_call(state, rusty::detail::__mdisp_write_length_prefix{}, rusty::len((*this)));
         for (auto&& elt : rusty::for_in(rusty::iter((*this)))) {
             rusty::hash::hash(elt, state);
         }

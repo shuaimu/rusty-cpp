@@ -3646,6 +3646,11 @@ import vec_port.vec;         // ::Vec (rewritten from ::Vec)
 import vec_port.vec.into_iter; // ::IntoIter
 import binary_heap_port;     // BinaryHeap (via using-decl below)
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(next)
+RUSTY_METHOD_DISPATCH(size_hint)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace binary_heap_tests_port {
 
 // patcher-injected: bring BinaryHeap into scope for bare uses
@@ -3745,11 +3750,11 @@ template<typename I>
 void check_exact_size_iterator(size_t len, I it) {
     I it_shadow1 = std::move(it);
     for (auto&& i : rusty::for_in(rusty::range(0, rusty::len(it_shadow1)))) {
-        auto [lower, upper] = rusty::detail::deref_if_pointer_like(rusty::deref_call(it_shadow1, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).size_hint()) { return std::forward<decltype(__recv)>(__recv).size_hint(); }));
+        auto [lower, upper] = rusty::detail::deref_if_pointer_like(rusty::deref_call(it_shadow1, rusty::detail::__mdisp_size_hint{}));
         assert((std::make_optional(lower) == upper));
         assert((lower == len - i));
         assert((it . len () == len - i));
-        rusty::deref_call(it_shadow1, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
+        rusty::deref_call(it_shadow1, rusty::detail::__mdisp_next{});
     }
     assert((it . len () == 0));
     assert((rusty::is_empty(it_shadow1)));
@@ -3765,12 +3770,12 @@ template<typename I>
 void check_trusted_len(size_t len, I it) {
     I it_shadow1 = std::move(it);
     for (auto&& i : rusty::for_in(rusty::range(0, len))) {
-        auto [lower, upper] = rusty::detail::deref_if_pointer_like(rusty::deref_call(it_shadow1, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).size_hint()) { return std::forward<decltype(__recv)>(__recv).size_hint(); }));
+        auto [lower, upper] = rusty::detail::deref_if_pointer_like(rusty::deref_call(it_shadow1, rusty::detail::__mdisp_size_hint{}));
         if (upper.is_some()) {
             assert((std::make_optional(lower) == upper));
             assert((lower == len - i));
         }
-        rusty::deref_call(it_shadow1, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
+        rusty::deref_call(it_shadow1, rusty::detail::__mdisp_next{});
     }
 }
 

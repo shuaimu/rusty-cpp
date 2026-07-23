@@ -3666,6 +3666,10 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module borrow_port;
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(clone_from)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace borrow_port {
 
 export template<typename B>
@@ -3879,7 +3883,7 @@ namespace rusty_ext {
     export template<typename T>
     void clone_into(const T& self_, T& target) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        rusty::deref_call(target, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).clone_from(self_)) { return std::forward<decltype(__recv)>(__recv).clone_from(self_); });
+        rusty::deref_call(target, rusty::detail::__mdisp_clone_from{}, self_);
     }
 
 }

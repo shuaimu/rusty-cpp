@@ -3683,6 +3683,10 @@ import hashbrown_port.util;
 
 
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(deallocate)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace rusty::port::collections::hashbrown {
 // deep-ns: guard-rename completed
 
@@ -5463,7 +5467,7 @@ void RawTableInner::free_buckets(const A& alloc, auto table_layout) {
     // @unsafe
     {
         auto [ptr_shadow1, layout] = rusty::detail::deref_if_pointer_like(this->allocation_info(std::move(table_layout)));
-        rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate(std::move(ptr_shadow1), std::move(layout))) { return std::forward<decltype(__recv)>(__recv).deallocate(std::move(ptr_shadow1), std::move(layout)); });
+        rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, std::move(ptr_shadow1), std::move(layout));
     }
 }
 

@@ -3661,6 +3661,13 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module core_slice_port;
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(end_bound)
+RUSTY_METHOD_DISPATCH(finish)
+RUSTY_METHOD_DISPATCH(size_hint)
+RUSTY_METHOD_DISPATCH(start_bound)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace private_get_disjoint_mut_index {}
 namespace private_slice_index {}
 
@@ -4893,13 +4900,13 @@ struct GenericSplitN {
     rusty::Option<T> next() {
         return [&]() -> rusty::Option<T> { auto&& _m = this->count; if (_m == 0) return rusty::Option<T>{rusty::None};
 if (_m == 1) return [&]() -> rusty::Option<T> { this->count -= 1;
-return rusty::deref_call(this->iter, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).finish()) { return std::forward<decltype(__recv)>(__recv).finish(); }); }();
+return rusty::deref_call(this->iter, rusty::detail::__mdisp_finish{}); }();
 return [&]() -> rusty::Option<T> { this->count -= 1;
 return this->iter.next(); }(); }();
     }
     template<typename T>
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        auto&& [lower, upper_opt] = rusty::detail::deref_if_pointer_like(rusty::deref_call(this->iter, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).size_hint()) { return std::forward<decltype(__recv)>(__recv).size_hint(); }));
+        auto&& [lower, upper_opt] = rusty::detail::deref_if_pointer_like(rusty::deref_call(this->iter, rusty::detail::__mdisp_size_hint{}));
         return std::make_tuple(rusty::cmp::min(this->count, std::move(lower)), rusty::Option<size_t>(upper_opt.map_or(this->count, [&](auto&& upper) { return rusty::cmp::min(this->count, std::move(upper)); })));
     }
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
@@ -7855,7 +7862,7 @@ std::span<T> index_mut(std::span<T> slice) const {
 export template<typename R>
 rusty::range<size_t> range(R range, rusty::range_to<size_t> bounds) {
     auto len = std::move(rusty::field_end(bounds));
-    return into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }).copied(), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); }).copied()));
+    return into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, rusty::detail::__mdisp_start_bound{}).copied(), rusty::deref_call(range, rusty::detail::__mdisp_end_bound{}).copied()));
 }
 
 /// Performs bounds checking of a range without panicking.
@@ -7889,7 +7896,7 @@ rusty::range<size_t> range(R range, rusty::range_to<size_t> bounds) {
 export template<typename R>
 rusty::Option<rusty::range<size_t>> try_range(R range, rusty::range_to<size_t> bounds) {
     auto len = std::move(rusty::field_end(bounds));
-    return try_into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }).copied(), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); }).copied()));
+    return try_into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, rusty::detail::__mdisp_start_bound{}).copied(), rusty::deref_call(range, rusty::detail::__mdisp_end_bound{}).copied()));
 }
 
 #if 0  // patcher: stub into_range_unchecked — match-arm bindings dropped; lambdas reference undeclared start/end

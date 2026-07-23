@@ -3686,6 +3686,12 @@ import btree_port.btree.btree_internal;
 // are now inlined below, ahead of the BTreeMap struct.
 import btree_port.btree.btree_internal;
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(end_bound)
+RUSTY_METHOD_DISPATCH(start_bound)
+RUSTY_METHOD_DISPATCH(write_length_prefix)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 namespace btree_port::btree::btree_internal {}
 namespace btree_port::btree::map {
 namespace btree_internal = ::btree_port::btree::btree_internal;
@@ -4499,7 +4505,7 @@ struct ExtractIfInner {
             auto kv = _whilelet.unwrap();
             auto [k, v] = rusty::detail::deref_if_pointer_like(kv.kv_mut());
             {
-                auto&& _m = rusty::deref_call(this->range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); });
+                auto&& _m = rusty::deref_call(this->range, rusty::detail::__mdisp_end_bound{});
                 std::visit(overloaded {
                     [&](const std::variant_alternative_t<1, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
                         const auto& end = _v._0;
@@ -5931,7 +5937,7 @@ return std::move(v);
             // (Rust DormantMutRef::new borrows &mut root); the emitted
             // std::move made the argument an unbindable rvalue.
             auto [root_shadow1, dormant_root] = rusty::detail::deref_if_pointer_like(__btree_port_make_dormant(root));
-            auto first = root_shadow1.borrow_mut().lower_bound(btree_internal::SearchBound<K>::from_range(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); })));
+            auto first = root_shadow1.borrow_mut().lower_bound(btree_internal::SearchBound<K>::from_range(rusty::deref_call(range, rusty::detail::__mdisp_start_bound{})));
             return std::make_tuple(ExtractIfInner<K, V, R>{.length = this->length, .dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(std::move(dormant_root)), .cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>(std::move(first)), .range = std::move(range)}, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         } else {
             return std::make_tuple(ExtractIfInner<K, V, R>{.length = this->length, .dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>{rusty::None}, .cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>{rusty::None}, .range = std::move(range)}, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
@@ -6003,7 +6009,7 @@ return std::make_tuple(std::move(key), std::move(value));
     }
     template<typename H>
     void hash(H& state) const {
-        rusty::deref_call(state, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this)))) { return std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this))); });
+        rusty::deref_call(state, rusty::detail::__mdisp_write_length_prefix{}, rusty::len((*this)));
         for (auto&& elt : rusty::for_in(rusty::iter((*this)))) {
             rusty::hash::hash(elt, state);
         }

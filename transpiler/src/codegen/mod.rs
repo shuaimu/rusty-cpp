@@ -44896,7 +44896,13 @@ fn inject_deref_dispatch_functors(output: &str) -> String {
                 .map(|nl| pos + nl + 1)
                 .unwrap_or(output.len());
             let trimmed = output[pos..line_end].trim_start();
-            if trimmed.starts_with("import ") || trimmed.is_empty() {
+            // Skip imports, blank lines, and comment lines — a namespace decl
+            // injected before a trailing import is ill-formed ("imports must
+            // immediately follow the module declaration").
+            if trimmed.starts_with("import ")
+                || trimmed.starts_with("//")
+                || trimmed.is_empty()
+            {
                 pos = line_end;
                 if line_end >= output.len() {
                     break;
