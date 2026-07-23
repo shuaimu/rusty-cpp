@@ -27,7 +27,6 @@
 // - Explicit nullability (Option)
 // - Explicit error handling (Result)
 
-// #include "rusty/std_minimal.hpp"  // Not needed with standard library
 #include "rusty/box.hpp"
 #include "rusty/arc.hpp"  // Unified Arc with polymorphism (like std::shared_ptr)
 // rusty::Rc retired — `rusty::Rc<T, A>` is the transpiled rustc Rc
