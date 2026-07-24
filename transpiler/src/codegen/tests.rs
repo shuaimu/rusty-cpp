@@ -11767,7 +11767,9 @@ fn test_assert_macro_with_match_body_lowers_to_iife() {
 #[test]
 fn test_panic_macro() {
     let out = transpile_str(r#"fn f() { panic!("error"); }"#);
-    assert!(out.contains("std::abort()"));
+    // panic! routes through the switchable primitive (throws by default,
+    // aborts under RUSTY_PANIC_ABORT) rather than an unconditional std::abort().
+    assert!(out.contains("rusty::panic::do_panic"), "{out}");
 }
 
 #[test]
@@ -37791,8 +37793,8 @@ fn test_diverging_tail_branch_emitted_as_statement_not_returned() {
     let out2 = transpile_str(r#"pub fn g(x: i32) -> i32 { if x > 0 { x } else { panic!("no") } }"#);
     assert!(!out2.contains("/* panic!"), "panic! left as a comment:\n{out2}");
     assert!(
-        out2.contains("std::abort()"),
-        "panic! not lowered to abort():\n{out2}"
+        out2.contains("rusty::panic::do_panic"),
+        "panic! not lowered to a diverging call:\n{out2}"
     );
 }
 

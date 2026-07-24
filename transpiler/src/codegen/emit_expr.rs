@@ -2393,12 +2393,17 @@ impl CodeGen {
                 }
             }
             "panic" => {
+                // Route through the unified panic primitive so panic! honors
+                // RUSTY_PANIC_ABORT like every other panic: default = throw
+                // (unwind, catchable); -DRUSTY_PANIC_ABORT = print + abort.
+                // rusty::panic::do_panic is always reachable (rusty.hpp is
+                // always included). Was: std::println(stderr,...) + std::abort()
+                // which aborted even in unwind mode.
                 if tokens.is_empty() {
-                    self.writeln("std::abort();");
+                    self.writeln("rusty::panic::do_panic(\"explicit panic\");");
                 } else {
                     let args = self.convert_format_args(&tokens);
-                    self.writeln(&format!("std::println(stderr, {});", args));
-                    self.writeln("std::abort();");
+                    self.writeln(&format!("rusty::panic::do_panic(std::format({}));", args));
                 }
             }
             "todo" => {
@@ -2610,17 +2615,15 @@ impl CodeGen {
             }
             "panic" => {
                 // Rust's `panic!()` in expression position (an if/match branch,
-                // a `?`-fallback, etc.). It diverges; emit `std::abort()` (a
-                // [[noreturn]] void expression), printing the message first via an
-                // IIFE when one is given. Mirrors `unreachable!()` below.
+                // a `?`-fallback, etc.). Diverges through the unified panic
+                // primitive (a [[noreturn]] void call, like the std::abort() it
+                // replaces) so it honors RUSTY_PANIC_ABORT: default throws
+                // (unwind), -DRUSTY_PANIC_ABORT prints + aborts.
                 if tokens.is_empty() {
-                    "std::abort()".to_string()
+                    "rusty::panic::do_panic(\"explicit panic\")".to_string()
                 } else {
                     let args = self.convert_format_args(&tokens);
-                    format!(
-                        "([&]() {{ std::println(stderr, {}); std::abort(); }}())",
-                        args
-                    )
+                    format!("rusty::panic::do_panic(std::format({}))", args)
                 }
             }
             "todo" => "throw std::logic_error(\"not yet implemented\")".to_string(),
