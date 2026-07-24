@@ -5577,7 +5577,12 @@ struct Handle {
             return handle.awaken();
         }
         auto _let_match_result = [&]() {
-            auto&& split = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_match_m0).unwrap());
+            // `.unwrap()` yields a prvalue SplitResult; `auto&&` bound a
+            // reference to that temporary (the deref_if_pointer wrapper hides
+            // the prvalue from init_is_rvalue), which dangled by the time
+            // make_tuple/forget_node_type ran (ASan stack-use-after-scope on
+            // the split path, e.g. non-trivial keys). Own it by value.
+            auto split = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_match_m0).unwrap());
             auto&& handle = rusty::detail::deref_if_pointer(_let_match_m1);
             return std::make_tuple(split.forget_node_type(), handle);
         }();

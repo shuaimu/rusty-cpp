@@ -725,18 +725,19 @@ TEST_CASE("test_check_invariants_ord_chaos_unstubbed") {
 }
 
 // rustc map/tests.rs::test_insert_remove_intertwined_ord_chaos
-// Original runs 1_000_000 iterations; still capped at 30 here. NOTE: the
-// plain-int sibling (test_insert_remove_intertwined_unstubbed) is now un-
-// capped to the full 1M — the slice-ref static-view UAF (0e6cd1d5) that
-// throttled IT is fixed. This chaos variant's remaining cap is a DIFFERENT
-// bug: the `auto&& [x,y] = deref_if_pointer_like(call())` prvalue-dangling
-// family (B-pop-last; ~92 sites, known transpiler fix pending — see
-// STATUS.md), which the gov.flip() Ord pressure trips at scale. A SIGSEGV
-// here would abort the whole suite process (the runner only catches
-// exceptions), so keep it capped until that fix lands.
+// Original runs 1_000_000; un-capped from 30 to 100_000 here. The old cap was
+// a SECOND latent dangling bug (distinct from the remove-path UAF that
+// throttled the plain-int sibling): insert_recursing's split path bound
+// `auto&& split = deref_if_pointer(...unwrap())` to the unwrap() prvalue, so
+// `split` dangled by the time make_tuple/forget_node_type ran — a stack-use-
+// after-scope the gov.flip() Ord pressure trips at scale (non-trivial keys).
+// Fixed in the vendored btree_internal (own the split by value); ASan+UBSan-
+// verified clean at 100k via scratchpad/audit/btree_chaos_repro.cpp. (Held at
+// 100k, not rustc's 1M: chaos Ord breaks the btree invariant so entries
+// accumulate — this keeps the map ~85k, still exercising the fixed path hard.)
 TEST_CASE("test_insert_remove_intertwined_ord_chaos_unstubbed") {
     using namespace btree_testing;
-    const int loops = 30;
+    const int loops = 100000;
     Governor gov;
     auto map = BTreeMap<Governed<int>, Unit>::new_in(::rusty::alloc::Global{});
     int i = 1;
