@@ -1757,7 +1757,7 @@ fn test_string_repeat_supports_zero_and_overflow_guard() {
             bool overflow_guard_triggered = false;
             try {
                 (void)seed.repeat(std::numeric_limits<size_t>::max());
-            } catch (const std::length_error&) {
+            } catch (const std::runtime_error&) {   // repeat-overflow now panics via rusty::panic::do_panic
                 overflow_guard_triggered = true;
             }
             return overflow_guard_triggered ? 0 : 4;

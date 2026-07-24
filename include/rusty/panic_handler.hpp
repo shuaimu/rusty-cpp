@@ -11,23 +11,40 @@
 // an include cycle -- panic.hpp includes result.hpp, so the primitive cannot
 // live there. panic.hpp builds catch_unwind / begin_panic on top of this.
 //
-// Stage 2 adds a RUSTY_PANIC_ABORT compile-time switch here (Rust's
-// `panic = "abort"`): when defined, do_panic() will abort() instead of
-// throwing. Keeping every panic funnelled through this one function is what
-// makes that a single-line switch.
+// The panic strategy is chosen at compile time via RUSTY_PANIC_ABORT, exactly
+// like Rust's `panic = "unwind"` (default) vs `panic = "abort"`. Because every
+// panic funnels through do_panic(), this is a single-point switch:
+//
+//   default            -> throw (unwind the stack, run destructors, catchable
+//                          via rusty::panic::catch_unwind)
+//   -DRUSTY_PANIC_ABORT -> print to stderr + std::abort() (no unwinding, no
+//                          cleanup, not catchable) — smaller binaries, mirrors
+//                          Rust's `-C panic=abort`.
 
 #include <cstdlib>
+#include <string_view>
+#ifdef RUSTY_PANIC_ABORT
+#include <cstdio>
+#else
 #include <stdexcept>
 #include <string>
-#include <string_view>
+#endif
 
 namespace rusty {
 namespace panic {
 
-// Rust's `panic = "unwind"` (the default): unwind the stack via a throw so
-// destructors run and catch_unwind can intercept.
 [[noreturn]] inline void do_panic(std::string_view message) {
+#ifdef RUSTY_PANIC_ABORT
+    // Rust's `panic = "abort"`: no unwinding, no cleanup — report and die.
+    std::fputs("thread panicked: ", stderr);
+    std::fwrite(message.data(), 1, message.size(), stderr);
+    std::fputc('\n', stderr);
+    std::abort();
+#else
+    // Rust's `panic = "unwind"` (default): unwind the stack via a throw so
+    // destructors run and catch_unwind can intercept.
     throw std::runtime_error(std::string(message));
+#endif
 }
 
 [[noreturn]] inline void do_panic() {
