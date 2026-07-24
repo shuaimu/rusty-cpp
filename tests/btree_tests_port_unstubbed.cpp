@@ -725,10 +725,15 @@ TEST_CASE("test_check_invariants_ord_chaos_unstubbed") {
 }
 
 // rustc map/tests.rs::test_insert_remove_intertwined_ord_chaos
-// Original runs 1_000_000 iterations; we cap at 30 to stay deterministic
-// (>30 starts intermittently tripping a latent dangling-binding site in
-// the chaos-Ord remove path — same bug family as B-pop-last, hits at
-// scale + flip pressure but eludes the bulk patch).
+// Original runs 1_000_000 iterations; still capped at 30 here. NOTE: the
+// plain-int sibling (test_insert_remove_intertwined_unstubbed) is now un-
+// capped to the full 1M — the slice-ref static-view UAF (0e6cd1d5) that
+// throttled IT is fixed. This chaos variant's remaining cap is a DIFFERENT
+// bug: the `auto&& [x,y] = deref_if_pointer_like(call())` prvalue-dangling
+// family (B-pop-last; ~92 sites, known transpiler fix pending — see
+// STATUS.md), which the gov.flip() Ord pressure trips at scale. A SIGSEGV
+// here would abort the whole suite process (the runner only catches
+// exceptions), so keep it capped until that fix lands.
 TEST_CASE("test_insert_remove_intertwined_ord_chaos_unstubbed") {
     using namespace btree_testing;
     const int loops = 30;
@@ -1568,13 +1573,16 @@ TEST_CASE("test_iter_descending_to_same_node_twice_unstubbed") {
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_insert_remove_intertwined (plain-int variant)
-// Original runs 1_000_000 iterations; we cap at 30 to match the chaos
-// variant's pragmatic limit (same dangling-binding family concern). The
-// non-chaotic Ord here is strict so we don't expect the same flakiness,
-// but stay conservative.
+// Restored to rustc's full 1_000_000 iterations. The previous cap of 30 was
+// forced by "a latent dangling-binding site in the remove path" — that was the
+// codegen slice-ref static-view-caching use-after-free (commit 0e6cd1d5); with
+// it fixed, 1M intertwined insert/remove churn runs clean (ASan+UBSan-verified
+// via scratchpad/audit/btree_intertwined_repro.cpp). The insert/remove are
+// plain statements (not inside assert()), so this exercises the churn for real
+// regardless of the suite-wide NDEBUG issue (see STATUS.md).
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("test_insert_remove_intertwined_unstubbed") {
-    const int loops = 30;
+    const int loops = 1000000;
     auto map = make_map<int, int>();
     int i = 1;
     constexpr int offset = 165;
@@ -1583,6 +1591,11 @@ TEST_CASE("test_insert_remove_intertwined_unstubbed") {
         map.insert(i, i);
         map.remove(0xFF - i);
     }
+    // Observe the (deterministic) final size: this both prevents -O3 from
+    // eliding the churn and checks the outcome for real. offset 165 is coprime
+    // with 256 so i cycles all keys; after 1_000_000 loops the steady state
+    // holds exactly 128 keys (ASan-repro-verified).
+    if (map.len() != 128) throw std::runtime_error("intertwined: len != 128");
     check(map);
 }
 
