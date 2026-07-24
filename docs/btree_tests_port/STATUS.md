@@ -123,9 +123,51 @@ patcher rule.
 
 **Tests blocked:** any test using `.into_keys()`, `.into_values()`.
 
+## ⚠️ CRITICAL: assert() is a NO-OP in this suite — most bodies pass VACUOUSLY
+
+**Discovered 2026-07-23.** `btree_tests_port_module_test` is compiled with
+`NDEBUG` **defined**, so every `assert(...)` in `btree_tests_port_unstubbed.cpp`
+expands to `((void)0)`. That means not just the value checks but any
+*side-effecting map operation written inside an assert* (`assert(map.insert(k,v).is_none())`,
+`assert(map.remove(k).is_some())`, …) is **compiled out entirely**. The bodies
+run almost no code; "passing" is largely vacuous. Crash-based detection still
+worked (SIGSEGV/UB is opt-independent — that's how B-pop-last was caught), but
+value correctness was never checked.
+
+**Root cause (CMakeLists.txt):** the module_test source-wiring block sets
+`-UNDEBUG` (line ~699, "so asserts run"), but the *stub-port `foreach`* a few
+blocks later re-applies release flags `-O3 -DNDEBUG -march=native` for
+`btree_tests_port` — and that trailing `-DNDEBUG` **wins** (last flag on the
+command line). Net NDEBUG tokens: `-DNDEBUG … -UNDEBUG … -DNDEBUG`. Re-adding
+`-UNDEBUG` afterward does NOT help (CMake dedupes it, so it stays at the earlier
+position). The real fix is to link `btree_tests_port` *without* `-DNDEBUG`
+(pull it out of the stub `foreach` into its own block, or drop `-DNDEBUG` there) —
+NDEBUG is not a module-BMI-compat flag, only `-std`/`-march` are.
+
+**What enabling live asserts surfaces (the un-stub-for-real work list):**
+- **~14 compile errors: `Iter::count()` missing** on both `btree::map::Iter`
+  and `btree::set::Iter` (`m.iter().count()`). btree_port's iterators don't
+  expose Rust's `Iterator::count`. Add it to the port (or adapt the tests).
+- **3 compile errors: `rusty::clone` not declared** — needs an `#include`
+  (`assert(map == rusty::clone(map))`).
+- 2 more (`begin`/`end`) inside clone/count instantiations.
+- Then: **runtime triage** — with value checks finally live, expect real
+  failures across the ~50 un-stubbed bodies that were passing vacuously.
+
+**Done so far:** `test_basic_large_unstubbed` now opts out of the no-op assert
+via a local throw-based `BT_REQUIRE` (the runner catches the throw as FAILED,
+same path as a rusty panic), so it is a REAL test. Restored from 12 keys to
+MIN_INSERTS_HEIGHT_2 (144) — a height-2 tree exercising the full node
+merge/rebalance path that the slice-ref-static UAF (commit 0e6cd1d5) used to
+crash. Passes. (btree_port verified correct to rustc's 10000 in isolation via
+the standalone repro.)
+
 ## Roadmap
 
 After the consolidated bug-fix pass, remaining work:
+0. **Make asserts live** (see the CRITICAL section above) — this is the real
+   "un-stub for real" gate. Fix the CMake flag order, then the ~17 compile
+   errors, then triage the runtime failures the live value-checks reveal.
 1. **B-pop-last** — needs runtime debugging (gdb). When fixed, the full
    `test_pop_first_last` and many other entry-removal tests un-stub.
 2. **B-into-iter** — transpiler-side fix to ManuallyDrop auto-deref;

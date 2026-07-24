@@ -19,6 +19,7 @@ import btree_port.btree.set;
 
 #include <cassert>
 #include <cstdio>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <rusty/alloc.hpp>
@@ -617,40 +618,97 @@ TEST_CASE("test_basic_small_unstubbed") {
     check(map);
 }
 
-// rustc map/tests.rs::test_basic_large (reduced)
-// Original uses 10000; we use MIN_INSERTS_HEIGHT_1 to exercise the
-// height-1 tree path. MIN_INSERTS_HEIGHT_2 trips a segfault in the
-// drain-via-remove path — likely another latent dangling-binding site.
+// rustc map/tests.rs::test_basic_large — un-reduced translation.
+//
+// This test was throttled to MIN_INSERTS_HEIGHT_1 (12 keys) while the
+// multi-node drain-via-remove path segfaulted; that was the codegen slice-ref
+// static-view-caching use-after-free (commit 0e6cd1d5). With it fixed we run
+// at MIN_INSERTS_HEIGHT_2 (144) — a height-2 tree whose remove passes drive
+// the full node merge / rebalance machinery, exactly the path that used to
+// crash. (btree_port is verified correct all the way to rustc's 10000 in
+// isolation — see the standalone btree_port_module_test / repro.)
+//
+// NOTE: this TU is compiled with NDEBUG defined (the btree_tests_port stub
+// link block re-applies release flags), so plain assert() is a no-op here and
+// every value check — plus any side-effecting map op written inside an
+// assert() — silently compiles out. The suite-wide consequence (most
+// hand-translated bodies pass VACUOUSLY) is tracked in docs/btree_tests_port/
+// STATUS.md. This one test opts out via BT_REQUIRE, which always evaluates and
+// throws on failure (the runner reports it as FAILED, the same path a rusty
+// panic takes), so it is a REAL exercise of the merge path.
+#define BT_REQUIRE(cond) \
+    do { if (!(cond)) throw std::runtime_error("test_basic_large: " #cond); } while (0)
 TEST_CASE("test_basic_large_unstubbed") {
     auto map = make_map<int, int>();
-    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
-    assert(map.len() == 0);
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_2);  // 144, even
+    BT_REQUIRE(map.len() == 0);
 
     for (int i = 0; i < size; ++i) {
-        assert(map.insert(i, 10 * i).is_none());
-        assert(map.len() == static_cast<size_t>(i + 1));
+        BT_REQUIRE(map.insert(i, 10 * i).is_none());
+        BT_REQUIRE(map.len() == static_cast<size_t>(i + 1));
+    }
+
+    {
+        auto first = map.first_key_value();
+        BT_REQUIRE(first.is_some());
+        auto t = std::move(first).unwrap();
+        BT_REQUIRE(std::get<0>(t) == 0);
+        BT_REQUIRE(std::get<1>(t) == 0);
+    }
+    {
+        auto last = map.last_key_value();
+        BT_REQUIRE(last.is_some());
+        auto t = std::move(last).unwrap();
+        BT_REQUIRE(std::get<0>(t) == size - 1);
+        BT_REQUIRE(std::get<1>(t) == 10 * (size - 1));
+    }
+
+    for (int i = 0; i < size; ++i) {
+        auto v = map.get(i);
+        BT_REQUIRE(v.is_some());
+        BT_REQUIRE(v.unwrap() == i * 10);
+    }
+    for (int i = size; i < size * 2; ++i) {
+        BT_REQUIRE(map.get(i).is_none());
+    }
+
+    for (int i = 0; i < size; ++i) {
+        auto old = map.insert(i, 100 * i);
+        BT_REQUIRE(old.is_some());
+        BT_REQUIRE(std::move(old).unwrap() == 10 * i);
+        BT_REQUIRE(map.len() == static_cast<size_t>(size));
     }
     for (int i = 0; i < size; ++i) {
         auto v = map.get(i);
-        assert(v.is_some());
-        assert(v.unwrap() == 10 * i);
+        BT_REQUIRE(v.is_some());
+        BT_REQUIRE(v.unwrap() == i * 100);
     }
-    for (int i = size; i < size * 2; ++i) {
-        assert(map.get(i).is_none());
+
+    // Remove the even keys (forces node merges / rebalancing), verify the
+    // odds survive, then drain the odds to empty — the once-crashing path.
+    for (int i = 0; i < size / 2; ++i) {
+        auto removed = map.remove(2 * i);
+        BT_REQUIRE(removed.is_some());
+        BT_REQUIRE(std::move(removed).unwrap() == i * 200);
+        BT_REQUIRE(map.len() == static_cast<size_t>(size - i - 1));
     }
-    for (int i = 0; i < size; ++i) {
-        auto old = map.insert(i, 100 * i);
-        assert(old.is_some());
-        assert(std::move(old).unwrap() == 10 * i);
-        assert(map.len() == static_cast<size_t>(size));
+    for (int i = 0; i < size / 2; ++i) {
+        BT_REQUIRE(map.get(2 * i).is_none());
+        auto v = map.get(2 * i + 1);
+        BT_REQUIRE(v.is_some());
+        BT_REQUIRE(v.unwrap() == i * 200 + 100);
     }
-    for (int i = 0; i < size; ++i) {
-        auto removed = map.remove(static_cast<int>(i));
-        assert(removed.is_some());
-        assert(std::move(removed).unwrap() == 100 * i);
+    for (int i = 0; i < size / 2; ++i) {
+        BT_REQUIRE(map.remove(2 * i).is_none());
+        auto removed = map.remove(2 * i + 1);
+        BT_REQUIRE(removed.is_some());
+        BT_REQUIRE(std::move(removed).unwrap() == i * 200 + 100);
+        BT_REQUIRE(map.len() == static_cast<size_t>(size / 2 - i - 1));
     }
-    assert(map.is_empty());
+    BT_REQUIRE(map.is_empty());
+    check(map);
 }
+#undef BT_REQUIRE
 
 // rustc map/tests.rs::test_check_invariants_ord_chaos
 // Same shape as test_check_ord_chaos but we route through our no-op
