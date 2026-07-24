@@ -4407,6 +4407,7 @@ impl CodeGen {
             self.writeln("#include <string_view>");
             self.writeln("#include <charconv>");
             self.writeln("#include <cstdlib>");
+            self.writeln("#include <cstdio>");  // std::fprintf for the RUSTY_PANIC_ABORT branch of panicking::do_panic_
             self.writeln("#include <bit>");
             self.writeln("#include <cwctype>");
             self.writeln("#include <stdexcept>");
@@ -47307,29 +47308,39 @@ std::string to_debug_string_pretty(const T& value) {
 }
 namespace panicking {
 enum class AssertKind { Eq, Ne };
+// Single panic point; RUSTY_PANIC_ABORT flips the whole generated unit between
+// Rust's panic=unwind (throw) and panic=abort, mirroring rusty::panic::do_panic.
+[[noreturn]] inline void do_panic_(std::string_view message) {
+#ifdef RUSTY_PANIC_ABORT
+    std::fprintf(stderr, "thread panicked: %.*s\n", (int)message.size(), message.data());
+    std::abort();
+#else
+    throw std::runtime_error(std::string(message));
+#endif
+}
 template<typename... Args>
 [[noreturn]] inline void assert_failed(Args&&...) {
-    throw std::runtime_error("assertion failed");
+    do_panic_("assertion failed");
 }
 [[noreturn]] inline void panic() {
-    throw std::runtime_error("panic");
+    do_panic_("panic");
 }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic(Message&& message, Args&&...) {
     if constexpr (std::is_convertible_v<Message, std::string_view>) {
-        throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+        do_panic_(std::string_view(std::forward<Message>(message)));
     } else {
-        throw std::runtime_error("panic");
+        do_panic_("panic");
     }
 }
 [[noreturn]] inline void panic_fmt() {
-    throw std::runtime_error("panic");
+    do_panic_("panic");
 }
 [[noreturn]] inline void panic_fmt(std::string_view message) {
-    throw std::runtime_error(std::string(message));
+    do_panic_(message);
 }
 [[noreturn]] inline void panic_fmt(const std::string& message) {
-    throw std::runtime_error(message);
+    do_panic_(message);
 }
 }
 namespace intrinsics {
@@ -52265,28 +52276,36 @@ decltype(auto) deref_mut(T& value) {\n\
 }\n\
 namespace panicking {\n\
 enum class AssertKind { Eq, Ne };\n\
+[[noreturn]] inline void do_panic_(std::string_view message) {\n\
+#ifdef RUSTY_PANIC_ABORT\n\
+    std::fprintf(stderr, \"thread panicked: %.*s\\n\", (int)message.size(), message.data());\n\
+    std::abort();\n\
+#else\n\
+    throw std::runtime_error(std::string(message));\n\
+#endif\n\
+}\n\
 template<typename... Args>\n\
-[[noreturn]] inline void assert_failed(Args&&...) { throw std::runtime_error(\"assertion failed\"); }\n\
-[[noreturn]] inline void panic() { throw std::runtime_error(\"panic\"); }\n\
+[[noreturn]] inline void assert_failed(Args&&...) { do_panic_(\"assertion failed\"); }\n\
+[[noreturn]] inline void panic() { do_panic_(\"panic\"); }\n\
 template<typename Message, typename... Args>\n\
 [[noreturn]] inline void panic(Message&& message, Args&&...) {\n\
     if constexpr (std::is_convertible_v<Message, std::string_view>) {\n\
-        throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));\n\
+        do_panic_(std::string_view(std::forward<Message>(message)));\n\
     } else {\n\
-        throw std::runtime_error(\"panic\");\n\
+        do_panic_(\"panic\");\n\
     }\n\
 }\n\
-[[noreturn]] inline void panic_fmt() { throw std::runtime_error(\"panic\"); }\n\
+[[noreturn]] inline void panic_fmt() { do_panic_(\"panic\"); }\n\
 template<typename Message, typename... Args>\n\
 [[noreturn]] inline void panic_fmt(Message&& message, Args&&...) {\n\
     if constexpr (std::is_convertible_v<Message, std::string_view>) {\n\
-        throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));\n\
+        do_panic_(std::string_view(std::forward<Message>(message)));\n\
     } else {\n\
-        throw std::runtime_error(\"panic\");\n\
+        do_panic_(\"panic\");\n\
     }\n\
 }\n\
 template<typename... Args>\n\
-[[noreturn]] inline void unreachable_display(Args&&...) { throw std::runtime_error(\"unreachable\"); }\n\
+[[noreturn]] inline void unreachable_display(Args&&...) { do_panic_(\"unreachable\"); }\n\
 }\n\
 namespace intrinsics {\n\
 struct Discriminant {\n\
