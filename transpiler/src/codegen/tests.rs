@@ -21409,6 +21409,41 @@ fn test_cluster_a_completion_template_args_recovery_in_absorbed_method() {
 }
 
 #[test]
+fn test_structural_decomp_never_rewrites_the_method_template_param_list() {
+    // Regression: the dependent-path substitution (`Generic` ->
+    // `typename __TemplateArgs<Host>::arg_N`) is a post-emit TEXT pass. It ran
+    // over the whole method, including the method's own `template<...>`
+    // parameter LIST, where those names are DECLARATIONS. That emitted
+    //     template<typename typename __TemplateArgs<Node>::arg_0, ...>
+    // — a dependent qualified name used as a template parameter name, which is
+    // ill-formed and made every affected method uncallable (51 occurrences when
+    // regenerating btree_port; the older transpiler emitted none). Substitution
+    // must apply to the body/signature only; parameters whose uses were all
+    // rewritten are then unused and must be dropped from the list.
+    let src = r#"
+        struct Marker;
+        struct NodeRef<B, K, V, T> { b: B, k: K, v: V, t: T }
+        struct Handle<Node, Type> { node: Node, ty: Type }
+        impl<B, K, V, T> Handle<NodeRef<B, K, V, T>, Marker> {
+            fn rebuild(node: NodeRef<B, K, V, T>) -> Handle<NodeRef<B, K, V, T>, Marker> {
+                Handle { node, ty: Marker }
+            }
+        }
+    "#;
+    let out = transpile_str(src);
+    assert!(
+        !out.contains("typename typename"),
+        "malformed doubled `typename` in emitted template header:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("template<typename __TemplateArgs"),
+        "dependent path used as a template PARAMETER name:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_impl_block_generics_structurally_consumed_by_host_drop_method_template_params() {
     // Cluster A: when an impl block has generics that decompose into
     // structural components of the host type (e.g. `impl<B, K, V, T>

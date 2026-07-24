@@ -1808,8 +1808,22 @@ impl CodeGen {
                     self.emit_impl_item(impl_item);
                     self.current_emit_structural_decomp = prev_emit_decomp;
                     let method_text = self.output[start..].to_string();
-                    let mut substituted =
-                        apply_structural_decomp_text_substitution(&method_text, &decomp);
+                    // Both substitution passes below rewrite a concrete type
+                    // name into the host's dependent path
+                    // (`typename __TemplateArgs<Host>::arg_N`). Neither may
+                    // touch the method's own `template<...>` parameter LIST:
+                    // a name there is a DECLARATION, and rewriting it emitted
+                    // `template<typename typename __TemplateArgs<Node>::arg_0, ..>`
+                    // — a dependent qualified name used as a parameter name,
+                    // which is ill-formed and made every such method
+                    // uncallable. Split the header off, substitute only in the
+                    // body/signature, then drop parameters the body no longer
+                    // mentions (their uses became the host's path, so they are
+                    // unused and undeducible) — dropping the whole header when
+                    // nothing survives.
+                    let (header, body) = split_leading_template_header(&method_text);
+                    let mut new_body =
+                        apply_structural_decomp_text_substitution(body, &decomp);
                     // Cluster C nested-marker subs: when parallel impls
                     // hardcode different markers at a nested arg
                     // position (e.g. NodeRef's 4th arg = Leaf vs
@@ -1823,14 +1837,17 @@ impl CodeGen {
                             .get(&method_key)
                         {
                             for (concrete, dep_path) in nested_subs {
-                                substituted = replace_whole_word(
-                                    &substituted,
-                                    concrete,
-                                    dep_path,
-                                );
+                                new_body =
+                                    replace_whole_word(&new_body, concrete, dep_path);
                             }
                         }
                     }
+                    let substituted = match header {
+                        Some(h) => prune_unused_template_params(h, &new_body)
+                            .map(|kept| format!("{}{}", kept, new_body))
+                            .unwrap_or(new_body),
+                        None => new_body,
+                    };
                     self.output.replace_range(start.., &substituted);
                 } else {
                     self.emit_impl_item(impl_item);
@@ -7996,4 +8013,131 @@ impl CodeGen {
         }
         Some(format!("<{}>", joined))
     }
+}
+
+/// Split a leading `template<...>` header off an emitted method.
+///
+/// Returns `(Some(header_including_trailing_text_up_to_body), rest)` when the
+/// text (after leading whitespace) starts with a `template<` whose angle
+/// brackets balance; otherwise `(None, whole)`. The header keeps its original
+/// leading whitespace so re-joining preserves indentation.
+fn split_leading_template_header(text: &str) -> (Option<&str>, &str) {
+    let lead = text.len() - text.trim_start().len();
+    let rest = &text[lead..];
+    let Some(after_kw) = rest.strip_prefix("template") else {
+        return (None, text);
+    };
+    let after_kw_trimmed = after_kw.trim_start();
+    if !after_kw_trimmed.starts_with('<') {
+        return (None, text);
+    }
+    let open_off = lead + (after_kw.len() - after_kw_trimmed.len()) + "template".len();
+    let mut depth = 0usize;
+    for (i, ch) in text[open_off..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = open_off + i + ch.len_utf8();
+                    return (Some(&text[..end]), &text[end..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    (None, text)
+}
+
+/// Drop template parameters that `body` no longer mentions.
+///
+/// After the host's dependent-path substitution, a parameter whose every use
+/// was rewritten to `typename __TemplateArgs<Host>::arg_N` is unused; C++
+/// cannot deduce it, so leaving it makes the method uncallable. Returns the
+/// rebuilt header, or `None` when nothing survives (drop the header entirely).
+fn prune_unused_template_params(header: &str, body: &str) -> Option<String> {
+    let open = header.find('<')?;
+    let close = header.rfind('>')?;
+    let prefix = &header[..=open];
+    let params_src = &header[open + 1..close];
+
+    // Split on top-level commas (parameters may themselves nest `<...>`).
+    let mut params: Vec<&str> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in params_src.char_indices() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                params.push(&params_src[start..i]);
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    params.push(&params_src[start..]);
+
+    let kept: Vec<&str> = params
+        .into_iter()
+        .filter(|p| {
+            let t = p.trim();
+            if t.is_empty() {
+                return false;
+            }
+            // The declared name is the last identifier-ish token
+            // (`typename T`, `class T`, `size_t N`, `typename... Ts`).
+            let Some(name) = t
+                .rsplit(|c: char| c.is_whitespace() || c == '.')
+                .find(|s| !s.is_empty())
+            else {
+                return false;
+            };
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_')
+                || name.is_empty()
+            {
+                // Not a plain identifier — a substitution mangled this
+                // parameter (e.g. `typename __TemplateArgs<Node>::arg_0`).
+                return false;
+            }
+            contains_whole_word(body, name)
+        })
+        .collect();
+
+    if kept.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}{}>",
+        prefix,
+        kept.iter().map(|p| p.trim()).collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// Whole-word containment test (identifier boundaries).
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let at = from + rel;
+        let before_ok = at == 0 || {
+            let c = bytes[at - 1] as char;
+            !(c.is_alphanumeric() || c == '_')
+        };
+        let after = at + needle.len();
+        let after_ok = after >= bytes.len() || {
+            let c = bytes[after] as char;
+            !(c.is_alphanumeric() || c == '_')
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
 }

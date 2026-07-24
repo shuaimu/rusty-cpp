@@ -5641,22 +5641,29 @@ def fix_global_qualifiers_for_namespace_wrap(path: Path) -> None:
     src = path.read_text()
     patterns = [
         # marker:: family — all 11 marker symbols + KV/Edge enums.
-        (r"::marker::Owned\b", "marker::Owned"),
-        (r"::marker::Mut\b", "marker::Mut"),
-        (r"::marker::Immut\b", "marker::Immut"),
-        (r"::marker::Internal\b", "marker::Internal"),
-        (r"::marker::Leaf\b", "marker::Leaf"),
-        (r"::marker::LeafOrInternal\b", "marker::LeafOrInternal"),
-        (r"::marker::Dying\b", "marker::Dying"),
-        (r"::marker::DormantMut\b", "marker::DormantMut"),
-        (r"::marker::ValMut\b", "marker::ValMut"),
-        (r"::marker::KV\b", "marker::KV"),
-        (r"::marker::Edge\b", "marker::Edge"),
+        # Anchored with the same negative lookbehind the free-function
+        # strips below use: without it these also match the `::` INSIDE an
+        # already-qualified path, so the transpiler's correct
+        # `btree_internal::marker::Immut` was being mangled into
+        # `btree_internalmarker::Immut` (58 such corruptions in map.cppm
+        # alone, and they are not the patcher's own hand-port text — the
+        # current transpiler emits the qualified form itself).
+        (r"(?<![a-zA-Z0-9_])::marker::Owned\b", "marker::Owned"),
+        (r"(?<![a-zA-Z0-9_])::marker::Mut\b", "marker::Mut"),
+        (r"(?<![a-zA-Z0-9_])::marker::Immut\b", "marker::Immut"),
+        (r"(?<![a-zA-Z0-9_])::marker::Internal\b", "marker::Internal"),
+        (r"(?<![a-zA-Z0-9_])::marker::Leaf\b", "marker::Leaf"),
+        (r"(?<![a-zA-Z0-9_])::marker::LeafOrInternal\b", "marker::LeafOrInternal"),
+        (r"(?<![a-zA-Z0-9_])::marker::Dying\b", "marker::Dying"),
+        (r"(?<![a-zA-Z0-9_])::marker::DormantMut\b", "marker::DormantMut"),
+        (r"(?<![a-zA-Z0-9_])::marker::ValMut\b", "marker::ValMut"),
+        (r"(?<![a-zA-Z0-9_])::marker::KV\b", "marker::KV"),
+        (r"(?<![a-zA-Z0-9_])::marker::Edge\b", "marker::Edge"),
         # Bare types defined inside btree_internal — referenced from
         # hand-port code with `::Foo` (global) qualifier that no longer
-        # resolves under the namespace wrap.
-        (r"::LeafNode<", "LeafNode<"),
-        (r"::InternalNode<", "InternalNode<"),
+        # resolves under the namespace wrap. Same anchoring rationale.
+        (r"(?<![a-zA-Z0-9_])::LeafNode<", "LeafNode<"),
+        (r"(?<![a-zA-Z0-9_])::InternalNode<", "InternalNode<"),
         # Free functions defined inside btree_internal:
         # All bare-global `::name(` strips below are anchored with a
         # negative lookbehind so we don't mangle qualified-path tails
