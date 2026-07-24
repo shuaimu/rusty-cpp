@@ -14137,6 +14137,30 @@ fn test_nested_fn_sibling_call_uses_capture_lambda() {
 }
 
 #[test]
+fn test_nested_fn_same_named_method_call_is_not_self_recursion() {
+    // Regression: self-recursion was detected by a token-level "does this
+    // identifier appear in the body" scan, so a nested helper that CALLS a
+    // same-named METHOD (rustc's own btree tests do exactly this) was lowered
+    // as a Y-combinator. That prepended a bogus `__self` parameter, turned the
+    // call into `is_subset(is_subset, ..)`, and dropped the per-argument
+    // expected types so `&[1, 2]` no longer converted to a span.
+    let out = transpile_str(
+        "fn outer() { fn is_subset(a: &[i32], b: &[i32]) -> bool { a.is_subset(b) } \
+         let r = is_subset(&[1], &[1, 2]); }",
+    );
+    assert!(!out.contains("__self"), "spurious Y-combinator: {out}");
+    assert!(!out.contains("is_subset(is_subset"), "self-seeded call: {out}");
+    assert!(out.contains("std::span<const int32_t>"), "params lost span type: {out}");
+
+    // A genuinely self-recursive nested fn must still get the Y-combinator.
+    let rec = transpile_str(
+        "fn outer() { fn fact(n: u32) -> u32 { if n <= 1 { 1 } else { n * fact(n - 1) } } \
+         let r = fact(5); }",
+    );
+    assert!(rec.contains("__self"), "real recursion lost its Y-combinator: {rec}");
+}
+
+#[test]
 fn test_nested_fn_not_at_toplevel() {
     // Top-level functions should NOT be lambdas
     let out = transpile_str("fn top_level() {}");

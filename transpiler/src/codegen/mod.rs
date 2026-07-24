@@ -13617,6 +13617,58 @@ impl CodeGen {
         false
     }
 
+    /// Does this nested `fn`'s body actually name ITSELF (so it must be
+    /// lowered as a Y-combinator with an explicit `__self` parameter)?
+    ///
+    /// A plain token-level "does the identifier appear anywhere" check is
+    /// wrong: rustc's own tests define helpers whose name collides with a
+    /// method they call —
+    ///
+    ///     fn is_subset(a: &[i32], b: &[i32]) -> bool {
+    ///         ...
+    ///         set_a.is_subset(&set_b)   // METHOD, not recursion
+    ///     }
+    ///
+    /// Treating that as self-recursive prepends a spurious `__self`, which
+    /// both changes the call shape to `is_subset(is_subset, ..)` and loses the
+    /// per-argument expected types (so `&[1, 2]` stopped converting to a span).
+    ///
+    /// Walk the AST instead. A method name lives in `ExprMethodCall::method`
+    /// (an `Ident`, never an `Expr::Path`) and a field in `ExprField::member`,
+    /// so visiting path expressions alone naturally excludes both. A bare path
+    /// use (`let f = is_subset;`) still counts — the value form needs `__self`
+    /// seeded the same way a direct call does.
+    fn nested_fn_body_names_itself(block: &syn::Block, name: &str) -> bool {
+        use syn::visit::Visit;
+
+        struct SelfRef<'a> {
+            name: &'a str,
+            found: bool,
+        }
+        impl<'ast, 'a> Visit<'ast> for SelfRef<'a> {
+            fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+                if node.qself.is_none()
+                    && node.path.segments.len() == 1
+                    && node.path.segments[0].ident == self.name
+                {
+                    self.found = true;
+                }
+                syn::visit::visit_expr_path(self, node);
+            }
+            fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+                // A deeper nested `fn` of the same name shadows ours; its body
+                // refers to itself, not to us.
+                if node.sig.ident != self.name {
+                    syn::visit::visit_item_fn(self, node);
+                }
+            }
+        }
+
+        let mut v = SelfRef { name, found: false };
+        v.visit_block(block);
+        v.found
+    }
+
     fn nested_function_needs_sibling_capture(&self, f: &syn::ItemFn) -> bool {
         let Some(local_fns) = self.local_function_bindings.last() else {
             return false;
@@ -14065,8 +14117,9 @@ impl CodeGen {
         // type isn't known until the initializer completes. Y-combinator
         // form sidesteps the problem by passing `__self` explicitly.
         let raw_name = f.sig.ident.to_string();
-        let is_self_recursive =
-            Self::token_stream_mentions_ident(f.block.to_token_stream(), &raw_name);
+        // AST-precise: a same-named METHOD call (`set_a.is_subset(..)`) or
+        // field is not self-recursion. See nested_fn_body_names_itself.
+        let is_self_recursive = Self::nested_fn_body_names_itself(&f.block, &raw_name);
         // Register for the `name.template operator()<Args>(args)` call-site
         // rewrite only when a turbofish maps positionally onto the template
         // parameter list: every non-derived type param is a template param
