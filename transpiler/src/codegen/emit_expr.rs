@@ -2475,20 +2475,56 @@ impl CodeGen {
                     ));
                 }
             }
-            "assert_eq" | "debug_assert_eq" => {
+            "assert_eq" | "debug_assert_eq" | "assert_ne" | "debug_assert_ne" => {
+                // Both operands must go through the REAL expression emitter,
+                // exactly like `assert!` above. The old path ran each side
+                // through `convert_macro_tokens` — a textual substitution that
+                // leaves Rust-only syntax intact (`vec![..]`, `a..b`, `&x`,
+                // method chains), so e.g.
+                //   assert_eq!(range_keys(&map, (Included(a), Excluded(b))), vec![])
+                // emitted raw Rust tokens that are not valid C++. Building the
+                // comparison as one expression and lowering it also picks up the
+                // proper equality semantics for free (Rust `==` on non-primitive
+                // types routes through rusty::cmp::eq).
+                let is_ne = macro_name.ends_with("_ne");
+                let op = if is_ne { "!=" } else { "==" };
                 let parts = self.split_macro_args(&tokens);
                 if parts.len() >= 2 {
-                    let left = self.convert_macro_tokens(parts[0].trim());
-                    let right = self.convert_macro_tokens(parts[1].trim());
-                    self.writeln(&format!("assert(({} == {}));", left, right));
-                }
-            }
-            "assert_ne" | "debug_assert_ne" => {
-                let parts = self.split_macro_args(&tokens);
-                if parts.len() >= 2 {
-                    let left = self.convert_macro_tokens(parts[0].trim());
-                    let right = self.convert_macro_tokens(parts[1].trim());
-                    self.writeln(&format!("assert(({} != {}));", left, right));
+                    let (lhs, rhs) = (parts[0].trim(), parts[1].trim());
+                    let cond_src = format!("({}) {} ({})", lhs, op, rhs);
+                    let cond_cpp = if let Ok(expr) = syn::parse_str::<syn::Expr>(&cond_src) {
+                        self.emit_expr_to_string(&expr)
+                    } else {
+                        // Same conservative fallback `assert!` uses.
+                        format!(
+                            "{} {} {}",
+                            self.convert_macro_tokens(lhs),
+                            op,
+                            self.convert_macro_tokens(rhs)
+                        )
+                    };
+                    if parts.len() <= 2 {
+                        self.writeln(&format!("assert(({}));", cond_cpp));
+                    } else {
+                        // `assert_eq!(a, b, "msg")` / `(a, b, "fmt {}", x)` — the
+                        // message tail used to be dropped silently.
+                        let msg_parts: Vec<&str> =
+                            parts.iter().skip(2).map(|s| s.trim()).collect();
+                        let msg_cpp = if msg_parts.len() == 1 {
+                            if let Ok(expr) = syn::parse_str::<syn::Expr>(msg_parts[0]) {
+                                self.emit_expr_to_string(&expr)
+                            } else {
+                                self.convert_macro_tokens(msg_parts[0])
+                            }
+                        } else {
+                            let joined = msg_parts.join(", ");
+                            format!("std::format({})", self.convert_format_args(&joined))
+                        };
+                        self.writeln(&format!(
+                            "if (!({})) {{ throw std::logic_error({}); }}",
+                            cond_cpp, msg_cpp
+                        ));
+                    }
                 }
             }
             "dbg" => {

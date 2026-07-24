@@ -11693,7 +11693,42 @@ fn test_assert_macro() {
 #[test]
 fn test_assert_eq_macro() {
     let out = transpile_str("fn f() { assert_eq!(a, b); }");
-    assert!(out.contains("assert((a == b))"));
+    assert!(out.contains("assert(("), "{out}");
+    assert!(out.contains("=="), "{out}");
+    assert!(out.contains("a") && out.contains("b"), "{out}");
+}
+
+#[test]
+fn test_assert_eq_operands_go_through_the_expression_emitter() {
+    // Regression: assert_eq!/assert_ne! used to run each operand through the
+    // TEXTUAL convert_macro_tokens, which left Rust-only syntax intact and
+    // emitted invalid C++ (`vec ! []`, `(x .. y) . contains (& i)`). Both sides
+    // must be parsed and lowered as real expressions. Scope the checks to the
+    // emitted assert line — the surrounding prelude legitimately contains `..`.
+    let assert_line = |src: &str| -> String {
+        transpile_str(src)
+            .lines()
+            .find(|l| l.trim_start().starts_with("assert(("))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let eq = assert_line("fn f() { let v = vec![1]; assert_eq!(v, vec![1]); }");
+    assert!(eq.contains("rusty::Vec{"), "vec! not lowered in assert_eq: {eq}");
+    assert!(!eq.contains("vec !"), "raw Rust token-stream leaked: {eq}");
+    let rng = assert_line("fn f() { let x = 0; let y = 9; assert!((x..y).contains(&1)); }");
+    assert!(rng.contains("rusty::range("), "range not lowered: {rng}");
+    assert!(!rng.contains(".."), "unlowered Rust range leaked: {rng}");
+}
+
+#[test]
+fn test_assert_eq_macro_with_message_is_not_dropped() {
+    // Regression: the message tail of `assert_eq!(a, b, "msg")` was silently
+    // discarded (only the first two args were ever emitted).
+    let out = transpile_str(r#"fn f() { assert_eq!(a, b, "boom"); }"#);
+    assert!(out.contains("throw std::logic_error"), "{out}");
+    assert!(out.contains("boom"), "message tail dropped: {out}");
+    let fmt = transpile_str(r#"fn f() { let a = 1; let b = 2; assert_ne!(a, b, "{} vs {}", a, b); }"#);
+    assert!(fmt.contains("std::format"), "format message tail dropped: {fmt}");
 }
 
 #[test]
