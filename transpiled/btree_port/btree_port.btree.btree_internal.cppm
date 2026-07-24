@@ -6262,7 +6262,7 @@ struct BalancingContext {
             auto parent_val = slice_remove(parent_node.val_area_mut(rusty::range_to(old_parent_len)), std::move(parent_idx));
             left_node.val_area_mut(std::move(old_left_len)).write(std::move(parent_val));
             move_to_slice(right_node.val_area_mut(rusty::range_to(right_len)), left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len)));
-            slice_remove([&]() { static auto _slice_ref_tmp = parent_node.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_parent_len) + 1)); auto _span = std::span(_slice_ref_tmp); return _span; }(), rusty::detail::deref_if_pointer_like(parent_idx) + static_cast<size_t>(1));
+            slice_remove([&]() { auto _slice_ref_tmp = parent_node.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_parent_len) + 1)); auto _span = std::span(_slice_ref_tmp); return _span; }(), rusty::detail::deref_if_pointer_like(parent_idx) + static_cast<size_t>(1));
             parent_node.correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(parent_idx) + 1, old_parent_len));
             rusty::detail::deref_if_pointer_like(parent_node.len_mut()) -= 1;
             if (rusty::detail::deref_if_pointer_like(parent_node.height_field) > 1) {

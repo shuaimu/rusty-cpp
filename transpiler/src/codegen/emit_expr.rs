@@ -14688,6 +14688,36 @@ impl CodeGen {
         ))
     }
 
+    /// Whether a slice-typed `&expr` reference target (routed through the
+    /// span-storage IIFE below) needs its storage local to be `static`.
+    ///
+    /// Two shapes reach that IIFE:
+    ///   * The span views a freshly-materialized *literal* (`&[a, b][..]`,
+    ///     `[x; n].as_slice()`): the storage must outlive the IIFE, so it is
+    ///     `static`. These bottom out in a constant literal, so sharing the
+    ///     one materialized copy across calls is benign.
+    ///   * The span views a *persistent object* reachable from the enclosing
+    ///     scope (`node.edge_area_mut(range)`, `*drop_back`): the storage must
+    ///     NOT be `static`. A `static` local caches the FIRST call's span and
+    ///     aliases its backing storage on every later call — that was the
+    ///     btree merge use-after-free, where each do_merge's edge-shift kept
+    ///     hitting the first merged node's edges instead of the current
+    ///     parent's, corrupting the edge array into a self-merge.
+    ///
+    /// Returns true (keep `static`) only when the target bottoms out in an
+    /// array/repeat literal; everything else is treated as a live view.
+    fn span_ref_target_needs_static_storage(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Array(_) | syn::Expr::Repeat(_) => true,
+            syn::Expr::Index(idx) => self.span_ref_target_needs_static_storage(&idx.expr),
+            syn::Expr::MethodCall(mc) => {
+                self.span_ref_target_needs_static_storage(&mc.receiver)
+            }
+            syn::Expr::Reference(r) => self.span_ref_target_needs_static_storage(&r.expr),
+            _ => false,
+        }
+    }
+
     pub(super) fn try_emit_reference_expr_with_expected_span_storage(
         &self,
         reference: &syn::ExprReference,
@@ -14742,9 +14772,16 @@ impl CodeGen {
             );
             let span_decl = if is_mut { "auto" } else { "const auto" };
             let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
+            // `static` only for literal-backed targets; a live view must be
+            // re-evaluated each call (see span_ref_target_needs_static_storage).
+            let static_kw = if self.span_ref_target_needs_static_storage(&reference.expr) {
+                "static "
+            } else {
+                ""
+            };
             return Some(format!(
-                "{}() {{ static {} = {}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
-                capture, storage_decl, inner, span_decl
+                "{}() {{ {}{} = {}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
+                capture, static_kw, storage_decl, inner, span_decl
             ));
         }
 
@@ -14761,9 +14798,16 @@ impl CodeGen {
         let inner = self
             .emit_expr_to_string_with_expected(&reference.expr, Some(expected_ref.elem.as_ref()));
         let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
+        // `static` only for literal-backed targets; a live view must be
+        // re-evaluated each call (see span_ref_target_needs_static_storage).
+        let static_kw = if self.span_ref_target_needs_static_storage(&reference.expr) {
+            "static "
+        } else {
+            ""
+        };
         Some(format!(
-            "{}() -> {} {{ static {} = {}; return {}(_slice_ref_tmp); }}()",
-            capture, span_cpp, storage_decl, inner, span_cpp
+            "{}() -> {} {{ {}{} = {}; return {}(_slice_ref_tmp); }}()",
+            capture, span_cpp, static_kw, storage_decl, inner, span_cpp
         ))
     }
 

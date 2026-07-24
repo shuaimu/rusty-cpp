@@ -4597,7 +4597,7 @@ written += 1; }();
                 const auto drop_back = rusty::slice_to(back, end);
                 this->head = this->to_physical_idx(rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(len));
                 this->len_field = std::move(len);
-                const auto _back_dropper = Dropper_3([&]() -> std::span<T> { static auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(drop_back); return std::span<T>(_slice_ref_tmp); }());
+                const auto _back_dropper = Dropper_3([&]() -> std::span<T> { auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(drop_back); return std::span<T>(_slice_ref_tmp); }());
                 rusty::ptr::drop_in_place(std::move(drop_front));
             }
         }
