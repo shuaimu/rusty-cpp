@@ -17,6 +17,61 @@ import re
 import sys
 from pathlib import Path
 
+def normalize_module_purview(path: Path) -> None:
+    """Final pass: every `import X;` must sit directly after `export module X;`.
+
+    Three stages touch this region — the transpiler injects the issue-#31
+    deref-dispatch functor block after the module declaration, the main patcher
+    reorders imports, and step 1 above hoists imports out of the namespace wrap.
+    Combined, an import can end up AFTER the injected `namespace rusty { ... }`
+    block (and duplicated), which clang rejects:
+
+        error: imports must immediately follow the module declaration
+
+    Collect every purview-level import, drop duplicates, and re-seat them
+    immediately after the module declaration. Imports are only legal there
+    anyway, so moving them is always safe.
+    """
+    text = path.read_text()
+    lines = text.split("\n")
+    module_idx = next(
+        (i for i, l in enumerate(lines) if l.startswith("export module ")), None
+    )
+    if module_idx is None:
+        return
+    import_re = re.compile(r"^import\s+[A-Za-z_][\w.]*\s*;\s*$")
+    imports, kept = [], []
+    for i, line in enumerate(lines):
+        if i > module_idx and import_re.match(line):
+            stripped = line.strip()
+            # `rusty` AGGREGATES these ports — include/rusty/rusty.cppm carries
+            # `export import btree_port.btree.map;` / `...set;`. A btree_port
+            # module importing `rusty` is therefore a CYCLE (set -> rusty ->
+            # set), which clang reports from the import line as
+            #     error: failed to find module file for module 'btree_port.btree.set'
+            # The vendored port never imports rusty: the global module fragment
+            # already `#include`s the rusty headers textually, so every
+            # `rusty::` name is in scope without the import. Drop it.
+            if stripped == "import rusty;":
+                continue
+            if stripped not in imports:
+                imports.append(stripped)
+            continue
+        kept.append(line)
+    if not imports:
+        return
+    out_idx = next(
+        (i for i, l in enumerate(kept) if l.startswith("export module ")), None
+    )
+    if out_idx is None:
+        return
+    rebuilt = kept[: out_idx + 1] + imports + kept[out_idx + 1 :]
+    new_text = "\n".join(rebuilt)
+    if new_text != text:
+        path.write_text(new_text)
+        print(f"  normalized module purview in: {path.name} ({len(imports)} import(s))")
+
+
 def postprocess(path: Path, extra_imports: list[str]) -> None:
     text = path.read_text()
     lines = text.split('\n')
@@ -276,3 +331,15 @@ if __name__ == "__main__":
         "btree_port.btree.btree_internal",
         "btree_port.btree.map",
     ])
+    for name in (
+        "btree_port.btree.btree_internal.cppm",
+        "btree_port.btree.map.cppm",
+        "btree_port.btree.map.entry.cppm",
+        "btree_port.btree.set.cppm",
+        "btree_port.btree.set.entry.cppm",
+        "btree_port.btree.cppm",
+        "btree_port.cppm",
+    ):
+        candidate = src / name
+        if candidate.exists():
+            normalize_module_purview(candidate)

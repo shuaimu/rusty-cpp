@@ -1995,16 +1995,16 @@ def merge_map_entry_into_map(map_mod: Path, map_entry: Path) -> None:
     entry_fwd_decls = (
         "namespace entry {\n"
         "    export template<typename K, typename V, typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    struct OccupiedEntry;\n"
         "    export template<typename K, typename V, typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    struct VacantEntry;\n"
         "    export template<typename K, typename V, typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    struct Entry;\n"
         "    export template<typename K, typename V, typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    struct OccupiedError;\n"
         "}\n"
     )
@@ -2104,7 +2104,7 @@ def fix_rusty_btreemap_namespace_clash(path: Path) -> None:
         "// DormantMutRef stores only NonNull<T> + PhantomData<T&>, which work with incomplete T.\n"
         "namespace rusty { namespace alloc { struct Global; } }\n"
         "template<typename K, typename V, typename A = rusty::alloc::Global>\n"
-        "    requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "struct BTreeMap;\n"
     )
     # Insert AFTER the first `import btree_port.btree.btree_internal;`
@@ -2424,7 +2424,7 @@ def apply_step58_lazy_gates_and_fixes(path: Path) -> None:
     # 2. InternalNode::new_ bypass (LeafNode pattern).
     old_int_new = (
         "    template<typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    static rusty::Box<InternalNode<K, V>, A> new_(A alloc) {\n"
         "        auto node = rusty::Box<InternalNode<K, V>, rusty::Box<InternalNode<K, V>, A>>::new_uninit_in(std::move(alloc));\n"
         "        // @unsafe\n"
@@ -2437,7 +2437,7 @@ def apply_step58_lazy_gates_and_fixes(path: Path) -> None:
     )
     new_int_new = (
         "    template<typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    static rusty::Box<InternalNode<K, V>, A> new_(A alloc) {\n"
         "        // btree_port port step 59: bypass missing Box::new_uninit_in\n"
         "        // (same pattern as LeafNode::new_ step-54 fix #6).\n"
@@ -3093,7 +3093,7 @@ def apply_step54_insert_path_fixes(path: Path) -> None:
     # Fix 4: Handle::split. Match the signature + first 2 lines of body.
     old_split = (
         "    template<typename A, typename K, typename V>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    SplitResult<K, V, ::marker::Leaf> split(A alloc) {\n"
         "        auto new_node = LeafNode<K, V>::new_(std::move(alloc));\n"
         "        auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));\n"
@@ -3103,7 +3103,7 @@ def apply_step54_insert_path_fixes(path: Path) -> None:
         "    // btree_port port step 54: recover K/V via __NodeRefArgs<Node>,\n"
         "    // correct NodeRef<A, K, V, Type> typo to NodeRef<Owned, K, V, Leaf>.\n"
         "    template<typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    SplitResult<typename __NodeRefArgs<Node>::Key,\n"
         "                typename __NodeRefArgs<Node>::Value,\n"
         "                ::marker::Leaf> split(A alloc) {\n"
@@ -3134,7 +3134,7 @@ def apply_step54_insert_path_fixes(path: Path) -> None:
     # Fix 6: LeafNode::new_ — bypass Box::new_uninit_in.
     old_leafnode_new = (
         "    template<typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    static rusty::Box<LeafNode<K, V>, A> new_(A alloc) {\n"
         "        auto leaf = rusty::Box<LeafNode<K, V>, A>::new_uninit_in(std::move(alloc));\n"
         "        // @unsafe\n"
@@ -3146,7 +3146,7 @@ def apply_step54_insert_path_fixes(path: Path) -> None:
     )
     new_leafnode_new = (
         "    template<typename A>\n"
-        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
         "    static rusty::Box<LeafNode<K, V>, A> new_(A alloc) {\n"
         "        // btree_port port step 54: rusty::Box has no new_uninit_in,\n"
         "        // and we don't need uninit storage anyway — the MaybeUninit\n"
@@ -3844,7 +3844,7 @@ def stub_nodref_insert_entry(path: Path) -> None:
 def align_requires_clauses(path: Path) -> None:
     """For algebraic-data-type wrapper structs (e.g. `struct Entry`), the
     transpiler emits a `requires (rusty::alloc::Allocator<A> &&
-    std::copyable<A>)` clause on the forward declaration but omits it
+    rusty::clone_like<A>)` clause on the forward declaration but omits it
     on the variant-inheriting definition. C++20 treats this as a
     constraint mismatch (redeclaration with different constraints).
 
@@ -3862,7 +3862,7 @@ def align_requires_clauses(path: Path) -> None:
         return
 
     requires_kva = (
-        "    requires (rusty::alloc::Allocator<A> && std::copyable<A>)"
+        "    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)"
     )
     new_src, n = re.subn(
         r"(template<typename (?:K, typename V|T), typename A>)\n(struct Entry : std::variant<)",
@@ -5367,7 +5367,7 @@ def stub_broken_set_methods(path: Path) -> None:
         anchor = f"template<typename T, typename A>\nstruct {name} : std::variant<"
         repl = (
             f"template<typename T, typename A>\n"
-            f"    requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+            f"    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)\n"
             f"struct {name} : std::variant<"
         )
         if anchor in src and repl not in src:
