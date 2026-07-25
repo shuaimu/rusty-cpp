@@ -3,7 +3,11 @@
 /example.cpp
 editors/vscode/node_modules/
 editors/vscode/*.vsix
+editors/vscode/server/
+editors/vscode/LICENSE
 .vscode
+!editors/vscode/.vscode/
+!editors/vscode/.vscode/launch.json
 *.out
 *.swp
 tests/build/

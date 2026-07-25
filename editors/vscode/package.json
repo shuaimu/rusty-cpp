@@ -5,9 +5,17 @@
   "version": "0.1.0",
   "publisher": "rusty-cpp",
   "license": "MIT",
-  "engines": {
-    "vscode": "^1.90.0"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shuaimu/rusty-cpp.git",
+    "directory": "editors/vscode"
   },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
   "categories": [
     "Programming Languages",
     "Linters"
@@ -21,11 +29,27 @@
     "workspaceContains:**/*.hpp"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "sync-server": "node scripts/sync-server.js",
+    "check": "node --check extension.js && npm run sync-server",
+    "vscode:prepublish": "npm run check",
+    "package": "vsce package --out rusty-cpp-vscode.vsix"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "RustyCpp runs the configured checker and C++ compiler."
+    }
+  },
   "contributes": {
     "commands": [
       {
         "command": "rustyCpp.restartLanguageServer",
         "title": "RustyCpp: Restart Language Server"
+      },
+      {
+        "command": "rustyCpp.showOutput",
+        "title": "RustyCpp: Show Language Server Output"
       }
     ],
     "configuration": {
@@ -34,12 +58,14 @@
         "rustyCpp.lsp.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to a prebuilt rusty-cpp-lsp binary. If empty, the extension compiles tools/rusty-cpp-lsp.cpp."
+          "scope": "window",
+          "description": "Path to a prebuilt rusty-cpp-lsp binary. If empty, the extension compiles its bundled C++ server."
         },
         "rustyCpp.lsp.checkerPath": {
           "type": "string",
           "default": "",
-          "description": "Path to rusty-cpp-checker. If empty, the LSP server uses RUSTY_CPP_CHECKER or rusty-cpp-checker on PATH."
+          "scope": "resource",
+          "description": "Path to rusty-cpp-checker. If empty, the extension checks target/debug and target/release, then the LSP server uses RUSTY_CPP_CHECKER or PATH."
         },
         "rustyCpp.lsp.includePaths": {
           "type": "array",
@@ -49,6 +75,7 @@
           "items": {
             "type": "string"
           },
+          "scope": "resource",
           "description": "Include paths passed to rusty-cpp-checker."
         },
         "rustyCpp.lsp.defines": {
@@ -57,25 +84,29 @@
           "items": {
             "type": "string"
           },
+          "scope": "resource",
           "description": "Preprocessor defines passed to rusty-cpp-checker."
         },
         "rustyCpp.lsp.compileCommands": {
           "type": "string",
           "default": "",
+          "scope": "resource",
           "description": "Path to compile_commands.json passed to rusty-cpp-checker."
         },
         "rustyCpp.lsp.compilerPath": {
           "type": "string",
           "default": "c++",
-          "description": "C++ compiler used to build tools/rusty-cpp-lsp.cpp when serverPath is empty."
+          "scope": "window",
+          "description": "C++23 compiler used to build the bundled language server when serverPath is empty."
         }
       }
     }
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
-    "@types/vscode": "^1.90.0"
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.6.2"
   }
 }
