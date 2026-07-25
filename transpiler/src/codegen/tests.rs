@@ -21445,6 +21445,39 @@ fn test_self_return_type_does_not_qualify_calls_with_declaration_param_names() {
 }
 
 #[test]
+fn test_deref_assign_through_generic_receiver_keeps_the_deref() {
+    // Issue #34 (assignment analog of #32): `*x.borrow_mut() = v` with a
+    // GENERIC receiver. `borrow_mut` counts as reference-returning unless the
+    // receiver is a KNOWN RefCell, so an un-typeable receiver collapsed the
+    // deref and assigned to the `RefMut` guard itself — which does not
+    // compile. Emit the deref-tolerant form so a guard is unboxed and a plain
+    // Rust reference still passes through. Concrete receivers keep `*`.
+    let src = r#"
+        use std::cell::RefCell;
+        pub struct W { pub cell: RefCell<i32> }
+        pub fn set_concrete(w: &W, v: i32) { *w.cell.borrow_mut() = v; }
+        pub fn set_gen<T>(w: &T, v: i32) { *w.cell.borrow_mut() = v; }
+    "#;
+    let out = transpile_str(src);
+    let generic_line = out
+        .lines()
+        .find(|l| l.contains("deref_if_pointer_like(w.cell.borrow_mut())"))
+        .unwrap_or_default();
+    assert!(
+        !generic_line.is_empty(),
+        "generic deref-assign not routed through the deref-tolerant form:\n{out}"
+    );
+    assert!(
+        !out.contains("\n    w.cell.borrow_mut() = "),
+        "deref dropped — assignment targets the guard itself:\n{out}"
+    );
+    assert!(
+        out.contains("*w.cell.borrow_mut() = "),
+        "concrete receiver lost its deref:\n{out}"
+    );
+}
+
+#[test]
 fn test_refcell_borrow_through_generic_receiver_dispatches_deref() {
     // Issue #32: `w.cell.borrow().get()` with a GENERIC receiver could not be
     // typed, so `borrow()` lowered to the free helper `rusty::borrow(w.cell)`

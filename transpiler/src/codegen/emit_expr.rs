@@ -12815,6 +12815,22 @@ impl CodeGen {
                 if matches!(un.op, syn::UnOp::Deref(_)) && !self.is_expr_raw_pointer_like(&un.expr)
                 {
                     let operand = self.peel_paren_group_expr(&un.expr);
+                    // issue #34: `*x.borrow_mut() = v` where the receiver is
+                    // GENERIC. `borrow_mut` counts as reference-returning
+                    // unless the receiver is a KNOWN RefCell, so an
+                    // un-typeable receiver collapsed the deref and assigned to
+                    // the `RefMut` guard itself. Neither answer is right for
+                    // every instantiation — a guard needs the deref, a plain
+                    // Rust reference must not have one — so emit the
+                    // deref-TOLERANT form, which unboxes a guard and passes a
+                    // reference through unchanged. Assigning through it is
+                    // safe: the guard temporary outlives the full expression.
+                    if self.receiver_is_uncertain_guard_call(operand) {
+                        return format!(
+                            "rusty::detail::deref_if_pointer_like({})",
+                            self.emit_expr_to_string(operand)
+                        );
+                    }
                     if let syn::Expr::Path(path) = operand
                         && path.path.segments.len() == 1
                     {
@@ -21594,6 +21610,22 @@ impl CodeGen {
                     }
                 }
                 syn::UnOp::Deref(_) => {
+                    // issue #34: `*x.borrow_mut() = v` with a GENERIC receiver.
+                    // `borrow_mut` counts as reference-returning unless the
+                    // receiver is a KNOWN RefCell, so an un-typeable receiver
+                    // collapsed the deref and assigned to the `RefMut` guard
+                    // itself. Neither fixed answer works for every
+                    // instantiation — a guard needs the deref, a plain Rust
+                    // reference must not have one — so emit the deref-TOLERANT
+                    // form: it unboxes a guard and passes a reference through.
+                    // Assigning through it is safe, the guard temporary
+                    // outlives the full expression.
+                    if self.receiver_is_uncertain_guard_call(&un.expr) {
+                        return format!(
+                            "rusty::detail::deref_if_pointer_like({})",
+                            self.emit_expr_to_string(&un.expr)
+                        );
+                    }
                     if let syn::Expr::Lit(syn::ExprLit {
                         lit: syn::Lit::ByteStr(bs),
                         ..
