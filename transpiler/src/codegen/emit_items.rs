@@ -1848,7 +1848,22 @@ impl CodeGen {
                             .unwrap_or(new_body),
                         None => new_body,
                     };
-                    self.output.replace_range(start.., &substituted);
+                    // Two parallel impls can decompose onto the SAME host and
+                    // absorb a method that substitutes down to byte-identical
+                    // text (btree's `Handle::{reborrow,reborrow_mut,dormant,
+                    // awaken}` land twice in one `struct Handle` → "class
+                    // member cannot be redeclared"). The normal per-signature
+                    // dedup in emit_method can't see this: it runs BEFORE the
+                    // substitution that makes the two collapse together. Key
+                    // on the post-substitution text so only an exact duplicate
+                    // is dropped — a genuine overload still differs somewhere
+                    // in its signature and survives.
+                    let dup_key = format!("clusterA-absorbed|{}", substituted);
+                    if self.mark_emitted_method_conflict_key(dup_key) {
+                        self.output.replace_range(start.., &substituted);
+                    } else {
+                        self.output.truncate(start);
+                    }
                 } else {
                     self.emit_impl_item(impl_item);
                 }

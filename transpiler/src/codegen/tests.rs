@@ -21409,6 +21409,34 @@ fn test_cluster_a_completion_template_args_recovery_in_absorbed_method() {
 }
 
 #[test]
+fn test_structural_decomp_absorbed_duplicates_are_deduped() {
+    // Regression: two parallel impls that decompose onto the SAME host can
+    // absorb a method which, AFTER the dependent-path substitution, is
+    // byte-identical — both landed in one class ("class member cannot be
+    // redeclared"; btree's Handle::{reborrow,reborrow_mut,dormant,awaken}).
+    // emit_method's per-signature dedup can't catch it: it runs BEFORE the
+    // substitution that collapses the two together, so the duplicate has to be
+    // rejected on the post-substitution text.
+    let src = r#"
+        struct Marker;
+        struct NodeRef<B, K, V, T> { b: B, k: K, v: V, t: T }
+        struct Handle<Node, Type> { node: Node, ty: Type }
+        impl<B, K, V, T> Handle<NodeRef<B, K, V, T>, Marker> {
+            fn reborrow(&self) -> u32 { 1 }
+        }
+        impl<B, K, V, T> Handle<NodeRef<B, K, V, T>, Marker> {
+            fn reborrow(&self) -> u32 { 1 }
+        }
+    "#;
+    let out = transpile_str(src);
+    let copies = out.matches("reborrow()").count();
+    assert!(
+        copies <= 1,
+        "identical absorbed method emitted {copies} times (redeclaration):\n{out}"
+    );
+}
+
+#[test]
 fn test_structural_decomp_never_rewrites_the_method_template_param_list() {
     // Regression: the dependent-path substitution (`Generic` ->
     // `typename __TemplateArgs<Host>::arg_N`) is a post-emit TEXT pass. It ran
