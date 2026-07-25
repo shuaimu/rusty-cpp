@@ -36,109 +36,119 @@ namespace arch {
 
 namespace detail {
 
+// The feature names below are compared as `std::string_view` on BOTH sides
+// (hence the `sv` suffixes) rather than against bare string literals. These
+// functions live inside `namespace rusty`, so unqualified lookup finds
+// `rusty::operator==(const char*, const String&)` and friends in the enclosing
+// namespace; against a `const char[N]` literal their C++20 reversed forms are
+// exactly as good a match as `std::operator==`, and the call is ambiguous.
+// Comparing view-to-view leaves `std::operator==` the only viable candidate.
 inline bool x86_feature_detected(std::string_view feature) noexcept {
+    using namespace std::string_view_literals;
 #if RUSTY_ARCH_X86_AVAILABLE && (defined(__GNUC__) || defined(__clang__))
     __builtin_cpu_init();
 
-    if (feature == "sse") return __builtin_cpu_supports("sse");
-    if (feature == "sse2") return __builtin_cpu_supports("sse2");
-    if (feature == "sse3") return __builtin_cpu_supports("sse3");
-    if (feature == "ssse3") return __builtin_cpu_supports("ssse3");
-    if (feature == "sse4.1") return __builtin_cpu_supports("sse4.1");
-    if (feature == "sse4.2") return __builtin_cpu_supports("sse4.2");
-    if (feature == "avx") return __builtin_cpu_supports("avx");
-    if (feature == "avx2") return __builtin_cpu_supports("avx2");
-    if (feature == "fma") return __builtin_cpu_supports("fma");
-    if (feature == "bmi1") return __builtin_cpu_supports("bmi");
-    if (feature == "bmi2") return __builtin_cpu_supports("bmi2");
-    if (feature == "lzcnt") return __builtin_cpu_supports("lzcnt");
-    if (feature == "popcnt") return __builtin_cpu_supports("popcnt");
-    if (feature == "aes") return __builtin_cpu_supports("aes");
-    if (feature == "pclmulqdq") return __builtin_cpu_supports("pclmul");
-    if (feature == "rdrand") return __builtin_cpu_supports("rdrnd");
-    if (feature == "rdseed") return __builtin_cpu_supports("rdseed");
-    if (feature == "sha") return __builtin_cpu_supports("sha");
-    if (feature == "avx512f") return __builtin_cpu_supports("avx512f");
-    if (feature == "avx512bw") return __builtin_cpu_supports("avx512bw");
-    if (feature == "avx512cd") return __builtin_cpu_supports("avx512cd");
-    if (feature == "avx512dq") return __builtin_cpu_supports("avx512dq");
-    if (feature == "avx512vl") return __builtin_cpu_supports("avx512vl");
+    if (feature == "sse"sv) return __builtin_cpu_supports("sse");
+    if (feature == "sse2"sv) return __builtin_cpu_supports("sse2");
+    if (feature == "sse3"sv) return __builtin_cpu_supports("sse3");
+    if (feature == "ssse3"sv) return __builtin_cpu_supports("ssse3");
+    if (feature == "sse4.1"sv) return __builtin_cpu_supports("sse4.1");
+    if (feature == "sse4.2"sv) return __builtin_cpu_supports("sse4.2");
+    if (feature == "avx"sv) return __builtin_cpu_supports("avx");
+    if (feature == "avx2"sv) return __builtin_cpu_supports("avx2");
+    if (feature == "fma"sv) return __builtin_cpu_supports("fma");
+    if (feature == "bmi1"sv) return __builtin_cpu_supports("bmi");
+    if (feature == "bmi2"sv) return __builtin_cpu_supports("bmi2");
+    if (feature == "lzcnt"sv) return __builtin_cpu_supports("lzcnt");
+    if (feature == "popcnt"sv) return __builtin_cpu_supports("popcnt");
+    if (feature == "aes"sv) return __builtin_cpu_supports("aes");
+    if (feature == "pclmulqdq"sv) return __builtin_cpu_supports("pclmul");
+    if (feature == "rdrand"sv) return __builtin_cpu_supports("rdrnd");
+    if (feature == "rdseed"sv) return __builtin_cpu_supports("rdseed");
+    if (feature == "sha"sv) return __builtin_cpu_supports("sha");
+    if (feature == "avx512f"sv) return __builtin_cpu_supports("avx512f");
+    if (feature == "avx512bw"sv) return __builtin_cpu_supports("avx512bw");
+    if (feature == "avx512cd"sv) return __builtin_cpu_supports("avx512cd");
+    if (feature == "avx512dq"sv) return __builtin_cpu_supports("avx512dq");
+    if (feature == "avx512vl"sv) return __builtin_cpu_supports("avx512vl");
 #else
     (void)feature;
 #endif
     return false;
 }
 
+// See the note on `x86_feature_detected` for why these compare view-to-view.
 inline constexpr bool x86_target_feature_enabled(std::string_view feature) noexcept {
+    using namespace std::string_view_literals;
 #if RUSTY_ARCH_X86_AVAILABLE
 #if defined(__SSE__)
-    if (feature == "sse") return true;
+    if (feature == "sse"sv) return true;
 #endif
 #if defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
-    if (feature == "sse2") return true;
+    if (feature == "sse2"sv) return true;
 #endif
 #if defined(__SSE3__)
-    if (feature == "sse3") return true;
+    if (feature == "sse3"sv) return true;
 #endif
 #if defined(__SSSE3__)
-    if (feature == "ssse3") return true;
+    if (feature == "ssse3"sv) return true;
 #endif
 #if defined(__SSE4_1__)
-    if (feature == "sse4.1") return true;
+    if (feature == "sse4.1"sv) return true;
 #endif
 #if defined(__SSE4_2__)
-    if (feature == "sse4.2") return true;
+    if (feature == "sse4.2"sv) return true;
 #endif
 #if defined(__AVX__)
-    if (feature == "avx") return true;
+    if (feature == "avx"sv) return true;
 #endif
 #if defined(__AVX2__)
-    if (feature == "avx2") return true;
+    if (feature == "avx2"sv) return true;
 #endif
 #if defined(__FMA__)
-    if (feature == "fma") return true;
+    if (feature == "fma"sv) return true;
 #endif
 #if defined(__BMI__)
-    if (feature == "bmi1") return true;
+    if (feature == "bmi1"sv) return true;
 #endif
 #if defined(__BMI2__)
-    if (feature == "bmi2") return true;
+    if (feature == "bmi2"sv) return true;
 #endif
 #if defined(__LZCNT__)
-    if (feature == "lzcnt") return true;
+    if (feature == "lzcnt"sv) return true;
 #endif
 #if defined(__POPCNT__)
-    if (feature == "popcnt") return true;
+    if (feature == "popcnt"sv) return true;
 #endif
 #if defined(__AES__)
-    if (feature == "aes") return true;
+    if (feature == "aes"sv) return true;
 #endif
 #if defined(__PCLMUL__)
-    if (feature == "pclmulqdq") return true;
+    if (feature == "pclmulqdq"sv) return true;
 #endif
 #if defined(__RDRND__)
-    if (feature == "rdrand") return true;
+    if (feature == "rdrand"sv) return true;
 #endif
 #if defined(__RDSEED__)
-    if (feature == "rdseed") return true;
+    if (feature == "rdseed"sv) return true;
 #endif
 #if defined(__SHA__)
-    if (feature == "sha") return true;
+    if (feature == "sha"sv) return true;
 #endif
 #if defined(__AVX512F__)
-    if (feature == "avx512f") return true;
+    if (feature == "avx512f"sv) return true;
 #endif
 #if defined(__AVX512BW__)
-    if (feature == "avx512bw") return true;
+    if (feature == "avx512bw"sv) return true;
 #endif
 #if defined(__AVX512CD__)
-    if (feature == "avx512cd") return true;
+    if (feature == "avx512cd"sv) return true;
 #endif
 #if defined(__AVX512DQ__)
-    if (feature == "avx512dq") return true;
+    if (feature == "avx512dq"sv) return true;
 #endif
 #if defined(__AVX512VL__)
-    if (feature == "avx512vl") return true;
+    if (feature == "avx512vl"sv) return true;
 #endif
 #else
     (void)feature;
