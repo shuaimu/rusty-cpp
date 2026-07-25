@@ -21445,6 +21445,43 @@ fn test_self_return_type_does_not_qualify_calls_with_declaration_param_names() {
 }
 
 #[test]
+fn test_refcell_borrow_through_generic_receiver_dispatches_deref() {
+    // Issue #32: `w.cell.borrow().get()` with a GENERIC receiver could not be
+    // typed, so `borrow()` lowered to the free helper `rusty::borrow(w.cell)`
+    // and the following call was emitted with `.`. When `W::cell` really is a
+    // `RefCell<T>` that helper yields a `rusty::Ref<T>` guard, which needs
+    // `->` to reach `T` ("no member named 'get' in 'rusty::Ref<Inner>'").
+    // Route the uncertain case through the deref dispatch so BOTH a guard and
+    // a plain identity borrow work. Concrete receivers keep their `->`.
+    let src = r#"
+        use std::cell::RefCell;
+        pub struct Inner { pub v: i32 }
+        impl Inner { pub fn get(&self) -> i32 { self.v } }
+        pub struct W { pub cell: RefCell<Inner> }
+        pub fn read_concrete(w: &W) -> i32 { w.cell.borrow().get() }
+        pub fn read_gen<T>(w: &T) -> i32 { w.cell.borrow().get() }
+    "#;
+    let out = transpile_str(src);
+    let generic_line = out
+        .lines()
+        .find(|l| l.contains("rusty::borrow("))
+        .unwrap_or_default();
+    assert!(
+        !generic_line.contains("rusty::borrow(w.cell).get()"),
+        "`.` called on a possible Ref guard: {generic_line}"
+    );
+    assert!(
+        generic_line.contains("deref_call"),
+        "generic borrow not routed through deref dispatch: {generic_line}"
+    );
+    // The concrete receiver must be untouched.
+    assert!(
+        out.contains("w.cell.borrow()->get()"),
+        "concrete receiver lost its arrow:\n{out}"
+    );
+}
+
+#[test]
 fn test_structural_decomp_absorbed_duplicates_are_deduped() {
     // Regression: two parallel impls that decompose onto the SAME host can
     // absorb a method which, AFTER the dependent-path substitution, is

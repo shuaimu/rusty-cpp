@@ -32529,6 +32529,58 @@ impl CodeGen {
         self.is_type_param_in_scope(&name)
     }
 
+    /// A guard-producing call (`RefCell::borrow`, `Mutex::lock`, ...) whose
+    /// own type cannot be inferred because the chain bottoms out in a generic.
+    ///
+    /// `w.cell.borrow().get()` with `w: &W` cannot be typed here, so the
+    /// borrow lowers to the free helper `rusty::borrow(w.cell)` and the
+    /// following method was emitted with `.` — but when `W::cell` really is a
+    /// `RefCell<T>` the helper yields a `rusty::Ref<T>` guard, which needs
+    /// `->` to reach `T`. Concrete receivers are unaffected: their type is
+    /// known, so the existing RefCell-aware paths already pick `->`.
+    ///
+    /// Reported as issue #32.
+    fn receiver_is_uncertain_guard_call(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::MethodCall(mc) = expr else {
+            return false;
+        };
+        if !mc.args.is_empty() {
+            return false;
+        }
+        if !matches!(
+            mc.method.to_string().as_str(),
+            "borrow" | "borrow_mut" | "lock" | "read" | "write"
+        ) {
+            return false;
+        }
+        // Only the UNCERTAIN case: a receiver we can type is already handled.
+        if self.infer_simple_expr_type(expr).is_some() {
+            return false;
+        }
+        // ...and only when the chain really is generic, so a plain unknown
+        // (a genuine miss elsewhere) keeps its current lowering.
+        self.expr_chain_roots_in_type_param(&mc.receiver)
+    }
+
+    /// Walk method-call receivers / field bases to the root path expression
+    /// and report whether its type is a type parameter in scope.
+    fn expr_chain_roots_in_type_param(&self, expr: &syn::Expr) -> bool {
+        let mut cur = self.peel_paren_group_expr(expr);
+        loop {
+            match cur {
+                syn::Expr::MethodCall(mc) => cur = self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::Field(f) => cur = self.peel_paren_group_expr(&f.base),
+                syn::Expr::Reference(r) => cur = self.peel_paren_group_expr(&r.expr),
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                    cur = self.peel_paren_group_expr(&u.expr)
+                }
+                _ => break,
+            }
+        }
+        self.receiver_expr_has_type_param_type(cur)
+    }
+
     fn receiver_is_arc_wrapper_type(&self, receiver: &syn::Expr) -> bool {
         let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
             return false;
@@ -33185,7 +33237,11 @@ impl CodeGen {
         let has_closure_arg = args.iter().any(|s| s.contains("[&](auto&&"));
         if !has_closure_arg
             && (self.forwarding_wrapper_inner_expr(receiver_expr).is_some()
-                || self.receiver_expr_has_type_param_type(receiver_expr))
+                || self.receiver_expr_has_type_param_type(receiver_expr)
+                // issue #32: a guard-producing call we cannot type (generic
+                // receiver) must go through the same `.`-vs-`->` dispatch —
+                // `rusty::borrow(x)` may yield a `Ref<T>` guard.
+                || self.receiver_is_uncertain_guard_call(receiver_expr))
         {
             let escaped_method_name = Self::escape_cpp_method_name(method_name);
             let method_call = if let Some(template_args) = method_template_args {
