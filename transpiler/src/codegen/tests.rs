@@ -21409,6 +21409,42 @@ fn test_cluster_a_completion_template_args_recovery_in_absorbed_method() {
 }
 
 #[test]
+fn test_self_return_type_does_not_qualify_calls_with_declaration_param_names() {
+    // Regression: `lookup_associated_call_return_type` substituted `Self` in a
+    // callee's return type with `compose_owner_self_type_for_lookup`, which
+    // spells the owner using its DECLARATION parameter names
+    // (`Handle<Node, Type>`). For `fn new_edge(..) -> Self` that spelling then
+    // became the emitted call qualification. It is valid only INSIDE the
+    // owner; at a cross-impl call site `Node` is undeclared, and `Type` can
+    // SILENTLY bind an unrelated same-named parameter of the enclosing type.
+    let src = r#"
+        pub mod marker { pub struct Edge; pub trait BorrowType {} }
+        pub struct NodeRef<B, K, V, T> { b: B, k: K, v: V, t: T }
+        pub struct Handle<Node, Type> { node: Node, ty: Type }
+        impl<B, K, V, N> Handle<NodeRef<B, K, V, N>, marker::Edge> {
+            pub fn new_edge(node: NodeRef<B, K, V, N>, idx: usize) -> Self {
+                Handle { node, ty: marker::Edge }
+            }
+        }
+        impl<B: marker::BorrowType, K, V, T> NodeRef<B, K, V, T> {
+            pub fn via_let(self, idx: usize) -> usize {
+                let e = Handle::new_edge(self, idx);
+                idx
+            }
+        }
+    "#;
+    let out = transpile_str(src);
+    let call_line = out
+        .lines()
+        .find(|l| l.contains("new_edge(std::move"))
+        .unwrap_or_default();
+    assert!(
+        !call_line.contains("Handle<Node, Type>"),
+        "owner qualified with its own declaration param names: {call_line}"
+    );
+}
+
+#[test]
 fn test_structural_decomp_absorbed_duplicates_are_deduped() {
     // Regression: two parallel impls that decompose onto the SAME host can
     // absorb a method which, AFTER the dependent-path substitution, is

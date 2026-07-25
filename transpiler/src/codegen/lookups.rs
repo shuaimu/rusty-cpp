@@ -792,6 +792,23 @@ impl CodeGen {
         };
         if cross_impl_call
             && let Some(owner_self_ty) = self.compose_owner_self_type_for_lookup(&owner_tail)
+            // `compose_owner_self_type_for_lookup` spells the owner with its
+            // DECLARATION parameter names (`Handle<Node, Type>`). Those name
+            // the current instantiation only inside that owner; at a
+            // cross-impl call site they are either undeclared or — worse —
+            // silently bind an unrelated same-named parameter of the
+            // enclosing type (`Type` inside `NodeRef<BorrowType, K, V, Type>`).
+            // Substituting them into a `-> Self` return type let that bogus
+            // spelling become the emitted call qualification
+            // (`Handle<Node, Type>::new_edge(..)`). Only use the composed
+            // shape when every parameter it mentions is actually in scope
+            // here; otherwise leave `Self` alone so the caller falls through
+            // to argument-based owner recovery, which resolves it properly.
+            && self
+                .declared_owner_type_param_names_by_tail(&owner_tail)
+                .is_none_or(|params| {
+                    params.iter().all(|p| self.is_type_param_in_scope(p))
+                })
         {
             let mut self_subs: HashMap<String, syn::Type> = HashMap::new();
             self_subs.insert("Self".to_string(), owner_self_ty);
