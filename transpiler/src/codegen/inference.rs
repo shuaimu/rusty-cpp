@@ -9427,6 +9427,97 @@ impl CodeGen {
     /// concrete `marker::Edge` from the impl signature.
     /// Collect bare single-ident path types that LOOK like type params
     /// (uppercase-initial CamelCase, no path/args) anywhere inside `ty`.
+    /// Re-bind a struct-literal hint whose arguments name the CALLEE impl's
+    /// generics onto the enclosing type's own (in-scope) parameters.
+    ///
+    /// A declared parameter type is written in its own impl's generics. Inside
+    /// `NodeRef<BorrowType, K, V, Type>::push_with_handle`, the hint for
+    /// `Handle::new_kv(NodeRef { .. }, idx)` arrives as
+    /// `NodeRef<BorrowType, K, V, NodeType>` — `NodeType` belongs to
+    /// `impl<BorrowType, K, V, NodeType> Handle<..>` and does not exist here,
+    /// so the literal emitted an undeclared identifier.
+    ///
+    /// When the hint names the SAME base type we are currently emitting, its
+    /// arguments correspond positionally to that type's parameters, so an
+    /// out-of-scope argument can be replaced by the parameter occupying the
+    /// same position. Returns `None` when nothing needs rebinding — callers
+    /// then keep the original hint, so hints that are merely unfamiliar (but
+    /// resolvable) are left alone.
+    pub(super) fn rebind_struct_literal_hint_to_current_struct(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
+            return None;
+        };
+        if tp.qself.is_some() {
+            return None;
+        }
+        let last = tp.path.segments.last()?;
+        let base = last.ident.to_string();
+        let current = self.current_struct.as_deref()?;
+        let current_tail = current.rsplit("::").next().unwrap_or(current);
+        if base != current_tail {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let params = self
+            .declared_type_params
+            .get(current)
+            .or_else(|| self.declared_type_params.get(&self.scoped_type_key(current)))?;
+        let type_args: Vec<&syn::Type> = args
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        if type_args.len() != args.args.len() || type_args.len() != params.len() {
+            return None;
+        }
+        let mut rebound: Vec<syn::Type> = Vec::with_capacity(type_args.len());
+        let mut changed = false;
+        for (idx, arg) in type_args.iter().enumerate() {
+            let is_out_of_scope = matches!(arg, syn::Type::Path(atp)
+                if atp.qself.is_none()
+                    && atp.path.segments.len() == 1
+                    && matches!(atp.path.segments[0].arguments, syn::PathArguments::None)
+                    && {
+                        let name = atp.path.segments[0].ident.to_string();
+                        Self::owner_template_arg_is_probable_type_param_ident(&name)
+                            && !self.is_type_param_in_scope(&name)
+                            && !self.simple_ident_is_known_type_name(&name)
+                    });
+            if is_out_of_scope {
+                let replacement = syn::parse_str::<syn::Type>(&params[idx]).ok()?;
+                rebound.push(replacement);
+                changed = true;
+            } else {
+                rebound.push((*arg).clone());
+            }
+        }
+        if !changed {
+            return None;
+        }
+        let joined = rebound
+            .iter()
+            .map(|t| quote::quote!(#t).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        syn::parse_str::<syn::Type>(&format!("{}<{}>", base, joined)).ok()
+    }
+
+    /// Option-taking wrapper for [`Self::rebind_struct_literal_hint_to_current_struct`].
+    pub(super) fn rebind_struct_literal_hint_to_current_struct_opt(
+        &self,
+        ty: Option<&syn::Type>,
+    ) -> Option<syn::Type> {
+        self.rebind_struct_literal_hint_to_current_struct(ty?)
+    }
+
     fn collect_bare_probable_type_param_idents_in_type(
         ty: &syn::Type,
         out: &mut std::collections::BTreeSet<String>,

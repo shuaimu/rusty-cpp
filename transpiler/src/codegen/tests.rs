@@ -21482,6 +21482,52 @@ fn test_refcell_borrow_through_generic_receiver_dispatches_deref() {
 }
 
 #[test]
+fn test_struct_literal_hint_rebinds_callee_impl_generics() {
+    // A struct-literal hint carried over from a callee's DECLARED parameter is
+    // spelled in that callee impl's generics. Inside
+    // `NodeRef<BorrowType, K, V, Type>::push_with_handle`, the hint for
+    // `Handle::new_kv(NodeRef { .. }, idx)` arrives as
+    // `NodeRef<BorrowType, K, V, NodeType>` — `NodeType` belongs to
+    // `impl<BorrowType, K, V, NodeType> Handle<..>` and does not exist at the
+    // call site, so the literal emitted an undeclared identifier.
+    //
+    // Rebind the out-of-scope argument onto the enclosing type's parameter in
+    // the same position. Dropping the hint outright also "fixed" btree but
+    // regressed smallvec (`SmallVec<rusty::ptr>`), so the rebind is
+    // deliberately limited to hints naming the type being emitted.
+    let src = r#"
+        pub mod marker { pub struct Mut; pub struct Leaf; pub struct KV; }
+        pub struct PhantomData;
+        pub struct NodeRef<B, K, V, T> { pub height: u8, pub node: u64, pub _marker: PhantomData }
+        pub struct Handle<Node, Type> { pub node: Node, pub ty: Type }
+        impl<BorrowType, K, V, NodeType> Handle<NodeRef<BorrowType, K, V, NodeType>, marker::KV> {
+            pub fn new_kv(node: NodeRef<BorrowType, K, V, NodeType>, idx: usize) -> Self {
+                Handle { node, ty: marker::KV }
+            }
+        }
+        impl<BorrowType, K, V, Type> NodeRef<BorrowType, K, V, Type> {
+            pub fn push_with_handle(&mut self, idx: usize)
+                -> Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV>
+            {
+                Handle::new_kv(
+                    NodeRef { height: self.height, node: self.node, _marker: PhantomData },
+                    idx,
+                )
+            }
+        }
+    "#;
+    let out = transpile_str(src);
+    let call_line = out
+        .lines()
+        .find(|l| l.contains("new_kv(NodeRef<"))
+        .unwrap_or_default();
+    assert!(
+        !call_line.contains("NodeType"),
+        "callee impl generic leaked into the literal: {call_line}"
+    );
+}
+
+#[test]
 fn test_structural_decomp_absorbed_duplicates_are_deduped() {
     // Regression: two parallel impls that decompose onto the SAME host can
     // absorb a method which, AFTER the dependent-path substitution, is

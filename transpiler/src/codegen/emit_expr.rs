@@ -13291,7 +13291,17 @@ impl CodeGen {
                 }
             }
             syn::Expr::Struct(struct_expr) => {
-                self.emit_struct_expr_to_string_with_expected(struct_expr, expected_ty)
+                // A hint carried over from a callee's DECLARED parameter is
+                // spelled in that callee impl's own generics. When it names the
+                // type we are already emitting, rebind its out-of-scope
+                // arguments onto our own parameters (issue: btree's
+                // `NodeRef<BorrowType, K, V, NodeType>` inside
+                // `NodeRef<BorrowType, K, V, Type>`); otherwise keep the hint.
+                let rebound = self.rebind_struct_literal_hint_to_current_struct_opt(expected_ty);
+                self.emit_struct_expr_to_string_with_expected(
+                    struct_expr,
+                    rebound.as_ref().or(expected_ty),
+                )
             }
             syn::Expr::Index(idx) => {
                 if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx, expected_ty)
