@@ -528,6 +528,142 @@ fn render_block_rewrite(block: &ParsedBlock) -> Result<String, String> {
     Ok(out)
 }
 
+const DISPATCH_BEGIN: &str = "/*RUSTYCPP:GEN-DISPATCH-BEGIN*/";
+const DISPATCH_END: &str = "/*RUSTYCPP:GEN-DISPATCH-END*/";
+const DISPATCH_TRAILER: &str = "// namespace rusty::detail (issue #31 deref_call dispatch)";
+
+/// Cut the `namespace rusty { namespace detail { RUSTY_METHOD_DISPATCH(..) } }`
+/// block out of a generated region, returning the dispatched method names.
+///
+/// Issue #33: an inline-rust block is spliced wherever the `#if RUSTYCPP_RUST`
+/// sits — typically INSIDE a consumer namespace. Emitting the functor there
+/// declares `demo::rusty`, which then shadows `::rusty` for the rest of the
+/// block, so every later `rusty::deref_call` / `rusty::clone` / `rusty::thread`
+/// resolves into the wrong namespace. The definitions have to live at global
+/// scope, exactly as module output already places them.
+fn take_dispatch_functor_block(region: &mut String) -> Vec<String> {
+    let Some(start) = region.find("namespace rusty { namespace detail {") else {
+        return Vec::new();
+    };
+    let Some(trailer) = region[start..].find(DISPATCH_TRAILER) else {
+        return Vec::new();
+    };
+    let mut end = start + trailer + DISPATCH_TRAILER.len();
+    // consume the rest of the trailer line plus any blank lines it left behind
+    while end < region.len() && region.as_bytes()[end] != b'\n' {
+        end += 1;
+    }
+    while end < region.len() && region.as_bytes()[end] == b'\n' {
+        end += 1;
+        if !region[end..].starts_with('\n') {
+            break;
+        }
+    }
+    let cut = region[start..end].to_string();
+    let mut names = Vec::new();
+    for line in cut.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("RUSTY_METHOD_DISPATCH(")
+            && let Some(name) = rest.strip_suffix(')')
+        {
+            names.push(name.to_string());
+        }
+    }
+    region.replace_range(start..end, "");
+    names
+}
+
+/// Drop a previously hoisted dispatch region so `--rewrite` stays idempotent.
+fn strip_hoisted_dispatch_region(content: &str) -> String {
+    let Some(start) = content.find(DISPATCH_BEGIN) else {
+        return content.to_string();
+    };
+    let Some(rel_end) = content[start..].find(DISPATCH_END) else {
+        return content.to_string();
+    };
+    let mut end = start + rel_end + DISPATCH_END.len();
+    while end < content.len() && content.as_bytes()[end] == b'\n' {
+        end += 1;
+    }
+    let mut out = String::with_capacity(content.len());
+    out.push_str(&content[..start]);
+    out.push_str(&content[end..]);
+    out
+}
+
+/// Insert the hoisted functor definitions at GLOBAL scope: after
+/// `export module X;` and the imports that must immediately follow it,
+/// otherwise after the leading `#include`/`module;` preamble.
+fn insert_hoisted_dispatch_region(content: &str, methods: &[String]) -> String {
+    if methods.is_empty() {
+        return content.to_string();
+    }
+    let mut block = String::new();
+    block.push_str(DISPATCH_BEGIN);
+    block.push('\n');
+    block.push_str("namespace rusty { namespace detail {\n");
+    for m in methods {
+        block.push_str("RUSTY_METHOD_DISPATCH(");
+        block.push_str(m);
+        block.push_str(")\n");
+    }
+    block.push_str("} } ");
+    block.push_str(DISPATCH_TRAILER);
+    block.push('\n');
+    block.push_str(DISPATCH_END);
+    block.push_str("\n\n");
+
+    // Prefer just after `export module X;` + its import block: imports must
+    // immediately follow the module declaration, so a namespace injected
+    // before them would be ill-formed.
+    let anchor = content
+        .find("\nexport module ")
+        .map(|i| i + 1)
+        .or_else(|| content.starts_with("export module ").then_some(0));
+    let mut pos = match anchor {
+        Some(a) => content[a..]
+            .find('\n')
+            .map(|nl| a + nl + 1)
+            .unwrap_or(content.len()),
+        None => {
+            // No module declaration — sit after the include/preamble prologue.
+            let mut p = 0usize;
+            for line in content.lines() {
+                let t = line.trim();
+                if t.starts_with("#include") || t.starts_with("module;") || t.is_empty() {
+                    p += line.len() + 1;
+                } else {
+                    break;
+                }
+            }
+            p.min(content.len())
+        }
+    };
+    if anchor.is_some() {
+        loop {
+            let rest = &content[pos..];
+            let line_end = rest
+                .find('\n')
+                .map(|nl| pos + nl + 1)
+                .unwrap_or(content.len());
+            let trimmed = content[pos..line_end].trim_start();
+            if trimmed.starts_with("import ") || trimmed.starts_with("//") || trimmed.is_empty() {
+                pos = line_end;
+                if line_end >= content.len() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    let mut out = String::with_capacity(content.len() + block.len());
+    out.push_str(&content[..pos]);
+    out.push_str(&block);
+    out.push_str(&content[pos..]);
+    out
+}
+
 fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result<String, String> {
     if blocks.is_empty() {
         return Ok(content.to_string());
@@ -535,9 +671,11 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
 
     let mut out = String::with_capacity(content.len() + blocks.len() * 128);
     let mut cursor = 0usize;
+    let mut dispatch_methods: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     for block in blocks {
         out.push_str(&content[cursor..block.replace_start]);
-        let rewritten = render_block_rewrite(block).map_err(|e| {
+        let mut rewritten = render_block_rewrite(block).map_err(|e| {
             format!(
                 "{}:{}: failed to transpile inline block id={}: {}",
                 path.display(),
@@ -546,11 +684,18 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
                 e
             )
         })?;
+        // Issue #33: hoist the dispatch functors out of the block — inside a
+        // consumer namespace they would declare `demo::rusty` and shadow the
+        // real `::rusty`.
+        dispatch_methods.extend(take_dispatch_functor_block(&mut rewritten));
         out.push_str(&rewritten);
         cursor = block.replace_end;
     }
     out.push_str(&content[cursor..]);
-    Ok(out)
+
+    let out = strip_hoisted_dispatch_region(&out);
+    let methods: Vec<String> = dispatch_methods.into_iter().collect();
+    Ok(insert_hoisted_dispatch_region(&out, &methods))
 }
 
 #[cfg(test)]
@@ -570,6 +715,51 @@ fn add(a: i32, b: i32) -> i32 {{
 "#,
             gen_hash
         )
+    }
+
+    #[test]
+    fn test_dispatch_functors_are_hoisted_out_of_the_consumer_namespace() {
+        // Issue #33: the deref-dispatch functor was emitted inside the
+        // generated block, which normally sits INSIDE a consumer namespace.
+        // That declares `demo::rusty` and shadows `::rusty`, so every later
+        // `rusty::deref_call` / `rusty::clone` / `rusty::thread` resolves into
+        // the wrong namespace ("no member named 'deref_call' in namespace
+        // 'demo::rusty'"). The definitions belong at global scope.
+        let mut region = String::from(
+            "namespace rusty { namespace detail {\nRUSTY_METHOD_DISPATCH(is_ready)\n} } // namespace rusty::detail (issue #31 deref_call dispatch)\n\ntemplate<typename W>\nbool f();\n",
+        );
+        let taken = take_dispatch_functor_block(&mut region);
+        assert_eq!(taken, vec!["is_ready".to_string()]);
+        assert!(
+            !region.contains("namespace rusty"),
+            "functor left inside the block: {region}"
+        );
+        assert!(region.contains("template<typename W>"), "body lost: {region}");
+
+        let file = "module;\n#include <rusty/rusty.hpp>\nexport module m;\nimport std;\nexport namespace demo {\nbody\n}\n";
+        let hoisted = insert_hoisted_dispatch_region(file, &["is_ready".to_string()]);
+        let dispatch_at = hoisted.find("RUSTY_METHOD_DISPATCH").expect("no functor emitted");
+        let ns_at = hoisted.find("export namespace demo").expect("namespace vanished");
+        assert!(
+            dispatch_at < ns_at,
+            "functor must precede the consumer namespace:\n{hoisted}"
+        );
+        let import_at = hoisted.find("import std;").expect("import vanished");
+        assert!(
+            import_at < dispatch_at,
+            "imports must still immediately follow the module declaration:\n{hoisted}"
+        );
+
+        // Re-running --rewrite must not stack regions.
+        let again = insert_hoisted_dispatch_region(
+            &strip_hoisted_dispatch_region(&hoisted),
+            &["is_ready".to_string()],
+        );
+        assert_eq!(
+            again.matches(DISPATCH_BEGIN).count(),
+            1,
+            "hoisted region duplicated on re-run:\n{again}"
+        );
     }
 
     #[test]
