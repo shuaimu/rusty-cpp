@@ -608,7 +608,27 @@ impl CodeGen {
             return true;
         }
         let scope_key = scope.join("::");
+        // A FILE-BASED module (`mod map;`) contributes no inline items, so
+        // `collect_scope_import_bindings` never recurses into it and its
+        // `use` lines land under the crate-root scope instead of
+        // `btree::set`. Querying only the scoped key therefore misses them,
+        // and a crate-local type imported from a sibling file kept the
+        // runtime mapping — btree_port's own `set` module emitted
+        // `rusty::BTreeMap` instead of `map::BTreeMap`, which then triggered
+        // an automatic `import rusty;` and a module cycle (rusty re-exports
+        // btree_port). Inline `mod map { .. }` never hit this, which is why
+        // it only shows up in multi-file ports.
+        //
+        // Falling back to the root scope is safe here: this predicate has
+        // already established that the CRATE declares its own type with this
+        // name, so the only crates affected are ones deliberately shadowing a
+        // std name.
         self.resolve_scope_import_binding_path_for_scope(&scope_key, name)
+            .or_else(|| {
+                (!scope_key.is_empty())
+                    .then(|| self.resolve_scope_import_binding_path_for_scope("", name))
+                    .flatten()
+            })
             .is_some_and(|target| {
                 let mut normalized = target.trim().trim_start_matches("::").to_string();
                 // Own-crate-name prefix is crate-internal: std-family sources
@@ -719,7 +739,19 @@ impl CodeGen {
 
     pub(super) fn bare_std_named_type_suppression_applies(&self, name: &str) -> bool {
         if !self.crate_declares_std_named_type(name) {
-            return false;
+            // MULTI-FILE crate: `local_declared_types` only carries the file
+            // being emitted, so a type declared in a SIBLING FILE (btree_port's
+            // `map.rs` declaring `BTreeMap`, used from `set.rs`) is invisible
+            // here and the runtime mapping wrongly won — `set` emitted
+            // `rusty::BTreeMap`, which then triggered an automatic
+            // `import rusty;` and a module cycle, since rusty re-exports
+            // btree_port. An inline `mod map { .. }` never hit this.
+            //
+            // An import binding this leaf is equivalent evidence: the check
+            // below only accepts crate-internal targets (std::/core::/alloc::/
+            // rusty:: targets keep the runtime mapping), so this cannot
+            // capture a genuine std import.
+            return self.current_module_binds_bare_type_name(name);
         }
         if self.module_stack.is_empty() && self.ufcs_impl_module_path.is_empty() {
             return true;

@@ -21528,6 +21528,38 @@ fn test_struct_literal_hint_rebinds_callee_impl_generics() {
 }
 
 #[test]
+fn test_inline_sibling_module_shadowing_a_std_name_keeps_crate_type() {
+    // A crate that declares its OWN std-named type must not have references to
+    // it rewritten to the runtime alias. Inline modules always worked; the
+    // multi-file form did not (see the companion note in
+    // `bare_std_named_type_suppression_applies`) because sibling files are not
+    // in `local_declared_types` and file-based `mod map;` contributes no items
+    // to the scope-import collector.
+    //
+    // Getting this wrong is not merely cosmetic: emitting `rusty::BTreeMap`
+    // inside btree_port's own `set` module triggered an automatic
+    // `import rusty;`, and `rusty` re-exports btree_port — a module cycle.
+    let src = r#"
+        pub mod map {
+            pub struct BTreeMap<K, V> { pub k: K, pub v: V }
+        }
+        pub mod set {
+            use super::map::BTreeMap;
+            pub struct BTreeSet<T> { pub map: BTreeMap<T, u8> }
+        }
+    "#;
+    let out = transpile_str(src);
+    assert!(
+        !out.contains("rusty::BTreeMap<"),
+        "crate-local BTreeMap rewritten to the runtime alias:\n{out}"
+    );
+    assert!(
+        !out.contains("import rusty;"),
+        "runtime-alias reference pulled in an aggregate import:\n{out}"
+    );
+}
+
+#[test]
 fn test_structural_decomp_absorbed_duplicates_are_deduped() {
     // Regression: two parallel impls that decompose onto the SAME host can
     // absorb a method which, AFTER the dependent-path substitution, is
