@@ -16,6 +16,7 @@ fn cpp_lsp_publishes_and_clears_diagnostics() {
         .arg("-Wall")
         .arg("-Wextra")
         .arg("-pedantic")
+        .arg("-pthread")
         .arg("tools/rusty-cpp-lsp.cpp")
         .arg("-o")
         .arg(&lsp_bin)
@@ -146,6 +147,56 @@ void f() {
         "didChange with clean source should clear diagnostics: {cleared_diagnostics}"
     );
 
+    {
+        let stdin = child.stdin.as_mut().expect("child stdin");
+        write_lsp(
+            stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "version": 3
+                    },
+                    "contentChanges": [{
+                        "text": source
+                    }]
+                }
+            }),
+        );
+        write_lsp(
+            stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "version": 4
+                    },
+                    "contentChanges": [{
+                        "text": r#"
+// @safe
+void f() {
+    int x = 1;
+}
+"#
+                    }]
+                }
+            }),
+        );
+    }
+
+    let newest_diagnostics = read_lsp(&mut reader);
+    assert!(
+        newest_diagnostics["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .is_empty(),
+        "rapid edits should publish only the newest diagnostics: {newest_diagnostics}"
+    );
+
     let unannotated_source = r#"
 int helper() {
     return 1;
@@ -162,7 +213,7 @@ int helper() {
                 "params": {
                     "textDocument": {
                         "uri": uri,
-                        "version": 3
+                        "version": 5
                     },
                     "contentChanges": [{
                         "text": unannotated_source
@@ -227,6 +278,31 @@ int helper() {
     assert_eq!(
         actions[1]["edit"]["changes"][uri.as_str()][0]["newText"],
         json!("// @unsafe\n")
+    );
+
+    {
+        let stdin = child.stdin.as_mut().expect("child stdin");
+        write_lsp(
+            stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didClose",
+                "params": {
+                    "textDocument": {
+                        "uri": uri
+                    }
+                }
+            }),
+        );
+    }
+
+    let close_diagnostics = read_lsp(&mut reader);
+    assert!(
+        close_diagnostics["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .is_empty(),
+        "didClose should clear diagnostics: {close_diagnostics}"
     );
 
     {

@@ -1,18 +1,22 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -36,8 +40,42 @@ struct CheckerDiagnostic {
     std::string message;
 };
 
+struct CheckerRun {
+    std::string output;
+    int status = 0;
+};
+
+class DiagnosticsScheduler {
+  public:
+    DiagnosticsScheduler();
+    ~DiagnosticsScheduler();
+
+    void schedule(OpenDocument document, bool immediate);
+    void cancel(const std::string& uri);
+
+  private:
+    struct PendingDiagnostics {
+        OpenDocument document;
+        std::uint64_t generation = 0;
+        std::chrono::steady_clock::time_point ready_at;
+    };
+
+    void run();
+    bool is_current(const std::string& uri, std::uint64_t generation);
+
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::map<std::string, PendingDiagnostics> pending_;
+    std::map<std::string, std::uint64_t> latest_generations_;
+    std::uint64_t next_generation_ = 0;
+    bool stopping_ = false;
+    std::thread worker_;
+};
+
 std::map<std::string, OpenDocument> g_documents;
 ServerConfig g_config;
+DiagnosticsScheduler* g_diagnostics_scheduler = nullptr;
+std::mutex g_output_mutex;
 
 std::string trim_cr(std::string line) {
     if (!line.empty() && line.back() == '\r') {
@@ -88,6 +126,7 @@ std::optional<std::string> read_lsp_message() {
 }
 
 void write_lsp_message(const std::string& body) {
+    std::lock_guard lock(g_output_mutex);
     std::cout << "Content-Length: " << body.size() << "\r\n\r\n" << body;
     std::cout.flush();
 }
@@ -354,7 +393,7 @@ std::optional<std::filesystem::path> write_temp_document(const OpenDocument& doc
     return path;
 }
 
-std::string run_checker(const std::filesystem::path& path) {
+CheckerRun run_checker(const std::filesystem::path& path) {
     std::ostringstream command;
     command << shell_quote(checker_path()) << " " << shell_quote(path);
     for (const auto& include_path : g_config.include_paths) {
@@ -368,18 +407,20 @@ std::string run_checker(const std::filesystem::path& path) {
     }
     command << " 2>&1";
 
-    std::string output;
+    CheckerRun run;
     FILE* pipe = popen(command.str().c_str(), "r");
     if (!pipe) {
-        return "rusty-cpp-lsp: failed to run checker";
+        run.output = "rusty-cpp-lsp: failed to run checker";
+        run.status = -1;
+        return run;
     }
 
     char buffer[4096];
     while (fgets(buffer, sizeof(buffer), pipe)) {
-        output += buffer;
+        run.output += buffer;
     }
-    pclose(pipe);
-    return output;
+    run.status = pclose(pipe);
+    return run;
 }
 
 std::vector<std::string> split_lines(std::string_view text) {
@@ -542,20 +583,114 @@ std::string diagnostics_array_json(const std::vector<CheckerDiagnostic>& diagnos
     return out.str();
 }
 
-void publish_diagnostics(const OpenDocument& document) {
+std::vector<CheckerDiagnostic> analyze_document(const OpenDocument& document) {
     auto temp_path = write_temp_document(document);
     std::vector<CheckerDiagnostic> diagnostics;
-    if (temp_path) {
-        std::string checker_output = run_checker(*temp_path);
-        std::filesystem::remove(*temp_path);
-        diagnostics = parse_checker_diagnostics(checker_output, document.text);
+    if (!temp_path) {
+        diagnostics.push_back({0, "RustyCpp could not create a temporary file for analysis"});
+        return diagnostics;
     }
 
+    CheckerRun checker_run = run_checker(*temp_path);
+    std::error_code remove_error;
+    std::filesystem::remove(*temp_path, remove_error);
+    diagnostics = parse_checker_diagnostics(checker_run.output, document.text);
+    if (diagnostics.empty() && checker_run.status != 0) {
+        std::string message = "rusty-cpp-checker failed";
+        if (!checker_run.output.empty()) {
+            message += ":\n" + checker_run.output;
+        }
+        diagnostics.push_back({0, std::move(message)});
+    }
+    return diagnostics;
+}
+
+void publish_diagnostics(const OpenDocument& document,
+                         const std::vector<CheckerDiagnostic>& diagnostics) {
     std::ostringstream body;
     body << R"({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":")"
          << json_escape(document.uri) << R"(","diagnostics":)"
          << diagnostics_array_json(diagnostics, document.text) << "}}";
     write_lsp_message(body.str());
+}
+
+DiagnosticsScheduler::DiagnosticsScheduler() : worker_([this] { run(); }) {}
+
+DiagnosticsScheduler::~DiagnosticsScheduler() {
+    {
+        std::lock_guard lock(mutex_);
+        stopping_ = true;
+        pending_.clear();
+    }
+    condition_.notify_all();
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+}
+
+void DiagnosticsScheduler::schedule(OpenDocument document, bool immediate) {
+    std::lock_guard lock(mutex_);
+    const auto generation = ++next_generation_;
+    latest_generations_[document.uri] = generation;
+    const auto delay = immediate ? std::chrono::milliseconds(0) : std::chrono::milliseconds(300);
+    pending_[document.uri] = {
+        std::move(document),
+        generation,
+        std::chrono::steady_clock::now() + delay,
+    };
+    condition_.notify_all();
+}
+
+void DiagnosticsScheduler::cancel(const std::string& uri) {
+    std::lock_guard lock(mutex_);
+    latest_generations_[uri] = ++next_generation_;
+    pending_.erase(uri);
+    condition_.notify_all();
+}
+
+bool DiagnosticsScheduler::is_current(const std::string& uri, std::uint64_t generation) {
+    std::lock_guard lock(mutex_);
+    auto latest = latest_generations_.find(uri);
+    return !stopping_ && latest != latest_generations_.end() && latest->second == generation;
+}
+
+void DiagnosticsScheduler::run() {
+    std::unique_lock lock(mutex_);
+    while (!stopping_) {
+        if (pending_.empty()) {
+            condition_.wait(lock, [this] { return stopping_ || !pending_.empty(); });
+            continue;
+        }
+
+        auto next_ready = std::min_element(
+            pending_.begin(), pending_.end(), [](const auto& left, const auto& right) {
+                return left.second.ready_at < right.second.ready_at;
+            });
+        const auto ready_at = next_ready->second.ready_at;
+        if (condition_.wait_until(lock, ready_at) != std::cv_status::timeout) {
+            continue;
+        }
+
+        std::vector<PendingDiagnostics> ready;
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = pending_.begin(); it != pending_.end();) {
+            if (it->second.ready_at <= now) {
+                ready.push_back(std::move(it->second));
+                it = pending_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        lock.unlock();
+        for (const auto& item : ready) {
+            auto diagnostics = analyze_document(item.document);
+            if (is_current(item.document.uri, item.generation)) {
+                publish_diagnostics(item.document, diagnostics);
+            }
+        }
+        lock.lock();
+    }
 }
 
 void write_response(const std::string& id, const std::string& result_json) {
@@ -698,19 +833,30 @@ void handle_message(const std::string& message) {
     } else if (*method == "textDocument/didOpen") {
         if (auto document = document_from_did_open(message)) {
             g_documents[document->uri] = *document;
-            publish_diagnostics(*document);
+            g_diagnostics_scheduler->schedule(*document, true);
         }
     } else if (*method == "textDocument/didChange") {
         if (auto document = document_from_did_change(message)) {
             g_documents[document->uri] = *document;
-            publish_diagnostics(*document);
+            g_diagnostics_scheduler->schedule(*document, false);
         }
     } else if (*method == "textDocument/didSave") {
         auto uri = find_string_field(message, "uri");
         if (uri) {
             auto existing = g_documents.find(*uri);
             if (existing != g_documents.end()) {
-                publish_diagnostics(existing->second);
+                g_diagnostics_scheduler->schedule(existing->second, true);
+            }
+        }
+    } else if (*method == "textDocument/didClose") {
+        auto uri = find_string_field(message, "uri");
+        if (uri) {
+            auto existing = g_documents.find(*uri);
+            if (existing != g_documents.end()) {
+                OpenDocument document = existing->second;
+                g_documents.erase(existing);
+                g_diagnostics_scheduler->cancel(*uri);
+                publish_diagnostics(document, {});
             }
         }
     } else if (*method == "textDocument/codeAction") {
@@ -734,11 +880,14 @@ void handle_message(const std::string& message) {
 }  // namespace
 
 int main() {
+    DiagnosticsScheduler diagnostics_scheduler;
+    g_diagnostics_scheduler = &diagnostics_scheduler;
     while (auto message = read_lsp_message()) {
         if (auto method = find_string_field(*message, "method"); method && *method == "exit") {
             break;
         }
         handle_message(*message);
     }
+    g_diagnostics_scheduler = nullptr;
     return 0;
 }
