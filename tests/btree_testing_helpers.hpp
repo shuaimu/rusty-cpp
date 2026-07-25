@@ -237,4 +237,32 @@ struct IdBased {
     bool operator>=(const IdBased& other) const { return id >= other.id; }
 };
 
+// DeterministicRng — C++ port of rustc's `alloc/src/testing/rng.rs`
+// (an XorShiftRng). The seed and the shift sequence are copied exactly so a
+// translated test draws the SAME numbers rustc's test does. `next()`
+// guarantees each returned number is unique, which the tests rely on; the
+// 70029 ceiling is rustc's own assertion for that guarantee.
+struct DeterministicRng {
+    size_t count;
+    uint32_t x, y, z, w;
+
+    DeterministicRng()
+        : count(0), x(0x193a6754u), y(0xa8a7d469u), z(0x97830e05u), w(0x113ba7bbu) {}
+
+    static DeterministicRng new_() { return DeterministicRng(); }
+
+    uint32_t next() {
+        count += 1;
+        assert(count <= 70029);
+        const uint32_t x_ = x;
+        const uint32_t t = x_ ^ (x_ << 11);
+        x = y;
+        y = z;
+        z = w;
+        const uint32_t w_ = w;
+        w = w_ ^ (w_ >> 19) ^ (t ^ (t >> 8));
+        return w;
+    }
+};
+
 }  // namespace btree_testing
