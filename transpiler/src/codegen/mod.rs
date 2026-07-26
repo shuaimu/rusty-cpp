@@ -2305,6 +2305,80 @@ impl CodeGen {
         self.output.insert_str(insert_pos, &bridge);
     }
 
+    /// Module imports are only legal in the preamble; clang rejects a later one
+    /// outright ("imports must immediately follow the module declaration").
+    ///
+    /// A `pub mod dep;` re-export emits `export import <crate>.<dep>;` at the
+    /// item's source position, so any item declared before it in the Rust file
+    /// pushes the import out of the preamble and the unit stops compiling —
+    /// and under `--auto-namespace` the import also lands inside the crate
+    /// namespace, where an import is doubly invalid. Hoist every top-level
+    /// import back into the preamble, in source order.
+    ///
+    /// Runs before the namespace wrap so the wrap sees the finished preamble.
+    fn hoist_module_imports_into_preamble(&mut self) {
+        /// Deliberately strict: a module name has no spaces, so a line that
+        /// merely starts with the word `import` (inside a string, say) is not
+        /// mistaken for one.
+        fn is_module_import_line(line: &str) -> bool {
+            let Some(rest) = line
+                .strip_prefix("export import ")
+                .or_else(|| line.strip_prefix("import "))
+            else {
+                return false;
+            };
+            let Some(name) = rest.strip_suffix(';') else {
+                return false;
+            };
+            !name.is_empty()
+                && name.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '_' | '.' | ':' | '<' | '>' | '/' | '-' | '+' | '"')
+                })
+        }
+
+        let Some(export_idx) = self.output.find("\nexport module ") else {
+            return;
+        };
+        let after_export = export_idx + 1;
+        let Some(line_end_rel) = self.output[after_export..].find('\n') else {
+            return;
+        };
+
+        // The preamble ends at the first line that is neither blank, nor an
+        // import, nor a preprocessor directive.
+        let mut preamble_end = after_export + line_end_rel + 1;
+        loop {
+            let remaining = &self.output[preamble_end..];
+            let Some(line_end) = remaining.find('\n') else {
+                break;
+            };
+            let trimmed = remaining[..line_end].trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') || is_module_import_line(trimmed) {
+                preamble_end += line_end + 1;
+                continue;
+            }
+            break;
+        }
+
+        // Only column-0 lines are candidates. Anything indented sits inside a
+        // body, where `import` is not a module import to begin with.
+        let mut hoisted = String::new();
+        let mut rest = String::new();
+        for line in self.output[preamble_end..].split_inclusive('\n') {
+            if !line.starts_with([' ', '\t']) && is_module_import_line(line.trim_end()) {
+                hoisted.push_str(line.trim_end());
+                hoisted.push('\n');
+            } else {
+                rest.push_str(line);
+            }
+        }
+        if hoisted.is_empty() {
+            return;
+        }
+        self.output = format!("{}{}{}", &self.output[..preamble_end], hoisted, rest);
+    }
+
     fn wrap_module_purview_in_crate_namespace(&mut self, crate_name: String) {
         let Some(export_idx) = self.output.find("\nexport module ") else {
             return;
@@ -3012,6 +3086,11 @@ impl CodeGen {
         // wrap engulfs the bridge block (→ `<crate>::<module>::rusty_ext`) while an unwrapped
         // consumer keeps it at global scope (where its own `<module>::rusty_ext` lives).
         self.emit_cross_crate_rusty_ext_bridge();
+
+        // An import emitted at its item's source position can land below other
+        // declarations, which clang rejects. Put them back in the preamble
+        // before the wrap runs, so the wrap sees the real purview start.
+        self.hoist_module_imports_into_preamble();
 
         // We insert `namespace <crate> {` immediately after the
         // module declaration's import block, and append the closing
@@ -19114,7 +19193,20 @@ impl CodeGen {
             if self.module_stack.is_empty() && self.block_depth == 0 {
                 self.writeln(&format!("namespace {} {{}}", escaped));
             }
-            self.writeln(&format!("using namespace ::{};", escaped));
+            // The global qualifier is only right when the purview sits at
+            // global scope. Under a crate/module namespace wrap the forward
+            // declaration above and the real definition are both nested, so
+            // `::foo` names a global namespace that does not exist -- drop it
+            // and let the wrap's own scope resolve the name.
+            self.writeln(&format!(
+                "using namespace {}{};",
+                if self.cxx_namespace.is_some() {
+                    ""
+                } else {
+                    "::"
+                },
+                escaped
+            ));
             maybe_emit_private_content_reexport(self, trimmed);
             return;
         }

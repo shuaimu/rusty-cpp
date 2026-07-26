@@ -10861,6 +10861,42 @@ fn test_pub_mod_export_import() {
     assert!(out.contains("export import my_crate.api;"));
 }
 
+/// A `pub mod` after another item used to emit its `export import` at that
+/// source position, below the declaration -- which clang rejects outright
+/// ("imports must immediately follow the module declaration"), so the unit did
+/// not compile at all. Every import belongs in the preamble.
+#[test]
+fn test_late_pub_mod_export_import_is_hoisted_into_the_preamble() {
+    let out = transpile_str_module("pub const B: usize = 6;\npub mod api;\n", "my_crate");
+    let import_line = out
+        .lines()
+        .position(|l| l.trim() == "export import my_crate.api;")
+        .expect(&format!("expected an export import for `api`:\n{out}"));
+    let decl_line = out
+        .lines()
+        .position(|l| l.contains("B ="))
+        .expect(&format!("expected the constant to be emitted:\n{out}"));
+    assert!(
+        import_line < decl_line,
+        "import must precede every declaration, got import at {import_line} \
+         and declaration at {decl_line}:\n{out}"
+    );
+    let module_line = out
+        .lines()
+        .position(|l| l.starts_with("export module "))
+        .expect("expected a module declaration");
+    assert!(
+        out.lines()
+            .skip(module_line + 1)
+            .take(import_line - module_line - 1)
+            .all(|l| l.trim().is_empty()
+                || l.trim_start().starts_with('#')
+                || l.trim_start().starts_with("import ")
+                || l.trim_start().starts_with("export import ")),
+        "only imports/directives may sit between the module declaration and the import:\n{out}"
+    );
+}
+
 #[test]
 fn test_use_statement() {
     let out = transpile_str_module("use std::collections::HashMap;", "my_crate");
