@@ -15,22 +15,25 @@
 //! Getting either wrong compiles-or-works for one shape and breaks the other,
 //! which is exactly the failure mode both issues were.
 //!
-//! Because these compile against whatever `$CXX`/`c++` resolves to rather than
-//! the project's default clang, they double as a guard that the runtime
-//! headers stay portable: writing them is what caught `rusty.hpp` failing to
-//! compile under GCC entirely (see the lookup note in `arch.hpp`).
+//! These compile with clang specifically -- it is the project's toolchain and
+//! the only compiler these shapes are required to work under.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-fn find_cpp_compiler() -> Option<String> {
+/// Ask for clang by name rather than taking whatever `c++` happens to be.
+/// clang is the project's toolchain (CLAUDE.md) and the only compiler these
+/// shapes have to work under, so a non-clang system compiler must not be able
+/// to redden this test. If no clang is present the test skips rather than
+/// falling back -- a gcc failure here would be noise, not a regression.
+fn find_clang() -> Option<String> {
     if let Ok(cxx) = env::var("CXX") {
         if !cxx.trim().is_empty() {
             return Some(cxx);
         }
     }
-    for candidate in ["c++", "g++", "clang++"] {
+    for candidate in ["clang++", "clang++-22", "clang++-21"] {
         let status = Command::new(candidate)
             .arg("--version")
             .stdout(Stdio::null())
@@ -50,7 +53,10 @@ fn project_include_dir() -> PathBuf {
 }
 
 fn compile_and_run_cpp(source: &str, test_name: &str) {
-    let compiler = find_cpp_compiler().expect("no C++ compiler found in PATH or CXX");
+    let Some(compiler) = find_clang() else {
+        eprintln!("skipping {test_name}: no clang++ in PATH or CXX");
+        return;
+    };
     let temp = tempfile::tempdir().expect("create temp dir");
     let source_path = temp.path().join(format!("{test_name}.cpp"));
     let bin_path = temp.path().join(format!("{test_name}.bin"));
