@@ -32722,11 +32722,48 @@ impl CodeGen {
         let syn::Expr::MethodCall(mc) = expr else {
             return false;
         };
+        let method = mc.method.to_string();
+        // `unwrap()` / `expect(..)` PASS GUARD-NESS THROUGH: `lock().unwrap()`
+        // peels the `Result` and hands back the `MutexGuard` itself, so the
+        // unwrapped value needs exactly the same tolerant treatment as the
+        // guard call it wraps. Without this, the standard Mutex idiom
+        // `x.lock().unwrap().m()` called `.m()` straight on the guard while
+        // the bare `x.borrow_mut().m()` shape was already handled -- guard
+        // classification has to follow the VALUE'S FLOW, not one syntactic
+        // shape (the lesson of issues #32/#34/#35, each a different flow path
+        // of the same value).
+        let peels_result = match method.as_str() {
+            "unwrap" => mc.args.is_empty(),
+            "expect" => mc.args.len() == 1,
+            _ => false,
+        };
+        if peels_result {
+            // `lock()` and the `try_` producers yield `Result<Guard, _>`; the
+            // guard only emerges once the Result is peeled, at which point it
+            // needs the same tolerant treatment as a direct `borrow_mut()`.
+            let inner = self.peel_paren_group_expr(&mc.receiver);
+            let syn::Expr::MethodCall(pmc) = inner else {
+                return false;
+            };
+            return pmc.args.is_empty()
+                && matches!(
+                    pmc.method.to_string().as_str(),
+                    "lock"
+                        | "read"
+                        | "write"
+                        | "try_borrow"
+                        | "try_borrow_mut"
+                        | "try_lock"
+                        | "try_read"
+                        | "try_write"
+                )
+                && self.infer_simple_expr_type(&pmc.receiver).is_none();
+        }
         if !mc.args.is_empty() {
             return false;
         }
         if !matches!(
-            mc.method.to_string().as_str(),
+            method.as_str(),
             "borrow" | "borrow_mut" | "lock" | "read" | "write"
         ) {
             return false;
@@ -33433,7 +33470,12 @@ impl CodeGen {
                 // issue #32: a guard-producing call we cannot type (generic
                 // receiver) must go through the same `.`-vs-`->` dispatch —
                 // `rusty::borrow(x)` may yield a `Ref<T>` guard.
-                || self.receiver_is_uncertain_guard_call(receiver_expr))
+                || self.receiver_is_uncertain_guard_call(receiver_expr)
+                // ...and a LOCAL bound from one. Rust autoderef means the
+                // common form is `let mut g = x.borrow_mut(); g.push_back(v)`
+                // — no `*` ever appears in the source, so only the receiver's
+                // provenance can tell us the call must go through the guard.
+                || self.expr_is_uncertain_guard_local(receiver_expr))
         {
             let escaped_method_name = Self::escape_cpp_method_name(method_name);
             let method_call = if let Some(template_args) = method_template_args {

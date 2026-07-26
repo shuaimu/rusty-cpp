@@ -1092,11 +1092,19 @@ size_t len(const Container& container) {
                              const_cast<std::remove_cvref_t<Container>&>(container).into_iter();
                          }) {
         return rusty::len(const_cast<std::remove_cvref_t<Container>&>(container).into_iter());
+    } else if constexpr (requires { *container; }) {
+        // Deref-peel, mirroring rusty::iter's final arm: the receiver may be
+        // a guard (`Ref`/`RefMut`/`MutexGuard`) or another deref wrapper the
+        // caller could not see through -- `rusty::len(cell.borrow())`. None
+        // of the shape probes above look through it, so peel one level and
+        // retry. (`const char*` never reaches here; the dedicated overloads
+        // above are a better match.)
+        return rusty::len(*container);
     } else {
         static_assert(
             detail::collect_range_dependent_false_v<Container>,
             "rusty::len requires len(), size(), as_str(), std::size-compatible range, "
-            "size_hint(), or into_iter()");
+            "size_hint(), into_iter(), or a dereferenceable wrapper of one");
     }
 }
 
