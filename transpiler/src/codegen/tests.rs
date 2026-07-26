@@ -10861,6 +10861,37 @@ fn test_pub_mod_export_import() {
     assert!(out.contains("export import my_crate.api;"));
 }
 
+/// A let-chain condition (`if let A = x && let B = y`) parses as
+/// `Binary(Let, &&, Let)`, which every if-let lowering declines -- they all
+/// require the condition to be exactly an `Expr::Let`. The bare `Expr::Let`
+/// operands then reached generic expression emission, which has no lowering
+/// for them and emitted void `unreachable()` placeholders as the condition.
+/// They must lower to nested if-lets instead.
+#[test]
+fn test_let_chain_condition_lowers_to_nested_if_lets() {
+    let out = transpile_str_module(
+        "pub fn f(a: Option<u32>, b: Option<u32>) -> u32 {\n\
+         if let Some(x) = a && let Some(y) = b { x + y } else { 99 }\n\
+         }",
+        "my_crate",
+    );
+    assert!(
+        !out.contains("unreachable"),
+        "a let-chain must not degrade to an unreachable() placeholder:\n{out}"
+    );
+    assert!(
+        out.contains("a.is_some()") && out.contains("b.is_some()"),
+        "each chain element must become its own test:\n{out}"
+    );
+    // The else arm belongs to every level -- whichever test fails must reach
+    // it -- so it appears once per chain element.
+    assert_eq!(
+        out.matches("99").count(),
+        2,
+        "the else arm must be reachable from both tests:\n{out}"
+    );
+}
+
 /// A unit struct's bare name is a value in Rust, so it must emit as `Zst{}`.
 /// The per-file struct scan only sees the file being emitted, so one reached
 /// through a sibling file (`use super::inner::Zst;`) emitted the bare name --

@@ -4093,6 +4093,17 @@ impl CodeGen {
             }
             None => file,
         };
+        // Same treatment for let-chains, which every if-let lowering below
+        // would otherwise miss (they all require the condition to be exactly
+        // an `Expr::Let`). Lazy clone — only files that use one pay for it.
+        let unchained_file;
+        let file = match Self::normalize_let_chain_conditions(file) {
+            Some(f) => {
+                unchained_file = f;
+                &unchained_file
+            }
+            None => file,
+        };
         let profile_emit = std::env::var_os("RUSTY_CPP_PROFILE_EMIT").is_some();
         let profile_this_file = profile_emit;
         let emit_start = std::time::Instant::now();
@@ -46037,6 +46048,107 @@ fn replace_whole_word(haystack: &str, needle: &str, replacement: &str) -> String
 /// (indexmap set operators; the assoc-type spelling would otherwise keep
 /// the old name even if only the METHOD were rewritten).
 impl CodeGen {
+    /// Rewrite let-chain `if` conditions into nested `if let`s.
+    ///
+    /// `if let P1 = a && let P2 = b { A } else { B }` is exactly
+    /// `if let P1 = a { if let P2 = b { A } else { B } } else { B }` — the
+    /// short-circuit order is preserved, each binding is in scope for the
+    /// tests that follow it, and `B` still runs at most once because only one
+    /// path is ever taken. The nested form is what the existing if-let
+    /// lowering already handles.
+    ///
+    /// Without this the chain parses as `Expr::Binary(Expr::Let, &&, ..)`, so
+    /// every if-let path — all of which match on the condition being exactly
+    /// an `Expr::Let` — declines it, and the bare `Expr::Let` operands reach
+    /// generic expression emission, where they have no lowering and become
+    /// void `rusty::intrinsics::unreachable()` placeholders. The result does
+    /// not compile. Rust's own std uses let-chains (`BTreeSet::difference`).
+    ///
+    /// Returns `None` when the file contains no let-chain, so the common case
+    /// does not pay for a clone.
+    fn normalize_let_chain_conditions(file: &syn::File) -> Option<syn::File> {
+        /// Flatten a left-associative `&&` spine into its operands.
+        fn flatten_and(expr: &syn::Expr, out: &mut Vec<syn::Expr>) {
+            if let syn::Expr::Binary(bin) = expr
+                && matches!(bin.op, syn::BinOp::And(_))
+            {
+                flatten_and(&bin.left, out);
+                flatten_and(&bin.right, out);
+                return;
+            }
+            out.push(expr.clone());
+        }
+
+        /// A chain is only interesting when it actually binds something; a
+        /// plain `a && b` is left exactly as it was.
+        fn chain_parts(cond: &syn::Expr) -> Option<Vec<syn::Expr>> {
+            let mut parts = Vec::new();
+            flatten_and(cond, &mut parts);
+            (parts.len() >= 2 && parts.iter().any(|p| matches!(p, syn::Expr::Let(_))))
+                .then_some(parts)
+        }
+
+        struct Detector {
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Detector {
+            fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+                if chain_parts(&node.cond).is_some() {
+                    self.found = true;
+                }
+                syn::visit::visit_expr_if(self, node);
+            }
+        }
+
+        struct Rewriter;
+        impl VisitMut for Rewriter {
+            fn visit_expr_if_mut(&mut self, node: &mut syn::ExprIf) {
+                // Depth-first, so a chain nested inside a chain is already
+                // rewritten by the time this level is rebuilt.
+                visit_mut::visit_expr_if_mut(self, node);
+                let Some(mut parts) = chain_parts(&node.cond) else {
+                    return;
+                };
+                let wrap = |inner: syn::ExprIf, brace| syn::Block {
+                    brace_token: brace,
+                    // No trailing semicolon: the nested `if` stays a tail
+                    // expression, so an if-chain in expression position keeps
+                    // yielding its value.
+                    stmts: vec![syn::Stmt::Expr(syn::Expr::If(inner), None)],
+                };
+                let brace = node.then_branch.brace_token;
+                let else_branch = node.else_branch.clone();
+                let mut inner = syn::ExprIf {
+                    attrs: Vec::new(),
+                    if_token: node.if_token,
+                    cond: Box::new(parts.pop().expect("chain has >= 2 parts")),
+                    then_branch: node.then_branch.clone(),
+                    else_branch: else_branch.clone(),
+                };
+                while parts.len() > 1 {
+                    inner = syn::ExprIf {
+                        attrs: Vec::new(),
+                        if_token: node.if_token,
+                        cond: Box::new(parts.pop().expect("loop guard keeps one")),
+                        then_branch: wrap(inner, brace),
+                        else_branch: else_branch.clone(),
+                    };
+                }
+                node.cond = Box::new(parts.pop().expect("one part remains"));
+                node.then_branch = wrap(inner, brace);
+            }
+        }
+
+        let mut detector = Detector { found: false };
+        syn::visit::Visit::visit_file(&mut detector, file);
+        if !detector.found {
+            return None;
+        }
+        let mut rewritten = file.clone();
+        Rewriter.visit_file_mut(&mut rewritten);
+        Some(rewritten)
+    }
+
     fn normalize_bare_self_param_impls(file: &syn::File) -> Option<syn::File> {
         fn type_param_names(g: &syn::Generics) -> Vec<String> {
             g.params
