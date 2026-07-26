@@ -10893,6 +10893,48 @@ fn test_impl_method_conflict_ignores_generic_param_names_and_lifetimes() {
     );
 }
 
+/// F3 of the btree swap-in: `Ok(Left(x))` where TWO enums share the
+/// Left/Right variant names (btree_internal has both `Peeked` and
+/// `LeftOrRight`). Name-based disambiguation ties, and the outer `Result`
+/// ctx propagated to the inner pattern (Result is not in the data-enum
+/// registries, so it looked like an unknown user enum) — the arm degraded
+/// to a TODO marker with a hard-coded `true` condition. The scrutinee TYPE
+/// names the payload enum; the projection must use it.
+#[test]
+fn test_nested_container_payload_projects_ctx_from_scrutinee_type() {
+    let out = transpile_str(
+        r#"
+        pub enum LR<T> { Left(T), Right(T) }
+        pub enum Peek2 { Left(u8), Right(u8) }
+        use LR::*;
+
+        pub struct Node2 { pub n: usize }
+
+        impl Node2 {
+            pub fn choose(self) -> Result<LR<usize>, Node2> {
+                if self.n == 0 { Ok(Left(self.n)) } else { Err(self) }
+            }
+            pub fn pick(self) -> usize {
+                let new_pos = match self.choose() {
+                    Ok(Left(l)) => l,
+                    Ok(Right(r)) => r + 1,
+                    Err(pos) => pos.n + 2,
+                };
+                new_pos
+            }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("unresolved bare-glob variant"),
+        "the payload enum is named by the scrutinee type; the arm must          resolve:\n{out}"
+    );
+    assert!(
+        out.contains("variant_index"),
+        "inner Left/Right arms must test the LR variant index:\n{out}"
+    );
+}
+
 /// F6 of the btree swap-in: `Owner::assoc(&self.field)` with omitted owner
 /// generics recovers the owner as `decltype(arg0)` — but the argument emits
 /// as `&this->field`, and in C++ that `&` is ADDRESS-OF, so the recovered

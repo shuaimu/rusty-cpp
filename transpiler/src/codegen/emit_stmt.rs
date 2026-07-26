@@ -1087,8 +1087,31 @@ impl CodeGen {
                         ));
                         let matched_value = format!("_mv{}", idx);
                         let mut binding_stmts = Vec::new();
-                        let payload_variant_ctx =
-                            self.infer_variant_type_context_from_pattern(&ts.elems[0], variant_ctx);
+                        // Project the container's PAYLOAD ctx from the
+                        // scrutinee type first: for `Ok(Left(x))` on a
+                        // `Result<LeftOrRight<..>, _>` the inner enum is
+                        // named right there, and name-based fallbacks tie
+                        // when enums share variant names (swap-in family F3:
+                        // Peeked vs LeftOrRight, both with Left/Right).
+                        let arm_variant = ts
+                            .path
+                            .segments
+                            .last()
+                            .map(|seg| {
+                                self.canonical_variant_name(&seg.ident.to_string()).to_string()
+                            })
+                            .unwrap_or_default();
+                        let projected_payload_ctx = self
+                            .infer_simple_expr_type(&match_expr.expr)
+                            .or_else(|| {
+                                self.infer_local_binding_type_from_initializer(&match_expr.expr)
+                            })
+                            .and_then(|ty| {
+                                self.variant_ctx_from_container_payload(&ty, &arm_variant)
+                            });
+                        let payload_variant_ctx = projected_payload_ctx.or_else(|| {
+                            self.infer_variant_type_context_from_pattern(&ts.elems[0], variant_ctx)
+                        });
                         let payload_match_condition = self
                             .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                                 &ts.elems[0],

@@ -2941,6 +2941,78 @@ impl CodeGen {
         }
     }
 
+    /// Project a container scrutinee's PAYLOAD into a variant context:
+    /// `match r { Ok(Left(x)) => .. }` with `r: Result<LeftOrRight<..>, _>`
+    /// — the inner pattern's enum is the Ok payload's type, readable straight
+    /// off the scrutinee type. Without this projection the inner pattern only
+    /// had the OUTER ctx (`Result`) plus name-based disambiguation, which
+    /// ties when two enums share variant names (btree_internal's `Peeked` and
+    /// `LeftOrRight` both have Left/Right — swap-in family F3).
+    ///
+    /// `canonical_variant` is the OUTER arm's variant (Ok/Some/Err); returns
+    /// None unless the payload's type tail names a known data enum.
+    pub(super) fn variant_ctx_from_container_payload(
+        &self,
+        scrutinee_ty: &syn::Type,
+        canonical_variant: &str,
+    ) -> Option<VariantTypeContext> {
+        let ty = self.peel_reference_paren_group_type(scrutinee_ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let container = last.ident.to_string();
+        let payload_pos = match (container.as_str(), canonical_variant) {
+            ("Option", "Some") => 0,
+            ("Result", "Ok") => 0,
+            ("Result", "Err") => 1,
+            _ => return None,
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let payload = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .nth(payload_pos)?;
+        let payload = self.peel_reference_paren_group_type(payload);
+        let syn::Type::Path(ptp) = payload else {
+            return None;
+        };
+        let pseg = ptp.path.segments.last()?;
+        let enum_name = pseg.ident.to_string();
+        // Only claim the projection when the tail names a KNOWN data enum —
+        // a `Result<usize, E>` payload must not manufacture a bogus ctx.
+        let is_known = self.data_enum_types.contains(&enum_name)
+            || self.data_enum_variants_by_enum.contains_key(&enum_name)
+            || self
+                .data_enum_variants_by_enum
+                .keys()
+                .any(|known| known.rsplit("::").next().is_some_and(|t| t == enum_name));
+        if !is_known {
+            return None;
+        }
+        let template_args = match &pseg.arguments {
+            syn::PathArguments::AngleBracketed(pargs) => pargs
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Some(VariantTypeContext {
+            enum_name,
+            template_args,
+        })
+    }
+
     pub(super) fn infer_variant_type_context_from_pattern(
         &self,
         pat: &syn::Pat,

@@ -1410,13 +1410,27 @@ impl CodeGen {
                     }
                     let matched_value = format!("_mv{}", idx);
                     let mut binding_stmts = Vec::new();
+                    // The inner pattern's enum is the CONTAINER'S PAYLOAD, and
+                    // the scrutinee type says exactly what that is — project it
+                    // instead of handing down the outer Result/Option ctx,
+                    // which cannot disambiguate enums that share variant names
+                    // (guard doc: swap-in family F3).
+                    let arm_variant = ts
+                        .path
+                        .segments
+                        .last()
+                        .map(|seg| self.canonical_variant_name(&seg.ident.to_string()).to_string())
+                        .unwrap_or_default();
+                    let projected_payload_ctx = match_scrutinee_ty
+                        .as_ref()
+                        .and_then(|ty| self.variant_ctx_from_container_payload(ty, &arm_variant));
                     let Some(payload_condition) = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             &ts.elems[0],
                             &matched_value,
                             &mut binding_stmts,
                             &mut arm_binding_map,
-                            variant_ctx,
+                            projected_payload_ctx.as_ref().or(variant_ctx),
                         )
                     else {
                         return false;
