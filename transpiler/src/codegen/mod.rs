@@ -4351,6 +4351,46 @@ impl CodeGen {
             self.cross_file_unit_struct_tails = foreign_units;
         }
         log_emit("seed_cross_file_unit_structs");
+        // Same replay for sibling-file `impl Deref`/`DerefMut` blocks: the
+        // guard-flow classifier keys on `user_deref_targets`, and the per-file
+        // collect pass only sees this file's own impls — without the replay,
+        // whether a custom guard from a sibling file classified depended on
+        // FILE EMISSION ORDER (the map is never cleared, so later files saw
+        // earlier files' impls but not vice versa).
+        {
+            let foreign_impls = std::mem::take(&mut self.cross_file_impl_blocks);
+            for impl_block in &foreign_impls {
+                let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
+                    continue;
+                };
+                let is_deref = trait_path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| seg.ident == "Deref" || seg.ident == "DerefMut");
+                if !is_deref {
+                    continue;
+                }
+                let syn::Type::Path(tp) = impl_block.self_ty.as_ref() else {
+                    continue;
+                };
+                let Some(simple) = tp.path.segments.last().map(|seg| seg.ident.to_string())
+                else {
+                    continue;
+                };
+                for impl_item in &impl_block.items {
+                    if let syn::ImplItem::Type(assoc) = impl_item
+                        && assoc.ident == "Target"
+                    {
+                        let scoped = self.scoped_type_key(&simple);
+                        self.user_deref_targets
+                            .insert(simple.clone(), assoc.ty.clone());
+                        self.user_deref_targets.insert(scoped, assoc.ty.clone());
+                    }
+                }
+            }
+            self.cross_file_impl_blocks = foreign_impls;
+        }
+        log_emit("seed_cross_file_deref_targets");
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
         // UFCS Phase 3: classify method names for call-site lowering.

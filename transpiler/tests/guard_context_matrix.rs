@@ -99,6 +99,29 @@ fn qmut(h: &Holder) -> std::cell::RefMut<'_, std::collections::VecDeque<i32>> {
 }
 fn c26_userfn_inline(h: &Holder) { qmut(h).push_back(26); }
 fn c27_userfn_bound(h: &Holder) { let mut g = qmut(h); g.push_back(27); }
+// C28/C29: a CUSTOM guard type — recognized by its `impl Deref`, not by any
+// name list. `Tracked` and `mk_tracked` appear on no whitelist anywhere.
+struct Tracked {
+    inner: std::collections::VecDeque<i32>,
+}
+impl std::ops::Deref for Tracked {
+    type Target = std::collections::VecDeque<i32>;
+    fn deref(&self) -> &Self::Target { &self.inner }
+}
+impl std::ops::DerefMut for Tracked {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inner }
+}
+fn mk_tracked() -> Tracked {
+    Tracked { inner: std::collections::VecDeque::new() }
+}
+fn c28_custom_guard_bound() -> usize {
+    let mut g = mk_tracked();
+    g.push_back(28);
+    (*g).len()
+}
+fn c29_custom_guard_inline() -> usize {
+    mk_tracked().len()
+}
 #endif
 }
 "####;
@@ -137,6 +160,9 @@ int main() {
     { auto h = mk(); c25_tuple_guards(h); c26_userfn_inline(h); c27_userfn_bound(h);
       auto g = h.q.borrow(); assert((*g).len() == 3);
       assert((*g)[0]==25 && (*g)[1]==26 && (*g)[2]==27); }
+    // Custom-guard rows: no name on any list — impl Deref is the signal.
+    assert(c28_custom_guard_bound() == 1);
+    assert(c29_custom_guard_inline() == 0);
     return 0;
 }
 "####;

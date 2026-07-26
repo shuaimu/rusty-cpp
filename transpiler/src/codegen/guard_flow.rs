@@ -66,27 +66,7 @@ const GUARD_TYPE_TAILS: &[&str] = &[
     "WriteGuard",
 ];
 
-/// Does this declared type's last path segment name a guard type? Peels
-/// references and parens; a `-> RefMut<'_, T>` and a `-> rusty::RefMut<T>`
-/// both answer yes.
-fn declared_type_tail_names_guard(ty: &syn::Type) -> bool {
-    let mut ty = ty;
-    loop {
-        match ty {
-            syn::Type::Reference(r) => ty = &r.elem,
-            syn::Type::Paren(p) => ty = &p.elem,
-            syn::Type::Group(g) => ty = &g.elem,
-            _ => break,
-        }
-    }
-    let syn::Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path
-        .segments
-        .last()
-        .is_some_and(|seg| GUARD_TYPE_TAILS.contains(&seg.ident.to_string().as_str()))
-}
+
 const RESULT_GUARD_PRODUCERS: &[&str] = &[
     "lock",
     "read",
@@ -99,6 +79,63 @@ const RESULT_GUARD_PRODUCERS: &[&str] = &[
 ];
 
 impl CodeGen {
+    /// Does this declared type name a deref wrapper? Structural where it can
+    /// be: any crate type with an `impl Deref`/`DerefMut` qualifies via the
+    /// collected `user_deref_targets` — no name list involved, exactly as in
+    /// Rust, where the trait impl IS the signal. The small name seed covers
+    /// only the hand-written runtime guards (`RefCell`, `Mutex`, …), whose
+    /// Rust-side `impl Deref` the transpiler never sees — the same role
+    /// rustc's std metadata plays.
+    /// Split by KNOWLEDGE SOURCE, because the two halves scope differently:
+    ///
+    /// * a SEED guard (`RefMut`, `MutexGuard`, …) classifies unconditionally —
+    ///   these are hand-written runtime types the typed tier has no dispatch
+    ///   for, so the tolerant path is the only correct one;
+    /// * a CRATE type with `impl Deref` classifies only when the expression
+    ///   is UNTYPABLE (doctrine rule 3). When inference can see the type, the
+    ///   existing typed auto-deref engine already resolves Target methods as
+    ///   `(*g).method()` and inherent methods directly — and in Rust every
+    ///   smart pointer and collection implements Deref (`Vec`, `String`,
+    ///   `SmallVec`…), so classifying them here re-routed perfectly good
+    ///   typed emission through the tolerant machinery (caught by a golden
+    ///   test and two matrix crates).
+    fn declared_type_tail(ty: &syn::Type) -> Option<String> {
+        let mut ty = ty;
+        loop {
+            match ty {
+                syn::Type::Reference(r) => ty = &r.elem,
+                syn::Type::Paren(p) => ty = &p.elem,
+                syn::Type::Group(g) => ty = &g.elem,
+                _ => break,
+            }
+        }
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        tp.path.segments.last().map(|seg| seg.ident.to_string())
+    }
+
+    fn declared_type_is_seed_guard(ty: &syn::Type) -> bool {
+        Self::declared_type_tail(ty).is_some_and(|t| GUARD_TYPE_TAILS.contains(&t.as_str()))
+    }
+
+    fn declared_type_is_crate_deref_wrapper(&self, ty: &syn::Type) -> bool {
+        Self::declared_type_tail(ty).is_some_and(|t| {
+            self.user_deref_targets.contains_key(&t)
+                || self.user_deref_targets.contains_key(&self.scoped_type_key(&t))
+        })
+    }
+
+    /// The two-tier answer for a call expression whose declared return type
+    /// is known: see the scoping note above.
+    fn signature_classifies_as_guard(&self, expr: &syn::Expr, ty: &syn::Type) -> bool {
+        if Self::declared_type_is_seed_guard(ty) {
+            return true;
+        }
+        self.declared_type_is_crate_deref_wrapper(ty)
+            && self.infer_simple_expr_type(expr).is_none()
+    }
+
     /// May `expr` evaluate to a guard object the source never spells a deref
     /// for? True only in the UNCERTAIN case: the receiver the guard came from
     /// is one inference cannot type (doctrine rule 2) — a typable receiver is
@@ -114,7 +151,8 @@ impl CodeGen {
         if let syn::Expr::Call(call) = expr {
             return self
                 .lookup_function_return_type(&call.func)
-                .is_some_and(declared_type_tail_names_guard);
+                .cloned()
+                .is_some_and(|ty| self.signature_classifies_as_guard(expr, &ty));
         }
         let syn::Expr::MethodCall(mc) = expr else {
             return false;
@@ -144,8 +182,7 @@ impl CodeGen {
         // User METHOD with a guard-naming declared return type — the method
         // sibling of the `Call` arm above.
         self.lookup_known_method_return_type_by_name(&method)
-            .as_ref()
-            .is_some_and(declared_type_tail_names_guard)
+            .is_some_and(|ty| self.signature_classifies_as_guard(expr, &ty))
     }
 
     /// Flow-following variant for a `let` initializer: the guard call may sit

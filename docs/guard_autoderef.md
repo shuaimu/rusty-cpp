@@ -1,7 +1,7 @@
 # Guard flow and autoderef: the systematic design
 
-Status: implemented (phases 1–5). The living regression surface is
-`transpiler/tests/guard_context_matrix.rs` — 27 rows.
+Status: implemented (phases 1–6). The living regression surface is
+`transpiler/tests/guard_context_matrix.rs` — 29 rows.
 
 ## The problem
 
@@ -47,9 +47,22 @@ or a plain reference:
    `unwrap()`/`expect()` (`lock()` returns `Result<Guard, _>`), via a local
    binding, via the tail of a block/`if`/`match` initializer, element-wise
    through a tuple destructure, or re-surfaced by a *user function* whose
-   declared return type names a guard (`fn locked(&self) -> MutexGuard<…>`
-   — the signature is the flow edge). Every flow path must give the same
-   answer. A per-site syntactic predicate is how the class kept reopening.
+   declared return type is a deref wrapper (the signature is the flow edge).
+   Every flow path must give the same answer. A per-site syntactic predicate
+   is how the class kept reopening.
+   **Corollary — the trait impl is the signal, not a name.** "Is this type a
+   deref wrapper" is answered structurally: any crate type with an
+   `impl Deref`/`DerefMut` qualifies, via the collected `user_deref_targets`
+   (replayed from sibling files in `emit_file` so the answer never depends
+   on file emission order). A name seed remains ONLY for the hand-written
+   runtime guards (`Ref`, `RefMut`, `MutexGuard`, …), whose Rust-side
+   `impl Deref` the transpiler never sees — the same role rustc's std
+   metadata plays. The producer-method names (`borrow`, `lock`, …) are the
+   last-resort heuristic for receivers so opaque that NO signature is known;
+   they are a fallback, not the mechanism. A custom guard participates with
+   no list anywhere: `impl Deref` emits `operator*`, so the tolerant runtime
+   walks it structurally, and the classifier recognizes it from the impl
+   (matrix rows c28/c29 pin exactly this).
 2. **Every shape-laddered runtime helper ends with a deref-peel arm**
    (`else if constexpr (requires { *x; }) { return helper(*x); }` —
    see `rusty::iter`, `rusty::len`, `rusty::contains`). This is the single
@@ -100,7 +113,8 @@ has `front`/`back`, not `first`/`last`).
 
 Phase-3 rows added: `if`/`match`/block-tail initializers, tuple-destructured
 guards, user-fn guard returns (inline and bound), a generic-receiver
-variant, and drop-then-reborrow. The user-fn rows also flushed out a
+variant, and drop-then-reborrow. Phase-6 rows: a fully custom guard type
+(`impl Deref`/`DerefMut`, no name on any list), bound and inline. The user-fn rows also flushed out a
 pre-existing inline-rust bug — block-local calls were `::`-qualified, which
 names nothing inside a consumer namespace — and the missing
 `Ref`/`RefMut`/`MutexGuard` std type-map entries.
