@@ -4016,7 +4016,18 @@ impl CodeGen {
     /// struct body; when file B's impl block is then emitted, the
     /// methods are emitted as out-of-line member definitions matching
     /// those declarations.
-    pub fn set_cross_file_impl_blocks(&mut self, impls: Vec<syn::ItemImpl>) {
+    pub fn set_cross_file_impl_blocks(&mut self, mut impls: Vec<syn::ItemImpl>) {
+        // These are collected straight from the sibling files' source, so they
+        // skip the normalization `emit_file` runs on the file being emitted.
+        // Normalize let-chains here too, or the codegen ends up holding two
+        // versions of the same method -- the sibling's raw one and the local
+        // rewritten one -- which disagree on their bodies. Today only the
+        // declaration comes from this copy, so the raw body does not reach the
+        // output, but the mismatch is a live hazard and it makes genuinely
+        // identical methods look like conflicting impls.
+        for item in &mut impls {
+            LetChainRewriter.visit_item_impl_mut(item);
+        }
         self.cross_file_impl_blocks = impls;
     }
 
@@ -45646,6 +45657,142 @@ fn is_assoc_self_forwarder_method(method: &syn::ImplItemFn) -> bool {
     true
 }
 
+/// Resolve two impl methods that collapse to the same C++ signature: keep one
+/// and discard the other, warning first when that actually loses behaviour.
+pub(crate) fn resolve_impl_method_conflict(
+    entry: &mut Vec<syn::ImplItem>,
+    key: &str,
+    merged: syn::ImplItemFn,
+    type_name: &str,
+) {
+    let Some(existing_index) = find_impl_method_conflict_index(entry, key) else {
+        return;
+    };
+    let Some(syn::ImplItem::Fn(existing)) = entry.get(existing_index) else {
+        return;
+    };
+    // Conflicts are rare, so cloning to sidestep the borrow is cheap.
+    let existing = existing.clone();
+    let should_replace = should_replace_conflicting_impl_method(&existing, &merged);
+    let (kept, dropped) = if should_replace {
+        (&merged, &existing)
+    } else {
+        (&existing, &merged)
+    };
+    warn_on_lossy_impl_method_conflict(type_name, kept, dropped);
+    if should_replace {
+        entry[existing_index] = syn::ImplItem::Fn(merged);
+    }
+}
+
+/// Most signature collisions are benign — a derive-generated body against an
+/// explicit one, or a forwarder — and discarding one is correct. Two DIFFERENT
+/// bodies collapsing to one signature is not: one impl's behaviour is silently
+/// gone, and the port compiles and does the wrong thing. C++ cannot overload on
+/// a Rust trait's type argument alone, so the standard `Extend<T>` +
+/// `Extend<&'a T>` pair lands here for every std container. Say so out loud.
+fn warn_on_lossy_impl_method_conflict(
+    type_name: &str,
+    kept: &syn::ImplItemFn,
+    dropped: &syn::ImplItemFn,
+) {
+    if impl_method_is_automatically_derived(kept) || impl_method_is_automatically_derived(dropped) {
+        return;
+    }
+    if is_assoc_self_forwarder_method(kept) || is_assoc_self_forwarder_method(dropped) {
+        return;
+    }
+    if kept.block.to_token_stream().to_string() == dropped.block.to_token_stream().to_string() {
+        return;
+    }
+    // One line per (type, method) however many times the collect passes run.
+    static WARNED: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+    let slot = format!("{}::{}", type_name, kept.sig.ident);
+    if let Ok(mut guard) = WARNED.lock() {
+        if !guard.get_or_insert_with(HashSet::new).insert(slot) {
+            return;
+        }
+    }
+    eprintln!(
+        "warning: {}::{}: two impls collapse to a single C++ signature, so one \
+         body is kept and the other discarded. C++ cannot overload on the Rust \
+         trait type argument alone (as in `Extend<T>` vs `Extend<&T>`).",
+        type_name, kept.sig.ident
+    );
+}
+
+    /// Flatten a left-associative `&&` spine into its operands.
+    fn flatten_and(expr: &syn::Expr, out: &mut Vec<syn::Expr>) {
+        if let syn::Expr::Binary(bin) = expr
+            && matches!(bin.op, syn::BinOp::And(_))
+        {
+            flatten_and(&bin.left, out);
+            flatten_and(&bin.right, out);
+            return;
+        }
+        out.push(expr.clone());
+    }
+
+    /// A chain is only interesting when it actually binds something; a
+    /// plain `a && b` is left exactly as it was.
+    fn chain_parts(cond: &syn::Expr) -> Option<Vec<syn::Expr>> {
+        let mut parts = Vec::new();
+        flatten_and(cond, &mut parts);
+        (parts.len() >= 2 && parts.iter().any(|p| matches!(p, syn::Expr::Let(_))))
+            .then_some(parts)
+    }
+
+    struct Detector {
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Detector {
+        fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+            if chain_parts(&node.cond).is_some() {
+                self.found = true;
+            }
+            syn::visit::visit_expr_if(self, node);
+        }
+    }
+
+    pub(crate) struct LetChainRewriter;
+    impl VisitMut for LetChainRewriter {
+        fn visit_expr_if_mut(&mut self, node: &mut syn::ExprIf) {
+            // Depth-first, so a chain nested inside a chain is already
+            // rewritten by the time this level is rebuilt.
+            visit_mut::visit_expr_if_mut(self, node);
+            let Some(mut parts) = chain_parts(&node.cond) else {
+                return;
+            };
+            let wrap = |inner: syn::ExprIf, brace| syn::Block {
+                brace_token: brace,
+                // No trailing semicolon: the nested `if` stays a tail
+                // expression, so an if-chain in expression position keeps
+                // yielding its value.
+                stmts: vec![syn::Stmt::Expr(syn::Expr::If(inner), None)],
+            };
+            let brace = node.then_branch.brace_token;
+            let else_branch = node.else_branch.clone();
+            let mut inner = syn::ExprIf {
+                attrs: Vec::new(),
+                if_token: node.if_token,
+                cond: Box::new(parts.pop().expect("chain has >= 2 parts")),
+                then_branch: node.then_branch.clone(),
+                else_branch: else_branch.clone(),
+            };
+            while parts.len() > 1 {
+                inner = syn::ExprIf {
+                    attrs: Vec::new(),
+                    if_token: node.if_token,
+                    cond: Box::new(parts.pop().expect("loop guard keeps one")),
+                    then_branch: wrap(inner, brace),
+                    else_branch: else_branch.clone(),
+                };
+            }
+            node.cond = Box::new(parts.pop().expect("one part remains"));
+            node.then_branch = wrap(inner, brace);
+        }
+    }
+
 fn should_replace_conflicting_impl_method(
     existing_method: &syn::ImplItemFn,
     candidate_method: &syn::ImplItemFn,
@@ -45753,25 +45900,75 @@ fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
         _ => "recv:static",
     };
 
+    // The key has to describe the C++ SIGNATURE, because that is what decides
+    // whether two methods collide. Two things in the Rust signature do not
+    // survive into C++ and so must not appear here:
+    //
+    //   * a generic parameter's SPELLING — `fn f<Iter>(it: Iter)` and
+    //     `fn f<I>(it: I)` both emit `template<class X> void f(X)`;
+    //   * lifetimes — they erase completely.
+    //
+    // Keying on either made two colliding methods look distinct, so the
+    // collision went undetected and both were emitted: "class member cannot
+    // be redeclared". Rust's own std hits this with the standard
+    // `Extend<T>` + `Extend<&'a T>` pair, which differ only in a lifetime and
+    // in what the two impls happened to name their iterator parameter.
+    //
+    // So: drop lifetimes, and rename each remaining generic parameter to its
+    // position, substituting the same names into the parameter types.
+    struct CanonicalizeGenerics {
+        types: HashMap<String, String>,
+        lifetimes: HashSet<String>,
+    }
+    impl VisitMut for CanonicalizeGenerics {
+        fn visit_ident_mut(&mut self, ident: &mut syn::Ident) {
+            if let Some(slot) = self.types.get(&ident.to_string()) {
+                *ident = syn::Ident::new(slot, ident.span());
+            }
+        }
+        fn visit_lifetime_mut(&mut self, lifetime: &mut syn::Lifetime) {
+            if self.lifetimes.contains(&lifetime.ident.to_string()) {
+                lifetime.ident = syn::Ident::new("_erased", lifetime.ident.span());
+            }
+        }
+    }
+
+    let mut canon = CanonicalizeGenerics {
+        types: HashMap::new(),
+        lifetimes: HashSet::new(),
+    };
+    let mut generic_slots = Vec::new();
+    let mut slot = 0usize;
+    for param in &method.sig.generics.params {
+        match param {
+            syn::GenericParam::Type(tp) => {
+                canon.types.insert(tp.ident.to_string(), format!("__mp{slot}"));
+                generic_slots.push(format!("type:__mp{slot}"));
+                slot += 1;
+            }
+            syn::GenericParam::Const(cp) => {
+                canon.types.insert(cp.ident.to_string(), format!("__mp{slot}"));
+                generic_slots.push(format!("const:__mp{slot}"));
+                slot += 1;
+            }
+            // No slot: a lifetime parameter contributes nothing to the C++
+            // signature, so it must not shift the positions of the others.
+            syn::GenericParam::Lifetime(lp) => {
+                canon.lifetimes.insert(lp.lifetime.ident.to_string());
+            }
+        }
+    }
+
     let mut params = Vec::new();
     for arg in &method.sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
-            params.push(normalize_token_text(pt.ty.to_token_stream().to_string()));
+            let mut ty = (*pt.ty).clone();
+            canon.visit_type_mut(&mut ty);
+            params.push(normalize_token_text(ty.to_token_stream().to_string()));
         }
     }
     let params_key = params.join(",");
-    let generics_key = method
-        .sig
-        .generics
-        .params
-        .iter()
-        .map(|param| match param {
-            syn::GenericParam::Type(tp) => format!("type:{}", tp.ident),
-            syn::GenericParam::Const(cp) => format!("const:{}", cp.ident),
-            syn::GenericParam::Lifetime(lp) => format!("lt:{}", lp.lifetime.ident),
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let generics_key = generic_slots.join(",");
     format!(
         "{}|{}|{}|{}",
         method.sig.ident, receiver_key, generics_key, params_key
@@ -46067,85 +46264,13 @@ impl CodeGen {
     /// Returns `None` when the file contains no let-chain, so the common case
     /// does not pay for a clone.
     fn normalize_let_chain_conditions(file: &syn::File) -> Option<syn::File> {
-        /// Flatten a left-associative `&&` spine into its operands.
-        fn flatten_and(expr: &syn::Expr, out: &mut Vec<syn::Expr>) {
-            if let syn::Expr::Binary(bin) = expr
-                && matches!(bin.op, syn::BinOp::And(_))
-            {
-                flatten_and(&bin.left, out);
-                flatten_and(&bin.right, out);
-                return;
-            }
-            out.push(expr.clone());
-        }
-
-        /// A chain is only interesting when it actually binds something; a
-        /// plain `a && b` is left exactly as it was.
-        fn chain_parts(cond: &syn::Expr) -> Option<Vec<syn::Expr>> {
-            let mut parts = Vec::new();
-            flatten_and(cond, &mut parts);
-            (parts.len() >= 2 && parts.iter().any(|p| matches!(p, syn::Expr::Let(_))))
-                .then_some(parts)
-        }
-
-        struct Detector {
-            found: bool,
-        }
-        impl<'ast> syn::visit::Visit<'ast> for Detector {
-            fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
-                if chain_parts(&node.cond).is_some() {
-                    self.found = true;
-                }
-                syn::visit::visit_expr_if(self, node);
-            }
-        }
-
-        struct Rewriter;
-        impl VisitMut for Rewriter {
-            fn visit_expr_if_mut(&mut self, node: &mut syn::ExprIf) {
-                // Depth-first, so a chain nested inside a chain is already
-                // rewritten by the time this level is rebuilt.
-                visit_mut::visit_expr_if_mut(self, node);
-                let Some(mut parts) = chain_parts(&node.cond) else {
-                    return;
-                };
-                let wrap = |inner: syn::ExprIf, brace| syn::Block {
-                    brace_token: brace,
-                    // No trailing semicolon: the nested `if` stays a tail
-                    // expression, so an if-chain in expression position keeps
-                    // yielding its value.
-                    stmts: vec![syn::Stmt::Expr(syn::Expr::If(inner), None)],
-                };
-                let brace = node.then_branch.brace_token;
-                let else_branch = node.else_branch.clone();
-                let mut inner = syn::ExprIf {
-                    attrs: Vec::new(),
-                    if_token: node.if_token,
-                    cond: Box::new(parts.pop().expect("chain has >= 2 parts")),
-                    then_branch: node.then_branch.clone(),
-                    else_branch: else_branch.clone(),
-                };
-                while parts.len() > 1 {
-                    inner = syn::ExprIf {
-                        attrs: Vec::new(),
-                        if_token: node.if_token,
-                        cond: Box::new(parts.pop().expect("loop guard keeps one")),
-                        then_branch: wrap(inner, brace),
-                        else_branch: else_branch.clone(),
-                    };
-                }
-                node.cond = Box::new(parts.pop().expect("one part remains"));
-                node.then_branch = wrap(inner, brace);
-            }
-        }
-
         let mut detector = Detector { found: false };
         syn::visit::Visit::visit_file(&mut detector, file);
         if !detector.found {
             return None;
         }
         let mut rewritten = file.clone();
-        Rewriter.visit_file_mut(&mut rewritten);
+        LetChainRewriter.visit_file_mut(&mut rewritten);
         Some(rewritten)
     }
 

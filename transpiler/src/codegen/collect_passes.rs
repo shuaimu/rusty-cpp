@@ -2930,22 +2930,7 @@ impl CodeGen {
                             }
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
-                                if let Some(existing_index) =
-                                    find_impl_method_conflict_index(entry, &key)
-                                {
-                                    let should_replace = match &entry[existing_index] {
-                                        syn::ImplItem::Fn(existing_method) => {
-                                            should_replace_conflicting_impl_method(
-                                                existing_method,
-                                                &merged,
-                                            )
-                                        }
-                                        _ => false,
-                                    };
-                                    if should_replace {
-                                        entry[existing_index] = syn::ImplItem::Fn(merged);
-                                    }
-                                }
+                                resolve_impl_method_conflict(entry, &key, merged, &type_name);
                                 continue;
                             }
                             seen_method_keys.insert(key);
@@ -3194,23 +3179,7 @@ impl CodeGen {
                                         }
                                         let key = impl_method_conflict_key(&merged);
                                         if seen_method_keys.contains(&key) {
-                                            if let Some(existing_index) =
-                                                find_impl_method_conflict_index(entry, &key)
-                                            {
-                                                let should_replace = match &entry[existing_index] {
-                                                    syn::ImplItem::Fn(existing_method) => {
-                                                        should_replace_conflicting_impl_method(
-                                                            existing_method,
-                                                            &merged,
-                                                        )
-                                                    }
-                                                    _ => false,
-                                                };
-                                                if should_replace {
-                                                    entry[existing_index] =
-                                                        syn::ImplItem::Fn(merged);
-                                                }
-                                            }
+                                            resolve_impl_method_conflict(entry, &key, merged, &type_name);
                                             continue;
                                         }
                                         seen_method_keys.insert(key);
@@ -3945,17 +3914,7 @@ impl CodeGen {
                     }
                     let key = impl_method_conflict_key(&merged);
                     if seen_method_keys.contains(&key) {
-                        if let Some(existing_index) = find_impl_method_conflict_index(entry, &key) {
-                            let should_replace = match &entry[existing_index] {
-                                syn::ImplItem::Fn(existing_method) => {
-                                    should_replace_conflicting_impl_method(existing_method, &merged)
-                                }
-                                _ => false,
-                            };
-                            if should_replace {
-                                entry[existing_index] = syn::ImplItem::Fn(merged);
-                            }
-                        }
+                        resolve_impl_method_conflict(entry, &key, merged, &type_name);
                         continue;
                     }
                     seen_method_keys.insert(key);

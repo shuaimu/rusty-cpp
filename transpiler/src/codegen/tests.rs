@@ -10861,6 +10861,38 @@ fn test_pub_mod_export_import() {
     assert!(out.contains("export import my_crate.api;"));
 }
 
+/// Two impl methods that collapse to the same C++ signature must be detected
+/// as conflicting whatever the Rust source named their generic parameters, and
+/// whatever lifetimes they carry -- neither survives into C++. Keying the
+/// conflict on those names let the standard `Extend<T>` + `Extend<&'a T>` pair
+/// (which differ only in a lifetime and in `Iter` vs `I`) reach the output as
+/// two identical member templates: "class member cannot be redeclared".
+#[test]
+fn test_impl_method_conflict_ignores_generic_param_names_and_lifetimes() {
+    let out = transpile_str_module(
+        "pub trait Ext<T> { fn ext<I: IntoIterator<Item = T>>(&mut self, it: I); }\n\
+         pub struct S { pub n: u32 }\n\
+         impl Ext<u32> for S {\n\
+           fn ext<Iter: IntoIterator<Item = u32>>(&mut self, it: Iter) { self.n += 1; }\n\
+         }\n\
+         impl<'a> Ext<&'a u32> for S {\n\
+           fn ext<I: IntoIterator<Item = &'a u32>>(&mut self, it: I) { self.n += 2; }\n\
+         }",
+        "my_crate",
+    );
+    // The in-class declaration; the UFCS free functions take an explicit
+    // `self_` and are a separate surface.
+    let members = out
+        .lines()
+        .filter(|l| l.contains("void ext(") && !l.contains("self_"))
+        .count();
+    assert_eq!(
+        members, 1,
+        "the two impls emit one C++ signature, so exactly one member may be \
+         declared:\n{out}"
+    );
+}
+
 /// A let-chain condition (`if let A = x && let B = y`) parses as
 /// `Binary(Let, &&, Let)`, which every if-let lowering declines -- they all
 /// require the condition to be exactly an `Expr::Let`. The bare `Expr::Let`
