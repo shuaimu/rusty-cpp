@@ -5140,8 +5140,26 @@ impl CodeGen {
                         resolved_ty
                     };
                     let has_unresolved_infer = self.type_contains_infer(&resolved_ty);
-                    if !has_unresolved_infer {
+                    let has_pointer_hole =
+                        !has_unresolved_infer && self.type_infer_hole_behind_pointer(&resolved_ty);
+                    if !has_unresolved_infer && !has_pointer_hole {
                         self.update_local_binding_type(name_str.clone(), resolved_ty.clone());
+                    } else if let Some(init) = &local.init
+                        && let Some(init_ty) = self
+                            .infer_simple_expr_type(&init.expr)
+                            .filter(|t| !self.type_contains_infer(t))
+                    {
+                        // An infer-holed annotation (`let p: *const _ = f();`)
+                        // recorded NOTHING, so the local stayed untyped for
+                        // everything downstream — and consumers of the local
+                        // (`(*p).field`) then couldn't be typed either, which
+                        // cascaded into wrong closure-param classification
+                        // (btree's `ascend`: `*parent` over `&NonNull` emitted
+                        // a deref through the NonNull). The hole only means
+                        // "you infer it", exactly like no annotation at all —
+                        // record what the initializer infers to, as the
+                        // un-annotated path does.
+                        self.update_local_binding_type(name_str.clone(), init_ty);
                     }
                     let mapped_ty = self.map_type(&resolved_ty);
                     // A mapped type containing `<auto>` as a template argument

@@ -10893,6 +10893,82 @@ fn test_impl_method_conflict_ignores_generic_param_names_and_lifetimes() {
     );
 }
 
+/// F6 of the btree swap-in: `Owner::assoc(&self.field)` with omitted owner
+/// generics recovers the owner as `decltype(arg0)` — but the argument emits
+/// as `&this->field`, and in C++ that `&` is ADDRESS-OF, so the recovered
+/// owner was a pointer type and `Ptr*::method` is ill-formed. The decltype
+/// must take the referent.
+#[test]
+fn test_owner_recovery_decltype_peels_the_reference_argument() {
+    let out = transpile_str(
+        r#"
+        use std::ptr::NonNull;
+        pub struct Node { pub v: i32 }
+        pub struct NR<B> { pub node: NonNull<Node>, pub b: B }
+        impl<B> NR<B> {
+            pub fn as_node_ptr(this: &NR<B>) -> *mut Node { this.node.as_ptr() }
+        }
+        pub struct Handle2<B> { pub inner: NR<B> }
+        impl<B> Handle2<B> {
+            pub fn grab(&self) -> *mut Node {
+                NR::as_node_ptr(&self.inner)
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("std::remove_cvref_t<decltype(this->inner)>::as_node_ptr"),
+        "owner recovery must decltype the referent:\n{out}"
+    );
+    assert!(
+        !out.contains("decltype(&this->inner)"),
+        "address-of in the owner decltype makes a pointer type:\n{out}"
+    );
+}
+
+/// F1 of the btree swap-in (rustc's `NodeRef::ascend` shape): an infer-holed
+/// raw-pointer annotation (`let leaf_ptr: *const _ = ...`) recorded the
+/// literal `*const _` as the binding type — `type_contains_infer` had no
+/// `Type::Ptr` arm — so `(*leaf_ptr).parent` could not be typed, the map
+/// lambda's param fell into the untyped-closure scope, and `*parent` over
+/// `&NonNull` emitted `rusty::deref_mut(parent)`: a deref THROUGH the
+/// NonNull, one level deeper than Rust's reference peel.
+#[test]
+fn test_infer_holed_pointer_annotation_records_initializer_type() {
+    let out = transpile_str(
+        r#"
+        use std::marker::PhantomData;
+        use std::ptr::NonNull;
+        pub struct Node { pub v: i32 }
+        pub struct NR3<B> { pub node: NonNull<Node>, pub height: usize, pub _m: PhantomData<B> }
+        pub struct H3<N> { pub node: N, pub idx: usize }
+        pub struct Leafy2 { pub parent: Option<NonNull<Node>>, pub parent_idx: usize }
+        impl<B> NR3<B> {
+            pub fn from_internal(node: NonNull<Node>, height: usize) -> NR3<B> {
+                NR3 { node, height, _m: PhantomData }
+            }
+            fn as_leaf_ptr(this: &NR3<B>) -> *const Leafy2 {
+                this.node.as_ptr() as *const Leafy2
+            }
+            pub fn ascend(self) -> Result<H3<NR3<B>>, NR3<B>> {
+                let leaf_ptr: *const _ = Self::as_leaf_ptr(&self);
+                unsafe { (*leaf_ptr).parent }
+                    .as_ref()
+                    .map(|parent| H3 {
+                        node: NR3::from_internal(*parent, self.height + 1),
+                        idx: unsafe { (*leaf_ptr).parent_idx },
+                    })
+                    .ok_or(self)
+            }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("deref_mut(parent)"),
+        "`*parent` over `&NonNull` must peel the reference, not deref the NonNull:\n{out}"
+    );
+}
+
 /// A let-chain condition (`if let A = x && let B = y`) parses as
 /// `Binary(Let, &&, Let)`, which every if-let lowering declines -- they all
 /// require the condition to be exactly an `Expr::Let`. The bare `Expr::Let`

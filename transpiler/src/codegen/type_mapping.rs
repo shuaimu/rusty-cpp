@@ -627,6 +627,33 @@ impl CodeGen {
             syn::Type::Tuple(t) => t.elems.iter().any(|elem| self.type_contains_infer(elem)),
             syn::Type::Array(a) => self.type_contains_infer(&a.elem),
             syn::Type::Slice(s) => self.type_contains_infer(&s.elem),
+            // NB deliberately NO `Type::Ptr` arm: several consumers use this
+            // to decide whether the mapped C++ DECL spelling is usable, and
+            // for `*const _` the mapped `const auto*` is perfectly valid C++
+            // that must be kept (three goldens pin it). The one consumer that
+            // needs to see through the pointer — binding-type RECORDING, so
+            // the literal `*const _` is never recorded as a local's type —
+            // uses `type_infer_hole_behind_pointer` below.
+            _ => false,
+        }
+    }
+
+    /// Is there an infer hole hiding behind raw-pointer levels only —
+    /// `*const _`, `*mut *const _`? `type_contains_infer` deliberately does
+    /// not look through `Type::Ptr` (see the note there); the binding-type
+    /// recording must, or `let leaf_ptr: *const _ = ...` records the literal
+    /// holed type and every downstream consumer of the local fails to type
+    /// (btree's `ascend`: `(*leaf_ptr).parent` untypable → the map lambda's
+    /// param fell to the untyped-closure scope → `*parent` over `&NonNull`
+    /// deref'd one level too deep).
+    pub(super) fn type_infer_hole_behind_pointer(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Ptr(p) => {
+                self.type_contains_infer(&p.elem) || self.type_infer_hole_behind_pointer(&p.elem)
+            }
+            syn::Type::Paren(p) => self.type_infer_hole_behind_pointer(&p.elem),
+            syn::Type::Group(g) => self.type_infer_hole_behind_pointer(&g.elem),
+            syn::Type::Reference(r) => self.type_infer_hole_behind_pointer(&r.elem),
             _ => false,
         }
     }
