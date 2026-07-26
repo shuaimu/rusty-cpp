@@ -1790,6 +1790,11 @@ pub struct CodeGen {
     /// struct body via cross-file impl-block injection, so suppress
     /// the free-fn fallback here."
     pub(crate) cross_file_struct_tails: HashSet<String>,
+    /// The subset of `cross_file_struct_tails` declared as UNIT structs.
+    /// Replayed into `unit_struct_types` during `emit_file`, which clears
+    /// that set before its collect passes and only re-fills it from the
+    /// file being emitted.
+    pub(crate) cross_file_unit_struct_tails: HashSet<String>,
     /// Map from a type alias's name (e.g. "Root") to the tail of its
     /// underlying struct/type (e.g. "NodeRef"). Built from
     /// `pub type Root<K, V> = NodeRef<...>;` declarations collected
@@ -2141,6 +2146,7 @@ impl CodeGen {
             glob_imported_enum_tails: HashSet::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_struct_tails: HashSet::new(),
+            cross_file_unit_struct_tails: HashSet::new(),
             cross_file_type_alias_tails: HashMap::new(),
         }
     }
@@ -4020,6 +4026,17 @@ impl CodeGen {
     /// lives in another file (since that file will absorb the methods
     /// via cross-file impl-block injection during its struct emission).
     pub fn set_cross_file_structs(&mut self, structs: Vec<syn::ItemStruct>) {
+        // A unit struct's bare name is a VALUE in Rust -- `Zst` constructs one
+        // -- so it has to emit as `Zst{}`; the bare name in C++ names a type,
+        // not a value. `collect_struct_metadata` records unit-ness, but only
+        // for the file being emitted, so unit structs reached through a
+        // sibling file (`use super::inner::Zst;`) are kept here and replayed
+        // in `emit_file` (which clears `unit_struct_types` before its passes).
+        self.cross_file_unit_struct_tails = structs
+            .iter()
+            .filter(|s| matches!(s.fields, syn::Fields::Unit))
+            .map(|s| s.ident.to_string())
+            .collect();
         self.cross_file_struct_tails = structs
             .into_iter()
             .map(|s| s.ident.to_string())
@@ -4294,6 +4311,16 @@ impl CodeGen {
             self.cross_file_enums = foreign_enums;
         }
         log_emit("seed_cross_file_enum_metadata");
+        // Same replay for sibling-file UNIT structs, whose bare name is a
+        // value expression in Rust and must emit as `Zst{}`. `emit_file`
+        // cleared `unit_struct_types` above and the collect pass below only
+        // sees this file's own declarations.
+        if !self.cross_file_unit_struct_tails.is_empty() {
+            let foreign_units = std::mem::take(&mut self.cross_file_unit_struct_tails);
+            self.unit_struct_types.extend(foreign_units.iter().cloned());
+            self.cross_file_unit_struct_tails = foreign_units;
+        }
+        log_emit("seed_cross_file_unit_structs");
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
         // UFCS Phase 3: classify method names for call-site lowering.

@@ -10861,6 +10861,26 @@ fn test_pub_mod_export_import() {
     assert!(out.contains("export import my_crate.api;"));
 }
 
+/// A unit struct's bare name is a value in Rust, so it must emit as `Zst{}`.
+/// The per-file struct scan only sees the file being emitted, so one reached
+/// through a sibling file (`use super::inner::Zst;`) emitted the bare name --
+/// which in C++ names a type, not a value, and does not compile.
+#[test]
+fn test_sibling_file_unit_struct_emits_as_a_constructed_value() {
+    let sibling: syn::ItemStruct = syn::parse_str("pub struct Zst;").unwrap();
+    let file: syn::File =
+        syn::parse_str("use super::inner::{sink, Zst};\npub fn call() -> usize { sink(1, Zst) }")
+            .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cross_file_structs(vec![sibling]);
+    cg.emit_file(&file, Some("my_crate.user"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("Zst{}"),
+        "a sibling-file unit struct must be constructed, not named:\n{out}"
+    );
+}
+
 /// A `pub mod` after another item used to emit its `export import` at that
 /// source position, below the declaration -- which clang rejects outright
 /// ("imports must immediately follow the module declaration"), so the unit did
