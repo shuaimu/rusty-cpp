@@ -1,7 +1,7 @@
 # Guard flow and autoderef: the systematic design
 
-Status: phases 1–2 landed; phases 3–5 in progress. The living regression
-surface is `transpiler/tests/guard_context_matrix.rs`.
+Status: implemented (phases 1–5). The living regression surface is
+`transpiler/tests/guard_context_matrix.rs` — 27 rows.
 
 ## The problem
 
@@ -24,8 +24,11 @@ inline and bound), and their unreported siblings.
 
 **Typed tier** — the receiver's type is visible (a known `RefCell` field).
 The concrete lowerings emit a direct `->` through the guard. Requirement:
-*the model must tell the truth*; the guard-producing methods and
-guard-by-value returns are recognized explicitly.
+*the model must tell the truth*; `known_guard_producing_call()` in
+`guard_flow.rs` is the one predicate the typed lowerings consult for "this
+call yields a guard by value" — the reference-shape classifier and the
+`auto&`-shortcut suppression query it instead of re-deriving "borrow on a
+RefCell / lock on a Mutex" locally.
 
 **Untyped tier** — the receiver is generic, or concrete but out of view.
 Classification happens by **value flow, not syntactic shape**
@@ -42,9 +45,11 @@ or a plain reference:
 
 1. **Classify flow, not shape.** A guard reaches its consumer directly, via
    `unwrap()`/`expect()` (`lock()` returns `Result<Guard, _>`), via a local
-   binding, or via the tail of a block/`if`/`match` initializer. Every flow
-   path must give the same answer. A per-site syntactic predicate is how the
-   class kept reopening.
+   binding, via the tail of a block/`if`/`match` initializer, element-wise
+   through a tuple destructure, or re-surfaced by a *user function* whose
+   declared return type names a guard (`fn locked(&self) -> MutexGuard<…>`
+   — the signature is the flow edge). Every flow path must give the same
+   answer. A per-site syntactic predicate is how the class kept reopening.
 2. **Every shape-laddered runtime helper ends with a deref-peel arm**
    (`else if constexpr (requires { *x; }) { return helper(*x); }` —
    see `rusty::iter`, `rusty::len`, `rusty::contains`). This is the single
@@ -81,7 +86,7 @@ scope** — the recorder self-seeds.
 
 `transpiler/tests/guard_context_matrix.rs` transpiles (through the real
 binary), compiles, and **runs** every known consumption context, asserting
-the produced values — currently 24 rows: inline calls, autoderef calls on
+the produced values — currently 27 rows: inline calls, autoderef calls on
 bound guards, deref assign/read/compound-assign, reborrowed arguments,
 comparison, arithmetic, `if let`, `for`, return position, chained calls,
 `lock().unwrap()`, indexing, repeated use, `if`/`match`/block-tail
@@ -92,6 +97,13 @@ initializers, the free-helper family (`len`/`is_empty`/`front`/`back`/
 fix; rows cannot regress silently. Probe hygiene: rows must be *valid Rust*
 (`Mutex::lock()` returns a `Result` — `.lock().m()` tests nothing; VecDeque
 has `front`/`back`, not `first`/`last`).
+
+Phase-3 rows added: `if`/`match`/block-tail initializers, tuple-destructured
+guards, user-fn guard returns (inline and bound), a generic-receiver
+variant, and drop-then-reborrow. The user-fn rows also flushed out a
+pre-existing inline-rust bug — block-local calls were `::`-qualified, which
+names nothing inside a consumer namespace — and the missing
+`Ref`/`RefMut`/`MutexGuard` std type-map entries.
 
 ## What falls out of the audit (fixed en route)
 
@@ -108,14 +120,14 @@ has `front`/`back`, not `first`/`last`).
 - `drop(x)` emits `std::move(x)` — it consumes; a move-only guard failed on
   the deleted copy ctor, and a copyable value silently dropped a *copy*.
 
-## Known remaining gaps (planned)
+## Known remaining gaps
 
-- **Guards returned from user functions** (`fn all(&self) -> MutexGuard<…>`)
-  — classify by the callee's declared return-type tail naming a guard type.
-- **Tuple-destructured guards** (`let (a, b) = (x.borrow(), y.borrow());`).
-- Typed-tier consolidation: `receiver_is_refcell_borrow`,
-  `returns_guard_by_value` and friends should query one
-  `known_guard_producing_call()` in guard_flow so both tiers share one
-  source of truth.
 - `deref_ref`/`deref_mut` remain emitted-block-only (as `addr_of_temp` was);
   promote when touched next.
+- The RwLock guard types are NESTED classes (`RwLock<T>::ReadGuard`), which
+  the flat std type map cannot spell — signatures naming them stay unmapped
+  (loud error over silent miscompile) until the runtime exposes top-level
+  aliases.
+- A guard stored in a struct FIELD and consumed later is not classified
+  (guards are overwhelmingly scope-local; add the row first if it ever
+  matters).

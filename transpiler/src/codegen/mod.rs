@@ -31507,27 +31507,16 @@ impl CodeGen {
         {
             return true;
         }
+        // A KNOWN guard-producing call yields the guard BY VALUE, never a
+        // reference (guard_flow.rs, typed tier).
+        if self.known_guard_producing_method_call(mc) {
+            return false;
+        }
         if matches!(
             method.as_str(),
             "as_ref" | "as_mut" | "deref" | "deref_mut" | "borrow" | "borrow_mut"
         ) {
-            // `RefCell::borrow()` / `borrow_mut()` return guard wrappers
-            // (`Ref<T>`/`RefMut<T>`) BY VALUE, not references. Treating
-            // them as ref-returning would emit `auto& guard = …` which
-            // fails to bind to the temporary.
-            if matches!(method.as_str(), "borrow" | "borrow_mut")
-                && self.receiver_is_refcell_container_type(&mc.receiver)
-            {
-                return false;
-            }
             return true;
-        }
-        // `Mutex::lock()` / `SpinMutex::lock()` return `Result<MutexGuard<T>, _>`
-        // or similar BY VALUE. Don't treat them as ref-returning.
-        if matches!(method.as_str(), "lock" | "try_lock" | "read" | "write")
-            && self.receiver_is_mutex_container_type(&mc.receiver)
-        {
-            return false;
         }
         if matches!(
             method.as_str(),
@@ -43312,13 +43301,9 @@ impl CodeGen {
         let peeled = peel_to_tail_expr(expr).unwrap_or_else(|| self.peel_paren_group_expr(expr));
         if let syn::Expr::MethodCall(mc) = peeled {
             let method = mc.method.to_string();
-            // `RefCell::borrow()` / `borrow_mut()` return guard wrappers
-            // (`Ref<T>` / `RefMut<T>`) BY VALUE — they are NOT references.
-            // Same for `Mutex::lock()` / `SpinMutex::lock()`.
-            let returns_guard_by_value = (matches!(method.as_str(), "borrow" | "borrow_mut")
-                && self.receiver_is_refcell_container_type(&mc.receiver))
-                || (matches!(method.as_str(), "lock" | "try_lock" | "read" | "write")
-                    && self.receiver_is_mutex_container_type(&mc.receiver));
+            // A KNOWN guard-producing call yields the guard BY VALUE — it is
+            // NOT a reference (guard_flow.rs, typed tier).
+            let returns_guard_by_value = self.known_guard_producing_call(peeled);
             if !returns_guard_by_value
                 && (matches!(
                     method.as_str(),

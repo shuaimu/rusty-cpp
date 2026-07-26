@@ -3474,13 +3474,12 @@ impl CodeGen {
                         {
                             return true;
                         }
-                        // `RefCell::borrow_mut()` returns `RefMut<T>` BY VALUE,
-                        // not `&mut T`. Skip the `borrow_mut` shortcut when the
-                        // receiver is actually a `RefCell` — otherwise we'd
-                        // emit `auto& guard = …` which can't bind to the
-                        // by-value temporary.
-                        let receiver_is_refcell_borrow = matches!(method.as_str(), "borrow_mut")
-                            && self.receiver_is_refcell_container_type(&mc.receiver);
+                        // A KNOWN guard-producing call returns the guard BY
+                        // VALUE, not `&mut T` — skip the reference shortcut or
+                        // we'd emit `auto& guard = …` against a temporary
+                        // (guard_flow.rs, typed tier).
+                        let receiver_is_refcell_borrow =
+                            self.known_guard_producing_call(peeled_ref.unwrap_or(&init.expr));
                         // Same shape: `Arc<T>::get_mut()` returns `Option<&mut T>`
                         // by value, not `&mut T`. Suppress the generic
                         // `get_mut → &mut T` heuristic when the receiver is an `Arc`.

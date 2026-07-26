@@ -223,6 +223,32 @@ impl CodeGen {
             .any(|scope| scope.contains(&name))
     }
 
+    /// TYPED tier: the receiver's type is VISIBLE and it is a cell/lock
+    /// container, so this call yields a guard BY VALUE — definitely, not
+    /// maybe. The typed lowerings consult this one predicate instead of each
+    /// re-deriving "borrow on a RefCell / lock on a Mutex" locally, so both
+    /// tiers share a single source of truth about what produces a guard.
+    ///
+    /// (`try_lock` is included: its `Result<Guard, _>` is equally not a
+    /// reference, which is what the callers are deciding.)
+    pub(super) fn known_guard_producing_call(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::MethodCall(mc) = expr else {
+            return false;
+        };
+        self.known_guard_producing_method_call(mc)
+    }
+
+    /// Method-call form of [`Self::known_guard_producing_call`], for callers
+    /// that already hold the `ExprMethodCall`.
+    pub(super) fn known_guard_producing_method_call(&self, mc: &syn::ExprMethodCall) -> bool {
+        let method = mc.method.to_string();
+        (matches!(method.as_str(), "borrow" | "borrow_mut")
+            && self.receiver_is_refcell_container_type(&mc.receiver))
+            || (matches!(method.as_str(), "lock" | "try_lock" | "read" | "write")
+                && self.receiver_is_mutex_container_type(&mc.receiver))
+    }
+
     /// The single value/argument-position adapter (doctrine rule 3): when
     /// `expr` may be a guard, wrap its emitted form in the tolerant deref so
     /// the VALUE — not the guard — reaches the consumer. `emitted` is
