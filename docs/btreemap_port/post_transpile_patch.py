@@ -1959,6 +1959,51 @@ def merge_map_entry_into_map(map_mod: Path, map_entry: Path) -> None:
         "} // namespace entry",
     )
 
+    # 3b. Hoist deref-dispatch functor blocks OUT of the merged content.
+    # The transpiler emits `namespace rusty { namespace detail {
+    # RUSTY_METHOD_DISPATCH(name) } }` blocks at module-purview scope
+    # (issue #31: functors must be namespace-scope). Spliced INSIDE
+    # map.cppm's `namespace btree_port::btree::map { ... }` wrap they
+    # would declare `...::map::rusty`, shadowing `::rusty` for every
+    # later `rusty::X` reference in the module (dozens of "no member
+    # named 'X' in namespace 'btree_port::btree::map::rusty'" errors).
+    # Move the names into map.cppm's own pre-wrap functor block,
+    # skipping ones map already defines (redefinition otherwise).
+    functor_block_re = re.compile(
+        r"namespace rusty \{ namespace detail \{\n"
+        r"((?:RUSTY_METHOD_DISPATCH\(\w+\)\n)+)"
+        r"\} \}[^\n]*\n",
+    )
+    hoisted_names: list[str] = []
+    def _take_block(m: "re.Match[str]") -> str:
+        hoisted_names.extend(re.findall(r"RUSTY_METHOD_DISPATCH\((\w+)\)", m.group(1)))
+        return ""
+    entry_content = functor_block_re.sub(_take_block, entry_content)
+    if hoisted_names:
+        existing = set(re.findall(r"RUSTY_METHOD_DISPATCH\((\w+)\)", map_src))
+        missing = [n for n in dict.fromkeys(hoisted_names) if n not in existing]
+        if missing:
+            lines = "".join(f"RUSTY_METHOD_DISPATCH({n})\n" for n in missing)
+            host_anchor = "namespace rusty { namespace detail {\n"
+            hx = map_src.find(host_anchor)
+            if hx != -1:
+                at = hx + len(host_anchor)
+                map_src = map_src[:at] + lines + map_src[at:]
+            else:
+                # map.cppm has no functor block of its own: emit one at
+                # purview scope, right after the last import line.
+                block = (
+                    "namespace rusty { namespace detail {\n" + lines
+                    + "} } // namespace rusty::detail (hoisted from map.entry merge)\n"
+                )
+                imports = list(re.finditer(r"^import [A-Za-z_.<>]+;\s*\n", map_src, re.MULTILINE))
+                if imports:
+                    at = imports[-1].end()
+                    map_src = map_src[:at] + "\n" + block + map_src[at:]
+                else:
+                    print(f"  [warn] nowhere to hoist dispatch functors in {map_mod.name}", file=sys.stderr)
+        print(f"  hoisted {len(hoisted_names)} dispatch functor name(s) from {map_entry.name} ({len(missing) if hoisted_names else 0} new)")
+
     # 4. Inject entry content right before the BTreeMap struct
     #    definition. Anchor on the comment line immediately above
     #    `export template<typename K, typename V, typename A = …>`.
