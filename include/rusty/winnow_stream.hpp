@@ -515,6 +515,14 @@ bool contains(const Haystack& haystack, const Needle& needle) {
             }
         }
         return false;
+    } else if constexpr (requires { *haystack; } && !std::is_pointer_v<std::remove_cvref_t<Haystack>>) {
+        // Deref-peel for a HAYSTACK behind a guard (`Ref`/`MutexGuard`) or
+        // other deref wrapper — rule 4 of the guard-flow doctrine
+        // (transpiler/src/codegen/guard_flow.rs). Without this arm the guard
+        // matched nothing above and fell into the permissive `false` tail: a
+        // present element silently reported absent. Raw-pointer haystacks are
+        // excluded — a `T*` haystack is not a collection.
+        return rusty::contains(*haystack, needle);
     } else {
         return false;
     }

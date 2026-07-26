@@ -295,10 +295,12 @@ inline Token_TupleStructEnd TupleStructEnd() { return Token_TupleStructEnd{}; }
 namespace rusty {
 template<typename Target, typename Input>
 Target from_into(Input&& input);
+#if !defined(RUSTY_HAS_ADDR_OF_TEMP)
 template<typename T>
 constexpr T* addr_of_temp(T& value);
 template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value);
+#endif
 }
 namespace de {
 namespace impls {
@@ -2815,6 +2817,7 @@ return static_cast<Target>(std::forward<Input>(input).as_ref());
 return static_cast<Target>(std::forward<Input>(input));
 }
 }
+#if !defined(RUSTY_HAS_ADDR_OF_TEMP)
 template<typename T>
 constexpr T* addr_of_temp(T& value) {
 return &value;
@@ -2827,6 +2830,7 @@ _addr_of_tmp.reset();
 _addr_of_tmp.emplace(std::forward<T>(value));
 return &*_addr_of_tmp;
 }
+#endif
 struct Cow_Borrowed {
 std::string_view _0;
 Cow_Borrowed() : _0(std::string_view{}) {}
@@ -3543,6 +3547,7 @@ return true;
 return code >= 0x2000 && code <= 0x200A;
 }
 }
+#if !defined(RUSTY_HAS_FREE_IS_EMPTY)
 template<typename T>
 bool is_empty(const T& value) {
 if constexpr (requires { value.is_empty(); }) {
@@ -3553,6 +3558,7 @@ return value.empty();
 return false;
 }
 }
+#endif
 template<typename T>
 auto deref_ref(const T& value) {
 if constexpr (requires { value.as_str(); }) {

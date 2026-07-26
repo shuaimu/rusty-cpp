@@ -3916,10 +3916,12 @@ impl CodeGen {
                 // lifetime-extends a guard prvalue and still aliases a real
                 // reference. The deref side is handled by emitting `*g`
                 // through `deref_if_pointer_like`.
+                // Flow-following: the guard call may sit behind a block tail
+                // or the arms of an `if`/`match` initializer.
                 let init_is_uncertain_guard_call = local
                     .init
                     .as_ref()
-                    .is_some_and(|init| self.receiver_is_uncertain_guard_call(&init.expr));
+                    .is_some_and(|init| self.init_expr_yields_maybe_guard(&init.expr));
                 let ref_suffix = if init_is_uncertain_guard_call && type_str == "auto" {
                     "&&"
                 } else if emits_ref_binding

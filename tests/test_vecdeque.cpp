@@ -227,8 +227,8 @@ void test_push_back() {
     for (int i = 0; i < 100; ++i) {
         dq.push_back(i);
         assert(dq.len() == static_cast<size_t>(i + 1));
-        assert(dq.back() == i);
-        assert(dq.front() == 0);
+        assert(dq.back().unwrap() == i);
+        assert(dq.front().unwrap() == 0);
     }
 
     for (int i = 0; i < 100; ++i) {
@@ -246,8 +246,8 @@ void test_push_front() {
     for (int i = 0; i < 100; ++i) {
         dq.push_front(i);
         assert(dq.len() == static_cast<size_t>(i + 1));
-        assert(dq.front() == i);
-        assert(dq.back() == 0);
+        assert(dq.front().unwrap() == i);
+        assert(dq.back().unwrap() == 0);
     }
 
     for (int i = 0; i < 100; ++i) {
@@ -269,8 +269,8 @@ void test_alternating_push() {
     }
 
     assert(dq.len() == 100);
-    assert(dq.front() == -50);
-    assert(dq.back() == 49);
+    assert(dq.front().unwrap() == -50);
+    assert(dq.back().unwrap() == 49);
 
     // Verify order: -50, -49, ..., -1, 0, 1, ..., 49
     for (int i = 0; i < 50; ++i) {
@@ -292,12 +292,12 @@ void test_pop_back() {
 
     rusty::VecDeque<int> dq = {1, 2, 3, 4, 5};
 
-    assert(dq.pop_back() == 5);
+    assert(dq.pop_back().unwrap() == 5);
     assert(dq.len() == 4);
-    assert(dq.pop_back() == 4);
-    assert(dq.pop_back() == 3);
-    assert(dq.pop_back() == 2);
-    assert(dq.pop_back() == 1);
+    assert(dq.pop_back().unwrap() == 4);
+    assert(dq.pop_back().unwrap() == 3);
+    assert(dq.pop_back().unwrap() == 2);
+    assert(dq.pop_back().unwrap() == 1);
     assert(dq.is_empty());
 
     std::cout << "  pop_back passed!" << std::endl;
@@ -308,12 +308,12 @@ void test_pop_front() {
 
     rusty::VecDeque<int> dq = {1, 2, 3, 4, 5};
 
-    assert(dq.pop_front() == 1);
+    assert(dq.pop_front().unwrap() == 1);
     assert(dq.len() == 4);
-    assert(dq.pop_front() == 2);
-    assert(dq.pop_front() == 3);
-    assert(dq.pop_front() == 4);
-    assert(dq.pop_front() == 5);
+    assert(dq.pop_front().unwrap() == 2);
+    assert(dq.pop_front().unwrap() == 3);
+    assert(dq.pop_front().unwrap() == 4);
+    assert(dq.pop_front().unwrap() == 5);
     assert(dq.is_empty());
 
     std::cout << "  pop_front passed!" << std::endl;
@@ -324,13 +324,13 @@ void test_mixed_pop() {
 
     rusty::VecDeque<int> dq = {1, 2, 3, 4, 5, 6};
 
-    assert(dq.pop_front() == 1);
-    assert(dq.pop_back() == 6);
-    assert(dq.pop_front() == 2);
-    assert(dq.pop_back() == 5);
+    assert(dq.pop_front().unwrap() == 1);
+    assert(dq.pop_back().unwrap() == 6);
+    assert(dq.pop_front().unwrap() == 2);
+    assert(dq.pop_back().unwrap() == 5);
     assert(dq.len() == 2);
-    assert(dq.front() == 3);
-    assert(dq.back() == 4);
+    assert(dq.front().unwrap() == 3);
+    assert(dq.back().unwrap() == 4);
 
     std::cout << "  Mixed pop passed!" << std::endl;
 }
@@ -368,12 +368,12 @@ void test_get_method() {
 
     rusty::VecDeque<int> dq = {5, 10, 15};
 
-    assert(dq.get(0) == 5);
-    assert(dq.get(1) == 10);
-    assert(dq.get(2) == 15);
+    assert(dq.get(0).unwrap() == 5);
+    assert(dq.get(1).unwrap() == 10);
+    assert(dq.get(2).unwrap() == 15);
 
-    dq.get(1) = 100;
-    assert(dq.get(1) == 100);
+    dq.get(1).unwrap() = 100;
+    assert(dq.get(1).unwrap() == 100);
 
     std::cout << "  get method passed!" << std::endl;
 }
@@ -383,24 +383,24 @@ void test_front_back() {
 
     rusty::VecDeque<int> dq = {1, 2, 3};
 
-    assert(dq.front() == 1);
-    assert(dq.back() == 3);
+    assert(dq.front().unwrap() == 1);
+    assert(dq.back().unwrap() == 3);
 
-    dq.front() = 10;
-    dq.back() = 30;
-    assert(dq.front() == 10);
-    assert(dq.back() == 30);
+    dq.front().unwrap() = 10;
+    dq.back().unwrap() = 30;
+    assert(dq.front().unwrap() == 10);
+    assert(dq.back().unwrap() == 30);
 
     // Const access
     const rusty::VecDeque<int>& cdq = dq;
-    assert(cdq.front() == 10);
-    assert(cdq.back() == 30);
+    assert(cdq.front().unwrap() == 10);
+    assert(cdq.back().unwrap() == 30);
 
     // Single element
     rusty::VecDeque<int> dq_single = {42};
-    assert(dq_single.front() == 42);
-    assert(dq_single.back() == 42);
-    assert(&dq_single.front() == &dq_single.back());
+    assert(dq_single.front().unwrap() == 42);
+    assert(dq_single.back().unwrap() == 42);
+    assert(&dq_single.front().unwrap() == &dq_single.back().unwrap());
 
     std::cout << "  front/back passed!" << std::endl;
 }
@@ -990,8 +990,8 @@ void test_string_type() {
     assert(dq[3] == "foo");
 
     // Pop
-    assert(dq.pop_front() == "bar");
-    assert(dq.pop_back() == "foo");
+    assert(dq.pop_front().unwrap() == "bar");
+    assert(dq.pop_back().unwrap() == "foo");
 
     std::cout << "  String type passed!" << std::endl;
 }
@@ -1056,8 +1056,8 @@ void test_stress_large_data() {
     }
 
     assert(dq.len() == N);
-    assert(dq.front() == 0);
-    assert(dq.back() == N - 1);
+    assert(dq.front().unwrap() == 0);
+    assert(dq.back().unwrap() == N - 1);
 
     // Random access check
     assert(dq[N / 2] == N / 2);
@@ -1105,16 +1105,16 @@ void test_single_element() {
     dq.push_back(42);
 
     assert(dq.len() == 1);
-    assert(dq.front() == 42);
-    assert(dq.back() == 42);
+    assert(dq.front().unwrap() == 42);
+    assert(dq.back().unwrap() == 42);
     assert(dq[0] == 42);
-    assert(&dq.front() == &dq.back());
+    assert(&dq.front().unwrap() == &dq.back().unwrap());
 
-    assert(dq.pop_back() == 42);
+    assert(dq.pop_back().unwrap() == 42);
     assert(dq.is_empty());
 
     dq.push_front(100);
-    assert(dq.pop_front() == 100);
+    assert(dq.pop_front().unwrap() == 100);
     assert(dq.is_empty());
 
     std::cout << "  Single element passed!" << std::endl;
@@ -1172,12 +1172,12 @@ void test_wrap_around_edge_case() {
 
     // Now head should be at some position, add from front
     dq.push_front(10);
-    assert(dq.front() == 10);
-    assert(dq.back() == 10);
+    assert(dq.front().unwrap() == 10);
+    assert(dq.back().unwrap() == 10);
 
     dq.push_front(20);
-    assert(dq.front() == 20);
-    assert(dq.back() == 10);
+    assert(dq.front().unwrap() == 20);
+    assert(dq.back().unwrap() == 10);
 
     std::cout << "  Wrap around edge case passed!" << std::endl;
 }

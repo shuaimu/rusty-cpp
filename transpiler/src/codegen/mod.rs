@@ -29986,33 +29986,6 @@ impl CodeGen {
     }
 
 
-    pub(crate) fn record_local_uncertain_guard_binding(&mut self, name: &str) {
-        // The surrounding scope stack is only pushed on some emission paths
-        // (inline-rust never pushes one), so make sure there is somewhere to
-        // record this. `emit_file` clears the stack per file.
-        if self.local_uncertain_guard_bindings.is_empty() {
-            self.local_uncertain_guard_bindings.push(HashSet::new());
-        }
-        if let Some(scope) = self.local_uncertain_guard_bindings.last_mut() {
-            scope.insert(name.to_string());
-        }
-    }
-
-    /// Is this expression a plain path naming a local bound from an
-    /// untypable guard call? See `local_uncertain_guard_bindings`.
-    pub(crate) fn expr_is_uncertain_guard_local(&self, expr: &syn::Expr) -> bool {
-        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
-            return false;
-        };
-        let Some(ident) = path.path.get_ident() else {
-            return false;
-        };
-        let name = ident.to_string();
-        self.local_uncertain_guard_bindings
-            .iter()
-            .any(|scope| scope.contains(&name))
-    }
-
     fn record_local_reference_binding(&mut self, name: &str, is_reference: bool) {
         let Some(scope) = self.local_reference_bindings.last_mut() else {
             return;
@@ -32717,81 +32690,6 @@ impl CodeGen {
     /// known, so the existing RefCell-aware paths already pick `->`.
     ///
     /// Reported as issue #32.
-    fn receiver_is_uncertain_guard_call(&self, expr: &syn::Expr) -> bool {
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::MethodCall(mc) = expr else {
-            return false;
-        };
-        let method = mc.method.to_string();
-        // `unwrap()` / `expect(..)` PASS GUARD-NESS THROUGH: `lock().unwrap()`
-        // peels the `Result` and hands back the `MutexGuard` itself, so the
-        // unwrapped value needs exactly the same tolerant treatment as the
-        // guard call it wraps. Without this, the standard Mutex idiom
-        // `x.lock().unwrap().m()` called `.m()` straight on the guard while
-        // the bare `x.borrow_mut().m()` shape was already handled -- guard
-        // classification has to follow the VALUE'S FLOW, not one syntactic
-        // shape (the lesson of issues #32/#34/#35, each a different flow path
-        // of the same value).
-        let peels_result = match method.as_str() {
-            "unwrap" => mc.args.is_empty(),
-            "expect" => mc.args.len() == 1,
-            _ => false,
-        };
-        if peels_result {
-            // `lock()` and the `try_` producers yield `Result<Guard, _>`; the
-            // guard only emerges once the Result is peeled, at which point it
-            // needs the same tolerant treatment as a direct `borrow_mut()`.
-            let inner = self.peel_paren_group_expr(&mc.receiver);
-            let syn::Expr::MethodCall(pmc) = inner else {
-                return false;
-            };
-            return pmc.args.is_empty()
-                && matches!(
-                    pmc.method.to_string().as_str(),
-                    "lock"
-                        | "read"
-                        | "write"
-                        | "try_borrow"
-                        | "try_borrow_mut"
-                        | "try_lock"
-                        | "try_read"
-                        | "try_write"
-                )
-                && self.infer_simple_expr_type(&pmc.receiver).is_none();
-        }
-        if !mc.args.is_empty() {
-            return false;
-        }
-        if !matches!(
-            method.as_str(),
-            "borrow" | "borrow_mut" | "lock" | "read" | "write"
-        ) {
-            return false;
-        }
-        // Only the UNCERTAIN case: a receiver we can type is already handled.
-        //
-        // Everything else that reaches here produces a guard we cannot see
-        // through, whether the chain roots in a type parameter (issue #32) or
-        // in a perfectly concrete type we simply have no type for (issue #35 --
-        // `h.q.borrow_mut().push_back(1)` on a `RefCell<VecDeque<int>>` field
-        // called `.push_back` straight on the `RefMut`). The type model says
-        // `borrow_mut()` yields `&mut T`, which is true of Rust and not of the
-        // C++ runtime, where it yields a guard that has to be dereferenced.
-        //
-        // Routing both through the dispatch ladder is safe in the direction it
-        // matters: the ladder tries `__recv.m(args)` first and only falls back
-        // to `__recv->m(args)` when that does not compile, so a receiver that
-        // was already fine still behaves the same.
-        //
-        // The receiver's own type is the tell. When we can see it is a
-        // `RefCell`/`Mutex`, the concrete lowering elsewhere already emits a
-        // direct `->` and that is the better output, so leave it alone; fire
-        // only when the receiver is as opaque as the call itself. A generic
-        // receiver (issue #32) has no inferable type either, so it stays
-        // covered.
-        self.infer_simple_expr_type(&mc.receiver).is_none()
-    }
-
     /// Walk method-call receivers / field bases to the root path expression
     /// and report whether its type is a type parameter in scope.
     fn expr_chain_roots_in_type_param(&self, expr: &syn::Expr) -> bool {
@@ -47919,6 +47817,7 @@ auto discriminant_value(const V& value) {
     std::abort();
 }
 }
+#if !defined(RUSTY_HAS_ADDR_OF_TEMP)
 template<typename T>
 constexpr T* addr_of_temp(T& value) {
     return &value;
@@ -47931,6 +47830,7 @@ template<typename T>
 constexpr std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {
     return &value;
 }
+#endif
 }
 namespace ser {
 namespace rusty_ext {
@@ -48602,12 +48502,14 @@ inline Token_TupleStructEnd TupleStructEnd() { return Token_TupleStructEnd{}; }\
 namespace rusty {\n\
 template<typename Target, typename Input>\n\
 Target from_into(Input&& input);\n\
+#if !defined(RUSTY_HAS_ADDR_OF_TEMP)\n\
 template<typename T>\n\
 constexpr T* addr_of_temp(T& value);\n\
 template<typename T>\n\
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value);\n\
 template<typename T>\n\
 std::remove_reference_t<T>* addr_of_temp_mut(T&& value);\n\
+#endif\n\
 }\n\
 namespace de {\n\
 namespace impls {\n\
@@ -51512,6 +51414,7 @@ Target as_ref_into(Input&& input) {\n\
         return static_cast<Target>(std::forward<Input>(input));\n\
     }\n\
 }\n\
+#if !defined(RUSTY_HAS_ADDR_OF_TEMP)\n\
 template<typename T>\n\
 constexpr T* addr_of_temp(T& value) {\n\
     return &value;\n\
@@ -51533,6 +51436,7 @@ std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {\n\
         return &value;\n\
     }\n\
 }\n\
+#endif\n\
 struct Cow_Borrowed {\n\
     std::string_view _0;\n\
     Cow_Borrowed() : _0(std::string_view{}) {}\n\
@@ -52804,6 +52708,7 @@ inline bool is_digit(char32_t ch, uint32_t radix) {\n\
 inline std::size_t len_utf16(char32_t ch) { return static_cast<uint32_t>(ch) <= 0xFFFF ? std::size_t(1) : std::size_t(2); }\n\
 inline bool eq_ignore_ascii_case(char32_t a, char32_t b) { return to_ascii_lowercase(a) == to_ascii_lowercase(b); }\n\
 }\n\
+#if !defined(RUSTY_HAS_FREE_IS_EMPTY)\n\
 template<typename T>\n\
 bool is_empty(const T& value) {\n\
     if constexpr (requires { value.is_empty(); }) {\n\
@@ -52814,6 +52719,7 @@ bool is_empty(const T& value) {\n\
         return false;\n\
     }\n\
 }\n\
+#endif\n\
 template<typename T>\n\
 auto deref_ref(const T& value) {\n\
     if constexpr (requires { value.as_str(); }) {\n\
@@ -57263,6 +57169,7 @@ mod collect_passes;
 mod emit_expr;
 mod emit_items;
 mod emit_stmt;
+mod guard_flow;
 mod inference;
 mod lookups;
 mod name_resolver;

@@ -66,6 +66,27 @@ fn c16_mutex_bound(h: &Holder) { let mut g = h.mq.lock().unwrap(); g.push_back(1
 fn c17_index(h: &Holder) -> i32 { let g = h.q.borrow(); (*g)[0] }
 // C18: guard held across a statement then reused twice
 fn c18_two_uses(h: &Holder) { let mut g = h.q.borrow_mut(); (*g).push_back(18); (*g).push_back(19); }
+// C19: guard behind an if-expression initializer (flow, not shape)
+fn c19_if_init(h: &Holder, cond: bool) { let mut g = if cond { h.q.borrow_mut() } else { h.q.borrow_mut() }; g.push_back(19); }
+// C20: guard behind a match-arm initializer
+fn c20_match_init(h: &Holder, k: i32) { let mut g = match k { _ => h.q.borrow_mut() }; g.push_back(20); }
+// C21: guard behind a block-tail initializer
+fn c21_block_init(h: &Holder) { let mut g = { h.q.borrow_mut() }; g.push_back(21); }
+// C22: free-helper family on a bound guard (len/is_empty/first/last/get/contains)
+fn c22_helpers(h: &Holder) -> usize {
+    let g = h.q.borrow();
+    let mut n = g.len();
+    if !g.is_empty() { n += 1; }
+    if g.front().is_some() { n += 1; }
+    if g.back().is_some() { n += 1; }
+    if g.get(0).is_some() { n += 1; }
+    if g.contains(&19) { n += 1; }
+    n
+}
+// C23: generic receiver, bound guard, autoderef call
+fn c23_generic<H>(h: &H) { let mut g = h.q.borrow_mut(); g.push_back(23); }
+// C24: drop the guard early, then re-borrow (runtime borrow counter must clear)
+fn c24_drop_reborrow(h: &Holder) { let g = h.q.borrow_mut(); drop(g); let g2 = h.q.borrow(); let _ = g2.len(); }
 #endif
 }
 "####;
@@ -93,6 +114,13 @@ int main() {
       assert(c17_index(h) == 1); c18_two_uses(h); assert(c13_return_len(h) == 4); }
     { auto h = mk(); c15_mutex_inline(h); c16_mutex_bound(h);
       auto g = h.mq.lock().unwrap(); assert((*g).len() == 2); assert((*g)[0]==15 && (*g)[1]==16); }
+    // Flow rows: guard behind if/match/block initializers, generic receiver,
+    // the helper family on a bound guard, and drop-then-reborrow.
+    { auto h = mk(); c19_if_init(h, true); c20_match_init(h, 0); c21_block_init(h); c23_generic(h);
+      assert(c13_return_len(h) == 4);          // 19, 20, 21, 23
+      assert(c22_helpers(h) == 9);             // len(4) + 5 positive probes
+      c24_drop_reborrow(h);                    // must not double-borrow panic
+      assert(c13_return_len(h) == 4); }
     return 0;
 }
 "####;

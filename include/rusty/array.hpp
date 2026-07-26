@@ -1108,6 +1108,28 @@ size_t len(const Container& container) {
     }
 }
 
+// Free `is_empty` mirroring `rusty::len` — the emitter routes `x.is_empty()`
+// here when the receiver declares no inherent is_empty. Deferring to len
+// covers guards via len's deref-peel arm (rule 4 of the guard-flow doctrine,
+// transpiler/src/codegen/guard_flow.rs). The emitted-block copy this replaces
+// had a silent-wrong `return false` tail — a guard-wrapped non-empty deque
+// reported empty; the macro tells the emitted block to stand down.
+#define RUSTY_HAS_FREE_IS_EMPTY 1
+template<typename Container>
+bool is_empty(const Container& container) {
+    if constexpr (requires { container.is_empty(); }) {
+        return static_cast<bool>(container.is_empty());
+    } else if constexpr (requires { container.empty(); }) {
+        return static_cast<bool>(container.empty());
+    } else {
+        // Everything else — including a guard wrapping a container — defers
+        // to len, whose ladder ends with the deref-peel arm. Peeling HERE
+        // would misfire: iterators also have `operator*`, and their deref
+        // yields an element, not a container.
+        return rusty::len(container) == 0;
+    }
+}
+
 template<typename T, typename U>
 constexpr auto saturating_add(T lhs, U rhs) {
     /* Rust's rhs is always Self — compute in the RECEIVER type. The old

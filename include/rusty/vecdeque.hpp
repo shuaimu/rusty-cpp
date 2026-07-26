@@ -209,24 +209,32 @@ public:
     // Pop operations
     // ========================================================================
 
-    // Pop element from the back
-    T pop_back() {
-        assert(size_ > 0 && "pop_back on empty VecDeque");
+    // Pop element from the back.
+    // Rust-faithful: `VecDeque::pop_back` returns `Option<T>` — `None` on an
+    // empty deque, not UB. (These returned bare `T` with an assert until the
+    // guard-context matrix exercised them; nothing had before.)
+    Option<T> pop_back() {
+        if (size_ == 0) {
+            return Option<T>(None);
+        }
         --size_;
         size_t idx = to_physical_index(size_);
         T result = std::move(data_[idx]);
         data_[idx].~T();
-        return result;
+        return Option<T>(std::move(result));
     }
 
-    // Pop element from the front
-    T pop_front() {
-        assert(size_ > 0 && "pop_front on empty VecDeque");
+    // Pop element from the front.
+    // Rust-faithful: returns `Option<T>`.
+    Option<T> pop_front() {
+        if (size_ == 0) {
+            return Option<T>(None);
+        }
         T result = std::move(data_[head_]);
         data_[head_].~T();
         head_ = wrap_index(head_ + 1);
         --size_;
-        return result;
+        return Option<T>(std::move(result));
     }
 
     // ========================================================================
@@ -246,43 +254,62 @@ public:
         return data_[to_physical_index(index)];
     }
 
-    // Get element by index (same as operator[], Rust-style)
+    // Get element by index.
+    // Rust-faithful: `VecDeque::get` returns `Option<&T>` — `None` out of
+    // range. (Bounds-asserting `T&` variants preceded the guard-context
+    // matrix; the dispatch ladder calls members expecting Rust semantics, so
+    // members must HAVE Rust semantics.) For the asserting form use
+    // `operator[]`, which is Rust's `deque[i]`.
     // @lifetime: (&'a) -> &'a
-    T& get(size_t index) {
-        assert(index < size_ && "VecDeque::get index out of bounds");
-        return data_[to_physical_index(index)];
+    Option<T&> get(size_t index) {
+        if (index >= size_) {
+            return Option<T&>(None);
+        }
+        return Option<T&>(data_[to_physical_index(index)]);
     }
 
     // @lifetime: (&'a) -> &'a
-    const T& get(size_t index) const {
-        assert(index < size_ && "VecDeque::get index out of bounds");
-        return data_[to_physical_index(index)];
+    Option<const T&> get(size_t index) const {
+        if (index >= size_) {
+            return Option<const T&>(None);
+        }
+        return Option<const T&>(data_[to_physical_index(index)]);
     }
 
-    // Get first element
+    // Get first element.
+    // Rust-faithful: `Option<&T>`, `None` on empty.
     // @lifetime: (&'a) -> &'a
-    T& front() {
-        assert(size_ > 0 && "front on empty VecDeque");
-        return data_[head_];
-    }
-
-    // @lifetime: (&'a) -> &'a
-    const T& front() const {
-        assert(size_ > 0 && "front on empty VecDeque");
-        return data_[head_];
-    }
-
-    // Get last element
-    // @lifetime: (&'a) -> &'a
-    T& back() {
-        assert(size_ > 0 && "back on empty VecDeque");
-        return data_[to_physical_index(size_ - 1)];
+    Option<T&> front() {
+        if (size_ == 0) {
+            return Option<T&>(None);
+        }
+        return Option<T&>(data_[head_]);
     }
 
     // @lifetime: (&'a) -> &'a
-    const T& back() const {
-        assert(size_ > 0 && "back on empty VecDeque");
-        return data_[to_physical_index(size_ - 1)];
+    Option<const T&> front() const {
+        if (size_ == 0) {
+            return Option<const T&>(None);
+        }
+        return Option<const T&>(data_[head_]);
+    }
+
+    // Get last element.
+    // Rust-faithful: `Option<&T>`, `None` on empty.
+    // @lifetime: (&'a) -> &'a
+    Option<T&> back() {
+        if (size_ == 0) {
+            return Option<T&>(None);
+        }
+        return Option<T&>(data_[to_physical_index(size_ - 1)]);
+    }
+
+    // @lifetime: (&'a) -> &'a
+    Option<const T&> back() const {
+        if (size_ == 0) {
+            return Option<const T&>(None);
+        }
+        return Option<const T&>(data_[to_physical_index(size_ - 1)]);
     }
 
     // ========================================================================

@@ -16400,6 +16400,36 @@ impl CodeGen {
                 );
             }
         }
+        // `drop(x)` CONSUMES x — that is its entire meaning. rusty::mem::drop
+        // takes its parameter by value, so a copyable argument would silently
+        // copy (destroying the copy and dropping nothing), and a move-only
+        // one — a guard being dropped early to release its borrow, the
+        // classic use — fails to compile against the deleted copy ctor.
+        // Emit the place through std::move. Temporaries and call results are
+        // already rvalues and stay as they are.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && call.args.len() == 1
+            && fp.path.segments.last().is_some_and(|s| s.ident == "drop")
+        {
+            let joined = fp
+                .path
+                .segments
+                .iter()
+                .map(|seg| seg.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            if self.map_function_path_scope_aware(&joined) == Some("rusty::mem::drop")
+                && matches!(
+                    self.peel_paren_group_expr(&call.args[0]),
+                    syn::Expr::Path(_) | syn::Expr::Field(_)
+                )
+            {
+                return format!(
+                    "rusty::mem::drop(std::move({}))",
+                    self.emit_expr_to_string(&call.args[0])
+                );
+            }
+        }
         // `guard(self, |s| ...)` / `guard(&mut place, ...)`: the ScopeGuard
         // slot must ALIAS the place — a value slot copies (a Clone-backed
         // RawTable copy re-enters clone_from_impl's own guard: infinite

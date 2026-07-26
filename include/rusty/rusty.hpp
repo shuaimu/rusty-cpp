@@ -271,6 +271,31 @@ namespace rusty {
         }
     }
 
+    // Address-of for emitted `&expr` on temporaries: Rust's `&temp` lives to
+    // the end of the enclosing statement, which is exactly a C++ temporary's
+    // full-expression lifetime, so taking the materialized temporary's
+    // address is sound for the argument positions the emitter uses it in.
+    //
+    // These lived only in the transpiler's emitted runtime block, so any
+    // output that did not carry the block — inline-rust rewrites include the
+    // runtime headers instead — referenced an undefined helper. The macro
+    // lets the emitted block skip its copy when this header is in view
+    // (the block's copy would be attached to the emitting module, and the
+    // same declaration in two module attachments is an ODR error).
+#define RUSTY_HAS_ADDR_OF_TEMP 1
+    template<typename T>
+    constexpr T* addr_of_temp(T& value) {
+        return &value;
+    }
+    template<typename T>
+    const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {
+        return &value;
+    }
+    template<typename T>
+    constexpr std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {
+        return &value;
+    }
+
     namespace detail {
         template<typename T>
         struct is_std_variant : std::false_type {};
