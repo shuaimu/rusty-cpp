@@ -53,6 +53,40 @@ use super::*;
 /// variants yield `Result<Guard, _>`; the guard itself only emerges behind
 /// `unwrap()`/`expect()`.
 const DIRECT_GUARD_PRODUCERS: &[&str] = &["borrow", "borrow_mut", "lock", "read", "write"];
+
+/// The guard types themselves, by (Rust and runtime) name — used to classify
+/// a user function whose declared return type re-surfaces one.
+const GUARD_TYPE_TAILS: &[&str] = &[
+    "Ref",
+    "RefMut",
+    "MutexGuard",
+    "RwLockReadGuard",
+    "RwLockWriteGuard",
+    "ReadGuard",
+    "WriteGuard",
+];
+
+/// Does this declared type's last path segment name a guard type? Peels
+/// references and parens; a `-> RefMut<'_, T>` and a `-> rusty::RefMut<T>`
+/// both answer yes.
+fn declared_type_tail_names_guard(ty: &syn::Type) -> bool {
+    let mut ty = ty;
+    loop {
+        match ty {
+            syn::Type::Reference(r) => ty = &r.elem,
+            syn::Type::Paren(p) => ty = &p.elem,
+            syn::Type::Group(g) => ty = &g.elem,
+            _ => break,
+        }
+    }
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|seg| GUARD_TYPE_TAILS.contains(&seg.ident.to_string().as_str()))
+}
 const RESULT_GUARD_PRODUCERS: &[&str] = &[
     "lock",
     "read",
@@ -71,6 +105,17 @@ impl CodeGen {
     /// the typed tier's business.
     pub(super) fn receiver_is_uncertain_guard_call(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
+        // A call to a USER function whose DECLARED return type names a guard:
+        // `fn locked(&self) -> MutexGuard<'_, T>` re-surfaces the guard under
+        // a name the producer list cannot know. The signature is the flow
+        // edge here (doctrine rule 1). A false positive (a user type that
+        // merely shares a guard's name) still behaves: the tolerant paths
+        // try the direct member first and only deref when that is ill-formed.
+        if let syn::Expr::Call(call) = expr {
+            return self
+                .lookup_function_return_type(&call.func)
+                .is_some_and(declared_type_tail_names_guard);
+        }
         let syn::Expr::MethodCall(mc) = expr else {
             return false;
         };
@@ -93,13 +138,14 @@ impl CodeGen {
                 && RESULT_GUARD_PRODUCERS.contains(&pmc.method.to_string().as_str())
                 && self.infer_simple_expr_type(&pmc.receiver).is_none();
         }
-        if !mc.args.is_empty() {
-            return false;
+        if mc.args.is_empty() && DIRECT_GUARD_PRODUCERS.contains(&method.as_str()) {
+            return self.infer_simple_expr_type(&mc.receiver).is_none();
         }
-        if !DIRECT_GUARD_PRODUCERS.contains(&method.as_str()) {
-            return false;
-        }
-        self.infer_simple_expr_type(&mc.receiver).is_none()
+        // User METHOD with a guard-naming declared return type — the method
+        // sibling of the `Call` arm above.
+        self.lookup_known_method_return_type_by_name(&method)
+            .as_ref()
+            .is_some_and(declared_type_tail_names_guard)
     }
 
     /// Flow-following variant for a `let` initializer: the guard call may sit

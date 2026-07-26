@@ -4822,6 +4822,23 @@ impl CodeGen {
                         tuple_binding_names.push(cpp_name);
                     }
                 }
+                // Guard flow: a tuple init destructures element-wise, so each
+                // pattern slot classifies against ITS OWN init element —
+                // `let (a, b) = (x.borrow_mut(), y.borrow());` binds two
+                // maybe-guards (doctrine rule 1, guard_flow.rs). Recorded by
+                // Rust name, which is what consumption sites look up.
+                if let Some(init) = &local.init
+                    && let syn::Expr::Tuple(init_tup) = self.peel_paren_group_expr(&init.expr)
+                {
+                    for (p, elem) in tuple.elems.iter().zip(init_tup.elems.iter()) {
+                        if let syn::Pat::Ident(pi) = p
+                            && pi.ident != "_"
+                            && self.init_expr_yields_maybe_guard(elem)
+                        {
+                            self.record_local_uncertain_guard_binding(&pi.ident.to_string());
+                        }
+                    }
+                }
                 if let Some(expr_str) = expr_str {
                     if tuple_binding_names.is_empty() {
                         self.writeln(&format!("static_cast<void>({});", expr_str));

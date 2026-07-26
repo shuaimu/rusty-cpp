@@ -87,6 +87,18 @@ fn c22_helpers(h: &Holder) -> usize {
 fn c23_generic<H>(h: &H) { let mut g = h.q.borrow_mut(); g.push_back(23); }
 // C24: drop the guard early, then re-borrow (runtime borrow counter must clear)
 fn c24_drop_reborrow(h: &Holder) { let g = h.q.borrow_mut(); drop(g); let g2 = h.q.borrow(); let _ = g2.len(); }
+// C25: tuple-destructured guards — each slot classifies independently
+fn c25_tuple_guards(h: &Holder) {
+    let (mut a, b) = (h.q.borrow_mut(), h.n.borrow());
+    a.push_back(25);
+    let _ = *b;
+}
+// C26/C27: guard re-surfaced through a USER function's declared return type
+fn qmut(h: &Holder) -> std::cell::RefMut<'_, std::collections::VecDeque<i32>> {
+    h.q.borrow_mut()
+}
+fn c26_userfn_inline(h: &Holder) { qmut(h).push_back(26); }
+fn c27_userfn_bound(h: &Holder) { let mut g = qmut(h); g.push_back(27); }
 #endif
 }
 "####;
@@ -121,6 +133,10 @@ int main() {
       assert(c22_helpers(h) == 9);             // len(4) + 5 positive probes
       c24_drop_reborrow(h);                    // must not double-borrow panic
       assert(c13_return_len(h) == 4); }
+    // Phase 3 rows: tuple-destructured guards and user-fn guard returns.
+    { auto h = mk(); c25_tuple_guards(h); c26_userfn_inline(h); c27_userfn_bound(h);
+      auto g = h.q.borrow(); assert((*g).len() == 3);
+      assert((*g)[0]==25 && (*g)[1]==26 && (*g)[2]==27); }
     return 0;
 }
 "####;

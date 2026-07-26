@@ -792,6 +792,33 @@ fn add(a: i32, b: i32) -> i32 {{
         assert!(rewritten.contains(&format!("rust_sha256={}", blocks[0].rust_hash)));
     }
 
+    /// A block-local fn calling another emitted `::helper(..)` — correct for
+    /// single-file outputs whose fns really sit at purview scope, but an
+    /// inline-rust GEN region lives inside the consumer's namespace, where
+    /// `::helper` names nothing. Block-local crate-root calls must stay bare.
+    #[test]
+    fn test_block_local_fn_call_is_not_globally_qualified() {
+        let content = r#"#if RUSTYCPP_RUST
+fn helper(x: i32) -> i32 {
+    x + 1
+}
+fn caller(x: i32) -> i32 {
+    helper(x) * 2
+}
+#endif
+"#;
+        let blocks = parse_blocks(Path::new("demo.hpp"), content).expect("parse");
+        let out = rewrite_content(Path::new("demo.hpp"), content, &blocks).expect("rewrite");
+        assert!(
+            !out.contains("::helper("),
+            "block-local call must not be globally qualified:\n{out}"
+        );
+        assert!(
+            out.contains("helper(std::move(x))"),
+            "the call itself must survive:\n{out}"
+        );
+    }
+
     /// Issue #35: the guard deref was dropped whenever the receiver was
     /// concrete but untypable. `x.borrow_mut()` yields a `RefMut` guard in the
     /// C++ runtime, not the `&mut T` the type model claims, so calling a method

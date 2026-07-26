@@ -500,6 +500,18 @@ impl CodeGen {
                     }
                     return Some(local_name);
                 }
+                // Inline-rust: the block's functions are emitted INTO the
+                // consumer's namespace, wherever the GEN region happens to
+                // sit — there is no global `::name` to qualify to (clang:
+                // "no member named 'helper' in the global namespace"). A
+                // crate-root fn (no parent namespace) is a SIBLING of its
+                // call site there, so the bare name is both correct and the
+                // only spelling that works. Single-file/module outputs keep
+                // the global form: their functions really are at purview
+                // scope, and the `::` guards against member shadowing.
+                if self.inline_rust_block && qualified_parent.is_empty() {
+                    return Some(escape_cpp_keyword(&path.segments[0].ident.to_string()));
+                }
             }
             return Some(format!("::{}", escaped));
         }

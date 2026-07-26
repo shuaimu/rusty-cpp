@@ -96,6 +96,19 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Cell" | "std::cell::Cell" => Some(("rusty::Cell", true)),
         "RefCell" | "std::cell::RefCell" => Some(("rusty::RefCell", true)),
         "UnsafeCell" | "std::cell::UnsafeCell" => Some(("rusty::UnsafeCell", true)),
+        // Guard types — a user fn can re-surface a guard in its signature
+        // (`fn locked(&self) -> MutexGuard<'_, T>`), and the guard-flow
+        // classifier keys off exactly these names (codegen/guard_flow.rs).
+        // Bare `Ref` stays unmapped: the name is too common to claim.
+        "std::cell::Ref" | "cell::Ref" => Some(("rusty::Ref", true)),
+        "RefMut" | "std::cell::RefMut" | "cell::RefMut" => Some(("rusty::RefMut", true)),
+        "MutexGuard" | "std::sync::MutexGuard" | "sync::MutexGuard" => {
+            Some(("rusty::MutexGuard", true))
+        }
+        // The RwLock guards stay unmapped: they are NESTED classes in the
+        // runtime (`rusty::RwLock<T>::ReadGuard`), which this flat map cannot
+        // spell — a wrong mapping would be a silent miscompile, an unmapped
+        // name a loud error.
 
         // Collections
         "Vec" | "std::vec::Vec" => Some(("rusty::Vec", true)),
