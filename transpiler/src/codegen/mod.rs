@@ -36985,7 +36985,18 @@ impl CodeGen {
                     )
                 });
             if first_param_is_owner {
-                let arg0 = self.emit_expr_to_string(&call.args[0]);
+                // Decltype the REFERENT, not the reference: Rust's
+                // `Owner::assoc(&self.node)` emits the argument as
+                // `&this->node`, and in C++ that `&` is ADDRESS-OF —
+                // `decltype(&this->node)` is a pointer type, `remove_cvref_t`
+                // of a pointer is still a pointer, and `Ptr*::method` is
+                // ill-formed. The reference is transparent for recovering the
+                // instantiation, so peel it before emitting.
+                let mut owner_arg = self.peel_paren_group_expr(&call.args[0]);
+                while let syn::Expr::Reference(r) = owner_arg {
+                    owner_arg = self.peel_paren_group_expr(&r.expr);
+                }
+                let arg0 = self.emit_expr_to_string(owner_arg);
                 return format!(
                     "std::remove_cvref_t<decltype({})>::{}",
                     arg0, method_part
