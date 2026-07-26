@@ -3907,7 +3907,22 @@ impl CodeGen {
                         syn::Expr::Try(_)
                     )
                 });
-                let ref_suffix = if emits_ref_binding
+                // `let g = x.borrow_mut();` on a receiver we cannot type
+                // (issue #35). The type model says `borrow_mut()` yields
+                // `&mut T`, which is true of Rust but not of the C++ runtime,
+                // where it yields a guard BY VALUE — so `auto&` cannot bind it
+                // and `*g` must not be dropped. We cannot tell the two apart
+                // here, so bind with `auto&&`, which is right either way: it
+                // lifetime-extends a guard prvalue and still aliases a real
+                // reference. The deref side is handled by emitting `*g`
+                // through `deref_if_pointer_like`.
+                let init_is_uncertain_guard_call = local
+                    .init
+                    .as_ref()
+                    .is_some_and(|init| self.receiver_is_uncertain_guard_call(&init.expr));
+                let ref_suffix = if init_is_uncertain_guard_call && type_str == "auto" {
+                    "&&"
+                } else if emits_ref_binding
                     || (init_returns_reference_binding && !init_reference_lowers_to_value)
                 {
                     "&"
@@ -4004,6 +4019,9 @@ impl CodeGen {
                     qualifier == "const " && local.init.is_some(),
                 );
                 self.record_local_reference_binding(&name_str, local_decl_is_reference);
+                if init_is_uncertain_guard_call && ref_suffix == "&&" {
+                    self.record_local_uncertain_guard_binding(&name_str);
+                }
                 if needs_rebind_pointer_local {
                     self.record_rebind_reference_pointer_binding(&name_str);
                 }

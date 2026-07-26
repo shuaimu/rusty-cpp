@@ -792,6 +792,47 @@ fn add(a: i32, b: i32) -> i32 {{
         assert!(rewritten.contains(&format!("rust_sha256={}", blocks[0].rust_hash)));
     }
 
+    /// Issue #35: the guard deref was dropped whenever the receiver was
+    /// concrete but untypable. `x.borrow_mut()` yields a `RefMut` guard in the
+    /// C++ runtime, not the `&mut T` the type model claims, so calling a method
+    /// straight on it does not compile — and binding it to `auto&` binds a
+    /// non-const lvalue reference to a prvalue. #32 covered only the generic
+    /// receiver.
+    #[test]
+    fn test_concrete_receiver_guard_keeps_its_deref() {
+        let content = r#"#if RUSTYCPP_RUST
+fn push_inline(h: &Holder) {
+    h.q.borrow_mut().push_back(1);
+}
+fn push_bound(h: &Holder) {
+    let mut g = h.q.borrow_mut();
+    (*g).push_back(2);
+}
+#endif
+"#;
+        let blocks = parse_blocks(Path::new("demo.hpp"), content).expect("parse");
+        let out = rewrite_content(Path::new("demo.hpp"), content, &blocks).expect("rewrite");
+
+        assert!(
+            out.contains("rusty::deref_call(h.q.borrow_mut()"),
+            "the inline call must dispatch through the guard:\n{out}"
+        );
+        assert!(
+            !out.contains("auto& g ="),
+            "a guard is a prvalue; `auto&` cannot bind it:\n{out}"
+        );
+        assert!(
+            out.contains("auto&& g ="),
+            "bind the guard with `auto&&`, which also still aliases a real \
+             reference:\n{out}"
+        );
+        assert!(
+            out.contains("deref_if_pointer_like(g)"),
+            "`*g` must stay tolerant -- dropping it calls the method on the \
+             guard:\n{out}"
+        );
+    }
+
     #[test]
     fn test_parse_blocks_rejects_legacy_else_layout() {
         let content = r#"#if RUSTYCPP_RUST

@@ -12825,7 +12825,12 @@ impl CodeGen {
                     // deref-TOLERANT form, which unboxes a guard and passes a
                     // reference through unchanged. Assigning through it is
                     // safe: the guard temporary outlives the full expression.
-                    if self.receiver_is_uncertain_guard_call(operand) {
+                    // ...and once that guard has been bound to a local, which
+                    // is declared `auto&&` for exactly the same reason
+                    // (issue #35).
+                    if self.receiver_is_uncertain_guard_call(operand)
+                        || self.expr_is_uncertain_guard_local(operand)
+                    {
                         return format!(
                             "rusty::detail::deref_if_pointer_like({})",
                             self.emit_expr_to_string(operand)
@@ -21620,7 +21625,15 @@ impl CodeGen {
                     // form: it unboxes a guard and passes a reference through.
                     // Assigning through it is safe, the guard temporary
                     // outlives the full expression.
-                    if self.receiver_is_uncertain_guard_call(&un.expr) {
+                    // Same reasoning once the guard has been bound to a local
+                    // (`let g = x.borrow_mut(); *g`, issue #35): `g` is
+                    // declared `auto&&` precisely because we could not tell a
+                    // guard from a reference, so the deref has to stay
+                    // tolerant here too rather than being dropped as a
+                    // Rust-reference deref.
+                    if self.receiver_is_uncertain_guard_call(&un.expr)
+                        || self.expr_is_uncertain_guard_local(&un.expr)
+                    {
                         return format!(
                             "rusty::detail::deref_if_pointer_like({})",
                             self.emit_expr_to_string(&un.expr)

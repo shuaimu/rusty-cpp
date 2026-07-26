@@ -125,6 +125,61 @@ int main() {
     compile_and_run_cpp(source, "guard_dispatch_deref_call");
 }
 
+/// Issue #35: the same two shapes for a CONCRETE receiver — an inline
+/// `deref_call` on the guard, and a guard bound with `auto&&` and dereferenced
+/// through `deref_if_pointer_like`. Both must reach the guarded value, and the
+/// bound form must also still work when the call yields a plain reference,
+/// which is the case `auto&&` exists to cover.
+#[test]
+fn concrete_receiver_guard_shapes_reach_the_value_bound_or_inline() {
+    let source = r#"
+#include <rusty/rusty.hpp>
+#include <rusty/refcell.hpp>
+#include <cassert>
+
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(push_back)
+} }
+
+struct Guarded { rusty::RefCell<rusty::VecDeque<int>> v; };
+
+// borrow_mut() returns a plain reference rather than a guard.
+struct Plain {
+    rusty::VecDeque<int> inner;
+    rusty::VecDeque<int>& borrow_mut() { return inner; }
+};
+
+int main() {
+    Guarded g{rusty::RefCell<rusty::VecDeque<int>>(rusty::VecDeque<int>())};
+
+    // inline: dispatched through the guard
+    rusty::deref_call(g.v.borrow_mut(), rusty::detail::__mdisp_push_back{}, 1);
+    // bound: auto&& holds the guard prvalue alive, deref stays tolerant
+    {
+        auto&& held = g.v.borrow_mut();
+        rusty::detail::deref_if_pointer_like(held).push_back(2);
+    }
+    {
+        auto held = g.v.borrow();
+        assert((*held).len() == 2);
+        assert((*held)[0] == 1);
+        assert((*held)[1] == 2);
+    }
+
+    // the same bound shape over a plain reference must alias, not copy
+    Plain p{rusty::VecDeque<int>()};
+    {
+        auto&& held = p.borrow_mut();
+        rusty::detail::deref_if_pointer_like(held).push_back(7);
+    }
+    assert(p.inner.len() == 1);
+    assert(p.inner[0] == 7);
+    return 0;
+}
+"#;
+    compile_and_run_cpp(source, "guard_dispatch_concrete_receiver");
+}
+
 /// Issue #34: `*w.cell.borrow_mut() = v` through a generic receiver lowers to
 /// `rusty::detail::deref_if_pointer_like(..) = v`. It must assign THROUGH a
 /// `RefMut` guard, and still assign through a plain returned reference.

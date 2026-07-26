@@ -1329,6 +1329,12 @@ pub struct CodeGen {
     /// Scoped Rust-local names emitted as C++ reference bindings.
     /// Used by deref collapsing when local type tracking is inconclusive.
     pub(crate) local_reference_bindings: Vec<HashSet<String>>,
+    /// Locals bound from a guard-producing call on a receiver we could not
+    /// type (`let g = x.borrow_mut();`). They are declared `auto&&`, so `g`
+    /// may be either a guard or a plain reference and `*g` has to go through
+    /// `deref_if_pointer_like` rather than being dropped as a Rust-reference
+    /// deref would be. See issue #35.
+    pub(crate) local_uncertain_guard_bindings: Vec<HashSet<String>>,
     /// Scoped Rust-local names lowered to pointer storage for reference
     /// rebinding (`let mut r: &T` reassigned within the same block).
     /// This is stricter than `local_reference_bindings` and is used to
@@ -2023,6 +2029,7 @@ impl CodeGen {
             non_path_impl_assoc_types: HashMap::new(),
             iterator_impl_items: HashMap::new(),
             local_reference_bindings: Vec::new(),
+            local_uncertain_guard_bindings: Vec::new(),
             rebind_reference_pointer_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),
             pending_uninit_let_locals: Vec::new(),
@@ -4276,6 +4283,7 @@ impl CodeGen {
         self.local_const_bindings.clear();
         self.local_item_const_names.clear();
         self.local_reference_bindings.clear();
+        self.local_uncertain_guard_bindings.clear();
         self.rebind_reference_pointer_bindings.clear();
         self.delayed_init_locals.clear();
         self.pending_uninit_let_locals.clear();
@@ -28231,6 +28239,7 @@ impl CodeGen {
             self.local_shadowed_binding_types.push(HashMap::new());
             self.local_const_bindings.push(local_consts);
             self.local_reference_bindings.push(HashSet::new());
+            self.local_uncertain_guard_bindings.push(HashSet::new());
             self.rebind_reference_pointer_bindings.push(HashSet::new());
             self.emit_block(body);
             self.local_reference_bindings.pop();
@@ -29976,6 +29985,33 @@ impl CodeGen {
         }
     }
 
+
+    pub(crate) fn record_local_uncertain_guard_binding(&mut self, name: &str) {
+        // The surrounding scope stack is only pushed on some emission paths
+        // (inline-rust never pushes one), so make sure there is somewhere to
+        // record this. `emit_file` clears the stack per file.
+        if self.local_uncertain_guard_bindings.is_empty() {
+            self.local_uncertain_guard_bindings.push(HashSet::new());
+        }
+        if let Some(scope) = self.local_uncertain_guard_bindings.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    /// Is this expression a plain path naming a local bound from an
+    /// untypable guard call? See `local_uncertain_guard_bindings`.
+    pub(crate) fn expr_is_uncertain_guard_local(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        let Some(ident) = path.path.get_ident() else {
+            return false;
+        };
+        let name = ident.to_string();
+        self.local_uncertain_guard_bindings
+            .iter()
+            .any(|scope| scope.contains(&name))
+    }
 
     fn record_local_reference_binding(&mut self, name: &str, is_reference: bool) {
         let Some(scope) = self.local_reference_bindings.last_mut() else {
@@ -32696,12 +32732,27 @@ impl CodeGen {
             return false;
         }
         // Only the UNCERTAIN case: a receiver we can type is already handled.
-        if self.infer_simple_expr_type(expr).is_some() {
-            return false;
-        }
-        // ...and only when the chain really is generic, so a plain unknown
-        // (a genuine miss elsewhere) keeps its current lowering.
-        self.expr_chain_roots_in_type_param(&mc.receiver)
+        //
+        // Everything else that reaches here produces a guard we cannot see
+        // through, whether the chain roots in a type parameter (issue #32) or
+        // in a perfectly concrete type we simply have no type for (issue #35 --
+        // `h.q.borrow_mut().push_back(1)` on a `RefCell<VecDeque<int>>` field
+        // called `.push_back` straight on the `RefMut`). The type model says
+        // `borrow_mut()` yields `&mut T`, which is true of Rust and not of the
+        // C++ runtime, where it yields a guard that has to be dereferenced.
+        //
+        // Routing both through the dispatch ladder is safe in the direction it
+        // matters: the ladder tries `__recv.m(args)` first and only falls back
+        // to `__recv->m(args)` when that does not compile, so a receiver that
+        // was already fine still behaves the same.
+        //
+        // The receiver's own type is the tell. When we can see it is a
+        // `RefCell`/`Mutex`, the concrete lowering elsewhere already emits a
+        // direct `->` and that is the better output, so leave it alone; fire
+        // only when the receiver is as opaque as the call itself. A generic
+        // receiver (issue #32) has no inferable type either, so it stays
+        // covered.
+        self.infer_simple_expr_type(&mc.receiver).is_none()
     }
 
     /// Walk method-call receivers / field bases to the root path expression
