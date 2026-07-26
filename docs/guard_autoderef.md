@@ -3,6 +3,11 @@
 Status: implemented (phases 1–6). The living regression surface is
 `transpiler/tests/guard_context_matrix.rs` — 29 rows.
 
+Book coverage: `docs/rusty-std-book.md` §6.11 (the runtime dispatcher and
+its functor caller shape), §6.12 (this design in narrative form), and
+§7.14 (the bug-class catalogue entry, Class G1). This file remains the
+normative reference; update the book sections when the design here moves.
+
 ## The problem
 
 Rust's cell/lock types hand out **guard objects** — `Ref`, `RefMut`,
