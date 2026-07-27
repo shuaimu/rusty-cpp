@@ -5083,6 +5083,51 @@ def fix_const_left_kv_ok_unwrap(path: Path) -> None:
         print(f"  dropped const on left_leaf_kv*/_shadow1 in: {path.name}")
 
 
+def generalize_collapsed_full_range_return(path: Path) -> None:
+    """Rust has THREE marker-specialized `full_range` impls (Immut / ValMut /
+    Dying). C++ absorption collapses same-signature methods per struct, and
+    the conflict key cannot express the differing impl self-type args, so ONE
+    body survives — with the WINNING impl's concrete return marker
+    (`LazyLeafRange<marker::Immut, K, V>`), which is wrong for every other
+    instantiation (`root.into_dying().full_range()` must yield Dying; the
+    IntoIter field type checks it).
+
+    The kept body already calls the free
+    `full_range(NodeRef<BorrowType,..>, NodeRef<BorrowType,..>)`, which
+    deduces and FOLLOWS the receiver's BorrowType — only the declared return
+    type pins the wrong marker. Generalize it to `BorrowType` (this codifies
+    the previously-manual vendored edit; the principled transpiler fix is
+    the marker-impl requires-clause system, same deferred bucket as the
+    `Extend<T>`/`Extend<&T>` collapse).
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: full_range return generalized to BorrowType by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (full_range return already generalized)")
+        return
+    # Spelling at patcher time may be `::marker::Immut` (global-qualified)
+    # or `marker::Immut`; possibly const or not. Tolerate both.
+    anchor_re = re.compile(
+        r"( *)LazyLeafRange<(?:::)?marker::Immut, K, V> full_range\(\)( const)? \{"
+    )
+    m = anchor_re.search(src)
+    if m is None:
+        print(f"  [warn] full_range anchor not found in {path.name}", file=sys.stderr)
+        return
+    indent = m.group(1)
+    constness = m.group(2) or ""
+    replacement = (
+        f"{indent}{sentinel}\n"
+        f"{indent}// (three marker-specialized Rust impls collapse to this one method;\n"
+        f"{indent}// the free fn follows the receiver's BorrowType, the declared return\n"
+        f"{indent}// must too)\n"
+        f"{indent}LazyLeafRange<BorrowType, K, V> full_range(){constness} {{"
+    )
+    src = anchor_re.sub(lambda _m: replacement, src, count=1)
+    path.write_text(src)
+    print(f"  generalized full_range return to BorrowType in: {path.name}")
+
+
 def fix_full_range_recursive_call(path: Path) -> None:
     """Qualify `full_range(self, self)` calls inside the NodeRef::full_range
     method body so they resolve to the FREE function rather than recursing
@@ -5962,6 +6007,7 @@ def main() -> int:
             fix_unresolved_bare_glob_variants(p)
     fix_leafnode_shadow_arrow(internal)
     fix_full_range_recursive_call(internal)
+    generalize_collapsed_full_range_return(internal)
     # Nested `Ok(LeftOrRight::Variant(_))` arm: inner condition wraps the
     # outer `_m` (Result) instead of the unwrapped `_mvN` (LeftOrRight).
     # Affects 4 sites in fix_node_through_parent (B-tree's rebalance path).
