@@ -4911,6 +4911,157 @@ def fix_const_slice_remove_binding(path: Path) -> None:
         print(f"  dropped const on parent_key/val slice_remove bindings in: {path.name}")
 
 
+def codify_bound_index_bodies(path: Path) -> None:
+    """The emitted `find_{lower,upper}_bound_index` IIFE bodies call
+    `rusty::detail::variant_holds<SearchBound_AllIncluded>(_m)` with a
+    BARE class template as the alternative — unmatchable (the emitted
+    SearchBound member structs are templated). Never seen by the module
+    precompile (templates check at instantiation; the parity matrix's
+    range test instantiates them). Replace both bodies with the
+    vendored hand-port (index()-based dispatch, SearchBound<K>)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: bound-index bodies hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (bound-index bodies already hand-ported)")
+        return
+    replaced = 0
+    for anchor, body in (
+        ("find_lower_bound_index(SearchBound<K> bound) const {", '{\n        using __Ret = std::tuple<size_t, SearchBound<K>>;\n        if (bound.index() == 0) {\n            // Included(key)\n            const auto& key = std::get<0>(bound)._0;\n            auto __r = this->find_key_index(key, static_cast<size_t>(0));\n            if (__r.index() == 0) {\n                // KV: key matched exactly → return the matching index and\n                // narrow the search to "everything strictly greater".\n                size_t idx = std::get<0>(__r)._0;\n                return __Ret{idx, SearchBound<K>{SearchBound_AllExcluded<K>{}}};\n            }\n            // Edge: pass the original bound through unchanged.\n            size_t idx = std::get<1>(__r)._0;\n            return __Ret{idx, std::move(bound)};\n        }\n        if (bound.index() == 1) {\n            // Excluded(key)\n            const auto& key = std::get<1>(bound)._0;\n            auto __r = this->find_key_index(key, static_cast<size_t>(0));\n            if (__r.index() == 0) {\n                size_t idx = std::get<0>(__r)._0;\n                return __Ret{idx + static_cast<size_t>(1),\n                             SearchBound<K>{SearchBound_AllIncluded<K>{}}};\n            }\n            size_t idx = std::get<1>(__r)._0;\n            return __Ret{idx, std::move(bound)};\n        }\n        if (bound.index() == 2) {\n            // AllIncluded\n            return __Ret{static_cast<size_t>(0),\n                         SearchBound<K>{SearchBound_AllIncluded<K>{}}};\n        }\n        // AllExcluded (index == 3)\n        return __Ret{rusty::len(*this), SearchBound<K>{SearchBound_AllExcluded<K>{}}};\n    }'),
+        ("find_upper_bound_index(SearchBound<K> bound, size_t start_index) const {", '{\n        using __Ret = std::tuple<size_t, SearchBound<K>>;\n        if (bound.index() == 0) {\n            // Included(key) → step past the matching key.\n            const auto& key = std::get<0>(bound)._0;\n            auto __r = this->find_key_index(key, start_index);\n            if (__r.index() == 0) {\n                size_t idx = std::get<0>(__r)._0;\n                return __Ret{idx + static_cast<size_t>(1),\n                             SearchBound<K>{SearchBound_AllExcluded<K>{}}};\n            }\n            size_t idx = std::get<1>(__r)._0;\n            return __Ret{idx, std::move(bound)};\n        }\n        if (bound.index() == 1) {\n            // Excluded(key) → stop at the matching key.\n            const auto& key = std::get<1>(bound)._0;\n            auto __r = this->find_key_index(key, start_index);\n            if (__r.index() == 0) {\n                size_t idx = std::get<0>(__r)._0;\n                return __Ret{idx, SearchBound<K>{SearchBound_AllIncluded<K>{}}};\n            }\n            size_t idx = std::get<1>(__r)._0;\n            return __Ret{idx, std::move(bound)};\n        }\n        if (bound.index() == 2) {\n            // AllIncluded → upper edge is past the last key.\n            return __Ret{rusty::len(*this),\n                         SearchBound<K>{SearchBound_AllIncluded<K>{}}};\n        }\n        // AllExcluded (index == 3) → upper edge is the start of this slice.\n        return __Ret{start_index, SearchBound<K>{SearchBound_AllExcluded<K>{}}};\n    }'),
+    ):
+        i = src.find(anchor)
+        if i == -1:
+            print(f"  [warn] bound-index anchor missing: {anchor[:40]}…", file=sys.stderr)
+            continue
+        open_brace = i + len(anchor) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            print(f"  [warn] bound-index body end not found", file=sys.stderr)
+            continue
+        src = src[:open_brace] + body + src[close_brace + 1 :]
+        replaced += 1
+    if replaced:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print(f"  hand-ported {replaced} bound-index body(ies) in: {path.name}")
+
+
+def codify_find_leaf_edges_body(path: Path) -> None:
+    """The emitted `find_leaf_edges_spanning_range` body carries two
+    silent breaks the module precompile never sees (templates check at
+    instantiation; the parity matrix's range test instantiates them):
+    the `(Leaf(f), Leaf(b))` / `(Internal(f), Internal(b))` tuple-match
+    arms lower to bare-glob TODO conditions (`true && true` + `._0` on
+    the std::variant itself), and the Err(none) arm can drop its
+    return. Replace the body with the vendored hand-port (index()-based
+    dispatch over the forced pair, SearchBound<K> chain)."""
+    src = path.read_text()
+    sentinel = "Range-path hand-port: drop the Q template"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (find_leaf body already hand-ported)")
+        return
+    anchor = "::find_leaf_edges_spanning_range(R range) {"
+    i = src.find(anchor)
+    if i == -1:
+        print(f"  no out-of-line find_leaf def in: {path.name}", file=sys.stderr)
+        return
+    open_brace = i + len(anchor) - 1
+    close_brace = find_matching_brace(src, open_brace)
+    if close_brace == -1:
+        print(f"  [warn] find_leaf body end not found in: {path.name}", file=sys.stderr)
+        return
+    body = '{\n        // Range-path hand-port: drop the Q template (Q=K for the typed\n        // BTreeMap lookup) and propagate the SearchBound<K> chain.\n        auto __sr = this->search_tree_for_bifurcation(range);\n        if (__sr.is_err()) {\n            // The Rust source returns LeafRange::none() when the bifurcation\n            // collapses to a single leaf edge (empty range). The previously\n            // transpiled body dropped this return entirely, which made the\n            // function fall off the end (UB).\n            return LeafRange<BorrowType, K, V>::none();\n        }\n        auto __ok = std::move(__sr).unwrap();\n        auto node = std::move(std::get<0>(__ok));\n        size_t lower_edge_idx = std::get<1>(__ok);\n        size_t upper_edge_idx = std::get<2>(__ok);\n        SearchBound<K> lower_child_bound = std::move(std::get<3>(__ok));\n        SearchBound<K> upper_child_bound = std::move(std::get<4>(__ok));\n        // We need two handles into the same node; clone it (NodeRef is\n        // just a pointer + size_t + PhantomData, cheap to copy).\n        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, marker::Edge>;\n        auto node_for_upper = node;\n        auto lower_edge = __EdgeHandle::new_edge(std::move(node), lower_edge_idx);\n        auto upper_edge = __EdgeHandle::new_edge(std::move(node_for_upper), upper_edge_idx);\n        // match (lower_edge.force(), upper_edge.force()):\n        //   (Leaf(f), Leaf(b))           → return LeafRange{f, b}\n        //   (Internal(f), Internal(b))   → descend and find_*_bound_edge\n        //   _                            → unreachable (depths must match)\n        while (true) {\n            auto _m0 = lower_edge.force();\n            auto _m1 = upper_edge.force();\n            if (_m0.index() == 0 && _m1.index() == 0) {\n                auto f = std::move(std::get<0>(_m0)._0);\n                auto b = std::move(std::get<0>(_m1)._0);\n                return LeafRange<BorrowType, K, V>(\n                    rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(f)),\n                    rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(b)));\n            }\n            if (_m0.index() == 1 && _m1.index() == 1) {\n                auto f = std::move(std::get<1>(_m0)._0);\n                auto b = std::move(std::get<1>(_m1)._0);\n                auto lower_pair = f.descend().find_lower_bound_edge(std::move(lower_child_bound));\n                lower_edge = std::move(std::get<0>(lower_pair));\n                lower_child_bound = std::move(std::get<1>(lower_pair));\n                auto upper_pair = b.descend().find_upper_bound_edge(std::move(upper_child_bound));\n                upper_edge = std::move(std::get<0>(upper_pair));\n                upper_child_bound = std::move(std::get<1>(upper_pair));\n                continue;\n            }\n            std::println(stderr, "BTreeMap has different depths");\n            rusty::intrinsics::unreachable();\n        }\n    }'
+    src = src[:open_brace] + body + src[close_brace + 1 :]
+    path.write_text(src)
+    print(f"  hand-ported find_leaf_edges_spanning_range body in: {path.name}")
+
+
+def codify_range_path_q_to_k(path: Path) -> None:
+    """Codifies the vendored "Range-path hand-port" as a type-level
+    transform. Rust's range chain (`search_tree_for_bifurcation`,
+    `find_{lower,upper}_bound_{edge,index}`, `lower_bound`,
+    `upper_bound`) is generic over `Q: ?Sized` with `K: Borrow<Q>` —
+    C++ has no Borrow edge, so `Q` is UNDEDUCIBLE at every call site
+    ("couldn't infer template argument 'Q'"), and
+    `variant<...const Q&...>` (SearchBound of a reference) is not
+    assignable anyway. For the keyed lookup Q=K suffices: rewrite the
+    SearchBound spellings to `SearchBound<K>` (by value) and drop the
+    dead `Q` template params. `search_node`/`find_key_index` keep
+    their `Q` — a `const Q&` parameter deduces fine.
+
+    The dependent-owner synthesis (`std::conditional_t<true, …, Q>` in
+    new_edge recovery) named Q too — repoint it at `K`, which is
+    always in scope on this class."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: range-path Q=K codified by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (range-path Q=K already codified)")
+        return
+    n_const_ref = src.count("SearchBound<const Q&>")
+    n_plain = src.count("SearchBound<Q>")
+    n_edge = src.count(", Q>::new_edge")
+    if n_const_ref == 0 and n_plain == 0:
+        print(f"  no range-path Q sites in: {path.name}")
+        return
+    src = src.replace("SearchBound<const Q&>", "SearchBound<K>")
+    src = src.replace("SearchBound<Q>", "SearchBound<K>")
+    src = src.replace(", Q>::new_edge", ", K>::new_edge")
+    # Variant member-struct spellings inside the long IIFE bodies
+    # (SearchBound_Included<const Q&>{...} etc.).
+    src, n_members = re.subn(r"SearchBound_([A-Za-z]+)<const Q&>", r"SearchBound_\1<K>", src)
+    src, n_qr = re.subn(r"template<typename Q, typename R>", "template<typename R>", src)
+    # Drop `template<typename Q>` ONLY where the following signature is
+    # part of the SearchBound family (now spelled SearchBound<K>) —
+    # search_node / find_key_index keep theirs.
+    src, n_q = re.subn(
+        r"[ \t]*template<typename Q>\n(?=[^\n]*(?:SearchBound<K>|find_(?:lower|upper)_bound_edge))",
+        "",
+        src,
+    )
+    i = src.find("\n")
+    src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+    path.write_text(src)
+    print(
+        f"  range-path Q=K: {n_const_ref}+{n_plain} SearchBound, {n_members} members, "
+        f"{n_edge} new_edge, {n_qr}+{n_q} template headers in: {path.name}"
+    )
+
+
+def fix_range_search_const_mismatch(path: Path) -> None:
+    """`range_search` (by-value `self`, Copy NodeRef) emits `const` while
+    its callee `find_leaf_edges_spanning_range` (same receiver form)
+    emits NON-const — a const `*this` cannot call it ("no matching
+    member function", surfaced by BTreeMap::range in the tests_port
+    suite). The vendored port shipped BOTH non-const and passed every
+    suite; drop the `const` to match. The principled transpiler fix is
+    const-ness propagation through sibling calls (deferred, same bucket
+    as the marker-impl requires-clause system)."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: range_search const dropped by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (range_search const already dropped)")
+        return
+    pattern = re.compile(
+        r"(LeafRange<(?:::)?marker::(?:Immut|ValMut)[^>]*, K, V> range_search\(R range\)) const \{"
+    )
+    new_src, n = pattern.subn(r"\1 {", src)
+    if n == 0:
+        print(f"  no const range_search site in: {path.name}")
+        return
+    new_src = new_src.replace(
+        "LeafRange<marker::Immut, K, V> range_search(R range) {",
+        f"{sentinel}\n    LeafRange<marker::Immut, K, V> range_search(R range) {{",
+        1,
+    )
+    path.write_text(new_src)
+    print(f"  dropped const on {n} range_search overload(s) in: {path.name}")
+
+
 def fix_const_next_internal_edge_binding(path: Path) -> None:
     """Drop `const` on `const auto next_internal_edge = …` so the
     subsequent `.descend()` by-value call is well-formed.
@@ -5647,6 +5798,83 @@ def stub_broken_set_methods(path: Path) -> None:
         print(f"  no broken set.cppm regions found in: {path.name}")
 
 
+def fix_set_stitch_peekable_field(path: Path) -> None:
+    """set's Difference/Intersection `Stitch` variants type a field as
+    `decltype(std::declval<Iter<T>>().peekable())` — but Iter<T> has no
+    ported peekable() member. difference()/intersection() only ever
+    construct the Search variant, so Stitch is dead code that must
+    merely parse: use a plain `Iter<T>` for the field/param type, the
+    same workaround the vendored port shipped."""
+    src = path.read_text()
+    sentinel = "// btree_port port: Stitch peekable field typed as plain Iter by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Stitch peekable already plain Iter)")
+        return
+    needle = "decltype(std::declval<Iter<T>>().peekable())"
+    n = src.count(needle)
+    if n == 0:
+        print(f"  no Stitch peekable sites in: {path.name}")
+        return
+    src = src.replace(needle, "Iter<T>")
+    i = src.find("\n")
+    src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+    path.write_text(src)
+    print(f"  replaced {n} Stitch peekable type(s) in: {path.name}")
+
+
+def fix_map_dormant_append_cluster(path: Path) -> None:
+    """Matrix-tail cluster in map.cppm (instantiated only by the parity
+    test's split_off/append/extract_if paths; the module precompile
+    never sees them):
+    - `__btree_port_make_dormant(std::move(root))` — the helper takes an
+      LVALUE (`__T&`); strip the move (old-vendored called it on the
+      lvalue).
+    - `…make_dormant(root)._1` — `_1` on a std::tuple; use std::get<1>.
+    - `const auto root = …awaken();` before `root.pop_internal_level(…)`
+      — Rust `let mut root`; const blocks the non-const call.
+    - `append_from_sorted_iters(…, &this->length, …)` — the callee takes
+      `size_t&`; pass the lvalue, not its address."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: dormant/append cluster fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (dormant/append cluster already fixed)")
+        return
+    n = 0
+    new_src, k = re.subn(
+        r"__btree_port_make_dormant\(std::move\(([A-Za-z_][A-Za-z0-9_]*)\)\)",
+        r"__btree_port_make_dormant(\1)",
+        src,
+    )
+    n += k
+    new_src, k = re.subn(
+        r"__btree_port_make_dormant\(([A-Za-z_()\*][A-Za-z0-9_():>\*-]*)\)\._1",
+        r"std::get<1>(__btree_port_make_dormant(\1))",
+        new_src,
+    )
+    n += k
+    new_src, k = re.subn(
+        r"const (auto root = this->dormant_root\.take\(\)\.unwrap\(\)\.awaken\(\);)",
+        r"\1",
+        new_src,
+    )
+    n += k
+    new_src, k = re.subn(
+        r"(append_from_sorted_iters\(std::move\(self_iter\), std::move\(other_iter\), )&(this->length)",
+        r"\1\2",
+        new_src,
+    )
+    n += k
+    if n == 0:
+        print(f"  no dormant/append sites in: {path.name}")
+        return
+    i = new_src.find("\n")
+    new_src = new_src[: i + 1] + sentinel + "\n" + new_src[i + 1 :]
+    path.write_text(new_src)
+    print(f"  fixed {n} dormant/append site(s) in: {path.name}")
+
+
 def fix_set_orphan_fmt_gated_iter(path: Path) -> None:
     """A map-orphan `Debug for IntoIter` fmt lands in set's IntoIter
     calling `this->iter()` — but the orphan `iter()` member right above
@@ -6174,6 +6402,13 @@ def main() -> int:
     implement_deallocating(internal)
     # Collapsed-impl repair: Internal-vs-Leaf split marker dispatch.
     fix_collapsed_split_marker_dispatch(internal)
+    # Const-pair mismatch: const range_search cannot call non-const callee.
+    fix_range_search_const_mismatch(internal)
+
+    # Range-path Q=K (undeducible Borrow-bound generic, vendored hand-port).
+    codify_range_path_q_to_k(internal)
+    codify_find_leaf_edges_body(internal)
+    codify_bound_index_bodies(internal)
     # Phase E (correctness fixes surfaced at instantiation time):
     fix_dormant_mut_ref_from_t(internal)
     fix_dormant_mut_ref_const_ref(internal)
@@ -6447,6 +6682,9 @@ def main() -> int:
     # `::BTreeMap` / `::IntoIter` global qualifiers that need to be
     # in-scope names.
     if map_mod.exists():
+        # Matrix-tail dormant/append cluster — must run AFTER the pass
+        # that introduces __btree_port_make_dormant call sites.
+        fix_map_dormant_append_cluster(map_mod)
         fix_map_cppm_qualifiers_for_namespace_wrap(map_mod)
     if set_mod.exists():
         # Set-specific rules MUST run before the shared map-qualifier
@@ -6460,6 +6698,7 @@ def main() -> int:
         # see (they carry no template<> line of their own).
         fix_set_orphan_fmt_gated_iter(set_mod)
         fix_set_cursor_clone_orphan_gate(set_mod)
+        fix_set_stitch_peekable_field(set_mod)
     if set_entry.exists():
         fix_map_cppm_qualifiers_for_namespace_wrap(set_entry)
     return 0

@@ -4879,11 +4879,15 @@ struct OccupiedEntry {
         return rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(this->inner.remove_entry()));
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename K>
+    template<typename K, typename V>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_struct("OccupiedEntry").field("key", this->key()).field("value", this->get()).finish();
+    }
+    template<typename K, typename V>
     const K& key() const {
         return rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv()));
     }
-    template<typename K>
+    template<typename K, typename V>
     const K& into_key() {
         return rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut()));
     }
@@ -4891,23 +4895,23 @@ struct OccupiedEntry {
     std::tuple<K, V> remove_entry() {
         return this->remove_kv();
     }
-    template<typename V>
+    template<typename K, typename V>
     const V& get() const {
         return rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv()));
     }
-    template<typename V>
+    template<typename K, typename V>
     V& get_mut() {
         return rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })(this->handle.kv_mut()));
     }
-    template<typename V>
+    template<typename K, typename V>
     V& into_mut() {
         return this->handle.into_val_mut();
     }
-    template<typename V>
+    template<typename K, typename V>
     V insert(V value) {
         return rusty::mem::replace(this->get_mut(), std::move(value));
     }
-    template<typename V>
+    template<typename K, typename V>
     V remove() {
         return std::get<1>(this->remove_kv());
     }
@@ -4973,15 +4977,19 @@ struct VacantEntry {
         return OccupiedEntry<T, A>{.inner = this->inner.insert_entry(btree_internal::SetValZST{})};
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename K>
+    template<typename K, typename V>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_tuple("VacantEntry").field(this->key()).finish();
+    }
+    template<typename K, typename V>
     const K& key() const {
         return this->key;
     }
-    template<typename K>
+    template<typename K, typename V>
     K into_key() {
         return std::move(this->key);
     }
-    template<typename V>
+    template<typename K, typename V>
     V& insert(V value) {
         return this->insert_entry(std::move(value)).into_mut();
     }
@@ -5046,12 +5054,16 @@ struct Entry : std::variant<Entry_Occupied<T, A>, Entry_Vacant<T, A>> {
         return [&]() -> const T& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { const auto& entry = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return entry.get(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { const auto& entry = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return entry.get(); } return [&]() -> const T& { rusty::intrinsics::unreachable(); }(); }();
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename V>
+    template<typename K, typename V>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { const auto& v = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(v).finish(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { const auto& o = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(o).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename K, typename V>
     V& or_insert(V default_) {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(std::move(default_)); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
 #endif
-    template<typename F>
+    template<typename F, typename K>
     decltype(auto) or_insert_with(F default_) {
         using V = std::remove_cvref_t<decltype((default_()))>;
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(default_()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
@@ -5063,12 +5075,12 @@ struct Entry : std::variant<Entry_Occupied<T, A>, Entry_Vacant<T, A>> {
 return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename K>
+    template<typename K, typename V>
     const K& key() const {
         return [&]() -> const K& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { const auto& entry = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { const auto& entry = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } return [&]() -> const K& { rusty::intrinsics::unreachable(); }(); }();
     }
 #endif
-    template<typename F>
+    template<typename F, typename K, typename V>
     Entry<T, A> and_modify(F f) {
         return [&]() -> Entry<T, A> { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto entry = std::move(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0)); return [&]() -> Entry<T, A> { f(entry.get_mut());
 return Entry<T, A>{Entry_Occupied<T, A>{entry}}; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Entry<T, A>{Entry_Vacant<T, A>{entry}}; } return [&]() -> Entry<T, A> { rusty::intrinsics::unreachable(); }(); }();
@@ -5079,7 +5091,7 @@ return Entry<T, A>{Entry_Occupied<T, A>{entry}}; }(); } if (rusty::detail::varia
         return [&]() -> OccupiedEntry<K, V, A> { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto entry = std::move(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0)); return [&]() -> OccupiedEntry<K, V, A> { entry.insert(std::move(value));
 return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(std::move(value)); } return [&]() -> OccupiedEntry<K, V, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    template<typename V>
+    template<typename K, typename V>
     V& or_default() {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(rusty::default_like<V>()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }

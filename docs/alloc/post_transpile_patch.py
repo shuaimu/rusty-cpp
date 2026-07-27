@@ -451,9 +451,9 @@ def _rc_rules(t: str) -> str:
     # dyn-Any downcast (Rust `Rc<dyn Any>::downcast`) — no C++ dyn-Any model;
     # abort-stub (signature kept so the class parses).
     t = _replace_method_body(
-        t, "rusty::Result<Rc<T, A>, Rc<T, A>> downcast() const {", "std::abort();"
+        t, "rusty::Result<Rc<T, A>, Rc<T, A>> downcast(", "std::abort();"
     )
-    t = _replace_method_body(t, "Rc<T, A> downcast_unchecked() const {", "std::abort();")
+    t = _replace_method_body(t, "Rc<T, A> downcast_unchecked(", "std::abort();")
     # From<&str> for Rc<str> — the body routes through a span-of-span
     # mis-emission and collides with another from(string_view) overload;
     # str-Rc isn't part of the port surface. Delete.
@@ -518,9 +518,9 @@ def _arc_rules(t: str) -> str:
     )
     # dyn-Any downcast + nightly error::Request provide — no C++ model.
     t = _replace_method_body(
-        t, "rusty::Result<Arc<T, A>, Arc<T, A>> downcast() const {", "std::abort();"
+        t, "rusty::Result<Arc<T, A>, Arc<T, A>> downcast(", "std::abort();"
     )
-    t = _replace_method_body(t, "Arc<T, A> downcast_unchecked() const {", "std::abort();")
+    t = _replace_method_body(t, "Arc<T, A> downcast_unchecked(", "std::abort();")
     t = _delete_method(t, "void provide(rusty::error::Request& req) const {")
     # From<&str> for Arc<str> — same span-of-span mis-emission as Rc's.
     t = _delete_method(t, "static Arc<std::string_view> from(std::string_view v) {")

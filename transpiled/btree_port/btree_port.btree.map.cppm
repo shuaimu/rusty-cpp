@@ -1,5 +1,6 @@
 // btree_port port: map.cppm qualifier fix-up by post_transpile_patch.py
 // btree_port port step 67: step 64-66 runtime fixes codified by post_transpile_patch.py
+// btree_port port: dormant/append cluster fixed by post_transpile_patch.py
 // btree_port port: debug_map→debug_list by post_transpile_patch.py
 // btree_port port: rusty::alloc::Global type→value by post_transpile_patch.py
 // btree_port port: new_() A→Global fixed by post_transpile_patch.py
@@ -5002,11 +5003,25 @@ struct Iter {
     Iter<K, V> clone() const {
         return Iter<K, V>{.range = rusty::clone(this->range), .length = this->length};
     }
+#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
+    template<typename T>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_tuple("Iter").field(&this->iter).finish();
+    }
+    template<typename T>
+    Iter<K, V> clone() const {
+        return Iter<K, V>{.iter = rusty::clone(this->iter)};
+    }
+#endif
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
     rusty::Option<const T&> next() {
         return this->iter.next();
+    }
+    template<typename T>
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return this->iter.size_hint();
     }
     template<typename T>
     rusty::Option<const T&> last() {
@@ -5023,6 +5038,10 @@ struct Iter {
     template<typename T>
     rusty::Option<const T&> next_back() {
         return this->iter.next_back();
+    }
+    template<typename T>
+    size_t len() const {
+        return rusty::len(this->iter);
     }
     template<typename T>
     static Iter<K, V> default_() {
@@ -5218,11 +5237,19 @@ return std::move(k);
 });
     }
     template<typename T>
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return this->iter.size_hint();
+    }
+    template<typename T>
     rusty::Option<T> next_back() {
         return this->iter.next_back().map([&](auto&& _destruct_param0) -> T {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
+    }
+    template<typename T>
+    size_t len() const {
+        return rusty::len(this->iter);
     }
     template<typename T>
         requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
@@ -5497,6 +5524,12 @@ struct Range {
     Range<K, V> clone() const {
         return Range<K, V>{.inner = rusty::clone(this->inner)};
     }
+#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
+    template<typename T>
+    Range<K, V> clone() const {
+        return Range<K, V>{.iter = rusty::clone(this->iter)};
+    }
+#endif
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
@@ -5618,9 +5651,9 @@ struct ExtractIfInner {
             if (pred(std::move(k), std::move(v))) {
                 this->length -= 1;
                 auto [kv_shadow1, pos] = rusty::detail::deref_if_pointer_like(kv.remove_kv_tracking([&]() -> decltype(auto) {
-const auto root = this->dormant_root.take().unwrap().awaken();
+auto root = this->dormant_root.take().unwrap().awaken();
 root.pop_internal_level(rusty::clone(alloc));
-this->dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(__btree_port_make_dormant(std::move(root))._1);
+this->dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(std::get<1>(__btree_port_make_dormant(root)));
 }, rusty::clone(alloc)));
                 this->cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<btree_internal::marker::Mut, K, V, btree_internal::marker::Leaf>, btree_internal::marker::Edge>>(std::move(pos));
                 return rusty::Option<std::tuple<K, V>>(std::move(kv_shadow1));
@@ -5654,16 +5687,30 @@ struct ExtractIf {
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
+#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
+    template<typename T>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_struct("ExtractIf").field("peek", this->inner.peek().map([&](auto&& _destruct_param0) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+})).finish_non_exhaustive();
+    }
+#endif
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
     rusty::Option<T> next() {
         auto& pred = this->pred;
-        auto mapped_pred = [&](const T& k, btree_internal::SetValZST& _v) -> decltype(auto) { return pred(k); };
+        auto mapped_pred = [&](const T& k, btree_internal::SetValZST& _v) { return pred(k); };
         return this->inner.next(rusty::detail::deref_if_pointer_like(mapped_pred), rusty::clone(this->alloc)).map([&](auto&& _destruct_param0) -> T {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
+    }
+    template<typename T>
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return this->inner.size_hint();
     }
 #endif
 };
@@ -6369,6 +6416,10 @@ struct OccupiedEntry {
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_struct("OccupiedEntry").field("value", this->get()).finish();
+    }
+    template<typename T>
     const T& get() const {
         return this->inner.key();
     }
@@ -6426,6 +6477,10 @@ return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(rusty:
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_tuple("VacantEntry").field(this->get()).finish();
+    }
+    template<typename T>
     const T& get() const {
         return this->inner.key();
     }
@@ -6433,13 +6488,10 @@ return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(rusty:
     T into_value() {
         return this->inner.into_key();
     }
-#endif
-#if 0  // // btree_port port: template-free SetValZST misroutes hidden by post_transpile_patch.py
+    template<typename T>
     void insert() {
         this->inner.insert(btree_internal::SetValZST{});
     }
-#endif
-#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
     OccupiedEntry<K, V, A> insert_entry() {
         return OccupiedEntry<K, V, A>{.inner = this->inner.insert_entry(btree_internal::SetValZST{})};
@@ -6501,17 +6553,20 @@ return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_po
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { const auto& v = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(v).finish(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { const auto& o = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(o).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename T>
     OccupiedEntry<K, V, A> insert() {
         return [&]() -> OccupiedEntry<K, V, A> { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::move(entry); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(); } return [&]() -> OccupiedEntry<K, V, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-#endif
+    template<typename T>
     void or_insert() const {
         if (rusty::detail::variant_index(rusty::detail::deref_if_pointer((*this))) == 0) {
             auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer((*this)))._0);
             entry.insert();
         }
     }
-#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename T>
     const T& get() const {
         return [&]() -> const T& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { const auto& entry = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return entry.get(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { const auto& entry = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return entry.get(); } return [&]() -> const T& { rusty::intrinsics::unreachable(); }(); }();
@@ -6779,7 +6834,7 @@ return std::move(v);
         const auto self_iter = rusty::mem::replace((*this), BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
         const auto other_iter = rusty::mem::replace(other, BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
         auto& root = this->root.get_or_insert_with([&]() { return btree_internal::Root<K, V>::new_(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc))))); });
-        root.append_from_sorted_iters(std::move(self_iter), std::move(other_iter), &this->length, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
+        root.append_from_sorted_iters(std::move(self_iter), std::move(other_iter), this->length, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
     }
     void merge(BTreeMap<K, V, A> other, auto&& conflict) {
         if (rusty::is_empty(other)) {
@@ -6963,7 +7018,7 @@ return std::move(v);
     std::tuple<ExtractIfInner<K, V, R>, A> extract_if_inner(R range) {
         if (auto&& _iflet_scrutinee = this->root.as_mut(); _iflet_scrutinee.is_some()) {
             auto& root = rusty::detail::deref_if_pointer_like(_iflet_scrutinee.unwrap());
-            auto [root_shadow1, dormant_root] = rusty::detail::deref_if_pointer_like(__btree_port_make_dormant(std::move(root)));
+            auto [root_shadow1, dormant_root] = rusty::detail::deref_if_pointer_like(__btree_port_make_dormant(root));
             auto first = rusty::deref_call(root_shadow1.borrow_mut(), rusty::detail::__mdisp_lower_bound{}, btree_internal::SearchBound<K>::from_range(rusty::deref_call(range, rusty::detail::__mdisp_start_bound{})));
             return std::make_tuple(ExtractIfInner<K, V, R>{.length = this->length, .dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(std::move(dormant_root)), .cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<btree_internal::marker::Mut, K, V, btree_internal::marker::Leaf>, btree_internal::marker::Edge>>(std::move(first)), .range = std::move(range)}, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         } else {

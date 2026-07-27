@@ -6501,8 +6501,34 @@ impl CodeGen {
         // the body tokens, and not in any emitted requires-constraint.
         // Only for methods WITH a receiver — free-function call sites
         // may turbofish. `__`-prefixed forced shadow params stay.
+        //
+        // SCOPE GUARD: only `?Sized`-bounded params qualify. The
+        // `?Sized` marker is the tell of the Borrow-lookup pattern; a
+        // plain generic that LOOKS unused on the Rust surface can still
+        // be named by emission synthesis the scan can't see (serde's
+        // `ArrayVisitor<[T; 0]>::visit_seq` spells `std::array<T, 0>`
+        // from the Self::Value assoc expansion; alloc's downcast
+        // machinery spells `template is<T>`) — dropping those broke
+        // green matrix crates.
         let mut undeducible_dropped_generics: HashSet<String> = HashSet::new();
         if matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+            fn param_is_maybe_sized(tp: &syn::TypeParam, generics: &syn::Generics) -> bool {
+                let bound_is_maybe = |bound: &syn::TypeParamBound| {
+                    matches!(bound, syn::TypeParamBound::Trait(tb)
+                        if matches!(tb.modifier, syn::TraitBoundModifier::Maybe(_)))
+                };
+                if tp.bounds.iter().any(bound_is_maybe) {
+                    return true;
+                }
+                let Some(where_clause) = generics.where_clause.as_ref() else {
+                    return false;
+                };
+                where_clause.predicates.iter().any(|pred| {
+                    matches!(pred, syn::WherePredicate::Type(pt)
+                        if matches!(&pt.bounded_ty, syn::Type::Path(p) if p.path.is_ident(&tp.ident))
+                            && pt.bounds.iter().any(bound_is_maybe))
+                })
+            }
             fn collect_idents(ts: proc_macro2::TokenStream, out: &mut HashSet<String>) {
                 for tt in ts {
                     match tt {
@@ -6518,7 +6544,8 @@ impl CodeGen {
             }
             let has_droppable_type_param = emitted_generics.params.iter().any(|param| {
                 matches!(param, syn::GenericParam::Type(tp)
-                    if !tp.ident.to_string().starts_with("__"))
+                    if !tp.ident.to_string().starts_with("__")
+                        && param_is_maybe_sized(tp, &method.sig.generics))
             });
             if has_droppable_type_param {
                 let mut mentioned: HashSet<String> = HashSet::new();
@@ -6543,6 +6570,7 @@ impl CodeGen {
                         syn::GenericParam::Type(tp) => {
                             let name = tp.ident.to_string();
                             let keep = name.starts_with("__")
+                                || !param_is_maybe_sized(tp, &method.sig.generics)
                                 || mentioned.contains(&name)
                                 || emitted_constraints
                                     .iter()

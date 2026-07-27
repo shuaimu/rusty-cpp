@@ -21013,17 +21013,36 @@ impl CodeGen {
             }
             fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
                 // Bare `self` passed BY VALUE as a call argument —
-                // `ManuallyDrop::new(self)`, `Some(self)` — moves self
-                // out. The lowering is `std::move((*this))`; on a const
-                // method that yields `const Own&&`, which only a copy
-                // ctor can consume — deleted for move-only types
-                // (btree_port's `fn into_iter(self)` hit exactly this
-                // via `ManuallyDrop::new(self)` → mem.hpp deleted-copy).
+                // `ManuallyDrop::new(self)` — moves self out. The
+                // lowering is `std::move((*this))`; on a const method
+                // that yields `const Own&&`, which only a copy ctor can
+                // consume — deleted for move-only types (btree_port's
+                // `fn into_iter(self)` hit exactly this via
+                // `ManuallyDrop::new(self)` → mem.hpp deleted-copy).
                 // Reference args (`foo(&self)`) don't count: the arg
                 // expr is an ExprReference, never a bare path. Bare
                 // `self` in TAIL position (`fn forget_type(self) -> T
                 // { self }`) also doesn't count — that shape must stay
-                // const for as_const'd call sites (btree B3).
+                // const for as_const'd call sites (btree B3). Neither
+                // do the canonical variant wrappers `Some(self)` /
+                // `Ok(self)` / `Err(self)` — they are tail-self in a
+                // constructor coat (alloc's `Rc::downcast` ends in
+                // `Err(self)`; flipping it non-const changed the
+                // `(*self).is::<T>()` lowering and broke the crate).
+                let callee_is_variant_wrapper = match &*c.func {
+                    syn::Expr::Path(p) => p
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|seg| {
+                            matches!(seg.ident.to_string().as_str(), "Some" | "Ok" | "Err")
+                        }),
+                    _ => false,
+                };
+                if callee_is_variant_wrapper {
+                    syn::visit::visit_expr_call(self, c);
+                    return;
+                }
                 for arg in &c.args {
                     let mut a = arg;
                     loop {
