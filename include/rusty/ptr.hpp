@@ -537,6 +537,24 @@ inline void write_(T* dst, U&& value) {
     write(dst, std::forward<U>(value));
 }
 
+// Rust coerces `&mut T` to `*mut T` implicitly at `ptr::write(v, ..)` call
+// sites; the emitted argument for a `&mut T` parameter is a C++ REFERENCE,
+// so accept it directly (btree's polonius `replace` helper does exactly
+// this). Constrained away from pointer-typed lvalues, which must keep
+// binding the pointer overload above rather than writing over the pointer
+// variable itself.
+template<typename T, typename U>
+    requires (!std::is_pointer_v<std::remove_cvref_t<T>>)
+inline void write(T& dst, U&& value) {
+    write(std::addressof(dst), std::forward<U>(value));
+}
+
+template<typename T, typename U>
+    requires (!std::is_pointer_v<std::remove_cvref_t<T>>)
+inline void write_(T& dst, U&& value) {
+    write(std::addressof(dst), std::forward<U>(value));
+}
+
 template<typename T>
 inline T read_unaligned(const T* src) {
     T value;
