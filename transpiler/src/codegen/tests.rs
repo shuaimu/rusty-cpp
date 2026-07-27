@@ -22423,6 +22423,154 @@ fn test_mut_self_by_value_method_emits_non_const() {
 }
 
 #[test]
+fn test_self_by_value_passed_as_call_arg_emits_non_const() {
+    // Regression for the btree_port swap-in (map's IntoIterator):
+    //   fn into_iter(self) -> IntoIter {
+    //       let me = ManuallyDrop::new(self);
+    //       ...
+    //   }
+    // Bare `self` passed BY VALUE as a call argument moves self out.
+    // The body lowering is `manually_drop_new(std::move((*this)))`;
+    // if the method is emitted `const`, `std::move((*this))` is a
+    // `const Own&&` and ManuallyDrop's ctor can only COPY from it —
+    // deleted for move-only types (mem.hpp:211 deleted-copy error).
+    //
+    // The by-value-self const heuristic previously only counted
+    // `self.field` reads, `self.method()` receivers, and `match self`
+    // — bare `self` in ARGUMENT position slipped through and kept the
+    // method const. It must emit non-const.
+    let out = transpile_str(
+        r#"
+        pub struct Own {
+            pub b: Box<i32>,
+        }
+        pub struct OwnIter {
+            pub cur: i32,
+        }
+        impl Own {
+            pub fn into_iter(self) -> OwnIter {
+                let me = core::mem::ManuallyDrop::new(self);
+                OwnIter { cur: *me.b }
+            }
+            pub fn tail_self(self) -> Own { self }
+        }
+        "#,
+    );
+    assert!(
+        (out.contains("OwnIter into_iter()") || out.contains("OwnIter Own::into_iter()"))
+            && !out.contains("into_iter() const"),
+        "fn into_iter(self) passing bare self to ManuallyDrop::new must emit non-const\nGot: {out}"
+    );
+    // Tail-position bare `self` (`fn tail_self(self) -> Own {{ self }}`)
+    // must STAY const — the forget_type/B3 as_const call sites rely on it.
+    assert!(
+        out.contains("Own tail_self() const") || out.contains("Own Own::tail_self() const"),
+        "tail-position bare self must keep the const modeling\nGot: {out}"
+    );
+}
+
+#[test]
+fn test_undeducible_unused_method_generic_dropped() {
+    // Regression for the btree_port swap-in (BTreeMap::range):
+    //   fn range<T: ?Sized, R>(&self, range: R) -> Range<'_, K, V>
+    //   where T: Ord, K: Borrow<T>, R: RangeBounds<T>
+    // `T` is a Rust Borrow-bound device that appears in NO C++
+    // parameter type; a C++ call site can never deduce it and method
+    // calls never pass explicit template arguments, so
+    // `m.range(rusty::range<int>(3, 7))` failed with "couldn't infer
+    // template argument 'T'". Type params the emitted C++ surface
+    // never names (inputs, return, body, requires-constraints) must be
+    // dropped from method template headers. Params that ARE used stay.
+    let out = transpile_str(
+        r#"
+        use std::borrow::Borrow;
+        use std::ops::RangeBounds;
+        pub struct Holder<K> {
+            pub items: [K; 5],
+        }
+        impl<K: Ord> Holder<K> {
+            pub fn count_range<T: ?Sized, R>(&self, range: R) -> usize
+            where
+                T: Ord,
+                K: Borrow<T> + Ord,
+                R: RangeBounds<T>,
+            {
+                let mut n = 0;
+                for it in &self.items {
+                    if range.contains(it.borrow()) {
+                        n += 1;
+                    }
+                }
+                n
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("template<typename R>"),
+        "unused Borrow-bound T must be dropped, leaving template<typename R>\nGot: {out}"
+    );
+    assert!(
+        !out.contains("template<typename T, typename R>"),
+        "undeducible T must not survive in the method template header\nGot: {out}"
+    );
+}
+
+#[test]
+fn test_mut_borrow_match_peeks_payload_mutably() {
+    // Regression for the btree_port swap-in (LazyLeafRange::init_front):
+    //   fn init_front(&mut self) -> Option<&mut Handle<...>> {
+    //       match &mut self.front {
+    //           None => None,
+    //           Some(LazyLeafHandle::Edge(edge)) => Some(edge),
+    //           Some(LazyLeafHandle::Root(_)) => unreachable!(),
+    //       }
+    //   }
+    // `match &mut …` hands the arms MUTABLE references into the
+    // scrutinee. The value-position runtime-match IIFE materialized
+    // refutable payloads via `std::as_const(…).unwrap()`, so `edge`
+    // bound const and could not seed the non-const `Option<Handle&>`
+    // return (no matching conversion, btree_internal.cppm:7072).
+    //
+    // A mut-borrow scrutinee must peek with `unwrap_mut()` on the
+    // NON-const source: mutable references, and `_m` stays intact for
+    // later arms (unwrap_mut does not consume).
+    let out = transpile_str(
+        r#"
+        pub enum Lazy {
+            Root(i32),
+            Edge(i32),
+        }
+        pub struct Range {
+            pub front: Option<Lazy>,
+        }
+        impl Range {
+            pub fn init_front(&mut self) -> Option<&mut i32> {
+                match &mut self.front {
+                    None => None,
+                    Some(Lazy::Edge(edge)) => Some(edge),
+                    Some(Lazy::Root(_)) => unreachable!(),
+                }
+            }
+        }
+        "#,
+    );
+    let body = out
+        .split("Range::init_front()")
+        .nth(1)
+        .unwrap_or(&out);
+    let body_head = &body[..body.len().min(1200)];
+    assert!(
+        body_head.contains(".unwrap_mut()"),
+        "mut-borrow match must peek payloads via unwrap_mut()\nGot: {out}"
+    );
+    assert!(
+        !body_head.contains("std::as_const"),
+        "mut-borrow match must not const-materialize its payloads\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_const_method_body_calls_non_const_helper_is_inherited_const() {
     // Regression for btree_port B3 (const-correctness drift).
     // `fn iter(&self) -> Iter` must lower to `Iter iter() const`.

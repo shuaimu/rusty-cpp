@@ -37,13 +37,17 @@ STUB_BODY = (
 
 # Method header substrings (anchored on the unique tail of each signature).
 # We match by `find()` so a substring of the full declaration is enough.
-TARGETS = [
-    "from_new_leaf(rusty::Box<LeafNode<K, V>, A> leaf)",
-    "from_new_internal(rusty::Box<InternalNode<K, V>, A> internal, rusty::num::NonZero<size_t> height)",
-    "push_with_handle(K key, V val)",
-    "deallocating_next(A alloc)",
-    "deallocating_next_back(A alloc)",
-]
+#
+# RETIRED (swap-in, July 2026): the transpiler now emits real,
+# compiling bodies for all five original targets (from_new_leaf,
+# from_new_internal, push_with_handle, deallocating_next{,_back}).
+# Worse, the stale matcher had turned harmful: push_with_handle is now
+# emitted as declaration + out-of-line definition, so stub() matched
+# the DECLARATION and replaced the following method's (`push`) body,
+# and the stubbed deallocating_next sat on the IntoIter drop path —
+# the module test aborted at runtime. The B1/B2/B3/B4/B5 repair steps
+# anchor on stub shapes and now no-op cleanly.
+TARGETS: list[str] = []
 
 
 def find_matching_brace(text: str, open_pos: int) -> int:
@@ -5083,6 +5087,47 @@ def fix_const_left_kv_ok_unwrap(path: Path) -> None:
         print(f"  dropped const on left_leaf_kv*/_shadow1 in: {path.name}")
 
 
+
+
+def fix_collapsed_split_marker_dispatch(path: Path) -> None:
+    """Rust has TWO `Handle::split` impls (Leaf and Internal); the C++
+    absorption collapses same-signature methods, and the LEAF body wins —
+    so an Internal split allocates a LeafNode (112 bytes, no edges array)
+    for its right half, and the caller's subsequent edge insert writes past
+    the allocation (ASan heap-buffer-overflow at stress(200), height-2).
+
+    Codifies the vendored hand-fix: ONE body that `if constexpr`-dispatches
+    on the NodeRef's Type marker (+ a runtime height check for
+    LeafOrInternal), running the real Internal split — InternalNode
+    allocation, split_leaf_data on the .data portion, edge move,
+    from_new_internal — and falling through to the original leaf codegen.
+    The principled transpiler fix is the marker-impl requires-clause
+    system (same deferred bucket as Extend<T>/Extend<&T>)."""
+    src = path.read_text()
+    sentinel = "btree_port fix (N=90+ drop crash)"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (collapsed split already marker-dispatched)")
+        return
+    anchor = (
+        "SplitResult<typename __TemplateArgs<Node>::arg_1, "
+        "typename __TemplateArgs<Node>::arg_2, "
+        "typename __TemplateArgs<Node>::arg_3> split(A alloc) {"
+    )
+    i = src.find(anchor)
+    if i == -1:
+        print(f"  [warn] collapsed-split anchor not found in {path.name}", file=sys.stderr)
+        return
+    open_brace = i + len(anchor) - 1
+    close_brace = find_matching_brace(src, open_brace)
+    if close_brace == -1:
+        print(f"  [warn] collapsed-split body end not found in {path.name}", file=sys.stderr)
+        return
+    body = "{\n        // btree_port fix (N=90+ drop crash): the transpiler only ported the\n        // Leaf-Handle::split impl; the corresponding Internal-Handle::split\n        // impl was missing, so when the root needed to split (height-1 →\n        // height-2 transition at 90 sequential inserts), this method\n        // allocated a LeafNode for the right half of an Internal split,\n        // leaving the new node without an `edges` array. Subsequent\n        // descents into that right half read past the leaf allocation\n        // and got NULL/garbage child pointers → SIGSEGV in find_key_index.\n        //\n        // Mirrors libcore/alloc/src/collections/btree/node.rs's\n        //   impl Handle<NodeRef<Mut, K, V, Internal>, KV>::split.\n        //\n        // Dispatched via `if constexpr` on the NodeRef's Type marker so\n        // that the leaf-only instantiations (which lack edge_area_mut /\n        // as_internal_mut) don't try to compile the internal branch.\n        using K_ = typename __TemplateArgs<Node>::arg_1;\n        using V_ = typename __TemplateArgs<Node>::arg_2;\n        using Type_ = typename __TemplateArgs<Node>::arg_3;\n        if constexpr (std::is_same_v<Type_, marker::Internal>\n                      || std::is_same_v<Type_, marker::LeafOrInternal>) {\n            if (rusty::detail::deref_if_pointer_like(this->node.height_field) > static_cast<size_t>(0)) {\n                // Internal split: allocate InternalNode, move keys/vals/edges,\n                // construct via from_new_internal so parent links get fixed.\n                const auto old_len = rusty::len(this->node);\n                auto new_node_box = InternalNode<K_, V_>::new_(rusty::clone(alloc));\n                auto& new_internal = *new_node_box;\n                // Reuse split_leaf_data on the .data (LeafNode) portion — the\n                // key/val arrays + len bookkeeping are identical to a leaf.\n                auto kv = this->split_leaf_data(new_internal.data);\n                const auto new_len = static_cast<size_t>(new_internal.data.len);\n                // Move edges (idx+1..old_len+1) from old → new's [0..new_len+1].\n                // @unsafe\n                {\n                    move_to_slice(\n                        this->node.edge_area_mut(rusty::range(\n                            rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1),\n                            rusty::detail::deref_if_pointer_like(old_len) + static_cast<size_t>(1))),\n                        rusty::slice_to(new_internal.edges, new_len + static_cast<size_t>(1)));\n                }\n                const auto height = this->node.height_field;\n                auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_internal(\n                    std::move(new_node_box),\n                    rusty::num::NonZero<size_t>::new_(height).unwrap());\n                return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));\n            }\n        }\n        // Leaf split (original codegen).\n        auto new_node = LeafNode<K_, V_>::new_(std::move(alloc));\n        auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));\n        auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_leaf(std::move(new_node));\n        return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));\n    }"
+    src = src[:open_brace] + body + src[close_brace + 1 :]
+    path.write_text(src)
+    print(f"  marker-dispatched collapsed Handle::split in: {path.name}")
+
+
 def generalize_collapsed_full_range_return(path: Path) -> None:
     """Rust has THREE marker-specialized `full_range` impls (Immut / ValMut /
     Dying). C++ absorption collapses same-signature methods per struct, and
@@ -5602,6 +5647,80 @@ def stub_broken_set_methods(path: Path) -> None:
         print(f"  no broken set.cppm regions found in: {path.name}")
 
 
+def fix_set_orphan_fmt_gated_iter(path: Path) -> None:
+    """A map-orphan `Debug for IntoIter` fmt lands in set's IntoIter
+    calling `this->iter()` — but the orphan `iter()` member right above
+    it is `#if 0`-gated (template-header heuristic), leaving fmt calling
+    a member that does not exist. The fmt itself carries no template<>
+    line, so the gating heuristic cannot see it. Route through the
+    tolerant free helper instead (`rusty::iter((*this))`), the same
+    spelling the vendored port compiled with. Anchor: an fmt DIRECTLY
+    after an `#endif` (the gated-orphan tail) — set's own BTreeSet::fmt
+    also spells `this->iter()` but follows a REAL iter(), not a gate."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: orphan fmt routed through rusty::iter by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (orphan fmt already routed)")
+        return
+    pattern = re.compile(
+        r"(#endif\n    rusty::fmt::Result fmt\(rusty::fmt::Formatter& f\) const \{\n"
+        r"        return f\.debug_list\(\)\.entries\()this->iter\(\)"
+    )
+    new_src, n = pattern.subn(r"\1rusty::iter((*this))", src)
+    if n == 0:
+        print(f"  no orphan-fmt gated-iter site in: {path.name}")
+        return
+    new_src = new_src.replace(
+        "#endif\n    rusty::fmt::Result fmt(",
+        f"#endif\n    {sentinel}\n    rusty::fmt::Result fmt(",
+        1,
+    )
+    path.write_text(new_src)
+    print(f"  routed {n} orphan fmt(s) through rusty::iter in: {path.name}")
+
+
+def fix_set_cursor_clone_orphan_gate(path: Path) -> None:
+    """A map-orphan `Cursor<K>::clone` lands UNGATED in set's Cursor
+    (no template<> header of its own, so the cluster heuristic misses
+    it) and redeclares against set's real `Cursor clone()`. Wrap it in
+    `#if 0` like its cluster siblings."""
+    src = path.read_text()
+    sentinel = "// btree_port port: orphan Cursor<K> clone gated by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (orphan Cursor<K> clone already gated)")
+        return
+    anchor = "    Cursor<K> clone() const {"
+    i = src.find(anchor)
+    if i == -1:
+        print(f"  no orphan Cursor<K> clone in: {path.name}")
+        return
+    # Already gated? Look back for an unclosed `#if 0` between the
+    # previous `#endif` and the anchor.
+    prev = src.rfind("#if 0", 0, i)
+    prev_end = src.rfind("#endif", 0, i)
+    if prev != -1 and prev > prev_end:
+        print(f"  orphan Cursor<K> clone already inside a gate in: {path.name}")
+        return
+    open_brace = src.find("{", i)
+    close_brace = find_matching_brace(src, open_brace)
+    if close_brace == -1:
+        print(f"  [warn] Cursor<K> clone body end not found in: {path.name}", file=sys.stderr)
+        return
+    end_of_line = src.find("\n", close_brace)
+    if end_of_line == -1:
+        end_of_line = close_brace + 1
+    gated = (
+        f"#if 0  {sentinel}\n"
+        + src[i : end_of_line + 1]
+        + "#endif\n"
+    )
+    src = src[:i] + gated + src[end_of_line + 1 :]
+    path.write_text(src)
+    print(f"  gated orphan Cursor<K> clone in: {path.name}")
+
+
 def fix_set_cppm_qualifiers_for_namespace_wrap(path: Path) -> None:
     """In set.cppm under --auto-namespace, references to map's
     `BTreeMap` are emitted bare (because the prep.sh + transpiler
@@ -6053,6 +6172,8 @@ def main() -> int:
     implement_from_new_internal(internal)
     implement_push_with_handle(internal)
     implement_deallocating(internal)
+    # Collapsed-impl repair: Internal-vs-Leaf split marker dispatch.
+    fix_collapsed_split_marker_dispatch(internal)
     # Phase E (correctness fixes surfaced at instantiation time):
     fix_dormant_mut_ref_from_t(internal)
     fix_dormant_mut_ref_const_ref(internal)
@@ -6335,6 +6456,10 @@ def main() -> int:
         fix_set_cppm_qualifiers_for_namespace_wrap(set_mod)
         fix_map_cppm_qualifiers_for_namespace_wrap(set_mod)
         stub_broken_set_methods(set_mod)
+        # Orphan-cluster stragglers the template-header heuristic can't
+        # see (they carry no template<> line of their own).
+        fix_set_orphan_fmt_gated_iter(set_mod)
+        fix_set_cursor_clone_orphan_gate(set_mod)
     if set_entry.exists():
         fix_map_cppm_qualifiers_for_namespace_wrap(set_entry)
     return 0

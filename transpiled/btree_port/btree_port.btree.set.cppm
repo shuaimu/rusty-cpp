@@ -19,7 +19,9 @@ module;
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <cstdio>
 #include <bit>
+#include <cwctype>
 #include <stdexcept>
 #include <print>
 #include <immintrin.h>
@@ -30,15 +32,21 @@ module;
 #pragma GCC diagnostic ignored "-Wunused-local-typedefs"
 #endif
 
-template<class... Ts>
-struct overloaded : Ts... { using Ts::operator()...; };
-template<class... Ts>
-overloaded(Ts...) -> overloaded<Ts...>;
-
 struct TokenTree;
 namespace rusty {
 namespace cmp {
 enum class Ordering { Less, Equal, Greater };
+inline std::string rusty_debug_string(Ordering o) {
+return o == Ordering::Less ? "Less" : (o == Ordering::Greater ? "Greater" : "Equal");
+}
+constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }
+constexpr Ordering reverse(Ordering a) { return a == Ordering::Less ? Ordering::Greater : (a == Ordering::Greater ? Ordering::Less : Ordering::Equal); }
+constexpr bool is_lt(Ordering a) { return a == Ordering::Less; }
+constexpr bool is_gt(Ordering a) { return a == Ordering::Greater; }
+constexpr bool is_eq(Ordering a) { return a == Ordering::Equal; }
+constexpr bool is_ne(Ordering a) { return a != Ordering::Equal; }
+constexpr bool is_le(Ordering a) { return a != Ordering::Greater; }
+constexpr bool is_ge(Ordering a) { return a != Ordering::Less; }
 template<typename T>
 struct Reverse {
 T _0;
@@ -56,6 +64,14 @@ template<typename L, typename R>
 bool less_than(const L& lhs, const R& rhs) {
 if constexpr (requires { lhs < rhs; }) {
 return lhs < rhs;
+} else if constexpr (requires {
+rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);
+}) {
+/* Pointer-carried operand (addr_of_temp needle): peel and compare.
+Without this tier the permissive fallback returned false BOTH
+ways - cmp::cmp called everything Equal and binary_search found
+phantom matches. */
+return rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);
 } else if constexpr (requires {
 std::begin(lhs); std::end(lhs); std::begin(rhs); std::end(rhs);
 *std::begin(lhs) < *std::begin(rhs);
@@ -85,12 +101,120 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
-// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.
-// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).
+// A char[N] operand is the C++ carrier of a Rust `str` LITERAL needle
+// (`map.contains_key("a")` with String keys): content semantics, no
+// trailing NUL. No member/operator tier can take it (raw arrays have no
+// members) and the elementwise tier would walk the NUL byte.
+template<typename X>
+concept str_literal_carrier = std::is_array_v<std::remove_cvref_t<X>>
+&& std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<X>>>, char>;
+// One side of an element-wise eq must be iterable in a shape rusty::for_in
+// accepts — mirrors its tiers structurally (for_in itself static_asserts,
+// so it can't be probed directly). Scalars fail this and keep the plain
+// operator== diagnostic.
+template<typename X>
+concept eq_elementwise_side = requires(std::remove_cvref_t<X>& x) { x.next(); }
+|| requires(std::remove_cvref_t<X>& x) { x.iter(); }
+|| requires(const std::remove_cvref_t<X>& x) { x.data(); x.size(); }
+|| requires(const std::remove_cvref_t<X>& x) { std::begin(x); std::end(x); }
+|| requires(std::remove_cvref_t<X>& x) { x.begin(); x.end(); };
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==,
+// else ELEMENT-WISE over both sides (Rust Iterator::eq and cross-container
+// PartialEq like `IndexSet == Vec` / `Keys == slice::Iter` have no C++
+// operator== between distinct types). Derefs pointer-like rhs (Rust `&other`
+// becomes addr_of_temp() in C++ emit).
 template<typename A, typename B>
 bool eq(const A& a, const B& b) {
-if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+if constexpr (std::is_pointer_v<std::remove_cvref_t<A>>
+&& std::is_pointer_v<std::remove_cvref_t<B>>) {
+/* Two pointer carriers are lowered Rust REFERENCES: PartialEq
+delegates to the pointees. Raw pointer == compared ADDRESSES,
+so `&mut 1` map keys never matched (occupied_entry_key). */
+return eq(*a, *b);
+} else if constexpr ((str_literal_carrier<A>
+|| str_literal_carrier<decltype(rusty::detail::deref_if_pointer_like(b))>)
+&& requires {
+std::string_view(a);
+std::string_view(rusty::detail::deref_if_pointer_like(b));
+}) {
+/* str-literal needle vs a string-viewable partner: compare CONTENT
+(string_view drops the array's trailing NUL). */
+return std::string_view(a)
+== std::string_view(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
 return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires {
+{ a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+/* PartialEq-impl wrappers delegate their body back here with the
+SAME instantiation (Slice::operator==(array) -> cmp::eq(self,
+other) -> that operator==): a per-instantiation re-entrancy
+guard breaks the cycle by falling to the elementwise compare,
+which IS the Rust slice-family semantics of those wrappers. */
+thread_local int _rusty_eq_depth = 0;
+if (_rusty_eq_depth == 0) {
+struct _DepthGuard {
+int& d;
+~_DepthGuard() { --d; }
+} _g{(++_rusty_eq_depth, _rusty_eq_depth)};
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+if constexpr (
+eq_elementwise_side<A>
+&& eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>
+) {
+auto&& ra = rusty::for_in(a);
+auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));
+auto ita = ra.begin();
+auto ea = ra.end();
+auto itb = rb.begin();
+auto eb = rb.end();
+for (; ita != ea && itb != eb; ++ita, ++itb) {
+if (!rusty::cmp::eq(*ita, *itb)) {
+return false;
+}
+}
+return !(ita != ea) && !(itb != eb);
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+} else if constexpr (
+eq_elementwise_side<A>
+&& eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>
+) {
+auto&& ra = rusty::for_in(a);
+auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));
+auto ita = ra.begin();
+auto ea = ra.end();
+auto itb = rb.begin();
+auto eb = rb.end();
+for (; ita != ea && itb != eb; ++ita, ++itb) {
+if (!rusty::cmp::eq(*ita, *itb)) {
+return false;
+}
+}
+return !(ita != ea) && !(itb != eb);
+} else if constexpr (requires {
+{ rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+/* both sides pointer-carried references (Q-key equivalence) */
+return rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b);
+} else if constexpr (requires {
+a.key_field;
+a.value_field;
+std::get<0>(rusty::detail::deref_if_pointer_like(b));
+std::get<1>(rusty::detail::deref_if_pointer_like(b));
+}) {
+/* map-entry projection: a Bucket{hash, key, value} against a
+(K, V) tuple compares by key/value (Rust's Slice iter yields
+entry pairs, not raw buckets). */
+auto&& bb = rusty::detail::deref_if_pointer_like(b);
+return rusty::cmp::eq(a.key_field, std::get<0>(bb))
+&& rusty::cmp::eq(a.value_field, std::get<1>(bb));
+} else if constexpr (requires { a.key_field; }) {
+/* set-entry projection: Bucket<T, ()> against a bare element
+compares the key only (set iteration yields keys). */
+return rusty::cmp::eq(a.key_field, rusty::detail::deref_if_pointer_like(b));
 } else {
 return a == rusty::detail::deref_if_pointer_like(b);
 }
@@ -99,8 +223,12 @@ template<typename A, typename B>
 bool ne(const A& a, const B& b) {
 if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
 return a.ne(rusty::detail::deref_if_pointer_like(b));
-} else {
+} else if constexpr (requires {
+{ a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
 return !(a == rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b));
 }
 }
 template<typename F>
@@ -121,10 +249,20 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// btree_port port: local rusty::clone removed (canonical lives in move.hpp)
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting
+// it again as a redundant duplicate makes call sites that pass a
+// type accepted by both overloads ambiguous, so we omit it.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
+}
+// Rust's Iterator::size_hint DEFAULT ((0, None)) for adapter types that
+// do not override it (rusty map/filter next-iter wrappers).
+template<typename Iter>
+requires (!requires(const Iter& it) { it.size_hint(); })
+std::tuple<size_t, rusty::Option<size_t>> size_hint(const Iter&) {
+return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::None));
 }
 template<typename Value>
 decltype(auto) left(Value&& value) {
@@ -145,6 +283,27 @@ template<typename L, typename R>
 Either_Left<L, R> Left(L _0) { return Either_Left<L, R>{std::forward<L>(_0)}; }
 template<typename L, typename R>
 Either_Right<L, R> Right(R _0) { return Either_Right<L, R>{std::forward<R>(_0)}; }
+// Deferred one-sided constructions: Rust infers the OTHER Either side from
+// the use site, so a bare `Either::Left(x)` can't spell R at construction.
+// These carry the payload and convert to any Either<L, R2> at the point
+// where C++ knows the destination (function argument, return, Option
+// converting constructor, ...).
+template<typename L>
+struct left_value {
+L __v;
+template<typename R2>
+operator Either<L, R2>() && { return Either_Left<L, R2>{std::move(__v)}; }
+};
+template<typename R>
+struct right_value {
+R __v;
+template<typename L2>
+operator Either<L2, R>() && { return Either_Right<L2, R>{std::move(__v)}; }
+};
+template<typename L>
+left_value<L> Left(L _0) { return {std::forward<L>(_0)}; }
+template<typename R>
+right_value<R> Right(R _0) { return {std::forward<R>(_0)}; }
 }
 // Display-oriented conversion helper used by format_args lowering.
 template<typename T>
@@ -300,6 +459,8 @@ template<typename T>
 constexpr T* addr_of_temp(T& value);
 template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value);
+template<typename T>
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value);
 #endif
 }
 namespace de {
@@ -353,7 +514,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(std::forward<decltype(value)>(value)));
 }
 
 template<typename E>
@@ -1957,8 +2118,24 @@ return serializer_ref<Serializer&&>{&serializer};
 return std::forward<Serializer>(serializer);
 }
 }
+// Explicit (non-deduced) result type for the recursive serialize dispatchers.
+// serialize/serialize_value/serialize_bytes call each other, so a deduced
+// `decltype(auto)` return makes the mutual recursion ill-formed (function with
+// deduced return type cannot be used before it is defined) for any value that
+// reaches the recursive fall-through edge. Every serde serialize path yields
+// Result<S::Ok, S::Error>, so we can state it explicitly and break the cycle.
+// deref_if_pointer_like handles serializers arriving as a raw pointer / ref /
+// serializer_ref proxy; a serializer without Ok/Error makes this SFINAE-fail
+// (return-type substitution), so `requires { serialize(...) }` stays well-behaved.
+template<typename S>
+using __ser_result_t = rusty::Result<
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Ok,
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer>;
 struct fallback_error {
 rusty::String message;
 
@@ -1967,7 +2144,8 @@ return fallback_error{rusty::String::from(msg)};
 }
 };
 template<typename Value, typename Serializer>
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {
+auto serialize_value(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
 if constexpr (requires {
 std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
@@ -2078,7 +2256,8 @@ return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer)
 }
 }
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2099,7 +2278,8 @@ rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(
 });
 template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 if constexpr (requires {
 std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
 }) {
@@ -2193,7 +2373,8 @@ return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLi
 namespace impls {
 namespace rusty_ext {
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2207,6 +2388,214 @@ static DefaultHasher new_() { return DefaultHasher{}; }
 std::size_t finish() const { return state; }
 };
 namespace rusty {
+// Rust slice binary-search family. Free functions PREFER a member spelling
+// (transpiled Slice types keep their own delegating methods); otherwise any
+// as_slice()-viewable receiver binary-searches with the Ordering-returning
+// comparator, mirroring core::slice semantics (Result<usize, usize>).
+template<typename R, typename F>
+auto binary_search_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).binary_search_by(std::forward<F>(f)); }) {
+return std::forward<R>(recv).binary_search_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+size_t lo = 0;
+size_t hi = s.size();
+while (lo < hi) {
+const size_t mid = lo + (hi - lo) / 2;
+const auto ord = f(s[mid]);
+if (ord == rusty::cmp::Ordering::Less) {
+lo = mid + 1;
+} else if (ord == rusty::cmp::Ordering::Greater) {
+hi = mid;
+} else {
+return rusty::Result<size_t, size_t>::Ok(mid);
+}
+}
+return rusty::Result<size_t, size_t>::Err(lo);
+}
+}
+template<typename R, typename T>
+auto binary_search(R&& recv, const T& target) {
+if constexpr (requires { std::forward<R>(recv).binary_search(target); }) {
+return std::forward<R>(recv).binary_search(target);
+} else {
+return rusty::binary_search_by(std::forward<R>(recv),
+[&](const auto& x) { return rusty::cmp::cmp(x, rusty::detail::deref_if_pointer_like(target)); });
+}
+}
+template<typename R, typename B, typename F>
+auto binary_search_by_key(R&& recv, const B& b, F&& f) {
+if constexpr (requires { std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f)); }) {
+return std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f));
+} else {
+return rusty::binary_search_by(std::forward<R>(recv),
+[&](const auto& x) { return rusty::cmp::cmp(f(x), rusty::detail::deref_if_pointer_like(b)); });
+}
+}
+// Rust slice is_sorted family: member-preference, else pairwise compare
+// through rusty::cmp over the as_slice view.
+template<typename R>
+bool is_sorted(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).is_sorted(); }) {
+return std::forward<R>(recv).is_sorted();
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+/* PartialOrd semantics: NAN pairs are NOT sorted (native <= says false) */
+if constexpr (requires { s[i - 1] <= s[i]; }) {
+if (!(s[i - 1] <= s[i])) { return false; }
+} else {
+if (rusty::cmp::cmp(s[i - 1], s[i]) == rusty::cmp::Ordering::Greater) { return false; }
+}
+}
+return true;
+}
+}
+template<typename R, typename F>
+bool is_sorted_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).is_sorted_by(std::forward<F>(f)); }) {
+return std::forward<R>(recv).is_sorted_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+if (!f(s[i - 1], s[i])) { return false; }
+}
+return true;
+}
+}
+template<typename R, typename F>
+bool is_sorted_by_key(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f)); }) {
+return std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+/* PartialOrd semantics: NAN keys are NOT sorted (native <= says false) */
+if constexpr (requires { f(s[i - 1]) <= f(s[i]); }) {
+if (!(f(s[i - 1]) <= f(s[i]))) { return false; }
+} else {
+if (rusty::cmp::cmp(f(s[i - 1]), f(s[i])) == rusty::cmp::Ordering::Greater) { return false; }
+}
+}
+return true;
+}
+}
+template<typename R, typename P>
+auto partition_point(R&& recv, P&& pred) {
+if constexpr (requires { std::forward<R>(recv).partition_point(std::forward<P>(pred)); }) {
+return std::forward<R>(recv).partition_point(std::forward<P>(pred));
+} else {
+auto s = rusty::as_slice(recv);
+size_t lo = 0;
+size_t hi = s.size();
+while (lo < hi) {
+const size_t mid = lo + (hi - lo) / 2;
+if (pred(s[mid])) {
+lo = mid + 1;
+} else {
+hi = mid;
+}
+}
+return lo;
+}
+}
+// Rust slice sort family (Vec reaches these through Deref). Members win;
+// the port Vec spells only the STABLE sorts, and a stable sort is a valid
+// unstable sort, so sort_unstable_* fall back to the sort_* members before
+// the generic std::sort over as_mut_slice.
+template<typename R, typename F>
+void sort_unstable_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_unstable_by(std::forward<F>(f));
+} else if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return f(a, b) == rusty::cmp::Ordering::Less;
+});
+}
+}
+template<typename R>
+void sort_unstable(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable(); }) {
+std::forward<R>(recv).sort_unstable();
+} else if constexpr (requires { std::forward<R>(recv).sort(); }) {
+std::forward<R>(recv).sort();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end());
+}
+}
+template<typename R, typename K>
+void sort_unstable_by_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key));
+} else if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+// STABLE sort family - members win (the port Vec spells these); the
+// std::stable_sort fallback serves array/vector receivers reached
+// through routed chains (collect_range results, [T; N] locals).
+template<typename R>
+void sort(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).sort(); }) {
+std::forward<R>(recv).sort();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end());
+}
+}
+template<typename R, typename F>
+void sort_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return f(a, b) == rusty::cmp::Ordering::Less;
+});
+}
+}
+template<typename R, typename K>
+void sort_by_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+// Rust caches the key per element; recomputing gives the same order for
+// the pure keys sorts see, so the fallback reuses the sort_by_key shape.
+template<typename R, typename K>
+void sort_by_cached_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_by_cached_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_cached_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+template<typename R>
+void reverse(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).reverse(); }) {
+std::forward<R>(recv).reverse();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::reverse(s.begin(), s.end());
+}
+}
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {
 if (opt.is_none()) return std::partial_ordering::unordered;
@@ -2229,11 +2618,40 @@ return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);
 }
 namespace fmt {
 // Error and Result are defined in rusty/fmt.hpp
-struct Arguments {};
+// Carries prerendered text: `write!(w, ...)` sites lower their
+// format_args!() through std::format, so Arguments accepts the
+// resulting string and Write::write_fmt forwards it to write_str.
+struct Arguments {
+std::string text;
+Arguments() = default;
+Arguments(std::string s) : text(std::move(s)) {}
+Arguments(std::string_view s) : text(s) {}
+Arguments(const char* s) : text(s ? s : "") {}
+};
 enum class Alignment { Left, Right, Center };
 struct DebugList {
 template<typename... Args>
 DebugList& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugList& entry(Args&&...) { return *this; }
+Result finish() { return Result::Ok(std::make_tuple()); }
+};
+struct DebugSet {
+template<typename... Args>
+DebugSet& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugSet& entry(Args&&...) { return *this; }
+Result finish() { return Result::Ok(std::make_tuple()); }
+};
+struct DebugMap {
+template<typename... Args>
+DebugMap& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& entry(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& key(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& value(Args&&...) { return *this; }
 Result finish() { return Result::Ok(std::make_tuple()); }
 };
 struct Formatter {
@@ -2296,6 +2714,13 @@ formatter->out_ += "}";
 }
 return Result::Ok(std::make_tuple());
 }
+Result finish_non_exhaustive() {
+if (formatter) {
+if (!first) { formatter->out_ += ", "; }
+formatter->out_ += ".. }";
+}
+return Result::Ok(std::make_tuple());
+}
 };
 template<typename... Args>
 static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }
@@ -2347,6 +2772,10 @@ st.name(std::forward<Name>(name));
 return st;
 }
 DebugList debug_list() const { return DebugList{}; }
+DebugSet debug_set() const { return DebugSet{}; }
+DebugMap debug_map() const { return DebugMap{}; }
+template<typename Str>
+Result pad(Str&& s) const { out_ += rusty::to_string(std::forward<Str>(s)); return Result::Ok(std::make_tuple()); }
 private:
 template<typename Arg>
 void append_one(Arg&& arg) const { out_ += rusty::to_string(std::forward<Arg>(arg)); }
@@ -2382,8 +2811,46 @@ case '"': out += "\\\""; break;
 case '\n': out += "\\n"; break;
 case '\r': out += "\\r"; break;
 case '\t': out += "\\t"; break;
+case '\0': out += "\\0"; break;
 default: out.push_back(ch); break;
 }
+}
+return out;
+}
+inline std::string escape_default_char(char32_t code) {
+switch (code) {
+case U'\\': return "\\\\";
+case U'"': return "\\\"";
+case U'\'': return "\\'";
+case U'\n': return "\\n";
+case U'\r': return "\\r";
+case U'\t': return "\\t";
+default: break;
+}
+if (code >= 0x20 && code < 0x7F) {
+return std::string(1, static_cast<char>(code));
+}
+return std::format("\\u{{{:x}}}", static_cast<std::uint32_t>(code));
+}
+inline std::string escape_default_string(std::string_view input) {
+std::string out;
+out.reserve(input.size());
+std::size_t i = 0;
+while (i < input.size()) {
+const unsigned char b = static_cast<unsigned char>(input[i]);
+char32_t code = b;
+std::size_t len = 1;
+if ((b & 0xE0) == 0xC0) { code = b & 0x1F; len = 2; }
+else if ((b & 0xF0) == 0xE0) { code = b & 0x0F; len = 3; }
+else if ((b & 0xF8) == 0xF0) { code = b & 0x07; len = 4; }
+if (len > 1) {
+if (i + len > input.size()) { break; }
+for (std::size_t k = 1; k < len; ++k) {
+code = (code << 6) | (static_cast<unsigned char>(input[i + k]) & 0x3F);
+}
+}
+out += escape_default_char(code);
+i += len;
 }
 return out;
 }
@@ -2449,6 +2916,9 @@ if (!stack.empty()) {
 stack.back().saw_value = true;
 stack.back().last_was_comma = false;
 }
+if (ch == '{' && !out.empty() && out.back() != ' ' && out.back() != '\n') {
+out.push_back(' ');
+}
 out.push_back(ch);
 stack.push_back(Frame{ch, false, false});
 std::size_t j = i + 1;
@@ -2486,6 +2956,9 @@ stack.back().last_was_comma = false;
 continue;
 }
 out.push_back(ch);
+if (ch == ':') {
+out.push_back(' ');
+}
 if (!stack.empty()) {
 stack.back().saw_value = true;
 stack.back().last_was_comma = false;
@@ -2538,6 +3011,29 @@ if (result.is_ok()) {
 return formatter.str();
 }
 return "<fmt-error>";
+} else if constexpr (std::is_floating_point_v<Value>) {
+return rusty::detail::float_display_string(value);
+} else if constexpr (std::is_same_v<Value, __int128>
+|| std::is_same_v<Value, unsigned __int128>) {
+// std::to_string has no 128-bit overloads; digits by division.
+if (value == 0) { return "0"; }
+unsigned __int128 mag;
+bool neg = false;
+if constexpr (std::is_same_v<Value, __int128>) {
+neg = value < 0;
+mag = neg ? static_cast<unsigned __int128>(-(value + 1)) + 1
+: static_cast<unsigned __int128>(value);
+} else {
+mag = value;
+}
+std::string out;
+while (mag != 0) {
+out.push_back(static_cast<char>('0' + static_cast<int>(mag % 10)));
+mag /= 10;
+}
+if (neg) { out.push_back('-'); }
+std::reverse(out.begin(), out.end());
+return out;
 } else if constexpr (requires { std::to_string(value); }) {
 return std::to_string(value);
 } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {
@@ -2572,7 +3068,25 @@ return out;
 template<typename T>
 std::string to_debug_string(const T& value) {
 using Value = std::remove_cv_t<std::remove_reference_t<T>>;
-if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
+if constexpr (requires { value.rusty_debug_string(); }) {
+return value.rusty_debug_string();
+} else if constexpr (std::is_enum_v<Value> && requires { rusty_debug_string(value); }) {
+return rusty_debug_string(value);
+} else if constexpr (requires { value.is_some(); value.unwrap(); }) {
+if (value.is_some()) {
+return std::string("Some(") + rusty::to_debug_string(value.unwrap()) + ")";
+}
+return "None";
+} else if constexpr (requires { value.is_ok(); value.unwrap(); value.unwrap_err(); }) {
+if (value.is_ok()) {
+return std::string("Ok(") + rusty::to_debug_string(value.unwrap()) + ")";
+}
+return std::string("Err(") + rusty::to_debug_string(value.unwrap_err()) + ")";
+} else if constexpr (requires { std::visit([](const auto&) {}, value); }) {
+return std::visit([](const auto& alt) -> std::string {
+return rusty::to_debug_string(alt);
+}, value);
+} else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
 return std::to_string(static_cast<int>(value));
 } else if constexpr (std::is_same_v<Value, char>
 || std::is_same_v<Value, signed char>
@@ -2581,10 +3095,22 @@ return std::to_string(static_cast<int>(value));
 || std::is_same_v<Value, char16_t>
 || std::is_same_v<Value, char32_t>) {
 const auto ch = static_cast<char32_t>(value);
-if (ch == U'\0') {
-return "'\\0'";
+switch (ch) {
+case U'\0': return "'\\0'";
+case U'\\': return "'\\\\'";
+case U'\'': return "'\\''";
+case U'\n': return "'\\n'";
+case U'\r': return "'\\r'";
+case U'\t': return "'\\t'";
+default: break;
 }
 return std::string("'") + rusty::detail::utf8_from_char32(ch) + "'";
+} else if constexpr (std::is_pointer_v<Value>
+&& !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {
+if (value == nullptr) {
+return "<null>";
+}
+return rusty::to_debug_string(*value);
 } else if constexpr (std::is_convertible_v<T, std::string_view>) {
 return std::string("\"")
 + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
@@ -2599,6 +3125,29 @@ return std::string("\"")
 return std::string("\"")
 + rusty::detail::escape_debug_string(std::string(s))
 + "\"";
+}
+} else if constexpr (std::is_floating_point_v<Value>) {
+std::string s = rusty::to_string(value);
+if (std::isfinite(value) && s.find_first_of(".eEin") == std::string::npos) {
+s += ".0";
+}
+return s;
+} else if constexpr (requires { std::tuple_size<Value>::value; }
+&& !requires { std::begin(value); std::end(value); }) {
+if constexpr (std::tuple_size_v<Value> == 0) {
+return "()";
+} else {
+std::string out = "(";
+bool first = true;
+std::apply([&](const auto&... elems) {
+((out += (first ? "" : ", "), first = false,
+out += rusty::to_debug_string(elems)), ...);
+}, value);
+if constexpr (std::tuple_size_v<Value> == 1) {
+out += ",";
+}
+out += ")";
+return out;
 }
 } else if constexpr (requires { std::begin(value); std::end(value); }) {
 std::string out = "[";
@@ -2824,11 +3373,20 @@ return &value;
 }
 template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {
-using Stored = std::remove_cv_t<std::remove_reference_t<T>>;
-thread_local std::optional<Stored> _addr_of_tmp;
-_addr_of_tmp.reset();
-_addr_of_tmp.emplace(std::forward<T>(value));
-return &*_addr_of_tmp;
+/* The rvalue argument is a caller-side temporary that lives to the end
+of the FULL EXPRESSION - exactly Rust's `&temp` statement scope. The
+old per-TYPE thread_local slot aliased simultaneous same-type temps:
+vec![&1, &2, &3, &4] produced four pointers all reading 4. */
+return &value;
+}
+template<typename T>
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {
+if constexpr (std::is_lvalue_reference_v<T&&>) {
+return &value;
+} else {
+/* Same full-expression-lifetime rationale as addr_of_temp above. */
+return &value;
+}
 }
 #endif
 struct Cow_Borrowed {
@@ -2935,16 +3493,25 @@ return &value;
 namespace hash {
 template<typename State>
 inline void combine(State& state, std::size_t value) {
-std::size_t seed;
 if constexpr (requires { state.state; }) {
-seed = state.state;
-} else {
-seed = static_cast<std::size_t>(state);
-}
+std::size_t seed = state.state;
 seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-if constexpr (requires { state.state; }) {
 state.state = seed;
+} else if constexpr (requires {
+state.write_(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* A real Hasher-protocol state (e.g. the transpiled std
+DefaultHasher wrapping rusty::hash::SipHasher): feed the value's
+bytes through the hasher instead of integer-state mixing. Only
+types that previously FAILED the static_cast fallback take this
+branch, so existing integer-state hashers are unchanged. */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));
 } else {
+std::size_t seed = static_cast<std::size_t>(state);
+seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
 state = static_cast<State>(seed);
 }
 }
@@ -2952,6 +3519,32 @@ template<typename T, typename State>
 void hash(const T& value, State& state) {
 if constexpr (requires { value.hash(state); }) {
 value.hash(state);
+} else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>
+&& std::is_same_v<std::remove_cv_t<
+std::remove_pointer_t<std::remove_cvref_t<T>>>, char>) {
+/* Plain-char pointer = Rust str carrier (i8/u8 are signed/unsigned
+char; Rust char is char32_t): hash CONTENT like rusty::String,
+not the pointee char (Pair("a", "b") vs (String, String) keys). */
+hash(std::string_view(value), state);
+} else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {
+/* A pointer carrier is a lowered Rust REFERENCE: Hash delegates
+to the pointee. Hashing the address made `&mut 1` map keys
+miss each other (occupied_entry_key found Vacant). */
+hash(*value, state);
+} else if constexpr (requires {
+std::tuple_size<std::remove_cvref_t<T>>::value;
+} && !requires { std::begin(value); }) {
+/* Rust derives Hash for tuples elementwise; the byte-FNV fallback
+hashed a tuple<String, String> key's HEAP POINTERS. */
+std::apply(
+[&state](const auto&... elems) { (hash(elems, state), ...); },
+value);
+} else if constexpr (std::is_array_v<std::remove_cvref_t<T>>
+&& std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<T>>>, char>) {
+/* char[N] = Rust str-literal needle: hash CONTENT chars without
+the trailing NUL, matching rusty::String's range-tier per-char
+hashing (string_view recurses into the range tier below). */
+hash(std::string_view(value), state);
 } else if constexpr (requires { std::begin(value); std::end(value); }) {
 // Hash range-like containers by element value, not object bytes.
 // This avoids pointer/address-based drift for owning containers.
@@ -2969,6 +3562,22 @@ h *= 1099511628211ULL;
 }
 combine(state, h);
 }
+}
+}
+// Rust BuildHasher::hash_one. Prefers the builder's own member; inert
+// transpiled builders (hashbrown's DefaultHashBuilder — foldhash's
+// methods come from trait defaults that never emit) fall back to rusty's
+// deterministic combine hashing. Hash VALUES never surface in parity
+// assertions (indexmap iterates in insertion order); only internal
+// consistency matters.
+template<typename B, typename T>
+uint64_t hash_one(B&& builder, const T& value) {
+if constexpr (requires { std::forward<B>(builder).hash_one(value); }) {
+return std::forward<B>(builder).hash_one(value);
+} else {
+std::size_t state = 14695981039346656037ULL;
+rusty::hash::hash(value, state);
+return static_cast<uint64_t>(state);
 }
 }
 template<typename Writer, typename FmtArg>
@@ -3099,62 +3708,86 @@ return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 namespace str_runtime {
-using Utf8Error = rusty::String;
-inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {
+// Mirrors core::str::Utf8Error: byte index of the valid prefix plus the
+// invalid-sequence length (None = input ended in the middle of a sequence).
+struct Utf8Error {
+std::size_t valid_up_to_ = 0;
+long long error_len_ = -1;
+std::size_t valid_up_to() const { return valid_up_to_; }
+rusty::Option<std::size_t> error_len() const {
+if (error_len_ < 0) { return rusty::Option<std::size_t>(rusty::None); }
+return rusty::Option<std::size_t>(static_cast<std::size_t>(error_len_));
+}
+std::string to_string() const { return "invalid utf-8 sequence"; }
+constexpr bool operator==(const Utf8Error&) const = default;
+};
+// Rust-faithful UTF-8 validation: on failure reports where the valid prefix
+// ends and how many bytes the broken sequence spans (-1 error_len = the
+// input ended prematurely, Rust's error_len() == None).
+inline Utf8Error validate_utf8(const unsigned char* data, std::size_t len, bool& ok) {
 std::size_t i = 0;
+ok = true;
 while (i < len) {
 const auto byte = data[i];
 if (byte <= 0x7F) {
 ++i;
 continue;
 }
+std::size_t need;
 if ((byte >> 5) == 0x6) {
-if (i + 1 >= len) return false;
-const auto b1 = data[i + 1];
-if ((b1 & 0xC0) != 0x80 || byte < 0xC2) return false;
-i += 2;
-continue;
+if (byte < 0xC2) { ok = false; return Utf8Error{i, 1}; }
+need = 1;
+} else if ((byte >> 4) == 0xE) {
+need = 2;
+} else if ((byte >> 3) == 0x1E) {
+if (byte > 0xF4) { ok = false; return Utf8Error{i, 1}; }
+need = 3;
+} else {
+ok = false;
+return Utf8Error{i, 1};
 }
-if ((byte >> 4) == 0xE) {
-if (i + 2 >= len) return false;
-const auto b1 = data[i + 1];
-const auto b2 = data[i + 2];
-if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;
-if (byte == 0xE0 && b1 < 0xA0) return false;
-if (byte == 0xED && b1 >= 0xA0) return false;
-i += 3;
-continue;
+for (std::size_t k = 1; k <= need; ++k) {
+if (i + k >= len) { ok = false; return Utf8Error{i, -1}; }
+const auto cont = data[i + k];
+bool cont_ok = (cont & 0xC0) == 0x80;
+if (k == 1) {
+if (byte == 0xE0) cont_ok = cont >= 0xA0 && cont <= 0xBF;
+else if (byte == 0xED) cont_ok = cont >= 0x80 && cont <= 0x9F;
+else if (byte == 0xF0) cont_ok = cont >= 0x90 && cont <= 0xBF;
+else if (byte == 0xF4) cont_ok = cont >= 0x80 && cont <= 0x8F;
 }
-if ((byte >> 3) == 0x1E) {
-if (i + 3 >= len) return false;
-const auto b1 = data[i + 1];
-const auto b2 = data[i + 2];
-const auto b3 = data[i + 3];
-if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
-if (byte == 0xF0 && b1 < 0x90) return false;
-if (byte == 0xF4 && b1 >= 0x90) return false;
-if (byte > 0xF4) return false;
-i += 4;
-continue;
+if (!cont_ok) { ok = false; return Utf8Error{i, static_cast<long long>(k)}; }
 }
-return false;
+i += need + 1;
 }
-return true;
+return Utf8Error{};
+}
+inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {
+bool ok = true;
+(void)validate_utf8(data, len, ok);
+return ok;
 }
 template<typename Bytes>
-rusty::Result<std::string_view, rusty::String> from_utf8(const Bytes& bytes) {
+rusty::Result<std::string_view, Utf8Error> from_utf8(const Bytes& bytes) {
+const unsigned char* data = nullptr;
+std::size_t len = 0;
 if constexpr (requires { bytes.data(); bytes.size(); }) {
-const auto* raw = bytes.data();
-const std::size_t len = static_cast<std::size_t>(bytes.size());
-const auto* data = reinterpret_cast<const unsigned char*>(raw);
-if (!is_valid_utf8(data, len)) {
-return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from("invalid utf-8"));
+data = reinterpret_cast<const unsigned char*>(bytes.data());
+len = static_cast<std::size_t>(bytes.size());
+} else if constexpr (requires { rusty::as_ptr(bytes); rusty::len(bytes); }) {
+data = reinterpret_cast<const unsigned char*>(rusty::as_ptr(bytes));
+len = static_cast<std::size_t>(rusty::len(bytes));
+} else {
+return rusty::Result<std::string_view, Utf8Error>::Err(Utf8Error{});
 }
-return rusty::Result<std::string_view, rusty::String>::Ok(
-std::string_view(reinterpret_cast<const char*>(raw), len)
+bool ok = true;
+const auto err = validate_utf8(data, len, ok);
+if (!ok) {
+return rusty::Result<std::string_view, Utf8Error>::Err(err);
+}
+return rusty::Result<std::string_view, Utf8Error>::Ok(
+std::string_view(reinterpret_cast<const char*>(data), len)
 );
-}
-return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from("unsupported from_utf8 input"));
 }
 template<typename Bytes>
 std::string_view from_utf8_unchecked(Bytes&& bytes) {
@@ -3246,8 +3879,13 @@ return false;
 return static_cast<bool>(std::forward<Pred>(pred)(decoded[index]));
 }
 
-Chars as_str() const {
-return *this;
+std::string as_str() const {
+// Rust Chars::as_str — the UNITERATED remainder as a str.
+std::string out;
+for (std::size_t k = index; k < decoded.size(); ++k) {
+out += rusty::detail::utf8_from_char32(decoded[k]);
+}
+return out;
 }
 
 Chars rev() const {
@@ -3270,12 +3908,17 @@ Chars iter;
 std::size_t index = 0;
 
 rusty::Option<Item> next() {
+/* Rust str::char_indices yields BYTE offsets, not char counts —
+advance by each char's UTF-8 encoded length. */
 auto next_ch = iter.next();
 if (next_ch.is_none()) {
 return rusty::Option<Item>(rusty::None);
 }
-auto value = std::make_tuple(index++, next_ch.unwrap());
-return rusty::Option<Item>(std::move(value));
+const char32_t ch = next_ch.unwrap();
+const std::size_t at = index;
+const auto code = static_cast<uint32_t>(ch);
+index += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+return rusty::Option<Item>(std::make_tuple(at, ch));
 }
 };
 inline CharIndices char_indices(std::string_view text) {
@@ -3348,15 +3991,56 @@ text = std::string_view(input.as_str());
 } else {
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("unsupported parse input"));
 }
-if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+if constexpr (std::is_same_v<T, char32_t>) {
+// Rust str parse::<char>() — exactly one UTF-8 scalar or Err.
+if (text.empty()) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("cannot parse char from empty string"));
+}
+const unsigned char lead = static_cast<unsigned char>(text[0]);
+size_t len = lead < 0x80 ? 1 : (lead >> 5) == 0x6 ? 2 : (lead >> 4) == 0xE ? 3 : (lead >> 3) == 0x1E ? 4 : 0;
+if (len == 0 || text.size() != len) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("too many characters in char"));
+}
+char32_t code = 0;
+if (len == 1) { code = lead; }
+else {
+code = lead & (0x7F >> len);
+for (size_t k = 1; k < len; ++k) {
+const unsigned char cont = static_cast<unsigned char>(text[k]);
+if ((cont & 0xC0) != 0x80) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("too many characters in char"));
+}
+code = (code << 6) | (cont & 0x3F);
+}
+}
+return rusty::Result<T, rusty::String>::Ok(static_cast<T>(code));
+}
+if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char32_t>) {
 T value{};
 const auto* begin = text.data();
 const auto* end = begin + text.size();
+if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }
 const auto [ptr, ec] = std::from_chars(begin, end, value);
 if (ec == std::errc() && ptr == end) {
 return rusty::Result<T, rusty::String>::Ok(value);
 }
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("invalid digit found in string"));
+}
+if constexpr (std::is_floating_point_v<T>) {
+T value{};
+const auto* begin = text.data();
+const auto* end = begin + text.size();
+if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }
+const auto [ptr, ec] = std::from_chars(begin, end, value, std::chars_format::general);
+if (ec == std::errc() && ptr == end) {
+return rusty::Result<T, rusty::String>::Ok(value);
+}
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("invalid float literal"));
+}
+if constexpr (std::is_same_v<T, bool>) {
+if (text == "true") { return rusty::Result<T, rusty::String>::Ok(true); }
+if (text == "false") { return rusty::Result<T, rusty::String>::Ok(false); }
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("provided string was not `true` or `false`"));
 }
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("unsupported parse target"));
 }
@@ -3375,6 +4059,28 @@ inline std::string_view trim_end_matches(std::string_view s, char32_t ch) {
 size_t end = s.size();
 while (end > 0 && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;
 return s.substr(0, end);
+}
+inline std::string_view trim_matches(std::string_view s, char32_t ch) {
+size_t start = 0;
+while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;
+size_t end = s.size();
+while (end > start && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;
+return s.substr(start, end - start);
+}
+inline std::string_view trim_start_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) { while (s.starts_with(pat)) s.remove_prefix(pat.size()); }
+return s;
+}
+inline std::string_view trim_end_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) { while (s.ends_with(pat)) s.remove_suffix(pat.size()); }
+return s;
+}
+inline std::string_view trim_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) {
+while (s.starts_with(pat)) s.remove_prefix(pat.size());
+while (s.ends_with(pat)) s.remove_suffix(pat.size());
+}
+return s;
 }
 inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {
 if (s.starts_with(prefix)) {
@@ -3413,6 +4119,23 @@ pos += to.size();
 }
 return rusty::String::from(out);
 }
+template<typename To>
+inline rusty::String replace(std::string_view s, char32_t from, To&& to) {
+char pat_buf[4]; size_t pat_n;
+if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }
+else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }
+else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }
+else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }
+return replace(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)));
+}
+template<typename S, typename To>
+inline rusty::String replace(const S& value, char32_t from, To&& to) {
+if constexpr (requires { value.as_str(); }) {
+return replace(std::string_view(value.as_str()), from, std::forward<To>(to));
+} else {
+return replace(std::string_view(value), from, std::forward<To>(to));
+}
+}
 template<typename S, typename From, typename To>
 inline rusty::String replace(const S& value, From&& from, To&& to) {
 if constexpr (requires { value.as_str(); }) {
@@ -3448,6 +4171,150 @@ return rusty::Option<std::size_t>(i);
 }
 }
 return rusty::Option<std::size_t>(rusty::None);
+}
+template<typename Pred>
+requires (!std::is_convertible_v<Pred, std::string_view> && !std::is_convertible_v<Pred, char32_t> && requires(Pred p) { p(char32_t{}); })
+inline rusty::Option<std::size_t> find(std::string_view s, Pred&& pred) {
+/* Rust str::find(char predicate): byte index of the first char
+satisfying the predicate, walking UTF-8 sequences. */
+std::size_t i = 0;
+while (i < s.size()) {
+const unsigned char b = static_cast<unsigned char>(s[i]);
+std::size_t len = 1;
+char32_t c = b;
+if (b >= 0xF0) { len = 4; c = b & 0x07; }
+else if (b >= 0xE0) { len = 3; c = b & 0x0F; }
+else if (b >= 0xC0) { len = 2; c = b & 0x1F; }
+if (len > 1) {
+if (i + len > s.size()) { break; }
+for (std::size_t k = 1; k < len; ++k) {
+c = static_cast<char32_t>((c << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F));
+}
+}
+if (pred(c)) { return rusty::Option<std::size_t>(i); }
+i += len;
+}
+return rusty::Option<std::size_t>(rusty::None);
+}
+inline rusty::Option<std::size_t> rfind(std::string_view s, std::string_view needle) {
+const auto pos = s.rfind(needle);
+if (pos == std::string_view::npos) {
+return rusty::Option<std::size_t>(rusty::None);
+}
+return rusty::Option<std::size_t>(pos);
+}
+inline rusty::Option<std::size_t> rfind(std::string_view s, char32_t ch) {
+const auto pos = s.rfind(static_cast<char>(ch));
+if (pos == std::string_view::npos) {
+return rusty::Option<std::size_t>(rusty::None);
+}
+return rusty::Option<std::size_t>(pos);
+}
+template<std::size_t N>
+inline rusty::Option<std::size_t> rfind(std::string_view s, const std::array<char32_t, N>& any_char) {
+for (std::size_t i = s.size(); i-- > 0; ) {
+const auto cur = static_cast<char32_t>(static_cast<unsigned char>(s[i]));
+for (const auto ch : any_char) {
+if (cur == ch) {
+return rusty::Option<std::size_t>(i);
+}
+}
+}
+return rusty::Option<std::size_t>(rusty::None);
+}
+inline std::string_view trim_start(std::string_view s) {
+auto start = s.find_first_not_of(" \t\n\r");
+return start == std::string_view::npos ? std::string_view{} : s.substr(start);
+}
+inline std::string_view trim_end(std::string_view s) {
+auto end = s.find_last_not_of(" \t\n\r");
+return end == std::string_view::npos ? std::string_view{} : s.substr(0, end + 1);
+}
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, std::string_view suffix) {
+if (s.ends_with(suffix)) return rusty::Option<std::string_view>(s.substr(0, s.size() - suffix.size()));
+return rusty::Option<std::string_view>(rusty::None);
+}
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, char32_t ch) {
+if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == ch) return rusty::Option<std::string_view>(s.substr(0, s.size() - 1));
+return rusty::Option<std::string_view>(rusty::None);
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, char32_t delim) {
+auto pos = s.find(static_cast<char>(delim));
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, std::string_view delim) {
+auto pos = s.find(delim);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, char32_t delim) {
+auto pos = s.rfind(static_cast<char>(delim));
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, std::string_view delim) {
+auto pos = s.rfind(delim);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));
+}
+inline rusty::String replacen(std::string_view s, std::string_view from, std::string_view to, std::size_t count) {
+if (from.empty() || count == 0) return rusty::String::from(s);
+std::string out(s);
+std::size_t pos = 0, done = 0;
+while (done < count && (pos = out.find(from, pos)) != std::string::npos) {
+out.replace(pos, from.size(), to);
+pos += to.size();
+++done;
+}
+return rusty::String::from(out);
+}
+template<typename To>
+inline rusty::String replacen(std::string_view s, char32_t from, To&& to, std::size_t count) {
+char pat_buf[4]; size_t pat_n;
+if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }
+else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }
+else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }
+else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }
+return replacen(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)), count);
+}
+template<typename S, typename To>
+inline rusty::String replacen(const S& value, char32_t from, To&& to, std::size_t count) {
+if constexpr (requires { value.as_str(); }) {
+return replacen(std::string_view(value.as_str()), from, std::forward<To>(to), count);
+} else {
+return replacen(std::string_view(value), from, std::forward<To>(to), count);
+}
+}
+template<typename S, typename From, typename To>
+inline rusty::String replacen(const S& value, From&& from, To&& to, std::size_t count) {
+if constexpr (requires { value.as_str(); }) {
+return replacen(std::string_view(value.as_str()), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);
+} else if constexpr (std::is_convertible_v<S, std::string_view>) {
+return replacen(std::string_view(value), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);
+} else {
+return rusty::String::from("");
+}
+}
+inline rusty::String to_ascii_uppercase(std::string_view s) {
+std::string out(s);
+for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+return rusty::String::from(out);
+}
+inline rusty::String to_ascii_lowercase(std::string_view s) {
+std::string out(s);
+for (auto& c : out) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+return rusty::String::from(out);
+}
+inline bool eq_ignore_ascii_case(std::string_view a, std::string_view b) {
+if (a.size() != b.size()) return false;
+for (std::size_t i = 0; i < a.size(); ++i) {
+char ca = a[i], cb = b[i];
+if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + 32);
+if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + 32);
+if (ca != cb) return false;
+}
+return true;
 }
 struct SplitIter {
 std::string_view remaining;
@@ -3494,19 +4361,200 @@ return split(*value, delim);
 return SplitIter{std::string_view{}, delim, true};
 }
 }
+struct RSplitIter {
+std::string_view remaining;
+char32_t delim;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+auto pos = remaining.rfind(static_cast<char>(delim));
+if (pos == std::string_view::npos) {
+done = true;
+return rusty::Option<std::string_view>(remaining);
+}
+auto piece = remaining.substr(pos + 1);
+remaining = remaining.substr(0, pos);
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) {
+if (next().is_none()) {
+return rusty::Option<std::string_view>(rusty::None);
+}
+}
+return next();
+}
+};
+inline RSplitIter rsplit(std::string_view s, char32_t delim) {
+return RSplitIter{s, delim};
+}
+template<typename S>
+inline RSplitIter rsplit(const S& value, char32_t delim) {
+if constexpr (std::is_convertible_v<S, std::string_view>) {
+return rsplit(std::string_view(value), delim);
+} else if constexpr (requires { value.as_str(); }) {
+return rsplit(std::string_view(value.as_str()), delim);
+} else {
+return RSplitIter{std::string_view{}, delim, true};
+}
+}
+inline bool is_ascii_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+struct WhitespaceSplitIter {
+std::string_view remaining;
+rusty::Option<std::string_view> next() {
+std::size_t i = 0;
+while (i < remaining.size() && is_ascii_ws(remaining[i])) ++i;
+remaining = remaining.substr(i);
+if (remaining.empty()) return rusty::Option<std::string_view>(rusty::None);
+std::size_t j = 0;
+while (j < remaining.size() && !is_ascii_ws(remaining[j])) ++j;
+auto word = remaining.substr(0, j);
+remaining = remaining.substr(j);
+return rusty::Option<std::string_view>(word);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline WhitespaceSplitIter split_whitespace(std::string_view s) { return WhitespaceSplitIter{s}; }
+struct SplitNIter {
+std::string_view remaining;
+char32_t delim;
+std::size_t remaining_count;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto pos = remaining.find(static_cast<char>(delim));
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto piece = remaining.substr(0, pos);
+remaining = remaining.substr(pos + 1);
+--remaining_count;
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline SplitNIter splitn(std::string_view s, std::size_t n, char32_t delim) { return SplitNIter{s, delim, n, n == 0}; }
+struct RSplitNIter {
+std::string_view remaining;
+char32_t delim;
+std::size_t remaining_count;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto pos = remaining.rfind(static_cast<char>(delim));
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto piece = remaining.substr(pos + 1);
+remaining = remaining.substr(0, pos);
+--remaining_count;
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline RSplitNIter rsplitn(std::string_view s, std::size_t n, char32_t delim) { return RSplitNIter{s, delim, n, n == 0}; }
+inline SplitIter split_terminator(std::string_view s, char32_t delim) {
+/* Rust str::split_terminator: like split, but a trailing delimiter does
+not produce a final empty piece. Strip one trailing delimiter, then
+plain-split; an empty input yields no pieces at all. */
+if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == delim) {
+s = s.substr(0, s.size() - 1);
+return SplitIter{s, delim};
+}
+return SplitIter{s, delim, s.empty()};
+}
+struct LinesIter {
+std::string_view remaining;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done || remaining.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto pos = remaining.find('\n');
+if (pos == std::string_view::npos) { auto line = remaining; remaining = std::string_view{}; done = true; return rusty::Option<std::string_view>(line); }
+auto line = remaining.substr(0, pos);
+if (!line.empty() && line.back() == '\r') line = line.substr(0, line.size() - 1);
+remaining = remaining.substr(pos + 1);
+return rusty::Option<std::string_view>(line);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline LinesIter lines(std::string_view s) { return LinesIter{s}; }
+struct MatchesIter {
+std::string_view remaining;
+std::string pat;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done || pat.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto pos = remaining.find(pat);
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto m = remaining.substr(pos, pat.size());
+remaining = remaining.substr(pos + pat.size());
+return rusty::Option<std::string_view>(m);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline MatchesIter matches(std::string_view s, std::string_view pat) { return MatchesIter{s, std::string(pat)}; }
+inline MatchesIter matches(std::string_view s, char32_t ch) { return MatchesIter{s, std::string(1, static_cast<char>(ch))}; }
 }
 namespace char_runtime {
+// Rust `char::REPLACEMENT_CHARACTER` (U+FFFD).
+inline constexpr char32_t REPLACEMENT_CHARACTER = static_cast<char32_t>(0xFFFD);
 inline rusty::Option<char32_t> from_u32(uint32_t value) {
 if (value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
 return rusty::Option<char32_t>(rusty::None);
 }
 return rusty::Option<char32_t>(static_cast<char32_t>(value));
 }
+/* Rust char::from_digit(num, radix): digit -> char in the given radix
+(lowercase letters for 10..). Panics in Rust when radix > 36; None when
+num is not a digit in that radix. */
+inline rusty::Option<char32_t> from_digit(uint32_t num, uint32_t radix) {
+if (radix > 36 || num >= radix) {
+return rusty::Option<char32_t>(rusty::None);
+}
+const char32_t ch = num < 10
+? static_cast<char32_t>(U'0' + num)
+: static_cast<char32_t>(U'a' + (num - 10));
+return rusty::Option<char32_t>(ch);
+}
 inline std::size_t len_utf8(char32_t ch) {
 const auto code = static_cast<uint32_t>(ch);
 if (code < 0x80) return 1;
 if (code < 0x800) return 2;
 if (code < 0x10000) return 3;
+return 4;
+}
+template<typename Dst>
+inline std::size_t encode_utf8_raw_unchecked(uint32_t code, Dst dst) {
+using B = std::remove_reference_t<decltype(dst[0])>;
+if (code < 0x80u) { dst[0] = static_cast<B>(code); return 1; }
+if (code < 0x800u) {
+dst[0] = static_cast<B>(0xC0u | (code >> 6));
+dst[1] = static_cast<B>(0x80u | (code & 0x3Fu));
+return 2;
+}
+if (code < 0x10000u) {
+dst[0] = static_cast<B>(0xE0u | (code >> 12));
+dst[1] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));
+dst[2] = static_cast<B>(0x80u | (code & 0x3Fu));
+return 3;
+}
+dst[0] = static_cast<B>(0xF0u | (code >> 18));
+dst[1] = static_cast<B>(0x80u | ((code >> 12) & 0x3Fu));
+dst[2] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));
+dst[3] = static_cast<B>(0x80u | (code & 0x3Fu));
 return 4;
 }
 template<typename Buffer>
@@ -3546,6 +4594,71 @@ return true;
 }
 return code >= 0x2000 && code <= 0x200A;
 }
+// Rust `char` classifiers. The ASCII range is matched EXACTLY (as Rust does);
+// non-ASCII scalar values delegate to the C wide-character predicates, which
+// in the default "C" locale classify only ASCII — deterministic, and correct
+// for the ASCII-only inputs the ports exercise. Not a full Unicode oracle.
+inline bool is_ascii(char32_t ch) { return static_cast<uint32_t>(ch) <= 0x7F; }
+inline bool is_alphabetic(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+return std::iswalpha(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_numeric(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= '0' && c <= '9';
+return std::iswdigit(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_alphanumeric(char32_t ch) { return is_alphabetic(ch) || is_numeric(ch); }
+inline bool is_uppercase(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= 'A' && c <= 'Z';
+return std::iswupper(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_lowercase(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= 'a' && c <= 'z';
+return std::iswlower(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_control(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+// Unicode general category Cc: U+0000..=U+001F, U+007F..=U+009F.
+return c <= 0x1F || (c >= 0x7F && c <= 0x9F);
+}
+inline bool is_ascii_alphabetic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+inline bool is_ascii_digit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= '0' && c <= '9'; }
+inline bool is_ascii_alphanumeric(char32_t ch) { return is_ascii_alphabetic(ch) || is_ascii_digit(ch); }
+inline bool is_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'A' && c <= 'Z'; }
+inline bool is_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'a' && c <= 'z'; }
+inline bool is_ascii_hexdigit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+inline bool is_ascii_whitespace(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D; }
+inline bool is_ascii_control(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c <= 0x1F || c == 0x7F; }
+inline bool is_ascii_graphic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 0x21 && c <= 0x7E; }
+inline bool is_ascii_punctuation(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E); }
+inline char32_t to_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'a' && c <= 'z') ? static_cast<char32_t>(c - 32) : ch; }
+inline char32_t to_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') ? static_cast<char32_t>(c + 32) : ch; }
+inline char32_t to_lowercase_first(char32_t ch) { return to_ascii_lowercase(ch); }
+inline char32_t to_uppercase_first(char32_t ch) { return to_ascii_uppercase(ch); }
+inline rusty::Option<uint32_t> to_digit(char32_t ch, uint32_t radix) {
+const auto c = static_cast<uint32_t>(ch);
+uint32_t d;
+if (c >= '0' && c <= '9') d = c - '0';
+else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+else return rusty::Option<uint32_t>(rusty::None);
+return d < radix ? rusty::Option<uint32_t>(d) : rusty::Option<uint32_t>(rusty::None);
+}
+inline bool is_digit(char32_t ch, uint32_t radix) {
+const auto c = static_cast<uint32_t>(ch);
+uint32_t d;
+if (c >= '0' && c <= '9') d = c - '0';
+else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+else return false;
+return d < radix;
+}
+inline std::size_t len_utf16(char32_t ch) { return static_cast<uint32_t>(ch) <= 0xFFFF ? std::size_t(1) : std::size_t(2); }
+inline bool eq_ignore_ascii_case(char32_t a, char32_t b) { return to_ascii_lowercase(a) == to_ascii_lowercase(b); }
 }
 #if !defined(RUSTY_HAS_FREE_IS_EMPTY)
 template<typename T>
@@ -3579,28 +4692,36 @@ return (value);
 }
 namespace panicking {
 enum class AssertKind { Eq, Ne };
+[[noreturn]] inline void do_panic_(std::string_view message) {
+#ifdef RUSTY_PANIC_ABORT
+std::fprintf(stderr, "thread panicked: %.*s\n", (int)message.size(), message.data());
+std::abort();
+#else
+throw std::runtime_error(std::string(message));
+#endif
+}
 template<typename... Args>
-[[noreturn]] inline void assert_failed(Args&&...) { throw std::runtime_error("assertion failed"); }
-[[noreturn]] inline void panic() { throw std::runtime_error("panic"); }
+[[noreturn]] inline void assert_failed(Args&&...) { do_panic_("assertion failed"); }
+[[noreturn]] inline void panic() { do_panic_("panic"); }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic(Message&& message, Args&&...) {
 if constexpr (std::is_convertible_v<Message, std::string_view>) {
-throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+do_panic_(std::string_view(std::forward<Message>(message)));
 } else {
-throw std::runtime_error("panic");
+do_panic_("panic");
 }
 }
-[[noreturn]] inline void panic_fmt() { throw std::runtime_error("panic"); }
+[[noreturn]] inline void panic_fmt() { do_panic_("panic"); }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic_fmt(Message&& message, Args&&...) {
 if constexpr (std::is_convertible_v<Message, std::string_view>) {
-throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+do_panic_(std::string_view(std::forward<Message>(message)));
 } else {
-throw std::runtime_error("panic");
+do_panic_("panic");
 }
 }
 template<typename... Args>
-[[noreturn]] inline void unreachable_display(Args&&...) { throw std::runtime_error("unreachable"); }
+[[noreturn]] inline void unreachable_display(Args&&...) { do_panic_("unreachable"); }
 }
 namespace intrinsics {
 struct Discriminant {
@@ -3665,11 +4786,16 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module btree_port.btree.set;
-// btree_port port: imports reordered by post_transpile_patch.py
-import btree_port.btree.btree_internal;
 import btree_port.btree.map;
+import btree_port.btree.btree_internal;
 import btree_port.btree.set.entry;
+// btree_port port: imports reordered by post_transpile_patch.py
 
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(into_iter)
+RUSTY_METHOD_DISPATCH(last_leaf_edge)
+RUSTY_METHOD_DISPATCH(push_with_handle)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
 
 namespace btree_port::btree::btree_internal {}
 namespace btree_port::btree::map {}
@@ -3679,6 +4805,7 @@ namespace btree_internal = ::btree_port::btree::btree_internal;
 namespace map = ::btree_port::btree::map;
 namespace marker = ::btree_port::btree::btree_internal::marker;
 namespace node = ::btree_port::btree::btree_internal;
+
 // btree_port port: variant-type forward decls injected by post_transpile_patch.py
 template<typename T, typename A>
 struct DifferenceInner_Stitch;
@@ -3693,11 +4820,10 @@ struct IntersectionInner_Search;
 template<typename T, typename A>
 struct IntersectionInner_Answer;
 
-
 export template<typename T>
 struct Iter;
 export template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct IntoIter;
 export template<typename T>
 struct Range;
@@ -3706,7 +4832,7 @@ struct SymmetricDifference;
 export template<typename T>
 struct Union;
 export template<typename T, typename R, typename F, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct ExtractIf;
 export template<typename K>
 struct Cursor;
@@ -3715,19 +4841,31 @@ struct CursorMutKey;
 export template<typename K, typename A>
 struct CursorMut;
 export template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct BTreeSet;
 export template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct Difference;
 template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+struct DifferenceInner_Stitch;
+template<typename T, typename A>
+struct DifferenceInner_Search;
+template<typename T, typename A>
+struct DifferenceInner_Iterate;
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct DifferenceInner;
 export template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct Intersection;
 template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+struct IntersectionInner_Stitch;
+template<typename T, typename A>
+struct IntersectionInner_Search;
+template<typename T, typename A>
+struct IntersectionInner_Answer;
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct IntersectionInner;
 constexpr size_t ITER_PERFORMANCE_TIPPING_SIZE_DIFF = static_cast<size_t>(16);
 
@@ -3816,10 +4954,6 @@ struct Iter {
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.debug_list().entries(rusty::clone((*this))).finish();
-    }
-    template<typename K, typename V>
     static Iter<T> default_() {
         return Iter<T>{.range = Iter::default_(), .length = 0};
     }
@@ -3834,10 +4968,6 @@ struct Iter {
             rusty::detail::deref_if_pointer_like(this->length) -= 1;
             return rusty::Option<std::tuple<const K&, const V&>>(this->range.next_unchecked());
         }
-    }
-    template<typename K, typename V>
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(this->length, rusty::Option<size_t>(this->length));
     }
     template<typename K, typename V>
     rusty::Option<std::tuple<const K&, const V&>> last() {
@@ -3860,14 +4990,6 @@ struct Iter {
             return rusty::Option<std::tuple<const K&, const V&>>(this->range.next_back_unchecked());
         }
     }
-    template<typename K, typename V>
-    size_t len() const {
-        return this->length;
-    }
-    template<typename K, typename V>
-    Iter<T> clone() const {
-        return Iter<T>{.range = rusty::clone(this->range), .length = this->length};
-    }
 #endif
 };
 
@@ -3878,7 +5000,7 @@ struct Iter {
 ///
 /// [`into_iter`]: BTreeSet#method.into_iter
 export template<typename T, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct IntoIter {
     using Item = T;
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
@@ -3903,7 +5025,7 @@ struct IntoIter {
 
 
     rusty::Option<T> next() {
-        return this->iter_field.next().map([&](auto&& _destruct_param0) {
+        return this->iter_field.next().map([&](auto&& _destruct_param0) -> T {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
@@ -3912,7 +5034,7 @@ return std::move(k);
         return this->iter_field.size_hint();
     }
     rusty::Option<T> next_back() {
-        return this->iter_field.next_back().map([&](auto&& _destruct_param0) {
+        return this->iter_field.next_back().map([&](auto&& _destruct_param0) -> T {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
@@ -3921,21 +5043,23 @@ return std::move(k);
         return rusty::len(this->iter_field);
     }
     static IntoIter<T, A> default_() {
-        return IntoIter<T, A>(rusty::default_value<map::IntoIter<T, btree_internal::SetValZST, A>>());
+        return IntoIter<T, A>(rusty::default_like<A>());
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
     Iter<K, V> iter() const {
         return Iter<K, V>{.range = this->range.reborrow(), .length = this->length};
     }
-    template<typename K, typename V>
+#endif
+    // btree_port port: orphan fmt routed through rusty::iter by post_transpile_patch.py
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_list().entries(rusty::iter((*this))).finish();
     }
+#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static IntoIter<T, A> default_() {
-        return IntoIter<T, A>{.range = A::default_(), .length = 0, .alloc = A::default_()};
+        return IntoIter<T, A>{.range = rusty::default_like<A>(), .length = 0, .alloc = rusty::default_like<A>()};
     }
 #endif
 #if 0  // // btree_port port: broken set.cppm regions stubbed by post_transpile_patch.py
@@ -3965,7 +5089,7 @@ return std::move(k);
             while (true) {
                 auto&& _whilelet = this->_0.dying_next();
                 if (!(_whilelet.is_some())) { break; }
-                auto kv = _whilelet.unwrap();
+                decltype(auto) kv = _whilelet.unwrap();
                 // @unsafe
                 {
                     kv.drop_key_val();
@@ -3981,7 +5105,7 @@ return std::move(k);
         while (true) {
             auto&& _whilelet = this->dying_next();
             if (!(_whilelet.is_some())) { break; }
-            auto kv = _whilelet.unwrap();
+            decltype(auto) kv = _whilelet.unwrap();
             const auto guard = DropGuard((*this));
             // @unsafe
             {
@@ -4018,21 +5142,16 @@ return std::move(k);
         return this->dying_next().map([&](auto&& kv) -> std::tuple<K, V> { return kv.into_key_val(); });
     }
     template<typename K, typename V>
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(this->length, rusty::Option<size_t>(this->length));
-    }
-    template<typename K, typename V>
     rusty::Option<std::tuple<K, V>> next_back() {
         return this->dying_next_back().map([&](auto&& kv) -> std::tuple<K, V> { return kv.into_key_val(); });
     }
-    template<typename K, typename V>
-    size_t len() const {
-        return this->length;
-    }
 #endif
 
+    std::string rusty_debug_string() const {
+        return std::string("IntoIter { ") + "iter: " + rusty::to_debug_string(this->iter_field) + " }";
+    }
     friend std::ostream& operator<<(std::ostream& os, const IntoIter& v) {
-        return os << "IntoIter { ... }";
+        return os << v.rusty_debug_string();
     }
 };
 
@@ -4052,11 +5171,10 @@ struct Range {
         return Range<T>{.iter = rusty::clone(this->iter)};
     }
     rusty::Option<const T&> next() {
-        // Same const-ref fix as Keys::next — return `-> const T&` so we
-        // don't decay an lvalue-ref to const T&& via std::move.
-        return this->iter.next().map([&](auto&& _destruct_param0) -> const T& {
-            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-        });
+        return this->iter.next().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
     }
     rusty::Option<const T&> last() {
         return this->next_back();
@@ -4068,19 +5186,17 @@ struct Range {
         return this->next_back();
     }
     rusty::Option<const T&> next_back() {
-        return this->iter.next_back().map([&](auto&& _destruct_param0) -> const T& {
-            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-        });
+        return this->iter.next_back().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
     }
     static Range<T> default_() {
         return Range<T>{.iter = rusty::range<T>(static_cast<T>(0), static_cast<T>(0))};
     }
-#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename K, typename V>
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_list().entries(rusty::clone((*this))).finish();
     }
-#endif
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
@@ -4107,14 +5223,13 @@ struct Range {
     rusty::Option<std::tuple<const K&, const V&>> next_back() {
         return this->inner.next_back_checked();
     }
-    template<typename K, typename V>
-    Range<T> clone() const {
-        return Range<T>{.inner = rusty::clone(this->inner)};
-    }
 #endif
 
+    std::string rusty_debug_string() const {
+        return std::string("Range { ") + "iter: " + rusty::to_debug_string(this->iter) + " }";
+    }
     friend std::ostream& operator<<(std::ostream& os, const Range& v) {
-        return os << "Range { ... }";
+        return os << v.rusty_debug_string();
     }
 };
 
@@ -4135,45 +5250,8 @@ struct SymmetricDifference {
     SymmetricDifference<T> clone() const {
         return SymmetricDifference(rusty::clone(this->_0));
     }
-    // Hand-port: bypass the broken MergeIterInner::nexts emit. Use
-    // _0.peeked directly. Peeked variant 0 = Left (a-buffered),
-    // variant 1 = Right (b-buffered).
     rusty::Option<const T&> next() {
-        while (true) {
-            rusty::Option<const T&> a_val{rusty::None};
-            rusty::Option<const T&> b_val{rusty::None};
-            if (this->_0.peeked.is_some()) {
-                auto pv = std::move(this->_0.peeked).unwrap();
-                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};
-                if (pv.index() == 0) {
-                    a_val = rusty::Option<const T&>(std::get<0>(pv)._0);
-                    b_val = this->_0.b.next();
-                } else {
-                    b_val = rusty::Option<const T&>(std::get<1>(pv)._0);
-                    a_val = this->_0.a.next();
-                }
-            } else {
-                a_val = this->_0.a.next();
-                b_val = this->_0.b.next();
-            }
-            if (!a_val.is_some() && !b_val.is_some()) {
-                return rusty::Option<const T&>{rusty::None};
-            }
-            if (!b_val.is_some()) return std::move(a_val);
-            if (!a_val.is_some()) return std::move(b_val);
-            const T& a_ref = a_val.unwrap();
-            const T& b_ref = b_val.unwrap();
-            if (a_ref < b_ref) {
-                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
-                    btree_internal::Peeked_Right<Iter<T>>{b_ref});
-                return rusty::Option<const T&>(a_ref);
-            } else if (b_ref < a_ref) {
-                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
-                    btree_internal::Peeked_Left<Iter<T>>{a_ref});
-                return rusty::Option<const T&>(b_ref);
-            }
-            // equal: drop both, loop
-        }
+        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         auto [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
@@ -4201,43 +5279,8 @@ struct Union {
     Union<T> clone() const {
         return Union(rusty::clone(this->_0));
     }
-    // Union: emit a if Some, else b. For equal pair, emit a and drop b.
-    // Implementation uses _0.peeked directly (see SymmetricDifference::next).
     rusty::Option<const T&> next() {
-        rusty::Option<const T&> a_val{rusty::None};
-        rusty::Option<const T&> b_val{rusty::None};
-        if (this->_0.peeked.is_some()) {
-            auto pv = std::move(this->_0.peeked).unwrap();
-            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};
-            if (pv.index() == 0) {
-                a_val = rusty::Option<const T&>(std::get<0>(pv)._0);
-                b_val = this->_0.b.next();
-            } else {
-                b_val = rusty::Option<const T&>(std::get<1>(pv)._0);
-                a_val = this->_0.a.next();
-            }
-        } else {
-            a_val = this->_0.a.next();
-            b_val = this->_0.b.next();
-        }
-        if (!a_val.is_some() && !b_val.is_some()) {
-            return rusty::Option<const T&>{rusty::None};
-        }
-        if (!b_val.is_some()) return std::move(a_val);
-        if (!a_val.is_some()) return std::move(b_val);
-        const T& a_ref = a_val.unwrap();
-        const T& b_ref = b_val.unwrap();
-        if (a_ref < b_ref) {
-            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
-                btree_internal::Peeked_Right<Iter<T>>{b_ref});
-            return rusty::Option<const T&>(a_ref);
-        } else if (b_ref < a_ref) {
-            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
-                btree_internal::Peeked_Left<Iter<T>>{a_ref});
-            return rusty::Option<const T&>(b_ref);
-        }
-        // equal: emit a, drop b
-        return rusty::Option<const T&>(a_ref);
+        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         auto [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
@@ -4250,7 +5293,7 @@ struct Union {
 
 /// An iterator produced by calling `extract_if` on BTreeSet.
 export template<typename T, typename R, typename F, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct ExtractIf {
     using Item = T;
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
@@ -4267,13 +5310,8 @@ return std::move(k);
     }
     rusty::Option<T> next() {
         auto& pred = this->pred;
-        // Hand-port: the inner map path invokes the predicate with a moved
-        // rvalue SetValZST; Rust inferred this closure param — auto&& matches
-        // both value categories.
-        auto mapped_pred = [&](const T& k, auto&& _v) { return pred(k); };
-        // Hand-port: Rust `&mut mapped_pred` is a borrow — the emitted address-of
-        // produced a pointer rvalue that `next(F&)` cannot bind.
-        return this->inner.next(mapped_pred, rusty::clone(this->alloc)).map([&](auto&& _destruct_param0) {
+        auto mapped_pred = [&](const T& k, btree_internal::SetValZST& _v) { return pred(k); };
+        return this->inner.next(&mapped_pred, rusty::clone(this->alloc)).map([&](auto&& _destruct_param0) -> T {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
@@ -4281,22 +5319,11 @@ return std::move(k);
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
-#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename K, typename V>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.debug_struct("ExtractIf").field("peek", this->inner.peek()).finish_non_exhaustive();
-    }
-#endif
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
     rusty::Option<std::tuple<K, V>> next() {
         return this->inner.next(&this->pred, rusty::clone(this->alloc));
-    }
-    template<typename K, typename V>
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return this->inner.size_hint();
     }
 #endif
 };
@@ -4317,55 +5344,52 @@ struct Cursor {
         return f.write_str("Cursor");
     }
     rusty::Option<const K&> next() {
-        return this->inner.next().map([&](auto&& _destruct_param0) {
+        return this->inner.next().map([&](auto&& _destruct_param0) -> decltype(auto) {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
+return k;
 });
     }
     rusty::Option<const K&> prev() {
-        return this->inner.prev().map([&](auto&& _destruct_param0) {
+        return this->inner.prev().map([&](auto&& _destruct_param0) -> decltype(auto) {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
+return k;
 });
     }
     rusty::Option<const K&> peek_next() const {
-        return this->inner.peek_next().map([&](auto&& _destruct_param0) {
+        return this->inner.peek_next().map([&](auto&& _destruct_param0) -> decltype(auto) {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
+return k;
 });
     }
     rusty::Option<const K&> peek_prev() const {
-        return this->inner.peek_prev().map([&](auto&& _destruct_param0) {
+        return this->inner.peek_prev().map([&](auto&& _destruct_param0) -> decltype(auto) {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
+return k;
 });
     }
-#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename V>
+#if 0  // btree_port port: orphan Cursor<K> clone gated by post_transpile_patch.py
     Cursor<K> clone() const {
         auto&& _let_pat = (*this);
         auto&& current = rusty::detail::deref_if_pointer(_let_pat.current);
         auto&& root = rusty::detail::deref_if_pointer(_let_pat.root);
         return Cursor<K>{.current = std::move(current), .root = std::move(root)};
     }
-    template<typename V>
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.write_str("Cursor");
-    }
+#endif
+#if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename V>
     rusty::Option<std::tuple<const K&, const V&>> next() {
-        const auto current = RUSTY_TRY_OPT(this->current.take());
-        return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto&& _m = current.next_kv(); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& kv = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto result = kv.into_kv();
+        auto&& current = RUSTY_TRY_OPT(this->current.take());
+        return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto&& _m = current.next_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto&& kv = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto result = kv.into_kv();
 this->current = rusty::Some(kv.next_leaf_edge());
-return rusty::Option<std::tuple<const K&, const V&>>(std::move(result)); }(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { this->current = rusty::Some(root.last_leaf_edge());
+return rusty::Option<std::tuple<const K&, const V&>>(std::move(result)); }(); } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err_mut(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { this->current = rusty::Some(root.last_leaf_edge());
 return rusty::Option<std::tuple<const K&, const V&>>{rusty::None}; }(); } return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename V>
     rusty::Option<std::tuple<const K&, const V&>> prev() {
-        const auto current = RUSTY_TRY_OPT(this->current.take());
-        return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto&& _m = current.next_back_kv(); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& kv = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto result = kv.into_kv();
+        auto&& current = RUSTY_TRY_OPT(this->current.take());
+        return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto&& _m = current.next_back_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto&& kv = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto result = kv.into_kv();
 this->current = rusty::Some(kv.next_back_leaf_edge());
-return rusty::Option<std::tuple<const K&, const V&>>(std::move(result)); }(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { this->current = rusty::Some(root.first_leaf_edge());
+return rusty::Option<std::tuple<const K&, const V&>>(std::move(result)); }(); } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err_mut(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { this->current = rusty::Some(root.first_leaf_edge());
 return rusty::Option<std::tuple<const K&, const V&>>{rusty::None}; }(); } return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename V>
@@ -4409,114 +5433,133 @@ struct CursorMutKey {
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.write_str("CursorMutKey");
     }
+    rusty::Option<K&> next() {
+        return this->inner.next().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    rusty::Option<K&> prev() {
+        return this->inner.prev().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    rusty::Option<K&> peek_next() {
+        return this->inner.peek_next().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    rusty::Option<K&> peek_prev() {
+        return this->inner.peek_prev().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    Cursor<K> as_cursor() const {
+        return Cursor<K>{.inner = this->inner.as_cursor()};
+    }
+    void insert_after_unchecked(K value) {
+        // @unsafe
+        {
+            this->inner.insert_after_unchecked(std::move(value), btree_internal::SetValZST{});
+        }
+    }
+    void insert_before_unchecked(K value) {
+        // @unsafe
+        {
+            this->inner.insert_before_unchecked(std::move(value), btree_internal::SetValZST{});
+        }
+    }
+    auto insert_after(K value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
+        return this->inner.insert_after(std::move(value), btree_internal::SetValZST{});
+    }
+    auto insert_before(K value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
+        return this->inner.insert_before(std::move(value), btree_internal::SetValZST{});
+    }
+    rusty::Option<K> remove_next() {
+        return this->inner.remove_next().map([&](auto&& _destruct_param0) -> K {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return std::move(k);
+});
+    }
+    rusty::Option<K> remove_prev() {
+        return this->inner.remove_prev().map([&](auto&& _destruct_param0) -> K {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return std::move(k);
+});
+    }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename T>
-    rusty::Option<T&> next() {
-        return this->inner.next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<T&> prev() {
-        return this->inner.prev().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<T&> peek_next() {
-        return this->inner.peek_next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<T&> peek_prev() {
-        return this->inner.peek_prev().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    Cursor<T> as_cursor() const {
-        return Cursor<T>{.inner = this->inner.as_cursor()};
-    }
-    template<typename T>
-    void insert_after_unchecked(T value) {
-        // @unsafe
-        {
-            this->inner.insert_after_unchecked(std::move(value), SetValZST);
-        }
-    }
-    template<typename T>
-    void insert_before_unchecked(T value) {
-        // @unsafe
-        {
-            this->inner.insert_before_unchecked(std::move(value), SetValZST);
-        }
-    }
-    template<typename T>
-    auto insert_after(T value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
-        return this->inner.insert_after(std::move(value), SetValZST);
-    }
-    template<typename T>
-    auto insert_before(T value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
-        return this->inner.insert_before(std::move(value), SetValZST);
-    }
-    template<typename T>
-    rusty::Option<T> remove_next() {
-        return this->inner.remove_next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<T> remove_prev() {
-        return this->inner.remove_prev().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+    template<typename V>
+    rusty::Option<std::tuple<K&, V&>> next() {
+        auto&& current = RUSTY_TRY_OPT(this->current.take());
+        return [&]() -> rusty::Option<std::tuple<K&, V&>> { auto&& _m = current.next_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto kv = std::move(rusty::detail::deref_if_pointer(_mv0)); return [&]() -> rusty::Option<std::tuple<K&, V&>> { auto [k, v] = rusty::detail::deref_if_pointer_like(kv.reborrow_mut().into_kv_mut());
+auto [k_shadow1, v_shadow1] = rusty::detail::deref_if_pointer_like(std::make_tuple(const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<decltype((k))>>>*>(k), const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<decltype((v))>>>*>(v)));
+this->current = rusty::Some(kv.next_leaf_edge());
+return rusty::Option<std::tuple<K&, V&>>(std::tuple<K&, V&>{*k_shadow1, *v_shadow1}); }(); } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err_mut(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<std::tuple<K&, V&>> { this->current = rusty::Some(root.last_leaf_edge());
+return rusty::Option<std::tuple<K&, V&>>{rusty::None}; }(); } return [&]() -> rusty::Option<std::tuple<K&, V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename V>
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.write_str("CursorMutKey");
+    rusty::Option<std::tuple<K&, V&>> prev() {
+        auto&& current = RUSTY_TRY_OPT(this->current.take());
+        return [&]() -> rusty::Option<std::tuple<K&, V&>> { auto&& _m = current.next_back_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto kv = std::move(rusty::detail::deref_if_pointer(_mv0)); return [&]() -> rusty::Option<std::tuple<K&, V&>> { auto [k, v] = rusty::detail::deref_if_pointer_like(kv.reborrow_mut().into_kv_mut());
+auto [k_shadow1, v_shadow1] = rusty::detail::deref_if_pointer_like(std::make_tuple(const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<decltype((k))>>>*>(k), const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<decltype((v))>>>*>(v)));
+this->current = rusty::Some(kv.next_back_leaf_edge());
+return rusty::Option<std::tuple<K&, V&>>(std::tuple<K&, V&>{*k_shadow1, *v_shadow1}); }(); } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err_mut(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<std::tuple<K&, V&>> { this->current = rusty::Some(root.first_leaf_edge());
+return rusty::Option<std::tuple<K&, V&>>{rusty::None}; }(); } return [&]() -> rusty::Option<std::tuple<K&, V&>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename V>
+    rusty::Option<std::tuple<K&, V&>> peek_next() {
+        auto&& current = RUSTY_TRY_OPT(this->current.as_mut());
+        auto& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_kv().ok()).into_kv_mut();
+        return rusty::Option<std::tuple<K&, V&>>(kv);
+    }
+    template<typename V>
+    rusty::Option<std::tuple<K&, V&>> peek_prev() {
+        auto&& current = RUSTY_TRY_OPT(this->current.as_mut());
+        auto& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();
+        return rusty::Option<std::tuple<K&, V&>>(kv);
+    }
+    template<typename V>
+    Cursor<K, V> as_cursor() const {
+        return Cursor<K, V>{.root = this->root.reborrow_shared().as_ref(), .current = this->current.as_ref().map([&](auto&& current) { return current.reborrow(); })};
     }
     template<typename V>
     void insert_after_unchecked(K key, V value) {
         const auto edge = ({ auto&& _m = this->current.take(); std::conditional_t<std::is_reference_v<decltype(_m.unwrap())>, std::optional<std::reference_wrapper<std::remove_reference_t<decltype(_m.unwrap())>>>, std::optional<std::remove_cvref_t<decltype(_m.unwrap())>>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
 auto&& current = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-_match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } auto& root = this->root.reborrow();
+_match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } auto root = this->root.reborrow();
 assert((root.is_none()));
 auto node = NodeRef::new_leaf(rusty::clone(this->alloc));
-const auto handle = node.borrow_mut().push_with_handle(std::move(key), std::move(value));
-root = rusty::Some(node.forget_type());
+const auto handle = rusty::deref_call(node.borrow_mut(), rusty::detail::__mdisp_push_with_handle{}, std::move(key), std::move(value));
+rusty::detail::deref_if_pointer_like(root) = rusty::Some(node.forget_type());
 rusty::detail::deref_if_pointer_like(this->length) += 1;
 this->current = rusty::Some(handle.left_edge()); return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
         const auto handle = edge.insert_recursing(std::move(key), std::move(value), rusty::clone(this->alloc), [&](auto&& ins) {
-rusty::mem::drop(std::move(ins.left));
-auto& root = this->root.reborrow().as_mut().unwrap();
-return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
+rusty::mem::drop(std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.left); }) { return (__r.left); } else if constexpr (requires { (__r.left_field); }) { return (__r.left_field); } else if constexpr (requires { ((*__r).left); }) { return ((*__r).left); } else { return ((*__r).left_field); } }(ins)));
+auto root = this->root.reborrow().as_mut().unwrap();
+return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.kv); }) { return (__r.kv); } else if constexpr (requires { (__r.kv_field); }) { return (__r.kv_field); } else if constexpr (requires { ((*__r).kv); }) { return ((*__r).kv); } else { return ((*__r).kv_field); } }(ins)))), std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.kv); }) { return (__r.kv); } else if constexpr (requires { (__r.kv_field); }) { return (__r.kv_field); } else if constexpr (requires { ((*__r).kv); }) { return ((*__r).kv); } else { return ((*__r).kv_field); } }(ins)))), std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.right); }) { return (__r.right); } else if constexpr (requires { (__r.right_field); }) { return (__r.right_field); } else if constexpr (requires { ((*__r).right); }) { return ((*__r).right); } else { return ((*__r).right_field); } }(ins)));
 });
         this->current = rusty::Some(handle.left_edge());
         rusty::detail::deref_if_pointer_like(this->length) += 1;
     }
     template<typename V>
     void insert_before_unchecked(K key, V value) {
-        const auto edge = [&]() { auto&& _m = this->current.take(); if (_m.is_none()) { return ({ auto&& _m = this->root.reborrow(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto&& _mv = _m.unwrap();
+        const auto edge = [&]() { auto&& _m = this->current.take(); if (rusty::detail::deref_if_pointer(_m).is_none()) { return ({ auto&& _m = this->root.reborrow(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto&& _mv = _m.unwrap();
 auto&& root = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-return (root.borrow_mut().last_leaf_edge()); })())>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
+return (rusty::deref_call(root.borrow_mut(), rusty::detail::__mdisp_last_leaf_edge{})); })())>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
 auto&& root = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-_match_value.emplace(std::move(root.borrow_mut().last_leaf_edge())); } else { const auto& root = _m;
+_match_value.emplace(std::move(rusty::deref_call(root.borrow_mut(), rusty::detail::__mdisp_last_leaf_edge{}))); } else { const auto& root = _m;
 auto node = NodeRef::new_leaf(rusty::clone(this->alloc));
-const auto handle = node.borrow_mut().push_with_handle(std::move(key), std::move(value));
+const auto handle = rusty::deref_call(node.borrow_mut(), rusty::detail::__mdisp_push_with_handle{}, std::move(key), std::move(value));
 rusty::detail::deref_if_pointer_like(root) = rusty::Some(node.forget_type());
 rusty::detail::deref_if_pointer_like(this->length) += 1;
-this->current = rusty::Some(handle.right_edge()); return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }); } if (_m.is_some()) { return _m.unwrap(); } rusty::intrinsics::unreachable(); }();
+this->current = rusty::Some(handle.right_edge()); return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }); } if (rusty::detail::deref_if_pointer(_m).is_some()) { return rusty::detail::deref_if_pointer(_m).unwrap(); } rusty::intrinsics::unreachable(); }();
         const auto handle = edge.insert_recursing(std::move(key), std::move(value), rusty::clone(this->alloc), [&](auto&& ins) {
-rusty::mem::drop(std::move(ins.left));
-auto& root = this->root.reborrow().as_mut().unwrap();
-return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
+rusty::mem::drop(std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.left); }) { return (__r.left); } else if constexpr (requires { (__r.left_field); }) { return (__r.left_field); } else if constexpr (requires { ((*__r).left); }) { return ((*__r).left); } else { return ((*__r).left_field); } }(ins)));
+auto root = this->root.reborrow().as_mut().unwrap();
+return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.kv); }) { return (__r.kv); } else if constexpr (requires { (__r.kv_field); }) { return (__r.kv_field); } else if constexpr (requires { ((*__r).kv); }) { return ((*__r).kv); } else { return ((*__r).kv_field); } }(ins)))), std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.kv); }) { return (__r.kv); } else if constexpr (requires { (__r.kv_field); }) { return (__r.kv_field); } else if constexpr (requires { ((*__r).kv); }) { return ((*__r).kv); } else { return ((*__r).kv_field); } }(ins)))), std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.right); }) { return (__r.right); } else if constexpr (requires { (__r.right_field); }) { return (__r.right_field); } else if constexpr (requires { ((*__r).right); }) { return ((*__r).right); } else { return ((*__r).right_field); } }(ins)));
 });
         this->current = rusty::Some(handle.right_edge());
         rusty::detail::deref_if_pointer_like(this->length) += 1;
@@ -4565,6 +5608,40 @@ return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(([](au
         }
         return rusty::Result<rusty::Unit, map::UnorderedKeyError>::Ok(std::make_tuple());
     }
+    template<typename V>
+    rusty::Option<std::tuple<K, V>> remove_next() {
+        auto&& current = RUSTY_TRY_OPT(this->current.take());
+        if (current.reborrow().next_kv().is_err()) {
+            this->current = rusty::Some(std::move(current));
+            return rusty::Option<std::tuple<K, V>>{rusty::None};
+        }
+        auto emptied_internal_root = false;
+        auto [kv, pos] = rusty::detail::deref_if_pointer_like(RUSTY_TRY_OPT(current.next_kv().ok()).remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
+        this->current = rusty::Some(std::move(pos));
+        rusty::detail::deref_if_pointer_like(this->length) -= 1;
+        if (emptied_internal_root) {
+            auto root = this->root.reborrow().as_mut().unwrap();
+            root.pop_internal_level(rusty::clone(this->alloc));
+        }
+        return rusty::Option<std::tuple<K, V>>(std::move(kv));
+    }
+    template<typename V>
+    rusty::Option<std::tuple<K, V>> remove_prev() {
+        auto&& current = RUSTY_TRY_OPT(this->current.take());
+        if (current.reborrow().next_back_kv().is_err()) {
+            this->current = rusty::Some(std::move(current));
+            return rusty::Option<std::tuple<K, V>>{rusty::None};
+        }
+        auto emptied_internal_root = false;
+        auto [kv, pos] = rusty::detail::deref_if_pointer_like(RUSTY_TRY_OPT(current.next_back_kv().ok()).remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
+        this->current = rusty::Some(std::move(pos));
+        rusty::detail::deref_if_pointer_like(this->length) -= 1;
+        if (emptied_internal_root) {
+            auto root = this->root.reborrow().as_mut().unwrap();
+            root.pop_internal_level(rusty::clone(this->alloc));
+        }
+        return rusty::Option<std::tuple<K, V>>(std::move(kv));
+    }
 #endif
 };
 
@@ -4587,82 +5664,94 @@ struct CursorMut {
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.write_str("CursorMut");
     }
+    rusty::Option<const K&> next() {
+        return this->inner.next().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    rusty::Option<const K&> prev() {
+        return this->inner.prev().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    rusty::Option<const K&> peek_next() {
+        return this->inner.peek_next().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    rusty::Option<const K&> peek_prev() {
+        return this->inner.peek_prev().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
+    }
+    Cursor<K> as_cursor() const {
+        return Cursor<K>{.inner = this->inner.as_cursor()};
+    }
+    CursorMutKey<K, A> with_mutable_key() {
+        return CursorMutKey<K, A>{.inner = this->inner.with_mutable_key()};
+    }
+    void insert_after_unchecked(K value) {
+        // @unsafe
+        {
+            this->inner.insert_after_unchecked(std::move(value), btree_internal::SetValZST{});
+        }
+    }
+    void insert_before_unchecked(K value) {
+        // @unsafe
+        {
+            this->inner.insert_before_unchecked(std::move(value), btree_internal::SetValZST{});
+        }
+    }
+    auto insert_after(K value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
+        return this->inner.insert_after(std::move(value), btree_internal::SetValZST{});
+    }
+    auto insert_before(K value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
+        return this->inner.insert_before(std::move(value), btree_internal::SetValZST{});
+    }
+    rusty::Option<K> remove_next() {
+        return this->inner.remove_next().map([&](auto&& _destruct_param0) -> K {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return std::move(k);
+});
+    }
+    rusty::Option<K> remove_prev() {
+        return this->inner.remove_prev().map([&](auto&& _destruct_param0) -> K {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return std::move(k);
+});
+    }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
-    template<typename T>
-    rusty::Option<const T&> next() {
-        return this->inner.next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<const T&> prev() {
-        return this->inner.prev().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<const T&> peek_next() {
-        return this->inner.peek_next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<const T&> peek_prev() {
-        return this->inner.peek_prev().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    Cursor<T> as_cursor() const {
-        return Cursor<T>{.inner = this->inner.as_cursor()};
-    }
-    template<typename T>
-    CursorMutKey<T, A> with_mutable_key() {
-        return CursorMutKey<T, A>{.inner = this->inner.with_mutable_key()};
-    }
-    template<typename T>
-    void insert_after_unchecked(T value) {
-        // @unsafe
-        {
-            this->inner.insert_after_unchecked(std::move(value), SetValZST);
-        }
-    }
-    template<typename T>
-    void insert_before_unchecked(T value) {
-        // @unsafe
-        {
-            this->inner.insert_before_unchecked(std::move(value), SetValZST);
-        }
-    }
-    template<typename T>
-    auto insert_after(T value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
-        return this->inner.insert_after(std::move(value), SetValZST);
-    }
-    template<typename T>
-    auto insert_before(T value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
-        return this->inner.insert_before(std::move(value), SetValZST);
-    }
-    template<typename T>
-    rusty::Option<T> remove_next() {
-        return this->inner.remove_next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
-    }
-    template<typename T>
-    rusty::Option<T> remove_prev() {
-        return this->inner.remove_prev().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+    template<typename V>
+    rusty::Option<std::tuple<const K&, V&>> next() {
+        auto [k, v] = rusty::detail::deref_if_pointer_like(RUSTY_TRY_OPT(this->inner.next()));
+        return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{rusty::detail::deref_if_pointer_like(k), v});
     }
     template<typename V>
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.write_str("CursorMut");
+    rusty::Option<std::tuple<const K&, V&>> prev() {
+        auto [k, v] = rusty::detail::deref_if_pointer_like(RUSTY_TRY_OPT(this->inner.prev()));
+        return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{rusty::detail::deref_if_pointer_like(k), v});
+    }
+    template<typename V>
+    rusty::Option<std::tuple<const K&, V&>> peek_next() {
+        auto [k, v] = rusty::detail::deref_if_pointer_like(RUSTY_TRY_OPT(this->inner.peek_next()));
+        return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{rusty::detail::deref_if_pointer_like(k), v});
+    }
+    template<typename V>
+    rusty::Option<std::tuple<const K&, V&>> peek_prev() {
+        auto [k, v] = rusty::detail::deref_if_pointer_like(RUSTY_TRY_OPT(this->inner.peek_prev()));
+        return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{rusty::detail::deref_if_pointer_like(k), v});
+    }
+    template<typename V>
+    Cursor<K, V> as_cursor() const {
+        return this->inner.as_cursor();
+    }
+    template<typename V>
+    CursorMutKey<K, V, A> with_mutable_key() {
+        return std::move(this->inner);
     }
     template<typename V>
     void insert_after_unchecked(K key, V value) {
@@ -4685,6 +5774,14 @@ return std::move(k);
     template<typename V>
     auto insert_before(K key, V value) -> rusty::Result<rusty::Unit, map::UnorderedKeyError> {
         return this->inner.insert_before(std::move(key), std::move(value));
+    }
+    template<typename V>
+    rusty::Option<std::tuple<K, V>> remove_next() {
+        return this->inner.remove_next();
+    }
+    template<typename V>
+    rusty::Option<std::tuple<K, V>> remove_prev() {
+        return this->inner.remove_prev();
     }
 #endif
 };
@@ -4745,7 +5842,7 @@ return std::move(k);
 /// let set = BTreeSet::from([1, 2, 3]);
 /// ```
 export template<typename T, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct BTreeSet {
     using Item = T;
     using IntoIter = IntoIter<T, A>;
@@ -4767,53 +5864,28 @@ struct BTreeSet {
         return rusty::cmp::cmp(this->map, other.map);
     }
     BTreeSet<T, A> clone() const {
-        return BTreeSet<T, A>(this->map.clone());
+        return BTreeSet<T, A>(rusty::clone(this->map));
     }
     void clone_from(const BTreeSet<T, A>& source) {
         this->map.clone_from(source.map);
     }
-    static BTreeSet<T> new_() {
+    static constexpr BTreeSet<T> new_() {
         return BTreeSet<T>(map::BTreeMap<T, btree_internal::SetValZST, A>::new_());
     }
-    static BTreeSet<T, A> new_in(A alloc) {
+    static constexpr BTreeSet<T, A> new_in(A alloc) {
         return BTreeSet<T, A>(map::BTreeMap<T, btree_internal::SetValZST, A>::new_in(std::move(alloc)));
     }
-    // Drop unused K template param (Rust uses it for the Borrow trait;
-    // C++ has no analog and it's undeducible at the call site).
     template<typename R>
     Range<T> range(R range) const {
         return Range<T>{.iter = this->map.range(std::move(range))};
     }
-    // Hand-port: skip the stitch-optimization choice from rustc (which
-    // depends on relative set sizes — irrelevant for correctness).
-    // Always pick the Search variant: iterate self, filter by
-    // other.contains. Same complexity in the worst case as Stitch on
-    // sorted inputs.
-    Difference<T, A> difference(const BTreeSet<T, A>& other) const {
-        return Difference<T, A>{
-            .inner = DifferenceInner<T, A>{
-                DifferenceInner_Search<T, A>{
-                    .self_iter = this->iter(),
-                    .other_set = other
-                }
-            }
-        };
-    }
+    Difference<T, A> difference(const BTreeSet<T, A>& other) const;
     SymmetricDifference<T> symmetric_difference(const BTreeSet<T, A>& other) const {
-        return SymmetricDifference(btree_internal::MergeIterInner<Iter<T>>::new_(rusty::iter((*this)), rusty::iter(other)));
+        return SymmetricDifference(btree_internal::MergeIterInner<Iter<T>>::new_(this->iter(), other.iter()));
     }
-    Intersection<T, A> intersection(const BTreeSet<T, A>& other) const {
-        return Intersection<T, A>{
-            .inner = IntersectionInner<T, A>{
-                IntersectionInner_Search<T, A>{
-                    .small_iter = this->iter(),
-                    .large_set = other
-                }
-            }
-        };
-    }
+    Intersection<T, A> intersection(const BTreeSet<T, A>& other) const;
     Union<T> union_(const BTreeSet<T, A>& other) const {
-        return Union(btree_internal::MergeIterInner<Iter<T>>::new_(rusty::iter((*this)), rusty::iter(other)));
+        return Union(btree_internal::MergeIterInner<Iter<T>>::new_(this->iter(), other.iter()));
     }
     void clear() {
         this->map.clear();
@@ -4824,41 +5896,37 @@ struct BTreeSet {
     }
     template<typename Q>
     rusty::Option<const T&> get(const Q& value) const {
-        // Same const-ref fix as Keys::next: return `-> const T&` so we
-        // don't decay an lvalue-ref to const T&& via std::move.
-        return this->map.get_key_value(value).map([&](auto&& _destruct_param0) -> const T& {
-            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-        });
+        return this->map.get_key_value(value).map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
     }
     bool is_disjoint(const BTreeSet<T, A>& other) const {
         return this->intersection(other).next().is_none();
     }
-    // Hand-port: ∀x∈*this, x ∈ other.
     bool is_subset(const BTreeSet<T, A>& other) const {
-        auto it = this->iter();
-        for (auto v = it.next(); v.is_some(); v = it.next()) {
-            if (!other.contains(v.unwrap())) return false;
-        }
-        return true;
+        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     bool is_superset(const BTreeSet<T, A>& other) const {
         return other.is_subset((*this));
     }
     rusty::Option<const T&> first() const {
-        return this->map.first_key_value().map([&](auto&& _destruct_param0) -> const T& {
-            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-        });
+        return this->map.first_key_value().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
     }
     rusty::Option<const T&> last() const {
-        return this->map.last_key_value().map([&](auto&& _destruct_param0) -> const T& {
-            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-        });
+        return this->map.last_key_value().map([&](auto&& _destruct_param0) -> decltype(auto) {
+auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return k;
+});
     }
     rusty::Option<T> pop_first() {
-        return this->map.pop_first().map([&](auto&& kv) { return std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });
+        return this->map.pop_first().map([&](auto&& kv) { return std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(kv))); });
     }
     rusty::Option<T> pop_last() {
-        return this->map.pop_last().map([&](auto&& kv) { return std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });
+        return this->map.pop_last().map([&](auto&& kv) { return std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(kv))); });
     }
     bool insert(T value) {
         return this->map.insert(std::move(value), btree_internal::SetValZST::default_()).is_none();
@@ -4874,7 +5942,7 @@ struct BTreeSet {
         return this->map.get_or_insert_with(value, std::move(f));
     }
     entry::Entry<T, A> entry(T value) {
-        return [&]() -> entry::Entry<T, A> { auto&& _m = this->map.entry(std::move(value)); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry::Entry<T, A>{entry::Entry_Occupied<T, A>{entry::OccupiedEntry<T, A>{.inner = entry_shadow1}}}; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry::Entry<T, A>{entry::Entry_Vacant<T, A>{entry::VacantEntry<T, A>{.inner = entry_shadow1}}}; } return [&]() -> entry::Entry<T, A> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> entry::Entry<T, A> { auto&& _m = this->map.entry(std::move(value)); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry::Entry<T, A>{entry::Entry_Occupied<T, A>{entry::OccupiedEntry<T, A>{.inner = entry_shadow1}}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry::Entry<T, A>{entry::Entry_Vacant<T, A>{entry::VacantEntry<T, A>{.inner = entry_shadow1}}}; } return [&]() -> entry::Entry<T, A> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename Q>
     bool remove(const Q& value) {
@@ -4882,22 +5950,20 @@ struct BTreeSet {
     }
     template<typename Q>
     rusty::Option<T> take(const Q& value) {
-        return this->map.remove_entry(value).map([&](auto&& _destruct_param0) {
+        return this->map.remove_entry(value).map([&](auto&& _destruct_param0) -> T {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
     }
     template<typename F>
     void retain(F f) {
-        // Hand-port: for_each is an Iterator DEFAULT method — no member on the
-        // transpiled ExtractIf; route through the rusty free-function adapter.
-        rusty::for_each(this->extract_if(rusty::range_full(), [&](auto&& v) { return !f(std::move(v)); }), [&](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
+        rusty::for_each(this->extract_if(rusty::range_full(), [&](auto&& v) { return !f(std::move(v)); }), [](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
     }
     void append(BTreeSet<T, A>& other) {
         this->map.append(other.map);
     }
     template<typename Q>
-        requires (std::copyable<A>)
+        requires (rusty::clone_like<A>)
     BTreeSet<T, A> split_off(const Q& value) {
         return BTreeSet<T, A>(this->map.split_off(value));
     }
@@ -4909,11 +5975,11 @@ return std::move(k);
     Iter<T> iter() const {
         return Iter<T>{.iter = this->map.keys()};
     }
-    size_t len() const {
+    constexpr size_t len() const {
         return rusty::len(this->map);
     }
-    bool is_empty() const {
-        return rusty::len((*this)) == static_cast<size_t>(0);
+    constexpr bool is_empty() const {
+        return this->len() == static_cast<size_t>(0);
     }
     template<typename Q>
     Cursor<T> lower_bound(rusty::Bound<const Q&> bound) const {
@@ -4937,32 +6003,34 @@ return std::move(k);
         if (rusty::is_empty(inputs)) {
             return BTreeSet<T>::new_();
         }
-        inputs.sort();
+        rusty::sort(inputs);
         return BTreeSet<T>::from_sorted_iter(rusty::iter(std::move(inputs)), rusty::alloc::Global{});
     }
     template<typename I>
     static BTreeSet<T, A> from_sorted_iter(I iter, A alloc) {
-        auto iter_shadow1 = iter.map([&](auto&& k) { return std::make_tuple(std::move(k), btree_internal::SetValZST::default_()); });
+        auto iter_shadow1 = rusty::map(iter, [&](auto&& k) { return std::make_tuple(std::move(k), btree_internal::SetValZST::default_()); });
         auto map = map::BTreeMap<T, btree_internal::SetValZST, A>::bulk_build_from_sorted_iter(std::move(iter_shadow1), std::move(alloc));
         return BTreeSet<T, A>(std::move(map));
     }
     template<size_t N>
-    static BTreeSet<T, A> from(std::array<T, rusty::sanitize_array_capacity<N>()> arr) {
+    static BTreeSet<T, A> from(std::array<T, N> arr) {
         if (rusty::detail::deref_if_pointer_like(N) == 0) {
             return BTreeSet<T, rusty::alloc::Global>::new_();
         }
-        arr.sort();
+        rusty::sort(arr);
         return BTreeSet<T, rusty::alloc::Global>::from_sorted_iter(arr.into_iter(), rusty::alloc::Global{});
     }
     IntoIter into_iter() {
         return IntoIter(this->map.into_iter());
     }
+    template<typename Iter>
+    void extend(Iter iter) {
+        rusty::for_each(rusty::deref_call(iter, rusty::detail::__mdisp_into_iter{}), [=](auto&& elem) mutable {
+this->insert(std::move(elem));
+});
+    }
     void extend_one(T elem) {
         this->insert(std::move(elem));
-    }
-    template<typename I>
-    void extend(I iter) {
-        this->extend(rusty::iter(std::move(iter)).cloned());
     }
     void extend_one(const T& _arg1) {
         auto&& elem = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_arg1));
@@ -4972,19 +6040,19 @@ return std::move(k);
         return BTreeSet<T>::new_();
     }
     BTreeSet<T, A> operator-(const BTreeSet<T, A>& rhs) const {
-        return BTreeSet<T, A>::from_sorted_iter(this->difference(rhs).cloned(), rusty::clone(*this->map.alloc));
+        return BTreeSet<T, A>::from_sorted_iter(rusty::cloned(this->difference(rhs)), rusty::clone(*this->map.alloc));
     }
     BTreeSet<T, A> operator^(const BTreeSet<T, A>& rhs) const {
-        return BTreeSet<T, A>::from_sorted_iter(this->symmetric_difference(rhs).cloned(), rusty::clone(*this->map.alloc));
+        return BTreeSet<T, A>::from_sorted_iter(rusty::cloned(this->symmetric_difference(rhs)), rusty::clone(*this->map.alloc));
     }
     BTreeSet<T, A> operator&(const BTreeSet<T, A>& rhs) const {
-        return BTreeSet<T, A>::from_sorted_iter(this->intersection(rhs).cloned(), rusty::clone(*this->map.alloc));
+        return BTreeSet<T, A>::from_sorted_iter(rusty::cloned(this->intersection(rhs)), rusty::clone(*this->map.alloc));
     }
     BTreeSet<T, A> operator|(const BTreeSet<T, A>& rhs) const {
-        return BTreeSet<T, A>::from_sorted_iter(this->union_(rhs).cloned(), rusty::clone(*this->map.alloc));
+        return BTreeSet<T, A>::from_sorted_iter(rusty::cloned(this->union_(rhs)), rusty::clone(*this->map.alloc));
     }
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.debug_list().entries(rusty::iter((*this))).finish();
+        return f.debug_list().entries(this->iter()).finish();
     }
 };
 
@@ -4996,7 +6064,7 @@ return std::move(k);
 ///
 /// [`difference`]: BTreeSet::difference
 export template<typename T, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct Difference {
     using Item = const T&;
     DifferenceInner<T, A> inner;
@@ -5004,54 +6072,19 @@ struct Difference {
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_tuple("Difference").field(&this->inner).finish();
     }
-    Difference<T, A> clone() const {
-        return Difference<T, A>{.inner = [&]() -> DifferenceInner<T, A> { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = rusty::clone(self_iter), .other_iter = rusty::clone(other_iter)}}; } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return DifferenceInner<T, A>{DifferenceInner_Search<T, A>{.self_iter = rusty::clone(self_iter), .other_set = other_set}}; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return DifferenceInner<T, A>{DifferenceInner_Iterate<T, A>{rusty::clone(iter)}}; } return [&]() -> DifferenceInner<T, A> { rusty::intrinsics::unreachable(); }(); }()};
-    }
-    // Hand-port: bypass the broken std::visit emit (transpiler used
-    // `if (true)` guards on match-arm bodies, all eval true). Since
-    // difference() always constructs the Search variant, simplify
-    // and dispatch directly via .index().
-    rusty::Option<const T&> next() {
-        if (this->inner.index() == 1) {
-            auto& v = std::get<1>(this->inner);
-            while (true) {
-                auto self_next = v.self_iter.next();
-                if (!self_next.is_some()) return rusty::Option<const T&>{rusty::None};
-                if (!v.other_set.contains(self_next.unwrap())) {
-                    return self_next;
-                }
-            }
-        }
-        // Stitch and Iterate variants are no longer constructed; reach
-        // here only if someone built a Difference manually.
-        return rusty::Option<const T&>{rusty::None};
-    }
-    // Hand-port: bypass broken pointer-to-variant emit (`&this->inner`).
-    // Compute from the Search variant (the only one we construct).
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        if (this->inner.index() == 1) {
-            const auto& v = std::get<1>(this->inner);
-            const size_t self_len = rusty::len(v.self_iter);
-            const size_t other_len = rusty::len(v.other_set);
-            return std::make_tuple(rusty::saturating_sub(self_len, other_len),
-                                   rusty::Option<size_t>(self_len));
-        }
-        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));
-    }
+    Difference<T, A> clone() const;
+    rusty::Option<const T&> next();
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const;
     rusty::Option<const T&> min() {
         return this->next();
     }
 };
 
 // Algebraic data type
-// Stitch was the "sorted merge" optimization variant. Iter<T> doesn't
-// have a peekable() method ported, so use a plain Iter for the field
-// type. Since difference()/intersection() always construct the Search
-// variant, this struct is dead code, but it must still compile.
 template<typename T, typename A>
 struct DifferenceInner_Stitch {
     Iter<T> self_iter;
-    Iter<T> other_iter;
+    decltype(std::declval<Iter<T>>().peekable()) other_iter;
 };
 template<typename T, typename A>
 struct DifferenceInner_Search {
@@ -5069,17 +6102,17 @@ DifferenceInner_Search<T, A> Search(Iter<T> self_iter, const BTreeSet<T, A>& oth
 template<typename T, typename A>
 DifferenceInner_Iterate<T, A> Iterate(Iter<T> _0);
 template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct DifferenceInner : std::variant<DifferenceInner_Stitch<T, A>, DifferenceInner_Search<T, A>, DifferenceInner_Iterate<T, A>> {
     using variant = std::variant<DifferenceInner_Stitch<T, A>, DifferenceInner_Search<T, A>, DifferenceInner_Iterate<T, A>>;
     using variant::variant;
-    static DifferenceInner<T, A> Stitch(Iter<T> self_iter, Iter<T> other_iter) { return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = std::forward<decltype(self_iter)>(self_iter), .other_iter = std::forward<decltype(other_iter)>(other_iter)}}; }
+    static DifferenceInner<T, A> Stitch(Iter<T> self_iter, decltype(std::declval<Iter<T>>().peekable()) other_iter) { return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = std::forward<decltype(self_iter)>(self_iter), .other_iter = std::forward<decltype(other_iter)>(other_iter)}}; }
     static DifferenceInner<T, A> Search(Iter<T> self_iter, const BTreeSet<T, A>& other_set) { return DifferenceInner<T, A>{DifferenceInner_Search<T, A>{.self_iter = std::forward<decltype(self_iter)>(self_iter), .other_set = std::forward<decltype(other_set)>(other_set)}}; }
     static DifferenceInner<T, A> Iterate(Iter<T> _0) { return DifferenceInner<T, A>{DifferenceInner_Iterate<T, A>{std::forward<decltype(_0)>(_0)}}; }
 
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return f.debug_struct("Stitch").field("self_iter", self_iter).field("other_iter", other_iter).finish(); } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return f.debug_struct("Search").field("self_iter", self_iter).field("other_iter", other_set).finish(); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& x = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return f.debug_tuple("Iterate").field(x).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).other_iter); return f.debug_struct("Stitch").field("self_iter", self_iter).field("other_iter", other_iter).finish(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).other_set); return f.debug_struct("Search").field("self_iter", self_iter).field("other_iter", other_set).finish(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { auto&& x = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return f.debug_tuple("Iterate").field(x).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 template<typename T, typename A>
@@ -5096,7 +6129,7 @@ DifferenceInner_Iterate<T, A> Iterate(Iter<T> _0) { return DifferenceInner_Itera
 ///
 /// [`intersection`]: BTreeSet::intersection
 export template<typename T, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct Intersection {
     using Item = const T&;
     IntersectionInner<T, A> inner;
@@ -5104,34 +6137,9 @@ struct Intersection {
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_tuple("Intersection").field(&this->inner).finish();
     }
-    Intersection<T, A> clone() const {
-        return Intersection<T, A>{.inner = [&]() -> IntersectionInner<T, A> { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(_m).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(_m).b); return IntersectionInner<T, A>{IntersectionInner_Stitch<T, A>{.a = rusty::clone(a), .b = rusty::clone(b)}}; } if (_m.index() == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).small_iter); auto&& large_set = rusty::detail::deref_if_pointer(std::get<1>(_m).large_set); return IntersectionInner<T, A>{IntersectionInner_Search<T, A>{.small_iter = rusty::clone(small_iter), .large_set = large_set}}; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& answer = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return IntersectionInner<T, A>{IntersectionInner_Answer<T, A>{std::move(rusty::detail::deref_if_pointer_like(answer))}}; } return [&]() -> IntersectionInner<T, A> { rusty::intrinsics::unreachable(); }(); }()};
-    }
-    // Hand-port: same as Difference::next — dispatch via .index() on
-    // the IntersectionInner variant. intersection() now always
-    // constructs the Search variant. Stitch/Answer kept as dead code.
-    rusty::Option<const T&> next() {
-        if (this->inner.index() == 1) {
-            auto& v = std::get<1>(this->inner);
-            while (true) {
-                auto small_next = v.small_iter.next();
-                if (!small_next.is_some()) return rusty::Option<const T&>{rusty::None};
-                if (v.large_set.contains(small_next.unwrap())) {
-                    return small_next;
-                }
-            }
-        }
-        return rusty::Option<const T&>{rusty::None};
-    }
-    // Hand-port: bypass broken &this->inner pointer-to-variant emit.
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        if (this->inner.index() == 1) {
-            const auto& v = std::get<1>(this->inner);
-            return std::make_tuple(static_cast<size_t>(0),
-                                   rusty::Option<size_t>(rusty::len(v.small_iter)));
-        }
-        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));
-    }
+    Intersection<T, A> clone() const;
+    rusty::Option<const T&> next();
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const;
     rusty::Option<const T&> min() {
         return this->next();
     }
@@ -5159,7 +6167,7 @@ IntersectionInner_Search<T, A> Search(Iter<T> small_iter, const BTreeSet<T, A>& 
 template<typename T, typename A>
 IntersectionInner_Answer<T, A> Answer(rusty::Option<const T&> _0);
 template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 struct IntersectionInner : std::variant<IntersectionInner_Stitch<T, A>, IntersectionInner_Search<T, A>, IntersectionInner_Answer<T, A>> {
     using variant = std::variant<IntersectionInner_Stitch<T, A>, IntersectionInner_Search<T, A>, IntersectionInner_Answer<T, A>>;
     using variant::variant;
@@ -5169,7 +6177,7 @@ struct IntersectionInner : std::variant<IntersectionInner_Stitch<T, A>, Intersec
 
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (_m.index() == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(_m).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(_m).b); return f.debug_struct("Stitch").field("a", a).field("b", b).finish(); } if (_m.index() == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).small_iter); auto&& large_set = rusty::detail::deref_if_pointer(std::get<1>(_m).large_set); return f.debug_struct("Search").field("small_iter", small_iter).field("large_set", large_set).finish(); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& x = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return f.debug_tuple("Answer").field(x).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).b); return f.debug_struct("Stitch").field("a", a).field("b", b).finish(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).small_iter); auto&& large_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).large_set); return f.debug_struct("Search").field("small_iter", small_iter).field("large_set", large_set).finish(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { auto&& x = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return f.debug_tuple("Answer").field(x).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 template<typename T, typename A>
@@ -5181,5 +6189,165 @@ IntersectionInner_Answer<T, A> Answer(rusty::Option<const T&> _0) { return Inter
 
 
 // #[cfg(test)] module omitted
+
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+Difference<T, A> BTreeSet<T, A>::difference(const BTreeSet<T, A>& other) const {
+    using IntoIter = typename BTreeSet<T, A>::IntoIter;
+    using Item = typename BTreeSet<T, A>::Item;
+    if (auto&& _iflet_scrutinee = this->first(); _iflet_scrutinee.is_some()) {
+        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+    } else {
+        return Difference<T, A>(DifferenceInner<T, A>{DifferenceInner_Iterate<T, A>{this->iter()}});
+    }
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+Intersection<T, A> BTreeSet<T, A>::intersection(const BTreeSet<T, A>& other) const {
+    using IntoIter = typename BTreeSet<T, A>::IntoIter;
+    using Item = typename BTreeSet<T, A>::Item;
+    if (auto&& _iflet_scrutinee = this->first(); _iflet_scrutinee.is_some()) {
+        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+    } else {
+        return Intersection<T, A>(IntersectionInner<T, A>{IntersectionInner_Answer<T, A>{rusty::Option<const T&>{rusty::None}}});
+    }
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+Difference<T, A> Difference<T, A>::clone() const {
+    using Item = typename Difference<T, A>::Item;
+    return Difference<T, A>{.inner = [&]() -> DifferenceInner<T, A> { auto&& _m = &this->inner; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).other_iter); return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = rusty::clone(self_iter), .other_iter = rusty::clone(other_iter)}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).other_set); return DifferenceInner<T, A>{DifferenceInner_Search<T, A>{.self_iter = rusty::clone(self_iter), .other_set = other_set}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return DifferenceInner<T, A>{DifferenceInner_Iterate<T, A>{rusty::clone(iter)}}; } return [&]() -> DifferenceInner<T, A> { rusty::intrinsics::unreachable(); }(); }()};
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+rusty::Option<const T&> Difference<T, A>::next() {
+    using Item = typename Difference<T, A>::Item;
+    {
+        auto&& _m = &this->inner;
+        if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) {
+            auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).self_iter);
+            auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).other_iter);
+            auto self_next = RUSTY_TRY_OPT(self_iter.next());
+            while (true) {
+                {
+                    auto&& _m = other_iter.peek().map_or(Ordering::Less, [&](auto&& other_next) { return rusty::cmp::cmp(self_next, other_next); });
+                    bool _m_matched = false;
+                    if (!_m_matched) {
+                        if (_m == Less) {
+                            return rusty::Option<const T&>(self_next);
+                            _m_matched = true;
+                        }
+                    }
+                    if (!_m_matched) {
+                        if (_m == Equal) {
+                            self_next = RUSTY_TRY_OPT(self_iter.next());
+                            other_iter.next();
+                            _m_matched = true;
+                        }
+                    }
+                    if (!_m_matched) {
+                        if (_m == Greater) {
+                            other_iter.next();
+                            _m_matched = true;
+                        }
+                    }
+                }
+            }
+        }
+        else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) {
+            auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).self_iter);
+            auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).other_set);
+            while (true) {
+                auto&& self_next = RUSTY_TRY_OPT(self_iter.next());
+                if (rusty::detail::rust_not(rusty::contains(other_set, &self_next))) {
+                    return rusty::Option<const T&>(self_next);
+                }
+            }
+        }
+        else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) {
+            auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0);
+            iter.next();
+        }
+    }
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+std::tuple<size_t, rusty::Option<size_t>> Difference<T, A>::size_hint() const {
+    using Item = typename Difference<T, A>::Item;
+    auto [self_len, other_len] = rusty::detail::deref_if_pointer_like([&]() { auto&& _m = &this->inner; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).other_iter); return std::make_tuple(rusty::len(self_iter), rusty::len(other_iter)); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).other_set); return std::make_tuple(rusty::len(self_iter), rusty::len(other_set)); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return std::make_tuple(rusty::len(iter), 0); } rusty::intrinsics::unreachable(); }());
+    return std::make_tuple(rusty::saturating_sub(self_len, rusty::detail::deref_if_pointer(std::move(other_len))), rusty::Option<size_t>(std::move(self_len)));
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+Intersection<T, A> Intersection<T, A>::clone() const {
+    using Item = typename Intersection<T, A>::Item;
+    return Intersection<T, A>{.inner = [&]() -> IntersectionInner<T, A> { auto&& _m = &this->inner; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).b); return IntersectionInner<T, A>{IntersectionInner_Stitch<T, A>{.a = rusty::clone(a), .b = rusty::clone(b)}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).small_iter); auto&& large_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).large_set); return IntersectionInner<T, A>{IntersectionInner_Search<T, A>{.small_iter = rusty::clone(small_iter), .large_set = large_set}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { auto&& answer = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return IntersectionInner<T, A>{IntersectionInner_Answer<T, A>{std::move(rusty::detail::deref_if_pointer_like(answer))}}; } return [&]() -> IntersectionInner<T, A> { rusty::intrinsics::unreachable(); }(); }()};
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+rusty::Option<const T&> Intersection<T, A>::next() {
+    using Item = typename Intersection<T, A>::Item;
+    {
+        auto&& _m = &this->inner;
+        if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) {
+            auto&& a = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).a);
+            auto&& b = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).b);
+            auto a_next = RUSTY_TRY_OPT(a.next());
+            auto b_next = RUSTY_TRY_OPT(b.next());
+            while (true) {
+                {
+                    auto&& _m = rusty::cmp::cmp(a_next, b_next);
+                    bool _m_matched = false;
+                    if (!_m_matched) {
+                        if (_m == Less) {
+                            a_next = RUSTY_TRY_OPT(a.next());
+                            _m_matched = true;
+                        }
+                    }
+                    if (!_m_matched) {
+                        if (_m == Greater) {
+                            b_next = RUSTY_TRY_OPT(b.next());
+                            _m_matched = true;
+                        }
+                    }
+                    if (!_m_matched) {
+                        if (_m == Equal) {
+                            return rusty::Option<const T&>(a_next);
+                            _m_matched = true;
+                        }
+                    }
+                }
+            }
+        }
+        else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) {
+            auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).small_iter);
+            auto&& large_set = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).large_set);
+            while (true) {
+                auto&& small_next = RUSTY_TRY_OPT(small_iter.next());
+                if (rusty::contains(large_set, &small_next)) {
+                    return rusty::Option<const T&>(small_next);
+                }
+            }
+        }
+        else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) {
+            auto&& answer = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0);
+            answer.take();
+        }
+    }
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+std::tuple<size_t, rusty::Option<size_t>> Intersection<T, A>::size_hint() const {
+    using Item = typename Intersection<T, A>::Item;
+    return [&]() -> std::tuple<size_t, rusty::Option<size_t>> { auto&& _m = &this->inner; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).b); return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(::rusty::cmp::min(rusty::len(a), rusty::len(b)))); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).small_iter); return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::len(small_iter))); } if ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2 && rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0).is_none())) { return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0))); } if ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2 && rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0).is_some())) { return std::make_tuple(static_cast<size_t>(1), rusty::Option<size_t>(static_cast<size_t>(1))); } return [&]() -> std::tuple<size_t, rusty::Option<size_t>> { rusty::intrinsics::unreachable(); }(); }();
+}
 
 } // namespace btree_port::btree::set

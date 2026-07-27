@@ -1007,10 +1007,22 @@ impl CodeGen {
         };
         let scrutinee_borrows_payload =
             self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
+        // `match &mut opt` payloads bind MUTABLY — Rust hands the arms
+        // `&mut` references into the scrutinee. `as_const` would make
+        // every binding const, so a mutable-reference return
+        // (`Some(edge) => Some(edge)` on `-> Option<&mut Handle>`,
+        // btree's LazyLeafRange::init_front) can't seed the non-const
+        // Option. Peek mutably instead: `unwrap_mut()` on the non-const
+        // source neither consumes `_m` (later arms still test it) nor
+        // consts the payload.
+        let scrutinee_is_mut_borrow = matches!(
+            self.peel_paren_group_expr(&match_expr.expr),
+            syn::Expr::Reference(r) if r.mutability.is_some()
+        );
         // deref_if_pointer is identity on non-pointers; an address-of
         // scrutinee (`match &self.document.error`) makes `_m` a pointer
         // whose Option methods need the pointee.
-        let payload_source = if scrutinee_borrows_payload {
+        let payload_source = if scrutinee_borrows_payload && !scrutinee_is_mut_borrow {
             "std::as_const(rusty::detail::deref_if_pointer(_m))"
         } else {
             "rusty::detail::deref_if_pointer(_m)"
@@ -1075,9 +1087,22 @@ impl CodeGen {
                             );
                         saw_runtime_pattern = true;
                         if direct_binding_passthrough {
+                            // Mut-borrow scrutinee: peek mutably — the
+                            // consuming unwrap() would empty the borrowed
+                            // Option and const-peek can't seed a `&mut`
+                            // return.
+                            let passthrough_unwrap = if scrutinee_is_mut_borrow {
+                                match unwrap_method {
+                                    "unwrap" => "unwrap_mut",
+                                    "unwrap_err" => "unwrap_err_mut",
+                                    other => other,
+                                }
+                            } else {
+                                unwrap_method
+                            };
                             out.push_str(&format!(
                                 "if (rusty::detail::deref_if_pointer(_m).{}()) {{ return {}.{}(); }} ",
-                                cond_method, payload_source, unwrap_method
+                                cond_method, payload_source, passthrough_unwrap
                             ));
                             continue;
                         }
@@ -1142,7 +1167,9 @@ impl CodeGen {
                             );
                         let mut payload_bindings_are_refs = true;
                         if needs_payload_materialization {
-                            let payload_value_source = if arm_consumes_payload {
+                            let payload_value_source = if arm_consumes_payload
+                                || scrutinee_is_mut_borrow
+                            {
                                 "rusty::detail::deref_if_pointer(_m)"
                             } else if payload_match_condition.is_some() || arm.guard.is_some() {
                                 "std::as_const(rusty::detail::deref_if_pointer(_m))"
@@ -1153,9 +1180,12 @@ impl CodeGen {
                             // into `_m`; the owned-consuming case is only the
                             // plain non-const unwrap.
                             payload_bindings_are_refs = arm_consumes_payload
+                                || scrutinee_is_mut_borrow
                                 || payload_value_source
                                     != "rusty::detail::deref_if_pointer(_m)";
-                            let effective_unwrap = if arm_consumes_payload {
+                            let effective_unwrap = if arm_consumes_payload
+                                || scrutinee_is_mut_borrow
+                            {
                                 match unwrap_method {
                                     "unwrap" => "unwrap_mut",
                                     "unwrap_err" => "unwrap_err_mut",

@@ -1824,6 +1824,62 @@ impl CodeGen {
                     let (header, body) = split_leading_template_header(&method_text);
                     let mut new_body =
                         apply_structural_decomp_text_substitution(body, &decomp);
+                    // Cluster A cross-impl leak: a type inferred from a
+                    // SIBLING impl's method signature carries that impl's
+                    // generic names into this method's text (btree's
+                    // `deallocating_next` — impl generics K,V with
+                    // BorrowType CONCRETE — infers its match-assign result
+                    // type from `forget_node_type`, whose impl spells the
+                    // position as `BorrowType`). The own-decomp pass above
+                    // can't substitute a name it never declared, and the
+                    // collapsed class has no such member → "use of
+                    // undeclared identifier 'BorrowType'". Substitute
+                    // names from every sibling decomposition of the same
+                    // host/inner pair, skipping any name this method binds
+                    // itself (own decomp, direct mappings, host param, or
+                    // its template header — there the name is a live
+                    // fn-level generic) and any name siblings disagree on.
+                    {
+                        let mut candidate: HashMap<String, Option<usize>> = HashMap::new();
+                        for ((owner, _sib_method), sib) in &self.method_structural_decompositions
+                        {
+                            if owner != &name_str
+                                || sib.host_param != decomp.host_param
+                                || sib.inner_struct != decomp.inner_struct
+                            {
+                                continue;
+                            }
+                            for (gname, &gpos) in &sib.generic_positions {
+                                candidate
+                                    .entry(gname.clone())
+                                    .and_modify(|slot| {
+                                        if *slot != Some(gpos) {
+                                            *slot = None;
+                                        }
+                                    })
+                                    .or_insert(Some(gpos));
+                            }
+                        }
+                        for (gname, slot) in candidate {
+                            let Some(gpos) = slot else { continue };
+                            if decomp.generic_positions.contains_key(&gname)
+                                || gname == decomp.host_param
+                                || decomp
+                                    .direct_param_mappings
+                                    .iter()
+                                    .any(|(from, to)| from == &gname || to == &gname)
+                                || header.is_some_and(|h| contains_whole_word(h, &gname))
+                                || !contains_whole_word(&new_body, &gname)
+                            {
+                                continue;
+                            }
+                            let dep_path = format!(
+                                "typename __TemplateArgs<{}>::arg_{}",
+                                decomp.host_param, gpos
+                            );
+                            new_body = replace_whole_word(&new_body, &gname, &dep_path);
+                        }
+                    }
                     // Cluster C nested-marker subs: when parallel impls
                     // hardcode different markers at a nested arg
                     // position (e.g. NodeRef's 4th arg = Leaf vs
@@ -6433,6 +6489,87 @@ impl CodeGen {
                 })
                 .collect();
         }
+        // Undeducible-and-unused method generics: a Rust Borrow-bound
+        // param (`fn range<T, R>(&self, range: R) where K: Borrow<T>,
+        // R: RangeBounds<T>`) appears in NO C++ parameter type, so no
+        // call site can ever deduce it, and method calls never pass
+        // explicit template arguments — `m.range(rusty::range<int>(3, 7))`
+        // dies with "couldn't infer template argument 'T'" (btree
+        // swap-in: BTreeMap::range/range_mut, the vendored port dropped
+        // T by hand). Drop any type param the emitted C++ surface never
+        // names: not in an input type, not in the return type, not in
+        // the body tokens, and not in any emitted requires-constraint.
+        // Only for methods WITH a receiver — free-function call sites
+        // may turbofish. `__`-prefixed forced shadow params stay.
+        let mut undeducible_dropped_generics: HashSet<String> = HashSet::new();
+        if matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+            fn collect_idents(ts: proc_macro2::TokenStream, out: &mut HashSet<String>) {
+                for tt in ts {
+                    match tt {
+                        proc_macro2::TokenTree::Ident(ident) => {
+                            out.insert(ident.to_string());
+                        }
+                        proc_macro2::TokenTree::Group(group) => {
+                            collect_idents(group.stream(), out);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let has_droppable_type_param = emitted_generics.params.iter().any(|param| {
+                matches!(param, syn::GenericParam::Type(tp)
+                    if !tp.ident.to_string().starts_with("__"))
+            });
+            if has_droppable_type_param {
+                let mut mentioned: HashSet<String> = HashSet::new();
+                for arg in &method.sig.inputs {
+                    if let syn::FnArg::Typed(pat_type) = arg {
+                        collect_idents(pat_type.ty.to_token_stream(), &mut mentioned);
+                    }
+                }
+                if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output {
+                    collect_idents(ret_ty.to_token_stream(), &mut mentioned);
+                }
+                collect_idents(method.block.to_token_stream(), &mut mentioned);
+                let prev_constraint_emit = self.in_constraint_emit.get();
+                self.in_constraint_emit.set(true);
+                let (_, emitted_constraints) =
+                    self.collect_emitted_template_parts(&method.sig.generics, true);
+                self.in_constraint_emit.set(prev_constraint_emit);
+                emitted_generics.params = emitted_generics
+                    .params
+                    .into_iter()
+                    .filter(|param| match param {
+                        syn::GenericParam::Type(tp) => {
+                            let name = tp.ident.to_string();
+                            let keep = name.starts_with("__")
+                                || mentioned.contains(&name)
+                                || emitted_constraints
+                                    .iter()
+                                    .any(|c| contains_whole_word(c, &name))
+                                // A deduced-return alias can synthesize C++
+                                // that names a param the Rust surface never
+                                // does: `F: FnOnce(&K) -> V` emits
+                                // `using V = invoke_result_t<F&, const K&>`
+                                // — K comes from the BOUND. Keep such
+                                // params (parseable, matching the prior
+                                // emission; they were never deducible
+                                // before either).
+                                || deduced_return_aliases
+                                    .iter()
+                                    .any(|(_, alias_expr)| {
+                                        contains_whole_word(alias_expr, &name)
+                                    });
+                            if !keep {
+                                undeducible_dropped_generics.insert(name);
+                            }
+                            keep
+                        }
+                        _ => true,
+                    })
+                    .collect();
+            }
+        }
         let mut forced_placeholder_params: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
         for arg in &method.sig.inputs {
@@ -6508,7 +6645,29 @@ impl CodeGen {
             }
         }
 
-        self.push_type_param_scope(&method.sig.generics);
+        // Scope generics: drop ONLY the undeducible-dropped params — an
+        // emission-synthesized dependent type (`std::conditional_t<true,
+        // Owner, Q>` picks the first in-scope param) must not name a
+        // dropped `Q`. Deduced-return-alias params (V) STAY in scope:
+        // they exist in the body as `using V = …` aliases and the
+        // return-annotation machinery keys on their in-scope presence.
+        let scope_generics = if undeducible_dropped_generics.is_empty() {
+            method.sig.generics.clone()
+        } else {
+            let mut scoped = method.sig.generics.clone();
+            scoped.params = scoped
+                .params
+                .into_iter()
+                .filter(|param| match param {
+                    syn::GenericParam::Type(tp) => {
+                        !undeducible_dropped_generics.contains(&tp.ident.to_string())
+                    }
+                    _ => true,
+                })
+                .collect();
+            scoped
+        };
+        self.push_type_param_scope(&scope_generics);
 
         let mut is_drop_destructor = false;
         // Check if this method is an operator trait impl (renamed)

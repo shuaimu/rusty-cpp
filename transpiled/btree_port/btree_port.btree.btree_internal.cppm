@@ -1,6 +1,5 @@
 // btree_port port step 60: step-58/59 lazy gates + extra fixes codified
 // btree_port port step 55: step-54 insert-path fixes codified by post_transpile_patch.py
-// btree_port port: k.borrow() SFINAE fallback by post_transpile_patch.py
 // btree_port port: assume_init_ref method→free-fn by post_transpile_patch.py
 // btree_port port: as_leaf_ptr() → as_leaf_ptr((*this)) by post_transpile_patch.py
 // btree_port port: DormantMutRef new_ref const→mut by post_transpile_patch.py
@@ -25,7 +24,9 @@ module;
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <cstdio>
 #include <bit>
+#include <cwctype>
 #include <stdexcept>
 #include <print>
 #include <immintrin.h>
@@ -36,15 +37,21 @@ module;
 #pragma GCC diagnostic ignored "-Wunused-local-typedefs"
 #endif
 
-template<class... Ts>
-struct overloaded : Ts... { using Ts::operator()...; };
-template<class... Ts>
-overloaded(Ts...) -> overloaded<Ts...>;
-
 struct TokenTree;
 namespace rusty {
 namespace cmp {
 enum class Ordering { Less, Equal, Greater };
+inline std::string rusty_debug_string(Ordering o) {
+return o == Ordering::Less ? "Less" : (o == Ordering::Greater ? "Greater" : "Equal");
+}
+constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }
+constexpr Ordering reverse(Ordering a) { return a == Ordering::Less ? Ordering::Greater : (a == Ordering::Greater ? Ordering::Less : Ordering::Equal); }
+constexpr bool is_lt(Ordering a) { return a == Ordering::Less; }
+constexpr bool is_gt(Ordering a) { return a == Ordering::Greater; }
+constexpr bool is_eq(Ordering a) { return a == Ordering::Equal; }
+constexpr bool is_ne(Ordering a) { return a != Ordering::Equal; }
+constexpr bool is_le(Ordering a) { return a != Ordering::Greater; }
+constexpr bool is_ge(Ordering a) { return a != Ordering::Less; }
 template<typename T>
 struct Reverse {
 T _0;
@@ -62,6 +69,14 @@ template<typename L, typename R>
 bool less_than(const L& lhs, const R& rhs) {
 if constexpr (requires { lhs < rhs; }) {
 return lhs < rhs;
+} else if constexpr (requires {
+rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);
+}) {
+/* Pointer-carried operand (addr_of_temp needle): peel and compare.
+Without this tier the permissive fallback returned false BOTH
+ways - cmp::cmp called everything Equal and binary_search found
+phantom matches. */
+return rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);
 } else if constexpr (requires {
 std::begin(lhs); std::end(lhs); std::begin(rhs); std::end(rhs);
 *std::begin(lhs) < *std::begin(rhs);
@@ -91,12 +106,120 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
-// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.
-// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).
+// A char[N] operand is the C++ carrier of a Rust `str` LITERAL needle
+// (`map.contains_key("a")` with String keys): content semantics, no
+// trailing NUL. No member/operator tier can take it (raw arrays have no
+// members) and the elementwise tier would walk the NUL byte.
+template<typename X>
+concept str_literal_carrier = std::is_array_v<std::remove_cvref_t<X>>
+&& std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<X>>>, char>;
+// One side of an element-wise eq must be iterable in a shape rusty::for_in
+// accepts — mirrors its tiers structurally (for_in itself static_asserts,
+// so it can't be probed directly). Scalars fail this and keep the plain
+// operator== diagnostic.
+template<typename X>
+concept eq_elementwise_side = requires(std::remove_cvref_t<X>& x) { x.next(); }
+|| requires(std::remove_cvref_t<X>& x) { x.iter(); }
+|| requires(const std::remove_cvref_t<X>& x) { x.data(); x.size(); }
+|| requires(const std::remove_cvref_t<X>& x) { std::begin(x); std::end(x); }
+|| requires(std::remove_cvref_t<X>& x) { x.begin(); x.end(); };
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==,
+// else ELEMENT-WISE over both sides (Rust Iterator::eq and cross-container
+// PartialEq like `IndexSet == Vec` / `Keys == slice::Iter` have no C++
+// operator== between distinct types). Derefs pointer-like rhs (Rust `&other`
+// becomes addr_of_temp() in C++ emit).
 template<typename A, typename B>
 bool eq(const A& a, const B& b) {
-if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+if constexpr (std::is_pointer_v<std::remove_cvref_t<A>>
+&& std::is_pointer_v<std::remove_cvref_t<B>>) {
+/* Two pointer carriers are lowered Rust REFERENCES: PartialEq
+delegates to the pointees. Raw pointer == compared ADDRESSES,
+so `&mut 1` map keys never matched (occupied_entry_key). */
+return eq(*a, *b);
+} else if constexpr ((str_literal_carrier<A>
+|| str_literal_carrier<decltype(rusty::detail::deref_if_pointer_like(b))>)
+&& requires {
+std::string_view(a);
+std::string_view(rusty::detail::deref_if_pointer_like(b));
+}) {
+/* str-literal needle vs a string-viewable partner: compare CONTENT
+(string_view drops the array's trailing NUL). */
+return std::string_view(a)
+== std::string_view(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
 return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires {
+{ a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+/* PartialEq-impl wrappers delegate their body back here with the
+SAME instantiation (Slice::operator==(array) -> cmp::eq(self,
+other) -> that operator==): a per-instantiation re-entrancy
+guard breaks the cycle by falling to the elementwise compare,
+which IS the Rust slice-family semantics of those wrappers. */
+thread_local int _rusty_eq_depth = 0;
+if (_rusty_eq_depth == 0) {
+struct _DepthGuard {
+int& d;
+~_DepthGuard() { --d; }
+} _g{(++_rusty_eq_depth, _rusty_eq_depth)};
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+if constexpr (
+eq_elementwise_side<A>
+&& eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>
+) {
+auto&& ra = rusty::for_in(a);
+auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));
+auto ita = ra.begin();
+auto ea = ra.end();
+auto itb = rb.begin();
+auto eb = rb.end();
+for (; ita != ea && itb != eb; ++ita, ++itb) {
+if (!rusty::cmp::eq(*ita, *itb)) {
+return false;
+}
+}
+return !(ita != ea) && !(itb != eb);
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+} else if constexpr (
+eq_elementwise_side<A>
+&& eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>
+) {
+auto&& ra = rusty::for_in(a);
+auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));
+auto ita = ra.begin();
+auto ea = ra.end();
+auto itb = rb.begin();
+auto eb = rb.end();
+for (; ita != ea && itb != eb; ++ita, ++itb) {
+if (!rusty::cmp::eq(*ita, *itb)) {
+return false;
+}
+}
+return !(ita != ea) && !(itb != eb);
+} else if constexpr (requires {
+{ rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+/* both sides pointer-carried references (Q-key equivalence) */
+return rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b);
+} else if constexpr (requires {
+a.key_field;
+a.value_field;
+std::get<0>(rusty::detail::deref_if_pointer_like(b));
+std::get<1>(rusty::detail::deref_if_pointer_like(b));
+}) {
+/* map-entry projection: a Bucket{hash, key, value} against a
+(K, V) tuple compares by key/value (Rust's Slice iter yields
+entry pairs, not raw buckets). */
+auto&& bb = rusty::detail::deref_if_pointer_like(b);
+return rusty::cmp::eq(a.key_field, std::get<0>(bb))
+&& rusty::cmp::eq(a.value_field, std::get<1>(bb));
+} else if constexpr (requires { a.key_field; }) {
+/* set-entry projection: Bucket<T, ()> against a bare element
+compares the key only (set iteration yields keys). */
+return rusty::cmp::eq(a.key_field, rusty::detail::deref_if_pointer_like(b));
 } else {
 return a == rusty::detail::deref_if_pointer_like(b);
 }
@@ -105,8 +228,12 @@ template<typename A, typename B>
 bool ne(const A& a, const B& b) {
 if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
 return a.ne(rusty::detail::deref_if_pointer_like(b));
-} else {
+} else if constexpr (requires {
+{ a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
 return !(a == rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b));
 }
 }
 template<typename F>
@@ -127,10 +254,20 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// btree_port port: local rusty::clone removed (canonical lives in move.hpp)
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting
+// it again as a redundant duplicate makes call sites that pass a
+// type accepted by both overloads ambiguous, so we omit it.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
+}
+// Rust's Iterator::size_hint DEFAULT ((0, None)) for adapter types that
+// do not override it (rusty map/filter next-iter wrappers).
+template<typename Iter>
+requires (!requires(const Iter& it) { it.size_hint(); })
+std::tuple<size_t, rusty::Option<size_t>> size_hint(const Iter&) {
+return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::None));
 }
 template<typename Value>
 decltype(auto) left(Value&& value) {
@@ -151,6 +288,27 @@ template<typename L, typename R>
 Either_Left<L, R> Left(L _0) { return Either_Left<L, R>{std::forward<L>(_0)}; }
 template<typename L, typename R>
 Either_Right<L, R> Right(R _0) { return Either_Right<L, R>{std::forward<R>(_0)}; }
+// Deferred one-sided constructions: Rust infers the OTHER Either side from
+// the use site, so a bare `Either::Left(x)` can't spell R at construction.
+// These carry the payload and convert to any Either<L, R2> at the point
+// where C++ knows the destination (function argument, return, Option
+// converting constructor, ...).
+template<typename L>
+struct left_value {
+L __v;
+template<typename R2>
+operator Either<L, R2>() && { return Either_Left<L, R2>{std::move(__v)}; }
+};
+template<typename R>
+struct right_value {
+R __v;
+template<typename L2>
+operator Either<L2, R>() && { return Either_Right<L2, R>{std::move(__v)}; }
+};
+template<typename L>
+left_value<L> Left(L _0) { return {std::forward<L>(_0)}; }
+template<typename R>
+right_value<R> Right(R _0) { return {std::forward<R>(_0)}; }
 }
 // Display-oriented conversion helper used by format_args lowering.
 template<typename T>
@@ -306,6 +464,8 @@ template<typename T>
 constexpr T* addr_of_temp(T& value);
 template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value);
+template<typename T>
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value);
 #endif
 }
 namespace de {
@@ -359,7 +519,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(std::forward<decltype(value)>(value)));
 }
 
 template<typename E>
@@ -1963,8 +2123,24 @@ return serializer_ref<Serializer&&>{&serializer};
 return std::forward<Serializer>(serializer);
 }
 }
+// Explicit (non-deduced) result type for the recursive serialize dispatchers.
+// serialize/serialize_value/serialize_bytes call each other, so a deduced
+// `decltype(auto)` return makes the mutual recursion ill-formed (function with
+// deduced return type cannot be used before it is defined) for any value that
+// reaches the recursive fall-through edge. Every serde serialize path yields
+// Result<S::Ok, S::Error>, so we can state it explicitly and break the cycle.
+// deref_if_pointer_like handles serializers arriving as a raw pointer / ref /
+// serializer_ref proxy; a serializer without Ok/Error makes this SFINAE-fail
+// (return-type substitution), so `requires { serialize(...) }` stays well-behaved.
+template<typename S>
+using __ser_result_t = rusty::Result<
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Ok,
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer>;
 struct fallback_error {
 rusty::String message;
 
@@ -1973,7 +2149,8 @@ return fallback_error{rusty::String::from(msg)};
 }
 };
 template<typename Value, typename Serializer>
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {
+auto serialize_value(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
 if constexpr (requires {
 std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
@@ -2084,7 +2261,8 @@ return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer)
 }
 }
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2105,7 +2283,8 @@ rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(
 });
 template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 if constexpr (requires {
 std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
 }) {
@@ -2199,7 +2378,8 @@ return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLi
 namespace impls {
 namespace rusty_ext {
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2213,6 +2393,214 @@ static DefaultHasher new_() { return DefaultHasher{}; }
 std::size_t finish() const { return state; }
 };
 namespace rusty {
+// Rust slice binary-search family. Free functions PREFER a member spelling
+// (transpiled Slice types keep their own delegating methods); otherwise any
+// as_slice()-viewable receiver binary-searches with the Ordering-returning
+// comparator, mirroring core::slice semantics (Result<usize, usize>).
+template<typename R, typename F>
+auto binary_search_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).binary_search_by(std::forward<F>(f)); }) {
+return std::forward<R>(recv).binary_search_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+size_t lo = 0;
+size_t hi = s.size();
+while (lo < hi) {
+const size_t mid = lo + (hi - lo) / 2;
+const auto ord = f(s[mid]);
+if (ord == rusty::cmp::Ordering::Less) {
+lo = mid + 1;
+} else if (ord == rusty::cmp::Ordering::Greater) {
+hi = mid;
+} else {
+return rusty::Result<size_t, size_t>::Ok(mid);
+}
+}
+return rusty::Result<size_t, size_t>::Err(lo);
+}
+}
+template<typename R, typename T>
+auto binary_search(R&& recv, const T& target) {
+if constexpr (requires { std::forward<R>(recv).binary_search(target); }) {
+return std::forward<R>(recv).binary_search(target);
+} else {
+return rusty::binary_search_by(std::forward<R>(recv),
+[&](const auto& x) { return rusty::cmp::cmp(x, rusty::detail::deref_if_pointer_like(target)); });
+}
+}
+template<typename R, typename B, typename F>
+auto binary_search_by_key(R&& recv, const B& b, F&& f) {
+if constexpr (requires { std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f)); }) {
+return std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f));
+} else {
+return rusty::binary_search_by(std::forward<R>(recv),
+[&](const auto& x) { return rusty::cmp::cmp(f(x), rusty::detail::deref_if_pointer_like(b)); });
+}
+}
+// Rust slice is_sorted family: member-preference, else pairwise compare
+// through rusty::cmp over the as_slice view.
+template<typename R>
+bool is_sorted(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).is_sorted(); }) {
+return std::forward<R>(recv).is_sorted();
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+/* PartialOrd semantics: NAN pairs are NOT sorted (native <= says false) */
+if constexpr (requires { s[i - 1] <= s[i]; }) {
+if (!(s[i - 1] <= s[i])) { return false; }
+} else {
+if (rusty::cmp::cmp(s[i - 1], s[i]) == rusty::cmp::Ordering::Greater) { return false; }
+}
+}
+return true;
+}
+}
+template<typename R, typename F>
+bool is_sorted_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).is_sorted_by(std::forward<F>(f)); }) {
+return std::forward<R>(recv).is_sorted_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+if (!f(s[i - 1], s[i])) { return false; }
+}
+return true;
+}
+}
+template<typename R, typename F>
+bool is_sorted_by_key(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f)); }) {
+return std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+/* PartialOrd semantics: NAN keys are NOT sorted (native <= says false) */
+if constexpr (requires { f(s[i - 1]) <= f(s[i]); }) {
+if (!(f(s[i - 1]) <= f(s[i]))) { return false; }
+} else {
+if (rusty::cmp::cmp(f(s[i - 1]), f(s[i])) == rusty::cmp::Ordering::Greater) { return false; }
+}
+}
+return true;
+}
+}
+template<typename R, typename P>
+auto partition_point(R&& recv, P&& pred) {
+if constexpr (requires { std::forward<R>(recv).partition_point(std::forward<P>(pred)); }) {
+return std::forward<R>(recv).partition_point(std::forward<P>(pred));
+} else {
+auto s = rusty::as_slice(recv);
+size_t lo = 0;
+size_t hi = s.size();
+while (lo < hi) {
+const size_t mid = lo + (hi - lo) / 2;
+if (pred(s[mid])) {
+lo = mid + 1;
+} else {
+hi = mid;
+}
+}
+return lo;
+}
+}
+// Rust slice sort family (Vec reaches these through Deref). Members win;
+// the port Vec spells only the STABLE sorts, and a stable sort is a valid
+// unstable sort, so sort_unstable_* fall back to the sort_* members before
+// the generic std::sort over as_mut_slice.
+template<typename R, typename F>
+void sort_unstable_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_unstable_by(std::forward<F>(f));
+} else if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return f(a, b) == rusty::cmp::Ordering::Less;
+});
+}
+}
+template<typename R>
+void sort_unstable(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable(); }) {
+std::forward<R>(recv).sort_unstable();
+} else if constexpr (requires { std::forward<R>(recv).sort(); }) {
+std::forward<R>(recv).sort();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end());
+}
+}
+template<typename R, typename K>
+void sort_unstable_by_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key));
+} else if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+// STABLE sort family - members win (the port Vec spells these); the
+// std::stable_sort fallback serves array/vector receivers reached
+// through routed chains (collect_range results, [T; N] locals).
+template<typename R>
+void sort(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).sort(); }) {
+std::forward<R>(recv).sort();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end());
+}
+}
+template<typename R, typename F>
+void sort_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return f(a, b) == rusty::cmp::Ordering::Less;
+});
+}
+}
+template<typename R, typename K>
+void sort_by_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+// Rust caches the key per element; recomputing gives the same order for
+// the pure keys sorts see, so the fallback reuses the sort_by_key shape.
+template<typename R, typename K>
+void sort_by_cached_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_by_cached_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_cached_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+template<typename R>
+void reverse(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).reverse(); }) {
+std::forward<R>(recv).reverse();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::reverse(s.begin(), s.end());
+}
+}
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {
 if (opt.is_none()) return std::partial_ordering::unordered;
@@ -2235,11 +2623,40 @@ return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);
 }
 namespace fmt {
 // Error and Result are defined in rusty/fmt.hpp
-struct Arguments {};
+// Carries prerendered text: `write!(w, ...)` sites lower their
+// format_args!() through std::format, so Arguments accepts the
+// resulting string and Write::write_fmt forwards it to write_str.
+struct Arguments {
+std::string text;
+Arguments() = default;
+Arguments(std::string s) : text(std::move(s)) {}
+Arguments(std::string_view s) : text(s) {}
+Arguments(const char* s) : text(s ? s : "") {}
+};
 enum class Alignment { Left, Right, Center };
 struct DebugList {
 template<typename... Args>
 DebugList& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugList& entry(Args&&...) { return *this; }
+Result finish() { return Result::Ok(std::make_tuple()); }
+};
+struct DebugSet {
+template<typename... Args>
+DebugSet& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugSet& entry(Args&&...) { return *this; }
+Result finish() { return Result::Ok(std::make_tuple()); }
+};
+struct DebugMap {
+template<typename... Args>
+DebugMap& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& entry(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& key(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& value(Args&&...) { return *this; }
 Result finish() { return Result::Ok(std::make_tuple()); }
 };
 struct Formatter {
@@ -2302,6 +2719,13 @@ formatter->out_ += "}";
 }
 return Result::Ok(std::make_tuple());
 }
+Result finish_non_exhaustive() {
+if (formatter) {
+if (!first) { formatter->out_ += ", "; }
+formatter->out_ += ".. }";
+}
+return Result::Ok(std::make_tuple());
+}
 };
 template<typename... Args>
 static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }
@@ -2353,6 +2777,10 @@ st.name(std::forward<Name>(name));
 return st;
 }
 DebugList debug_list() const { return DebugList{}; }
+DebugSet debug_set() const { return DebugSet{}; }
+DebugMap debug_map() const { return DebugMap{}; }
+template<typename Str>
+Result pad(Str&& s) const { out_ += rusty::to_string(std::forward<Str>(s)); return Result::Ok(std::make_tuple()); }
 private:
 template<typename Arg>
 void append_one(Arg&& arg) const { out_ += rusty::to_string(std::forward<Arg>(arg)); }
@@ -2388,8 +2816,46 @@ case '"': out += "\\\""; break;
 case '\n': out += "\\n"; break;
 case '\r': out += "\\r"; break;
 case '\t': out += "\\t"; break;
+case '\0': out += "\\0"; break;
 default: out.push_back(ch); break;
 }
+}
+return out;
+}
+inline std::string escape_default_char(char32_t code) {
+switch (code) {
+case U'\\': return "\\\\";
+case U'"': return "\\\"";
+case U'\'': return "\\'";
+case U'\n': return "\\n";
+case U'\r': return "\\r";
+case U'\t': return "\\t";
+default: break;
+}
+if (code >= 0x20 && code < 0x7F) {
+return std::string(1, static_cast<char>(code));
+}
+return std::format("\\u{{{:x}}}", static_cast<std::uint32_t>(code));
+}
+inline std::string escape_default_string(std::string_view input) {
+std::string out;
+out.reserve(input.size());
+std::size_t i = 0;
+while (i < input.size()) {
+const unsigned char b = static_cast<unsigned char>(input[i]);
+char32_t code = b;
+std::size_t len = 1;
+if ((b & 0xE0) == 0xC0) { code = b & 0x1F; len = 2; }
+else if ((b & 0xF0) == 0xE0) { code = b & 0x0F; len = 3; }
+else if ((b & 0xF8) == 0xF0) { code = b & 0x07; len = 4; }
+if (len > 1) {
+if (i + len > input.size()) { break; }
+for (std::size_t k = 1; k < len; ++k) {
+code = (code << 6) | (static_cast<unsigned char>(input[i + k]) & 0x3F);
+}
+}
+out += escape_default_char(code);
+i += len;
 }
 return out;
 }
@@ -2455,6 +2921,9 @@ if (!stack.empty()) {
 stack.back().saw_value = true;
 stack.back().last_was_comma = false;
 }
+if (ch == '{' && !out.empty() && out.back() != ' ' && out.back() != '\n') {
+out.push_back(' ');
+}
 out.push_back(ch);
 stack.push_back(Frame{ch, false, false});
 std::size_t j = i + 1;
@@ -2492,6 +2961,9 @@ stack.back().last_was_comma = false;
 continue;
 }
 out.push_back(ch);
+if (ch == ':') {
+out.push_back(' ');
+}
 if (!stack.empty()) {
 stack.back().saw_value = true;
 stack.back().last_was_comma = false;
@@ -2544,6 +3016,29 @@ if (result.is_ok()) {
 return formatter.str();
 }
 return "<fmt-error>";
+} else if constexpr (std::is_floating_point_v<Value>) {
+return rusty::detail::float_display_string(value);
+} else if constexpr (std::is_same_v<Value, __int128>
+|| std::is_same_v<Value, unsigned __int128>) {
+// std::to_string has no 128-bit overloads; digits by division.
+if (value == 0) { return "0"; }
+unsigned __int128 mag;
+bool neg = false;
+if constexpr (std::is_same_v<Value, __int128>) {
+neg = value < 0;
+mag = neg ? static_cast<unsigned __int128>(-(value + 1)) + 1
+: static_cast<unsigned __int128>(value);
+} else {
+mag = value;
+}
+std::string out;
+while (mag != 0) {
+out.push_back(static_cast<char>('0' + static_cast<int>(mag % 10)));
+mag /= 10;
+}
+if (neg) { out.push_back('-'); }
+std::reverse(out.begin(), out.end());
+return out;
 } else if constexpr (requires { std::to_string(value); }) {
 return std::to_string(value);
 } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {
@@ -2578,7 +3073,25 @@ return out;
 template<typename T>
 std::string to_debug_string(const T& value) {
 using Value = std::remove_cv_t<std::remove_reference_t<T>>;
-if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
+if constexpr (requires { value.rusty_debug_string(); }) {
+return value.rusty_debug_string();
+} else if constexpr (std::is_enum_v<Value> && requires { rusty_debug_string(value); }) {
+return rusty_debug_string(value);
+} else if constexpr (requires { value.is_some(); value.unwrap(); }) {
+if (value.is_some()) {
+return std::string("Some(") + rusty::to_debug_string(value.unwrap()) + ")";
+}
+return "None";
+} else if constexpr (requires { value.is_ok(); value.unwrap(); value.unwrap_err(); }) {
+if (value.is_ok()) {
+return std::string("Ok(") + rusty::to_debug_string(value.unwrap()) + ")";
+}
+return std::string("Err(") + rusty::to_debug_string(value.unwrap_err()) + ")";
+} else if constexpr (requires { std::visit([](const auto&) {}, value); }) {
+return std::visit([](const auto& alt) -> std::string {
+return rusty::to_debug_string(alt);
+}, value);
+} else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
 return std::to_string(static_cast<int>(value));
 } else if constexpr (std::is_same_v<Value, char>
 || std::is_same_v<Value, signed char>
@@ -2587,10 +3100,22 @@ return std::to_string(static_cast<int>(value));
 || std::is_same_v<Value, char16_t>
 || std::is_same_v<Value, char32_t>) {
 const auto ch = static_cast<char32_t>(value);
-if (ch == U'\0') {
-return "'\\0'";
+switch (ch) {
+case U'\0': return "'\\0'";
+case U'\\': return "'\\\\'";
+case U'\'': return "'\\''";
+case U'\n': return "'\\n'";
+case U'\r': return "'\\r'";
+case U'\t': return "'\\t'";
+default: break;
 }
 return std::string("'") + rusty::detail::utf8_from_char32(ch) + "'";
+} else if constexpr (std::is_pointer_v<Value>
+&& !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {
+if (value == nullptr) {
+return "<null>";
+}
+return rusty::to_debug_string(*value);
 } else if constexpr (std::is_convertible_v<T, std::string_view>) {
 return std::string("\"")
 + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
@@ -2605,6 +3130,29 @@ return std::string("\"")
 return std::string("\"")
 + rusty::detail::escape_debug_string(std::string(s))
 + "\"";
+}
+} else if constexpr (std::is_floating_point_v<Value>) {
+std::string s = rusty::to_string(value);
+if (std::isfinite(value) && s.find_first_of(".eEin") == std::string::npos) {
+s += ".0";
+}
+return s;
+} else if constexpr (requires { std::tuple_size<Value>::value; }
+&& !requires { std::begin(value); std::end(value); }) {
+if constexpr (std::tuple_size_v<Value> == 0) {
+return "()";
+} else {
+std::string out = "(";
+bool first = true;
+std::apply([&](const auto&... elems) {
+((out += (first ? "" : ", "), first = false,
+out += rusty::to_debug_string(elems)), ...);
+}, value);
+if constexpr (std::tuple_size_v<Value> == 1) {
+out += ",";
+}
+out += ")";
+return out;
 }
 } else if constexpr (requires { std::begin(value); std::end(value); }) {
 std::string out = "[";
@@ -2830,11 +3378,20 @@ return &value;
 }
 template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {
-using Stored = std::remove_cv_t<std::remove_reference_t<T>>;
-thread_local std::optional<Stored> _addr_of_tmp;
-_addr_of_tmp.reset();
-_addr_of_tmp.emplace(std::forward<T>(value));
-return &*_addr_of_tmp;
+/* The rvalue argument is a caller-side temporary that lives to the end
+of the FULL EXPRESSION - exactly Rust's `&temp` statement scope. The
+old per-TYPE thread_local slot aliased simultaneous same-type temps:
+vec![&1, &2, &3, &4] produced four pointers all reading 4. */
+return &value;
+}
+template<typename T>
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {
+if constexpr (std::is_lvalue_reference_v<T&&>) {
+return &value;
+} else {
+/* Same full-expression-lifetime rationale as addr_of_temp above. */
+return &value;
+}
 }
 #endif
 struct Cow_Borrowed {
@@ -2941,16 +3498,25 @@ return &value;
 namespace hash {
 template<typename State>
 inline void combine(State& state, std::size_t value) {
-std::size_t seed;
 if constexpr (requires { state.state; }) {
-seed = state.state;
-} else {
-seed = static_cast<std::size_t>(state);
-}
+std::size_t seed = state.state;
 seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-if constexpr (requires { state.state; }) {
 state.state = seed;
+} else if constexpr (requires {
+state.write_(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* A real Hasher-protocol state (e.g. the transpiled std
+DefaultHasher wrapping rusty::hash::SipHasher): feed the value's
+bytes through the hasher instead of integer-state mixing. Only
+types that previously FAILED the static_cast fallback take this
+branch, so existing integer-state hashers are unchanged. */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));
 } else {
+std::size_t seed = static_cast<std::size_t>(state);
+seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
 state = static_cast<State>(seed);
 }
 }
@@ -2958,6 +3524,32 @@ template<typename T, typename State>
 void hash(const T& value, State& state) {
 if constexpr (requires { value.hash(state); }) {
 value.hash(state);
+} else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>
+&& std::is_same_v<std::remove_cv_t<
+std::remove_pointer_t<std::remove_cvref_t<T>>>, char>) {
+/* Plain-char pointer = Rust str carrier (i8/u8 are signed/unsigned
+char; Rust char is char32_t): hash CONTENT like rusty::String,
+not the pointee char (Pair("a", "b") vs (String, String) keys). */
+hash(std::string_view(value), state);
+} else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {
+/* A pointer carrier is a lowered Rust REFERENCE: Hash delegates
+to the pointee. Hashing the address made `&mut 1` map keys
+miss each other (occupied_entry_key found Vacant). */
+hash(*value, state);
+} else if constexpr (requires {
+std::tuple_size<std::remove_cvref_t<T>>::value;
+} && !requires { std::begin(value); }) {
+/* Rust derives Hash for tuples elementwise; the byte-FNV fallback
+hashed a tuple<String, String> key's HEAP POINTERS. */
+std::apply(
+[&state](const auto&... elems) { (hash(elems, state), ...); },
+value);
+} else if constexpr (std::is_array_v<std::remove_cvref_t<T>>
+&& std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<T>>>, char>) {
+/* char[N] = Rust str-literal needle: hash CONTENT chars without
+the trailing NUL, matching rusty::String's range-tier per-char
+hashing (string_view recurses into the range tier below). */
+hash(std::string_view(value), state);
 } else if constexpr (requires { std::begin(value); std::end(value); }) {
 // Hash range-like containers by element value, not object bytes.
 // This avoids pointer/address-based drift for owning containers.
@@ -2975,6 +3567,22 @@ h *= 1099511628211ULL;
 }
 combine(state, h);
 }
+}
+}
+// Rust BuildHasher::hash_one. Prefers the builder's own member; inert
+// transpiled builders (hashbrown's DefaultHashBuilder — foldhash's
+// methods come from trait defaults that never emit) fall back to rusty's
+// deterministic combine hashing. Hash VALUES never surface in parity
+// assertions (indexmap iterates in insertion order); only internal
+// consistency matters.
+template<typename B, typename T>
+uint64_t hash_one(B&& builder, const T& value) {
+if constexpr (requires { std::forward<B>(builder).hash_one(value); }) {
+return std::forward<B>(builder).hash_one(value);
+} else {
+std::size_t state = 14695981039346656037ULL;
+rusty::hash::hash(value, state);
+return static_cast<uint64_t>(state);
 }
 }
 template<typename Writer, typename FmtArg>
@@ -3105,62 +3713,86 @@ return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 namespace str_runtime {
-using Utf8Error = rusty::String;
-inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {
+// Mirrors core::str::Utf8Error: byte index of the valid prefix plus the
+// invalid-sequence length (None = input ended in the middle of a sequence).
+struct Utf8Error {
+std::size_t valid_up_to_ = 0;
+long long error_len_ = -1;
+std::size_t valid_up_to() const { return valid_up_to_; }
+rusty::Option<std::size_t> error_len() const {
+if (error_len_ < 0) { return rusty::Option<std::size_t>(rusty::None); }
+return rusty::Option<std::size_t>(static_cast<std::size_t>(error_len_));
+}
+std::string to_string() const { return "invalid utf-8 sequence"; }
+constexpr bool operator==(const Utf8Error&) const = default;
+};
+// Rust-faithful UTF-8 validation: on failure reports where the valid prefix
+// ends and how many bytes the broken sequence spans (-1 error_len = the
+// input ended prematurely, Rust's error_len() == None).
+inline Utf8Error validate_utf8(const unsigned char* data, std::size_t len, bool& ok) {
 std::size_t i = 0;
+ok = true;
 while (i < len) {
 const auto byte = data[i];
 if (byte <= 0x7F) {
 ++i;
 continue;
 }
+std::size_t need;
 if ((byte >> 5) == 0x6) {
-if (i + 1 >= len) return false;
-const auto b1 = data[i + 1];
-if ((b1 & 0xC0) != 0x80 || byte < 0xC2) return false;
-i += 2;
-continue;
+if (byte < 0xC2) { ok = false; return Utf8Error{i, 1}; }
+need = 1;
+} else if ((byte >> 4) == 0xE) {
+need = 2;
+} else if ((byte >> 3) == 0x1E) {
+if (byte > 0xF4) { ok = false; return Utf8Error{i, 1}; }
+need = 3;
+} else {
+ok = false;
+return Utf8Error{i, 1};
 }
-if ((byte >> 4) == 0xE) {
-if (i + 2 >= len) return false;
-const auto b1 = data[i + 1];
-const auto b2 = data[i + 2];
-if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;
-if (byte == 0xE0 && b1 < 0xA0) return false;
-if (byte == 0xED && b1 >= 0xA0) return false;
-i += 3;
-continue;
+for (std::size_t k = 1; k <= need; ++k) {
+if (i + k >= len) { ok = false; return Utf8Error{i, -1}; }
+const auto cont = data[i + k];
+bool cont_ok = (cont & 0xC0) == 0x80;
+if (k == 1) {
+if (byte == 0xE0) cont_ok = cont >= 0xA0 && cont <= 0xBF;
+else if (byte == 0xED) cont_ok = cont >= 0x80 && cont <= 0x9F;
+else if (byte == 0xF0) cont_ok = cont >= 0x90 && cont <= 0xBF;
+else if (byte == 0xF4) cont_ok = cont >= 0x80 && cont <= 0x8F;
 }
-if ((byte >> 3) == 0x1E) {
-if (i + 3 >= len) return false;
-const auto b1 = data[i + 1];
-const auto b2 = data[i + 2];
-const auto b3 = data[i + 3];
-if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
-if (byte == 0xF0 && b1 < 0x90) return false;
-if (byte == 0xF4 && b1 >= 0x90) return false;
-if (byte > 0xF4) return false;
-i += 4;
-continue;
+if (!cont_ok) { ok = false; return Utf8Error{i, static_cast<long long>(k)}; }
 }
-return false;
+i += need + 1;
 }
-return true;
+return Utf8Error{};
+}
+inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {
+bool ok = true;
+(void)validate_utf8(data, len, ok);
+return ok;
 }
 template<typename Bytes>
-rusty::Result<std::string_view, rusty::String> from_utf8(const Bytes& bytes) {
+rusty::Result<std::string_view, Utf8Error> from_utf8(const Bytes& bytes) {
+const unsigned char* data = nullptr;
+std::size_t len = 0;
 if constexpr (requires { bytes.data(); bytes.size(); }) {
-const auto* raw = bytes.data();
-const std::size_t len = static_cast<std::size_t>(bytes.size());
-const auto* data = reinterpret_cast<const unsigned char*>(raw);
-if (!is_valid_utf8(data, len)) {
-return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from("invalid utf-8"));
+data = reinterpret_cast<const unsigned char*>(bytes.data());
+len = static_cast<std::size_t>(bytes.size());
+} else if constexpr (requires { rusty::as_ptr(bytes); rusty::len(bytes); }) {
+data = reinterpret_cast<const unsigned char*>(rusty::as_ptr(bytes));
+len = static_cast<std::size_t>(rusty::len(bytes));
+} else {
+return rusty::Result<std::string_view, Utf8Error>::Err(Utf8Error{});
 }
-return rusty::Result<std::string_view, rusty::String>::Ok(
-std::string_view(reinterpret_cast<const char*>(raw), len)
+bool ok = true;
+const auto err = validate_utf8(data, len, ok);
+if (!ok) {
+return rusty::Result<std::string_view, Utf8Error>::Err(err);
+}
+return rusty::Result<std::string_view, Utf8Error>::Ok(
+std::string_view(reinterpret_cast<const char*>(data), len)
 );
-}
-return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from("unsupported from_utf8 input"));
 }
 template<typename Bytes>
 std::string_view from_utf8_unchecked(Bytes&& bytes) {
@@ -3252,8 +3884,13 @@ return false;
 return static_cast<bool>(std::forward<Pred>(pred)(decoded[index]));
 }
 
-Chars as_str() const {
-return *this;
+std::string as_str() const {
+// Rust Chars::as_str — the UNITERATED remainder as a str.
+std::string out;
+for (std::size_t k = index; k < decoded.size(); ++k) {
+out += rusty::detail::utf8_from_char32(decoded[k]);
+}
+return out;
 }
 
 Chars rev() const {
@@ -3276,12 +3913,17 @@ Chars iter;
 std::size_t index = 0;
 
 rusty::Option<Item> next() {
+/* Rust str::char_indices yields BYTE offsets, not char counts —
+advance by each char's UTF-8 encoded length. */
 auto next_ch = iter.next();
 if (next_ch.is_none()) {
 return rusty::Option<Item>(rusty::None);
 }
-auto value = std::make_tuple(index++, next_ch.unwrap());
-return rusty::Option<Item>(std::move(value));
+const char32_t ch = next_ch.unwrap();
+const std::size_t at = index;
+const auto code = static_cast<uint32_t>(ch);
+index += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+return rusty::Option<Item>(std::make_tuple(at, ch));
 }
 };
 inline CharIndices char_indices(std::string_view text) {
@@ -3354,15 +3996,56 @@ text = std::string_view(input.as_str());
 } else {
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("unsupported parse input"));
 }
-if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+if constexpr (std::is_same_v<T, char32_t>) {
+// Rust str parse::<char>() — exactly one UTF-8 scalar or Err.
+if (text.empty()) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("cannot parse char from empty string"));
+}
+const unsigned char lead = static_cast<unsigned char>(text[0]);
+size_t len = lead < 0x80 ? 1 : (lead >> 5) == 0x6 ? 2 : (lead >> 4) == 0xE ? 3 : (lead >> 3) == 0x1E ? 4 : 0;
+if (len == 0 || text.size() != len) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("too many characters in char"));
+}
+char32_t code = 0;
+if (len == 1) { code = lead; }
+else {
+code = lead & (0x7F >> len);
+for (size_t k = 1; k < len; ++k) {
+const unsigned char cont = static_cast<unsigned char>(text[k]);
+if ((cont & 0xC0) != 0x80) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("too many characters in char"));
+}
+code = (code << 6) | (cont & 0x3F);
+}
+}
+return rusty::Result<T, rusty::String>::Ok(static_cast<T>(code));
+}
+if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char32_t>) {
 T value{};
 const auto* begin = text.data();
 const auto* end = begin + text.size();
+if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }
 const auto [ptr, ec] = std::from_chars(begin, end, value);
 if (ec == std::errc() && ptr == end) {
 return rusty::Result<T, rusty::String>::Ok(value);
 }
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("invalid digit found in string"));
+}
+if constexpr (std::is_floating_point_v<T>) {
+T value{};
+const auto* begin = text.data();
+const auto* end = begin + text.size();
+if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }
+const auto [ptr, ec] = std::from_chars(begin, end, value, std::chars_format::general);
+if (ec == std::errc() && ptr == end) {
+return rusty::Result<T, rusty::String>::Ok(value);
+}
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("invalid float literal"));
+}
+if constexpr (std::is_same_v<T, bool>) {
+if (text == "true") { return rusty::Result<T, rusty::String>::Ok(true); }
+if (text == "false") { return rusty::Result<T, rusty::String>::Ok(false); }
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("provided string was not `true` or `false`"));
 }
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("unsupported parse target"));
 }
@@ -3381,6 +4064,28 @@ inline std::string_view trim_end_matches(std::string_view s, char32_t ch) {
 size_t end = s.size();
 while (end > 0 && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;
 return s.substr(0, end);
+}
+inline std::string_view trim_matches(std::string_view s, char32_t ch) {
+size_t start = 0;
+while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;
+size_t end = s.size();
+while (end > start && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;
+return s.substr(start, end - start);
+}
+inline std::string_view trim_start_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) { while (s.starts_with(pat)) s.remove_prefix(pat.size()); }
+return s;
+}
+inline std::string_view trim_end_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) { while (s.ends_with(pat)) s.remove_suffix(pat.size()); }
+return s;
+}
+inline std::string_view trim_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) {
+while (s.starts_with(pat)) s.remove_prefix(pat.size());
+while (s.ends_with(pat)) s.remove_suffix(pat.size());
+}
+return s;
 }
 inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {
 if (s.starts_with(prefix)) {
@@ -3419,6 +4124,23 @@ pos += to.size();
 }
 return rusty::String::from(out);
 }
+template<typename To>
+inline rusty::String replace(std::string_view s, char32_t from, To&& to) {
+char pat_buf[4]; size_t pat_n;
+if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }
+else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }
+else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }
+else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }
+return replace(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)));
+}
+template<typename S, typename To>
+inline rusty::String replace(const S& value, char32_t from, To&& to) {
+if constexpr (requires { value.as_str(); }) {
+return replace(std::string_view(value.as_str()), from, std::forward<To>(to));
+} else {
+return replace(std::string_view(value), from, std::forward<To>(to));
+}
+}
 template<typename S, typename From, typename To>
 inline rusty::String replace(const S& value, From&& from, To&& to) {
 if constexpr (requires { value.as_str(); }) {
@@ -3454,6 +4176,150 @@ return rusty::Option<std::size_t>(i);
 }
 }
 return rusty::Option<std::size_t>(rusty::None);
+}
+template<typename Pred>
+requires (!std::is_convertible_v<Pred, std::string_view> && !std::is_convertible_v<Pred, char32_t> && requires(Pred p) { p(char32_t{}); })
+inline rusty::Option<std::size_t> find(std::string_view s, Pred&& pred) {
+/* Rust str::find(char predicate): byte index of the first char
+satisfying the predicate, walking UTF-8 sequences. */
+std::size_t i = 0;
+while (i < s.size()) {
+const unsigned char b = static_cast<unsigned char>(s[i]);
+std::size_t len = 1;
+char32_t c = b;
+if (b >= 0xF0) { len = 4; c = b & 0x07; }
+else if (b >= 0xE0) { len = 3; c = b & 0x0F; }
+else if (b >= 0xC0) { len = 2; c = b & 0x1F; }
+if (len > 1) {
+if (i + len > s.size()) { break; }
+for (std::size_t k = 1; k < len; ++k) {
+c = static_cast<char32_t>((c << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F));
+}
+}
+if (pred(c)) { return rusty::Option<std::size_t>(i); }
+i += len;
+}
+return rusty::Option<std::size_t>(rusty::None);
+}
+inline rusty::Option<std::size_t> rfind(std::string_view s, std::string_view needle) {
+const auto pos = s.rfind(needle);
+if (pos == std::string_view::npos) {
+return rusty::Option<std::size_t>(rusty::None);
+}
+return rusty::Option<std::size_t>(pos);
+}
+inline rusty::Option<std::size_t> rfind(std::string_view s, char32_t ch) {
+const auto pos = s.rfind(static_cast<char>(ch));
+if (pos == std::string_view::npos) {
+return rusty::Option<std::size_t>(rusty::None);
+}
+return rusty::Option<std::size_t>(pos);
+}
+template<std::size_t N>
+inline rusty::Option<std::size_t> rfind(std::string_view s, const std::array<char32_t, N>& any_char) {
+for (std::size_t i = s.size(); i-- > 0; ) {
+const auto cur = static_cast<char32_t>(static_cast<unsigned char>(s[i]));
+for (const auto ch : any_char) {
+if (cur == ch) {
+return rusty::Option<std::size_t>(i);
+}
+}
+}
+return rusty::Option<std::size_t>(rusty::None);
+}
+inline std::string_view trim_start(std::string_view s) {
+auto start = s.find_first_not_of(" \t\n\r");
+return start == std::string_view::npos ? std::string_view{} : s.substr(start);
+}
+inline std::string_view trim_end(std::string_view s) {
+auto end = s.find_last_not_of(" \t\n\r");
+return end == std::string_view::npos ? std::string_view{} : s.substr(0, end + 1);
+}
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, std::string_view suffix) {
+if (s.ends_with(suffix)) return rusty::Option<std::string_view>(s.substr(0, s.size() - suffix.size()));
+return rusty::Option<std::string_view>(rusty::None);
+}
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, char32_t ch) {
+if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == ch) return rusty::Option<std::string_view>(s.substr(0, s.size() - 1));
+return rusty::Option<std::string_view>(rusty::None);
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, char32_t delim) {
+auto pos = s.find(static_cast<char>(delim));
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, std::string_view delim) {
+auto pos = s.find(delim);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, char32_t delim) {
+auto pos = s.rfind(static_cast<char>(delim));
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, std::string_view delim) {
+auto pos = s.rfind(delim);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));
+}
+inline rusty::String replacen(std::string_view s, std::string_view from, std::string_view to, std::size_t count) {
+if (from.empty() || count == 0) return rusty::String::from(s);
+std::string out(s);
+std::size_t pos = 0, done = 0;
+while (done < count && (pos = out.find(from, pos)) != std::string::npos) {
+out.replace(pos, from.size(), to);
+pos += to.size();
+++done;
+}
+return rusty::String::from(out);
+}
+template<typename To>
+inline rusty::String replacen(std::string_view s, char32_t from, To&& to, std::size_t count) {
+char pat_buf[4]; size_t pat_n;
+if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }
+else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }
+else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }
+else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }
+return replacen(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)), count);
+}
+template<typename S, typename To>
+inline rusty::String replacen(const S& value, char32_t from, To&& to, std::size_t count) {
+if constexpr (requires { value.as_str(); }) {
+return replacen(std::string_view(value.as_str()), from, std::forward<To>(to), count);
+} else {
+return replacen(std::string_view(value), from, std::forward<To>(to), count);
+}
+}
+template<typename S, typename From, typename To>
+inline rusty::String replacen(const S& value, From&& from, To&& to, std::size_t count) {
+if constexpr (requires { value.as_str(); }) {
+return replacen(std::string_view(value.as_str()), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);
+} else if constexpr (std::is_convertible_v<S, std::string_view>) {
+return replacen(std::string_view(value), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);
+} else {
+return rusty::String::from("");
+}
+}
+inline rusty::String to_ascii_uppercase(std::string_view s) {
+std::string out(s);
+for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+return rusty::String::from(out);
+}
+inline rusty::String to_ascii_lowercase(std::string_view s) {
+std::string out(s);
+for (auto& c : out) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+return rusty::String::from(out);
+}
+inline bool eq_ignore_ascii_case(std::string_view a, std::string_view b) {
+if (a.size() != b.size()) return false;
+for (std::size_t i = 0; i < a.size(); ++i) {
+char ca = a[i], cb = b[i];
+if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + 32);
+if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + 32);
+if (ca != cb) return false;
+}
+return true;
 }
 struct SplitIter {
 std::string_view remaining;
@@ -3500,19 +4366,200 @@ return split(*value, delim);
 return SplitIter{std::string_view{}, delim, true};
 }
 }
+struct RSplitIter {
+std::string_view remaining;
+char32_t delim;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+auto pos = remaining.rfind(static_cast<char>(delim));
+if (pos == std::string_view::npos) {
+done = true;
+return rusty::Option<std::string_view>(remaining);
+}
+auto piece = remaining.substr(pos + 1);
+remaining = remaining.substr(0, pos);
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) {
+if (next().is_none()) {
+return rusty::Option<std::string_view>(rusty::None);
+}
+}
+return next();
+}
+};
+inline RSplitIter rsplit(std::string_view s, char32_t delim) {
+return RSplitIter{s, delim};
+}
+template<typename S>
+inline RSplitIter rsplit(const S& value, char32_t delim) {
+if constexpr (std::is_convertible_v<S, std::string_view>) {
+return rsplit(std::string_view(value), delim);
+} else if constexpr (requires { value.as_str(); }) {
+return rsplit(std::string_view(value.as_str()), delim);
+} else {
+return RSplitIter{std::string_view{}, delim, true};
+}
+}
+inline bool is_ascii_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+struct WhitespaceSplitIter {
+std::string_view remaining;
+rusty::Option<std::string_view> next() {
+std::size_t i = 0;
+while (i < remaining.size() && is_ascii_ws(remaining[i])) ++i;
+remaining = remaining.substr(i);
+if (remaining.empty()) return rusty::Option<std::string_view>(rusty::None);
+std::size_t j = 0;
+while (j < remaining.size() && !is_ascii_ws(remaining[j])) ++j;
+auto word = remaining.substr(0, j);
+remaining = remaining.substr(j);
+return rusty::Option<std::string_view>(word);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline WhitespaceSplitIter split_whitespace(std::string_view s) { return WhitespaceSplitIter{s}; }
+struct SplitNIter {
+std::string_view remaining;
+char32_t delim;
+std::size_t remaining_count;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto pos = remaining.find(static_cast<char>(delim));
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto piece = remaining.substr(0, pos);
+remaining = remaining.substr(pos + 1);
+--remaining_count;
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline SplitNIter splitn(std::string_view s, std::size_t n, char32_t delim) { return SplitNIter{s, delim, n, n == 0}; }
+struct RSplitNIter {
+std::string_view remaining;
+char32_t delim;
+std::size_t remaining_count;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto pos = remaining.rfind(static_cast<char>(delim));
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto piece = remaining.substr(pos + 1);
+remaining = remaining.substr(0, pos);
+--remaining_count;
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline RSplitNIter rsplitn(std::string_view s, std::size_t n, char32_t delim) { return RSplitNIter{s, delim, n, n == 0}; }
+inline SplitIter split_terminator(std::string_view s, char32_t delim) {
+/* Rust str::split_terminator: like split, but a trailing delimiter does
+not produce a final empty piece. Strip one trailing delimiter, then
+plain-split; an empty input yields no pieces at all. */
+if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == delim) {
+s = s.substr(0, s.size() - 1);
+return SplitIter{s, delim};
+}
+return SplitIter{s, delim, s.empty()};
+}
+struct LinesIter {
+std::string_view remaining;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done || remaining.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto pos = remaining.find('\n');
+if (pos == std::string_view::npos) { auto line = remaining; remaining = std::string_view{}; done = true; return rusty::Option<std::string_view>(line); }
+auto line = remaining.substr(0, pos);
+if (!line.empty() && line.back() == '\r') line = line.substr(0, line.size() - 1);
+remaining = remaining.substr(pos + 1);
+return rusty::Option<std::string_view>(line);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline LinesIter lines(std::string_view s) { return LinesIter{s}; }
+struct MatchesIter {
+std::string_view remaining;
+std::string pat;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done || pat.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto pos = remaining.find(pat);
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto m = remaining.substr(pos, pat.size());
+remaining = remaining.substr(pos + pat.size());
+return rusty::Option<std::string_view>(m);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline MatchesIter matches(std::string_view s, std::string_view pat) { return MatchesIter{s, std::string(pat)}; }
+inline MatchesIter matches(std::string_view s, char32_t ch) { return MatchesIter{s, std::string(1, static_cast<char>(ch))}; }
 }
 namespace char_runtime {
+// Rust `char::REPLACEMENT_CHARACTER` (U+FFFD).
+inline constexpr char32_t REPLACEMENT_CHARACTER = static_cast<char32_t>(0xFFFD);
 inline rusty::Option<char32_t> from_u32(uint32_t value) {
 if (value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
 return rusty::Option<char32_t>(rusty::None);
 }
 return rusty::Option<char32_t>(static_cast<char32_t>(value));
 }
+/* Rust char::from_digit(num, radix): digit -> char in the given radix
+(lowercase letters for 10..). Panics in Rust when radix > 36; None when
+num is not a digit in that radix. */
+inline rusty::Option<char32_t> from_digit(uint32_t num, uint32_t radix) {
+if (radix > 36 || num >= radix) {
+return rusty::Option<char32_t>(rusty::None);
+}
+const char32_t ch = num < 10
+? static_cast<char32_t>(U'0' + num)
+: static_cast<char32_t>(U'a' + (num - 10));
+return rusty::Option<char32_t>(ch);
+}
 inline std::size_t len_utf8(char32_t ch) {
 const auto code = static_cast<uint32_t>(ch);
 if (code < 0x80) return 1;
 if (code < 0x800) return 2;
 if (code < 0x10000) return 3;
+return 4;
+}
+template<typename Dst>
+inline std::size_t encode_utf8_raw_unchecked(uint32_t code, Dst dst) {
+using B = std::remove_reference_t<decltype(dst[0])>;
+if (code < 0x80u) { dst[0] = static_cast<B>(code); return 1; }
+if (code < 0x800u) {
+dst[0] = static_cast<B>(0xC0u | (code >> 6));
+dst[1] = static_cast<B>(0x80u | (code & 0x3Fu));
+return 2;
+}
+if (code < 0x10000u) {
+dst[0] = static_cast<B>(0xE0u | (code >> 12));
+dst[1] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));
+dst[2] = static_cast<B>(0x80u | (code & 0x3Fu));
+return 3;
+}
+dst[0] = static_cast<B>(0xF0u | (code >> 18));
+dst[1] = static_cast<B>(0x80u | ((code >> 12) & 0x3Fu));
+dst[2] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));
+dst[3] = static_cast<B>(0x80u | (code & 0x3Fu));
 return 4;
 }
 template<typename Buffer>
@@ -3552,6 +4599,71 @@ return true;
 }
 return code >= 0x2000 && code <= 0x200A;
 }
+// Rust `char` classifiers. The ASCII range is matched EXACTLY (as Rust does);
+// non-ASCII scalar values delegate to the C wide-character predicates, which
+// in the default "C" locale classify only ASCII — deterministic, and correct
+// for the ASCII-only inputs the ports exercise. Not a full Unicode oracle.
+inline bool is_ascii(char32_t ch) { return static_cast<uint32_t>(ch) <= 0x7F; }
+inline bool is_alphabetic(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+return std::iswalpha(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_numeric(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= '0' && c <= '9';
+return std::iswdigit(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_alphanumeric(char32_t ch) { return is_alphabetic(ch) || is_numeric(ch); }
+inline bool is_uppercase(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= 'A' && c <= 'Z';
+return std::iswupper(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_lowercase(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= 'a' && c <= 'z';
+return std::iswlower(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_control(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+// Unicode general category Cc: U+0000..=U+001F, U+007F..=U+009F.
+return c <= 0x1F || (c >= 0x7F && c <= 0x9F);
+}
+inline bool is_ascii_alphabetic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+inline bool is_ascii_digit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= '0' && c <= '9'; }
+inline bool is_ascii_alphanumeric(char32_t ch) { return is_ascii_alphabetic(ch) || is_ascii_digit(ch); }
+inline bool is_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'A' && c <= 'Z'; }
+inline bool is_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'a' && c <= 'z'; }
+inline bool is_ascii_hexdigit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+inline bool is_ascii_whitespace(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D; }
+inline bool is_ascii_control(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c <= 0x1F || c == 0x7F; }
+inline bool is_ascii_graphic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 0x21 && c <= 0x7E; }
+inline bool is_ascii_punctuation(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E); }
+inline char32_t to_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'a' && c <= 'z') ? static_cast<char32_t>(c - 32) : ch; }
+inline char32_t to_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') ? static_cast<char32_t>(c + 32) : ch; }
+inline char32_t to_lowercase_first(char32_t ch) { return to_ascii_lowercase(ch); }
+inline char32_t to_uppercase_first(char32_t ch) { return to_ascii_uppercase(ch); }
+inline rusty::Option<uint32_t> to_digit(char32_t ch, uint32_t radix) {
+const auto c = static_cast<uint32_t>(ch);
+uint32_t d;
+if (c >= '0' && c <= '9') d = c - '0';
+else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+else return rusty::Option<uint32_t>(rusty::None);
+return d < radix ? rusty::Option<uint32_t>(d) : rusty::Option<uint32_t>(rusty::None);
+}
+inline bool is_digit(char32_t ch, uint32_t radix) {
+const auto c = static_cast<uint32_t>(ch);
+uint32_t d;
+if (c >= '0' && c <= '9') d = c - '0';
+else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+else return false;
+return d < radix;
+}
+inline std::size_t len_utf16(char32_t ch) { return static_cast<uint32_t>(ch) <= 0xFFFF ? std::size_t(1) : std::size_t(2); }
+inline bool eq_ignore_ascii_case(char32_t a, char32_t b) { return to_ascii_lowercase(a) == to_ascii_lowercase(b); }
 }
 #if !defined(RUSTY_HAS_FREE_IS_EMPTY)
 template<typename T>
@@ -3585,28 +4697,36 @@ return (value);
 }
 namespace panicking {
 enum class AssertKind { Eq, Ne };
+[[noreturn]] inline void do_panic_(std::string_view message) {
+#ifdef RUSTY_PANIC_ABORT
+std::fprintf(stderr, "thread panicked: %.*s\n", (int)message.size(), message.data());
+std::abort();
+#else
+throw std::runtime_error(std::string(message));
+#endif
+}
 template<typename... Args>
-[[noreturn]] inline void assert_failed(Args&&...) { throw std::runtime_error("assertion failed"); }
-[[noreturn]] inline void panic() { throw std::runtime_error("panic"); }
+[[noreturn]] inline void assert_failed(Args&&...) { do_panic_("assertion failed"); }
+[[noreturn]] inline void panic() { do_panic_("panic"); }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic(Message&& message, Args&&...) {
 if constexpr (std::is_convertible_v<Message, std::string_view>) {
-throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+do_panic_(std::string_view(std::forward<Message>(message)));
 } else {
-throw std::runtime_error("panic");
+do_panic_("panic");
 }
 }
-[[noreturn]] inline void panic_fmt() { throw std::runtime_error("panic"); }
+[[noreturn]] inline void panic_fmt() { do_panic_("panic"); }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic_fmt(Message&& message, Args&&...) {
 if constexpr (std::is_convertible_v<Message, std::string_view>) {
-throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+do_panic_(std::string_view(std::forward<Message>(message)));
 } else {
-throw std::runtime_error("panic");
+do_panic_("panic");
 }
 }
 template<typename... Args>
-[[noreturn]] inline void unreachable_display(Args&&...) { throw std::runtime_error("unreachable"); }
+[[noreturn]] inline void unreachable_display(Args&&...) { do_panic_("unreachable"); }
 }
 namespace intrinsics {
 struct Discriminant {
@@ -3675,14 +4795,13 @@ export module btree_port.btree.btree_internal;
 namespace rusty { namespace detail {
 RUSTY_METHOD_DISPATCH(as_leaf_dying)
 RUSTY_METHOD_DISPATCH(as_leaf_mut)
-RUSTY_METHOD_DISPATCH(ascend)
 RUSTY_METHOD_DISPATCH(awaken)
 RUSTY_METHOD_DISPATCH(cast_to_leaf_unchecked)
 RUSTY_METHOD_DISPATCH(correct_childrens_parent_links)
 RUSTY_METHOD_DISPATCH(deallocate)
-RUSTY_METHOD_DISPATCH(deallocate_and_ascend)
 RUSTY_METHOD_DISPATCH(dormant)
 RUSTY_METHOD_DISPATCH(edge_area_mut)
+RUSTY_METHOD_DISPATCH(end_bound)
 RUSTY_METHOD_DISPATCH(force)
 RUSTY_METHOD_DISPATCH(forget_type)
 RUSTY_METHOD_DISPATCH(into_key_val_mut_at)
@@ -3691,26 +4810,28 @@ RUSTY_METHOD_DISPATCH(into_leaf_mut)
 RUSTY_METHOD_DISPATCH(key_area_mut)
 RUSTY_METHOD_DISPATCH(len_mut)
 RUSTY_METHOD_DISPATCH(next)
-RUSTY_METHOD_DISPATCH(peekable)
 RUSTY_METHOD_DISPATCH(reborrow)
 RUSTY_METHOD_DISPATCH(reborrow_mut)
+RUSTY_METHOD_DISPATCH(start_bound)
 RUSTY_METHOD_DISPATCH(val_area_mut)
 } } // namespace rusty::detail (issue #31 deref_call dispatch)
 
 namespace btree_port::btree::btree_internal {
 // Cluster A completion: __TemplateArgs primary template (specializations at file end)
 template<typename T> struct __TemplateArgs;
-
+export struct SetValZST;
+export struct IndexResult_KV;
+export struct IndexResult_Edge;
+export using IndexResult = std::variant<IndexResult_KV, IndexResult_Edge>;
 export template<typename T>
 struct DormantMutRef;
-export struct SetValZST;
 export template<typename K, typename V, typename I>
 struct DedupSortedIter;
-export template<typename I>
+template<typename I>
 struct Peeked_Left;
-export template<typename I>
+template<typename I>
 struct Peeked_Right;
-export template<typename I>
+template<typename I>
 using Peeked = std::variant<Peeked_Left<I>, Peeked_Right<I>>;
 export template<typename I>
 struct MergeIterInner;
@@ -3727,10 +4848,15 @@ struct ForceResult_Internal;
 export template<typename Leaf, typename Internal>
 using ForceResult = std::variant<ForceResult_Leaf<Leaf, Internal>, ForceResult_Internal<Leaf, Internal>>;
 export template<typename T>
+struct SearchBound_Included;
+export template<typename T>
+struct SearchBound_Excluded;
+export template<typename T>
+struct SearchBound_AllIncluded;
+export template<typename T>
+struct SearchBound_AllExcluded;
+export template<typename T>
 struct SearchBound;
-export struct IndexResult_KV;
-export struct IndexResult_Edge;
-export using IndexResult = std::variant<IndexResult_KV, IndexResult_Edge>;
 template<typename K, typename V, typename I>
 struct MergeIter;
 template<typename K, typename V>
@@ -3754,6 +4880,10 @@ using SearchResult = std::variant<SearchResult_Found<BorrowType, K, V, FoundType
 export template<typename BorrowType, typename K, typename V>
 struct LeafRange;
 template<typename BorrowType, typename K, typename V>
+struct LazyLeafHandle_Root;
+template<typename BorrowType, typename K, typename V>
+struct LazyLeafHandle_Edge;
+template<typename BorrowType, typename K, typename V>
 struct LazyLeafHandle;
 export template<typename BorrowType, typename K, typename V>
 struct LazyLeafRange;
@@ -3765,13 +4895,15 @@ export template<typename BorrowType, typename K, typename V>
 struct Position_InternalKV;
 export template<typename BorrowType, typename K, typename V>
 using Position = std::variant<Position_Leaf<BorrowType, K, V>, Position_Internal<BorrowType, K, V>, Position_InternalKV<BorrowType, K, V>>;
+template<typename K, typename V>
+using BoxedNode = rusty::ptr::NonNull<LeafNode<K, V>>;
 export extern const size_t MIN_LEN;
 constexpr size_t B = static_cast<size_t>(6);
-export extern const size_t CAPACITY;
-export extern const size_t MIN_LEN_AFTER_SPLIT;
-extern const size_t KV_IDX_CENTER;
-extern const size_t EDGE_IDX_LEFT_OF_CENTER;
-extern const size_t EDGE_IDX_RIGHT_OF_CENTER;
+export constexpr size_t CAPACITY = (static_cast<size_t>(2) * rusty::detail::deref_if_pointer_like(B)) - static_cast<size_t>(1);
+export constexpr size_t MIN_LEN_AFTER_SPLIT = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
+constexpr size_t KV_IDX_CENTER = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
+constexpr size_t EDGE_IDX_LEFT_OF_CENTER = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
+constexpr size_t EDGE_IDX_RIGHT_OF_CENTER = B;
 namespace marker {
     export enum class Leaf;
     export enum class Internal;
@@ -3785,39 +4917,37 @@ namespace marker {
     export struct Mut;
     export struct ValMut;
 }
-template<typename K, typename V>
-using BoxedNode = rusty::ptr::NonNull<LeafNode<K, V>>;
 export template<typename K, typename V>
 using Root = NodeRef<marker::Owned, K, V, marker::LeafOrInternal>;
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 void __rusty_alias_Root_fix_top(auto& self_, A alloc);
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 void __rusty_alias_Root_fix_right_border(auto& self_, A alloc);
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 void __rusty_alias_Root_fix_left_border(auto& self_, A alloc);
 template<typename K, typename V>
 void __rusty_alias_Root_fix_right_border_of_plentiful(auto& self_);
 template<typename K, typename V>
 std::tuple<size_t, size_t> __rusty_alias_Root_calc_split_length(size_t total_num, const Root<K, V>& root_a, const Root<K, V>& root_b);
 template<typename Q, typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 auto __rusty_alias_Root_split_off(auto& self_, const Q& key, A alloc);
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 auto __rusty_alias_Root_new_pillar(size_t height, A alloc);
 template<typename I, typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 void __rusty_alias_Root_append_from_sorted_iters(auto& self_, I left, I right, size_t& length, A alloc);
 template<typename I, typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 void __rusty_alias_Root_bulk_push(auto& self_, I iter, size_t& length, A alloc);
 export template<typename T>
-void take_mut(T& v, const auto& change);
+void take_mut(T& v, auto&& change);
 export template<typename T>
-auto replace(T& v, const auto& change);
+auto replace(T& v, auto&& change);
 std::tuple<size_t, LeftOrRight<size_t>> splitpoint(size_t edge_idx);
 template<typename T>
 void slice_insert(std::span<rusty::MaybeUninit<T>> slice, size_t idx, T val);
@@ -3835,6 +4965,45 @@ LazyLeafRange<BorrowType, K, V> full_range(NodeRef<BorrowType, K, V, marker::Lea
 // Extension trait free-function forward declarations
 namespace rusty_ext {
 }
+/// Zero-Sized Type (ZST) for internal `BTreeSet` values.
+/// Used instead of `()` to differentiate between:
+/// * `BTreeMap<T, ()>` (possible user-defined map)
+/// * `BTreeMap<T, SetValZST>` (internal set representation)
+export struct SetValZST {
+
+    static bool is_set_val();
+
+    std::string rusty_debug_string() const {
+        return std::string("SetValZST");
+    }
+    friend std::ostream& operator<<(std::ostream& os, const SetValZST& v) {
+        return os << v.rusty_debug_string();
+    }
+    bool operator==(const SetValZST&) const = default;
+    auto operator<=>(const SetValZST&) const = default;
+    SetValZST clone() const { return SetValZST{}; }
+    static SetValZST default_() { return {}; }
+};
+
+} // namespace btree_port::btree::btree_internal (closed for std::hash)
+// btree_port port: std::hash<...> moved to module purview
+using btree_port::btree::btree_internal::SetValZST;
+template<>
+struct std::hash<SetValZST> {
+    size_t operator()(const SetValZST& v) const { return 0; /* TODO: hash fields */ }
+};
+namespace btree_port::btree::btree_internal {
+
+
+// Algebraic data type
+export struct IndexResult_KV {
+    size_t _0;
+};
+export struct IndexResult_Edge {
+    size_t _0;
+};
+using IndexResult = std::variant<IndexResult_KV, IndexResult_Edge>;
+
 export constexpr size_t MIN_LEN = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
 
 namespace intrinsics = rusty::intrinsics;
@@ -3885,34 +5054,7 @@ struct DormantMutRef {
     }
 };
 
-/// Zero-Sized Type (ZST) for internal `BTreeSet` values.
-/// Used instead of `()` to differentiate between:
-/// * `BTreeMap<T, ()>` (possible user-defined map)
-/// * `BTreeMap<T, SetValZST>` (internal set representation)
-export struct SetValZST {
-
-    static bool is_set_val();
-
-    friend std::ostream& operator<<(std::ostream& os, const SetValZST& v) {
-        return os << "SetValZST { ... }";
-    }
-    bool operator==(const SetValZST&) const = default;
-    auto operator<=>(const SetValZST&) const = default;
-    SetValZST clone() const { return SetValZST{}; }
-    static SetValZST default_() { return {}; }
-};
-
-} // namespace btree_port::btree::btree_internal (closed for std::hash)
-// btree_port port: std::hash<...> moved to module purview
-using btree_port::btree::btree_internal::SetValZST;
-template<>
-struct std::hash<SetValZST> {
-    size_t operator()(const SetValZST& v) const { return 0; /* TODO: hash fields */ }
-};
-namespace btree_port::btree::btree_internal {
-
-
-class IsSetVal {
+export class IsSetVal {
 public:
     virtual ~IsSetVal() noexcept(false) {}
     IsSetVal(const IsSetVal&) = delete;
@@ -3938,7 +5080,7 @@ struct DedupSortedIter {
     decltype(std::declval<I>().peekable()) iter;
 
     static DedupSortedIter<K, V, I> new_(I iter) {
-        return DedupSortedIter<K, V, I>{.iter = rusty::deref_call(iter, rusty::detail::__mdisp_peekable{})};
+        return DedupSortedIter<K, V, I>{.iter = rusty::peekable(iter)};
     }
     rusty::Option<std::tuple<K, V>> next() {
         while (true) {
@@ -3948,7 +5090,7 @@ _match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_non
             const auto peeked = ({ auto&& _m = this->iter.peek(); std::conditional_t<std::is_reference_v<decltype(_m.unwrap())>, std::optional<std::reference_wrapper<std::remove_reference_t<decltype(_m.unwrap())>>>, std::optional<std::remove_cvref_t<decltype(_m.unwrap())>>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
 auto&& peeked = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
 _match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return rusty::Option<std::tuple<K, V>>(std::move(next)); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
-            if (rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(next)) != rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(peeked))) {
+            if (rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(next))) != rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(peeked)))) {
                 return rusty::Option<std::tuple<K, V>>(std::move(next));
             }
         }
@@ -3961,22 +5103,26 @@ using rusty::cmp::Ordering;
 
 // Rust-only: using std::iter::FusedIterator;
 
-// Algebraic data type — exported so set.cppm can use Peeked / Peeked_Left
-// / Peeked_Right for hand-ported set-op merge bodies (bypassing the
-// broken transpiled MergeIterInner::nexts).
-export template<typename I>
+// Algebraic data type
+template<typename I>
 struct Peeked_Left {
     rusty::detail::associated_item_t<I> _0;
+    std::string rusty_debug_string() const {
+        return std::string("Left(") + rusty::to_debug_string(this->_0) + ")";
+    }
 };
-export template<typename I>
+template<typename I>
 struct Peeked_Right {
     rusty::detail::associated_item_t<I> _0;
+    std::string rusty_debug_string() const {
+        return std::string("Right(") + rusty::to_debug_string(this->_0) + ")";
+    }
 };
 template<typename I>
 Peeked_Left<I> Left(rusty::detail::associated_item_t<I> _0);
 template<typename I>
 Peeked_Right<I> Right(rusty::detail::associated_item_t<I> _0);
-export template<typename I>
+template<typename I>
 using Peeked = std::variant<Peeked_Left<I>, Peeked_Right<I>>;
 template<typename I>
 Peeked_Left<I> Left(rusty::detail::associated_item_t<I> _0) { return Peeked_Left<I>{std::forward<rusty::detail::associated_item_t<I>>(_0)};  }
@@ -4002,38 +5148,35 @@ struct MergeIterInner {
     }
     template<typename Cmp>
     auto nexts(Cmp cmp) {
-        // Hand-port: Rust declares `let mut a_next;` untyped (inferred as
-        // Option<I::Item>); the emitter filled the bindings with the
-        // function's RETURN tuple type instead.
-        rusty::Option<rusty::detail::associated_item_t<I>> a_next = rusty::Option<rusty::detail::associated_item_t<I>>{rusty::None};
-        rusty::Option<rusty::detail::associated_item_t<I>> b_next = rusty::Option<rusty::detail::associated_item_t<I>>{rusty::None};
+        rusty::Option<std::tuple<rusty::Option<I>, rusty::Option<I>>> a_next = rusty::Option<std::tuple<rusty::Option<I>, rusty::Option<I>>>{rusty::None};
+        rusty::Option<std::tuple<rusty::Option<I>, rusty::Option<I>>> b_next = rusty::Option<std::tuple<rusty::Option<I>, rusty::Option<I>>>{rusty::None};
         {
             auto&& _m = this->peeked.take();
             bool _m_matched = false;
             if (!_m_matched) {
-                if (_m.is_some()) {
-                    auto&& _mv0 = std::as_const(_m).unwrap();
-                    if (rusty::detail::deref_if_pointer(_mv0).index() == 0) {
+                if (rusty::detail::deref_if_pointer(_m).is_some()) {
+                    auto&& _mv0 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap();
+                    if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv0)) == 0) {
                         auto&& next = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0);
-                        a_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);
+                        a_next = rusty::Option<std::tuple<rusty::Option<I>, rusty::Option<I>>>(next);
                         b_next = rusty::deref_call(this->b, rusty::detail::__mdisp_next{});
                         _m_matched = true;
                     }
                 }
             }
             if (!_m_matched) {
-                if (_m.is_some()) {
-                    auto&& _mv1 = std::as_const(_m).unwrap();
-                    if (rusty::detail::deref_if_pointer(_mv1).index() == 1) {
+                if (rusty::detail::deref_if_pointer(_m).is_some()) {
+                    auto&& _mv1 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap();
+                    if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1) {
                         auto&& next = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0);
-                        b_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);
+                        b_next = rusty::Option<std::tuple<rusty::Option<I>, rusty::Option<I>>>(next);
                         a_next = rusty::deref_call(this->a, rusty::detail::__mdisp_next{});
                         _m_matched = true;
                     }
                 }
             }
             if (!_m_matched) {
-                if (_m.is_none()) {
+                if (rusty::detail::deref_if_pointer(_m).is_none()) {
                     a_next = rusty::deref_call(this->a, rusty::detail::__mdisp_next{});
                     b_next = rusty::deref_call(this->b, rusty::detail::__mdisp_next{});
                     _m_matched = true;
@@ -4041,8 +5184,10 @@ struct MergeIterInner {
             }
         }
         if (auto&& _iflet_scrutinee = std::make_tuple(a_next, b_next); (rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_scrutinee))).is_some() && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_iflet_scrutinee))).is_some())) {
-            auto&& a1 = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_scrutinee)))).unwrap());
-            auto&& b1 = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_iflet_scrutinee)))).unwrap());
+            auto&& a1_bind_tmp = std::as_const(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_scrutinee)))).unwrap();
+            auto&& a1 = rusty::detail::deref_if_pointer(a1_bind_tmp);
+            auto&& b1_bind_tmp = std::as_const(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_iflet_scrutinee)))).unwrap();
+            auto&& b1 = rusty::detail::deref_if_pointer(b1_bind_tmp);
             switch (cmp(std::move(a1), std::move(b1))) {
             case Ordering::Less:
             {
@@ -4064,7 +5209,7 @@ struct MergeIterInner {
         return std::make_tuple(std::move(a_next), std::move(b_next));
     }
     std::tuple<size_t, size_t> lens() const {
-        return [&]() -> std::tuple<size_t, size_t> { auto&& _m = this->peeked; if (_m.is_some()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { return std::make_tuple(static_cast<size_t>(1) + rusty::len(this->a), rusty::len(this->b)); } } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { return std::make_tuple(rusty::len(this->a), static_cast<size_t>(1) + rusty::len(this->b)); } } if (true) { return std::make_tuple(rusty::len(this->a), rusty::len(this->b)); } return [&]() -> std::tuple<size_t, size_t> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> std::tuple<size_t, size_t> { auto&& _m = this->peeked; if (rusty::detail::deref_if_pointer(_m).is_some()) { auto&& _mv0 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv0)) == 0) { return std::make_tuple(static_cast<size_t>(1) + rusty::len(this->a), rusty::len(this->b)); } } if (rusty::detail::deref_if_pointer(_m).is_some()) { auto&& _mv1 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1) { return std::make_tuple(rusty::len(this->a), static_cast<size_t>(1) + rusty::len(this->b)); } } if (true) { return std::make_tuple(rusty::len(this->a), rusty::len(this->b)); } return [&]() -> std::tuple<size_t, size_t> { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 
@@ -4084,15 +5229,10 @@ using rusty::alloc::Layout;
 using rusty::Box;
 
 
-export constexpr size_t CAPACITY = (static_cast<size_t>(2) * rusty::detail::deref_if_pointer_like(B)) - static_cast<size_t>(1);
 
-export constexpr size_t MIN_LEN_AFTER_SPLIT = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
 
-constexpr size_t KV_IDX_CENTER = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
 
-constexpr size_t EDGE_IDX_LEFT_OF_CENTER = rusty::detail::deref_if_pointer_like(B) - static_cast<size_t>(1);
 
-constexpr size_t EDGE_IDX_RIGHT_OF_CENTER = B;
 
 // Algebraic data type
 export template<typename T>
@@ -4158,32 +5298,8 @@ struct SearchBound : std::variant<SearchBound_Included<T>, SearchBound_Excluded<
     static SearchBound<T> AllExcluded() { return SearchBound<T>{SearchBound_AllExcluded<T>{}}; }
 
 
-    template<typename U>
-    static SearchBound<T> from_range(rusty::Bound<U> range_bound) {
-        // Range-path fix: the transpiled body returned bare `AllIncluded`
-        // (the function template), not a SearchBound value. Hand-port
-        // the match on rusty::Bound<U> = variant<Unbounded, Included, Excluded>
-        // and emit explicit SearchBound<T> constructions for each arm.
-        //
-        // Hand-port 2: accept Bound<U>, not just Bound<T>. Rust's Bound is
-        // polymorphic; the C++ range_full() has no key type to name and
-        // defaults its Bound to size_t — its only variant is Unbounded, so
-        // the payload arms are compile-guarded on T-from-U constructibility
-        // and asserted unreachable otherwise (retain() on any key type).
-        if constexpr (std::is_constructible_v<T, U&&>) {
-            if (range_bound.index() == 1) {
-                auto&& t = std::get<1>(range_bound)._0;
-                return SearchBound<T>{SearchBound_Included<T>{T(std::move(t))}};
-            }
-            if (range_bound.index() == 2) {
-                auto&& t = std::get<2>(range_bound)._0;
-                return SearchBound<T>{SearchBound_Excluded<T>{T(std::move(t))}};
-            }
-        } else {
-            assert(range_bound.index() == 0 && "payload-carrying Bound<U> with U not convertible to the key type");
-        }
-        // Bound_Unbounded → SearchBound_AllIncluded
-        return SearchBound<T>{SearchBound_AllIncluded<T>{}};
+    static SearchBound<T> from_range(rusty::Bound<T> range_bound) {
+        return [&]() -> SearchBound<T> { auto&& _m = range_bound; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& t = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return SearchBound<T>{SearchBound_Included<T>{t}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { auto&& t = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return SearchBound<T>{SearchBound_Excluded<T>{t}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { return AllIncluded; } return [&]() -> SearchBound<T> { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 template<typename T>
@@ -4196,15 +5312,6 @@ template<typename T>
 SearchBound_AllExcluded<T> AllExcluded() { return SearchBound_AllExcluded<T>{};  }
 
 
-// Algebraic data type
-export struct IndexResult_KV {
-    size_t _0;
-};
-export struct IndexResult_Edge {
-    size_t _0;
-};
-using IndexResult = std::variant<IndexResult_KV, IndexResult_Edge>;
-
 template<typename K, typename V, typename I>
 struct MergeIter {
     using Item = std::tuple<K, V>;
@@ -4212,11 +5319,9 @@ struct MergeIter {
 
     rusty::Option<std::tuple<K, V>> next() {
         auto [a_next, b_next] = rusty::detail::deref_if_pointer_like(this->_0.nexts([&](const std::tuple<K, V>& a, const std::tuple<K, V>& b) -> rusty::cmp::Ordering {
-// Hand-port: Rust `K::cmp(&a.0, &b.0)` is Ord::cmp — primitives have no
-// member cmp in C++; route through the generic comparator.
-return rusty::cmp::cmp(std::get<0>(a), std::get<0>(b));
+return rusty::cmp::cmp(rusty::detail::deref_if_pointer_like(std::get<0>(a)), rusty::detail::deref_if_pointer_like(std::get<0>(b)));
 }));
-        return [&]() -> rusty::Option<std::tuple<K, V>> { auto&& _m0 = a_next; auto&& _m1 = b_next; if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& a_k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap()))); auto&& b_v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap()))); return rusty::Option<std::tuple<K, V>>(std::make_tuple(a_k, b_v)); } if (rusty::detail::deref_if_pointer(_m0).is_some() && _m1.is_none()) { auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap()); return rusty::Option<std::tuple<K, V>>(a); } if (_m0.is_none() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap()); return rusty::Option<std::tuple<K, V>>(b); } if (_m0.is_none() && _m1.is_none()) { return rusty::Option<std::tuple<K, V>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<K, V>> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<std::tuple<K, V>> { auto&& _m0 = a_next; auto&& _m1 = b_next; if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& a_k_bind_tmp = std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap())); auto&& a_k = rusty::detail::deref_if_pointer(a_k_bind_tmp); auto&& b_v_bind_tmp = std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap())); auto&& b_v = rusty::detail::deref_if_pointer(b_v_bind_tmp); return rusty::Option<std::tuple<K, V>>(std::make_tuple(a_k, b_v)); } if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_none()) { auto&& a_bind_tmp = rusty::detail::deref_if_pointer(_m0).unwrap(); auto&& a = rusty::detail::deref_if_pointer(a_bind_tmp); return rusty::Option<std::tuple<K, V>>(a); } if (rusty::detail::deref_if_pointer(_m0).is_none() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& b_bind_tmp = rusty::detail::deref_if_pointer(_m1).unwrap(); auto&& b = rusty::detail::deref_if_pointer(b_bind_tmp); return rusty::Option<std::tuple<K, V>>(b); } if (rusty::detail::deref_if_pointer(_m0).is_none() && rusty::detail::deref_if_pointer(_m1).is_none()) { return rusty::Option<std::tuple<K, V>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<K, V>> { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 
@@ -4244,7 +5349,7 @@ struct LeafNode {
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static rusty::Box<LeafNode<K, V>, A> new_(A alloc) {
         // btree_port port step 54: rusty::Box has no new_uninit_in,
         // and we don't need uninit storage anyway — the MaybeUninit
@@ -4270,7 +5375,7 @@ struct InternalNode {
     std::array<rusty::MaybeUninit<BoxedNode<K, V>>, 2 * rusty::detail::deref_if_pointer_like(B)> edges;
 
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static rusty::Box<InternalNode<K, V>, A> new_(A alloc) {
         // btree_port port step 59: bypass missing Box::new_uninit_in
         // (same pattern as LeafNode::new_ step-54 fix #6).
@@ -4344,12 +5449,12 @@ struct NodeRef {
         return {.height_field = rusty::clone(this->height_field), .node = rusty::clone(this->node), ._marker = rusty::clone(this->_marker)};
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static NodeRef<BorrowType, K, V, Type> new_leaf(A alloc) {
         return NodeRef<BorrowType, K, V, Type>::from_new_leaf(LeafNode<K, V>::new_(std::move(alloc)));
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static NodeRef<BorrowType, K, V, Type> from_new_leaf(rusty::Box<LeafNode<K, V>, A> leaf) {
         // btree_port port: B1 from_new_leaf hand-ported by post_transpile_patch.py
         // Box::into_non_null_with_allocator(leaf) → (NonNull<T>, A).
@@ -4363,14 +5468,14 @@ struct NodeRef {
         };
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static NodeRef<BorrowType, K, V, Type> new_internal(Root<K, V> child, A alloc) {
         auto new_node = InternalNode<K, V>::new_(std::move(alloc));
-        (*new_node).edges[0].write(std::move(child.node));
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })((*new_node).edges.at(static_cast<size_t>(0)), std::move(child.node));
         return NodeRef<marker::Owned, K, V, marker::Internal>::from_new_internal(std::move(new_node), rusty::num::NonZero<size_t>::new_(rusty::detail::deref_if_pointer_like(child.height_field) + static_cast<size_t>(1)).unwrap());
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static NodeRef<BorrowType, K, V, Type> from_new_internal(rusty::Box<InternalNode<K, V>, A> internal, rusty::num::NonZero<size_t> height) {
         // btree_port port: B2 from_new_internal hand-ported by post_transpile_patch.py
         // Box::into_non_null_with_allocator → (NonNull, A); the Box's
@@ -4391,7 +5496,7 @@ struct NodeRef {
     }
     static NodeRef<BorrowType, K, V, Type> from_internal(rusty::ptr::NonNull<InternalNode<K, V>> node, size_t height) {
         assert((rusty::detail::deref_if_pointer_like(height) > 0));
-        return NodeRef<BorrowType, K, V, Type>{.height_field = std::move(height), .node = node.cast(), ._marker = rusty::PhantomData<std::tuple<BorrowType, Type>>{}};
+        return NodeRef<BorrowType, K, V, Type>{.height_field = std::move(height), .node = rusty::ptr::cast(node), ._marker = rusty::PhantomData<std::tuple<BorrowType, Type>>{}};
     }
     static std::add_pointer_t<InternalNode<K, V>> as_internal_ptr(const NodeRef<BorrowType, K, V, Type>& this_) {
         return const_cast<std::add_pointer_t<InternalNode<K, V>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<InternalNode<K, V>>>>(rusty::as_ptr(this_.node)));
@@ -4418,51 +5523,22 @@ struct NodeRef {
     static std::add_pointer_t<LeafNode<K, V>> as_leaf_ptr(const NodeRef<BorrowType, K, V, Type>& this_) {
         return const_cast<std::add_pointer_t<LeafNode<K, V>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<LeafNode<K, V>>>>(rusty::as_ptr(this_.node)));
     }
-    rusty::Result<Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>, NodeRef<BorrowType, K, V, Type>> ascend() {
-        // Hand-port: Rust's `*parent` inside the map closure derefs the
-        // `&NonNull` BORROW (copying the NonNull out) — the emitter read it
-        // as a pointer deref and passed the pointee InternalNode by value.
-        // from_internal takes the NonNull itself.
+    rusty::Result<Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>, NodeRef<BorrowType, K, V, Type>> ascend() const {
         // const-block elided (Rust 2024 compile-time fence)
         const auto* leaf_ptr = as_leaf_ptr((*this));
         return (*leaf_ptr).parent.as_ref().map([&](auto&& parent) -> Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge> { return Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>(NodeRef<BorrowType, K, V, marker::Internal>::from_internal(parent, rusty::detail::deref_if_pointer_like(this->height_field) + static_cast<size_t>(1)), static_cast<size_t>((*leaf_ptr).parent_idx.assume_init()), rusty::PhantomData<marker::Edge>{}); }).ok_or(NodeRef<BorrowType, K, V, Type>(std::move((*this))));
     }
-    Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> first_edge() const {
-        // @unsafe
-        {
-            return Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>::new_edge(std::move((*this)), static_cast<size_t>(0));
-        }
-    }
-    Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> last_edge() {
-        auto len = rusty::len((*this));
-        // @unsafe
-        {
-            return Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>::new_edge(std::move((*this)), std::move(len));
-        }
-    }
-    Handle<NodeRef<BorrowType, K, V, Type>, marker::KV> first_kv() {
-        const auto len = rusty::len((*this));
-        assert((rusty::detail::deref_if_pointer_like(len) > 0));
-        // @unsafe
-        {
-            return Handle<NodeRef<BorrowType, K, V, Type>, marker::KV>::new_kv(std::move((*this)), static_cast<size_t>(0));
-        }
-    }
-    Handle<NodeRef<BorrowType, K, V, Type>, marker::KV> last_kv() {
-        const auto len = rusty::len((*this));
-        assert((rusty::detail::deref_if_pointer_like(len) > 0));
-        // @unsafe
-        {
-            return Handle<NodeRef<BorrowType, K, V, Type>, marker::KV>::new_kv(std::move((*this)), rusty::detail::deref_if_pointer_like(len) - static_cast<size_t>(1));
-        }
-    }
+    Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> first_edge() const;
+    Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> last_edge() const;
+    Handle<NodeRef<BorrowType, K, V, Type>, marker::KV> first_kv() const;
+    Handle<NodeRef<BorrowType, K, V, Type>, marker::KV> last_kv() const;
     bool eq(const NodeRef<BorrowType, K, V, Type>& other) const {
         auto&& _let_pat = (*this);
         auto&& node = rusty::detail::deref_if_pointer(_let_pat.node);
         auto&& height = rusty::detail::deref_if_pointer(_let_pat.height_field);
         auto&& _marker = rusty::detail::deref_if_pointer(_let_pat._marker);
         if (rusty::cmp::eq(node, &other.node)) {
-            assert((height == other.height_field));  /* btree_port port: clang-strictness fix by post_transpile_patch.py */
+            assert(((rusty::detail::deref_if_pointer_like(height)) == rusty::detail::deref_if_pointer_like((other.height_field))));
             return true;
         } else {
             return false;
@@ -4483,14 +5559,14 @@ struct NodeRef {
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Internal>, marker::Edge>> deallocate_and_ascend(A alloc) {
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Internal>, marker::Edge>> deallocate_and_ascend(A alloc) const {
         const auto height = std::move(this->height_field);
         const auto node = std::move(this->node);
         auto ret = this->ascend().ok();
         // @unsafe
         {
-            rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, node.cast(), (rusty::detail::deref_if_pointer_like(height) > 0 ? Layout::new_<InternalNode<K, V>>() : Layout::new_<LeafNode<K, V>>()));
+            rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, rusty::ptr::cast(node), (rusty::detail::deref_if_pointer_like(height) > 0 ? Layout::new_<InternalNode<K, V>>() : Layout::new_<LeafNode<K, V>>()));
         }
         return std::move(ret);
     }
@@ -4514,7 +5590,7 @@ struct NodeRef {
     NodeRef<marker::DormantMut, K, V, Type> dormant() const {
         return NodeRef<marker::DormantMut, K, V, Type>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<marker::DormantMut, Type>>{}};
     }
-    NodeRef<marker::Mut, K, V, Type> awaken() {
+    NodeRef<marker::Mut, K, V, Type> awaken() const {
         return NodeRef<marker::Mut, K, V, Type>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Mut, Type>>{}};
     }
     LeafNode<K, V>& as_leaf_dying() {
@@ -4559,35 +5635,22 @@ struct NodeRef {
         }
     }
     std::tuple<const K&, V&> into_key_val_mut_at(size_t idx) {
-        // btree_port port fix: the transpiled body tried to index a
-        // pointer (keys_shadow1[idx]) as if it were an array, which on
-        // std::array* performs pointer arithmetic across the WHOLE
-        // array — out-of-bounds. Rewrite to the same lambda-dispatch
-        // pattern used by into_kv / into_kv_mut so the index is applied
-        // to the leaf's std::array<MaybeUninit<T>, N> directly.
-        auto& leaf = this->into_leaf_mut();
-        auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) {
-            if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; }
-            else { return __recv.get_unchecked(__idx); }
-        })(leaf.keys, idx).assume_init_ref();
-        auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) {
-            if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; }
-            else { return __recv.get_unchecked_mut(__idx); }
-        })(leaf.vals, std::move(idx)).assume_init_mut();
+        const auto leaf = as_leaf_ptr((*this));
+        auto keys = &(*leaf).keys;
+        auto vals = &(*leaf).vals;
+        auto keys_shadow1 = keys;
+        auto vals_shadow1 = vals;
+        auto& key = ((rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(keys_shadow1, std::move(idx))))))->assume_init_ref();
+        auto& val = ((rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(vals_shadow1, std::move(idx))))))->assume_init_mut();
         return std::tuple<const K&, V&>{key, val};
     }
     uint16_t& len_mut() {
         return this->as_leaf_mut().len;
     }
     template<typename R>
-    void correct_childrens_parent_links(R range) {
-        for (auto&& i : rusty::for_in(range)) {
-            assert((rusty::detail::deref_if_pointer_like(i) <= rusty::len((*this))));
-            std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->reborrow_mut()))>, marker::Edge>, R>::new_edge(this->reborrow_mut(), std::move(i)).correct_parent_link();
-        }
-    }
+    void correct_childrens_parent_links(R range);
     void correct_all_childrens_parent_links() {
-        const auto len = rusty::len((*this));
+        const auto len = this->len();
         // @unsafe
         {
             this->correct_childrens_parent_links(rusty::range_inclusive(0, len));
@@ -4601,7 +5664,7 @@ struct NodeRef {
         }
         // @unsafe
         {
-            (*leaf).parent_idx.write(static_cast<uint16_t>(parent_idx));
+            ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })((*leaf).parent_idx, static_cast<uint16_t>(parent_idx));
         }
     }
     void clear_parent_link() {
@@ -4610,29 +5673,29 @@ struct NodeRef {
         leaf.parent = rusty::None;
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     static NodeRef<BorrowType, K, V, Type> new_(A alloc) {
         return NodeRef<marker::Owned, K, V, marker::Leaf>::new_leaf(std::move(alloc)).forget_type();
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     NodeRef<marker::Mut, K, V, marker::Internal> push_internal_level(A alloc) {
-        take_mut((*this), [&](auto&& old_root) { return NodeRef<marker::Owned, K, V, marker::Internal>::new_internal(std::move(old_root), std::move(alloc)).forget_type(); });
+        take_mut((*this), [&](auto&& old_root) { return NodeRef<marker::Owned, K, V, marker::Internal>::new_internal(old_root, std::move(alloc)).forget_type(); });
         return NodeRef<marker::Mut, K, V, marker::Internal>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Internal>>{}};
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     void pop_internal_level(A alloc) {
         assert((rusty::detail::deref_if_pointer_like(this->height_field) > 0));
         const auto top = this->node;
         auto internal_self = this->borrow_mut().cast_to_internal_unchecked();
         InternalNode<K, V>& internal_node = internal_self.as_internal_mut();
-        this->node = internal_node.edges.at(0).assume_init_read();
+        this->node = internal_node.edges.at(static_cast<size_t>(0)).assume_init_read();
         this->height_field -= 1;
         this->clear_parent_link();
         // @unsafe
         {
-            rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, top.cast(), Layout::new_<InternalNode<K, V>>());
+            rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, rusty::ptr::cast(top), Layout::new_<InternalNode<K, V>>());
         }
     }
     NodeRef<marker::Mut, K, V, Type> borrow_mut() {
@@ -4641,79 +5704,37 @@ struct NodeRef {
     NodeRef<marker::ValMut, K, V, Type> borrow_valmut() {
         return NodeRef<marker::ValMut, K, V, Type>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<marker::ValMut, Type>>{}};
     }
-    NodeRef<marker::Dying, K, V, Type> into_dying() {
+    NodeRef<marker::Dying, K, V, Type> into_dying() const {
         return NodeRef<marker::Dying, K, V, Type>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Dying, Type>>{}};
     }
-    Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val) {
-        // btree_port port: B3 push_with_handle hand-ported by post_transpile_patch.py
-        // Same pattern as the already-transpiled `push()`: increment
-        // len, write into the key/val areas at idx, then return a
-        // Handle pointing at the new (key, val) pair. The returned
-        // NodeRef has a fresh lifetime 'b in Rust; in C++ lifetimes
-        // are erased, so it's just a sibling NodeRef<Mut, K, V, Leaf>.
-        uint16_t& __len = this->len_mut();
-        auto __idx = static_cast<size_t>(__len);
-        assert((__idx < CAPACITY));
-        __len += 1;
-        // @unsafe — caller has the only mutable borrow of this leaf.
-        this->key_area_mut(__idx).write(std::move(key));
-        this->val_area_mut(__idx).write(std::move(val));
-        return Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV>::new_kv(
-            NodeRef<marker::Mut, K, V, marker::Leaf>{
-                .height_field = this->height_field,
-                .node = this->node,
-                ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Leaf>>{}
-            },
-            __idx
-        );
-    }
-    V& push(K key, V val) {
+    Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val);
+    std::add_pointer_t<V> push(K key, V val) {
         // @unsafe
         {
             return this->push_with_handle(std::move(key), std::move(val)).into_val_mut();
         }
     }
-    void push(K key, V val, Root<K, V> edge) {
-        assert((rusty::detail::deref_if_pointer_like(edge.height_field) == (rusty::detail::deref_if_pointer_like(this->height_field) - 1)));
-        uint16_t& len = this->len_mut();
-        auto idx = static_cast<size_t>(len);
-        assert((rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(CAPACITY)));
-        len += 1;
-        // @unsafe
-        {
-            this->key_area_mut(std::move(idx)).write(std::move(key));
-            this->val_area_mut(std::move(idx)).write(std::move(val));
-            this->edge_area_mut(rusty::detail::deref_if_pointer_like(idx) + 1).write(std::move(edge.node));
-            std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->reborrow_mut()))>, marker::Edge>, K>::new_edge(this->reborrow_mut(), rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1)).correct_parent_link();
-        }
-    }
-    NodeRef<BorrowType, K, V, marker::LeafOrInternal> forget_type() {
+    void push(K key, V val, Root<K, V> edge);
+    NodeRef<BorrowType, K, V, marker::LeafOrInternal> forget_type() const {
         return NodeRef<BorrowType, K, V, marker::LeafOrInternal>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::LeafOrInternal>>{}};
     }
     ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>> force() const {
-        // Range-path const fix: NodeRef::force() inspects height_field
-        // and reads the node pointer, then constructs a fresh NodeRef
-        // copy under a different marker. The std::move calls were
-        // semantically no-ops (height_field is size_t, node is a
-        // NonNull pointer — both trivially copyable). Drop them so the
-        // method type-checks under const, which is what the read-only
-        // iter() / range() paths need.
         if (rusty::detail::deref_if_pointer_like(this->height_field) == static_cast<size_t>(0)) {
-            return ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{ForceResult_Leaf<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{NodeRef<BorrowType, K, V, marker::Leaf>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::Leaf>>{}}}};
+            return ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{ForceResult_Leaf<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{NodeRef<BorrowType, K, V, marker::Leaf>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::Leaf>>{}}}};
         } else {
-            return ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{ForceResult_Internal<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{NodeRef<BorrowType, K, V, marker::Internal>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::Internal>>{}}}};
+            return ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{ForceResult_Internal<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{NodeRef<BorrowType, K, V, marker::Internal>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::Internal>>{}}}};
         }
     }
-    NodeRef<marker::Mut, K, V, marker::Leaf> cast_to_leaf_unchecked() {
+    NodeRef<marker::Mut, K, V, marker::Leaf> cast_to_leaf_unchecked() const {
         assert((rusty::detail::deref_if_pointer_like(this->height_field) == static_cast<size_t>(0)));
         return NodeRef<marker::Mut, K, V, marker::Leaf>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Leaf>>{}};
     }
-    NodeRef<marker::Mut, K, V, marker::Internal> cast_to_internal_unchecked() {
+    NodeRef<marker::Mut, K, V, marker::Internal> cast_to_internal_unchecked() const {
         assert((rusty::detail::deref_if_pointer_like(this->height_field) > 0));
         return NodeRef<marker::Mut, K, V, marker::Internal>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Internal>>{}};
     }
     rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> choose_parent_kv() const {
-        return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = rusty::ptr::read(&(*this)).ascend(); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& parent_edge = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = parent_edge.left_kv(); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& left_parent_kv = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>>::Ok(LeftOrRight<BalancingContext<K, V>>{LeftOrRight_Left<BalancingContext<K, V>>{BalancingContext<K, V>(rusty::ptr::read(&left_parent_kv), left_parent_kv.left_edge().descend(), std::move((*this)))}}); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& parent_edge = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = parent_edge.right_kv(); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& right_parent_kv = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>>::Ok(LeftOrRight<BalancingContext<K, V>>{LeftOrRight_Right<BalancingContext<K, V>>{BalancingContext<K, V>(rusty::ptr::read(&right_parent_kv), std::move((*this)), right_parent_kv.right_edge().descend())}}); } if (_m.is_err()) { ([&]() { std::println(stderr, "empty internal node"); rusty::intrinsics::unreachable(); }()); } return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }(); } return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>>::Err(std::move(root)); } return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = rusty::ptr::read(&(*this)).ascend(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto&& parent_edge = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = parent_edge.left_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto&& left_parent_kv = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>>::Ok(LeftOrRight<BalancingContext<K, V>>{LeftOrRight_Left<BalancingContext<K, V>>{BalancingContext<K, V>(rusty::ptr::read(&left_parent_kv), left_parent_kv.left_edge().descend(), std::move((*this)))}}); } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err_mut(); auto&& parent_edge = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = parent_edge.right_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); auto&& right_parent_kv = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>>::Ok(LeftOrRight<BalancingContext<K, V>>{LeftOrRight_Right<BalancingContext<K, V>>{BalancingContext<K, V>(rusty::ptr::read(&right_parent_kv), std::move((*this)), right_parent_kv.right_edge().descend())}}); } if (rusty::detail::deref_if_pointer(_m).is_err()) { ([&]() { std::println(stderr, "empty internal node"); rusty::intrinsics::unreachable(); }()); } return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }(); } return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err(); auto&& root = rusty::detail::deref_if_pointer(_mv1); return rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>>::Err(std::move(root)); } return [&]() -> rusty::Result<LeftOrRight<BalancingContext<K, V>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename Q>
     SearchResult<BorrowType, K, V, marker::LeafOrInternal, marker::Leaf> search_tree(const Q& key) const {
@@ -4756,96 +5777,23 @@ struct NodeRef {
             self_ = __internal.descend();
         }
     }
-    // Range-path hand-port: the transpiler emitted SearchBound<const Q&>
-    // throughout this chain, but a variant<...<const Q&>...> isn't copy/
-    // move-assignable in C++, which broke essentially every constructor
-    // along the way. The original Rust uses Borrow<Q> for K, but C++ has
-    // no Borrow trait — for the keyed lookup we just need Q=K, so the
-    // ported signatures take SearchBound<K> by value.
-    template<typename R>
-    rusty::Result<
-        std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
-                   size_t, size_t,
-                   SearchBound<K>, SearchBound<K>>,
-        Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>
-    search_tree_for_bifurcation(const R& range) {
-        using __OkTuple = std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
-                                     size_t, size_t,
-                                     SearchBound<K>, SearchBound<K>>;
-        using __Ret = rusty::Result<__OkTuple,
-                                    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>;
-        // start_bound() / end_bound() return Bound<K> by value
-        // (see rusty::range<T> in include/rusty/array.hpp).
-        auto start = range.start_bound();
-        auto end = range.end_bound();
-        auto lower_bound = SearchBound<K>::from_range(std::move(start));
-        auto upper_bound = SearchBound<K>::from_range(std::move(end));
-        while (true) {
-            auto __lo = this->find_lower_bound_index(std::move(lower_bound));
-            size_t lower_edge_idx = std::get<0>(__lo);
-            SearchBound<K> lower_child_bound = std::move(std::get<1>(__lo));
-            auto __hi = this->find_upper_bound_index(std::move(upper_bound),
-                                                    lower_edge_idx);
-            size_t upper_edge_idx = std::get<0>(__hi);
-            SearchBound<K> upper_child_bound = std::move(std::get<1>(__hi));
-            if (lower_edge_idx < upper_edge_idx) {
-                return __Ret::Ok(__OkTuple{std::move(*this),
-                                            lower_edge_idx,
-                                            upper_edge_idx,
-                                            std::move(lower_child_bound),
-                                            std::move(upper_child_bound)});
-            }
-            assert(lower_edge_idx == upper_edge_idx);
-            using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
-                                        marker::Edge>;
-            auto common_edge = __EdgeHandle::new_edge(std::move(*this), lower_edge_idx);
-            auto __forced = common_edge.force();
-            if (__forced.index() == 0) {
-                // Leaf: return the edge as the empty-range error.
-                auto&& leaf_edge = std::get<0>(__forced)._0;
-                return __Ret::Err(std::move(leaf_edge));
-            }
-            // Internal: descend and reseat *this, then loop with the
-            // updated child bounds.
-            auto&& internal_edge = std::get<1>(__forced)._0;
-            *this = internal_edge.descend();
-            lower_bound = std::move(lower_child_bound);
-            upper_bound = std::move(upper_child_bound);
-        }
-    }
-    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>
-    find_lower_bound_edge(SearchBound<K> bound) {
-        auto __r = this->find_lower_bound_index(std::move(bound));
-        size_t edge_idx = std::get<0>(__r);
-        SearchBound<K> bound_shadow = std::move(std::get<1>(__r));
-        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>;
-        auto edge = __EdgeHandle::new_edge(std::move(*this), edge_idx);
-        return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>{
-            std::move(edge), std::move(bound_shadow)};
-    }
-    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>
-    find_upper_bound_edge(SearchBound<K> bound) {
-        auto __r = this->find_upper_bound_index(std::move(bound), static_cast<size_t>(0));
-        size_t edge_idx = std::get<0>(__r);
-        SearchBound<K> bound_shadow = std::move(std::get<1>(__r));
-        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>;
-        auto edge = __EdgeHandle::new_edge(std::move(*this), edge_idx);
-        return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>{
-            std::move(edge), std::move(bound_shadow)};
-    }
+    template<typename Q, typename R>
+    rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>> search_tree_for_bifurcation(const R& range);
     template<typename Q>
-    SearchResult<BorrowType, K, V, Type, Type> search_node(const Q& key) {
-        return [&]() -> SearchResult<BorrowType, K, V, Type, Type> { auto&& _m = this->find_key_index(key, static_cast<size_t>(0)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return SearchResult<BorrowType, K, V, Type, Type>{SearchResult_Found<BorrowType, K, V, Type, Type>{Handle<NodeRef<BorrowType, K, V, Type>, marker::KV>::new_kv(std::move((*this)), idx)}}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return SearchResult<BorrowType, K, V, Type, Type>{SearchResult_GoDown<BorrowType, K, V, Type, Type>{Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>::new_edge(std::move((*this)), idx)}}; } return [&]() -> SearchResult<BorrowType, K, V, Type, Type> { rusty::intrinsics::unreachable(); }(); }();
-    }
+    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>> find_lower_bound_edge(SearchBound<const Q&> bound) const;
+    template<typename Q>
+    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>> find_upper_bound_edge(SearchBound<const Q&> bound) const;
+    template<typename Q>
+    SearchResult<BorrowType, K, V, Type, Type> search_node(const Q& key) const;
     template<typename Q>
     IndexResult find_key_index(const Q& key, size_t start_index) const {
         auto node = this->reborrow();
-        const auto keys = node.keys();
+        auto keys = node.keys();
         assert((rusty::detail::deref_if_pointer_like(start_index) <= rusty::len(keys)));
         for (auto&& _for_item : rusty::for_in(rusty::enumerate(rusty::iter(rusty::slice_from(keys, start_index))))) {
             auto&& offset = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
             auto&& k = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
-            switch (rusty::cmp::cmp(key, ([&]() -> decltype(auto) { if constexpr (requires { k.borrow(); }) return k.borrow(); else return (k); }()))) {
+            switch (rusty::cmp::cmp(key, rusty::borrow(k))) {
             case Ordering::Greater:
             {
                 break;
@@ -4853,158 +5801,37 @@ struct NodeRef {
             case Ordering::Equal:
             {
                 return IndexResult{IndexResult_KV{rusty::detail::deref_if_pointer_like(start_index) + rusty::detail::deref_if_pointer_like(offset)}};
-                break;
             }
             case Ordering::Less:
             {
                 return IndexResult{IndexResult_Edge{rusty::detail::deref_if_pointer_like(start_index) + rusty::detail::deref_if_pointer_like(offset)}};
-                break;
             }
             }
         }
         return IndexResult{IndexResult_Edge{rusty::len(keys)}};
     }
-    // Range-path hand-port: see search_tree_for_bifurcation rationale.
-    // Body mirrors the Rust match on SearchBound. Returns the new index
-    // plus the bound that the next-deeper search should use.
-    std::tuple<size_t, SearchBound<K>>
-    find_lower_bound_index(SearchBound<K> bound) const {
-        using __Ret = std::tuple<size_t, SearchBound<K>>;
-        if (bound.index() == 0) {
-            // Included(key)
-            const auto& key = std::get<0>(bound)._0;
-            auto __r = this->find_key_index(key, static_cast<size_t>(0));
-            if (__r.index() == 0) {
-                // KV: key matched exactly → return the matching index and
-                // narrow the search to "everything strictly greater".
-                size_t idx = std::get<0>(__r)._0;
-                return __Ret{idx, SearchBound<K>{SearchBound_AllExcluded<K>{}}};
-            }
-            // Edge: pass the original bound through unchanged.
-            size_t idx = std::get<1>(__r)._0;
-            return __Ret{idx, std::move(bound)};
-        }
-        if (bound.index() == 1) {
-            // Excluded(key)
-            const auto& key = std::get<1>(bound)._0;
-            auto __r = this->find_key_index(key, static_cast<size_t>(0));
-            if (__r.index() == 0) {
-                size_t idx = std::get<0>(__r)._0;
-                return __Ret{idx + static_cast<size_t>(1),
-                             SearchBound<K>{SearchBound_AllIncluded<K>{}}};
-            }
-            size_t idx = std::get<1>(__r)._0;
-            return __Ret{idx, std::move(bound)};
-        }
-        if (bound.index() == 2) {
-            // AllIncluded
-            return __Ret{static_cast<size_t>(0),
-                         SearchBound<K>{SearchBound_AllIncluded<K>{}}};
-        }
-        // AllExcluded (index == 3)
-        return __Ret{rusty::len(*this), SearchBound<K>{SearchBound_AllExcluded<K>{}}};
+    template<typename Q>
+    std::tuple<size_t, SearchBound<const Q&>> find_lower_bound_index(SearchBound<const Q&> bound) const {
+        return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = bound; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), static_cast<size_t>(0)); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, SearchBound<const Q&>{SearchBound_AllExcluded<const Q&>{}}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& key = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), static_cast<size_t>(0)); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1), SearchBound<const Q&>{SearchBound_AllIncluded<const Q&>{}}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::variant_holds<SearchBound_AllIncluded>(_m)) { return std::tuple<size_t, SearchBound<const Q&>>{static_cast<size_t>(0), SearchBound<const Q&>{SearchBound_AllIncluded<const Q&>{}}}; } if (rusty::detail::variant_holds<SearchBound_AllExcluded>(_m)) { return std::tuple<size_t, SearchBound<const Q&>>{this->len(), SearchBound<const Q&>{SearchBound_AllExcluded<const Q&>{}}}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }();
     }
-    std::tuple<size_t, SearchBound<K>>
-    find_upper_bound_index(SearchBound<K> bound, size_t start_index) const {
-        using __Ret = std::tuple<size_t, SearchBound<K>>;
-        if (bound.index() == 0) {
-            // Included(key) → step past the matching key.
-            const auto& key = std::get<0>(bound)._0;
-            auto __r = this->find_key_index(key, start_index);
-            if (__r.index() == 0) {
-                size_t idx = std::get<0>(__r)._0;
-                return __Ret{idx + static_cast<size_t>(1),
-                             SearchBound<K>{SearchBound_AllExcluded<K>{}}};
-            }
-            size_t idx = std::get<1>(__r)._0;
-            return __Ret{idx, std::move(bound)};
-        }
-        if (bound.index() == 1) {
-            // Excluded(key) → stop at the matching key.
-            const auto& key = std::get<1>(bound)._0;
-            auto __r = this->find_key_index(key, start_index);
-            if (__r.index() == 0) {
-                size_t idx = std::get<0>(__r)._0;
-                return __Ret{idx, SearchBound<K>{SearchBound_AllIncluded<K>{}}};
-            }
-            size_t idx = std::get<1>(__r)._0;
-            return __Ret{idx, std::move(bound)};
-        }
-        if (bound.index() == 2) {
-            // AllIncluded → upper edge is past the last key.
-            return __Ret{rusty::len(*this),
-                         SearchBound<K>{SearchBound_AllIncluded<K>{}}};
-        }
-        // AllExcluded (index == 3) → upper edge is the start of this slice.
-        return __Ret{start_index, SearchBound<K>{SearchBound_AllExcluded<K>{}}};
+    template<typename Q>
+    std::tuple<size_t, SearchBound<const Q&>> find_upper_bound_index(SearchBound<const Q&> bound, size_t start_index) const {
+        return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = bound; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), std::move(start_index)); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1), SearchBound<const Q&>{SearchBound_AllExcluded<const Q&>{}}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& key = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), std::move(start_index)); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, SearchBound<const Q&>{SearchBound_AllIncluded<const Q&>{}}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::variant_holds<SearchBound_AllIncluded>(_m)) { return std::tuple<size_t, SearchBound<const Q&>>{this->len(), SearchBound<const Q&>{SearchBound_AllIncluded<const Q&>{}}}; } if (rusty::detail::variant_holds<SearchBound_AllExcluded>(_m)) { return std::tuple<size_t, SearchBound<const Q&>>{std::move(start_index), SearchBound<const Q&>{SearchBound_AllExcluded<const Q&>{}}}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename R>
-    LeafRange<BorrowType, K, V> find_leaf_edges_spanning_range(R range) {
-        // Range-path hand-port: drop the Q template (Q=K for the typed
-        // BTreeMap lookup) and propagate the SearchBound<K> chain.
-        auto __sr = this->search_tree_for_bifurcation(range);
-        if (__sr.is_err()) {
-            // The Rust source returns LeafRange::none() when the bifurcation
-            // collapses to a single leaf edge (empty range). The previously
-            // transpiled body dropped this return entirely, which made the
-            // function fall off the end (UB).
-            return LeafRange<BorrowType, K, V>::none();
-        }
-        auto __ok = std::move(__sr).unwrap();
-        auto node = std::move(std::get<0>(__ok));
-        size_t lower_edge_idx = std::get<1>(__ok);
-        size_t upper_edge_idx = std::get<2>(__ok);
-        SearchBound<K> lower_child_bound = std::move(std::get<3>(__ok));
-        SearchBound<K> upper_child_bound = std::move(std::get<4>(__ok));
-        // We need two handles into the same node; clone it (NodeRef is
-        // just a pointer + size_t + PhantomData, cheap to copy).
-        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, marker::Edge>;
-        auto node_for_upper = node;
-        auto lower_edge = __EdgeHandle::new_edge(std::move(node), lower_edge_idx);
-        auto upper_edge = __EdgeHandle::new_edge(std::move(node_for_upper), upper_edge_idx);
-        // match (lower_edge.force(), upper_edge.force()):
-        //   (Leaf(f), Leaf(b))           → return LeafRange{f, b}
-        //   (Internal(f), Internal(b))   → descend and find_*_bound_edge
-        //   _                            → unreachable (depths must match)
-        while (true) {
-            auto _m0 = lower_edge.force();
-            auto _m1 = upper_edge.force();
-            if (_m0.index() == 0 && _m1.index() == 0) {
-                auto f = std::move(std::get<0>(_m0)._0);
-                auto b = std::move(std::get<0>(_m1)._0);
-                return LeafRange<BorrowType, K, V>(
-                    rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(f)),
-                    rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(b)));
-            }
-            if (_m0.index() == 1 && _m1.index() == 1) {
-                auto f = std::move(std::get<1>(_m0)._0);
-                auto b = std::move(std::get<1>(_m1)._0);
-                auto lower_pair = f.descend().find_lower_bound_edge(std::move(lower_child_bound));
-                lower_edge = std::move(std::get<0>(lower_pair));
-                lower_child_bound = std::move(std::get<1>(lower_pair));
-                auto upper_pair = b.descend().find_upper_bound_edge(std::move(upper_child_bound));
-                upper_edge = std::move(std::get<0>(upper_pair));
-                upper_child_bound = std::move(std::get<1>(upper_pair));
-                continue;
-            }
-            std::println(stderr, "BTreeMap has different depths");
-            rusty::intrinsics::unreachable();
-        }
-    }
+    LeafRange<BorrowType, K, V> find_leaf_edges_spanning_range(R range);
     template<typename R>
-    LeafRange<BorrowType, K, V> range_search(R range) {
-        // Range-path hand-port: drop the Q template parameter (un-deducible
-        // at call site since R doesn't expose Q). The hardcoded
-        // marker::Immut return was also wrong for range_mut paths, but
-        // BTreeMap::range_mut currently doesn't call us; preserve the
-        // BorrowType-following return so we compose with both.
-        return this->find_leaf_edges_spanning_range(std::move(range));
+    LeafRange<marker::Immut, K, V> range_search(R range) const {
+        // @unsafe
+        {
+            return this->find_leaf_edges_spanning_range(std::move(range));
+        }
     }
+    // btree_port port: full_range return generalized to BorrowType by post_transpile_patch.py
+    // (three marker-specialized Rust impls collapse to this one method;
+    // the free fn follows the receiver's BorrowType, the declared return
+    // must too)
     LazyLeafRange<BorrowType, K, V> full_range() const {
-        // B-into-iter fix: was hardcoded as LazyLeafRange<marker::Immut, K, V>
-        // even when BorrowType is marker::Dying / marker::Mut etc. The
-        // underlying free fn preserves the borrow, so the return type has
-        // to follow.
         return ::btree_port::btree::btree_internal::full_range(std::move((*this)), std::move((*this)));
     }
     Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> first_leaf_edge() const {
@@ -5038,109 +5865,54 @@ struct NodeRef {
         }
     }
     template<typename F>
-    void visit_nodes_in_order(F visit) {
-        {
-            auto&& _m = this->force();
-            std::visit(overloaded {
-                [&](const ForceResult_Leaf<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>& _v) {
-                    auto&& leaf = rusty::detail::deref_if_pointer(_v._0);
-                    visit(Position_Leaf<BorrowType, K, V>{std::move(leaf)});
-                },
-                [&](const ForceResult_Internal<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>& _v) {
-                    auto&& internal = rusty::detail::deref_if_pointer(_v._0);
-                    visit(Position_Internal<BorrowType, K, V>{std::move(internal)});
-                    auto edge = internal.first_edge();
-                    while (true) {
-                        edge = [&]() { auto&& _m = edge.descend().force(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& leaf = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return ({ visit(Position_Leaf<BorrowType, K, V>{leaf});
-({ auto&& _m = edge.next_kv(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto&& _mv = _m.unwrap();
-auto&& kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-return ([&]() { visit(Position_InternalKV<BorrowType, K, V>{});
-return kv.right_edge(); }()); })())>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
-auto&& kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-_match_value.emplace(std::move([&]() { visit(Position_InternalKV<BorrowType, K, V>{});
-return kv.right_edge(); }())); } else { if (!(_m.is_err())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap_err();
-return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }); }); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { visit(Position_Internal<BorrowType, K, V>{internal});
-return internal.first_edge(); }(); } rusty::intrinsics::unreachable(); }();
-                    }
-                },
-            }, _m);
+    void visit_nodes_in_order(F visit) const;
+    size_t calc_length() const;
+    template<typename Q>
+    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> lower_bound(SearchBound<const Q&> bound) const {
+        auto node = std::move((*this));
+        while (true) {
+            auto [edge, new_bound] = rusty::detail::deref_if_pointer_like(node.find_lower_bound_edge(std::move(bound)));
+            {
+                auto&& _m = edge.force();
+                if (rusty::detail::deref_if_pointer(_m).index() == 0) {
+                    auto&& edge = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0);
+                    return std::move(edge);
+                }
+                else if (rusty::detail::deref_if_pointer(_m).index() == 1) {
+                    auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0);
+                    node = edge.descend();
+                    bound = std::move(new_bound);
+                }
+            }
         }
     }
-    size_t calc_length() {
-        // btree_port hand-port: bypass the transpiled visit_nodes_in_order
-        // entirely. The Internal arm of that helper has return-type-deduction
-        // failures inside its nested lambdas (one branch returns void, the
-        // other returns an Edge handle) that even leaf-only instantiations
-        // trip when the closure type is determined. We just recurse directly
-        // over the tree shape, mirroring libcore's invariant:
-        //   total = sum of leaf node.len() + count of internal kvs
-        size_t result = 0;
-        // Walk: stack-based DFS over edges. At each NodeRef:
-        //   - leaf (height == 0): add node.len()
-        //   - internal: add node.len() (internal kvs) and descend into each child
-        auto __recurse = [&](this auto&& self_, NodeRef<marker::Immut, K, V, marker::LeafOrInternal> node) -> void {
-            auto __f = node.force();
-            if (__f.index() == 0) {
-                auto& __leaf = std::get<0>(__f)._0;
-                result += rusty::len(__leaf);
-                return;
-            }
-            auto& __internal = std::get<1>(__f)._0;
-            const auto __n = rusty::len(__internal);
-            result += __n;  // internal kvs
-            // Children: edges 0..n inclusive (n+1 children).
-            for (size_t i = 0; i <= __n; ++i) {
-                auto __child = Handle<NodeRef<marker::Immut, K, V, marker::Internal>, marker::Edge>::new_edge(__internal, i).descend();
-                self_(std::move(__child));
-            }
-        };
-        __recurse(this->reborrow());
-        return result;
-    }
-    // Range-path hand-port: take SearchBound<K> by value (matches the
-    // rest of the bound-walk chain). The transpiled body used
-    // std::visit + match-arm shape that doesn't compile cleanly under
-    // the new signature.
-    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>
-    lower_bound(SearchBound<K> bound) const {
-        auto node = *this;
+    template<typename Q>
+    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> upper_bound(SearchBound<const Q&> bound) const {
+        auto node = std::move((*this));
         while (true) {
-            auto __p = node.find_lower_bound_edge(std::move(bound));
-            auto edge = std::move(std::get<0>(__p));
-            auto new_bound = std::move(std::get<1>(__p));
-            auto __forced = edge.force();
-            if (__forced.index() == 0) {
-                return std::move(std::get<0>(__forced)._0);
+            auto [edge, new_bound] = rusty::detail::deref_if_pointer_like(node.find_upper_bound_edge(std::move(bound)));
+            {
+                auto&& _m = edge.force();
+                if (rusty::detail::deref_if_pointer(_m).index() == 0) {
+                    auto&& edge = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0);
+                    return std::move(edge);
+                }
+                else if (rusty::detail::deref_if_pointer(_m).index() == 1) {
+                    auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0);
+                    node = edge.descend();
+                    bound = std::move(new_bound);
+                }
             }
-            auto&& internal_edge = std::get<1>(__forced)._0;
-            node = internal_edge.descend();
-            bound = std::move(new_bound);
-        }
-    }
-    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>
-    upper_bound(SearchBound<K> bound) const {
-        auto node = *this;
-        while (true) {
-            auto __p = node.find_upper_bound_edge(std::move(bound));
-            auto edge = std::move(std::get<0>(__p));
-            auto new_bound = std::move(std::get<1>(__p));
-            auto __forced = edge.force();
-            if (__forced.index() == 0) {
-                return std::move(std::get<0>(__forced)._0);
-            }
-            auto&& internal_edge = std::get<1>(__forced)._0;
-            node = internal_edge.descend();
-            bound = std::move(new_bound);
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> fix_node_through_parent(A alloc) {
-        const auto len = rusty::len((*this));
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> fix_node_through_parent(A alloc) const {
+        const auto len = this->len();
         if (rusty::detail::deref_if_pointer_like(len) >= rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
         } else {
-            return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = this->choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)>&>(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() {
+            return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = this->choose_parent_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv0)) == 0) { auto left_parent_kv = std::move(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)); return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> {
 if (left_parent_kv.can_merge()) {
 auto parent = left_parent_kv.merge_tracking_parent(std::move(alloc));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>(std::move(parent)));
@@ -5148,7 +5920,7 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
 left_parent_kv.bulk_steal_left(rusty::detail::deref_if_pointer_like(MIN_LEN) - rusty::detail::deref_if_pointer_like(len));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
 }
-}(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& right_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)>&>(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() {
+}(); } } if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1) { auto right_parent_kv = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)); return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> {
 if (right_parent_kv.can_merge()) {
 auto parent = right_parent_kv.merge_tracking_parent(std::move(alloc));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>(std::move(parent)));
@@ -5156,11 +5928,11 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
 right_parent_kv.bulk_steal_right(rusty::detail::deref_if_pointer_like(MIN_LEN) - rusty::detail::deref_if_pointer_like(len));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
 }
-}(); } } if (_m.is_err()) { auto&& _mv2 = _m.unwrap_err(); auto&& root = rusty::detail::deref_if_pointer(_mv2); return (rusty::detail::deref_if_pointer_like(len) > 0 ? rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None}) : rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Err(std::move(root))); } return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }();
+}(); } } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv2 = rusty::detail::deref_if_pointer(_m).unwrap_err(); auto&& root = rusty::detail::deref_if_pointer(_mv2); return (rusty::detail::deref_if_pointer_like(len) > 0 ? rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None}) : rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Err(std::move(root))); } return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { rusty::intrinsics::unreachable(); }(); }();
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     bool fix_node_and_affected_ancestors(A alloc) {
         // btree_port port: fix_node_and_affected_ancestors hand-port loop
         while (true) {
@@ -5173,43 +5945,36 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     void fix_top(A alloc) {
-        while ((this->height() > 0) && (rusty::len((*this)) == static_cast<size_t>(0))) {
+        while ((this->height() > 0) && (this->len() == static_cast<size_t>(0))) {
             this->pop_internal_level(rusty::clone(alloc));
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     void fix_right_border(A alloc) {
         this->fix_top(rusty::clone(alloc));
-        if (rusty::len((*this)) > 0) {
+        if (this->len() > 0) {
             this->borrow_mut().last_kv().fix_right_border_of_right_edge(rusty::clone(alloc));
             this->fix_top(std::move(alloc));
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     void fix_left_border(A alloc) {
         this->fix_top(rusty::clone(alloc));
-        if (rusty::len((*this)) > 0) {
+        if (this->len() > 0) {
             this->borrow_mut().first_kv().fix_left_border_of_left_edge(rusty::clone(alloc));
             this->fix_top(std::move(alloc));
         }
     }
     void fix_right_border_of_plentiful() {
-        // Hand-port: Rust `let mut cur_node = self.borrow_mut();` binds the
-        // NodeRef VALUE (thin trivially-copyable handle) and reassigns it
-        // each iteration; the emitted pointer form addressed a temporary.
-        auto cur_node = this->borrow_mut();
+        auto* cur_node = &(this->borrow_mut());
         while (true) {
-            auto&& _whilelet = cur_node.force();
-            // Hand-port (transpiler-marked arm): `while let Internal(internal)
-            // = cur_node.force()` — ForceResult is
-            // variant<ForceResult_Leaf, ForceResult_Internal>; Internal is
-            // index 1 and the payload is its _0.
-            if (_whilelet.index() != 1) { break; }
-            auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);
+            auto&& _whilelet = ((*cur_node)).force();
+            if (!(/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true)) { break; }
+            auto&& internal = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_whilelet)._0);
             auto last_kv = internal.last_kv().consider_for_balancing();
             assert((last_kv.left_child_len() >= (rusty::detail::deref_if_pointer_like(MIN_LEN) * 2)));
             const auto right_child_len = last_kv.right_child_len();
@@ -5224,135 +5989,685 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
         if (root_a.height() < root_b.height()) {
             length_a = root_a.reborrow().calc_length();
             length_b = rusty::detail::deref_if_pointer_like(total_num) - rusty::detail::deref_if_pointer_like(length_a);
-            assert((length_b == root_b . reborrow () . calc_length ()));
+            assert((rusty::detail::deref_if_pointer_like((length_b)) == (root_b.reborrow().calc_length())));
         } else {
             length_b = root_b.reborrow().calc_length();
             length_a = rusty::detail::deref_if_pointer_like(total_num) - rusty::detail::deref_if_pointer_like(length_b);
-            assert((length_a == root_a . reborrow () . calc_length ()));
+            assert((rusty::detail::deref_if_pointer_like((length_a)) == (root_a.reborrow().calc_length())));
         }
         return std::make_tuple(std::move(length_a), std::move(length_b));
     }
     template<typename Q, typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    NodeRef<BorrowType, K, V, Type> split_off(const Q& key, A alloc) {
-        // btree_port hand-port: the transpiler-emitted body had three
-        // separate bugs that all blocked compilation:
-        //   (1) `auto* left_node = &(left_root.borrow_mut())` took the
-        //       address of a temporary (borrow_mut returns by value).
-        //   (2) The bottom match arm matched on tuple-of-variants with
-        //       bare-glob markers (`Internal && Internal`), and destructured
-        //       via `std::get<0>(_m_tuple)._0` — `_0` doesn't exist on
-        //       `std::variant<ForceResult_Leaf, ForceResult_Internal>`;
-        //       you must pick the alternative first via std::get<N>(variant)._0.
-        //   (3) `__rusty_alias_Root_fix_{right,left}_border` calls had
-        //       non-deducible <K, V> template parameters at the call site.
-        //
-        // Replacement mirrors libcore alloc/src/collections/btree/node.rs's
-        // Root::split_off:
-        //   - keep left_node / right_node as VALUES (NodeRef<Mut, K, V, LeafOrInternal>)
-        //     and re-assign each loop iteration with descend().
-        //   - explicit `if (variant.index() == N)` over the (split_edge.force(),
-        //     right_node.force()) pair so the Internal / Leaf arms compile.
-        //   - call the member fix_right_border / fix_left_border directly
-        //     instead of the broken free-function aliases.
-        NodeRef<BorrowType, K, V, Type>& left_root = (*this);
-        auto right_root = NodeRef<BorrowType, K, V, Type>::new_pillar(left_root.height(), rusty::clone(alloc));
-        auto left_node = left_root.borrow_mut();
-        auto right_node = right_root.borrow_mut();
-        while (true) {
-            // search_node → SearchResult_Found(KV-handle) | SearchResult_GoDown(Edge-handle)
-            auto __sr = left_node.search_node(key);
-            using __EdgeH = Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge>;
-            __EdgeH split_edge = (__sr.index() == 0)
-                ? std::get<0>(std::move(__sr))._0.left_edge()
-                : std::get<1>(std::move(__sr))._0;
-            split_edge.move_suffix(right_node);
-            // Handle::force() and NodeRef::force() both return ForceResult variants;
-            // alternative 0 = Leaf, alternative 1 = Internal.
-            auto __lf = split_edge.force();
-            auto __rf = right_node.force();
-            if (__lf.index() == 1 && __rf.index() == 1) {
-                auto edge = std::move(std::get<1>(std::move(__lf))._0);   // Handle<NodeRef<Mut,K,V,Internal>, Edge>
-                auto node = std::move(std::get<1>(std::move(__rf))._0);   // NodeRef<Mut, K, V, Internal>
-                left_node = edge.descend();
-                right_node = node.first_edge().descend();
-                continue;
-            }
-            if (__lf.index() == 0 && __rf.index() == 0) {
-                break;
-            }
-            rusty::intrinsics::unreachable();
-        }
-        left_root.fix_right_border(rusty::clone(alloc));
-        right_root.fix_left_border(std::move(alloc));
-        return std::move(right_root);
-    }
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    NodeRef<BorrowType, K, V, Type> split_off(const Q& key, A alloc);
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    static NodeRef<BorrowType, K, V, Type> new_pillar(size_t height, A alloc) {
-        auto root = Root<K, V>::new_(rusty::clone(alloc));
-        for (auto&& _ : rusty::for_in(rusty::range(0, height))) {
-            root.push_internal_level(rusty::clone(alloc));
-        }
-        return std::move(root);
-    }
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    static NodeRef<BorrowType, K, V, Type> new_pillar(size_t height, A alloc);
     template<typename I, typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     void append_from_sorted_iters(I left, I right, size_t& length, A alloc) {
-        // Hand-port: MergeIter<K, V, I> — K and V are not deducible from the
-        // inner (no deduction guide); they come from the enclosing node.
-        auto iter = MergeIter<K, V, I>{MergeIterInner<I>::new_(std::move(left), std::move(right))};
+        auto iter = MergeIter(MergeIterInner<I>::new_(std::move(left), std::move(right)));
         this->bulk_push(std::move(iter), length, std::move(alloc));
     }
     template<typename I, typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    void bulk_push(I iter, size_t& length, A alloc) {
-        auto cur_node = this->borrow_mut().last_leaf_edge().into_node();
-        for (auto&& _for_item : rusty::for_in(iter)) {
-            auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
-            auto&& value = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
-            if (rusty::len(cur_node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
-                cur_node.push(std::move(key), std::move(value));
-            } else {
-                auto test_node = cur_node.forget_type();
-                auto open_node = [&]() {
-                    while (true) {
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    void bulk_push(I iter, size_t& length, A alloc);
+};
+
+/// A reference to a specific key-value pair or edge within a node. The `Node` parameter
+/// must be a `NodeRef`, while the `Type` can either be `KV` (signifying a handle on a key-value
+/// pair) or `Edge` (signifying a handle on an edge).
+///
+/// Note that even `Leaf` nodes can have `Edge` handles. Instead of representing a pointer to
+/// a child node, these represent the spaces where child pointers would go between the key-value
+/// pairs. For example, in a node with length 2, there would be 3 possible edge locations - one
+/// to the left of the node, one between the two pairs, and one at the right of the node.
+export template<typename Node, typename Type>
+struct Handle {
+    Node node;
+    size_t idx_field;
+    rusty::PhantomData<Type> _marker;
+
+    Handle<Node, Type> clone() const {
+        return {.node = rusty::clone(this->node), .idx_field = rusty::clone(this->idx_field), ._marker = rusty::clone(this->_marker)};
+    }
+    Node into_node() const {
+        return std::move(this->node);
+    }
+    size_t idx() const {
+        return this->idx_field;
+    }
+
+    static Handle<Node, Type> new_kv(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> node, size_t idx) {
+        assert((rusty::detail::deref_if_pointer_like(idx) < node.len()));
+        return Handle<Node, Type>(std::move(node), std::move(idx), rusty::PhantomData<Type>{});
+    }
+
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> left_edge() const {
+        // @unsafe
+        {
+            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge>::new_edge(std::move(this->node), std::move(this->idx_field));
+        }
+    }
+
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> right_edge() const {
+        // @unsafe
+        {
+            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge>::new_edge(std::move(this->node), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1));
+        }
+    }
+    bool operator==(const Handle<Node, Type>& other) const {
+        auto&& _let_pat = (*this);
+        auto&& node = rusty::detail::deref_if_pointer(_let_pat.node);
+        auto&& idx = rusty::detail::deref_if_pointer(_let_pat.idx_field);
+        auto&& _marker = rusty::detail::deref_if_pointer(_let_pat._marker);
+        return rusty::cmp::eq(node, &other.node) && (rusty::detail::deref_if_pointer_like(idx) == rusty::detail::deref_if_pointer_like(other.idx_field));
+    }
+
+    Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> reborrow() const {
+        return Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_reborrow{}), this->idx_field, rusty::PhantomData<Type>{});
+    }
+
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> reborrow_mut() {
+        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_reborrow_mut{}), this->idx_field, rusty::PhantomData<Type>{});
+    }
+
+    Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> dormant() const {
+        return Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_dormant{}), this->idx_field, rusty::PhantomData<Type>{});
+    }
+
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> awaken() const {
+        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_awaken{}), std::move(this->idx_field), rusty::PhantomData<Type>{});
+    }
+
+    static Handle<Node, Type> new_edge(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> node, size_t idx) {
+        assert((rusty::detail::deref_if_pointer_like(idx) <= node.len()));
+        return Handle<Node, Type>(std::move(node), std::move(idx), rusty::PhantomData<Type>{});
+    }
+
+    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> left_kv() const {
+        if (rusty::detail::deref_if_pointer_like(this->idx_field) > 0) {
+            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Ok(Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), rusty::detail::deref_if_pointer_like(this->idx_field) - static_cast<size_t>(1)));
+        } else {
+            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Err(std::move((*this)));
+        }
+    }
+
+    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> right_kv() const {
+        if (rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)) {
+            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Ok(Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), std::move(this->idx_field)));
+        } else {
+            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Err(std::move((*this)));
+        }
+    }
+
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV> insert_fit(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val) {
+        assert((rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)));
+        const auto new_len = rusty::len(this->node) + 1;
+        // @unsafe
+        {
+            slice_insert(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(new_len))), std::move(this->idx_field), std::move(key));
+            slice_insert(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(new_len))), std::move(this->idx_field), std::move(val));
+            rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{}) = static_cast<uint16_t>(new_len);
+            return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), std::move(this->idx_field));
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    std::tuple<rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>, Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>> insert(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, A alloc) {
+        if (rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
+            auto handle = this->insert_fit(std::move(key), std::move(val));
+            return std::make_tuple(rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>{rusty::None}, handle.dormant());
+        } else {
+            auto [middle_kv_idx, insertion] = rusty::detail::deref_if_pointer_like(splitpoint(std::move(this->idx_field)));
+            auto middle = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->node))>, marker::KV>, A>::new_kv(std::move(this->node), std::move(middle_kv_idx));
+            auto result = middle.split(std::move(alloc));
+            auto insertion_edge = [&]() -> Handle<Node, Type> { auto&& _m = insertion; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Handle<Node, marker::Edge>::new_edge([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.left); }) { return (__r.left); } else if constexpr (requires { (__r.left_field); }) { return (__r.left_field); } else if constexpr (requires { ((*__r).left); }) { return ((*__r).left); } else { return ((*__r).left_field); } }(result).reborrow_mut(), insert_idx); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Handle<Node, marker::Edge>::new_edge([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.right); }) { return (__r.right); } else if constexpr (requires { (__r.right_field); }) { return (__r.right_field); } else if constexpr (requires { ((*__r).right); }) { return ((*__r).right); } else { return ((*__r).right_field); } }(result).borrow_mut(), insert_idx); } return [&]() -> Handle<Node, Type> { rusty::intrinsics::unreachable(); }(); }();
+            auto handle = insertion_edge.insert_fit(std::move(key), std::move(val)).dormant();
+            return std::make_tuple(rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>(std::move(result)), std::move(handle));
+        }
+    }
+    void correct_parent_link() const {
+        auto ptr_shadow1 = std::conditional_t<true, NonNull<InternalNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>>, Node>::new_unchecked(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>::as_internal_ptr(this->node));
+        auto idx = std::move(this->idx_field);
+        auto child = this->descend();
+        child.set_parent_link(std::move(ptr_shadow1), std::move(idx));
+    }
+
+    void insert_fit(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, Root<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> edge) {
+        assert((rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)));
+        assert((rusty::detail::deref_if_pointer_like(edge.height_field) == (rusty::detail::deref_if_pointer_like(this->node.height_field) - 1)));
+        const auto new_len = rusty::len(this->node) + 1;
+        // @unsafe
+        {
+            slice_insert(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(new_len))), this->idx_field, std::move(key));
+            slice_insert(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(new_len))), this->idx_field, std::move(val));
+            slice_insert(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_edge_area_mut{}, rusty::range_to(rusty::detail::deref_if_pointer_like(new_len) + 1))), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1), std::move(edge.node));
+            rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{}) = static_cast<uint16_t>(new_len);
+            rusty::deref_call(this->node, rusty::detail::__mdisp_correct_childrens_parent_links{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, rusty::detail::deref_if_pointer_like(new_len) + 1));
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>> insert(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, Root<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> edge, A alloc) {
+        assert((rusty::detail::deref_if_pointer_like(edge.height_field) == (rusty::detail::deref_if_pointer_like(this->node.height_field) - 1)));
+        if (rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
+            this->insert_fit(std::move(key), std::move(val), std::move(edge));
+            return rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>{rusty::None};
+        } else {
+            auto [middle_kv_idx, insertion] = rusty::detail::deref_if_pointer_like(splitpoint(std::move(this->idx_field)));
+            auto middle = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->node))>, marker::KV>, A>::new_kv(std::move(this->node), std::move(middle_kv_idx));
+            auto result = middle.split(std::move(alloc));
+            auto insertion_edge = [&]() -> Handle<Node, Type> { auto&& _m = insertion; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Handle<Node, marker::Edge>::new_edge([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.left); }) { return (__r.left); } else if constexpr (requires { (__r.left_field); }) { return (__r.left_field); } else if constexpr (requires { ((*__r).left); }) { return ((*__r).left); } else { return ((*__r).left_field); } }(result).reborrow_mut(), insert_idx); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Handle<Node, marker::Edge>::new_edge([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.right); }) { return (__r.right); } else if constexpr (requires { (__r.right_field); }) { return (__r.right_field); } else if constexpr (requires { ((*__r).right); }) { return ((*__r).right); } else { return ((*__r).right_field); } }(result).borrow_mut(), insert_idx); } return [&]() -> Handle<Node, Type> { rusty::intrinsics::unreachable(); }(); }();
+            insertion_edge.insert_fit(std::move(key), std::move(val), std::move(edge));
+            return rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>(std::move(result));
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::KV> insert_recursing(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 value, A alloc, auto&& split_root) {
+        auto&& _let_match_tuple = this->insert(std::move(key), std::move(value), rusty::clone(alloc));
+        auto&& _let_match_m0 = std::get<0>(rusty::detail::deref_if_pointer(_let_match_tuple));
+        auto&& _let_match_m1 = std::get<1>(rusty::detail::deref_if_pointer(_let_match_tuple));
+        if (rusty::detail::deref_if_pointer(_let_match_m0).is_none()) {
+            auto&& handle = rusty::detail::deref_if_pointer(_let_match_m1);
+            return handle.awaken();
+        }
+        auto _let_match_result = [&]() {
+            auto&& split_bind_tmp = rusty::detail::deref_if_pointer(_let_match_m0).unwrap();
+            auto&& split = rusty::detail::deref_if_pointer(split_bind_tmp);
+            auto&& handle = rusty::detail::deref_if_pointer(_let_match_m1);
+            return std::make_tuple(split.forget_node_type(), handle);
+        }();
+        auto&& [split, handle] = _let_match_result;
+        while (true) {
+            auto& _assign_match_lhs = split;
+            {
+                auto&& _m = [&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.left); }) { return (__r.left); } else if constexpr (requires { (__r.left_field); }) { return (__r.left_field); } else if constexpr (requires { ((*__r).left); }) { return ((*__r).left); } else { return ((*__r).left_field); } }(split).ascend();
+                bool _m_matched = false;
+                if (!_m_matched) {
+                    if (rusty::detail::deref_if_pointer(_m).is_ok()) {
+                        auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap();
+                        auto&& parent = rusty::detail::deref_if_pointer(_mv0);
                         {
-                            auto&& _m = test_node.ascend();
+                            auto&& _m = parent.insert(std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.kv); }) { return (__r.kv); } else if constexpr (requires { (__r.kv_field); }) { return (__r.kv_field); } else if constexpr (requires { ((*__r).kv); }) { return ((*__r).kv); } else { return ((*__r).kv_field); } }(split)))), std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.kv); }) { return (__r.kv); } else if constexpr (requires { (__r.kv_field); }) { return (__r.kv_field); } else if constexpr (requires { ((*__r).kv); }) { return ((*__r).kv); } else { return ((*__r).kv_field); } }(split)))), std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.right); }) { return (__r.right); } else if constexpr (requires { (__r.right_field); }) { return (__r.right_field); } else if constexpr (requires { ((*__r).right); }) { return ((*__r).right); } else { return ((*__r).right_field); } }(split)), rusty::clone(alloc));
                             bool _m_matched = false;
                             if (!_m_matched) {
-                                if (_m.is_ok()) {
-                                    auto&& _mv0 = _m.unwrap();
-                                    auto&& parent = rusty::detail::deref_if_pointer(_mv0);
-                                    auto parent_shadow1 = parent.into_node();
-                                    if (rusty::len(parent_shadow1) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
-                                        return parent_shadow1;
-                                    } else {
-                                        test_node = parent_shadow1.forget_type();
-                                    }
+                                if (rusty::detail::deref_if_pointer(_m).is_none()) {
+                                    return handle.awaken();
                                     _m_matched = true;
                                 }
                             }
                             if (!_m_matched) {
-                                if (_m.is_err()) {
-                                    return this->push_internal_level(rusty::clone(alloc));
+                                if (rusty::detail::deref_if_pointer(_m).is_some()) {
+                                    auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_mut();
+                                    auto&& split = rusty::detail::deref_if_pointer(_mv1);
+                                    _assign_match_lhs = split.forget_node_type();
                                     _m_matched = true;
                                 }
                             }
                         }
+                        _m_matched = true;
                     }
-                }();
-                const auto tree_height = open_node.height() - 1;
-                auto right_tree = Root<K, V>::new_(rusty::clone(alloc));
-                for (auto&& _ : rusty::for_in(rusty::range(0, tree_height))) {
-                    right_tree.push_internal_level(rusty::clone(alloc));
                 }
-                open_node.push(std::move(key), std::move(value), std::move(right_tree));
-                cur_node = open_node.forget_type().last_leaf_edge().into_node();
+                if (!_m_matched) {
+                    if (rusty::detail::deref_if_pointer(_m).is_err()) {
+                        auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err();
+                        auto&& root = rusty::detail::deref_if_pointer(_mv1);
+                        split_root(SplitResult{.left = std::move(root), .kv = std::move(split.kv), .right = std::move(split.right)});
+                        return handle.awaken();
+                        _m_matched = true;
+                    }
+                }
             }
-            length += 1;
         }
-        this->fix_right_border_of_plentiful();
+    }
+
+    NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> descend() const {
+        // const-block elided (Rust 2024 compile-time fence)
+        const auto parent_ptr = std::remove_cvref_t<decltype(this->node)>::as_internal_ptr(this->node);
+        auto node = (*parent_ptr).edges[std::move(this->idx_field)].assume_init_read();
+        return NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>{.height_field = rusty::detail::deref_if_pointer_like(this->node.height_field) - static_cast<size_t>(1), .node = std::move(node), ._marker = rusty::PhantomData<std::tuple<typename __TemplateArgs<Node>::arg_0, marker::LeafOrInternal>>{}};
+    }
+
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> into_kv() const {
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf{});
+        auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_ref();
+        auto& v = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_ref();
+        return std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&>{k, v};
+    }
+
+    typename __TemplateArgs<Node>::arg_1& key_mut() {
+        // @unsafe
+        {
+            return rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_mut();
+        }
+    }
+
+    typename __TemplateArgs<Node>::arg_2& into_val_mut() {
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf_mut{});
+        // @unsafe
+        {
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
+        }
+    }
+
+    std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_mut() {
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf_mut{});
+        auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_mut();
+        auto& v = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
+        return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{k, v};
+    }
+
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() const {
+        // @unsafe
+        {
+            return rusty::deref_call(this->node, rusty::detail::__mdisp_into_key_val_mut_at{}, std::move(this->idx_field));
+        }
+    }
+
+    std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> kv_mut() {
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        // @unsafe
+        {
+            auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_mut{});
+            auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, this->idx_field).assume_init_mut();
+            auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, this->idx_field).assume_init_mut();
+            return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{key, val};
+        }
+    }
+
+    std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> replace_kv(typename __TemplateArgs<Node>::arg_1 k, typename __TemplateArgs<Node>::arg_2 v) {
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->kv_mut());
+        auto&& key = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& val = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        return std::make_tuple(rusty::mem::replace(key, std::move(k)), rusty::mem::replace(val, std::move(v)));
+    }
+
+    std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> into_key_val() {
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_dying{});
+        // @unsafe
+        {
+            auto key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_read();
+            auto val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_read();
+            return std::make_tuple(std::move(key), std::move(val));
+        }
+    }
+    template<typename T>
+    struct Dropper {
+        rusty::MaybeUninit<T>& _0;
+        mutable bool _rusty_forgotten = false;
+        Dropper(rusty::MaybeUninit<T>& _0_init) : _0(_0_init) {}
+        Dropper(const Dropper&) = default;
+        Dropper(Dropper&& other) noexcept : _0(other._0) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Dropper& operator=(const Dropper&) = default;
+        Dropper& operator=(Dropper&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Dropper();
+            new (this) Dropper(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Dropper() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            // @unsafe
+            {
+                this->_0.assume_init_drop();
+            }
+        }
+    };
+    void drop_key_val() {
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_dying{});
+        // @unsafe
+        {
+            auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field));
+            auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field));
+            const auto _guard = Dropper(val);
+            key.assume_init_drop();
+        }
+    }
+
+    std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> split_leaf_data(LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>& new_node) {
+        LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>* new_node_shadow1 = &new_node;
+        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
+        const auto old_len = rusty::len(this->node);
+        const auto new_len = (rusty::detail::deref_if_pointer_like(old_len) - rusty::detail::deref_if_pointer_like(this->idx_field)) - 1;
+        (*new_node_shadow1).len = static_cast<uint16_t>(new_len);
+        // @unsafe
+        {
+            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_read();
+            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init_read();
+            move_to_slice(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))), rusty::slice_to((*new_node_shadow1).keys, new_len));
+            move_to_slice(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))), rusty::slice_to((*new_node_shadow1).vals, new_len));
+            rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{}) = static_cast<uint16_t>(this->idx_field);
+            return std::make_tuple(std::move(k), std::move(v));
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> split(A alloc) {
+        // btree_port fix (N=90+ drop crash): the transpiler only ported the
+        // Leaf-Handle::split impl; the corresponding Internal-Handle::split
+        // impl was missing, so when the root needed to split (height-1 →
+        // height-2 transition at 90 sequential inserts), this method
+        // allocated a LeafNode for the right half of an Internal split,
+        // leaving the new node without an `edges` array. Subsequent
+        // descents into that right half read past the leaf allocation
+        // and got NULL/garbage child pointers → SIGSEGV in find_key_index.
+        //
+        // Mirrors libcore/alloc/src/collections/btree/node.rs's
+        //   impl Handle<NodeRef<Mut, K, V, Internal>, KV>::split.
+        //
+        // Dispatched via `if constexpr` on the NodeRef's Type marker so
+        // that the leaf-only instantiations (which lack edge_area_mut /
+        // as_internal_mut) don't try to compile the internal branch.
+        using K_ = typename __TemplateArgs<Node>::arg_1;
+        using V_ = typename __TemplateArgs<Node>::arg_2;
+        using Type_ = typename __TemplateArgs<Node>::arg_3;
+        if constexpr (std::is_same_v<Type_, marker::Internal>
+                      || std::is_same_v<Type_, marker::LeafOrInternal>) {
+            if (rusty::detail::deref_if_pointer_like(this->node.height_field) > static_cast<size_t>(0)) {
+                // Internal split: allocate InternalNode, move keys/vals/edges,
+                // construct via from_new_internal so parent links get fixed.
+                const auto old_len = rusty::len(this->node);
+                auto new_node_box = InternalNode<K_, V_>::new_(rusty::clone(alloc));
+                auto& new_internal = *new_node_box;
+                // Reuse split_leaf_data on the .data (LeafNode) portion — the
+                // key/val arrays + len bookkeeping are identical to a leaf.
+                auto kv = this->split_leaf_data(new_internal.data);
+                const auto new_len = static_cast<size_t>(new_internal.data.len);
+                // Move edges (idx+1..old_len+1) from old → new's [0..new_len+1].
+                // @unsafe
+                {
+                    move_to_slice(
+                        this->node.edge_area_mut(rusty::range(
+                            rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1),
+                            rusty::detail::deref_if_pointer_like(old_len) + static_cast<size_t>(1))),
+                        rusty::slice_to(new_internal.edges, new_len + static_cast<size_t>(1)));
+                }
+                const auto height = this->node.height_field;
+                auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_internal(
+                    std::move(new_node_box),
+                    rusty::num::NonZero<size_t>::new_(height).unwrap());
+                return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));
+            }
+        }
+        // Leaf split (original codegen).
+        auto new_node = LeafNode<K_, V_>::new_(std::move(alloc));
+        auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));
+        auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_leaf(std::move(new_node));
+        return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));
+    }
+
+    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove() {
+        const auto old_len = rusty::len(this->node);
+        // @unsafe
+        {
+            auto k = slice_remove(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(old_len))), std::move(this->idx_field));
+            auto v = slice_remove(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(old_len))), std::move(this->idx_field));
+            rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{}) = static_cast<uint16_t>((rusty::detail::deref_if_pointer_like(old_len) - 1));
+            return std::make_tuple(std::make_tuple(std::move(k), std::move(v)), this->left_edge());
+        }
+    }
+
+    BalancingContext<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> consider_for_balancing() const {
+        auto self1 = rusty::ptr::read(&(*this));
+        auto self2 = rusty::ptr::read(&(*this));
+        return BalancingContext<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>(std::move((*this)), self1.left_edge().descend(), self2.right_edge().descend());
+    }
+
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type> forget_node_type() const {
+        // @unsafe
+        {
+            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>::new_edge(rusty::deref_call(this->node, rusty::detail::__mdisp_forget_type{}), std::move(this->idx_field));
+        }
+    }
+
+    ForceResult<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>> force() const {
+        return [&]() -> ForceResult<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>> { auto&& _m = rusty::deref_call(this->node, rusty::detail::__mdisp_force{}); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return ForceResult<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>>{ForceResult_Leaf<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>>{Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{})}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return ForceResult<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>>{ForceResult_Internal<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>>{Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{})}}; } return [&]() -> ForceResult<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type> cast_to_leaf_unchecked() const {
+        auto node = rusty::deref_call(this->node, rusty::detail::__mdisp_cast_to_leaf_unchecked{});
+        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{});
+    }
+
+    void move_suffix(NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>& right) {
+        // @unsafe
+        {
+            const auto new_left_len = this->idx_field;
+            auto left_node = this->reborrow_mut().into_node();
+            const auto old_left_len = left_node.len();
+            const auto new_right_len = rusty::detail::deref_if_pointer_like(old_left_len) - rusty::detail::deref_if_pointer_like(new_left_len);
+            auto& right_node = right.reborrow_mut();
+            assert((rusty::len(right_node) == 0));
+            assert((rusty::detail::deref_if_pointer_like(left_node.height_field) == rusty::detail::deref_if_pointer_like(right_node.height_field)));
+            if (rusty::detail::deref_if_pointer_like(new_right_len) > 0) {
+                left_node.len_mut() = static_cast<uint16_t>(new_left_len);
+                right_node.len_mut() = static_cast<uint16_t>(new_right_len);
+                move_to_slice(rusty::as_mut_slice(left_node.key_area_mut(rusty::range(new_left_len, old_left_len))), rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(new_right_len))));
+                move_to_slice(rusty::as_mut_slice(left_node.val_area_mut(rusty::range(new_left_len, old_left_len))), rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(new_right_len))));
+                {
+                    auto&& _m0 = left_node.force();
+                    auto&& _m1 = right_node.force();
+                    auto _m_tuple = std::forward_as_tuple(_m0, _m1);
+                    bool _m_matched = false;
+                    if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1))) {
+                        auto left = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0));
+                        auto right = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0));
+                        move_to_slice(rusty::as_mut_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1))), rusty::as_mut_slice(right.edge_area_mut(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1))));
+                        right.correct_childrens_parent_links(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
+                        _m_matched = true;
+                    }
+                    if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 0 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 0))) {
+                        _m_matched = true;
+                    }
+                    if (!_m_matched && (true)) {
+                        rusty::intrinsics::unreachable();
+                        _m_matched = true;
+                    }
+                }
+            }
+        }
+    }
+
+    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>> next_kv() const {
+        auto edge = this->forget_node_type();
+        while (true) {
+            edge = ({ auto&& _m = edge.right_kv(); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; bool _m_matched = false; if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_ok())) { auto&& kv = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()); return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Ok(std::move(kv)); _m_matched = true; } if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_err())) { auto&& last_edge = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap_err()); _match_value.emplace(std::move(({ auto&& _m = last_edge.into_node().ascend(); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
+auto&& parent_edge = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+_match_value.emplace(std::move(parent_edge.forget_node_type())); } else { if (!(_m.is_err())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap_err();
+auto&& root = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Err(root); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }))); _m_matched = true; } if (!_m_matched) { rusty::intrinsics::unreachable(); } std::move(_match_value).value(); });
+        }
+    }
+
+    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>> next_back_kv() const {
+        auto edge = this->forget_node_type();
+        while (true) {
+            edge = ({ auto&& _m = edge.left_kv(); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; bool _m_matched = false; if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_ok())) { auto&& kv = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()); return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Ok(std::move(kv)); _m_matched = true; } if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_err())) { auto&& last_edge = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap_err()); _match_value.emplace(std::move(({ auto&& _m = last_edge.into_node().ascend(); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
+auto&& parent_edge = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+_match_value.emplace(std::move(parent_edge.forget_node_type())); } else { if (!(_m.is_err())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap_err();
+auto&& root = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Err(root); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }))); _m_matched = true; } if (!_m_matched) { rusty::intrinsics::unreachable(); } std::move(_match_value).value(); });
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>> deallocating_next(A alloc) const {
+        auto edge = this->forget_node_type();
+        while (true) {
+            edge = ({ auto&& _m = edge.right_kv(); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; bool _m_matched = false; if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_ok())) { auto&& kv = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()); return rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>>(std::make_tuple(rusty::ptr::read(rusty::addr_of_temp(kv)).next_leaf_edge(), std::move(kv))); _m_matched = true; } if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_err())) { auto&& last_edge = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap_err()); _match_value.emplace(std::move(({ auto&& _m = last_edge.into_node().deallocate_and_ascend(rusty::clone(alloc)); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
+auto&& parent_edge = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+_match_value.emplace(std::move(parent_edge.forget_node_type())); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>>{rusty::None}; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }))); _m_matched = true; } if (!_m_matched) { rusty::intrinsics::unreachable(); } std::move(_match_value).value(); });
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>> deallocating_next_back(A alloc) const {
+        auto edge = this->forget_node_type();
+        while (true) {
+            edge = ({ auto&& _m = edge.left_kv(); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; bool _m_matched = false; if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_ok())) { auto&& kv = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()); return rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>>(std::make_tuple(rusty::ptr::read(rusty::addr_of_temp(kv)).next_back_leaf_edge(), std::move(kv))); _m_matched = true; } if (!_m_matched && (rusty::detail::deref_if_pointer(_m).is_err())) { auto&& last_edge = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap_err()); _match_value.emplace(std::move(({ auto&& _m = last_edge.into_node().deallocate_and_ascend(rusty::clone(alloc)); std::optional<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
+auto&& parent_edge = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+_match_value.emplace(std::move(parent_edge.forget_node_type())); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>>{rusty::None}; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }))); _m_matched = true; } if (!_m_matched) { rusty::intrinsics::unreachable(); } std::move(_match_value).value(); });
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    void deallocating_end(A alloc) const {
+        auto edge = this->forget_node_type();
+        while (true) {
+            auto&& _whilelet = edge.into_node().deallocate_and_ascend(rusty::clone(alloc));
+            if (!(_whilelet.is_some())) { break; }
+            decltype(auto) parent_edge = _whilelet.unwrap();
+            edge = parent_edge.forget_node_type();
+        }
+    }
+
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> next_unchecked() {
+        return replace((*this), [&](auto&& leaf_edge) {
+auto kv = leaf_edge.next_kv().ok().unwrap();
+return std::make_tuple(kv.next_leaf_edge(), kv.into_kv());
+});
+    }
+
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> next_back_unchecked() {
+        return replace((*this), [&](auto&& leaf_edge) {
+auto kv = leaf_edge.next_back_kv().ok().unwrap();
+return std::make_tuple(kv.next_back_leaf_edge(), kv.into_kv());
+});
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV> deallocating_next_unchecked(A alloc) {
+        return replace((*this), [&](auto&& leaf_edge) { return leaf_edge.deallocating_next(std::move(alloc)).unwrap(); });
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV> deallocating_next_back_unchecked(A alloc) {
+        return replace((*this), [&](auto&& leaf_edge) { return leaf_edge.deallocating_next_back(std::move(alloc)).unwrap(); });
+    }
+
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> next_leaf_edge() const {
+        return [&]() -> Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> { auto&& _m = this->force(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& leaf_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return leaf_kv.right_edge(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> { auto&& next_internal_edge = internal_kv.right_edge();
+return next_internal_edge.descend().first_leaf_edge(); }(); } return [&]() -> Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> { rusty::intrinsics::unreachable(); }(); }();
+    }
+
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> next_back_leaf_edge() const {
+        return [&]() -> Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> { auto&& _m = this->force(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& leaf_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return leaf_kv.left_edge(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> { auto&& next_internal_edge = internal_kv.left_edge();
+return next_internal_edge.descend().last_leaf_edge(); }(); } return [&]() -> Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    void fix_left_border_of_left_edge(A alloc) {
+        while (true) {
+            auto&& _whilelet = this->force();
+            if (!(rusty::detail::variant_index(rusty::detail::deref_if_pointer(_whilelet)) == 1)) { break; }
+            auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);
+            (*this) = internal_kv.fix_left_child(rusty::clone(alloc)).first_kv();
+            assert((this->reborrow().into_node().len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    void fix_right_border_of_right_edge(A alloc) {
+        while (true) {
+            auto&& _whilelet = this->force();
+            if (!(rusty::detail::variant_index(rusty::detail::deref_if_pointer(_whilelet)) == 1)) { break; }
+            auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);
+            (*this) = internal_kv.fix_right_child(rusty::clone(alloc)).last_kv();
+            assert((this->reborrow().into_node().len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> fix_left_child(A alloc) const {
+        auto internal_kv = this->consider_for_balancing();
+        const auto left_len = internal_kv.left_child_len();
+        assert((internal_kv.right_child_len() >= rusty::detail::deref_if_pointer_like(MIN_LEN)));
+        if (internal_kv.can_merge()) {
+            return internal_kv.merge_tracking_child(std::move(alloc));
+        } else {
+            auto count = rusty::saturating_sub((rusty::detail::deref_if_pointer_like(MIN_LEN) + 1), rusty::detail::deref_if_pointer(std::move(left_len)));
+            if (rusty::detail::deref_if_pointer_like(count) > 0) {
+                internal_kv.bulk_steal_right(std::move(count));
+            }
+            return internal_kv.into_left_child();
+        }
+    }
+    template<typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> fix_right_child(A alloc) const {
+        auto internal_kv = this->consider_for_balancing();
+        const auto right_len = internal_kv.right_child_len();
+        assert((internal_kv.left_child_len() >= rusty::detail::deref_if_pointer_like(MIN_LEN)));
+        if (internal_kv.can_merge()) {
+            return internal_kv.merge_tracking_child(std::move(alloc));
+        } else {
+            auto count = rusty::saturating_sub((rusty::detail::deref_if_pointer_like(MIN_LEN) + 1), rusty::detail::deref_if_pointer(std::move(right_len)));
+            if (rusty::detail::deref_if_pointer_like(count) > 0) {
+                internal_kv.bulk_steal_left(std::move(count));
+            }
+            return internal_kv.into_right_child();
+        }
+    }
+    template<typename F, typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_kv_tracking(F handle_emptied_internal_root, A alloc) const {
+        return [&]() -> std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> { auto&& _m = this->force(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return node.remove_leaf_kv(std::move(handle_emptied_internal_root), std::move(alloc)); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return node.remove_internal_kv(std::move(handle_emptied_internal_root), std::move(alloc)); } return [&]() -> std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename F, typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_leaf_kv(F handle_emptied_internal_root, A alloc) {
+        auto [old_kv, pos] = rusty::detail::deref_if_pointer_like(this->remove());
+        const auto len = pos.reborrow().into_node().len();
+        if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {
+            auto idx = pos.idx();
+            auto&& new_pos = [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { auto&& _m = pos.into_node().forget_type().choose_parent_kv(); if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv0)) == 0) { auto&& left_parent_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+if (left_parent_kv.can_merge()) {
+    return left_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Right<size_t>{std::move(idx)}}, rusty::clone(alloc));
+} else {
+    assert((left_parent_kv.left_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
+    return left_parent_kv.steal_left(std::move(idx));
+} }(); } } if (rusty::detail::deref_if_pointer(_m).is_ok()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1) { auto&& right_parent_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((right_parent_kv.left_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+if (right_parent_kv.can_merge()) {
+    return right_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Left<size_t>{std::move(idx)}}, rusty::clone(alloc));
+} else {
+    assert((right_parent_kv.right_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
+    return right_parent_kv.steal_right(std::move(idx));
+} }(); } } if (rusty::detail::deref_if_pointer(_m).is_err()) { auto&& _mv2 = rusty::detail::deref_if_pointer(_m).unwrap_err(); auto&& pos = rusty::detail::deref_if_pointer(_mv2); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((pos))>, marker::Edge>, F>::new_edge(std::move(pos), std::move(idx)); } return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { rusty::intrinsics::unreachable(); }(); }();
+            pos = new_pos.cast_to_leaf_unchecked();
+            if (auto&& _iflet_scrutinee = pos.reborrow_mut().into_node().ascend(); _iflet_scrutinee.is_ok()) {
+                decltype(auto) parent = _iflet_scrutinee.unwrap();
+                if (rusty::detail::rust_not(parent.into_node().forget_type().fix_node_and_affected_ancestors(std::move(alloc)))) {
+                    handle_emptied_internal_root();
+                }
+            }
+        }
+        return std::make_tuple(std::move(old_kv), std::move(pos));
+    }
+    template<typename F, typename A>
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_internal_kv(F handle_emptied_internal_root, A alloc) const {
+        auto left_leaf_kv = this->left_edge().descend().last_leaf_edge().left_kv();
+        auto left_leaf_kv_shadow1 = left_leaf_kv.ok().unwrap_unchecked();
+        auto [left_kv, left_hole] = rusty::detail::deref_if_pointer_like(left_leaf_kv_shadow1.remove_leaf_kv(std::move(handle_emptied_internal_root), std::move(alloc)));
+        auto internal = left_hole.next_kv().ok().unwrap_unchecked();
+        auto old_kv = internal.replace_kv(std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(left_kv))), std::move(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })(left_kv))));
+        auto pos = internal.next_leaf_edge();
+        return std::make_tuple(std::move(old_kv), std::move(pos));
     }
 };
 
@@ -5435,797 +6750,6 @@ using rusty::Bound;
 
 // Rust-only namespace import skipped for type path: using namespace SearchResult;
 
-/// A reference to a specific key-value pair or edge within a node. The `Node` parameter
-/// must be a `NodeRef`, while the `Type` can either be `KV` (signifying a handle on a key-value
-/// pair) or `Edge` (signifying a handle on an edge).
-///
-/// Note that even `Leaf` nodes can have `Edge` handles. Instead of representing a pointer to
-/// a child node, these represent the spaces where child pointers would go between the key-value
-/// pairs. For example, in a node with length 2, there would be 3 possible edge locations - one
-/// to the left of the node, one between the two pairs, and one at the right of the node.
-export template<typename Node, typename Type>
-struct Handle {
-    Node node;
-    size_t idx_field;
-    rusty::PhantomData<Type> _marker;
-
-    Handle<Node, Type> clone() const {
-        return {.node = rusty::clone(this->node), .idx_field = rusty::clone(this->idx_field), ._marker = rusty::clone(this->_marker)};
-    }
-    Node into_node() {
-        return std::move(this->node);
-    }
-    size_t idx() const {
-        return this->idx_field;
-    }
-    static Handle<Node, Type> new_kv(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> node, size_t idx) {
-        assert((rusty::detail::deref_if_pointer_like(idx) < rusty::len(node)));
-        return Handle<Node, Type>(std::move(node), std::move(idx), rusty::PhantomData<Type>{});
-    }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> left_edge() {
-        // @unsafe
-        {
-            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge>::new_edge(std::move(this->node), std::move(this->idx_field));
-        }
-    }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> right_edge() {
-        // @unsafe
-        {
-            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge>::new_edge(std::move(this->node), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1));
-        }
-    }
-    bool operator==(const Handle<Node, Type>& other) const {
-        auto&& _let_pat = (*this);
-        auto&& node = rusty::detail::deref_if_pointer(_let_pat.node);
-        auto&& idx = rusty::detail::deref_if_pointer(_let_pat.idx_field);
-        auto&& _marker = rusty::detail::deref_if_pointer(_let_pat._marker);
-        return rusty::cmp::eq(node, &other.node) && (rusty::detail::deref_if_pointer_like(idx) == rusty::detail::deref_if_pointer_like(other.idx_field));
-    }
-    Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> reborrow() const {
-        return Handle<NodeRef<marker::Immut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_reborrow{}), this->idx_field, rusty::PhantomData<Type>{});
-    }
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> reborrow_mut() {
-        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_reborrow_mut{}), this->idx_field, rusty::PhantomData<Type>{});
-    }
-    Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> dormant() const {
-        return Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_dormant{}), this->idx_field, rusty::PhantomData<Type>{});
-    }
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> awaken() {
-        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, rusty::detail::__mdisp_awaken{}), std::move(this->idx_field), rusty::PhantomData<Type>{});
-    }
-    static Handle<Node, Type> new_edge(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> node, size_t idx) {
-        assert((rusty::detail::deref_if_pointer_like(idx) <= rusty::len(node)));
-        return Handle<Node, Type>(std::move(node), std::move(idx), rusty::PhantomData<Type>{});
-    }
-    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> left_kv() {
-        if (rusty::detail::deref_if_pointer_like(this->idx_field) > 0) {
-            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Ok(Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), rusty::detail::deref_if_pointer_like(this->idx_field) - static_cast<size_t>(1)));
-        } else {
-            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Err(std::move((*this)));
-        }
-    }
-    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> right_kv() {
-        if (rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)) {
-            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Ok(Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), std::move(this->idx_field)));
-        } else {
-            return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Err(std::move((*this)));
-        }
-    }
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV> insert_fit(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val) {
-        assert((rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)));
-        const auto new_len = rusty::len(this->node) + 1;
-        // @unsafe
-        {
-            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(new_len)), std::move(this->idx_field), std::move(key));
-            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(new_len)), std::move(this->idx_field), std::move(val));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(new_len);
-            return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), std::move(this->idx_field));
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    std::tuple<rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>, Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>> insert(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, A alloc) {
-        if (rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
-            auto handle = this->insert_fit(std::move(key), std::move(val));
-            return std::make_tuple(rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>{rusty::None}, handle.dormant());
-        } else {
-            auto [middle_kv_idx, insertion] = rusty::detail::deref_if_pointer_like(splitpoint(std::move(this->idx_field)));
-            auto middle = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->node))>, marker::KV>, A>::new_kv(std::move(this->node), std::move(middle_kv_idx));
-            auto result = middle.split(std::move(alloc));
-            auto insertion_edge = [&]() -> Handle<Node, Type> { auto&& _m = insertion; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((result.left.reborrow_mut()))>, marker::Edge>, A>::new_edge(result.left.reborrow_mut(), insert_idx); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((result.right.borrow_mut()))>, marker::Edge>, A>::new_edge(result.right.borrow_mut(), insert_idx); } return [&]() -> Handle<Node, Type> { rusty::intrinsics::unreachable(); }(); }();
-            auto handle = insertion_edge.insert_fit(std::move(key), std::move(val)).dormant();
-            return std::make_tuple(rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>(std::move(result)), std::move(handle));
-        }
-    }
-    void correct_parent_link() {
-        auto ptr_shadow1 = std::conditional_t<true, NonNull<InternalNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>>, Node>::new_unchecked(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>::as_internal_ptr(this->node));
-        auto idx = std::move(this->idx_field);
-        auto child = this->descend();
-        child.set_parent_link(std::move(ptr_shadow1), std::move(idx));
-    }
-    void insert_fit(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, Root<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> edge) {
-        assert((rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)));
-        assert((rusty::detail::deref_if_pointer_like(edge.height_field) == (rusty::detail::deref_if_pointer_like(this->node.height_field) - 1)));
-        const auto new_len = rusty::len(this->node) + 1;
-        // @unsafe
-        {
-            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(new_len)), this->idx_field, std::move(key));
-            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(new_len)), this->idx_field, std::move(val));
-            slice_insert(rusty::deref_call(this->node, rusty::detail::__mdisp_edge_area_mut{}, rusty::range_to(rusty::detail::deref_if_pointer_like(new_len) + 1)), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1), std::move(edge.node));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(new_len);
-            rusty::deref_call(this->node, rusty::detail::__mdisp_correct_childrens_parent_links{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, rusty::detail::deref_if_pointer_like(new_len) + 1));
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>> insert(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, Root<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> edge, A alloc) {
-        assert((rusty::detail::deref_if_pointer_like(edge.height_field) == (rusty::detail::deref_if_pointer_like(this->node.height_field) - 1)));
-        if (rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
-            this->insert_fit(std::move(key), std::move(val), std::move(edge));
-            return rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>{rusty::None};
-        } else {
-            auto [middle_kv_idx, insertion] = rusty::detail::deref_if_pointer_like(splitpoint(std::move(this->idx_field)));
-            auto middle = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->node))>, marker::KV>, A>::new_kv(std::move(this->node), std::move(middle_kv_idx));
-            auto result = middle.split(std::move(alloc));
-            auto insertion_edge = [&]() -> Handle<Node, Type> { auto&& _m = insertion; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((result.left.reborrow_mut()))>, marker::Edge>, A>::new_edge(result.left.reborrow_mut(), insert_idx); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& insert_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((result.right.borrow_mut()))>, marker::Edge>, A>::new_edge(result.right.borrow_mut(), insert_idx); } return [&]() -> Handle<Node, Type> { rusty::intrinsics::unreachable(); }(); }();
-            insertion_edge.insert_fit(std::move(key), std::move(val), std::move(edge));
-            return rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>(std::move(result));
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::KV> insert_recursing(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 value, A alloc, const auto& split_root) {
-        auto&& _let_match_tuple = this->insert(std::move(key), std::move(value), rusty::clone(alloc));
-        auto&& _let_match_m0 = std::get<0>(rusty::detail::deref_if_pointer(_let_match_tuple));
-        auto&& _let_match_m1 = std::get<1>(rusty::detail::deref_if_pointer(_let_match_tuple));
-        if (_let_match_m0.is_none()) {
-            auto&& handle = rusty::detail::deref_if_pointer(_let_match_m1);
-            return handle.awaken();
-        }
-        auto _let_match_result = [&]() {
-            // `.unwrap()` yields a prvalue SplitResult; `auto&&` bound a
-            // reference to that temporary (the deref_if_pointer wrapper hides
-            // the prvalue from init_is_rvalue), which dangled by the time
-            // make_tuple/forget_node_type ran (ASan stack-use-after-scope on
-            // the split path, e.g. non-trivial keys). Own it by value.
-            auto split = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_match_m0).unwrap());
-            auto&& handle = rusty::detail::deref_if_pointer(_let_match_m1);
-            return std::make_tuple(split.forget_node_type(), handle);
-        }();
-        auto&& [split, handle] = _let_match_result;
-        while (true) {
-            auto& _assign_match_lhs = split;
-            {
-                auto&& _m = split.left.ascend();
-                bool _m_matched = false;
-                if (!_m_matched) {
-                    if (_m.is_ok()) {
-                        auto&& _mv0 = _m.unwrap();
-                        auto&& parent = rusty::detail::deref_if_pointer(_mv0);
-                        {
-                            auto&& _m = parent.insert(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(split.kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(split.kv)), std::move(split.right), rusty::clone(alloc));
-                            bool _m_matched = false;
-                            if (!_m_matched) {
-                                if (_m.is_none()) {
-                                    return handle.awaken();
-                                    _m_matched = true;
-                                }
-                            }
-                            if (!_m_matched) {
-                                if (_m.is_some()) {
-                                    auto&& _mv1 = _m.unwrap();
-                                    auto&& split = rusty::detail::deref_if_pointer(_mv1);
-                                    _assign_match_lhs = split.forget_node_type();
-                                    _m_matched = true;
-                                }
-                            }
-                        }
-                        _m_matched = true;
-                    }
-                }
-                if (!_m_matched) {
-                    if (_m.is_err()) {
-                        auto&& _mv1 = _m.unwrap_err();
-                        auto&& root = rusty::detail::deref_if_pointer(_mv1);
-                        split_root(SplitResult{.left = root, .kv = std::move(split.kv), .right = std::move(split.right)});
-                        return handle.awaken();
-                        _m_matched = true;
-                    }
-                }
-            }
-        }
-    }
-    NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> descend() {
-        // const-block elided (Rust 2024 compile-time fence)
-        const auto parent_ptr = NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>::as_internal_ptr(this->node);
-        auto node = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })((*parent_ptr).edges, std::move(this->idx_field)).assume_init_read();
-        return NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>{.height_field = rusty::detail::deref_if_pointer_like(this->node.height_field) - static_cast<size_t>(1), .node = std::move(node), ._marker = rusty::PhantomData<std::tuple<typename __TemplateArgs<Node>::arg_0, marker::LeafOrInternal>>{}};
-    }
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> into_kv() const {
-        // Range-path const fix: into_kv() reads from the node and returns
-        // refs; no mutation. Const-qualifying it lets the range iter
-        // pipeline (which holds a `const auto kv = ...` from Cluster B)
-        // call into_kv() without a const-mismatch.
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf{});
-        auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.keys, this->idx_field).assume_init_ref();
-        auto& v_self_ref_tmp = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.vals, this->idx_field).assume_init_ref();
-        auto& v = v_self_ref_tmp;
-        return std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&>{k, v};
-    }
-    typename __TemplateArgs<Node>::arg_1& key_mut() {
-        // @unsafe
-        {
-            return rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_mut();
-        }
-    }
-    typename __TemplateArgs<Node>::arg_2& into_val_mut() {
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf_mut{});
-        // @unsafe
-        {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
-        }
-    }
-    std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_mut() {
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_into_leaf_mut{});
-        auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_mut();
-        auto& v_self_ref_tmp = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
-        auto& v = v_self_ref_tmp;
-        return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{k, v};
-    }
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() {
-        // @unsafe
-        {
-            return rusty::deref_call(this->node, rusty::detail::__mdisp_into_key_val_mut_at{}, std::move(this->idx_field));
-        }
-    }
-    std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> kv_mut() {
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        // @unsafe
-        {
-            auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_mut{});
-            auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, this->idx_field).assume_init_mut();
-            auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, this->idx_field).assume_init_mut();
-            return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{key, val};
-        }
-    }
-    std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> replace_kv(typename __TemplateArgs<Node>::arg_1 k, typename __TemplateArgs<Node>::arg_2 v) {
-        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->kv_mut());
-        auto&& key = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
-        auto&& val = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
-        return std::make_tuple(rusty::mem::replace(key, std::move(k)), rusty::mem::replace(val, std::move(v)));
-    }
-    std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> into_key_val() {
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_dying{});
-        // @unsafe
-        {
-            auto key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_read();
-            auto val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_read();
-            return std::make_tuple(std::move(key), std::move(val));
-        }
-    }
-    template<typename T>
-    struct Dropper {
-        rusty::MaybeUninit<T>& _0;
-        mutable bool _rusty_forgotten = false;
-        Dropper(rusty::MaybeUninit<T>& _0_init) : _0(_0_init) {}
-        Dropper(const Dropper&) = default;
-        Dropper(Dropper&& other) noexcept : _0(other._0) {
-            this->_rusty_forgotten = other._rusty_forgotten;
-            other._rusty_forgotten = true;
-        }
-        Dropper& operator=(const Dropper&) = default;
-        Dropper& operator=(Dropper&& other) noexcept {
-            if (this == &other) {
-                return *this;
-            }
-            this->~Dropper();
-            new (this) Dropper(std::move(other));
-            return *this;
-        }
-        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
-
-
-        ~Dropper() noexcept(false) {
-            if (_rusty_forgotten) { return; }
-            // @unsafe
-            {
-                this->_0.assume_init_drop();
-            }
-        }
-    };
-    void drop_key_val() {
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        auto& leaf = rusty::deref_call(this->node, rusty::detail::__mdisp_as_leaf_dying{});
-        // @unsafe
-        {
-            auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field));
-            auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field));
-            const auto _guard = Dropper(val);
-            key.assume_init_drop();
-        }
-    }
-    std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> split_leaf_data(LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>& new_node) {
-        LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>* new_node_shadow1 = &new_node;
-        assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
-        const auto old_len = rusty::len(this->node);
-        const auto new_len = (rusty::detail::deref_if_pointer_like(old_len) - rusty::detail::deref_if_pointer_like(this->idx_field)) - 1;
-        new_node_shadow1->len = static_cast<uint16_t>(new_len);
-        // @unsafe
-        {
-            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_read();
-            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init_read();
-            move_to_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len)), rusty::slice_to(new_node_shadow1->keys, new_len));
-            move_to_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len)), rusty::slice_to(new_node_shadow1->vals, new_len));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(this->idx_field);
-            return std::make_tuple(std::move(k), std::move(v));
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> split(A alloc) {
-        // btree_port fix (N=90+ drop crash): the transpiler only ported the
-        // Leaf-Handle::split impl; the corresponding Internal-Handle::split
-        // impl was missing, so when the root needed to split (height-1 →
-        // height-2 transition at 90 sequential inserts), this method
-        // allocated a LeafNode for the right half of an Internal split,
-        // leaving the new node without an `edges` array. Subsequent
-        // descents into that right half read past the leaf allocation
-        // and got NULL/garbage child pointers → SIGSEGV in find_key_index.
-        //
-        // Mirrors libcore/alloc/src/collections/btree/node.rs's
-        //   impl Handle<NodeRef<Mut, K, V, Internal>, KV>::split.
-        //
-        // Dispatched via `if constexpr` on the NodeRef's Type marker so
-        // that the leaf-only instantiations (which lack edge_area_mut /
-        // as_internal_mut) don't try to compile the internal branch.
-        using K_ = typename __TemplateArgs<Node>::arg_1;
-        using V_ = typename __TemplateArgs<Node>::arg_2;
-        using Type_ = typename __TemplateArgs<Node>::arg_3;
-        if constexpr (std::is_same_v<Type_, marker::Internal>
-                      || std::is_same_v<Type_, marker::LeafOrInternal>) {
-            if (rusty::detail::deref_if_pointer_like(this->node.height_field) > static_cast<size_t>(0)) {
-                // Internal split: allocate InternalNode, move keys/vals/edges,
-                // construct via from_new_internal so parent links get fixed.
-                const auto old_len = rusty::len(this->node);
-                auto new_node_box = InternalNode<K_, V_>::new_(rusty::clone(alloc));
-                auto& new_internal = *new_node_box;
-                // Reuse split_leaf_data on the .data (LeafNode) portion — the
-                // key/val arrays + len bookkeeping are identical to a leaf.
-                auto kv = this->split_leaf_data(new_internal.data);
-                const auto new_len = static_cast<size_t>(new_internal.data.len);
-                // Move edges (idx+1..old_len+1) from old → new's [0..new_len+1].
-                // @unsafe
-                {
-                    move_to_slice(
-                        this->node.edge_area_mut(rusty::range(
-                            rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1),
-                            rusty::detail::deref_if_pointer_like(old_len) + static_cast<size_t>(1))),
-                        rusty::slice_to(new_internal.edges, new_len + static_cast<size_t>(1)));
-                }
-                const auto height = this->node.height_field;
-                auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_internal(
-                    std::move(new_node_box),
-                    rusty::num::NonZero<size_t>::new_(height).unwrap());
-                return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));
-            }
-        }
-        // Leaf split (original codegen).
-        auto new_node = LeafNode<K_, V_>::new_(std::move(alloc));
-        auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));
-        auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_leaf(std::move(new_node));
-        return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));
-    }
-    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove() {
-        const auto old_len = rusty::len(this->node);
-        // @unsafe
-        {
-            auto k = slice_remove(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range_to(old_len)), std::move(this->idx_field));
-            auto v = slice_remove(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range_to(old_len)), std::move(this->idx_field));
-            rusty::detail::deref_if_pointer_like(rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>((rusty::detail::deref_if_pointer_like(old_len) - 1));
-            return std::make_tuple(std::make_tuple(std::move(k), std::move(v)), this->left_edge());
-        }
-    }
-    BalancingContext<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2> consider_for_balancing() const {
-        auto self1 = rusty::ptr::read(&(*this));
-        auto self2 = rusty::ptr::read(&(*this));
-        return BalancingContext<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>(std::move((*this)), self1.left_edge().descend(), self2.right_edge().descend());
-    }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type> forget_node_type() {
-        // @unsafe
-        {
-            return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>::new_edge(rusty::deref_call(this->node, rusty::detail::__mdisp_forget_type{}), std::move(this->idx_field));
-        }
-    }
-    // btree_port port: Handle::force hand-ported by post_transpile_patch.py
-    // The Rust source is `impl<BorrowType, K, V, Type>
-    //   Handle<NodeRef<BorrowType, K, V, LeafOrInternal>, Type>
-    //   { fn force(self) -> ForceResult<…, …> }`.
-    // C++ can't constrain Node to NodeRef<…,LeafOrInternal>
-    // at the class level, so we destructure Node via
-    // __TemplateArgs/__NodeRefArgs and build the result Handles.
-    ForceResult<
-        Handle<NodeRef<typename __TemplateArgs<Node>::arg_0,
-                       typename __TemplateArgs<Node>::arg_1,
-                       typename __TemplateArgs<Node>::arg_2,
-                       marker::Leaf>, Type>,
-        Handle<NodeRef<typename __TemplateArgs<Node>::arg_0,
-                       typename __TemplateArgs<Node>::arg_1,
-                       typename __TemplateArgs<Node>::arg_2,
-                       marker::Internal>, Type>>
-    force() const {
-        // Range-path const fix: const-qualified so it composes with
-        // NodeRef::force() which is now also const. The body doesn't
-        // mutate `*this` — it reads node + idx, asks node.force() to
-        // make a fresh NodeRef under a different marker, then builds
-        // a Handle around it. idx_field is size_t (trivially copyable);
-        // drop the unnecessary std::move so the body type-checks under
-        // const.
-        using __B = typename __TemplateArgs<Node>::arg_0;
-        using __K = typename __TemplateArgs<Node>::arg_1;
-        using __V = typename __TemplateArgs<Node>::arg_2;
-        using __LeafH = Handle<NodeRef<__B, __K, __V, marker::Leaf>, Type>;
-        using __IntH  = Handle<NodeRef<__B, __K, __V, marker::Internal>, Type>;
-        using __Ret   = ForceResult<__LeafH, __IntH>;
-        auto __forced = this->node.force();
-        if (__forced.index() == 0) {
-            auto&& __leaf_node = std::get<0>(__forced)._0;
-            return __Ret{
-                ForceResult_Leaf<__LeafH, __IntH>{
-                    __LeafH{std::move(__leaf_node),
-                            this->idx_field,
-                            rusty::PhantomData<Type>{}}
-                }
-            };
-        }
-        auto&& __int_node = std::get<1>(__forced)._0;
-        return __Ret{
-            ForceResult_Internal<__LeafH, __IntH>{
-                __IntH{std::move(__int_node),
-                       this->idx_field,
-                       rusty::PhantomData<Type>{}}
-            }
-        };
-    }
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type> cast_to_leaf_unchecked() {
-        auto node_self_ref_tmp = rusty::deref_call(this->node, rusty::detail::__mdisp_cast_to_leaf_unchecked{});
-        auto node = std::move(node_self_ref_tmp);
-        return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{});
-    }
-    void move_suffix(NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>& right) {
-        // btree_port hand-port: original emit had `auto& right_node =
-        // right.reborrow_mut();` — reborrow_mut() returns by value, so the
-        // lvalue ref bind doesn't compile. Mirrors Rust source:
-        //   let mut right_node = right.reborrow_mut();
-        // Also fixes the tuple-of-variants match-arm destructure that used
-        // `std::get<N>(_m_tuple)._0` directly (the variant alternative has
-        // to be selected first with std::get<INDEX>(variant)._0).
-        // @unsafe
-        {
-            const auto new_left_len = this->idx_field;
-            Node left_node = this->reborrow_mut().into_node();
-            const auto old_left_len = rusty::len(left_node);
-            const auto new_right_len = rusty::detail::deref_if_pointer_like(old_left_len) - rusty::detail::deref_if_pointer_like(new_left_len);
-            auto right_node = right.reborrow_mut();
-            assert((rusty::len(right_node) == 0));
-            assert((rusty::detail::deref_if_pointer_like(left_node.height_field) == rusty::detail::deref_if_pointer_like(right_node.height_field)));
-            if (rusty::detail::deref_if_pointer_like(new_right_len) > 0) {
-                rusty::detail::deref_if_pointer_like(rusty::deref_call(left_node, rusty::detail::__mdisp_len_mut{})) = static_cast<uint16_t>(new_left_len);
-                rusty::detail::deref_if_pointer_like(right_node.len_mut()) = static_cast<uint16_t>(new_right_len);
-                move_to_slice(rusty::deref_call(left_node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(new_left_len, old_left_len)), right_node.key_area_mut(rusty::range_to(new_right_len)));
-                move_to_slice(rusty::deref_call(left_node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(new_left_len, old_left_len)), right_node.val_area_mut(rusty::range_to(new_right_len)));
-                // Tuple match: (left_node.force(), right_node.force()).
-                // Both ForceResult<...Leaf, ...Internal> variants. Index 0 = Leaf, 1 = Internal.
-                auto __lf = rusty::deref_call(left_node, rusty::detail::__mdisp_force{});
-                auto __rf = right_node.force();
-                if (__lf.index() == 1 && __rf.index() == 1) {
-                    auto& __left  = std::get<1>(__lf)._0;   // NodeRef<Mut, K, V, Internal>
-                    auto& __right = std::get<1>(__rf)._0;   // NodeRef<Mut, K, V, Internal>
-                    move_to_slice(__left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1)), __right.edge_area_mut(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1)));
-                    __right.correct_childrens_parent_links(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
-                } else if (__lf.index() == 0 && __rf.index() == 0) {
-                    // both leaves; nothing else to do beyond keys/vals copy above.
-                } else {
-                    rusty::intrinsics::unreachable();
-                }
-            }
-        }
-    }
-    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>> next_kv() {
-        // btree_port port: next_kv / next_back_kv hand-port loop
-        auto edge = this->forget_node_type();
-        while (true) {
-            auto _m = edge.right_kv();
-            if (_m.is_ok()) {
-                return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Ok(std::move(_m).unwrap());
-            }
-            auto last_edge = std::move(_m).unwrap_err();
-            auto _m2 = last_edge.into_node().ascend();
-            if (_m2.is_err()) {
-                return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Err(std::move(_m2).unwrap_err());
-            }
-            edge = std::move(_m2).unwrap().forget_node_type();
-        }
-    }
-    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>> next_back_kv() {
-        // btree_port port: next_kv / next_back_kv hand-port loop
-        auto edge = this->forget_node_type();
-        while (true) {
-            auto _m = edge.left_kv();
-            if (_m.is_ok()) {
-                return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Ok(std::move(_m).unwrap());
-            }
-            auto last_edge = std::move(_m).unwrap_err();
-            auto _m2 = last_edge.into_node().ascend();
-            if (_m2.is_err()) {
-                return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>>::Err(std::move(_m2).unwrap_err());
-            }
-            edge = std::move(_m2).unwrap().forget_node_type();
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>> deallocating_next(A alloc) {
-        // btree_port port: B4/B5 deallocating_next hand-ported by post_transpile_patch.py
-        // Rust source (library/alloc/src/collections/btree/navigate.rs):
-        //   let mut edge = self.forget_node_type();
-        //   loop {
-        //       edge = match edge.right_kv() {
-        //           Ok(kv) => return Some((ptr::read(&kv).next_leaf_edge(), kv)),
-        //           Err(last_edge) => match last_edge.into_node().deallocate_and_ascend(alloc.clone()) {
-        //               Some(parent_edge) => parent_edge.forget_node_type(),
-        //               None => return None,
-        //           },
-        //       }
-        //   }
-        using __Ret = rusty::Option<std::tuple<
-            Handle<Node, Type>,
-            Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>
-        >>;
-        auto __edge = std::move(*this).forget_node_type();
-        while (true) {
-            auto __rkv = __edge.right_kv();
-            if (__rkv.is_ok()) {
-                auto __kv = std::move(__rkv).unwrap();
-                // ptr::read = bitwise copy. Caller's safety contract
-                // ensures the kv outlives the next-edge walk.
-                auto __copy = rusty::ptr::read(&__kv);
-                auto __next = std::move(__copy).next_leaf_edge();
-                return __Ret(std::make_tuple(
-                    std::move(__next), std::move(__kv)));
-            }
-            auto __last = std::move(__rkv).unwrap_err();
-            auto __dealloc = std::move(__last).into_node()
-                .deallocate_and_ascend(rusty::clone(alloc));
-            if (__dealloc.is_some()) {
-                __edge = std::move(__dealloc).unwrap().forget_node_type();
-                continue;
-            }
-            return __Ret(rusty::None);
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::Option<std::tuple<Handle<Node, Type>, Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>>> deallocating_next_back(A alloc) {
-        // btree_port port: B4/B5 deallocating_next_back hand-ported by post_transpile_patch.py
-        // Rust source (library/alloc/src/collections/btree/navigate.rs):
-        //   let mut edge = self.forget_node_type();
-        //   loop {
-        //       edge = match edge.left_kv() {
-        //           Ok(kv) => return Some((ptr::read(&kv).next_back_leaf_edge(), kv)),
-        //           Err(last_edge) => match last_edge.into_node().deallocate_and_ascend(alloc.clone()) {
-        //               Some(parent_edge) => parent_edge.forget_node_type(),
-        //               None => return None,
-        //           },
-        //       }
-        //   }
-        using __Ret = rusty::Option<std::tuple<
-            Handle<Node, Type>,
-            Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV>
-        >>;
-        auto __edge = std::move(*this).forget_node_type();
-        while (true) {
-            auto __rkv = __edge.left_kv();
-            if (__rkv.is_ok()) {
-                auto __kv = std::move(__rkv).unwrap();
-                // ptr::read = bitwise copy. Caller's safety contract
-                // ensures the kv outlives the next-edge walk.
-                auto __copy = rusty::ptr::read(&__kv);
-                auto __next = std::move(__copy).next_back_leaf_edge();
-                return __Ret(std::make_tuple(
-                    std::move(__next), std::move(__kv)));
-            }
-            auto __last = std::move(__rkv).unwrap_err();
-            auto __dealloc = std::move(__last).into_node()
-                .deallocate_and_ascend(rusty::clone(alloc));
-            if (__dealloc.is_some()) {
-                __edge = std::move(__dealloc).unwrap().forget_node_type();
-                continue;
-            }
-            return __Ret(rusty::None);
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    void deallocating_end(A alloc) {
-        auto edge = this->forget_node_type();
-        while (true) {
-            auto&& _whilelet = rusty::deref_call(edge.into_node(), rusty::detail::__mdisp_deallocate_and_ascend{}, rusty::clone(alloc));
-            if (!(_whilelet.is_some())) { break; }
-            auto parent_edge = _whilelet.unwrap();
-            edge = parent_edge.forget_node_type();
-        }
-    }
-    // btree_port: branch on BorrowType so Mut/ValMut iterators yield
-    // (const K&, V&) via into_kv_valmut, while Immut/etc. preserve the
-    // (const K&, const V&) shape produced by into_kv. next_leaf_edge is
-    // const and reads no mutable state from kv, so we can compute it
-    // before consuming kv via the mut accessor.
-    auto next_unchecked() {
-        using __BT = typename __TemplateArgs<Node>::arg_0;
-        if constexpr (std::is_same_v<__BT, marker::Mut> || std::is_same_v<__BT, marker::ValMut>) {
-            return replace((*this), [&](auto&& leaf_edge) {
-                auto kv = leaf_edge.next_kv().ok().unwrap();
-                auto next_edge = kv.next_leaf_edge();
-                auto kv_pair = kv.into_kv_valmut();
-                return std::make_tuple(std::move(next_edge), std::move(kv_pair));
-            });
-        } else {
-            return replace((*this), [&](auto&& leaf_edge) {
-                auto kv = leaf_edge.next_kv().ok().unwrap();
-                return std::make_tuple(kv.next_leaf_edge(), kv.into_kv());
-            });
-        }
-    }
-    auto next_back_unchecked() {
-        using __BT = typename __TemplateArgs<Node>::arg_0;
-        if constexpr (std::is_same_v<__BT, marker::Mut> || std::is_same_v<__BT, marker::ValMut>) {
-            return replace((*this), [&](auto&& leaf_edge) {
-                auto kv = leaf_edge.next_back_kv().ok().unwrap();
-                auto next_edge = kv.next_back_leaf_edge();
-                auto kv_pair = kv.into_kv_valmut();
-                return std::make_tuple(std::move(next_edge), std::move(kv_pair));
-            });
-        } else {
-            return replace((*this), [&](auto&& leaf_edge) {
-                auto kv = leaf_edge.next_back_kv().ok().unwrap();
-                return std::make_tuple(kv.next_back_leaf_edge(), kv.into_kv());
-            });
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV> deallocating_next_unchecked(A alloc) {
-        return replace((*this), [&](auto&& leaf_edge) { return leaf_edge.deallocating_next(std::move(alloc)).unwrap(); });
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    Handle<NodeRef<marker::Dying, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::KV> deallocating_next_back_unchecked(A alloc) {
-        return replace((*this), [&](auto&& leaf_edge) { return leaf_edge.deallocating_next_back(std::move(alloc)).unwrap(); });
-    }
-    // Range-path const fix: next_leaf_edge / next_back_leaf_edge are
-    // read-only traversals that compose with Handle::force() (also
-    // const now). They build fresh Handles by inspecting the
-    // ForceResult — no mutation of *this.
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> next_leaf_edge() const {
-        return [&]() { auto&& _m = this->force(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& leaf_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return leaf_kv.right_edge(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { auto&& next_internal_edge = internal_kv.right_edge();
-return next_internal_edge.descend().first_leaf_edge(); }(); } rusty::intrinsics::unreachable(); }();
-    }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge> next_back_leaf_edge() const {
-        return [&]() { auto&& _m = this->force(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& leaf_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return leaf_kv.left_edge(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { auto&& next_internal_edge = internal_kv.left_edge();
-return next_internal_edge.descend().last_leaf_edge(); }(); } rusty::intrinsics::unreachable(); }();
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    void fix_left_border_of_left_edge(A alloc) {
-        while (true) {
-            auto&& _whilelet = this->force();
-            if (!(rusty::detail::deref_if_pointer(_whilelet).index() == 1)) { break; }
-            auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);
-            (*this) = internal_kv.fix_left_child(rusty::clone(alloc)).first_kv();
-            assert((rusty::len(this->reborrow().into_node()) > rusty::detail::deref_if_pointer_like(MIN_LEN)));
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    void fix_right_border_of_right_edge(A alloc) {
-        while (true) {
-            auto&& _whilelet = this->force();
-            if (!(rusty::detail::deref_if_pointer(_whilelet).index() == 1)) { break; }
-            auto&& internal_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);
-            (*this) = internal_kv.fix_right_child(rusty::clone(alloc)).last_kv();
-            assert((rusty::len(this->reborrow().into_node()) > rusty::detail::deref_if_pointer_like(MIN_LEN)));
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> fix_left_child(A alloc) {
-        auto internal_kv = this->consider_for_balancing();
-        const auto left_len = internal_kv.left_child_len();
-        assert((internal_kv.right_child_len() >= rusty::detail::deref_if_pointer_like(MIN_LEN)));
-        if (internal_kv.can_merge()) {
-            return internal_kv.merge_tracking_child(std::move(alloc));
-        } else {
-            auto count = rusty::saturating_sub((rusty::detail::deref_if_pointer_like(MIN_LEN) + 1), rusty::detail::deref_if_pointer(std::move(left_len)));
-            if (rusty::detail::deref_if_pointer_like(count) > 0) {
-                internal_kv.bulk_steal_right(std::move(count));
-            }
-            return internal_kv.into_left_child();
-        }
-    }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> fix_right_child(A alloc) {
-        auto internal_kv = this->consider_for_balancing();
-        const auto right_len = internal_kv.right_child_len();
-        assert((internal_kv.left_child_len() >= rusty::detail::deref_if_pointer_like(MIN_LEN)));
-        if (internal_kv.can_merge()) {
-            return internal_kv.merge_tracking_child(std::move(alloc));
-        } else {
-            auto count = rusty::saturating_sub((rusty::detail::deref_if_pointer_like(MIN_LEN) + 1), rusty::detail::deref_if_pointer(std::move(right_len)));
-            if (rusty::detail::deref_if_pointer_like(count) > 0) {
-                internal_kv.bulk_steal_left(std::move(count));
-            }
-            return internal_kv.into_right_child();
-        }
-    }
-    template<typename F, typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_kv_tracking(F handle_emptied_internal_root, A alloc) {
-        return [&]() { auto&& _m = this->force(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return node.remove_leaf_kv(std::move(handle_emptied_internal_root), std::move(alloc)); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return node.remove_internal_kv(std::move(handle_emptied_internal_root), std::move(alloc)); } rusty::intrinsics::unreachable(); }();
-    }
-    template<typename F, typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_leaf_kv(F handle_emptied_internal_root, A alloc) {
-        // B-pop-last fix: `auto&&` here makes pos a dangling reference — `this->remove()` returns
-        // a prvalue tuple, `deref_if_pointer_like` materializes it as T&&, the temporary dies at
-        // the semicolon, and pos reads stale stack memory that gets clobbered the moment the
-        // rebalance lambda is entered. Owning copy via plain `auto` extends the tuple's lifetime
-        // to the function scope. Same fix needed everywhere else this pattern appears, but only
-        // this site is on the pop_last hot path.
-        auto [old_kv, pos] = rusty::detail::deref_if_pointer_like(this->remove());
-        const auto len = rusty::len(pos.reborrow().into_node());
-        if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {
-            auto idx = pos.idx();
-            auto&& new_pos = [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { auto&& _m = rusty::deref_call(pos.into_node(), rusty::detail::__mdisp_forget_type{}).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)>&>(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
-if (left_parent_kv.can_merge()) {
-    return left_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Right<size_t>{std::move(idx)}}, rusty::clone(alloc));
-} else {
-    assert((left_parent_kv.left_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
-    return left_parent_kv.steal_left(std::move(idx));
-} }(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& right_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)>&>(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((right_parent_kv.left_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
-if (right_parent_kv.can_merge()) {
-    return right_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Left<size_t>{std::move(idx)}}, rusty::clone(alloc));
-} else {
-    assert((right_parent_kv.right_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
-    return right_parent_kv.steal_right(std::move(idx));
-} }(); } } if (_m.is_err()) { auto&& _mv2 = _m.unwrap_err(); auto&& pos = rusty::detail::deref_if_pointer(_mv2); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((pos))>, marker::Edge>, F>::new_edge(std::move(pos), std::move(idx)); } return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { rusty::intrinsics::unreachable(); }(); }();
-            pos = new_pos.cast_to_leaf_unchecked();
-            if (auto&& _iflet_scrutinee = rusty::deref_call(pos.reborrow_mut().into_node(), rusty::detail::__mdisp_ascend{}); _iflet_scrutinee.is_ok()) {
-                decltype(auto) parent = _iflet_scrutinee.unwrap();
-                if (!parent.into_node().forget_type().fix_node_and_affected_ancestors(std::move(alloc))) {
-                    handle_emptied_internal_root();
-                }
-            }
-        }
-        return std::make_tuple(std::move(old_kv), std::move(pos));
-    }
-    template<typename F, typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_internal_kv(F handle_emptied_internal_root, A alloc) {
-        auto&& left_leaf_kv = this->left_edge().descend().last_leaf_edge().left_kv();
-        auto&& left_leaf_kv_shadow1 = left_leaf_kv.ok().unwrap_unchecked();
-        auto [left_kv, left_hole] = rusty::detail::deref_if_pointer_like(left_leaf_kv_shadow1.remove_leaf_kv(std::move(handle_emptied_internal_root), std::move(alloc)));
-        auto internal = left_hole.next_kv().ok().unwrap_unchecked();
-        auto old_kv = internal.replace_kv(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(left_kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(left_kv)));
-        auto pos = internal.next_leaf_edge();
-        return std::make_tuple(std::move(old_kv), std::move(pos));
-    }
-};
-
 /// Represents a session for evaluating and performing a balancing operation
 /// around an internal key-value pair.
 export template<typename K, typename V>
@@ -6235,10 +6759,10 @@ struct BalancingContext {
     NodeRef<marker::Mut, K, V, marker::LeafOrInternal> right_child;
 
     size_t left_child_len() const {
-        return rusty::len(this->left_child);
+        return this->left_child.len();
     }
     size_t right_child_len() const {
-        return rusty::len(this->right_child);
+        return this->right_child.len();
     }
     NodeRef<marker::Mut, K, V, marker::LeafOrInternal> into_left_child() {
         return std::move(this->left_child);
@@ -6247,65 +6771,65 @@ struct BalancingContext {
         return std::move(this->right_child);
     }
     bool can_merge() const {
-        return ((rusty::len(this->left_child) + 1) + rusty::len(this->right_child)) <= rusty::detail::deref_if_pointer_like(CAPACITY);
+        return ((this->left_child.len() + 1) + this->right_child.len()) <= rusty::detail::deref_if_pointer_like(CAPACITY);
     }
     template<typename F, typename A>
         requires (rusty::alloc::Allocator<A>)
     auto do_merge(F result, A alloc) {
         using R = std::remove_cvref_t<std::invoke_result_t<F&, NodeRef<marker::Mut, K, V, marker::Internal>, NodeRef<marker::Mut, K, V, marker::LeafOrInternal>>>;
         auto&& _let_pat = this->parent;
-        auto&& parent_node = rusty::detail::deref_if_pointer(_let_pat.node);
+        auto parent_node = std::move(rusty::detail::deref_if_pointer(_let_pat.node));
         auto&& parent_idx = rusty::detail::deref_if_pointer(_let_pat.idx_field);
         auto&& _marker = rusty::detail::deref_if_pointer(_let_pat._marker);
         const auto old_parent_len = rusty::len(parent_node);
         auto left_node = std::move(this->left_child);
-        auto old_left_len = rusty::len(left_node);
+        auto old_left_len = left_node.len();
         auto right_node = std::move(this->right_child);
-        const auto right_len = rusty::len(right_node);
+        const auto right_len = right_node.len();
         const auto new_left_len = (rusty::detail::deref_if_pointer_like(old_left_len) + 1) + rusty::detail::deref_if_pointer_like(right_len);
         assert((rusty::detail::deref_if_pointer_like(new_left_len) <= rusty::detail::deref_if_pointer_like(CAPACITY)));
         // @unsafe
         {
-            rusty::detail::deref_if_pointer_like(left_node.len_mut()) = static_cast<uint16_t>(new_left_len);
-            auto parent_key = slice_remove(parent_node.key_area_mut(rusty::range_to(old_parent_len)), std::move(parent_idx));
-            left_node.key_area_mut(std::move(old_left_len)).write(std::move(parent_key));
-            move_to_slice(right_node.key_area_mut(rusty::range_to(right_len)), left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len)));
-            auto parent_val = slice_remove(parent_node.val_area_mut(rusty::range_to(old_parent_len)), std::move(parent_idx));
-            left_node.val_area_mut(std::move(old_left_len)).write(std::move(parent_val));
-            move_to_slice(right_node.val_area_mut(rusty::range_to(right_len)), left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len)));
-            slice_remove([&]() { auto _slice_ref_tmp = parent_node.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_parent_len) + 1)); auto _span = std::span(_slice_ref_tmp); return _span; }(), rusty::detail::deref_if_pointer_like(parent_idx) + static_cast<size_t>(1));
+            left_node.len_mut() = static_cast<uint16_t>(new_left_len);
+            const auto parent_key = slice_remove(rusty::as_mut_slice(parent_node.key_area_mut(rusty::range_to(old_parent_len))), std::move(parent_idx));
+            ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(left_node.key_area_mut(std::move(old_left_len)), std::move(parent_key));
+            move_to_slice(rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(right_len))), rusty::as_mut_slice(left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len))));
+            const auto parent_val = slice_remove(rusty::as_mut_slice(parent_node.val_area_mut(rusty::range_to(old_parent_len))), std::move(parent_idx));
+            ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(left_node.val_area_mut(std::move(old_left_len)), std::move(parent_val));
+            move_to_slice(rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(right_len))), rusty::as_mut_slice(left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len))));
+            slice_remove(rusty::as_mut_slice([&]() { auto _slice_ref_tmp = parent_node.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_parent_len) + 1)); auto _span = std::span(_slice_ref_tmp); return _span; }()), rusty::detail::deref_if_pointer_like(parent_idx) + static_cast<size_t>(1));
             parent_node.correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(parent_idx) + 1, old_parent_len));
-            rusty::detail::deref_if_pointer_like(parent_node.len_mut()) -= 1;
-            if (rusty::detail::deref_if_pointer_like(parent_node.height_field) > 1) {
+            parent_node.len_mut() -= 1;
+            if (rusty::detail::deref_if_pointer_like([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.height_field); }) { return (__r.height_field); } else if constexpr (requires { (__r.height_field); }) { return (__r.height_field); } else if constexpr (requires { ((*__r).height_field); }) { return ((*__r).height_field); } else { return ((*__r).height_field); } }(parent_node)) > 1) {
                 auto left_node_shadow1 = left_node.reborrow_mut().cast_to_internal_unchecked();
                 auto right_node_shadow1 = right_node.cast_to_internal_unchecked();
-                move_to_slice(right_node_shadow1.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(right_len) + 1)), left_node_shadow1.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1)));
+                move_to_slice(rusty::as_mut_slice(right_node_shadow1.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(right_len) + 1))), rusty::as_mut_slice(left_node_shadow1.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1))));
                 left_node_shadow1.correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1));
-                rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, right_node_shadow1.node.cast(), Layout::new_<InternalNode<K, V>>());
+                rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, rusty::ptr::cast(right_node_shadow1.node), Layout::new_<InternalNode<K, V>>());
             } else {
-                rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, right_node.node.cast(), Layout::new_<LeafNode<K, V>>());
+                rusty::deref_call(alloc, rusty::detail::__mdisp_deallocate{}, rusty::ptr::cast(right_node.node), Layout::new_<LeafNode<K, V>>());
             }
         }
         return result(std::move(parent_node), std::move(left_node));
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     NodeRef<marker::Mut, K, V, marker::Internal> merge_tracking_parent(A alloc) {
         return this->do_merge([&](auto&& parent, auto&& _child) { return std::move(parent); }, std::move(alloc));
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     NodeRef<marker::Mut, K, V, marker::LeafOrInternal> merge_tracking_child(A alloc) {
         return this->do_merge([&](auto&& _parent, auto&& child) { return std::move(child); }, std::move(alloc));
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge> merge_tracking_child_edge(LeftOrRight<size_t> track_edge_idx, A alloc) {
-        const auto old_left_len = rusty::len(this->left_child);
-        const auto right_len = rusty::len(this->right_child);
-        assert(([&]() -> bool { auto&& _m = track_edge_idx; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(idx) <= rusty::detail::deref_if_pointer_like(old_left_len); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(idx) <= rusty::detail::deref_if_pointer_like(right_len); } return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }()));
+        const auto old_left_len = this->left_child.len();
+        const auto right_len = this->right_child.len();
+        assert(([&]() -> bool { auto&& _m = track_edge_idx; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(idx) <= rusty::detail::deref_if_pointer_like(old_left_len); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(idx) <= rusty::detail::deref_if_pointer_like(right_len); } return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }()));
         auto child = this->merge_tracking_child(std::move(alloc));
-        auto new_idx = [&]() -> size_t { auto&& _m = track_edge_idx; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return idx; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return (rusty::detail::deref_if_pointer_like(old_left_len) + static_cast<size_t>(1)) + rusty::detail::deref_if_pointer_like(idx); } return [&]() -> size_t { rusty::intrinsics::unreachable(); }(); }();
+        auto new_idx = [&]() -> size_t { auto&& _m = track_edge_idx; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return idx; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return (rusty::detail::deref_if_pointer_like(old_left_len) + static_cast<size_t>(1)) + rusty::detail::deref_if_pointer_like(idx); } return [&]() -> size_t { rusty::intrinsics::unreachable(); }(); }();
         // @unsafe
         {
             return Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge>::new_edge(std::move(child), std::move(new_idx));
@@ -6330,9 +6854,9 @@ struct BalancingContext {
         // @unsafe
         {
             auto& left_node = this->left_child;
-            const auto old_left_len = rusty::len(left_node);
+            const auto old_left_len = left_node.len();
             auto& right_node = this->right_child;
-            const auto old_right_len = rusty::len(right_node);
+            const auto old_right_len = right_node.len();
             assert(((rusty::detail::deref_if_pointer_like(old_right_len) + rusty::detail::deref_if_pointer_like(count)) <= rusty::detail::deref_if_pointer_like(CAPACITY)));
             assert((rusty::detail::deref_if_pointer_like(old_left_len) >= rusty::detail::deref_if_pointer_like(count)));
             auto new_left_len = rusty::detail::deref_if_pointer_like(old_left_len) - rusty::detail::deref_if_pointer_like(count);
@@ -6340,30 +6864,30 @@ struct BalancingContext {
             left_node.len_mut() = static_cast<uint16_t>(new_left_len);
             right_node.len_mut() = static_cast<uint16_t>(new_right_len);
             {
-                slice_shr(right_node.key_area_mut(rusty::range_to(new_right_len)), std::move(count));
-                slice_shr(right_node.val_area_mut(rusty::range_to(new_right_len)), std::move(count));
-                move_to_slice(left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, old_left_len)), right_node.key_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1)));
-                move_to_slice(left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, old_left_len)), right_node.val_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1)));
+                slice_shr(rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(new_right_len))), std::move(count));
+                slice_shr(rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(new_right_len))), std::move(count));
+                move_to_slice(rusty::as_mut_slice(left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, old_left_len))), rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1))));
+                move_to_slice(rusty::as_mut_slice(left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, old_left_len))), rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1))));
                 auto k = left_node.key_area_mut(std::move(new_left_len)).assume_init_read();
                 auto v = left_node.val_area_mut(std::move(new_left_len)).assume_init_read();
                 auto [k_shadow1, v_shadow1] = rusty::detail::deref_if_pointer_like(this->parent.replace_kv(std::move(k), std::move(v)));
-                right_node.key_area_mut(rusty::detail::deref_if_pointer_like(count) - 1).write(std::move(k_shadow1));
-                right_node.val_area_mut(rusty::detail::deref_if_pointer_like(count) - 1).write(std::move(v_shadow1));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(right_node.key_area_mut(rusty::detail::deref_if_pointer_like(count) - 1), std::move(k_shadow1));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(right_node.val_area_mut(rusty::detail::deref_if_pointer_like(count) - 1), std::move(v_shadow1));
             }
             {
                 auto&& _m0 = left_node.reborrow_mut().force();
                 auto&& _m1 = right_node.reborrow_mut().force();
                 auto _m_tuple = std::forward_as_tuple(_m0, _m1);
                 bool _m_matched = false;
-                if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1))) {
-                    auto&& left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                    auto&& right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                    slice_shr(right.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(new_right_len) + 1)), std::move(count));
-                    move_to_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1)), right.edge_area_mut(rusty::range_to(count)));
+                if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1))) {
+                    auto left = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0));
+                    auto right = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0));
+                    slice_shr(rusty::as_mut_slice(right.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(new_right_len) + 1))), std::move(count));
+                    move_to_slice(rusty::as_mut_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1))), rusty::as_mut_slice(right.edge_area_mut(rusty::range_to(count))));
                     right.correct_childrens_parent_links(rusty::range(0, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
                     _m_matched = true;
                 }
-                if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 0 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 0))) {
+                if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 0 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 0))) {
                     _m_matched = true;
                 }
                 if (!_m_matched && (true)) {
@@ -6378,9 +6902,9 @@ struct BalancingContext {
         // @unsafe
         {
             auto& left_node = this->left_child;
-            auto old_left_len = rusty::len(left_node);
+            auto old_left_len = left_node.len();
             auto& right_node = this->right_child;
-            const auto old_right_len = rusty::len(right_node);
+            const auto old_right_len = right_node.len();
             assert(((rusty::detail::deref_if_pointer_like(old_left_len) + rusty::detail::deref_if_pointer_like(count)) <= rusty::detail::deref_if_pointer_like(CAPACITY)));
             assert((rusty::detail::deref_if_pointer_like(old_right_len) >= rusty::detail::deref_if_pointer_like(count)));
             const auto new_left_len = rusty::detail::deref_if_pointer_like(old_left_len) + rusty::detail::deref_if_pointer_like(count);
@@ -6391,28 +6915,28 @@ struct BalancingContext {
                 auto k = right_node.key_area_mut(rusty::detail::deref_if_pointer_like(count) - 1).assume_init_read();
                 auto v = right_node.val_area_mut(rusty::detail::deref_if_pointer_like(count) - 1).assume_init_read();
                 auto [k_shadow1, v_shadow1] = rusty::detail::deref_if_pointer_like(this->parent.replace_kv(std::move(k), std::move(v)));
-                left_node.key_area_mut(std::move(old_left_len)).write(std::move(k_shadow1));
-                left_node.val_area_mut(std::move(old_left_len)).write(std::move(v_shadow1));
-                move_to_slice(right_node.key_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1)), left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len)));
-                move_to_slice(right_node.val_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1)), left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len)));
-                slice_shl(right_node.key_area_mut(rusty::range_to(old_right_len)), std::move(count));
-                slice_shl(right_node.val_area_mut(rusty::range_to(old_right_len)), std::move(count));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(left_node.key_area_mut(std::move(old_left_len)), std::move(k_shadow1));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(left_node.val_area_mut(std::move(old_left_len)), std::move(v_shadow1));
+                move_to_slice(rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1))), rusty::as_mut_slice(left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len))));
+                move_to_slice(rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(count) - 1))), rusty::as_mut_slice(left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len))));
+                slice_shl(rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(old_right_len))), std::move(count));
+                slice_shl(rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(old_right_len))), std::move(count));
             }
             {
                 auto&& _m0 = left_node.reborrow_mut().force();
                 auto&& _m1 = right_node.reborrow_mut().force();
                 auto _m_tuple = std::forward_as_tuple(_m0, _m1);
                 bool _m_matched = false;
-                if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1))) {
-                    auto&& left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                    auto&& right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                    move_to_slice(right.edge_area_mut(rusty::range_to(count)), left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1)));
-                    slice_shl(right.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_right_len) + 1)), std::move(count));
+                if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1))) {
+                    auto left = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0));
+                    auto right = std::move(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0));
+                    move_to_slice(rusty::as_mut_slice(right.edge_area_mut(rusty::range_to(count))), rusty::as_mut_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1))));
+                    slice_shl(rusty::as_mut_slice(right.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_right_len) + 1))), std::move(count));
                     left.correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1));
                     right.correct_childrens_parent_links(rusty::range(0, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
                     _m_matched = true;
                 }
-                if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 0 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 0))) {
+                if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 0 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 0))) {
                     _m_matched = true;
                 }
                 if (!_m_matched && (true)) {
@@ -6472,7 +6996,6 @@ struct LeafRange {
     LeafRange<BorrowType, K, V> clone() const {
         return LeafRange<BorrowType, K, V>{.front = rusty::clone(this->front), .back = rusty::clone(this->back)};
     }
-    template<typename B>
     static LeafRange<BorrowType, K, V> default_() {
         return LeafRange<BorrowType, K, V>{.front = rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>{rusty::None}, .back = rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>{rusty::None}};
     }
@@ -6485,48 +7008,11 @@ struct LeafRange {
     LeafRange<marker::Immut, K, V> reborrow() const {
         return LeafRange<marker::Immut, K, V>{.front = this->front.as_ref().map([&](auto&& f) -> Handle<NodeRef<marker::Immut, K, V, marker::Leaf>, marker::Edge> { return f.reborrow(); }), .back = this->back.as_ref().map([&](auto&& b) -> Handle<NodeRef<marker::Immut, K, V, marker::Leaf>, marker::Edge> { return b.reborrow(); })};
     }
-    // Parallel-impl branching: for Mut/ValMut, project to (const K&, V&)
-    // via into_kv() (for the const K&) + into_val_mut (for the V&).
-    // For Immut and other read-only borrows, use into_kv() which gives
-    // (const K&, const V&). perform_next_checked passes `const kv` so
-    // mut variant must use a mutable copy.
-    auto next_checked() {
-        if constexpr (std::is_same_v<BorrowType, marker::Mut>
-                      || std::is_same_v<BorrowType, marker::ValMut>) {
-            using R = std::tuple<const K&, V&>;
-            if (rusty::is_empty((*this))) {
-                return rusty::Option<R>{rusty::None};
-            }
-            return replace(this->front.as_mut().unwrap(), [&](auto&& front) {
-                auto kv = front.next_kv().ok().unwrap();
-                auto& k = std::get<0>(kv.into_kv());
-                auto& v = kv.into_val_mut();
-                auto next_edge = kv.next_leaf_edge();
-                return std::make_tuple(std::move(next_edge),
-                    rusty::Some(R{k, v}));
-            });
-        } else {
-            return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });
-        }
+    rusty::Option<std::tuple<const K&, const V&>> next_checked() {
+        return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });
     }
-    auto next_back_checked() {
-        if constexpr (std::is_same_v<BorrowType, marker::Mut>
-                      || std::is_same_v<BorrowType, marker::ValMut>) {
-            using R = std::tuple<const K&, V&>;
-            if (rusty::is_empty((*this))) {
-                return rusty::Option<R>{rusty::None};
-            }
-            return replace(this->back.as_mut().unwrap(), [&](auto&& back) {
-                auto kv = back.next_back_kv().ok().unwrap();
-                auto& k = std::get<0>(kv.into_kv());
-                auto& v = kv.into_val_mut();
-                auto next_edge = kv.next_back_leaf_edge();
-                return std::make_tuple(std::move(next_edge),
-                    rusty::Some(R{k, v}));
-            });
-        } else {
-            return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });
-        }
+    rusty::Option<std::tuple<const K&, const V&>> next_back_checked() {
+        return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });
     }
     template<typename F>
     auto perform_next_checked(F f) {
@@ -6574,10 +7060,10 @@ struct LazyLeafHandle : std::variant<LazyLeafHandle_Root<BorrowType, K, V>, Lazy
 
 
     LazyLeafHandle<BorrowType, K, V> clone() const {
-        return [&]() -> LazyLeafHandle<BorrowType, K, V> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<BorrowType, K, V>{LazyLeafHandle_Root<BorrowType, K, V>{std::move(rusty::detail::deref_if_pointer_like(root))}}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<BorrowType, K, V>{LazyLeafHandle_Edge<BorrowType, K, V>{std::move(rusty::detail::deref_if_pointer_like(edge))}}; } return [&]() -> LazyLeafHandle<BorrowType, K, V> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> LazyLeafHandle<BorrowType, K, V> { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<BorrowType, K, V>{LazyLeafHandle_Root<BorrowType, K, V>{std::move(rusty::detail::deref_if_pointer_like(root))}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<BorrowType, K, V>{LazyLeafHandle_Edge<BorrowType, K, V>{std::move(rusty::detail::deref_if_pointer_like(edge))}}; } return [&]() -> LazyLeafHandle<BorrowType, K, V> { rusty::intrinsics::unreachable(); }(); }();
     }
     LazyLeafHandle<marker::Immut, K, V> reborrow() const {
-        return [&]() -> LazyLeafHandle<marker::Immut, K, V> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<marker::Immut, K, V>{LazyLeafHandle_Root<marker::Immut, K, V>{root.reborrow()}}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<marker::Immut, K, V>{LazyLeafHandle_Edge<marker::Immut, K, V>{edge.reborrow()}}; } return [&]() -> LazyLeafHandle<marker::Immut, K, V> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> LazyLeafHandle<marker::Immut, K, V> { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<marker::Immut, K, V>{LazyLeafHandle_Root<marker::Immut, K, V>{root.reborrow()}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return LazyLeafHandle<marker::Immut, K, V>{LazyLeafHandle_Edge<marker::Immut, K, V>{edge.reborrow()}}; } return [&]() -> LazyLeafHandle<marker::Immut, K, V> { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 
@@ -6586,7 +7072,6 @@ struct LazyLeafRange {
     rusty::Option<LazyLeafHandle<BorrowType, K, V>> front;
     rusty::Option<LazyLeafHandle<BorrowType, K, V>> back;
 
-    template<typename B>
     static LazyLeafRange<BorrowType, K, V> default_() {
         return LazyLeafRange<BorrowType, K, V>{.front = rusty::Option<LazyLeafHandle<BorrowType, K, V>>{rusty::None}, .back = rusty::Option<LazyLeafHandle<BorrowType, K, V>>{rusty::None}};
     }
@@ -6599,26 +7084,23 @@ struct LazyLeafRange {
     LazyLeafRange<marker::Immut, K, V> reborrow() const {
         return LazyLeafRange<marker::Immut, K, V>{.front = this->front.as_ref().map([&](auto&& f) -> LazyLeafHandle<marker::Immut, K, V> { return f.reborrow(); }), .back = this->back.as_ref().map([&](auto&& b) -> LazyLeafHandle<marker::Immut, K, V> { return b.reborrow(); })};
     }
-    // btree_port: return type deduced so Mut/ValMut LazyLeafRange yields
-    // (const K&, V&) while Immut yields (const K&, const V&). Inner
-    // Handle::next_unchecked branches on BorrowType.
-    auto next_unchecked() {
+    std::tuple<const K&, const V&> next_unchecked() {
         // @unsafe
         {
             return this->init_front().unwrap().next_unchecked();
         }
     }
-    auto next_back_unchecked() {
+    std::tuple<const K&, const V&> next_back_unchecked() {
         // @unsafe
         {
             return this->init_back().unwrap().next_back_unchecked();
         }
     }
     rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>> take_front() {
-        return [&]() -> rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>> { auto&& _m = RUSTY_TRY_OPT(this->front.take()); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>(root.first_leaf_edge()); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>(edge); } return [&]() -> rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>> { auto&& _m = RUSTY_TRY_OPT(this->front.take()); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>(root.first_leaf_edge()); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>(edge); } return [&]() -> rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     Handle<NodeRef<marker::Dying, K, V, marker::LeafOrInternal>, marker::KV> deallocating_next_unchecked(A alloc) {
         assert((this->front.is_some()));
         Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>& front = this->init_front().unwrap();
@@ -6628,7 +7110,7 @@ struct LazyLeafRange {
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     Handle<NodeRef<marker::Dying, K, V, marker::LeafOrInternal>, marker::KV> deallocating_next_back_unchecked(A alloc) {
         assert((this->back.is_some()));
         Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>& back = this->init_back().unwrap();
@@ -6638,7 +7120,7 @@ struct LazyLeafRange {
         }
     }
     template<typename A>
-        requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+        requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
     void deallocating_end(A alloc) {
         if (auto&& _iflet_scrutinee = this->take_front(); _iflet_scrutinee.is_some()) {
             decltype(auto) front = _iflet_scrutinee.unwrap();
@@ -6648,22 +7130,22 @@ struct LazyLeafRange {
     rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> init_front() {
         if (this->front.is_some()) {
             auto&& _iflet_payload = std::as_const(this->front).unwrap();
-            if (rusty::detail::deref_if_pointer(_iflet_payload).index() == 0) {
+            if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_iflet_payload)) == 0) {
                 auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_payload))._0);
                 this->front = rusty::Option<LazyLeafHandle<BorrowType, K, V>>(LazyLeafHandle<BorrowType, K, V>{LazyLeafHandle_Edge<BorrowType, K, V>{rusty::ptr::read(&root).first_leaf_edge()}});
             }
         }
-        return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { auto&& _m = this->front; if (_m.is_none()) { return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>{rusty::None}; } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& edge = const_cast<std::remove_cvref_t<decltype(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)>&>(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>(edge); } } if (_m.is_some()) { auto&& _mv2 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv2).index() == 0) { return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); } } return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { auto&& _m = this->front; if (rusty::detail::deref_if_pointer(_m).is_none()) { return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>{rusty::None}; } if (rusty::detail::deref_if_pointer(_m).is_some()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>(edge); } } if (rusty::detail::deref_if_pointer(_m).is_some()) { auto&& _mv2 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv2)) == 0) { return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); } } return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> init_back() {
         if (this->back.is_some()) {
             auto&& _iflet_payload = std::as_const(this->back).unwrap();
-            if (rusty::detail::deref_if_pointer(_iflet_payload).index() == 0) {
+            if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_iflet_payload)) == 0) {
                 auto&& root = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_payload))._0);
                 this->back = rusty::Option<LazyLeafHandle<BorrowType, K, V>>(LazyLeafHandle<BorrowType, K, V>{LazyLeafHandle_Edge<BorrowType, K, V>{rusty::ptr::read(&root).last_leaf_edge()}});
             }
         }
-        return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { auto&& _m = this->back; if (_m.is_none()) { return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>{rusty::None}; } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& edge = const_cast<std::remove_cvref_t<decltype(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)>&>(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>(edge); } } if (_m.is_some()) { auto&& _mv2 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv2).index() == 0) { return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); } } return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { auto&& _m = this->back; if (rusty::detail::deref_if_pointer(_m).is_none()) { return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>{rusty::None}; } if (rusty::detail::deref_if_pointer(_m).is_some()) { auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&>(edge); } } if (rusty::detail::deref_if_pointer(_m).is_some()) { auto&& _mv2 = rusty::detail::deref_if_pointer(_m).unwrap_mut(); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv2)) == 0) { return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); } } return [&]() -> rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>&> { rusty::intrinsics::unreachable(); }(); }();
     }
 };
 
@@ -6702,8 +7184,8 @@ Position_InternalKV<BorrowType, K, V> InternalKV() { return Position_InternalKV<
 ///
 /// If a panic occurs in the `change` closure, the entire process will be aborted.
 export template<typename T>
-void take_mut(T& v, const auto& change) {
-    replace(v, [&](auto&& value) { return std::make_tuple(change(std::move(value)), std::make_tuple()); });
+void take_mut(T& v, auto&& change) {
+    replace(v, [&](auto&& value) { return std::make_tuple(change(value), std::make_tuple()); });
 }
 
 /// This replaces the value behind the `v` unique reference by calling the
@@ -6711,7 +7193,7 @@ void take_mut(T& v, const auto& change) {
 ///
 /// If a panic occurs in the `change` closure, the entire process will be aborted.
 export template<typename T>
-auto replace(T& v, const auto& change) {
+auto replace(T& v, auto&& change) {
     struct PanicGuard {
         mutable bool _rusty_forgotten = false;
         PanicGuard() = default;
@@ -6743,7 +7225,7 @@ auto replace(T& v, const auto& change) {
     auto [new_value, ret] = rusty::detail::deref_if_pointer_like(change(std::move(value)));
     // @unsafe
     {
-        rusty::ptr::write(&v, std::move(new_value));
+        rusty::ptr::write_(v, std::move(new_value));
     }
     rusty::mem::forget(std::move(guard));
     return std::move(ret);
@@ -6755,10 +7237,12 @@ auto replace(T& v, const auto& change) {
 // which is not valid C++ outside a member function. Move them into the
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
+#if 0  // patcher: orphan-impl block stubbed
 // Methods for V
 static bool is_set_val() {
     return false;
 }
+#endif  // patcher: end orphan-impl stub
 
 /// Given an edge index where we want to insert into a node filled to capacity,
 /// computes a sensible KV index of a split point and where to perform the insertion.
@@ -6793,7 +7277,7 @@ void slice_insert(std::span<rusty::MaybeUninit<T>> slice, size_t idx, T val) {
         if (rusty::detail::deref_if_pointer_like(len) > (rusty::detail::deref_if_pointer_like(idx) + 1)) {
             rusty::ptr::copy(rusty::ptr::add(slice_ptr, std::move(idx)), rusty::ptr::add(slice_ptr, rusty::detail::deref_if_pointer_like(idx) + 1), (rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(idx)) - 1);
         }
-        ((*rusty::ptr::add(slice_ptr, std::move(idx)))).write(std::move(val));
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(((*rusty::ptr::add(slice_ptr, std::move(idx)))), std::move(val));
     }
 }
 
@@ -6862,7 +7346,7 @@ LazyLeafRange<BorrowType, K, V> full_range(NodeRef<BorrowType, K, V, marker::Lea
 }
 
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline void __rusty_alias_Root_fix_top(auto& self_, A alloc) {
     while ((self_.height() > 0) && (rusty::len(self_) == 0)) {
         self_.pop_internal_level(rusty::clone(alloc));
@@ -6870,7 +7354,7 @@ inline void __rusty_alias_Root_fix_top(auto& self_, A alloc) {
 }
 
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline void __rusty_alias_Root_fix_right_border(auto& self_, A alloc) {
     self_.fix_top(rusty::clone(alloc));
     if (rusty::len(self_) > 0) {
@@ -6880,7 +7364,7 @@ inline void __rusty_alias_Root_fix_right_border(auto& self_, A alloc) {
 }
 
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline void __rusty_alias_Root_fix_left_border(auto& self_, A alloc) {
     self_.fix_top(rusty::clone(alloc));
     if (rusty::len(self_) > 0) {
@@ -6893,7 +7377,7 @@ template<typename K, typename V>
 inline void __rusty_alias_Root_fix_right_border_of_plentiful(auto& self_) {
     auto* cur_node = &(self_.borrow_mut());
     while (true) {
-        auto&& _whilelet = (*cur_node).force();
+        auto&& _whilelet = ((*cur_node)).force();
         if (!(/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true)) { break; }
         auto&& internal = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_whilelet)._0);
         auto last_kv = internal.last_kv().consider_for_balancing();
@@ -6912,30 +7396,28 @@ inline std::tuple<size_t, size_t> __rusty_alias_Root_calc_split_length(size_t to
     if (root_a.height() < root_b.height()) {
         length_a = root_a.reborrow().calc_length();
         length_b = rusty::detail::deref_if_pointer_like(total_num) - rusty::detail::deref_if_pointer_like(length_a);
-        assert((length_b == root_b . reborrow () . calc_length ()));
+        assert((rusty::detail::deref_if_pointer_like((length_b)) == (root_b.reborrow().calc_length())));
     } else {
         length_b = root_b.reborrow().calc_length();
         length_a = rusty::detail::deref_if_pointer_like(total_num) - rusty::detail::deref_if_pointer_like(length_b);
-        assert((length_a == root_a . reborrow () . calc_length ()));
+        assert((rusty::detail::deref_if_pointer_like((length_a)) == (root_a.reborrow().calc_length())));
     }
     return std::make_tuple(std::move(length_a), std::move(length_b));
 }
 
 template<typename Q, typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline auto __rusty_alias_Root_split_off(auto& self_, const Q& key, A alloc) {
     Root<K, V>& left_root = self_;
-    // split_off fix: explicit K, V on the new_pillar call so it's
-    // deducible (template params not inferable from the size_t arg alone).
-    auto right_root = __rusty_alias_Root_new_pillar<A, K, V>(left_root.height(), rusty::clone(alloc));
+    auto right_root = __rusty_alias_Root_new_pillar(left_root.height(), rusty::clone(alloc));
     auto* left_node = &(left_root.borrow_mut());
     auto* right_node = &(right_root.borrow_mut());
     while (true) {
-        auto split_edge = [&]() { auto&& _m = (*left_node).search_node(key); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return kv.left_edge(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return edge; } rusty::intrinsics::unreachable(); }();
-        split_edge.move_suffix(*right_node);
+        auto split_edge = [&]() { auto&& _m = ((*left_node)).search_node(key); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return kv.left_edge(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return edge; } rusty::intrinsics::unreachable(); }();
+        split_edge.move_suffix((*right_node));
         {
             auto&& _m0 = split_edge.force();
-            auto&& _m1 = (*right_node).force();
+            auto&& _m1 = ((*right_node)).force();
             auto _m_tuple = std::forward_as_tuple(_m0, _m1);
             bool _m_matched = false;
             if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true))) {
@@ -6956,12 +7438,12 @@ inline auto __rusty_alias_Root_split_off(auto& self_, const Q& key, A alloc) {
         }
     }
     __rusty_alias_Root_fix_right_border(left_root, rusty::clone(alloc));
-    __rusty_alias_Root_fix_left_border(right_root, std::move(alloc));
+    right_root.fix_left_border(std::move(alloc));
     return std::move(right_root);
 }
 
 template<typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline auto __rusty_alias_Root_new_pillar(size_t height, A alloc) {
     auto root = Root<K, V>::new_(rusty::clone(alloc));
     for (auto&& _ : rusty::for_in(rusty::range(0, height))) {
@@ -6971,14 +7453,14 @@ inline auto __rusty_alias_Root_new_pillar(size_t height, A alloc) {
 }
 
 template<typename I, typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline void __rusty_alias_Root_append_from_sorted_iters(auto& self_, I left, I right, size_t& length, A alloc) {
     auto iter = MergeIter(MergeIterInner<I>::new_(std::move(left), std::move(right)));
     self_.bulk_push(std::move(iter), length, std::move(alloc));
 }
 
 template<typename I, typename A, typename K, typename V>
-    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
 inline void __rusty_alias_Root_bulk_push(auto& self_, I iter, size_t& length, A alloc) {
     auto cur_node = self_.borrow_mut().last_leaf_edge().into_node();
     for (auto&& _for_item : rusty::for_in(iter)) {
@@ -6994,8 +7476,8 @@ inline void __rusty_alias_Root_bulk_push(auto& self_, I iter, size_t& length, A 
                         auto&& _m = test_node.ascend();
                         bool _m_matched = false;
                         if (!_m_matched) {
-                            if (_m.is_ok()) {
-                                auto&& _mv0 = _m.unwrap();
+                            if (rusty::detail::deref_if_pointer(_m).is_ok()) {
+                                auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut();
                                 auto&& parent = rusty::detail::deref_if_pointer(_mv0);
                                 auto parent_shadow1 = parent.into_node();
                                 if (rusty::len(parent_shadow1) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
@@ -7007,7 +7489,7 @@ inline void __rusty_alias_Root_bulk_push(auto& self_, I iter, size_t& length, A 
                             }
                         }
                         if (!_m_matched) {
-                            if (_m.is_err()) {
+                            if (rusty::detail::deref_if_pointer(_m).is_err()) {
                                 return self_.push_internal_level(rusty::clone(alloc));
                                 _m_matched = true;
                             }
@@ -7032,6 +7514,359 @@ inline void __rusty_alias_Root_bulk_push(auto& self_, I iter, size_t& length, A 
 
 bool SetValZST::is_set_val() {
     return true;
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> NodeRef<BorrowType, K, V, Type>::first_edge() const {
+    // @unsafe
+    {
+        return Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>::new_edge(std::move((*this)), static_cast<size_t>(0));
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> NodeRef<BorrowType, K, V, Type>::last_edge() const {
+    auto len = this->len();
+    // @unsafe
+    {
+        return Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>::new_edge(std::move((*this)), std::move(len));
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+Handle<NodeRef<BorrowType, K, V, Type>, marker::KV> NodeRef<BorrowType, K, V, Type>::first_kv() const {
+    const auto len = this->len();
+    assert((rusty::detail::deref_if_pointer_like(len) > 0));
+    // @unsafe
+    {
+        return Handle<NodeRef<BorrowType, K, V, Type>, marker::KV>::new_kv(std::move((*this)), static_cast<size_t>(0));
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+Handle<NodeRef<BorrowType, K, V, Type>, marker::KV> NodeRef<BorrowType, K, V, Type>::last_kv() const {
+    const auto len = this->len();
+    assert((rusty::detail::deref_if_pointer_like(len) > 0));
+    // @unsafe
+    {
+        return Handle<NodeRef<BorrowType, K, V, Type>, marker::KV>::new_kv(std::move((*this)), rusty::detail::deref_if_pointer_like(len) - static_cast<size_t>(1));
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename R>
+void NodeRef<BorrowType, K, V, Type>::correct_childrens_parent_links(R range) {
+    for (auto&& i : rusty::for_in(range)) {
+        assert((rusty::detail::deref_if_pointer_like(i) <= this->len()));
+        std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->reborrow_mut()))>, marker::Edge>, R>::new_edge(this->reborrow_mut(), std::move(i)).correct_parent_link();
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> NodeRef<BorrowType, K, V, Type>::push_with_handle(K key, V val) {
+    uint16_t& len = this->len_mut();
+    auto idx = static_cast<size_t>(len);
+    assert((rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(CAPACITY)));
+    len += 1;
+    // @unsafe
+    {
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(this->key_area_mut(std::move(idx)), std::move(key));
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(this->val_area_mut(std::move(idx)), std::move(val));
+        return Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV>::new_kv(NodeRef<BorrowType, K, V, Type>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<BorrowType, Type>>{}}, std::move(idx));
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+void NodeRef<BorrowType, K, V, Type>::push(K key, V val, Root<K, V> edge) {
+    assert((rusty::detail::deref_if_pointer_like(edge.height_field) == (rusty::detail::deref_if_pointer_like(this->height_field) - 1)));
+    uint16_t& len = this->len_mut();
+    auto idx = static_cast<size_t>(len);
+    assert((rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(CAPACITY)));
+    len += 1;
+    // @unsafe
+    {
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(this->key_area_mut(std::move(idx)), std::move(key));
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(this->val_area_mut(std::move(idx)), std::move(val));
+        ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(this->edge_area_mut(rusty::detail::deref_if_pointer_like(idx) + 1), std::move(edge.node));
+        std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->reborrow_mut()))>, marker::Edge>, K>::new_edge(this->reborrow_mut(), rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1)).correct_parent_link();
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename Q, typename R>
+rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>> NodeRef<BorrowType, K, V, Type>::search_tree_for_bifurcation(const R& range) {
+    const auto is_set = false;
+    auto [start, end] = rusty::detail::deref_if_pointer_like(std::make_tuple(rusty::deref_call(range, rusty::detail::__mdisp_start_bound{}), rusty::deref_call(range, rusty::detail::__mdisp_end_bound{})));
+    {
+        auto&& _m0 = start;
+        auto&& _m1 = end;
+        auto _m_tuple = std::forward_as_tuple(_m0, _m1);
+        bool _m_matched = false;
+        if (!_m_matched && ((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 2 && rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 2))) {
+            auto&& s = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+            auto&& e = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+            if (rusty::detail::deref_if_pointer_like(s) == rusty::detail::deref_if_pointer_like(e)) {
+                if (is_set) {
+                    rusty::panic::do_panic(std::format("range start and end are equal and excluded in BTreeSet"));
+                } else {
+                    rusty::panic::do_panic(std::format("range start and end are equal and excluded in BTreeMap"));
+                }
+                _m_matched = true;
+            }
+        }
+        if (!_m_matched && (((rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 || rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 2) && (rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 || rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 2)))) {
+            auto&& s = (rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 ? (rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0)) : (rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0)));
+            auto&& e = (rusty::detail::variant_index(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))) == 1 ? (rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0)) : (rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0)));
+            if (rusty::detail::deref_if_pointer_like(s) > rusty::detail::deref_if_pointer_like(e)) {
+                if (is_set) {
+                    rusty::panic::do_panic(std::format("range start is greater than range end in BTreeSet"));
+                } else {
+                    rusty::panic::do_panic(std::format("range start is greater than range end in BTreeMap"));
+                }
+                _m_matched = true;
+            }
+        }
+        if (!_m_matched && (true)) {
+            _m_matched = true;
+        }
+    }
+    auto lower_bound = SearchBound<Q>::from_range(std::move(start));
+    auto upper_bound = SearchBound<Q>::from_range(std::move(end));
+    while (true) {
+        auto [lower_edge_idx, lower_child_bound] = rusty::detail::deref_if_pointer_like(this->find_lower_bound_index(std::move(lower_bound)));
+        auto [upper_edge_idx, upper_child_bound] = rusty::detail::deref_if_pointer_like(this->find_upper_bound_index(std::move(upper_bound), std::move(lower_edge_idx)));
+        if (rusty::detail::deref_if_pointer_like(lower_edge_idx) < rusty::detail::deref_if_pointer_like(upper_edge_idx)) {
+            return rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>::Ok(std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>{std::move((*this)), std::move(lower_edge_idx), std::move(upper_edge_idx), std::move(lower_child_bound), std::move(upper_child_bound)});
+        }
+        assert((rusty::detail::deref_if_pointer_like((lower_edge_idx)) == rusty::detail::deref_if_pointer_like((upper_edge_idx))));
+        auto common_edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype(((*this)))>, marker::Edge>, Q>::new_edge(std::move((*this)), std::move(lower_edge_idx));
+        {
+            auto&& _m = common_edge.force();
+            if (rusty::detail::deref_if_pointer(_m).index() == 0) {
+                auto&& common_edge = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0);
+                return rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>::Err(common_edge);
+            }
+            else if (rusty::detail::deref_if_pointer(_m).index() == 1) {
+                auto&& common_edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0);
+                (*this) = common_edge.descend();
+                lower_bound = std::move(lower_child_bound);
+                upper_bound = std::move(upper_child_bound);
+            }
+        }
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename Q>
+std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>> NodeRef<BorrowType, K, V, Type>::find_lower_bound_edge(SearchBound<const Q&> bound) const {
+    auto [edge_idx, bound_shadow1] = rusty::detail::deref_if_pointer_like(this->find_lower_bound_index(std::move(bound)));
+    auto edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype(((*this)))>, marker::Edge>, Q>::new_edge(std::move((*this)), std::move(edge_idx));
+    return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>>{std::move(edge), std::move(bound_shadow1)};
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename Q>
+std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>> NodeRef<BorrowType, K, V, Type>::find_upper_bound_edge(SearchBound<const Q&> bound) const {
+    auto [edge_idx, bound_shadow1] = rusty::detail::deref_if_pointer_like(this->find_upper_bound_index(std::move(bound), static_cast<size_t>(0)));
+    auto edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype(((*this)))>, marker::Edge>, Q>::new_edge(std::move((*this)), std::move(edge_idx));
+    return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>>{std::move(edge), std::move(bound_shadow1)};
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename Q>
+SearchResult<BorrowType, K, V, Type, Type> NodeRef<BorrowType, K, V, Type>::search_node(const Q& key) const {
+    return [&]() -> SearchResult<BorrowType, K, V, Type, Type> { auto&& _m = this->find_key_index(key, static_cast<size_t>(0)); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return SearchResult<BorrowType, K, V, Type, Type>{SearchResult_Found<BorrowType, K, V, Type, Type>{Handle<NodeRef<BorrowType, K, V, Type>, marker::KV>::new_kv(std::move((*this)), idx)}}; } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return SearchResult<BorrowType, K, V, Type, Type>{SearchResult_GoDown<BorrowType, K, V, Type, Type>{Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>::new_edge(std::move((*this)), idx)}}; } return [&]() -> SearchResult<BorrowType, K, V, Type, Type> { rusty::intrinsics::unreachable(); }(); }();
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename R>
+LeafRange<BorrowType, K, V> NodeRef<BorrowType, K, V, Type>::find_leaf_edges_spanning_range(R range) {
+    {
+        auto&& _m = this->search_tree_for_bifurcation(range);
+        bool _m_matched = false;
+        if (!_m_matched) {
+            if (rusty::detail::deref_if_pointer(_m).is_err()) {
+                LeafRange<BorrowType, K, V>::none();
+                _m_matched = true;
+            }
+        }
+        if (!_m_matched) {
+            if (rusty::detail::deref_if_pointer(_m).is_ok()) {
+                auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap();
+                auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv1)));
+                auto&& lower_edge_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1)));
+                auto&& upper_edge_idx = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_mv1)));
+                auto lower_child_bound = std::move(rusty::detail::deref_if_pointer(std::get<3>(rusty::detail::deref_if_pointer(_mv1))));
+                auto upper_child_bound = std::move(rusty::detail::deref_if_pointer(std::get<4>(rusty::detail::deref_if_pointer(_mv1))));
+                auto lower_edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((rusty::ptr::read(&node)))>, marker::Edge>, R>::new_edge(rusty::ptr::read(&node), lower_edge_idx);
+                auto upper_edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((node))>, marker::Edge>, R>::new_edge(std::move(node), upper_edge_idx);
+                while (true) {
+                    {
+                        auto&& _m0 = lower_edge.force();
+                        auto&& _m1 = upper_edge.force();
+                        auto _m_tuple = std::forward_as_tuple(_m0, _m1);
+                        bool _m_matched = false;
+                        if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true))) {
+                            auto&& f = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
+                            auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
+                            return LeafRange<BorrowType, K, V>(rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(f), rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(b));
+                            _m_matched = true;
+                        }
+                        if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true))) {
+                            auto&& f = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
+                            auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
+                            std::tie(lower_edge, lower_child_bound) = f.descend().find_lower_bound_edge(lower_child_bound);
+                            std::tie(upper_edge, upper_child_bound) = b.descend().find_upper_bound_edge(upper_child_bound);
+                            _m_matched = true;
+                        }
+                        if (!_m_matched && (true)) {
+                            std::println(stderr, "BTreeMap has different depths");
+                            rusty::intrinsics::unreachable();
+                            _m_matched = true;
+                        }
+                    }
+                }
+                _m_matched = true;
+            }
+        }
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename F>
+void NodeRef<BorrowType, K, V, Type>::visit_nodes_in_order(F visit) const {
+    {
+        auto&& _m = this->force();
+        if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) {
+            auto&& leaf = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0);
+            visit(Position_Leaf<BorrowType, K, V>{leaf});
+        }
+        else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) {
+            auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0);
+            visit(Position_Internal<BorrowType, K, V>{internal});
+            auto edge = internal.first_edge();
+            while (true) {
+                edge = [&]() { auto&& _m = edge.descend().force(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& leaf = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return ({ visit(Position_Leaf<BorrowType, K, V>{leaf});
+({ auto&& _m = edge.next_kv(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto&& _mv = _m.unwrap();
+auto&& kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+return ([&]() { visit(Position_InternalKV<BorrowType, K, V>{});
+return kv.right_edge(); }()); })())>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
+auto&& kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+_match_value.emplace(std::move([&]() { visit(Position_InternalKV<BorrowType, K, V>{});
+return kv.right_edge(); }())); } else { if (!(_m.is_err())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap_err();
+return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); }); }); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { visit(Position_Internal<BorrowType, K, V>{internal});
+return internal.first_edge(); }(); } rusty::intrinsics::unreachable(); }();
+            }
+        }
+    }
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+size_t NodeRef<BorrowType, K, V, Type>::calc_length() const {
+    auto result = 0;
+    this->visit_nodes_in_order([&](auto&& pos) { return [&]() -> rusty::Unit { auto&& _m = pos; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(result) += rusty::len(node)); return std::make_tuple(); }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(result) += rusty::len(node)); return std::make_tuple(); }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2) { return std::make_tuple(); } rusty::intrinsics::unreachable(); }(); });
+    return std::move(result);
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename Q, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+NodeRef<BorrowType, K, V, Type> NodeRef<BorrowType, K, V, Type>::split_off(const Q& key, A alloc) {
+    NodeRef<BorrowType, K, V, Type>& left_root = (*this);
+    auto right_root = __rusty_alias_Root_new_pillar(left_root.height(), rusty::clone(alloc));
+    auto* left_node = &(left_root.borrow_mut());
+    auto* right_node = &(right_root.borrow_mut());
+    while (true) {
+        auto split_edge = [&]() { auto&& _m = ((*left_node)).search_node(key); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return kv.left_edge(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return edge; } rusty::intrinsics::unreachable(); }();
+        split_edge.move_suffix((*right_node));
+        {
+            auto&& _m0 = split_edge.force();
+            auto&& _m1 = ((*right_node)).force();
+            auto _m_tuple = std::forward_as_tuple(_m0, _m1);
+            bool _m_matched = false;
+            if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true))) {
+                auto&& edge = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
+                auto&& node = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
+                left_node = edge.descend();
+                right_node = node.first_edge().descend();
+                _m_matched = true;
+            }
+            if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true))) {
+                break;
+                _m_matched = true;
+            }
+            if (!_m_matched && (true)) {
+                rusty::intrinsics::unreachable();
+                _m_matched = true;
+            }
+        }
+    }
+    __rusty_alias_Root_fix_right_border(left_root, rusty::clone(alloc));
+    __rusty_alias_Root_fix_left_border(right_root, std::move(alloc));
+    return std::move(right_root);
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+NodeRef<BorrowType, K, V, Type> NodeRef<BorrowType, K, V, Type>::new_pillar(size_t height, A alloc) {
+    auto root = Root<BorrowType, K>::new_(rusty::clone(alloc));
+    for (auto&& _ : rusty::for_in(rusty::range(0, height))) {
+        root.push_internal_level(rusty::clone(alloc));
+    }
+    return std::move(root);
+}
+
+template<typename BorrowType, typename K, typename V, typename Type>
+template<typename I, typename A>
+    requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
+void NodeRef<BorrowType, K, V, Type>::bulk_push(I iter, size_t& length, A alloc) {
+    auto cur_node = this->borrow_mut().last_leaf_edge().into_node();
+    for (auto&& _for_item : rusty::for_in(iter)) {
+        auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
+        auto&& value = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
+        if (cur_node.len() < rusty::detail::deref_if_pointer_like(CAPACITY)) {
+            cur_node.push(std::move(key), std::move(value));
+        } else {
+            auto test_node = cur_node.forget_type();
+            auto open_node = [&]() -> NodeRef<marker::Mut, K, V, marker::Internal> {
+                while (true) {
+                    {
+                        auto&& _m = test_node.ascend();
+                        bool _m_matched = false;
+                        if (!_m_matched) {
+                            if (rusty::detail::deref_if_pointer(_m).is_ok()) {
+                                auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut();
+                                auto&& parent = rusty::detail::deref_if_pointer(_mv0);
+                                auto parent_shadow1 = parent.into_node();
+                                if (parent_shadow1.len() < rusty::detail::deref_if_pointer_like(CAPACITY)) {
+                                    return parent_shadow1;
+                                } else {
+                                    test_node = parent_shadow1.forget_type();
+                                }
+                                _m_matched = true;
+                            }
+                        }
+                        if (!_m_matched) {
+                            if (rusty::detail::deref_if_pointer(_m).is_err()) {
+                                return this->push_internal_level(rusty::clone(alloc));
+                                _m_matched = true;
+                            }
+                        }
+                    }
+                }
+            }();
+            const auto tree_height = open_node.height() - 1;
+            auto right_tree = Root<BorrowType, K>::new_(rusty::clone(alloc));
+            for (auto&& _ : rusty::for_in(rusty::range(0, tree_height))) {
+                right_tree.push_internal_level(rusty::clone(alloc));
+            }
+            open_node.push(std::move(key), std::move(value), std::move(right_tree));
+            cur_node = open_node.forget_type().last_leaf_edge().into_node();
+        }
+        length += 1;
+    }
+    this->fix_right_border_of_plentiful();
 }
 
 

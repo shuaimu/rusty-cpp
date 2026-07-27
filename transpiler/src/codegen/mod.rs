@@ -21011,6 +21011,36 @@ impl CodeGen {
                 syn::visit::visit_expr_reference(self, er);
                 self.in_ref -= 1;
             }
+            fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+                // Bare `self` passed BY VALUE as a call argument —
+                // `ManuallyDrop::new(self)`, `Some(self)` — moves self
+                // out. The lowering is `std::move((*this))`; on a const
+                // method that yields `const Own&&`, which only a copy
+                // ctor can consume — deleted for move-only types
+                // (btree_port's `fn into_iter(self)` hit exactly this
+                // via `ManuallyDrop::new(self)` → mem.hpp deleted-copy).
+                // Reference args (`foo(&self)`) don't count: the arg
+                // expr is an ExprReference, never a bare path. Bare
+                // `self` in TAIL position (`fn forget_type(self) -> T
+                // { self }`) also doesn't count — that shape must stay
+                // const for as_const'd call sites (btree B3).
+                for arg in &c.args {
+                    let mut a = arg;
+                    loop {
+                        match a {
+                            syn::Expr::Paren(p) => a = &p.expr,
+                            syn::Expr::Group(g) => a = &g.expr,
+                            _ => break,
+                        }
+                    }
+                    if let syn::Expr::Path(p) = a {
+                        if p.path.is_ident("self") {
+                            self.has_move = true;
+                        }
+                    }
+                }
+                syn::visit::visit_expr_call(self, c);
+            }
             fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
                 // `self.foo()` — Rust auto-refs by-value `self` for
                 // method dispatch and the method may take `&mut self`.
