@@ -8933,6 +8933,87 @@ impl CodeGen {
         for stmt in stmts {
             self.collect_value_call_argument_locals_in_stmt(stmt, &mut result);
         }
+        // Signature-based consumption, deliberately SCOPED to self-rebind
+        // shadows (`let x = x.f();` — btree: `let kv = kv.ok()
+        // .unwrap_unchecked();` then `kv.remove_leaf_kv(..)`). The rebound
+        // value is consumed by a USER method taking `self` by value, which
+        // no name list can know; a `const` shadow binding then rejects the
+        // call. The general (all-locals) version of this pass is KNOWN BAD:
+        // marking fresh lets consumed flips the let-match-IIFE typing path
+        // and resurrects the `Handle<Node, Type>` declaration-param leak —
+        // see the btree swap-in ledger before broadening this.
+        {
+            let mut self_rebinds: HashSet<String> = HashSet::new();
+            for stmt in stmts {
+                if let syn::Stmt::Local(local) = stmt
+                    && let Some(init) = &local.init
+                {
+                    let name = match &local.pat {
+                        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                        syn::Pat::Type(pt) => match pt.pat.as_ref() {
+                            syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        // Init's receiver chain roots in the same name?
+                        let mut cur: &syn::Expr = &init.expr;
+                        loop {
+                            match self.peel_paren_group_expr(cur) {
+                                syn::Expr::MethodCall(mc) => cur = &mc.receiver,
+                                syn::Expr::Field(f) => cur = &f.base,
+                                syn::Expr::Unsafe(b) => {
+                                    if let Some(syn::Stmt::Expr(tail, None)) = b.block.stmts.last()
+                                    {
+                                        cur = tail;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                syn::Expr::Path(pth)
+                                    if pth.path.get_ident().is_some_and(|i| i == name.as_str()) =>
+                                {
+                                    self_rebinds.insert(name.clone());
+                                    break;
+                                }
+                                _ => break,
+                            }
+                        }
+                    }
+                }
+            }
+            if !self_rebinds.is_empty() {
+                struct SigConsumed<'a> {
+                    cg: &'a CodeGen,
+                    names: &'a HashSet<String>,
+                    hits: HashSet<String>,
+                }
+                impl<'a, 'ast> Visit<'ast> for SigConsumed<'a> {
+                    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                        if let syn::Expr::Path(p) = self.cg.peel_paren_group_expr(&mc.receiver)
+                            && let Some(ident) = p.path.get_ident()
+                            && self.names.contains(&ident.to_string())
+                            && self
+                                .cg
+                                .known_method_consumes_self_by_value(&mc.method.to_string())
+                        {
+                            self.hits.insert(ident.to_string());
+                        }
+                        visit::visit_expr_method_call(self, mc);
+                    }
+                }
+                let mut visitor = SigConsumed {
+                    cg: self,
+                    names: &self_rebinds,
+                    hits: HashSet::new(),
+                };
+                for stmt in stmts {
+                    visitor.visit_stmt(stmt);
+                }
+                result.extend(visitor.hits);
+            }
+        }
         // `place = local;` consumes the local (Rust moves assignment RHS
         // places). A `const auto` binding would turn that emitted
         // `std::move(local)` into a copy — deleted for variants holding
