@@ -43370,6 +43370,35 @@ impl CodeGen {
             {
                 return true;
             }
+            // Owner-aware lookup FIRST: when the receiver's type is
+            // inferable, ask that owner's own impl for the method's return
+            // type. This is what disambiguates names with conflicting
+            // definitions across owners — btree's `reborrow` returns
+            // `&'a mut T` on DormantMutRef but a VALUE NodeRef on NodeRef,
+            // so the name-global lookup below must punt on it, and punting
+            // decayed `let map = self.dormant_map.reborrow();` into a
+            // by-value copy of the BTreeMap (deleted ctor; and mutations
+            // through `map` would have missed the real map).
+            if let Some(owner_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let owner_tail = {
+                    let peeled_ty = self.peel_reference_paren_group_type(&owner_ty);
+                    if let syn::Type::Path(tp) = peeled_ty {
+                        tp.path.segments.last().map(|seg| seg.ident.to_string())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(owner_tail) = owner_tail
+                    && let Some(ty) = self
+                        .lookup_owner_method_return_type_for_template_inference(&owner_tail, &method)
+                        .cloned()
+                        .or_else(|| {
+                            self.lookup_owner_method_return_type_by_scan(&owner_tail, &method)
+                        })
+                {
+                    return self.type_is_reference_like(&ty);
+                }
+            }
             // Look up the method's signature in the impl-block index. When
             // we can find a definition whose return type is a reference,
             // trust that even when the receiver's type can't be inferred at

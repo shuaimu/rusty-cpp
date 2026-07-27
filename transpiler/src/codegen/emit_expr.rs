@@ -1438,18 +1438,30 @@ impl CodeGen {
                     let needs_payload_materialization = !binding_stmts.is_empty()
                         || payload_condition.is_some()
                         || arm.guard.is_some();
+                    // See the emit_stmt twin: an arm body that CONSUMES its
+                    // payload binding (a `self`-by-value method — Rust moves
+                    // it) cannot be carved from an `as_const` materialization;
+                    // peek-mut instead, leaving `_m` intact for later arms.
+                    let arm_consumes_payload = !scrutinee_is_mut_borrow
+                        && needs_payload_materialization
+                        && self.expr_consumes_any_named_binding(
+                            &arm.body,
+                            &arm_binding_map.keys().cloned().collect(),
+                        );
                     if needs_payload_materialization {
                         let payload_value_source = if (payload_condition.is_some()
                             || arm.guard.is_some())
                             && !scrutinee_is_mut_borrow
+                            && !arm_consumes_payload
                         {
                             "std::as_const(rusty::detail::deref_if_pointer(_m))"
                         } else {
                             payload_source
                         };
                         // Mut-borrow scrutinees PEEK (unwrap_mut) — the
-                        // consuming unwrap() empties the matched Option.
-                        let effective_unwrap = if scrutinee_is_mut_borrow {
+                        // consuming unwrap() empties the matched Option. A
+                        // consumed payload peeks for the same reason.
+                        let effective_unwrap = if scrutinee_is_mut_borrow || arm_consumes_payload {
                             match unwrap_method {
                                 "unwrap" => "unwrap_mut",
                                 "unwrap_err" => "unwrap_err_mut",

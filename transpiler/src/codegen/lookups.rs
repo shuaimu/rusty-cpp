@@ -3180,6 +3180,139 @@ impl CodeGen {
         if seen { representative } else { None }
     }
 
+    /// Does every known definition of `method` take `self` BY VALUE
+    /// (a consuming method)? Name-global over the same impl-block indexes as
+    /// `lookup_known_method_return_type_by_name`; returns false when the name
+    /// is unseen or any definition disagrees, so a shared name never claims
+    /// consumption it cannot prove. Used by the match lowering to decide
+    /// whether an arm's payload binding must be materialized non-const
+    /// (btree swap-in const-payload family: `Ok(Left(kv)) =>
+    /// kv.merge_tracking_child_edge(..)` consumes `kv`, and a binding carved
+    /// from an `std::as_const(..)` materialization cannot call it).
+    /// Owner-filtered variant of `lookup_known_method_return_type_by_name`:
+    /// scan the same impl-block indexes (INCLUDING sibling-file blocks) but
+    /// only impls whose self-type tail is `owner_tail`. This is what
+    /// disambiguates method names with conflicting definitions across owners
+    /// (`reborrow`: `&mut T` on DormantMutRef, a value on NodeRef) when the
+    /// receiver's type is known — the per-file `function_return_types` map
+    /// cannot answer for owners implemented in a sibling file.
+    pub(super) fn lookup_owner_method_return_type_by_scan(
+        &self,
+        owner_tail: &str,
+        method: &str,
+    ) -> Option<syn::Type> {
+        let impl_matches_owner = |impl_block: &syn::ItemImpl| -> bool {
+            let syn::Type::Path(tp) = impl_block.self_ty.as_ref() else {
+                return false;
+            };
+            tp.path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == owner_tail)
+        };
+        let mut representative: Option<syn::Type> = None;
+        let mut conflicted = false;
+        let mut visit = |impl_block: &syn::ItemImpl| {
+            if !impl_matches_owner(impl_block) {
+                return;
+            }
+            for item in &impl_block.items {
+                if let syn::ImplItem::Fn(f) = item
+                    && f.sig.ident == method
+                {
+                    let ty = match &f.sig.output {
+                        syn::ReturnType::Default => syn::parse_quote!(()),
+                        syn::ReturnType::Type(_, ty) => (**ty).clone(),
+                    };
+                    match &representative {
+                        None => representative = Some(ty),
+                        Some(existing)
+                            if existing.to_token_stream().to_string()
+                                != ty.to_token_stream().to_string() =>
+                        {
+                            conflicted = true;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        };
+        for impl_block in &self.cross_file_impl_blocks {
+            visit(impl_block);
+        }
+        // Same-file impls are indexed by owner name directly.
+        let mut visit_items = |items: &[syn::ImplItem]| {
+            for item in items {
+                if let syn::ImplItem::Fn(f) = item
+                    && f.sig.ident == method
+                {
+                    let ty = match &f.sig.output {
+                        syn::ReturnType::Default => syn::parse_quote!(()),
+                        syn::ReturnType::Type(_, ty) => (**ty).clone(),
+                    };
+                    match &representative {
+                        None => representative = Some(ty),
+                        Some(existing)
+                            if existing.to_token_stream().to_string()
+                                != ty.to_token_stream().to_string() =>
+                        {
+                            conflicted = true;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        };
+        if let Some(items) = self.impl_blocks.get(owner_tail) {
+            visit_items(items);
+        }
+        if let Some(items) = self.consumed_impl_blocks.get(owner_tail) {
+            visit_items(items);
+        }
+        if conflicted {
+            return None;
+        }
+        representative
+    }
+
+    pub(super) fn known_method_consumes_self_by_value(&self, method: &str) -> bool {
+        let mut seen = false;
+        let mut visit_item = |item: &syn::ImplItem| -> Option<()> {
+            if let syn::ImplItem::Fn(f) = item {
+                if f.sig.ident == method {
+                    seen = true;
+                    match f.sig.inputs.first() {
+                        Some(syn::FnArg::Receiver(recv)) if recv.reference.is_none() => {}
+                        _ => return None,
+                    }
+                }
+            }
+            Some(())
+        };
+        for impl_block in &self.cross_file_impl_blocks {
+            for item in &impl_block.items {
+                if visit_item(item).is_none() {
+                    return false;
+                }
+            }
+        }
+        for items in self.impl_blocks.values() {
+            for item in items {
+                if visit_item(item).is_none() {
+                    return false;
+                }
+            }
+        }
+        for items in self.consumed_impl_blocks.values() {
+            for item in items {
+                if visit_item(item).is_none() {
+                    return false;
+                }
+            }
+        }
+        seen
+    }
+
     pub(super) fn lookup_callable_return_type_for_type_param(&self, type_param: &str) -> Option<syn::Type> {
         self.callable_type_param_return_scopes
             .iter()

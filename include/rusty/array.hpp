@@ -2056,12 +2056,27 @@ auto slice_full(std::array<T, N>&& container) {
     return detail::owned_array_slice<T, N>{std::move(container)};
 }
 
+namespace detail {
+template<typename T>
+inline constexpr bool is_span_view_v = false;
+template<typename E, std::size_t X>
+inline constexpr bool is_span_view_v<std::span<E, X>> = true;
+} // namespace detail
+
 template<typename Container>
 requires (
     !std::is_lvalue_reference_v<Container&&> &&
     !detail::is_std_array_like_v<std::remove_cv_t<std::remove_reference_t<Container>>>)
 auto slice_full(Container&& container) {
-    if constexpr (std::is_const_v<std::remove_reference_t<Container>>) {
+    if constexpr (detail::is_span_view_v<std::remove_cv_t<std::remove_reference_t<Container>>>) {
+        // Already a VIEW: a prvalue span aliases storage it does not own, so
+        // wrapping it in owned storage protects nothing — and the wrapper
+        // breaks template-argument deduction at slice-helper call sites
+        // (`slice_remove(std::span<MaybeUninit<T>>, ..)` cannot deduce
+        // through `owned_container_slice`; conversion operators do not
+        // participate in deduction — btree swap-in slice-helper family).
+        return container;
+    } else if constexpr (std::is_const_v<std::remove_reference_t<Container>>) {
         // A CONST rvalue (std::move of a `ref`-pattern binding) cannot be
         // moved into owned storage, and copying an owning container may be
         // impossible (move-only elements) or a hidden deep clone. Emissions

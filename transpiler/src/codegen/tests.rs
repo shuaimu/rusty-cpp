@@ -10893,6 +10893,49 @@ fn test_impl_method_conflict_ignores_generic_param_names_and_lifetimes() {
     );
 }
 
+/// Const-payload family of the btree swap-in: a nested-match arm whose body
+/// CONSUMES the payload binding (`Ok(Left(kv)) => kv.consume(..)`, a
+/// `self`-by-value method — Rust moves the binding) was carved out of a
+/// `std::as_const(..)` materialization: no viable overload for move-only
+/// payloads, a silent COPY for copyable ones. The materialization must
+/// peek-mut so the binding is a non-const reference and `_m` stays intact
+/// for later arms.
+#[test]
+fn test_consumed_nested_match_payload_materializes_non_const() {
+    let out = transpile_str(
+        r#"
+        pub enum LR<T> { Left(T), Right(T) }
+        use LR::*;
+        pub struct Ctx2 { pub n: usize }
+        impl Ctx2 {
+            pub fn consume(self, extra: usize) -> usize { self.n + extra }
+        }
+        pub struct Node4 { pub n: usize }
+        impl Node4 {
+            pub fn choose(self) -> Result<LR<Ctx2>, Node4> {
+                if self.n == 0 { Ok(Left(Ctx2 { n: 0 })) } else { Err(self) }
+            }
+            pub fn pick(self, idx: usize) -> usize {
+                let out = match self.choose() {
+                    Ok(Left(kv)) => kv.consume(idx),
+                    Ok(Right(kv)) => kv.consume(idx + 1),
+                    Err(pos) => pos.n,
+                };
+                out
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains(".unwrap_mut()"),
+        "consumed payload must materialize through the peek-mut unwrap:\n{out}"
+    );
+    assert!(
+        !out.contains("std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap();"),
+        "consumed payload must not be carved from an as_const materialization:\n{out}"
+    );
+}
+
 /// F3 of the btree swap-in: `Ok(Left(x))` where TWO enums share the
 /// Left/Right variant names (btree_internal has both `Peeked` and
 /// `LeftOrRight`). Name-based disambiguation ties, and the outer `Result`

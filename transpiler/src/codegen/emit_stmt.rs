@@ -1123,19 +1123,50 @@ impl CodeGen {
                         let needs_payload_materialization = !binding_stmts.is_empty()
                             || payload_match_condition.is_some()
                             || arm.guard.is_some();
+                        // A payload the arm BODY consumes (a method taking
+                        // `self` by value — Rust moves the binding) cannot be
+                        // carved out of a `std::as_const(..)` materialization:
+                        // the call has no viable overload on a const lvalue
+                        // for move-only payloads, and silently COPIES for
+                        // copyable ones. Materialize through the PEEK-mut
+                        // unwrap instead: non-const references into `_m`, and
+                        // `_m` itself is not consumed, so a failed inner
+                        // variant test still leaves it intact for the next
+                        // arm. (btree swap-in const-payload family:
+                        // `Ok(Left(kv)) => kv.merge_tracking_child_edge(..)`.)
+                        let arm_consumes_payload = !scrutinee_borrows_payload
+                            && needs_payload_materialization
+                            && self.expr_consumes_any_named_binding(
+                                &arm.body,
+                                &binding_map.keys().cloned().collect(),
+                            );
                         let mut payload_bindings_are_refs = true;
                         if needs_payload_materialization {
-                            let payload_value_source =
-                                if payload_match_condition.is_some() || arm.guard.is_some() {
-                                    "std::as_const(rusty::detail::deref_if_pointer(_m))"
-                                } else {
-                                    payload_source
-                                };
-                            payload_bindings_are_refs =
-                                payload_value_source != "rusty::detail::deref_if_pointer(_m)";
+                            let payload_value_source = if arm_consumes_payload {
+                                "rusty::detail::deref_if_pointer(_m)"
+                            } else if payload_match_condition.is_some() || arm.guard.is_some() {
+                                "std::as_const(rusty::detail::deref_if_pointer(_m))"
+                            } else {
+                                payload_source
+                            };
+                            // Peek-mut materialization yields REFERENCES
+                            // into `_m`; the owned-consuming case is only the
+                            // plain non-const unwrap.
+                            payload_bindings_are_refs = arm_consumes_payload
+                                || payload_value_source
+                                    != "rusty::detail::deref_if_pointer(_m)";
+                            let effective_unwrap = if arm_consumes_payload {
+                                match unwrap_method {
+                                    "unwrap" => "unwrap_mut",
+                                    "unwrap_err" => "unwrap_err_mut",
+                                    other => other,
+                                }
+                            } else {
+                                unwrap_method
+                            };
                             out.push_str(&format!(
                                 "auto&& {} = {}.{}(); ",
-                                matched_value, payload_value_source, unwrap_method
+                                matched_value, payload_value_source, effective_unwrap
                             ));
                         }
                         if let Some(cond) = &payload_match_condition {
