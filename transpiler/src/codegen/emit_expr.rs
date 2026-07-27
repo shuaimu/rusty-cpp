@@ -1079,20 +1079,28 @@ impl CodeGen {
                 });
                 true
             }
+            // Loop BODIES are never value-return positions, even when the
+            // loop itself is the fn's tail: a `loop` yields only through
+            // `break v` (handled by the break lowering), and `while`/`for`
+            // yield `()`. Preserving the enclosing value scope here emitted
+            // the body's tail expression as `return <tail>` — btree's
+            // `next_kv` (`loop { edge = match .. }`) returned on the FIRST
+            // iteration: a compile error there, and a SILENT-WRONG for
+            // copyable loop states (`loop { n = n + 3 }` returned n+3).
             syn::Expr::While(while_expr) => {
-                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                self.emit_control_flow_with_return_scope(false, |this| {
                     this.emit_while(while_expr);
                 });
                 true
             }
             syn::Expr::Loop(loop_expr) => {
-                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                self.emit_control_flow_with_return_scope(false, |this| {
                     this.emit_loop(loop_expr);
                 });
                 true
             }
             syn::Expr::ForLoop(for_expr) => {
-                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                self.emit_control_flow_with_return_scope(false, |this| {
                     this.emit_for_loop(for_expr);
                 });
                 true

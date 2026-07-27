@@ -22908,6 +22908,24 @@ impl CodeGen {
         if arms.is_empty() {
             return false;
         }
+        // A C++ `switch` has no standard case ranges, and
+        // `switch_case_labels_for_pat` labels ranges `default` — every range
+        // arm then MERGES into the first default group and the rest are
+        // silently DROPPED (btree's `next_kv` loop hung: `0..=10 => n + 3`
+        // became the only surviving arm). When any arm diverges (returns),
+        // reject the switch so the statement lowerings — which compare range
+        // bounds — take over. Pure-value range matches still take the switch
+        // (KNOWN BROKEN the same way, pre-existing; the value-position
+        // if-chain does not accept ranges yet — see the btree swap ledger).
+        let has_range_arm = arms
+            .iter()
+            .any(|arm| matches!(&arm.pat, syn::Pat::Range(_)));
+        let has_diverging_arm = arms
+            .iter()
+            .any(|arm| self.expr_is_try_style_return_flow(&arm.body));
+        if has_range_arm && has_diverging_arm {
+            return false;
+        }
         arms.iter().all(|arm| match &arm.pat {
             syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => true,
             syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),

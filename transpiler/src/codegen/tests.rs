@@ -10893,6 +10893,71 @@ fn test_impl_method_conflict_ignores_generic_param_names_and_lifetimes() {
     );
 }
 
+/// Range arms cannot be expressed as C++ switch cases, and the case-label
+/// fallback labeled them `default` — every range arm merged into the first
+/// group and the rest were SILENTLY DROPPED (`0..=10` became the only
+/// surviving arm of a three-arm match). Range matches must take the
+/// if-chain lowering.
+#[test]
+fn test_range_match_with_return_arms_does_not_lower_to_switch() {
+    let out = transpile_str(
+        r#"
+        pub fn hop(mut n: usize) -> usize {
+            loop {
+                n = match n {
+                    0..=10 => n + 3,
+                    11..=20 => return n,
+                    _ => return 0,
+                }
+            }
+        }
+    "#,
+    );
+    let hop_body: String = out
+        .split("size_t hop(size_t n) {")
+        .last()
+        .expect("hop() must be emitted")
+        .chars()
+        .take(2000)
+        .collect();
+    assert!(
+        !hop_body.contains("switch ("),
+        "range arms cannot be switch cases (they all label `default` and \
+         merge into one group, dropping the rest):\n{hop_body}"
+    );
+    assert!(
+        hop_body.contains("<= 10"),
+        "range bounds must be compared:\n{hop_body}"
+    );
+}
+
+/// A loop BODY's tail expression is not a value-return position — a `loop`
+/// yields only through `break v`, and `while`/`for` yield `()`. When the
+/// loop itself sat in the enclosing fn's tail, the body inherited the
+/// value-return scope and its tail expression emitted as `return <tail>`:
+/// btree's `next_kv` (`loop { edge = match .. }`) returned on the FIRST
+/// iteration — a compile error there, and a SILENT-WRONG for copyable loop
+/// states (`loop { n = n + 3 }` returned n+3 instead of looping).
+#[test]
+fn test_loop_body_tail_expression_is_not_a_return() {
+    let out = transpile_str(
+        r#"
+        pub fn spin(mut n: usize) -> usize {
+            loop {
+                if n > 10 {
+                    return n;
+                }
+                n = n + 3
+            }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("return n ="),
+        "the loop-body tail assignment must not become a return:\n{out}"
+    );
+}
+
 /// Const-payload family of the btree swap-in: a nested-match arm whose body
 /// CONSUMES the payload binding (`Ok(Left(kv)) => kv.consume(..)`, a
 /// `self`-by-value method — Rust moves the binding) was carved out of a
