@@ -632,6 +632,9 @@ def _strip_next_chunk_method(text: str) -> str:
     return "\n".join(out)
 
 
+MODULE_STUB_NAMES: list[str] = []
+
+
 def _stub_non_smoke_methods(text: str) -> str:
     """Replace bodies of methods off the smoke-test path with stubs.
 
@@ -649,53 +652,10 @@ def _stub_non_smoke_methods(text: str) -> str:
 
     Anything matching STUB_NAMES gets its body stubbed.
     """
-    STUB_NAMES = [
-        "clone",
-        "clone_from",
-        "with_capacity",
-        "try_with_capacity",
-        "try_with_capacity_in",
-        "extend",
-        "extend_front",
-        "extend_from_within",
-        "prepend_from_within",
-        "spec_extend",
-        "spec_extend_front",
-        "spec_from_iter",
-        "from_iter",
-        "drain",
-        "splice",
-        "extract_if",
-        "slice_ranges",
-        "range",
-        "range_mut",
-        "binary_search",
-        "binary_search_by",
-        "binary_search_by_key",
-        "partition_point",
-        "swap",
-        "swap_remove_back",
-        "swap_remove_front",
-        "rotate_left",
-        "rotate_right",
-        "resize",
-        "resize_with",
-        "truncate",
-        "retain",
-        "retain_mut",
-        "dedup",
-        "dedup_by",
-        "dedup_by_key",
-        "make_contiguous",
-        "as_slices",
-        "as_mut_slices",
-        "iter",
-        "iter_mut",
-        "into_iter",
-        "next_chunk",
-        "try_fold",
-        "try_rfold",
-    ]
+    # 2026-07-28: the blanket "off smoke-test path" stub list is
+    # retired — the transpiler now emits compiling bodies for the
+    # whole surface. Names left here get re-stubbed with a reason.
+    STUB_NAMES = MODULE_STUB_NAMES
     name_set = set(STUB_NAMES)
     lines = text.splitlines(keepends=True)
     n = len(lines)

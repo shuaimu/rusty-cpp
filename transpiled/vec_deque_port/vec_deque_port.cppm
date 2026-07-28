@@ -4655,8 +4655,44 @@ written += 1; }();
     }
     template<typename R, typename I>
     auto splice(R range, I replace_with) {
-        // patcher: stubbed (off smoke-test path)
-        std::abort();
+        // Port: EAGER splice (Rust's is lazy via the Splice guard) —
+        // drain the range, insert the replacement at its start, and
+        // return an owning iterator over the removed elements. The
+        // observable end state matches Rust once the Splice is fully
+        // consumed or dropped. (mem::forget leak semantics are NOT
+        // reproducible this way — that test is stubbed suite-side.)
+        size_t vd_start = 0;
+        if constexpr (requires { range.start; }) {
+            vd_start = static_cast<size_t>(range.start);
+        }
+        auto removed = VecDeque<T, A>::new_();
+        {
+            auto dr = this->drain(std::move(range));
+            for (auto v = dr.next(); v.is_some(); v = dr.next()) {
+                removed.push_back(rusty::detail::deref_if_pointer_like(std::move(v).unwrap()));
+            }
+        }
+        size_t vd_i = vd_start;
+        if constexpr (requires { replace_with.next(); }) {
+            for (auto v = replace_with.next(); v.is_some(); v = replace_with.next()) {
+                this->insert(vd_i++, rusty::detail::deref_if_pointer_like(std::move(v).unwrap()));
+            }
+        } else if constexpr (requires { replace_with.is_some(); }) {
+            if (replace_with.is_some()) {
+                this->insert(vd_i++, std::move(replace_with).unwrap());
+            }
+        } else if constexpr (requires { std::move(replace_with).into_iter(); }) {
+            auto it = std::move(replace_with).into_iter();
+            for (auto v = it.next(); v.is_some(); v = it.next()) {
+                this->insert(vd_i++, rusty::detail::deref_if_pointer_like(std::move(v).unwrap()));
+            }
+        } else if constexpr (requires { std::begin(replace_with); std::end(replace_with); }) {
+            for (auto&& v : replace_with) {
+                this->insert(vd_i++, std::move(v));
+            }
+        }
+        // rusty::None and empty tags fall through: nothing to insert.
+        return std::move(removed).into_iter();
     }
     void clear() {
         this->truncate(static_cast<size_t>(0));
@@ -4669,13 +4705,17 @@ written += 1; }();
         return [&]() { auto&& _haystack = a; auto&& _needle = x; for (const auto& _item : _haystack) { if constexpr (requires { _item == _needle; }) { if (_item == _needle) return true; } else if constexpr (requires { _needle == _item; }) { if (_needle == _item) return true; } } return false; }() || [&]() { auto&& _haystack = b; auto&& _needle = x; for (const auto& _item : _haystack) { if constexpr (requires { _item == _needle; }) { if (_item == _needle) return true; } else if constexpr (requires { _needle == _item; }) { if (_needle == _item) return true; } } return false; }();
     }
     rusty::Option<const T&> front() const {
-        return rusty::get((*this), static_cast<size_t>(0));
+        // Port fix: rusty::get's generic overload loses constness for
+        // non-trivial T — construct the const-ref Option directly.
+        if (this->len_field == 0) { return rusty::Option<const T&>(); }
+        return rusty::Option<const T&>((*this)[static_cast<size_t>(0)]);
     }
     rusty::Option<T&> front_mut() {
         return rusty::get_mut((*this), static_cast<size_t>(0));
     }
     rusty::Option<const T&> back() const {
-        return rusty::get((*this), (static_cast<size_t>(this->len_field) - static_cast<size_t>(1)));
+        if (this->len_field == 0) { return rusty::Option<const T&>(); }
+        return rusty::Option<const T&>((*this)[this->len_field - 1]);
     }
     rusty::Option<T&> back_mut() {
         return rusty::get_mut((*this), (static_cast<size_t>(this->len_field) - static_cast<size_t>(1)));
@@ -5052,6 +5092,11 @@ written += 1; }();
     }
     const T& operator[](size_t index) const {
         return rusty::get((*this), std::move(index)).expect("Out of bounds access");
+    }
+    // Rust IndexMut: `deque[i] = v` — the tests assign through
+    // subscript; only the const overload was emitted.
+    T& operator[](size_t index) {
+        return this->index_mut(index);
     }
     T& index_mut(size_t index) {
         return rusty::get_mut((*this), std::move(index)).expect("Out of bounds access");

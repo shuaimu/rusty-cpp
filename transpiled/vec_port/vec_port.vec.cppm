@@ -4802,10 +4802,11 @@ struct Vec {
     }
     std::tuple<std::add_pointer_t<T>, size_t, size_t, A> into_raw_parts_with_alloc() {
         auto me = rusty::mem::manually_drop_new(std::move((*this)));
-        auto len = rusty::len(me);
-        auto capacity = me.capacity();
-        auto ptr_shadow1 = (*me).as_mut_ptr();
-        auto alloc = rusty::ptr::read(me.allocator());
+        Vec<T, A>& me_ = *me;
+        auto len = rusty::len(me_);
+        auto capacity = me_.capacity();
+        auto ptr_shadow1 = me_.as_mut_ptr();
+        auto alloc = rusty::ptr::read(me_.allocator());
         return std::make_tuple(ptr_shadow1, std::move(len), std::move(capacity), std::move(alloc));
     }
     std::tuple<rusty::ptr::NonNull<T>, size_t, size_t, A> into_parts_with_alloc() {
