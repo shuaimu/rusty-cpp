@@ -232,7 +232,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         target_include_directories(${_port} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_compile_features(${_port} PUBLIC cxx_std_23)
         if(_port STREQUAL "btree_set_hash_tests_port" OR _port STREQUAL "arc_tests_port"
-           OR _port STREQUAL "string_tests_port")
+           OR _port STREQUAL "string_tests_port" OR _port STREQUAL "rc_tests_port")
             # Real translations (asserts live IN the module) — no NDEBUG,
             # or the whole suite passes vacuously.
             target_compile_options(${_port} PRIVATE -O3 -march=native -UNDEBUG)
@@ -574,7 +574,8 @@ set(TEST_SOURCES
     tests/vec_tests_port_module_test.cpp
     # arc_tests_port — driver for tests/arc.rs (14 tests, stub).
     tests/arc_tests_port_module_test.cpp
-    # rc_tests_port — driver for tests/rc.rs (61 tests, stub).
+    # rc_tests_port — driver for tests/rc.rs (61 tests, REAL
+    # translation: 30 live + 31 cited skips).
     tests/rc_tests_port_module_test.cpp
     # string_tests_port — driver for tests/string.rs (60 tests, REAL
     # translation: 52 live + 8 cited skips).
