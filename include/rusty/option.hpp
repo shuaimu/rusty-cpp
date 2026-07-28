@@ -717,6 +717,25 @@ public:
             return Option<const T*>(current);
         }
     };
+    // Rust IntoIterator for Option<T>: 0/1 OWNED item (iter() yields
+    // pointer carriers; value consumers — e.g. VecDeque::splice — need
+    // owned elements).
+    struct IntoIterOwned {
+        using Item = T;
+        Option inner;
+        std::tuple<size_t, Option<size_t>> size_hint() const {
+            const size_t n = inner.is_some() ? 1 : 0;
+            return {n, Option<size_t>(n)};
+        }
+        Option next() {
+            Option out = std::move(inner);
+            inner = Option();
+            return out;
+        }
+    };
+    IntoIterOwned into_iter() {
+        return IntoIterOwned{std::move(*this)};
+    }
     RefIter iter() const {
         return RefIter{has_value ? &value : nullptr};
     }
@@ -859,6 +878,10 @@ public:
 
     
     Option(T& ref) : ptr(&ref) {}
+
+    // Pointer form: emitted iterator-adapter bodies unwrap a pointer
+    // carrier and construct the reference Option from it directly.
+    explicit Option(T* p) : ptr(p) {}
 
     template<typename U>
     requires (!std::is_same_v<std::remove_cvref_t<U>, T>)

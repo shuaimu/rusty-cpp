@@ -687,6 +687,12 @@ auto array_from_fn(F&& func) {
 
 template<typename Range>
 void rotate_left(Range&& range, size_t mid) {
+    // Containers with a native rotate (alloc's VecDeque) use it —
+    // the std::begin/end fallback requires contiguity they lack.
+    if constexpr (requires { range.rotate_left(mid); }) {
+        range.rotate_left(mid);
+        return;
+    }
     auto&& view = range;
     auto first = std::begin(view);
     auto last = std::end(view);
@@ -712,6 +718,10 @@ auto select_nth_unstable(Range&& range, size_t n) {
 
 template<typename Range>
 void rotate_right(Range&& range, size_t k) {
+    if constexpr (requires { range.rotate_right(k); }) {
+        range.rotate_right(k);
+        return;
+    }
     auto&& view = range;
     auto first = std::begin(view);
     auto last = std::end(view);

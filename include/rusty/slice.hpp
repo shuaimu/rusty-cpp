@@ -44,6 +44,15 @@ void fill(Range&& range, Value&& value) {
     }
 }
 
+// Forward declarations for slice_iter::Iter::advance_by's signature —
+// full definitions come from result.hpp / num.hpp at instantiation.
+template<typename T, typename E>
+class Result;
+namespace num {
+template<typename T>
+class NonZero;
+}  // namespace num
+
 namespace slice_iter {
 
 template<typename T>
@@ -93,6 +102,35 @@ public:
         return rusty::Option<pointer>(current);
     }
 
+    // Rust Iterator::advance_by / advance_back_by — alloc's VecDeque
+    // iterators forward here. Result/NonZero are only FORWARD-declared
+    // above; every use is made DEPENDENT on N so lookup and
+    // instantiation defer to call sites (whose TUs have the full
+    // definitions). Keeps this header self-contained.
+    template<typename N = size_t>
+    auto advance_by(N n) {
+        using NZ = rusty::num::NonZero<
+            std::conditional_t<(sizeof(N) > 0), size_t, size_t>>;
+        using R = rusty::Result<std::tuple<>, NZ>;
+        const size_t len = static_cast<size_t>(end_ - cur_);
+        const size_t want = static_cast<size_t>(n);
+        const size_t step = want < len ? want : len;
+        cur_ += step;
+        if (want <= len) return R::Ok(std::tuple<>{});
+        return R::Err(NZ::new_(want - len).unwrap());
+    }
+    template<typename N = size_t>
+    auto advance_back_by(N n) {
+        using NZ = rusty::num::NonZero<
+            std::conditional_t<(sizeof(N) > 0), size_t, size_t>>;
+        using R = rusty::Result<std::tuple<>, NZ>;
+        const size_t len = static_cast<size_t>(end_ - cur_);
+        const size_t want = static_cast<size_t>(n);
+        const size_t step = want < len ? want : len;
+        end_ -= step;
+        if (want <= len) return R::Ok(std::tuple<>{});
+        return R::Err(NZ::new_(want - len).unwrap());
+    }
     rusty::Option<pointer> next_back() {
         if (cur_ == end_) {
             return rusty::None;
