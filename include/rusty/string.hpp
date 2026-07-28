@@ -23,6 +23,7 @@
 #include "rusty/fmt.hpp"
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
+#include "rusty/collections.hpp"  // TryReserveError
 
 // @safe
 namespace rusty {
@@ -46,6 +47,30 @@ struct FromUtf8Error {
     }
     std::vector<uint8_t> into_bytes() { return std::move(bytes_); }
     const std::vector<uint8_t>& as_bytes() const { return bytes_; }
+    bool operator==(const FromUtf8Error& other) const { return bytes_ == other.bytes_; }
+    // Rust FromUtf8Error::utf8_error().valid_up_to(): length of the
+    // longest valid UTF-8 prefix of the offending bytes.
+    struct Utf8ErrorInfo {
+        size_t valid_up_to_;
+        size_t valid_up_to() const { return valid_up_to_; }
+    };
+    Utf8ErrorInfo utf8_error() const {
+        size_t i = 0;
+        const auto* d = bytes_.data();
+        const size_t n = bytes_.size();
+        while (i < n) {
+            const unsigned char b = d[i];
+            size_t need = b <= 0x7F ? 1 : (b >> 5) == 0x6 ? 2 : (b >> 4) == 0xE ? 3 : (b >> 3) == 0x1E ? 4 : 0;
+            if (need == 0 || i + need > n) break;
+            bool ok = true;
+            for (size_t k = 1; k < need; ++k) {
+                if ((d[i + k] & 0xC0) != 0x80) { ok = false; break; }
+            }
+            if (!ok) break;
+            i += need;
+        }
+        return Utf8ErrorInfo{i};
+    }
     std::string to_string() const { return "invalid utf-8 sequence"; }
     Option<const void*&> source() const { return Option<const void*&>{None}; }
 };
@@ -509,6 +534,274 @@ public:
         ensure_null_terminated();
     }
 
+    // ── rustc string-test API batch (2026-07) ─────────────────────────
+
+private:
+    bool boundary_ok_(size_t i) const {
+        return i >= len_ || (static_cast<unsigned char>(data_[i]) & 0xC0) != 0x80;
+    }
+    // core::slice::index::slice_index_fail (Rust 1.95) message set.
+    [[noreturn]] static void slice_index_fail_(size_t start, size_t end, size_t len) {
+        if (start > len) {
+            rusty::panic::do_panic(
+                "range start index " + std::to_string(start)
+                + " out of range for slice of length " + std::to_string(len));
+        }
+        if (end > len) {
+            rusty::panic::do_panic(
+                "range end index " + std::to_string(end)
+                + " out of range for slice of length " + std::to_string(len));
+        }
+        if (start > end) {
+            rusty::panic::do_panic(
+                "slice index starts at " + std::to_string(start)
+                + " but ends at " + std::to_string(end));
+        }
+        rusty::panic::do_panic(
+            "range end index " + std::to_string(end)
+            + " out of range for slice of length " + std::to_string(len));
+    }
+    // Bound decode over variant<Unbounded, Included, Excluded> (payload
+    // `._0`), mirroring core::slice::index::into_slice_range: the end
+    // bound resolves first, then the start bound checks against it.
+    template<typename B>
+    static size_t resolve_end_bound_(const B& b, size_t len) {
+        switch (b.index()) {
+            case 0: return len;                                 // Unbounded
+            case 1: {                                           // Included
+                const size_t n = std::get<1>(b)._0;
+                if (n >= len) slice_index_fail_(0, n, len);
+                return n + 1;
+            }
+            default: {                                          // Excluded
+                const size_t n = std::get<2>(b)._0;
+                if (n > len) slice_index_fail_(0, n, len);
+                return n;
+            }
+        }
+    }
+    template<typename B>
+    static size_t resolve_start_bound_(const B& b, size_t end, size_t len) {
+        switch (b.index()) {
+            case 0: return 0;                                   // Unbounded
+            case 1: {                                           // Included
+                const size_t n = std::get<1>(b)._0;
+                if (n > end) slice_index_fail_(n, end, len);
+                return n;
+            }
+            default: {                                          // Excluded
+                const size_t n = std::get<2>(b)._0;
+                if (n >= end) slice_index_fail_(n, end, len);
+                return n + 1;
+            }
+        }
+    }
+    // Resolve a Rust RangeBounds-like argument (rusty range structs,
+    // tuples of Bound<size_t>, custom RangeBounds types) to [start,end)
+    // byte indices, with Rust's panic conditions and messages.
+    template<typename R>
+    std::pair<size_t, size_t> resolve_range_bounds_(const R& r) const {
+        size_t start = 0;
+        size_t end = len_;
+        if constexpr (requires { r.start_bound(); r.end_bound(); }) {
+            end = resolve_end_bound_(r.end_bound(), len_);
+            start = resolve_start_bound_(r.start_bound(), end, len_);
+        } else if constexpr (requires {
+            std::tuple_size<std::remove_cvref_t<R>>::value;
+        }) {
+            end = resolve_end_bound_(std::get<1>(r), len_);
+            start = resolve_start_bound_(std::get<0>(r), end, len_);
+        } else {
+            static_assert(sizeof(R) == 0, "unsupported range shape for String");
+        }
+        if (!boundary_ok_(start)) {
+            rusty::panic::do_panic("start of range should be a character boundary");
+        }
+        if (!boundary_ok_(end)) {
+            rusty::panic::do_panic("end of range should be a character boundary");
+        }
+        return {start, end};
+    }
+    void splice_(size_t start, size_t end, std::string_view repl) {
+        const size_t old_span = end - start;
+        const size_t new_len = len_ - old_span + repl.size();
+        if (repl.size() > old_span) {
+            grow(new_len + 1);
+        }
+        std::memmove(data_ + start + repl.size(), data_ + end, len_ - end);
+        std::memcpy(data_ + start, repl.data(), repl.size());
+        len_ = new_len;
+        ensure_null_terminated();
+    }
+    static std::string encode_char_(char32_t c) {
+        std::string out;
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+        } else if (c < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (c >> 6)));
+            out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        } else if (c < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (c >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (c >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((c >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        }
+        return out;
+    }
+
+public:
+    // Rust `Extend<char> for String` over Option-next char iterators
+    // (str_runtime::chars etc.). String-like overloads exist above.
+    template<typename It>
+        requires requires(It& it) { { it.next().is_some() } -> std::convertible_to<bool>; }
+    void extend(It it) {
+        for (auto c = it.next(); c.is_some(); c = it.next()) {
+            push(static_cast<char32_t>(std::move(c).unwrap()));
+        }
+    }
+
+    // Rust String::try_with_capacity.
+    static rusty::Result<String, rusty::collections::TryReserveError>
+    try_with_capacity(size_t cap) {
+        if (cap > (std::numeric_limits<size_t>::max() >> 1)) {
+            return rusty::Result<String, rusty::collections::TryReserveError>::Err(
+                rusty::collections::TryReserveError{});
+        }
+        return rusty::Result<String, rusty::collections::TryReserveError>::Ok(
+            String::with_capacity(cap));
+    }
+
+    // Rust String::split_off(at): the tail becomes a new String;
+    // panics off a char boundary or past the end.
+    String split_off(size_t at) {
+        if (at > len_) {
+            rusty::panic::do_panic("split_off index out of bounds");
+        }
+        if (!boundary_ok_(at)) {
+            rusty::panic::do_panic("split_off index is not a char boundary");
+        }
+        String tail(std::string_view(data_ + at, len_ - at));
+        len_ = at;
+        ensure_null_terminated();
+        return tail;
+    }
+
+    // Rust String::replace_range(range, replacement).
+    template<typename R>
+    void replace_range(R&& r, std::string_view replacement) {
+        auto [start, end] = resolve_range_bounds_(r);
+        splice_(start, end, replacement);
+    }
+
+    // Rust String::remove_matches(pat) — remove every occurrence.
+    void remove_matches(std::string_view pat) {
+        if (pat.empty()) {
+            return;
+        }
+        size_t from = 0;
+        while (from + pat.size() <= len_) {
+            const std::string_view hay(data_ + from, len_ - from);
+            const size_t rel = hay.find(pat);
+            if (rel == std::string_view::npos) {
+                break;
+            }
+            const size_t at = from + rel;
+            splice_(at, at + pat.size(), std::string_view{});
+            from = at;
+        }
+    }
+    void remove_matches(char32_t c) { remove_matches(std::string_view(encode_char_(c))); }
+
+    // Rust String::replace_first / replace_last (no-ops when absent).
+    void replace_first(std::string_view from, std::string_view to) {
+        const std::string_view hay(data_, len_);
+        const size_t at = hay.find(from);
+        if (at == std::string_view::npos || from.empty()) {
+            return;
+        }
+        splice_(at, at + from.size(), to);
+    }
+    void replace_last(std::string_view from, std::string_view to) {
+        const std::string_view hay(data_, len_);
+        const size_t at = hay.rfind(from);
+        if (at == std::string_view::npos || from.empty()) {
+            return;
+        }
+        splice_(at, at + from.size(), to);
+    }
+    void replace_first(char32_t from, std::string_view to) {
+        replace_first(std::string_view(encode_char_(from)), to);
+    }
+    void replace_last(char32_t from, std::string_view to) {
+        replace_last(std::string_view(encode_char_(from)), to);
+    }
+
+    // Rust `String::from(char)`.
+    static String from(char32_t c) {
+        return String::from(std::string_view(encode_char_(c)));
+    }
+
+    // Rust reserve_exact / try_reserve / try_reserve_exact. Allocation
+    // failure is modelled only for capacity overflow (len + additional
+    // wrapping past usize), which is what the tests probe.
+    void reserve_exact(size_t additional) { reserve(additional); }
+    rusty::Result<std::tuple<>, rusty::collections::TryReserveError>
+    try_reserve(size_t additional) {
+        if (additional > std::numeric_limits<size_t>::max() - len_ ||
+            len_ + additional > (std::numeric_limits<size_t>::max() >> 1)) {
+            return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Err(
+                rusty::collections::TryReserveError{});
+        }
+        // In-bounds request (<= isize::MAX): an actual allocation failure is
+        // Rust's AllocError kind, not CapacityOverflow.
+        try {
+            reserve(additional);
+        } catch (...) {
+            rusty::collections::TryReserveError err{};
+            err.kind = rusty::collections::TryReserveError::Kind::AllocError;
+            return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Err(err);
+        }
+        return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::tuple<>{});
+    }
+    rusty::Result<std::tuple<>, rusty::collections::TryReserveError>
+    try_reserve_exact(size_t additional) {
+        return try_reserve(additional);
+    }
+
+    // Rust String::drain(range): removes the range and yields its chars.
+    struct DrainChars {
+        std::string removed;
+        size_t pos = 0;
+        rusty::Option<char32_t> next() {
+            if (pos >= removed.size()) {
+                return rusty::Option<char32_t>{rusty::None};
+            }
+            const unsigned char lead = static_cast<unsigned char>(removed[pos]);
+            size_t seq_len = 1;
+            char32_t c = lead;
+            if (lead >= 0xF0) { seq_len = 4; c = lead & 0x07; }
+            else if (lead >= 0xE0) { seq_len = 3; c = lead & 0x0F; }
+            else if (lead >= 0xC0) { seq_len = 2; c = lead & 0x1F; }
+            for (size_t i = 1; i < seq_len && pos + i < removed.size(); ++i) {
+                c = (c << 6) | (static_cast<unsigned char>(removed[pos + i]) & 0x3F);
+            }
+            pos += seq_len;
+            return rusty::Option<char32_t>(c);
+        }
+    };
+    template<typename R>
+        requires (!std::is_integral_v<std::remove_cvref_t<R>>)
+    DrainChars drain(R&& r) {
+        auto [start, end] = resolve_range_bounds_(r);
+        DrainChars out{std::string(data_ + start, end - start)};
+        splice_(start, end, std::string_view{});
+        return out;
+    }
+
     // Rust parity: String::retain(pred) — keep chars where pred(ch) holds,
     // walking UTF-8 sequences.
     template<typename Pred>
@@ -532,7 +825,18 @@ public:
                         | (static_cast<unsigned char>(data_[read + k]) & 0x3F));
                 }
             }
-            if (pred(c)) {
+            // Panic safety (Rust parity): if pred unwinds, the string
+            // must stay valid UTF-8 — keep the retained prefix and
+            // drop the unprocessed tail, like std's drop guard.
+            bool keep;
+            try {
+                keep = static_cast<bool>(pred(c));
+            } catch (...) {
+                len_ = write;
+                ensure_null_terminated();
+                throw;
+            }
+            if (keep) {
                 if (write != read) {
                     std::memmove(data_ + write, data_ + read, seq_len);
                 }
@@ -546,22 +850,40 @@ public:
 
     // Remove and return one byte at index. This mirrors common transpiled
     // call sites that operate on ASCII punctuation.
-    char remove(size_t idx) {
+    // Rust String::remove(idx): removes and returns the CHAR at the
+    // byte index; panics out of bounds or off a char boundary. (The
+    // old byte-wise version silently corrupted multibyte text — same
+    // class as the String::pop bug.)
+    char32_t remove(size_t idx) {
         if (idx >= len_) {
-            rusty::panic::do_panic("remove index out of bounds");
+            rusty::panic::do_panic("cannot remove a char from the end of a string");
         }
-        char ch = data_[idx];
-        if (idx + 1 < len_) {
-            std::memmove(data_ + idx, data_ + idx + 1, len_ - idx - 1);
+        const unsigned char lead = static_cast<unsigned char>(data_[idx]);
+        if ((lead & 0xC0) == 0x80) {
+            rusty::panic::do_panic("remove: byte index is not a char boundary");
         }
-        --len_;
+        size_t seq_len = 1;
+        char32_t c = lead;
+        if (lead >= 0xF0) { seq_len = 4; c = lead & 0x07; }
+        else if (lead >= 0xE0) { seq_len = 3; c = lead & 0x0F; }
+        else if (lead >= 0xC0) { seq_len = 2; c = lead & 0x1F; }
+        for (size_t i = 1; i < seq_len && idx + i < len_; ++i) {
+            c = (c << 6) | (static_cast<unsigned char>(data_[idx + i]) & 0x3F);
+        }
+        if (idx + seq_len < len_) {
+            std::memmove(data_ + idx, data_ + idx + seq_len, len_ - idx - seq_len);
+        }
+        len_ -= seq_len;
         ensure_null_terminated();
-        return ch;
+        return c;
     }
     
     // Truncate to new length
     void truncate(size_t new_len) {
         if (new_len < len_) {
+            if (!boundary_ok_(new_len)) {
+                rusty::panic::do_panic("new_len does not lie on a char boundary");
+            }
             len_ = new_len;
             ensure_null_terminated();
         }
@@ -596,6 +918,9 @@ public:
         if (!str) return;
         if (idx > len_) {
             rusty::panic::do_panic("insert index out of bounds");
+        }
+        if (!boundary_ok_(idx)) {
+            rusty::panic::do_panic("insert index is not a char boundary");
         }
         
         size_t str_len = std::strlen(str);

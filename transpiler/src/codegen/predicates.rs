@@ -416,6 +416,41 @@ impl CodeGen {
         attrs.iter().any(|a| a.path().is_ident("test"))
     }
 
+    /// `#[should_panic]` on a test fn: `Some(None)` for the bare form,
+    /// `Some(Some(substr))` when an expected message substring is given
+    /// via `#[should_panic = "..."]` or `#[should_panic(expected = "...")]`.
+    pub(super) fn should_panic_expectation(attrs: &[syn::Attribute]) -> Option<Option<String>> {
+        for a in attrs {
+            if !a.path().is_ident("should_panic") {
+                continue;
+            }
+            match &a.meta {
+                syn::Meta::Path(_) => return Some(None),
+                syn::Meta::NameValue(nv) => {
+                    if let syn::Expr::Lit(lit) = &nv.value {
+                        if let syn::Lit::Str(s) = &lit.lit {
+                            return Some(Some(s.value()));
+                        }
+                    }
+                    return Some(None);
+                }
+                syn::Meta::List(list) => {
+                    let mut expected = None;
+                    let _ = list.parse_nested_meta(|meta| {
+                        if meta.path.is_ident("expected") {
+                            let value = meta.value()?;
+                            let s: syn::LitStr = value.parse()?;
+                            expected = Some(s.value());
+                        }
+                        Ok(())
+                    });
+                    return Some(expected);
+                }
+            }
+        }
+        None
+    }
+
     /// Check if attributes contain `#[cpp_ctor]`. When set on an
     /// associated function inside an `impl Owner { ... }` block whose
     /// body is a single `Self { field: expr, ... }` (or

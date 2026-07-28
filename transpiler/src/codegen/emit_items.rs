@@ -450,10 +450,45 @@ impl CodeGen {
 
         // Emit test case wrapper if #[test]
         if is_test {
+            let should_panic = Self::should_panic_expectation(&f.attrs);
             self.writeln(&format!("TEST_CASE(\"{}\") {{", name));
             self.indent += 1;
             self.push_param_bindings(&f.sig.inputs);
-            self.emit_block(&f.block);
+            if let Some(expected) = &should_panic {
+                // Rust `#[should_panic]`: the body must unwind. In unwind
+                // mode every panic funnels through rusty::panic::do_panic,
+                // which throws std::runtime_error — catch it, optionally
+                // match the expected substring, and fail if no panic fired.
+                self.writeln("bool rusty_should_panic_hit = false;");
+                self.writeln("try {");
+                self.indent += 1;
+                self.emit_block(&f.block);
+                self.indent -= 1;
+                self.writeln("} catch (const std::exception& rusty_should_panic_ex) {");
+                self.indent += 1;
+                self.writeln("rusty_should_panic_hit = true;");
+                if let Some(msg) = expected {
+                    let esc = msg.replace('\\', "\\\\").replace('"', "\\\"");
+                    self.writeln(&format!(
+                        "if (std::string_view(rusty_should_panic_ex.what()).find(\"{}\") == std::string_view::npos) {{",
+                        esc
+                    ));
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "rusty::panic::do_panic(std::string(\"panic did not contain expected string \\\"{}\\\": \") + rusty_should_panic_ex.what());",
+                        esc
+                    ));
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                self.indent -= 1;
+                self.writeln("}");
+                self.writeln(
+                    "if (!rusty_should_panic_hit) { rusty::panic::do_panic(\"test did not panic as expected\"); }",
+                );
+            } else {
+                self.emit_block(&f.block);
+            }
             self.pop_param_bindings();
             self.indent -= 1;
             self.writeln("}");

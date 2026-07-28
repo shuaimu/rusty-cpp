@@ -52232,6 +52232,10 @@ rusty::Result<T, rusty::String> parse(const Input& input) {\n\
         if (text == \"false\") { return rusty::Result<T, rusty::String>::Ok(false); }\n\
         return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"provided string was not `true` or `false`\"));\n\
     }\n\
+    if constexpr (std::is_same_v<T, rusty::String>) {\n\
+        /* Rust `FromStr for String` is infallible. */\n\
+        return rusty::Result<T, rusty::String>::Ok(rusty::String::from(text));\n\
+    }\n\
     return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"unsupported parse target\"));\n\
 }\n\
 inline std::string_view trim(std::string_view s) {\n\

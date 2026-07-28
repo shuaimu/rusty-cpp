@@ -2561,6 +2561,45 @@ impl CodeGen {
                     }
                 }
             }
+            "assert_matches" | "debug_assert_matches" => {
+                // `assert_matches!(expr, pat $(, fmt)*)` was falling to the
+                // TODO comment — the assertion was silently dropped. Reuse the
+                // matches! lowering for the condition and panic on mismatch
+                // with the message tail (or a generic message).
+                let parts = self.split_macro_args(&tokens);
+                let lowered = if parts.len() >= 2 {
+                    let matches_input = format!("{}, {}", parts[0].trim(), parts[1].trim());
+                    self.try_lower_matches_macro_expr(&matches_input)
+                } else {
+                    None
+                };
+                if let Some(cond_cpp) = lowered {
+                    let msg_cpp = if parts.len() > 2 {
+                        let msg_parts: Vec<&str> =
+                            parts.iter().skip(2).map(|s| s.trim()).collect();
+                        if msg_parts.len() == 1 {
+                            if let Ok(expr) = syn::parse_str::<syn::Expr>(msg_parts[0]) {
+                                self.emit_expr_to_string(&expr)
+                            } else {
+                                self.convert_macro_tokens(msg_parts[0])
+                            }
+                        } else {
+                            let joined = msg_parts.join(", ");
+                            format!("std::format({})", self.convert_format_args(&joined))
+                        }
+                    } else {
+                        let pat_txt =
+                            parts[1].trim().replace('\\', "\\\\").replace('"', "\\\"");
+                        format!("\"assertion failed: value does not match {}\"", pat_txt)
+                    };
+                    self.writeln(&format!(
+                        "if (!({})) {{ rusty::panic::do_panic({}); }}",
+                        cond_cpp, msg_cpp
+                    ));
+                } else {
+                    self.writeln(&format!("// TODO: {}!(...)", macro_name));
+                }
+            }
             "dbg" => {
                 // Statement position: `dbg!(x);` prints and discards. `dbg!()`
                 // has no operand — emit a bare marker rather than a malformed

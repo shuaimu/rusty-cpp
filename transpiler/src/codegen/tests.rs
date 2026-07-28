@@ -12775,6 +12775,39 @@ fn test_test_function_body() {
 }
 
 #[test]
+fn test_should_panic_bare_wraps_body() {
+    let out = transpile_str("#[test]\n#[should_panic]\nfn t_panics() { panic!(\"boom\"); }");
+    assert!(out.contains("TEST_CASE(\"t_panics\")"));
+    assert!(out.contains("bool rusty_should_panic_hit = false;"));
+    assert!(out.contains("catch (const std::exception& rusty_should_panic_ex)"));
+    assert!(out.contains("test did not panic as expected"));
+    // Bare form: no message-substring check.
+    assert!(!out.contains("panic did not contain expected string"));
+}
+
+#[test]
+fn test_should_panic_expected_substring_checked() {
+    let out = transpile_str(
+        "#[test]\n#[should_panic = \"out of range\"]\nfn t_msg() { panic!(\"x\"); }",
+    );
+    assert!(out.contains(".find(\"out of range\") == std::string_view::npos"));
+    assert!(out.contains("panic did not contain expected string"));
+    let out2 = transpile_str(
+        "#[test]\n#[should_panic(expected = \"bad index\")]\nfn t_msg2() { panic!(\"x\"); }",
+    );
+    assert!(out2.contains(".find(\"bad index\") == std::string_view::npos"));
+}
+
+#[test]
+fn test_assert_matches_lowered_not_dropped() {
+    let out = transpile_str(
+        "#[test]\nfn t_m() { let r: Result<i32, i32> = Ok(1); assert_matches!(r, Ok(_), \"want ok\"); }",
+    );
+    assert!(!out.contains("// TODO: assert_matches"));
+    assert!(out.contains("rusty::panic::do_panic"));
+}
+
+#[test]
 fn test_cfg_test_module_omitted() {
     let out = transpile_str("#[cfg(test)]\nmod tests { fn t() {} }");
     assert!(out.contains("// #[cfg(test)] module omitted"));
