@@ -692,11 +692,12 @@ foreach(test_source IN LISTS TEST_SOURCES)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/btree_tests_port_unstubbed.cpp)
         target_link_libraries(${test_executable} PRIVATE btree_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
-        # -UNDEBUG so the assert() calls in the un-stubbed test bodies
-        # actually run. Without this, many "passing" tests would silently
-        # drop their post-condition checks (the operations still execute
-        # but the result assertions get compiled out).
-        target_compile_options(${test_executable} PRIVATE -O3 -march=native -UNDEBUG)
+        # assert() liveness for the un-stubbed bodies is handled in the
+        # _stub_port foreach below — the option must be added exactly
+        # once, at the LAST target_compile_options touching this target
+        # (CMake dedupes repeated flags, so an early -UNDEBUG cannot be
+        # re-added after a later -DNDEBUG).
+        target_compile_options(${test_executable} PRIVATE -O3 -march=native)
     endif()
     target_include_directories(${test_executable} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(${test_executable} PRIVATE -Wall -Wextra -Wpedantic)
@@ -763,7 +764,15 @@ foreach(test_source IN LISTS TEST_SOURCES)
         if(test_name MATCHES "^${_stub_port}_")
             target_link_libraries(${test_executable} PRIVATE ${_stub_port})
             target_compile_features(${test_executable} PRIVATE cxx_std_23)
-            target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+            if(_stub_port STREQUAL "btree_tests_port")
+                # The un-stubbed btree test bodies check results via
+                # assert(); NDEBUG would compile every check out and the
+                # suite would pass vacuously. This is the LAST option
+                # site for the target, so -UNDEBUG wins.
+                target_compile_options(${test_executable} PRIVATE -O3 -march=native -UNDEBUG)
+            else()
+                target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+            endif()
             target_link_options(${test_executable} PRIVATE )
         endif()
     endforeach()

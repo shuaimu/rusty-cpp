@@ -272,11 +272,15 @@ fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
 }
 
 #[test]
-fn test_ci_workflow_defines_parity_matrix_job() {
+fn test_ci_workflow_parity_matrix_job_stays_dropped() {
+    // The parity-matrix CI job was deliberately removed (it is run
+    // locally via run_parity_matrix.sh as the gate instead); the
+    // transpile jobs that remain need cargo-expand installed. Guard
+    // both halves of that decision against accidental resurrection
+    // or loss.
     let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
-    assert!(workflow.contains("parity-matrix:"));
-    assert!(workflow.contains("./tests/transpile_tests/run_parity_matrix.sh"));
-    assert!(workflow.contains("--work-root \"${RUNNER_TEMP}/rusty-parity-matrix\""));
+    assert!(!workflow.contains("parity-matrix:"));
+    assert!(workflow.contains("cargo install cargo-expand"));
 }
 
 #[test]
@@ -296,36 +300,13 @@ fn test_ci_workflow_defines_cpp_std_complex_compile_job() {
 }
 
 #[test]
-fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
+fn test_ci_workflow_uploads_artifacts_on_failure() {
+    // The per-crate parity-matrix upload went away with the
+    // parity-matrix job; the remaining compile jobs still upload
+    // their work dirs on failure.
     let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
-    assert!(workflow.contains("Upload parity matrix artifacts on failure"));
     assert!(workflow.contains("if: failure()"));
     assert!(workflow.contains("actions/upload-artifact@v4"));
-
-    for crate_name in [
-        "either",
-        "tap",
-        "cfg-if",
-        "take_mut",
-        "arrayvec",
-        "semver",
-        "bitflags",
-        "smallvec",
-        "itertools",
-        "once_cell",
-        "serde_bytes",
-        "serde_repr",
-        "pollster",
-    ] {
-        assert!(
-            workflow.contains(&format!(
-                "${{{{ runner.temp }}}}/rusty-parity-matrix/{}/**",
-                crate_name
-            )),
-            "missing artifact upload path for crate '{}'",
-            crate_name
-        );
-    }
 }
 
 #[test]

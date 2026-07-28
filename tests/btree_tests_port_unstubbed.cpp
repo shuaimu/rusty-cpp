@@ -23,6 +23,16 @@ import btree_port.btree.set;
 #include <tuple>
 #include <utility>
 #include <rusty/alloc.hpp>
+#include <rusty/move.hpp>  // rusty::clone
+
+// Rust Iterator::count for port iterators (trait default methods are
+// not emitted per-type by the transpiler): consume and tally.
+template <typename I>
+static size_t count_iter(I it) {
+    size_t n = 0;
+    while (it.next().is_some()) ++n;
+    return n;
+}
 #include <rusty/array.hpp>
 #include <rusty/test_runner.hpp>
 
@@ -1712,33 +1722,33 @@ TEST_CASE("smoke_get_mut_discriminant_unstubbed") {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: iter().count() across several sizes. The Iterator::count
+// Smoke: count_iter(iter()) across several sizes. The Iterator::count
 // convenience drains the iter without exposing its Item shape.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("smoke_iter_count_unstubbed") {
     auto m = make_map<int, int>();
-    assert(m.iter().count() == 0u);
+    assert(count_iter(m.iter()) == 0u);
     m.insert(1, 1);
-    assert(m.iter().count() == 1u);
+    assert(count_iter(m.iter()) == 1u);
     m.insert(2, 2);
     m.insert(3, 3);
-    assert(m.iter().count() == 3u);
+    assert(count_iter(m.iter()) == 3u);
     // After remove, count goes down.
     m.remove(2);
-    assert(m.iter().count() == 2u);
+    assert(count_iter(m.iter()) == 2u);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: BTreeSet iter().count() across single-leaf size. Avoids
+// Smoke: BTreeSet count_iter(iter()) across single-leaf size. Avoids
 // .next()/.min()/.max() to dodge the Keys-return-type bug.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("set_smoke_iter_count_unstubbed") {
     auto s = make_set<int>();
-    assert(s.iter().count() == 0u);
+    assert(count_iter(s.iter()) == 0u);
     for (int i = 0; i < 5; ++i) s.insert(i);
-    assert(s.iter().count() == 5u);
+    assert(count_iter(s.iter()) == 5u);
     s.remove(2);
-    assert(s.iter().count() == 4u);
+    assert(count_iter(s.iter()) == 4u);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2060,19 +2070,21 @@ TEST_CASE("smoke_entry_vacant_key_unstubbed") {
 // — Vacant/Occupied discriminant.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("set_smoke_entry_discriminant_unstubbed") {
+    // NOTE: unlike map::Entry (Vacant first), the port's set/entry.rs
+    // declares Occupied FIRST — so Occupied=0, Vacant=1 here.
     auto s = make_set<int>();
     {
         auto e = s.entry(1);
-        assert(e.index() == 0);  // Vacant
+        assert(e.index() == 1);  // Vacant
     }
     s.insert(1);
     {
         auto e = s.entry(1);
-        assert(e.index() == 1);  // Occupied
+        assert(e.index() == 0);  // Occupied
     }
     {
         auto e = s.entry(2);
-        assert(e.index() == 0);
+        assert(e.index() == 1);  // Vacant
     }
 }
 
@@ -2938,7 +2950,7 @@ TEST_CASE("smoke_pop_last_updates_last_kv_unstubbed") {
 
 // ─────────────────────────────────────────────────────────────────────
 // Smoke: BTreeMap::keys() iterator instantiates at non-empty size.
-// Avoid .next() (Keys::next bug) but use .len() and .count().
+// Avoid .next() (Keys::next bug) but use .len() and count_iter().
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("smoke_keys_count_after_grow_unstubbed") {
     auto m = make_map<int, int>();
@@ -3601,11 +3613,11 @@ TEST_CASE("smoke_empty_iter_last_unstubbed") {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: BTreeSet iter().count() empty.
+// Smoke: BTreeSet count_iter(iter()) empty.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("set_smoke_iter_count_empty_unstubbed") {
     auto s = make_set<int>();
-    assert(s.iter().count() == 0u);
+    assert(count_iter(s.iter()) == 0u);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -4479,7 +4491,7 @@ TEST_CASE("set_smoke_wide_value_range_unstubbed") {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: BTreeMap iter().count() after partial drain.
+// Smoke: BTreeMap count_iter(iter()) after partial drain.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("smoke_iter_count_after_partial_drain_unstubbed") {
     auto m = make_map<int, int>();
@@ -4487,7 +4499,7 @@ TEST_CASE("smoke_iter_count_after_partial_drain_unstubbed") {
     auto it = m.iter();
     it.next();
     it.next();
-    assert(it.count() == 3u);  // 3 remaining after pulling 2
+    assert(count_iter(it) == 3u);  // 3 remaining after pulling 2
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -4860,7 +4872,7 @@ TEST_CASE("smoke_empty_all_ops_unstubbed") {
     // Many operations on empty.
     assert(m.is_empty());
     assert(m.len() == 0u);
-    assert(m.iter().count() == 0u);
+    assert(count_iter(m.iter()) == 0u);
     assert(m.iter().next().is_none());
     assert(m.iter().next_back().is_none());
     assert(m.iter().min().is_none());
@@ -4877,7 +4889,7 @@ TEST_CASE("set_smoke_empty_all_ops_unstubbed") {
     auto s = make_set<int>();
     assert(s.is_empty());
     assert(s.len() == 0u);
-    assert(s.iter().count() == 0u);
+    assert(count_iter(s.iter()) == 0u);
     assert(s.iter().len() == 0u);
 }
 
@@ -5089,7 +5101,7 @@ TEST_CASE("smoke_two_iter_calls_unstubbed") {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: BTreeMap.iter().count() on partially-iterated iter.
+// Smoke: count_iter(BTreeMap.iter()) on partially-iterated iter.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("smoke_iter_count_after_n_next_unstubbed") {
     auto m = make_map<int, int>();
@@ -5097,7 +5109,7 @@ TEST_CASE("smoke_iter_count_after_n_next_unstubbed") {
     auto it = m.iter();
     // Pull 3 from front.
     for (int i = 0; i < 3; ++i) it.next();
-    assert(it.count() == 5u);
+    assert(count_iter(it) == 5u);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -5332,21 +5344,21 @@ TEST_CASE("smoke_iter_alt_insert_unstubbed") {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: BTreeSet iter().count() across NODE_CAPACITY.
+// Smoke: BTreeSet count_iter(iter()) across NODE_CAPACITY.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("set_smoke_iter_count_at_node_capacity_unstubbed") {
     auto s = make_set<int>();
     for (size_t i = 0; i < NODE_CAPACITY; ++i) s.insert(static_cast<int>(i));
-    assert(s.iter().count() == NODE_CAPACITY);
+    assert(count_iter(s.iter()) == NODE_CAPACITY);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Smoke: BTreeMap.iter().count() across NODE_CAPACITY.
+// Smoke: count_iter(BTreeMap.iter()) across NODE_CAPACITY.
 // ─────────────────────────────────────────────────────────────────────
 TEST_CASE("smoke_iter_count_at_node_capacity_unstubbed") {
     auto m = make_map<int, int>();
     for (size_t i = 0; i < NODE_CAPACITY; ++i) m.insert(static_cast<int>(i), 0);
-    assert(m.iter().count() == NODE_CAPACITY);
+    assert(count_iter(m.iter()) == NODE_CAPACITY);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -8428,22 +8440,23 @@ TEST_CASE("set_test_range_panic_2_unstubbed") {
     m.insert(Cyclic3::A, kUnit);
     m.insert(Cyclic3::B, kUnit);
     m.insert(Cyclic3::C, kUnit);
-    // The Cyclic3 cycle is A<B<C<A, so even an apparently sane bound
-    // [A, C) is semantically broken. Verify the range call returns
-    // without crashing — we don't make any correctness assertion about
-    // the iterated set, only the lack of UB.
-    auto r = m.range(rusty::range<Cyclic3>(Cyclic3::A, Cyclic3::C));
-    size_t count = 0;
-    // Walk at most |map| steps to guarantee termination even if the
-    // cycle confuses the iterator.
-    for (size_t step = 0; step < 10; ++step) {
-        auto v = r.next();
-        if (!v.is_some()) break;
-        ++count;
+    // rustc's test_range_panic_2 is #[should_panic(expected = "range
+    // start is greater than range end in BTreeMap")]: under the
+    // Cyclic3 order (A<B<C<A) the bifurcation's sanity check concludes
+    // start > end and panics. The port panics identically (unwind mode
+    // throws std::runtime_error) — assert the panic fires with the
+    // expected message.
+    bool panicked = false;
+    try {
+        auto r = m.range(rusty::range<Cyclic3>(Cyclic3::A, Cyclic3::C));
+        (void)r.next();
+    } catch (const std::runtime_error& e) {
+        panicked = true;
+        assert(std::string(e.what()).find(
+                   "range start is greater than range end in BTreeMap")
+               != std::string::npos);
     }
-    // No UB. Count is implementation-defined under broken Ord; just
-    // verify it's within the cardinality.
-    assert(count <= 3u);
+    assert(panicked);
 }
 
 // ─────────────────────────────────────────────────────────────────────

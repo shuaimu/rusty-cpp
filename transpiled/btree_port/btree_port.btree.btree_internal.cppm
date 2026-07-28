@@ -5,6 +5,7 @@
 // btree_port port: DormantMutRef new_ref const→mut by post_transpile_patch.py
 // btree_port port: DormantMutRef NonNull::from(t) → from(&t) by post_transpile_patch.py
 // btree_port port: bare-glob variant TODOs rewritten by post_transpile_patch.py
+// btree_port port: ValMut next_unchecked family hand-ported by post_transpile_patch.py
 // btree_port port: Peeked family exported by post_transpile_patch.py
 // btree_port port: merge/push/range bodies hand-ported by post_transpile_patch.py
 // btree_port port: split/append/calc bodies hand-ported by post_transpile_patch.py
@@ -5667,13 +5668,21 @@ struct NodeRef {
         }
     }
     std::tuple<const K&, V&> into_key_val_mut_at(size_t idx) {
-        const auto leaf = as_leaf_ptr((*this));
-        auto keys = &(*leaf).keys;
-        auto vals = &(*leaf).vals;
-        auto keys_shadow1 = keys;
-        auto vals_shadow1 = vals;
-        auto& key = ((rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(keys_shadow1, std::move(idx))))))->assume_init_ref();
-        auto& val = ((rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(vals_shadow1, std::move(idx))))))->assume_init_mut();
+        // btree_port port fix: the transpiled body tried to index a
+        // pointer (keys_shadow1[idx]) as if it were an array, which on
+        // std::array* performs pointer arithmetic across the WHOLE
+        // array — out-of-bounds. Rewrite to the same lambda-dispatch
+        // pattern used by into_kv / into_kv_mut so the index is applied
+        // to the leaf's std::array<MaybeUninit<T>, N> directly.
+        auto& leaf = this->into_leaf_mut();
+        auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) {
+            if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; }
+            else { return __recv.get_unchecked(__idx); }
+        })(leaf.keys, idx).assume_init_ref();
+        auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) {
+            if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; }
+            else { return __recv.get_unchecked_mut(__idx); }
+        })(leaf.vals, std::move(idx)).assume_init_mut();
         return std::tuple<const K&, V&>{key, val};
     }
     uint16_t& len_mut() {
@@ -5912,7 +5921,7 @@ struct NodeRef {
     template<typename R>
     LeafRange<BorrowType, K, V> find_leaf_edges_spanning_range(R range);
     template<typename R>
-    LeafRange<marker::Immut, K, V> range_search(R range) {
+    LeafRange<BorrowType, K, V> range_search(R range) {
         // @unsafe
         {
             return this->find_leaf_edges_spanning_range(std::move(range));
@@ -6358,7 +6367,7 @@ struct Handle {
         return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{k, v};
     }
 
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() const {
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() {
         // @unsafe
         {
             return rusty::deref_call(this->node, rusty::detail::__mdisp_into_key_val_mut_at{}, std::move(this->idx_field));
@@ -6632,18 +6641,42 @@ _match_value.emplace(std::move(parent_edge.forget_node_type())); } else { if (!(
         }
     }
 
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> next_unchecked() {
-        return replace((*this), [&](auto&& leaf_edge) {
-auto kv = leaf_edge.next_kv().ok().unwrap();
-return std::make_tuple(kv.next_leaf_edge(), kv.into_kv());
-});
+    // btree_port: branch on BorrowType so Mut/ValMut iterators yield
+    // (const K&, V&) via into_kv_valmut, while Immut/etc. preserve the
+    // (const K&, const V&) shape produced by into_kv. next_leaf_edge is
+    // const and reads no mutable state from kv, so we can compute it
+    // before consuming kv via the mut accessor.
+    auto next_unchecked() {
+        using __BT = typename __TemplateArgs<Node>::arg_0;
+        if constexpr (std::is_same_v<__BT, marker::Mut> || std::is_same_v<__BT, marker::ValMut>) {
+            return replace((*this), [&](auto&& leaf_edge) {
+                auto kv = leaf_edge.next_kv().ok().unwrap();
+                auto next_edge = kv.next_leaf_edge();
+                auto kv_pair = kv.into_kv_valmut();
+                return std::make_tuple(std::move(next_edge), std::move(kv_pair));
+            });
+        } else {
+            return replace((*this), [&](auto&& leaf_edge) {
+                auto kv = leaf_edge.next_kv().ok().unwrap();
+                return std::make_tuple(kv.next_leaf_edge(), kv.into_kv());
+            });
+        }
     }
-
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> next_back_unchecked() {
-        return replace((*this), [&](auto&& leaf_edge) {
-auto kv = leaf_edge.next_back_kv().ok().unwrap();
-return std::make_tuple(kv.next_back_leaf_edge(), kv.into_kv());
-});
+    auto next_back_unchecked() {
+        using __BT = typename __TemplateArgs<Node>::arg_0;
+        if constexpr (std::is_same_v<__BT, marker::Mut> || std::is_same_v<__BT, marker::ValMut>) {
+            return replace((*this), [&](auto&& leaf_edge) {
+                auto kv = leaf_edge.next_back_kv().ok().unwrap();
+                auto next_edge = kv.next_back_leaf_edge();
+                auto kv_pair = kv.into_kv_valmut();
+                return std::make_tuple(std::move(next_edge), std::move(kv_pair));
+            });
+        } else {
+            return replace((*this), [&](auto&& leaf_edge) {
+                auto kv = leaf_edge.next_back_kv().ok().unwrap();
+                return std::make_tuple(kv.next_back_leaf_edge(), kv.into_kv());
+            });
+        }
     }
     template<typename A>
         requires (rusty::alloc::Allocator<A> && rusty::clone_like<A>)
@@ -7104,11 +7137,43 @@ struct LeafRange {
     LeafRange<marker::Immut, K, V> reborrow() const {
         return LeafRange<marker::Immut, K, V>{.front = this->front.as_ref().map([&](auto&& f) -> Handle<NodeRef<marker::Immut, K, V, marker::Leaf>, marker::Edge> { return f.reborrow(); }), .back = this->back.as_ref().map([&](auto&& b) -> Handle<NodeRef<marker::Immut, K, V, marker::Leaf>, marker::Edge> { return b.reborrow(); })};
     }
-    rusty::Option<std::tuple<const K&, const V&>> next_checked() {
-        return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });
+        auto next_checked() {
+        if constexpr (std::is_same_v<BorrowType, marker::Mut>
+                      || std::is_same_v<BorrowType, marker::ValMut>) {
+            using R = std::tuple<const K&, V&>;
+            if (rusty::is_empty((*this))) {
+                return rusty::Option<R>{rusty::None};
+            }
+            return replace(this->front.as_mut().unwrap(), [&](auto&& front) {
+                auto kv = front.next_kv().ok().unwrap();
+                auto& k = std::get<0>(kv.into_kv());
+                auto& v = kv.into_val_mut();
+                auto next_edge = kv.next_leaf_edge();
+                return std::make_tuple(std::move(next_edge),
+                    rusty::Some(R{k, v}));
+            });
+        } else {
+            return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });
+        }
     }
-    rusty::Option<std::tuple<const K&, const V&>> next_back_checked() {
-        return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });
+    auto next_back_checked() {
+        if constexpr (std::is_same_v<BorrowType, marker::Mut>
+                      || std::is_same_v<BorrowType, marker::ValMut>) {
+            using R = std::tuple<const K&, V&>;
+            if (rusty::is_empty((*this))) {
+                return rusty::Option<R>{rusty::None};
+            }
+            return replace(this->back.as_mut().unwrap(), [&](auto&& back) {
+                auto kv = back.next_back_kv().ok().unwrap();
+                auto& k = std::get<0>(kv.into_kv());
+                auto& v = kv.into_val_mut();
+                auto next_edge = kv.next_back_leaf_edge();
+                return std::make_tuple(std::move(next_edge),
+                    rusty::Some(R{k, v}));
+            });
+        } else {
+            return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });
+        }
     }
     template<typename F>
     auto perform_next_checked(F f) {
@@ -7180,13 +7245,16 @@ struct LazyLeafRange {
     LazyLeafRange<marker::Immut, K, V> reborrow() const {
         return LazyLeafRange<marker::Immut, K, V>{.front = this->front.as_ref().map([&](auto&& f) -> LazyLeafHandle<marker::Immut, K, V> { return f.reborrow(); }), .back = this->back.as_ref().map([&](auto&& b) -> LazyLeafHandle<marker::Immut, K, V> { return b.reborrow(); })};
     }
-    std::tuple<const K&, const V&> next_unchecked() {
+    // btree_port: return type deduced so Mut/ValMut LazyLeafRange yields
+    // (const K&, V&) while Immut yields (const K&, const V&). Inner
+    // Handle::next_unchecked branches on BorrowType.
+    auto next_unchecked() {
         // @unsafe
         {
             return this->init_front().unwrap().next_unchecked();
         }
     }
-    std::tuple<const K&, const V&> next_back_unchecked() {
+    auto next_back_unchecked() {
         // @unsafe
         {
             return this->init_back().unwrap().next_back_unchecked();

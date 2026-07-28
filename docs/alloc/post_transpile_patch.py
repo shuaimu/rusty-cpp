@@ -877,10 +877,28 @@ def _alloc_specific(cpp_out: Path):
             "rusty::ptr::copy(buf.add(std::move(rusty::detail::deref_if_pointer((*other_shadow1)).head)), std::move(buf), std::move(len));",
             "rusty::ptr::copy(rusty::ptr::add(buf, std::move(rusty::detail::deref_if_pointer((*other_shadow1)).head)), std::move(buf), std::move(len));",
         )
+        # Anchor tolerates both const-nesses: consumed-locals marking
+        # (ptr_shadow1 is moved into RawVecInner::from_raw_parts_in)
+        # flips the binding to plain `auto` depending on transpiler
+        # version — a const-only anchor silently missed and left the
+        # raw `.cast()` in place.
         t = t.replace(
             "const auto ptr_shadow1 = ptr.cast();",
             "const auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);",
         )
+        # Plain-auto variant, but ONLY inside the raw-pointer overload
+        # (`from_raw_parts_in(std::add_pointer_t<T> ptr, …)`).
+        # `from_nonnull_in` emits the same binding line where `ptr` is a
+        # NonNull STRUCT and `.cast()` is the correct member call — a
+        # blanket replace breaks it.
+        pieces = t.split("from_raw_parts_in(std::add_pointer_t")
+        for i in range(1, len(pieces)):
+            pieces[i] = pieces[i].replace(
+                "auto ptr_shadow1 = ptr.cast();",
+                "auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);",
+                1,
+            )
+        t = "from_raw_parts_in(std::add_pointer_t".join(pieces)
         # The (dead) ZST arms of `(sizeof(T)==0) ? … : …` RUNTIME ternaries in
         # Vec::into_iter/IntoIter::size_hint call raw-pointer methods
         # (`begin->wrapping_byte_add`, `p->addr()`) on a bare `const T*`, which

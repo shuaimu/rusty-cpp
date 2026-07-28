@@ -1787,8 +1787,10 @@ def stub_broken_map_entry_methods(path: Path) -> None:
     # specific known method.
     # Looking at line 3709: it's inside OccupiedEntry::key().
     targets = [
-        ("const K& key() const {",
-         "OccupiedEntry::key"),
+        # OccupiedEntry::key retired 2026-07: its body is the same
+        # reborrow().into_kv() projection as get() (which works); the
+        # stub predated the kv_mut-chain fixes and made 6 live-assert
+        # tests throw.
         ("K into_key() {",
          "OccupiedEntry::into_key"),
         ("V& get_mut() {",
@@ -5977,6 +5979,106 @@ def fix_map_dormant_append_cluster(path: Path) -> None:
     print(f"  fixed {n} dormant/append site(s) in: {path.name}")
 
 
+def codify_valmut_next_unchecked(path: Path) -> None:
+    """The ValMut iterator chain (iter_mut/values_mut/range_mut) needs
+    (const K&, V&) items, but the collapsed emissions pin
+    (const K&, const V&): Handle::next_unchecked +
+    LazyLeafRange::next_unchecked hardcode const tuples, and
+    range_search's collapsed return spells LeafRange<marker::Immut>
+    for every instantiation. Codify the vendored hand-ports: deduced
+    (`auto`) returns with an if-constexpr BorrowType branch
+    (Mut/ValMut → into_kv_valmut), and the range_search return
+    generalized to BorrowType (find_leaf already returns that)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: ValMut next_unchecked family hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (ValMut next_unchecked already hand-ported)")
+        return
+    n = 0
+
+    def kill_method(src, sig, n):
+        i = src.find(sig)
+        if i == -1:
+            print(f"  [warn] anchor missing: {sig[:56]}", file=sys.stderr)
+            return src, n, -1
+        open_brace = i + len(sig) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            return src, n, -1
+        return src[:i] + src[close_brace + 1 :].lstrip("\n"), n + 1, i
+
+    # Handle pair: delete both emitted methods, insert the vendored
+    # branching pair at the first one's position.
+    h1 = "    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> next_unchecked() {"
+    h2 = "    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> next_back_unchecked() {"
+    src, n, pos = kill_method(src, h1, n)
+    if pos != -1:
+        src, n, _ = kill_method(src, h2, n)
+        src = src[:pos] + '    // btree_port: branch on BorrowType so Mut/ValMut iterators yield\n    // (const K&, V&) via into_kv_valmut, while Immut/etc. preserve the\n    // (const K&, const V&) shape produced by into_kv. next_leaf_edge is\n    // const and reads no mutable state from kv, so we can compute it\n    // before consuming kv via the mut accessor.\n    auto next_unchecked() {\n        using __BT = typename __TemplateArgs<Node>::arg_0;\n        if constexpr (std::is_same_v<__BT, marker::Mut> || std::is_same_v<__BT, marker::ValMut>) {\n            return replace((*this), [&](auto&& leaf_edge) {\n                auto kv = leaf_edge.next_kv().ok().unwrap();\n                auto next_edge = kv.next_leaf_edge();\n                auto kv_pair = kv.into_kv_valmut();\n                return std::make_tuple(std::move(next_edge), std::move(kv_pair));\n            });\n        } else {\n            return replace((*this), [&](auto&& leaf_edge) {\n                auto kv = leaf_edge.next_kv().ok().unwrap();\n                return std::make_tuple(kv.next_leaf_edge(), kv.into_kv());\n            });\n        }\n    }\n    auto next_back_unchecked() {\n        using __BT = typename __TemplateArgs<Node>::arg_0;\n        if constexpr (std::is_same_v<__BT, marker::Mut> || std::is_same_v<__BT, marker::ValMut>) {\n            return replace((*this), [&](auto&& leaf_edge) {\n                auto kv = leaf_edge.next_back_kv().ok().unwrap();\n                auto next_edge = kv.next_back_leaf_edge();\n                auto kv_pair = kv.into_kv_valmut();\n                return std::make_tuple(std::move(next_edge), std::move(kv_pair));\n            });\n        } else {\n            return replace((*this), [&](auto&& leaf_edge) {\n                auto kv = leaf_edge.next_back_kv().ok().unwrap();\n                return std::make_tuple(kv.next_back_leaf_edge(), kv.into_kv());\n            });\n        }\n    }' + "\n" + src[pos:]
+    l1 = "    std::tuple<const K&, const V&> next_unchecked() {"
+    l2 = "    std::tuple<const K&, const V&> next_back_unchecked() {"
+    src, n, pos = kill_method(src, l1, n)
+    if pos != -1:
+        src, n, _ = kill_method(src, l2, n)
+        src = src[:pos] + '    // btree_port: return type deduced so Mut/ValMut LazyLeafRange yields\n    // (const K&, V&) while Immut yields (const K&, const V&). Inner\n    // Handle::next_unchecked branches on BorrowType.\n    auto next_unchecked() {\n        // @unsafe\n        {\n            return this->init_front().unwrap().next_unchecked();\n        }\n    }\n    auto next_back_unchecked() {\n        // @unsafe\n        {\n            return this->init_back().unwrap().next_back_unchecked();\n        }\n    }' + "\n" + src[pos:]
+    # next_checked/next_back_checked: the collapse kept the Immut body
+    # (`Option<tuple<const K&, const V&>>` via into_kv) — under
+    # Mut/ValMut the const item hits rusty::Option's mismatched-U
+    # fallback ctor, a RUNTIME panic ("invalid Option conversion") in
+    # range_mut. Vendored pair: auto return + BorrowType branch
+    # (into_kv + into_val_mut for the mutable side).
+    nc_sig = "    rusty::Option<std::tuple<const K&, const V&>> next_checked() {"
+    nb_sig = "    rusty::Option<std::tuple<const K&, const V&>> next_back_checked() {"
+    ni = src.find(nc_sig)
+    if ni != -1:
+        nb = src.find(nb_sig, ni)
+        if nb != -1:
+            ob = nb + len(nb_sig) - 1
+            cb = find_matching_brace(src, ob)
+            if cb != -1:
+                src = src[:ni] + '        auto next_checked() {\n        if constexpr (std::is_same_v<BorrowType, marker::Mut>\n                      || std::is_same_v<BorrowType, marker::ValMut>) {\n            using R = std::tuple<const K&, V&>;\n            if (rusty::is_empty((*this))) {\n                return rusty::Option<R>{rusty::None};\n            }\n            return replace(this->front.as_mut().unwrap(), [&](auto&& front) {\n                auto kv = front.next_kv().ok().unwrap();\n                auto& k = std::get<0>(kv.into_kv());\n                auto& v = kv.into_val_mut();\n                auto next_edge = kv.next_leaf_edge();\n                return std::make_tuple(std::move(next_edge),\n                    rusty::Some(R{k, v}));\n            });\n        } else {\n            return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });\n        }\n    }\n    auto next_back_checked() {\n        if constexpr (std::is_same_v<BorrowType, marker::Mut>\n                      || std::is_same_v<BorrowType, marker::ValMut>) {\n            using R = std::tuple<const K&, V&>;\n            if (rusty::is_empty((*this))) {\n                return rusty::Option<R>{rusty::None};\n            }\n            return replace(this->back.as_mut().unwrap(), [&](auto&& back) {\n                auto kv = back.next_back_kv().ok().unwrap();\n                auto& k = std::get<0>(kv.into_kv());\n                auto& v = kv.into_val_mut();\n                auto next_edge = kv.next_back_leaf_edge();\n                return std::make_tuple(std::move(next_edge),\n                    rusty::Some(R{k, v}));\n            });\n        } else {\n            return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });\n        }\n    }' + src[cb + 1 :]
+                n += 1
+    else:
+        print(f"  [warn] next_checked anchor missing", file=sys.stderr)
+    # into_key_val_mut_at: the emitted body wrapped the index-lambda
+    # result in addr_of_temp (pointer arithmetic across the WHOLE
+    # std::array — the out-of-bounds silent-wrong the vendored port
+    # documented) and lost the MaybeUninit element for assume_init_*.
+    # Whole-body swap to the vendored lambda-dispatch form.
+    kv_sig = "    std::tuple<const K&, V&> into_key_val_mut_at(size_t idx) {"
+    ki = src.find(kv_sig)
+    if ki != -1:
+        ob = ki + len(kv_sig) - 1
+        cb = find_matching_brace(src, ob)
+        if cb != -1:
+            src = src[:ob] + "{\n        // btree_port port fix: the transpiled body tried to index a\n        // pointer (keys_shadow1[idx]) as if it were an array, which on\n        // std::array* performs pointer arithmetic across the WHOLE\n        // array — out-of-bounds. Rewrite to the same lambda-dispatch\n        // pattern used by into_kv / into_kv_mut so the index is applied\n        // to the leaf's std::array<MaybeUninit<T>, N> directly.\n        auto& leaf = this->into_leaf_mut();\n        auto& key = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) {\n            if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; }\n            else { return __recv.get_unchecked(__idx); }\n        })(leaf.keys, idx).assume_init_ref();\n        auto& val = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) {\n            if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; }\n            else { return __recv.get_unchecked_mut(__idx); }\n        })(leaf.vals, std::move(idx)).assume_init_mut();\n        return std::tuple<const K&, V&>{key, val};\n    }" + src[cb + 1 :]
+            n += 1
+    else:
+        print(f"  [warn] into_key_val_mut_at anchor missing", file=sys.stderr)
+    # into_kv_valmut: by-value-self const modeling again — the body
+    # calls the MUTATING into_key_val_mut_at accessor through
+    # this->node (name ends in `_at`, so the `_mut`-suffix heuristic
+    # missed it). Vendored shipped it non-const.
+    if "into_kv_valmut() const {" in src:
+        src = src.replace("into_kv_valmut() const {", "into_kv_valmut() {")
+        n += 1
+    for immut_spelling in (
+        "LeafRange<marker::Immut, K, V> range_search(R range)",
+        "LeafRange<::marker::Immut, K, V> range_search(R range)",
+    ):
+        if immut_spelling in src:
+            src = src.replace(
+                immut_spelling,
+                "LeafRange<BorrowType, K, V> range_search(R range)",
+            )
+            n += 1
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  hand-ported " + str(n) + " ValMut next_unchecked span(s) in: " + path.name)
+
+
 def export_peeked_family(path: Path) -> None:
     """set.cppm's hand-ported SymmetricDifference/Union::next bodies name
     Peeked/Peeked_Left/Peeked_Right from btree_internal — export them
@@ -6032,17 +6134,50 @@ def fix_set_algebra_stubs(path: Path) -> None:
             return src, n
         return src[:i] + anchor[:-1] + body + src[close_brace + 1 :], n + 1
 
+    def oo_body_swap(src, sig, body, n):
+        i = src.find(sig)
+        if i == -1:
+            print(f"  [warn] anchor missing: {sig[:52]}", file=sys.stderr)
+            return src, n
+        open_brace = i + len(sig) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            return src, n
+        return src[:i] + sig[:-1] + body + src[close_brace + 1 :], n + 1
+
+    # size_hint: the emitted match-IIFE mixes arm types (Option<size_t>
+    # vs int 0) — deduced return clash. Vendored Search-only versions.
+    src, n = oo_body_swap(src, "std::tuple<size_t, rusty::Option<size_t>> Difference<T, A>::size_hint() const {", '{\n        if (this->inner.index() == 1) {\n            const auto& v = std::get<1>(this->inner);\n            const size_t self_len = rusty::len(v.self_iter);\n            const size_t other_len = rusty::len(v.other_set);\n            return std::make_tuple(rusty::saturating_sub(self_len, other_len),\n                                   rusty::Option<size_t>(self_len));\n        }\n        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));\n    }', n)
+    src, n = oo_body_swap(src, "std::tuple<size_t, rusty::Option<size_t>> Intersection<T, A>::size_hint() const {", '{\n        if (this->inner.index() == 1) {\n            const auto& v = std::get<1>(this->inner);\n            return std::make_tuple(static_cast<size_t>(0),\n                                   rusty::Option<size_t>(rusty::len(v.small_iter)));\n        }\n        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));\n    }', n)
     src, n = body_swap(src, "Difference<T, A> BTreeSet<T, A>::difference(const BTreeSet<T, A>& other) const {", '{\n        return Difference<T, A>{\n            .inner = DifferenceInner<T, A>{\n                DifferenceInner_Search<T, A>{\n                    .self_iter = this->iter(),\n                    .other_set = other\n                }\n            }\n        };\n    }', n)
     src, n = body_swap(src, "Intersection<T, A> BTreeSet<T, A>::intersection(const BTreeSet<T, A>& other) const {", '{\n        return Intersection<T, A>{\n            .inner = IntersectionInner<T, A>{\n                IntersectionInner_Search<T, A>{\n                    .small_iter = this->iter(),\n                    .large_set = other\n                }\n            }\n        };\n    }', n)
     src, n = body_swap(src, "    bool is_subset(const BTreeSet<T, A>& other) const {", '{\n        auto it = this->iter();\n        for (auto v = it.next(); v.is_some(); v = it.next()) {\n            if (!other.contains(v.unwrap())) return false;\n        }\n        return true;\n    }', n)
     for struct_anchor, body in (
-        ("struct SymmetricDifference {", '{\n        while (true) {\n            rusty::Option<const T&> a_val{rusty::None};\n            rusty::Option<const T&> b_val{rusty::None};\n            if (this->_0.peeked.is_some()) {\n                auto pv = std::move(this->_0.peeked).unwrap();\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};\n                if (pv.index() == 0) {\n                    a_val = rusty::Option<const T&>(std::get<0>(pv)._0);\n                    b_val = this->_0.b.next();\n                } else {\n                    b_val = rusty::Option<const T&>(std::get<1>(pv)._0);\n                    a_val = this->_0.a.next();\n                }\n            } else {\n                a_val = this->_0.a.next();\n                b_val = this->_0.b.next();\n            }\n            if (!a_val.is_some() && !b_val.is_some()) {\n                return rusty::Option<const T&>{rusty::None};\n            }\n            if (!b_val.is_some()) return std::move(a_val);\n            if (!a_val.is_some()) return std::move(b_val);\n            const T& a_ref = a_val.unwrap();\n            const T& b_ref = b_val.unwrap();\n            if (a_ref < b_ref) {\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                    btree_internal::Peeked_Right<Iter<T>>{b_ref});\n                return rusty::Option<const T&>(a_ref);\n            } else if (b_ref < a_ref) {\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                    btree_internal::Peeked_Left<Iter<T>>{a_ref});\n                return rusty::Option<const T&>(b_ref);\n            }\n            // equal: drop both, loop\n        }\n    }'),
-        ("struct Union {", '{\n        rusty::Option<const T&> a_val{rusty::None};\n        rusty::Option<const T&> b_val{rusty::None};\n        if (this->_0.peeked.is_some()) {\n            auto pv = std::move(this->_0.peeked).unwrap();\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};\n            if (pv.index() == 0) {\n                a_val = rusty::Option<const T&>(std::get<0>(pv)._0);\n                b_val = this->_0.b.next();\n            } else {\n                b_val = rusty::Option<const T&>(std::get<1>(pv)._0);\n                a_val = this->_0.a.next();\n            }\n        } else {\n            a_val = this->_0.a.next();\n            b_val = this->_0.b.next();\n        }\n        if (!a_val.is_some() && !b_val.is_some()) {\n            return rusty::Option<const T&>{rusty::None};\n        }\n        if (!b_val.is_some()) return std::move(a_val);\n        if (!a_val.is_some()) return std::move(b_val);\n        const T& a_ref = a_val.unwrap();\n        const T& b_ref = b_val.unwrap();\n        if (a_ref < b_ref) {\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                btree_internal::Peeked_Right<Iter<T>>{b_ref});\n            return rusty::Option<const T&>(a_ref);\n        } else if (b_ref < a_ref) {\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                btree_internal::Peeked_Left<Iter<T>>{a_ref});\n            return rusty::Option<const T&>(b_ref);\n        }\n        // equal: emit a, drop b\n        return rusty::Option<const T&>(a_ref);\n    }'),
+        ("struct SymmetricDifference {", '{\n        while (true) {\n            rusty::Option<const T&> a_val{rusty::None};\n            rusty::Option<const T&> b_val{rusty::None};\n            if (this->_0.peeked.is_some()) {\n                auto pv = std::move(this->_0.peeked).unwrap();\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};\n                if (pv.index() == 0) {\n                    this->popped = rusty::Option<T>(std::move(std::get<0>(pv)._0));\n                    a_val = rusty::Option<const T&>(std::as_const(this->popped).unwrap());\n                    b_val = this->_0.b.next();\n                } else {\n                    this->popped = rusty::Option<T>(std::move(std::get<1>(pv)._0));\n                    b_val = rusty::Option<const T&>(std::as_const(this->popped).unwrap());\n                    a_val = this->_0.a.next();\n                }\n            } else {\n                a_val = this->_0.a.next();\n                b_val = this->_0.b.next();\n            }\n            if (!a_val.is_some() && !b_val.is_some()) {\n                return rusty::Option<const T&>{rusty::None};\n            }\n            if (!b_val.is_some()) return std::move(a_val);\n            if (!a_val.is_some()) return std::move(b_val);\n            const T& a_ref = a_val.unwrap();\n            const T& b_ref = b_val.unwrap();\n            if (a_ref < b_ref) {\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                    btree_internal::Peeked_Right<Iter<T>>{b_ref});\n                return rusty::Option<const T&>(a_ref);\n            } else if (b_ref < a_ref) {\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                    btree_internal::Peeked_Left<Iter<T>>{a_ref});\n                return rusty::Option<const T&>(b_ref);\n            }\n            // equal: drop both, loop\n        }\n    }'),
+        ("struct Union {", '{\n        rusty::Option<const T&> a_val{rusty::None};\n        rusty::Option<const T&> b_val{rusty::None};\n        if (this->_0.peeked.is_some()) {\n            auto pv = std::move(this->_0.peeked).unwrap();\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};\n            if (pv.index() == 0) {\n                this->popped = rusty::Option<T>(std::move(std::get<0>(pv)._0));\n                a_val = rusty::Option<const T&>(std::as_const(this->popped).unwrap());\n                b_val = this->_0.b.next();\n            } else {\n                this->popped = rusty::Option<T>(std::move(std::get<1>(pv)._0));\n                b_val = rusty::Option<const T&>(std::as_const(this->popped).unwrap());\n                a_val = this->_0.a.next();\n            }\n        } else {\n            a_val = this->_0.a.next();\n            b_val = this->_0.b.next();\n        }\n        if (!a_val.is_some() && !b_val.is_some()) {\n            return rusty::Option<const T&>{rusty::None};\n        }\n        if (!b_val.is_some()) return std::move(a_val);\n        if (!a_val.is_some()) return std::move(b_val);\n        const T& a_ref = a_val.unwrap();\n        const T& b_ref = b_val.unwrap();\n        if (a_ref < b_ref) {\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                btree_internal::Peeked_Right<Iter<T>>{b_ref});\n            return rusty::Option<const T&>(a_ref);\n        } else if (b_ref < a_ref) {\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                btree_internal::Peeked_Left<Iter<T>>{a_ref});\n            return rusty::Option<const T&>(b_ref);\n        }\n        // equal: emit a, drop b\n        return rusty::Option<const T&>(a_ref);\n    }'),
     ):
         mi = src.find(struct_anchor)
         if mi == -1:
             print(f"  [warn] {struct_anchor} missing", file=sys.stderr)
             continue
+        # The hand-ported next() pops the peeked VALUE (Peeked stores
+        # associated_item_t = T by value, not Rust's &'a T) into a local
+        # and then returned `const T&` into it — stack-use-after-scope
+        # (ASan-caught; silent-wrong at -O3). Give the popped value a
+        # stable member home; the returned ref stays valid until the
+        # following next() call, which matches how all iterator
+        # consumers use it.
+        member_anchor = "btree_internal::MergeIterInner<Iter<T>> _0;"
+        ma = src.find(member_anchor, mi)
+        if ma != -1 and "rusty::Option<T> popped" not in src[mi : ma + 400]:
+            insert_at = ma + len(member_anchor)
+            src = (
+                src[:insert_at]
+                + "\n    // Stable home for the value popped off `peeked`; next() may"
+                + "\n    // return `const T&` into it (valid until the following call)."
+                + "\n    rusty::Option<T> popped{rusty::None};"
+                + src[insert_at:]
+            )
         sig = "rusty::Option<const T&> next() {"
         nx = src.find(sig, mi)
         if nx == -1:
@@ -6677,6 +6812,7 @@ def main() -> int:
     codify_split_append_calc_bodies(internal)
     codify_merge_push_range_bodies(internal)
     export_peeked_family(internal)
+    codify_valmut_next_unchecked(internal)
     # Phase E (correctness fixes surfaced at instantiation time):
     fix_dormant_mut_ref_from_t(internal)
     fix_dormant_mut_ref_const_ref(internal)

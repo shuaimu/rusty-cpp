@@ -56787,6 +56787,12 @@ fn collect_consuming_method_receivers_in_expr(
                             result.insert(name);
                         }
                     }
+                } else if call_path_is_assoc_fn_on_type(path_expr) {
+                    for arg in &call.args {
+                        if let Some(name) = extract_unreferenced_local_ident(arg) {
+                            result.insert(name);
+                        }
+                    }
                 }
             }
             collect_consuming_method_receivers_in_expr(&call.func, result);
@@ -56995,6 +57001,44 @@ fn call_path_is_value_constructor(path_expr: &syn::ExprPath) -> bool {
         .chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+/// `Type::assoc_fn(x)` — a static on an UpperCamelCase owner
+/// (`ManuallyDrop::new(subtree)`, `Box::new(v)`, `NonZero::new(n)`)
+/// consumes its by-value args: the emitter lowers the bare-ident arg to
+/// `std::move(arg)`, and a const local turns that move into a copy —
+/// deleted for move-only types (btree_tests' bulk-build recursion bound
+/// `subtree` const and died in manually_drop_new), or a silent
+/// double-drop for self-freeing copyables (the map_append double-free
+/// class). Callers must pair this with a NON-reference-peeling ident
+/// extractor: `Foo::bar(&x)` borrows and must stay const-eligible.
+fn call_path_is_assoc_fn_on_type(path_expr: &syn::ExprPath) -> bool {
+    if path_expr.path.segments.len() < 2 {
+        return false;
+    }
+    let owner = &path_expr.path.segments[path_expr.path.segments.len() - 2];
+    owner
+        .ident
+        .to_string()
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+/// Like `extract_simple_local_ident` but does NOT peel references —
+/// `&x` is a borrow, not a consumption.
+fn extract_unreferenced_local_ident(expr: &syn::Expr) -> Option<String> {
+    let mut current = expr;
+    loop {
+        match current {
+            syn::Expr::Paren(p) => current = &p.expr,
+            syn::Expr::Group(g) => current = &g.expr,
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                return Some(path.path.segments[0].ident.to_string());
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn is_consuming_method_name(method: &str) -> bool {

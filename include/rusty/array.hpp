@@ -1004,12 +1004,91 @@ struct zip_view {
         return iterator{std::begin(left), std::end(left), std::begin(right), std::end(right)};
     }
     sentinel end() { return sentinel{}; }
+
+    /// Rust `Iterator::all` over the zipped pairs (the transpiled
+    /// `zip(a, b).all(|(x, y)| …)` shape).
+    template<typename F>
+    bool all(F pred) {
+        for (auto it = begin(); it != end(); ++it) {
+            if (!pred(*it)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Rust `Iterator::any` — same walk, opposite polarity.
+    template<typename F>
+    bool any(F pred) {
+        for (auto it = begin(); it != end(); ++it) {
+            if (pred(*it)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
+
+// Rust-shaped (Option-returning `next()`) iterators — the transpiled
+// port types (map::Iter, set::Iter, …) have no begin()/end(). Adapt
+// them with a prefetching wrapper so zip can walk both worlds.
+template<typename It>
+concept rusty_next_iterable = requires(It& it) {
+    { it.next().is_some() } -> std::convertible_to<bool>;
+};
+
+template<typename It>
+struct next_range {
+    It it;
+    using next_t = decltype(std::declval<It&>().next());
+    struct sentinel {};
+    struct iterator {
+        It* src;
+        // mutable: zip_view::iterator::operator* is const but unwrap()
+        // (like next()) is a mutating access on the Option payload.
+        mutable next_t cur;
+        decltype(auto) operator*() const { return cur.unwrap(); }
+        iterator& operator++() {
+            cur = src->next();
+            return *this;
+        }
+        bool operator==(sentinel) const { return !cur.is_some(); }
+        bool operator!=(sentinel s) const { return !(*this == s); }
+    };
+    iterator begin() { return iterator{&it, it.next()}; }
+    sentinel end() { return sentinel{}; }
+};
+
+// Pick the walkable form of a zip side: std-iterables pass through
+// (LVALUES BY REFERENCE — a BTreeMap side must not be copied; its copy
+// ctor is deleted and a copyable container would double-free-free on a
+// self-freeing type), bare Rust iterators get wrapped, and Rust
+// containers walk through their own `.iter()` borrow.
+template<typename Side>
+constexpr decltype(auto) zip_walkable(Side&& side) {
+    using S = std::decay_t<Side>;
+    if constexpr (requires(Side& s) { std::begin(s); std::end(s); }) {
+        return std::forward<Side>(side);
+    } else if constexpr (rusty_next_iterable<S>) {
+        return next_range<S>{std::forward<Side>(side)};
+    } else if constexpr (requires(Side& s) { s.iter(); }) {
+        using I = std::decay_t<decltype(side.iter())>;
+        return next_range<I>{side.iter()};
+    } else {
+        return std::forward<Side>(side);
+    }
+}
 
 template<typename Left, typename Right>
 auto zip(Left&& left, Right&& right) {
-    return zip_view<std::decay_t<Left>, std::decay_t<Right>>{
-        std::forward<Left>(left), std::forward<Right>(right)};
+    // NO decay on the view parameters: an lvalue side deduces `T&` and
+    // the view holds a reference member; only adapters/rvalues are
+    // stored by value.
+    auto make = []<typename L, typename R>(L&& l, R&& r) {
+        return zip_view<L, R>{std::forward<L>(l), std::forward<R>(r)};
+    };
+    return make(zip_walkable(std::forward<Left>(left)),
+                zip_walkable(std::forward<Right>(right)));
 }
 
 /// Unified length helper for transpiled `.len()` calls.
