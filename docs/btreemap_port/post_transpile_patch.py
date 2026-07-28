@@ -4911,6 +4911,108 @@ def fix_const_slice_remove_binding(path: Path) -> None:
         print(f"  dropped const on parent_key/val slice_remove bindings in: {path.name}")
 
 
+def codify_split_append_calc_bodies(path: Path) -> None:
+    """Matrix-tail whole-method hand-ports, codified from the pre-swap
+    vendored file (0f698c68^). All are template bodies the module
+    precompile never checks; the parity test's split_off/append paths
+    instantiate them: split_off (addr-of-temporary + bare-glob variant
+    arms + broken free-alias calls), append_from_sorted_iters (MergeIter
+    CTAD needs explicit K, V), bulk_push, calc_length (nested-lambda
+    return deduction), move_suffix (non-const ref bound to temporary)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: split/append/calc bodies hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (split/append/calc already hand-ported)")
+        return
+    replaced = 0
+    for anchor, body in (
+        ("NodeRef<BorrowType, K, V, Type>::split_off(const Q& key, A alloc) {", "{\n        // btree_port hand-port: the transpiler-emitted body had three\n        // separate bugs that all blocked compilation:\n        //   (1) `auto* left_node = &(left_root.borrow_mut())` took the\n        //       address of a temporary (borrow_mut returns by value).\n        //   (2) The bottom match arm matched on tuple-of-variants with\n        //       bare-glob markers (`Internal && Internal`), and destructured\n        //       via `std::get<0>(_m_tuple)._0` — `_0` doesn't exist on\n        //       `std::variant<ForceResult_Leaf, ForceResult_Internal>`;\n        //       you must pick the alternative first via std::get<N>(variant)._0.\n        //   (3) `__rusty_alias_Root_fix_{right,left}_border` calls had\n        //       non-deducible <K, V> template parameters at the call site.\n        //\n        // Replacement mirrors libcore alloc/src/collections/btree/node.rs's\n        // Root::split_off:\n        //   - keep left_node / right_node as VALUES (NodeRef<Mut, K, V, LeafOrInternal>)\n        //     and re-assign each loop iteration with descend().\n        //   - explicit `if (variant.index() == N)` over the (split_edge.force(),\n        //     right_node.force()) pair so the Internal / Leaf arms compile.\n        //   - call the member fix_right_border / fix_left_border directly\n        //     instead of the broken free-function aliases.\n        NodeRef<BorrowType, K, V, Type>& left_root = (*this);\n        auto __new_pillar = [&](size_t __height) {\n            auto __root = Root<K, V>::new_(rusty::clone(alloc));\n            for (size_t __i = 0; __i < __height; ++__i) {\n                __root.push_internal_level(rusty::clone(alloc));\n            }\n            return __root;\n        };\n        auto right_root = __new_pillar(left_root.height());\n        auto left_node = left_root.borrow_mut();\n        auto right_node = right_root.borrow_mut();\n        while (true) {\n            // search_node → SearchResult_Found(KV-handle) | SearchResult_GoDown(Edge-handle)\n            auto __sr = left_node.search_node(key);\n            using __EdgeH = Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge>;\n            __EdgeH split_edge = (__sr.index() == 0)\n                ? std::get<0>(std::move(__sr))._0.left_edge()\n                : std::get<1>(std::move(__sr))._0;\n            split_edge.move_suffix(right_node);\n            // Handle::force() and NodeRef::force() both return ForceResult variants;\n            // alternative 0 = Leaf, alternative 1 = Internal.\n            auto __lf = split_edge.force();\n            auto __rf = right_node.force();\n            if (__lf.index() == 1 && __rf.index() == 1) {\n                auto edge = std::move(std::get<1>(std::move(__lf))._0);   // Handle<NodeRef<Mut,K,V,Internal>, Edge>\n                auto node = std::move(std::get<1>(std::move(__rf))._0);   // NodeRef<Mut, K, V, Internal>\n                left_node = edge.descend();\n                right_node = node.first_edge().descend();\n                continue;\n            }\n            if (__lf.index() == 0 && __rf.index() == 0) {\n                break;\n            }\n            rusty::intrinsics::unreachable();\n        }\n        left_root.fix_right_border(rusty::clone(alloc));\n        right_root.fix_left_border(std::move(alloc));\n        return std::move(right_root);\n    }"),
+        ("void NodeRef<BorrowType, K, V, Type>::bulk_push(I iter, size_t& length, A alloc) {", '{\n        auto cur_node = this->borrow_mut().last_leaf_edge().into_node();\n        for (auto&& _for_item : rusty::for_in(iter)) {\n            auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));\n            auto&& value = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));\n            if (rusty::len(cur_node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {\n                cur_node.push(std::move(key), std::move(value));\n            } else {\n                auto test_node = cur_node.forget_type();\n                auto open_node = [&]() {\n                    while (true) {\n                        {\n                            auto&& _m = test_node.ascend();\n                            bool _m_matched = false;\n                            if (!_m_matched) {\n                                if (_m.is_ok()) {\n                                    auto&& _mv0 = _m.unwrap();\n                                    auto&& parent = rusty::detail::deref_if_pointer(_mv0);\n                                    auto parent_shadow1 = parent.into_node();\n                                    if (rusty::len(parent_shadow1) < rusty::detail::deref_if_pointer_like(CAPACITY)) {\n                                        return parent_shadow1;\n                                    } else {\n                                        test_node = parent_shadow1.forget_type();\n                                    }\n                                    _m_matched = true;\n                                }\n                            }\n                            if (!_m_matched) {\n                                if (_m.is_err()) {\n                                    return this->push_internal_level(rusty::clone(alloc));\n                                    _m_matched = true;\n                                }\n                            }\n                        }\n                    }\n                }();\n                const auto tree_height = open_node.height() - 1;\n                auto right_tree = Root<K, V>::new_(rusty::clone(alloc));\n                for (auto&& _ : rusty::for_in(rusty::range(0, tree_height))) {\n                    right_tree.push_internal_level(rusty::clone(alloc));\n                }\n                open_node.push(std::move(key), std::move(value), std::move(right_tree));\n                cur_node = open_node.forget_type().last_leaf_edge().into_node();\n            }\n            length += 1;\n        }\n        this->fix_right_border_of_plentiful();\n    }'),
+        ("size_t NodeRef<BorrowType, K, V, Type>::calc_length() const {", "{\n        // btree_port hand-port: bypass the transpiled visit_nodes_in_order\n        // entirely. The Internal arm of that helper has return-type-deduction\n        // failures inside its nested lambdas (one branch returns void, the\n        // other returns an Edge handle) that even leaf-only instantiations\n        // trip when the closure type is determined. We just recurse directly\n        // over the tree shape, mirroring libcore's invariant:\n        //   total = sum of leaf node.len() + count of internal kvs\n        size_t result = 0;\n        // Walk: stack-based DFS over edges. At each NodeRef:\n        //   - leaf (height == 0): add node.len()\n        //   - internal: add node.len() (internal kvs) and descend into each child\n        auto __recurse = [&](this auto&& self_, NodeRef<marker::Immut, K, V, marker::LeafOrInternal> node) -> void {\n            auto __f = node.force();\n            if (__f.index() == 0) {\n                auto& __leaf = std::get<0>(__f)._0;\n                result += rusty::len(__leaf);\n                return;\n            }\n            auto& __internal = std::get<1>(__f)._0;\n            const auto __n = rusty::len(__internal);\n            result += __n;  // internal kvs\n            // Children: edges 0..n inclusive (n+1 children).\n            for (size_t i = 0; i <= __n; ++i) {\n                auto __child = Handle<NodeRef<marker::Immut, K, V, marker::Internal>, marker::Edge>::new_edge(__internal, i).descend();\n                self_(std::move(__child));\n            }\n        };\n        __recurse(this->reborrow());\n        return result;\n    }"),
+    ):
+        i = src.find(anchor)
+        if i == -1:
+            print(f"  [warn] anchor missing: {anchor[:52]}", file=sys.stderr)
+            continue
+        open_brace = i + len(anchor) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            continue
+        src = src[:open_brace] + body + src[close_brace + 1 :]
+        replaced += 1
+    append_anchor = "void append_from_sorted_iters(I left, I right, size_t& length, A alloc) {"
+    i = src.find(append_anchor)
+    if i != -1:
+        open_brace = i + len(append_anchor) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace != -1:
+            src = (
+                src[:open_brace]
+                + "{\n        auto iter = MergeIter<K, V, I>{MergeIterInner<I>::new_(std::move(left), std::move(right))};\n"
+                + "        this->bulk_push(std::move(iter), length, std::move(alloc));\n    }"
+                + src[close_brace + 1 :]
+            )
+            replaced += 1
+    n_ms = src.count("auto& right_node = right.reborrow_mut();")
+    src = src.replace(
+        "auto& right_node = right.reborrow_mut();",
+        "auto right_node = right.reborrow_mut();",
+    )
+    if replaced or n_ms:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  hand-ported " + str(replaced) + " split/append/calc body(ies), " + str(n_ms) + " move_suffix binding(s) in: " + path.name)
+
+
+def codify_merge_push_range_bodies(path: Path) -> None:
+    """Second matrix-tail batch (pre-swap vendored): MergeIterInner::nexts
+    + MergeIter::next (untyped `let mut a_next;` filled with the RETURN
+    tuple type instead of Option<I::Item>), SearchBound::from_range
+    (returned the bare AllIncluded FUNCTION template; must stay
+    polymorphic over Bound<U> — range_full defaults Bound to size_t),
+    leaf push (add_pointer return with an lvalue → V&), and
+    fix_right_border_of_plentiful (addr-of-temporary + `._0` on the
+    ForceResult variant)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: merge/push/range bodies hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (merge/push/range already hand-ported)")
+        return
+    state = {"n": 0}
+
+    def span(src, start_anchor, replacement):
+        i = src.find(start_anchor)
+        if i == -1:
+            print(f"  [warn] anchor missing: {start_anchor[:48]}", file=sys.stderr)
+            return src
+        open_brace = src.find("{", i)
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            return src
+        state["n"] += 1
+        return src[:i] + replacement + src[close_brace + 1 :]
+
+    src = span(src, "    auto nexts(Cmp cmp) {", "    " + "auto nexts(Cmp cmp) {\n        // Hand-port: Rust declares `let mut a_next;` untyped (inferred as\n        // Option<I::Item>); the emitter filled the bindings with the\n        // function's RETURN tuple type instead.\n        rusty::Option<rusty::detail::associated_item_t<I>> a_next = rusty::Option<rusty::detail::associated_item_t<I>>{rusty::None};\n        rusty::Option<rusty::detail::associated_item_t<I>> b_next = rusty::Option<rusty::detail::associated_item_t<I>>{rusty::None};\n        {\n            auto&& _m = this->peeked.take();\n            bool _m_matched = false;\n            if (!_m_matched) {\n                if (_m.is_some()) {\n                    auto&& _mv0 = std::as_const(_m).unwrap();\n                    if (rusty::detail::deref_if_pointer(_mv0).index() == 0) {\n                        auto&& next = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0);\n                        a_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);\n                        b_next = rusty::deref_call(this->b, rusty::detail::__mdisp_next{});\n                        _m_matched = true;\n                    }\n                }\n            }\n            if (!_m_matched) {\n                if (_m.is_some()) {\n                    auto&& _mv1 = std::as_const(_m).unwrap();\n                    if (rusty::detail::deref_if_pointer(_mv1).index() == 1) {\n                        auto&& next = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0);\n                        b_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);\n                        a_next = rusty::deref_call(this->a, rusty::detail::__mdisp_next{});\n                        _m_matched = true;\n                    }\n                }\n            }\n            if (!_m_matched) {\n                if (_m.is_none()) {\n                    a_next = rusty::deref_call(this->a, rusty::detail::__mdisp_next{});\n                    b_next = rusty::deref_call(this->b, rusty::detail::__mdisp_next{});\n                    _m_matched = true;\n                }\n            }\n        }\n        if (auto&& _iflet_scrutinee = std::make_tuple(a_next, b_next); (rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_scrutinee))).is_some() && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_iflet_scrutinee))).is_some())) {\n            auto&& a1 = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_scrutinee)))).unwrap());\n            auto&& b1 = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_iflet_scrutinee)))).unwrap());\n            switch (cmp(std::move(a1), std::move(b1))) {\n            case Ordering::Less:\n            {\n                this->peeked = b_next.take().map([](auto&& _v) { return Peeked_Right<I>{std::forward<decltype(_v)>(_v)}; });\n                break;\n            }\n            case Ordering::Greater:\n            {\n                this->peeked = a_next.take().map([](auto&& _v) { return Peeked_Left<I>{std::forward<decltype(_v)>(_v)}; });\n                break;\n            }\n            case Ordering::Equal:\n            {\n                std::make_tuple();\n                break;\n            }\n            }\n        }\n        return std::make_tuple(std::move(a_next), std::move(b_next));\n    }")
+    src = span(src, "    static SearchBound<T> from_range(rusty::Bound<T> range_bound) {", '    template<typename U>\n    static SearchBound<T> from_range(rusty::Bound<U> range_bound) {\n        // Range-path fix: the transpiled body returned bare `AllIncluded`\n        // (the function template), not a SearchBound value. Hand-port\n        // the match on rusty::Bound<U> = variant<Unbounded, Included, Excluded>\n        // and emit explicit SearchBound<T> constructions for each arm.\n        //\n        // Hand-port 2: accept Bound<U>, not just Bound<T>. Rust\'s Bound is\n        // polymorphic; the C++ range_full() has no key type to name and\n        // defaults its Bound to size_t — its only variant is Unbounded, so\n        // the payload arms are compile-guarded on T-from-U constructibility\n        // and asserted unreachable otherwise (retain() on any key type).\n        if constexpr (std::is_constructible_v<T, U&&>) {\n            if (range_bound.index() == 1) {\n                auto&& t = std::get<1>(range_bound)._0;\n                return SearchBound<T>{SearchBound_Included<T>{T(std::move(t))}};\n            }\n            if (range_bound.index() == 2) {\n                auto&& t = std::get<2>(range_bound)._0;\n                return SearchBound<T>{SearchBound_Excluded<T>{T(std::move(t))}};\n            }\n        } else {\n            assert(range_bound.index() == 0 && "payload-carrying Bound<U> with U not convertible to the key type");\n        }\n        // Bound_Unbounded → SearchBound_AllIncluded\n        return SearchBound<T>{SearchBound_AllIncluded<T>{}};\n    }')
+    src = span(src, "    std::add_pointer_t<V> push(K key, V val) {", '    V& push(K key, V val) {\n        // @unsafe\n        {\n            return this->push_with_handle(std::move(key), std::move(val)).into_val_mut();\n        }\n    }')
+    src = span(src, "    void fix_right_border_of_plentiful() {", '    void fix_right_border_of_plentiful() {\n        // Hand-port: Rust `let mut cur_node = self.borrow_mut();` binds the\n        // NodeRef VALUE (thin trivially-copyable handle) and reassigns it\n        // each iteration; the emitted pointer form addressed a temporary.\n        auto cur_node = this->borrow_mut();\n        while (true) {\n            auto&& _whilelet = cur_node.force();\n            // Hand-port (transpiler-marked arm): `while let Internal(internal)\n            // = cur_node.force()` — ForceResult is\n            // variant<ForceResult_Leaf, ForceResult_Internal>; Internal is\n            // index 1 and the payload is its _0.\n            if (_whilelet.index() != 1) { break; }\n            auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);\n            auto last_kv = internal.last_kv().consider_for_balancing();\n            assert((last_kv.left_child_len() >= (rusty::detail::deref_if_pointer_like(MIN_LEN) * 2)));\n            const auto right_child_len = last_kv.right_child_len();\n            if (rusty::detail::deref_if_pointer_like(right_child_len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {\n                last_kv.bulk_steal_left(rusty::detail::deref_if_pointer_like(MIN_LEN) - rusty::detail::deref_if_pointer_like(right_child_len));\n            }\n            cur_node = last_kv.into_right_child();\n        }\n    }')
+    mi = src.find("struct MergeIter {")
+    if mi != -1:
+        nx = src.find("rusty::Option<std::tuple<K, V>> next() {", mi)
+        if nx != -1:
+            open_brace = src.find("{", nx + 30)
+            close_brace = find_matching_brace(src, open_brace)
+            if close_brace != -1:
+                src = src[:nx] + 'rusty::Option<std::tuple<K, V>> next() {\n        auto [a_next, b_next] = rusty::detail::deref_if_pointer_like(this->_0.nexts([&](const std::tuple<K, V>& a, const std::tuple<K, V>& b) -> rusty::cmp::Ordering {\n// Hand-port: Rust `K::cmp(&a.0, &b.0)` is Ord::cmp — primitives have no\n// member cmp in C++; route through the generic comparator.\nreturn rusty::cmp::cmp(std::get<0>(a), std::get<0>(b));\n}));\n        return [&]() -> rusty::Option<std::tuple<K, V>> { auto&& _m0 = a_next; auto&& _m1 = b_next; if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& a_k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap()))); auto&& b_v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap()))); return rusty::Option<std::tuple<K, V>>(std::make_tuple(a_k, b_v)); } if (rusty::detail::deref_if_pointer(_m0).is_some() && _m1.is_none()) { auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap()); return rusty::Option<std::tuple<K, V>>(a); } if (_m0.is_none() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap()); return rusty::Option<std::tuple<K, V>>(b); } if (_m0.is_none() && _m1.is_none()) { return rusty::Option<std::tuple<K, V>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<K, V>> { rusty::intrinsics::unreachable(); }(); }();\n    }' + src[close_brace + 1 :]
+                state["n"] += 1
+    if state["n"]:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  hand-ported " + str(state["n"]) + " merge/push/range span(s) in: " + path.name)
+
+
 def codify_bound_index_bodies(path: Path) -> None:
     """The emitted `find_{lower,upper}_bound_index` IIFE bodies call
     `rusty::detail::variant_holds<SearchBound_AllIncluded>(_m)` with a
@@ -5875,6 +5977,169 @@ def fix_map_dormant_append_cluster(path: Path) -> None:
     print(f"  fixed {n} dormant/append site(s) in: {path.name}")
 
 
+def export_peeked_family(path: Path) -> None:
+    """set.cppm's hand-ported SymmetricDifference/Union::next bodies name
+    Peeked/Peeked_Left/Peeked_Right from btree_internal — export them
+    (the pre-swap vendored file did; "declaration must be imported…
+    before it is required" otherwise)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: Peeked family exported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Peeked family already exported)")
+        return
+    n = 0
+    for pat in (
+        "template<typename I>\nstruct Peeked_Left;",
+        "template<typename I>\nstruct Peeked_Right;",
+        "template<typename I>\nusing Peeked = std::variant<Peeked_Left<I>, Peeked_Right<I>>;",
+        "template<typename I>\nstruct Peeked_Left {",
+        "template<typename I>\nstruct Peeked_Right {",
+    ):
+        if pat in src:
+            src = src.replace(pat, "export " + pat, 1)
+            n += 1
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  exported " + str(n) + " Peeked decl(s) in: " + path.name)
+
+
+def fix_set_algebra_stubs(path: Path) -> None:
+    """Un-stub the set-algebra family with the pre-swap vendored bodies
+    (all runtime-proven at 26/26): difference()/intersection() always
+    construct the Search variant (skip rustc's size-heuristic Stitch
+    choice — same worst-case complexity, and the <T as Ord>::cmp emit
+    the heuristic needed is broken); is_subset iterates + contains;
+    SymmetricDifference::next / Union::next drive the hand-ported
+    MergeIterInner::nexts. MUST run AFTER stub_broken_set_methods
+    (which installs the throws these replace)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: set-algebra stubs replaced by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (set-algebra already un-stubbed)")
+        return
+    n = 0
+
+    def body_swap(src, anchor, body, n):
+        i = src.find(anchor)
+        if i == -1:
+            print(f"  [warn] anchor missing: {anchor[:52]}", file=sys.stderr)
+            return src, n
+        open_brace = i + len(anchor) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            return src, n
+        return src[:i] + anchor[:-1] + body + src[close_brace + 1 :], n + 1
+
+    src, n = body_swap(src, "Difference<T, A> BTreeSet<T, A>::difference(const BTreeSet<T, A>& other) const {", '{\n        return Difference<T, A>{\n            .inner = DifferenceInner<T, A>{\n                DifferenceInner_Search<T, A>{\n                    .self_iter = this->iter(),\n                    .other_set = other\n                }\n            }\n        };\n    }', n)
+    src, n = body_swap(src, "Intersection<T, A> BTreeSet<T, A>::intersection(const BTreeSet<T, A>& other) const {", '{\n        return Intersection<T, A>{\n            .inner = IntersectionInner<T, A>{\n                IntersectionInner_Search<T, A>{\n                    .small_iter = this->iter(),\n                    .large_set = other\n                }\n            }\n        };\n    }', n)
+    src, n = body_swap(src, "    bool is_subset(const BTreeSet<T, A>& other) const {", '{\n        auto it = this->iter();\n        for (auto v = it.next(); v.is_some(); v = it.next()) {\n            if (!other.contains(v.unwrap())) return false;\n        }\n        return true;\n    }', n)
+    for struct_anchor, body in (
+        ("struct SymmetricDifference {", '{\n        while (true) {\n            rusty::Option<const T&> a_val{rusty::None};\n            rusty::Option<const T&> b_val{rusty::None};\n            if (this->_0.peeked.is_some()) {\n                auto pv = std::move(this->_0.peeked).unwrap();\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};\n                if (pv.index() == 0) {\n                    a_val = rusty::Option<const T&>(std::get<0>(pv)._0);\n                    b_val = this->_0.b.next();\n                } else {\n                    b_val = rusty::Option<const T&>(std::get<1>(pv)._0);\n                    a_val = this->_0.a.next();\n                }\n            } else {\n                a_val = this->_0.a.next();\n                b_val = this->_0.b.next();\n            }\n            if (!a_val.is_some() && !b_val.is_some()) {\n                return rusty::Option<const T&>{rusty::None};\n            }\n            if (!b_val.is_some()) return std::move(a_val);\n            if (!a_val.is_some()) return std::move(b_val);\n            const T& a_ref = a_val.unwrap();\n            const T& b_ref = b_val.unwrap();\n            if (a_ref < b_ref) {\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                    btree_internal::Peeked_Right<Iter<T>>{b_ref});\n                return rusty::Option<const T&>(a_ref);\n            } else if (b_ref < a_ref) {\n                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                    btree_internal::Peeked_Left<Iter<T>>{a_ref});\n                return rusty::Option<const T&>(b_ref);\n            }\n            // equal: drop both, loop\n        }\n    }'),
+        ("struct Union {", '{\n        rusty::Option<const T&> a_val{rusty::None};\n        rusty::Option<const T&> b_val{rusty::None};\n        if (this->_0.peeked.is_some()) {\n            auto pv = std::move(this->_0.peeked).unwrap();\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};\n            if (pv.index() == 0) {\n                a_val = rusty::Option<const T&>(std::get<0>(pv)._0);\n                b_val = this->_0.b.next();\n            } else {\n                b_val = rusty::Option<const T&>(std::get<1>(pv)._0);\n                a_val = this->_0.a.next();\n            }\n        } else {\n            a_val = this->_0.a.next();\n            b_val = this->_0.b.next();\n        }\n        if (!a_val.is_some() && !b_val.is_some()) {\n            return rusty::Option<const T&>{rusty::None};\n        }\n        if (!b_val.is_some()) return std::move(a_val);\n        if (!a_val.is_some()) return std::move(b_val);\n        const T& a_ref = a_val.unwrap();\n        const T& b_ref = b_val.unwrap();\n        if (a_ref < b_ref) {\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                btree_internal::Peeked_Right<Iter<T>>{b_ref});\n            return rusty::Option<const T&>(a_ref);\n        } else if (b_ref < a_ref) {\n            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(\n                btree_internal::Peeked_Left<Iter<T>>{a_ref});\n            return rusty::Option<const T&>(b_ref);\n        }\n        // equal: emit a, drop b\n        return rusty::Option<const T&>(a_ref);\n    }'),
+    ):
+        mi = src.find(struct_anchor)
+        if mi == -1:
+            print(f"  [warn] {struct_anchor} missing", file=sys.stderr)
+            continue
+        sig = "rusty::Option<const T&> next() {"
+        nx = src.find(sig, mi)
+        if nx == -1:
+            print(f"  [warn] next() missing under {struct_anchor}", file=sys.stderr)
+            continue
+        open_brace = src.find("{", nx + len(sig) - 1)
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            continue
+        src = src[:open_brace] + body + src[close_brace + 1 :]
+        n += 1
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  un-stubbed " + str(n) + " set-algebra span(s) in: " + path.name)
+
+
+def fix_set_intersection_extractif(path: Path) -> None:
+    """Final set.cppm matrix-tail: Difference::next + Intersection::next
+    Stitch arms peek a plain Iter (peekable was never ported) — the
+    constructors only ever build the Search variant, so swap in the
+    vendored Search-only bodies; ExtractIf::next passed &mapped_pred
+    (address-of where the map inner takes F&) with a mis-pinned second
+    param type."""
+    src = path.read_text()
+    sentinel = "// btree_port port: set intersection/extract_if fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (intersection/extract_if already fixed)")
+        return
+    n = 0
+    for qual, body in (
+        ("rusty::Option<const T&> Intersection<T, A>::next() {", '{\n        if (this->inner.index() == 1) {\n            auto& v = std::get<1>(this->inner);\n            while (true) {\n                auto small_next = v.small_iter.next();\n                if (!small_next.is_some()) return rusty::Option<const T&>{rusty::None};\n                if (v.large_set.contains(small_next.unwrap())) {\n                    return small_next;\n                }\n            }\n        }\n        return rusty::Option<const T&>{rusty::None};\n    }'),
+        ("rusty::Option<const T&> Difference<T, A>::next() {", '{\n        if (this->inner.index() == 1) {\n            auto& v = std::get<1>(this->inner);\n            while (true) {\n                auto self_next = v.self_iter.next();\n                if (!self_next.is_some()) return rusty::Option<const T&>{rusty::None};\n                if (!v.other_set.contains(self_next.unwrap())) {\n                    return self_next;\n                }\n            }\n        }\n        // Stitch and Iterate variants are no longer constructed; reach\n        // here only if someone built a Difference manually.\n        return rusty::Option<const T&>{rusty::None};\n    }'),
+    ):
+        i = src.find(qual)
+        if i == -1:
+            print(f"  [warn] out-of-line anchor missing: {qual[:50]}", file=sys.stderr)
+            continue
+        open_brace = i + len(qual) - 1
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            continue
+        src = src[:i] + qual[: -1] + body + src[close_brace + 1 :]
+        n += 1
+    if "this->inner.next(&mapped_pred" in src:
+        src = src.replace("this->inner.next(&mapped_pred", "this->inner.next(mapped_pred")
+        n += 1
+    if "btree_internal::SetValZST& _v" in src:
+        src = src.replace("btree_internal::SetValZST& _v", "auto&& _v")
+        n += 1
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  fixed " + str(n) + " intersection/extract_if site(s) in: " + path.name)
+
+
+def fix_map_splitoff_alloc_and_le(path: Path) -> None:
+    """Final map.cppm matrix-tail: split_off's new-map construction
+    cloned the ManuallyDrop<A> WRAPPER (deleted copy) — clone the inner
+    A and re-wrap; extract_if's range-end gates called `.le/.lt(end)`
+    members on the key — use the comparison operators."""
+    src = path.read_text()
+    sentinel = "// btree_port port: split_off alloc-clone + le/lt gates fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (split_off alloc/le already fixed)")
+        return
+    n = 0
+    # append's iterator locals: `const auto self_iter/other_iter` +
+    # `std::move(const)` silently COPIES the IntoIter into the merge —
+    # the still-armed originals' destructors then dying_next the SAME
+    # tree again (ASan double-free in map_append). Rust moves them.
+    for cident in ("const auto self_iter = rusty::mem::replace(",
+                   "const auto other_iter = rusty::mem::replace("):
+        if cident in src:
+            src = src.replace(cident, cident.replace("const auto ", "auto ", 1))
+            n += 1
+    old_ctor = "rusty::clone(this->alloc), rusty::PhantomData<rusty::Box"
+    if old_ctor in src:
+        src = src.replace(
+            old_ctor,
+            "rusty::mem::manually_drop_new(rusty::clone(*this->alloc)), rusty::PhantomData<rusty::Box",
+        )
+        n += 1
+    for old, new in ((")).le(end)", ")) <= end"), (")).lt(end)", ")) < end")):
+        k = src.count(old)
+        if k:
+            src = src.replace(old, new)
+            n += k
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  fixed " + str(n) + " split_off-alloc/le site(s) in: " + path.name)
+
+
 def fix_set_orphan_fmt_gated_iter(path: Path) -> None:
     """A map-orphan `Debug for IntoIter` fmt lands in set's IntoIter
     calling `this->iter()` — but the orphan `iter()` member right above
@@ -6409,6 +6674,9 @@ def main() -> int:
     codify_range_path_q_to_k(internal)
     codify_find_leaf_edges_body(internal)
     codify_bound_index_bodies(internal)
+    codify_split_append_calc_bodies(internal)
+    codify_merge_push_range_bodies(internal)
+    export_peeked_family(internal)
     # Phase E (correctness fixes surfaced at instantiation time):
     fix_dormant_mut_ref_from_t(internal)
     fix_dormant_mut_ref_const_ref(internal)
@@ -6685,6 +6953,7 @@ def main() -> int:
         # Matrix-tail dormant/append cluster — must run AFTER the pass
         # that introduces __btree_port_make_dormant call sites.
         fix_map_dormant_append_cluster(map_mod)
+        fix_map_splitoff_alloc_and_le(map_mod)
         fix_map_cppm_qualifiers_for_namespace_wrap(map_mod)
     if set_mod.exists():
         # Set-specific rules MUST run before the shared map-qualifier
@@ -6694,11 +6963,13 @@ def main() -> int:
         fix_set_cppm_qualifiers_for_namespace_wrap(set_mod)
         fix_map_cppm_qualifiers_for_namespace_wrap(set_mod)
         stub_broken_set_methods(set_mod)
+        fix_set_algebra_stubs(set_mod)
         # Orphan-cluster stragglers the template-header heuristic can't
         # see (they carry no template<> line of their own).
         fix_set_orphan_fmt_gated_iter(set_mod)
         fix_set_cursor_clone_orphan_gate(set_mod)
         fix_set_stitch_peekable_field(set_mod)
+        fix_set_intersection_extractif(set_mod)
     if set_entry.exists():
         fix_map_cppm_qualifiers_for_namespace_wrap(set_entry)
     return 0

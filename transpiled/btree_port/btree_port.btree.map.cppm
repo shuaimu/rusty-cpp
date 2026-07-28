@@ -1,5 +1,6 @@
 // btree_port port: map.cppm qualifier fix-up by post_transpile_patch.py
 // btree_port port step 67: step 64-66 runtime fixes codified by post_transpile_patch.py
+// btree_port port: split_off alloc-clone + le/lt gates fixed by post_transpile_patch.py
 // btree_port port: dormant/append cluster fixed by post_transpile_patch.py
 // btree_port port: debug_map→debug_list by post_transpile_patch.py
 // btree_port port: rusty::alloc::Global type→value by post_transpile_patch.py
@@ -5633,11 +5634,11 @@ struct ExtractIfInner {
             auto [k, v] = rusty::detail::deref_if_pointer_like(kv.kv_mut());
             {
                 auto&& _m = rusty::deref_call(this->range, rusty::detail::__mdisp_end_bound{});
-                if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1 && [&]() -> bool { const auto& end = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))).le(end)); }()) {
+                if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1 && [&]() -> bool { const auto& end = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))) <= end); }()) {
                     const auto& end = std::get<1>(rusty::detail::deref_if_pointer(_m))._0;
                     std::make_tuple();
                 }
-                else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2 && [&]() -> bool { const auto& end = std::get<2>(rusty::detail::deref_if_pointer(_m))._0; return static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))).lt(end)); }()) {
+                else if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2 && [&]() -> bool { const auto& end = std::get<2>(rusty::detail::deref_if_pointer(_m))._0; return static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))) < end); }()) {
                     const auto& end = std::get<2>(rusty::detail::deref_if_pointer(_m))._0;
                     std::make_tuple();
                 }
@@ -6831,8 +6832,8 @@ return std::move(v);
             rusty::mem::swap(rusty::detail::deref_if_pointer((*this)), rusty::detail::deref_if_pointer(other));
             return;
         }
-        const auto self_iter = rusty::mem::replace((*this), BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
-        const auto other_iter = rusty::mem::replace(other, BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
+        auto self_iter = rusty::mem::replace((*this), BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
+        auto other_iter = rusty::mem::replace(other, BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
         auto& root = this->root.get_or_insert_with([&]() { return btree_internal::Root<K, V>::new_(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc))))); });
         root.append_from_sorted_iters(std::move(self_iter), std::move(other_iter), this->length, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
     }
@@ -7007,7 +7008,7 @@ return std::move(v);
         auto right_root = left_root.split_off(key, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         auto [new_left_len, right_len] = rusty::detail::deref_if_pointer_like(btree_internal::Root<K, V>::calc_split_length(std::move(total_num), left_root, right_root));
         this->length = std::move(new_left_len);
-        return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>(std::move(right_root)), std::move(right_len), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
+        return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>(std::move(right_root)), std::move(right_len), rusty::mem::manually_drop_new(rusty::clone(*this->alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
     }
     template<typename F, typename R>
     ExtractIf<K, V, R, F, A> extract_if(R range, F pred) {
