@@ -595,10 +595,18 @@ public:
 
     auto next() {
         using item_type = next_item_t<Iter>;
+        // UNDECAYED payload: a reference-Option (Option<T&> from mut
+        // iterators) must keep the reference in the entry tuple — the
+        // old decayed type silently COPIED items, so `for (i, elt) in
+        // deque.iter_mut().enumerate() { *elt = ...; }` wrote into
+        // temporaries.
+        using taken_type =
+            decltype(option_like_take_value(std::declval<next_result_t<Iter>&>()));
         using entry_item_type = std::conditional_t<
             std::is_pointer_v<item_type>,
             decltype(deref_if_pointer(std::declval<item_type>())),
-            item_type>;
+            std::conditional_t<
+                std::is_lvalue_reference_v<taken_type>, taken_type, item_type>>;
         using entry_type = std::tuple<size_t, entry_item_type>;
         using next_result = rusty::Option<entry_type>;
         auto item = iter_.next();

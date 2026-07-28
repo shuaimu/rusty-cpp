@@ -47369,6 +47369,28 @@ template<typename A, typename B>
 rusty::Option<Ordering> partial_cmp(const A& a, const B& b) {
     if constexpr (requires { a.partial_cmp(b); }) {
         return a.partial_cmp(b);
+    } else if constexpr (
+        requires(A& x, B& y) { x.next().is_some(); y.next().is_some(); }
+        && std::is_copy_constructible_v<A> && std::is_copy_constructible_v<B>) {
+        // Option-like next() iterators compare LEXICOGRAPHICALLY (Rust
+        // PartialOrd through iterators); the old fallback compared the
+        // ITERATOR OBJECTS themselves - silent-wrong Equal.
+        auto ita = a;
+        auto itb = b;
+        for (;;) {
+            auto va = ita.next();
+            auto vb = itb.next();
+            const bool ha = va.is_some();
+            const bool hb = vb.is_some();
+            if (!ha && !hb) return rusty::Option<Ordering>(Ordering::Equal);
+            if (!ha) return rusty::Option<Ordering>(Ordering::Less);
+            if (!hb) return rusty::Option<Ordering>(Ordering::Greater);
+            const auto& ea = rusty::detail::deref_if_pointer_like(std::move(va).unwrap());
+            const auto& eb = rusty::detail::deref_if_pointer_like(std::move(vb).unwrap());
+            auto e_ord = partial_cmp(ea, eb);
+            if (!e_ord.is_some()) return rusty::Option<Ordering>(rusty::None);
+            if (e_ord.unwrap() != Ordering::Equal) return e_ord;
+        }
     } else if constexpr (requires { a < b; b < a; }) {
         if (a < b) return rusty::Option<Ordering>(Ordering::Less);
         if (b < a) return rusty::Option<Ordering>(Ordering::Greater);
@@ -50790,6 +50812,27 @@ template<typename A, typename B>\n\
 auto partial_cmp(const A& a, const B& b) {\n\
     if constexpr (requires { a.partial_cmp(b); }) {\n\
         return a.partial_cmp(b);\n\
+    } else if constexpr (\n\
+        requires(A& x, B& y) { x.next().is_some(); y.next().is_some(); }\n\
+        && std::is_copy_constructible_v<A> && std::is_copy_constructible_v<B>) {\n\
+        /* Option-like next() iterators compare LEXICOGRAPHICALLY (Rust\n\
+           PartialOrd through iterators); the old fallback compared the\n\
+           ITERATOR OBJECTS themselves - silent-wrong Equal. */\n\
+        auto ita = a;\n\
+        auto itb = b;\n\
+        for (;;) {\n\
+            auto va = ita.next();\n\
+            auto vb = itb.next();\n\
+            const bool ha = va.is_some();\n\
+            const bool hb = vb.is_some();\n\
+            if (!ha && !hb) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);\n\
+            if (!ha) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);\n\
+            if (!hb) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);\n\
+            const auto& ea = rusty::detail::deref_if_pointer_like(std::move(va).unwrap());\n\
+            const auto& eb = rusty::detail::deref_if_pointer_like(std::move(vb).unwrap());\n\
+            if (rusty::cmp::detail::less_than(ea, eb)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);\n\
+            if (rusty::cmp::detail::less_than(eb, ea)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);\n\
+        }\n\
     } else {\n\
         if (rusty::cmp::detail::less_than(a, b)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);\n\
         if (rusty::cmp::detail::less_than(b, a)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);\n\
@@ -51338,6 +51381,22 @@ std::string to_debug_string(const T& value) {\n\
             }\n\
             first = false;\n\
             out += rusty::to_debug_string(item);\n\
+        }\n\
+        out += \"]\";\n\
+        return out;\n\
+    }\n\
+    else if constexpr (requires(const Value& v) { v.iter().next().is_some(); }) {\n\
+        /* Iterator-backed containers without begin/end (alloc\n\
+           VecDeque &c.): Rust Debug list form. */\n\
+        std::string out = \"[\";\n\
+        auto it = value.iter();\n\
+        bool first = true;\n\
+        for (auto e = it.next(); e.is_some(); e = it.next()) {\n\
+            if (!first) {\n\
+                out += \", \";\n\
+            }\n\
+            first = false;\n\
+            out += rusty::to_debug_string(rusty::detail::deref_if_pointer_like(std::move(e).unwrap()));\n\
         }\n\
         out += \"]\";\n\
         return out;\n\

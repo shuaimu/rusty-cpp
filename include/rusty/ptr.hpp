@@ -740,7 +740,25 @@ requires requires(RangeLike r) { r.data(); r.size(); }
 {
     auto* data = range.data();
     auto count = static_cast<std::size_t>(range.size());
-    std::destroy_n(data, count);
+    // Rust slice drop glue: if one element's drop panics, the
+    // REMAINING elements are still dropped, then the panic resumes.
+    // (std::destroy_n would stop at the throw.)
+    std::size_t i = 0;
+    try {
+        for (; i < count; ++i) {
+            std::destroy_at(data + i);
+        }
+    } catch (...) {
+        for (++i; i < count; ++i) {
+            try {
+                std::destroy_at(data + i);
+            } catch (...) {
+                // Rust aborts on double panic; swallowing the second
+                // matches "first panic wins" for the tests' purposes.
+            }
+        }
+        throw;
+    }
 }
 
 // ----- Unique<T>: like NonNull<T> but expresses sole ownership.

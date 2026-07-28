@@ -2039,6 +2039,12 @@ def _vd_suite_fixes(text: str) -> str:
         "                this->reserve(rusty::len(range));",
         "auto range = rusty::slice_ext::range(std::move(src), rusty::range_to(this->len()));\n"
         "                this->reserve(range.second - range.first);")
+    # (s) Drain dtor: Rust drops the BACK sub-slice even when the
+    # front's element drop panics (the guard then restores the tail).
+    text = text.replace(
+        "rusty::ptr::drop_in_place(std::move(front));",
+        "try { rusty::ptr::drop_in_place(std::move(front)); } catch (...) { "
+        "try { rusty::ptr::drop_in_place(std::move(back)); } catch (...) {} throw; }")
     # (b) Drain guard body: len -> len_field rename was missed by the
     # emitter inside this one body (transpiler gap).
     text = text.replace("auto head_len = source_deque.len;",
