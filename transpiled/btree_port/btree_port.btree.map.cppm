@@ -3529,6 +3529,16 @@ branch, so existing integer-state hashers are unchanged. */
 unsigned char bytes[sizeof(std::size_t)];
 __builtin_memcpy(bytes, &value, sizeof(value));
 state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));
+} else if constexpr (requires {
+state.write(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* Same Hasher protocol under the plain `write` spelling —
+rusty::hash::SipHasher used directly as the state (the
+btree_set_hash tests drive BTreeSet::hash this way). */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write(std::span<const unsigned char>(bytes, sizeof(bytes)));
 } else {
 std::size_t seed = static_cast<std::size_t>(state);
 seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -7062,8 +7072,8 @@ return std::move(v);
     template<typename I>
     static BTreeMap<K, V, A> bulk_build_from_sorted_iter(I iter, A alloc) {
         auto root = btree_internal::Root<K, V>::new_(rusty::clone(alloc));
-        auto length = 0;
-        root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), &length, rusty::clone(alloc));
+        size_t length = 0;
+        root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), length, rusty::clone(alloc));
         return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>(std::move(root)), std::move(length), rusty::mem::manually_drop_new(std::move(alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
     }
     IntoIter into_iter() {

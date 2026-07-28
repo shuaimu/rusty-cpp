@@ -5,6 +5,7 @@
 // btree_port port: DormantMutRef new_ref const→mut by post_transpile_patch.py
 // btree_port port: DormantMutRef NonNull::from(t) → from(&t) by post_transpile_patch.py
 // btree_port port: bare-glob variant TODOs rewritten by post_transpile_patch.py
+// btree_port port: DedupSortedIter::next codified by post_transpile_patch.py
 // btree_port port: ValMut next_unchecked family hand-ported by post_transpile_patch.py
 // btree_port port: Peeked family exported by post_transpile_patch.py
 // btree_port port: merge/push/range bodies hand-ported by post_transpile_patch.py
@@ -3520,6 +3521,16 @@ branch, so existing integer-state hashers are unchanged. */
 unsigned char bytes[sizeof(std::size_t)];
 __builtin_memcpy(bytes, &value, sizeof(value));
 state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));
+} else if constexpr (requires {
+state.write(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* Same Hasher protocol under the plain `write` spelling —
+rusty::hash::SipHasher used directly as the state (the
+btree_set_hash tests drive BTreeSet::hash this way). */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write(std::span<const unsigned char>(bytes, sizeof(bytes)));
 } else {
 std::size_t seed = static_cast<std::size_t>(state);
 seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -5089,14 +5100,15 @@ struct DedupSortedIter {
         return DedupSortedIter<K, V, I>{.iter = rusty::peekable(iter)};
     }
     rusty::Option<std::tuple<K, V>> next() {
+        // peekable items arrive as POINTER carriers - peel with
+        // deref_if_pointer before use.
         while (true) {
-            auto next = ({ auto&& _m = this->iter.next(); std::conditional_t<std::is_reference_v<decltype(_m.unwrap())>, std::optional<std::reference_wrapper<std::remove_reference_t<decltype(_m.unwrap())>>>, std::optional<std::remove_cvref_t<decltype(_m.unwrap())>>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
-auto&& next = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-_match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return rusty::Option<std::tuple<K, V>>{rusty::None}; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
-            const auto peeked = ({ auto&& _m = this->iter.peek(); std::conditional_t<std::is_reference_v<decltype(_m.unwrap())>, std::optional<std::reference_wrapper<std::remove_reference_t<decltype(_m.unwrap())>>>, std::optional<std::remove_cvref_t<decltype(_m.unwrap())>>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
-auto&& peeked = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
-_match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return rusty::Option<std::tuple<K, V>>(std::move(next)); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
-            if (rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(next))) != rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(peeked)))) {
+            auto n = this->iter.next();
+            if (!n.is_some()) return rusty::Option<std::tuple<K, V>>{rusty::None};
+            auto&& next = rusty::detail::deref_if_pointer(std::move(n).unwrap());
+            auto&& p = this->iter.peek();
+            if (!p.is_some()) return rusty::Option<std::tuple<K, V>>(std::move(next));
+            if (!(std::get<0>(next) == std::get<0>(rusty::detail::deref_if_pointer(p.unwrap())))) {
                 return rusty::Option<std::tuple<K, V>>(std::move(next));
             }
         }

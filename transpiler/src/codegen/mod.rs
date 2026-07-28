@@ -51689,6 +51689,16 @@ inline void combine(State& state, std::size_t value) {\n\
         unsigned char bytes[sizeof(std::size_t)];\n\
         __builtin_memcpy(bytes, &value, sizeof(value));\n\
         state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));\n\
+    } else if constexpr (requires {\n\
+        state.write(std::span<const unsigned char>{});\n\
+        state.finish();\n\
+    }) {\n\
+        /* Same Hasher protocol under the plain `write` spelling —\n\
+           rusty::hash::SipHasher used directly as the state (the\n\
+           btree_set_hash tests drive BTreeSet::hash this way). */\n\
+        unsigned char bytes[sizeof(std::size_t)];\n\
+        __builtin_memcpy(bytes, &value, sizeof(value));\n\
+        state.write(std::span<const unsigned char>(bytes, sizeof(bytes)));\n\
     } else {\n\
         std::size_t seed = static_cast<std::size_t>(state);\n\
         seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);\n\

@@ -66,6 +66,11 @@ public:
     constexpr void write_i64(std::int64_t v) noexcept { write_int(v); }
     constexpr void write_isize(std::ptrdiff_t v) noexcept { write_int(v); }
 
+    // Rust `Hasher::write_length_prefix` default = write_usize. The
+    // transpiled BTreeMap::hash prefixes with the length through this
+    // (via the __mdisp_write_length_prefix dispatcher).
+    constexpr void write_length_prefix(std::size_t len) noexcept { write_usize(len); }
+
     constexpr std::uint64_t finish() const noexcept { return state_; }
 };
 

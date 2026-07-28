@@ -28,14 +28,44 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from _test_port_helpers import (  # noqa
     inject_test_runner_include,
     inject_module_imports,
-    stub_all_remaining_tests,
 )
+
+HASH_HELPERS = """
+// alloctests' `fn hash<T: Hash>(t: &T) -> u64` helper, over the port's
+// emitted Hash protocol (`t.hash(state)`) and rusty::hash::SipHasher.
+template <typename T>
+static uint64_t hash(const T& t) {
+    rusty::hash::SipHasher s;
+    t.hash(s);
+    return s.finish();
+}
+// Rust hashes `&(&x, &y)` — a tuple of REFERENCES. The emitted
+// make_tuple would COPY the (move-only) sets; hash the pair in
+// sequence instead, mirroring tuple Hash (element-wise, no length).
+template <typename A, typename B>
+static uint64_t hash_pair(const A& a, const B& b) {
+    rusty::hash::SipHasher s;
+    a.hash(s);
+    b.hash(s);
+    return s.finish();
+}
+"""
+
 
 def apply_patches(path: Path) -> None:
     text = path.read_text()
     text = inject_test_runner_include(text)
     text = inject_module_imports(text, "btree_set_hash_tests_port", [])
-    text = stub_all_remaining_tests(text, "transpiled module needs rusty/std API surface gaps filled")
+    anchor = "// Rust-only namespace re-export: using hash;"
+    if anchor in text:
+        text = text.replace(anchor, anchor + "\n" + HASH_HELPERS, 1)
+    else:
+        print("warning: hash-helper anchor missing", file=sys.stderr)
+    text = text.replace(
+        "hash(std::make_tuple(x, y))", "hash_pair(x, y)"
+    ).replace(
+        "hash(std::make_tuple(y, x))", "hash_pair(y, x)"
+    )
     path.write_text(text)
 
 def main() -> int:

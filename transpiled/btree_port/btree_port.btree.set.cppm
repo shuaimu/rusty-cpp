@@ -3513,6 +3513,16 @@ branch, so existing integer-state hashers are unchanged. */
 unsigned char bytes[sizeof(std::size_t)];
 __builtin_memcpy(bytes, &value, sizeof(value));
 state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));
+} else if constexpr (requires {
+state.write(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* Same Hasher protocol under the plain `write` spelling —
+rusty::hash::SipHasher used directly as the state (the
+btree_set_hash tests drive BTreeSet::hash this way). */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write(std::span<const unsigned char>(bytes, sizeof(bytes)));
 } else {
 std::size_t seed = static_cast<std::size_t>(state);
 seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -6156,7 +6166,7 @@ return std::move(k);
             return BTreeSet<T, rusty::alloc::Global>::new_();
         }
         rusty::sort(arr);
-        return BTreeSet<T, rusty::alloc::Global>::from_sorted_iter(arr.into_iter(), rusty::alloc::Global{});
+        return BTreeSet<T, rusty::alloc::Global>::from_sorted_iter(std::move(arr), rusty::alloc::Global{});
     }
     IntoIter into_iter() {
         return IntoIter(this->map.into_iter());

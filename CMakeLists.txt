@@ -231,7 +231,14 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         )
         target_include_directories(${_port} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_compile_features(${_port} PUBLIC cxx_std_23)
-        target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native)
+        if(_port STREQUAL "btree_set_hash_tests_port")
+            # Real translations (asserts live IN the module) — no NDEBUG,
+            # or the whole suite passes vacuously.
+            target_compile_options(${_port} PRIVATE -O3 -march=native -UNDEBUG)
+            target_link_libraries(${_port} PUBLIC rusty)
+        else()
+            target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native)
+        endif()
     endforeach()
     # btree_tests_port (the SKIP-stub module) was retired 2026-07: the
     # btree suite is fully translated in tests/btree_tests_port_unstubbed.cpp.

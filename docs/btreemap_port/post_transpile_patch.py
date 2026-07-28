@@ -6116,6 +6116,53 @@ def export_peeked_family(path: Path) -> None:
     print("  exported " + str(n) + " Peeked decl(s) in: " + path.name)
 
 
+def codify_dedup_sorted_iter_next(path: Path) -> None:
+    """DedupSortedIter::next (first instantiated by bulk-build via
+    set::from/from_iter): the emitted statement-expr match machinery
+    wraps the popped tuple in the conditional_t/reference_wrapper
+    _match_value shape and the final Option cast can't convert it.
+    Hand-port the simple peek/skip-dup loop from dedup_sorted_iter.rs."""
+    src = path.read_text()
+    sentinel = "// btree_port port: DedupSortedIter::next codified by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (DedupSortedIter already codified)")
+        return
+    mi = src.find("struct DedupSortedIter {")
+    if mi == -1:
+        print("  [warn] DedupSortedIter struct missing", file=sys.stderr)
+        return
+    sig = "rusty::Option<std::tuple<K, V>> next() {"
+    i = src.find(sig, mi)
+    if i == -1:
+        print("  [warn] DedupSortedIter::next missing", file=sys.stderr)
+        return
+    open_brace = src.find("{", i + len(sig) - 1)
+    close_brace = find_matching_brace(src, open_brace)
+    if close_brace == -1:
+        return
+    body = (
+        "{\n"
+        "        // peekable items arrive as POINTER carriers - peel with\n"
+        "        // deref_if_pointer before use.\n"
+        "        while (true) {\n"
+        "            auto n = this->iter.next();\n"
+        "            if (!n.is_some()) return rusty::Option<std::tuple<K, V>>{rusty::None};\n"
+        "            auto&& next = rusty::detail::deref_if_pointer(std::move(n).unwrap());\n"
+        "            auto&& p = this->iter.peek();\n"
+        "            if (!p.is_some()) return rusty::Option<std::tuple<K, V>>(std::move(next));\n"
+        "            if (!(std::get<0>(next) == std::get<0>(rusty::detail::deref_if_pointer(p.unwrap())))) {\n"
+        "                return rusty::Option<std::tuple<K, V>>(std::move(next));\n"
+        "            }\n"
+        "        }\n"
+        "    }"
+    )
+    src = src[:i] + sig[:-1] + body + src[close_brace + 1 :]
+    i2 = src.find("\n")
+    src = src[: i2 + 1] + sentinel + "\n" + src[i2 + 1 :]
+    path.write_text(src)
+    print("  codified DedupSortedIter::next in: " + path.name)
+
+
 def codify_cursor_mut_key(path: Path) -> None:
     """CursorMutKey's emitted bodies were never instantiated until the
     cursor tests landed; first instantiation surfaced 5 emission bug
@@ -6267,6 +6314,18 @@ def fix_set_specialized_impl_forwards(path: Path) -> None:
         print(f"  no changes to: {path.name} (specialized forwards already rewired)")
         return
     n = 0
+    # BTreeSet::from(std::array) called `.into_iter()` on the array —
+    # std::array has no such member. The map's from(array) passes the
+    # array straight to bulk_build_from_sorted_iter (which adapts it
+    # internally); mirror that. First instantiated by btree_set_hash's
+    # test_prefix_free.
+    old_from = "from_sorted_iter(arr.into_iter(), rusty::alloc::Global{})"
+    new_from = "from_sorted_iter(std::move(arr), rusty::alloc::Global{})"
+    if old_from in src:
+        src = src.replace(old_from, new_from, 1)
+        n += 1
+    else:
+        print("  [warn] set from(array) into_iter site not found", file=sys.stderr)
     old_replace = (
         "    rusty::Option<T> replace(T value) {\n"
         "        return this->map.replace(std::move(value));\n"
@@ -6467,6 +6526,22 @@ def fix_map_splitoff_alloc_and_le(path: Path) -> None:
     # runtime, `k <= end` must still TYPE-CHECK for non-numeric keys
     # (CrashTestDummy Instance broke here). le_or_false/lt_or_false
     # compare only when the types can.
+    # bulk_build_from_sorted_iter (first instantiated via set::from):
+    # emitted `auto length = 0` (int) + `&length` (pointer) where
+    # Root::bulk_push takes `size_t&`. Type the local, pass the lvalue.
+    old_len = (
+        "        auto length = 0;\n"
+        "        root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), &length, rusty::clone(alloc));"
+    )
+    new_len = (
+        "        size_t length = 0;\n"
+        "        root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), length, rusty::clone(alloc));"
+    )
+    if old_len in src:
+        src = src.replace(old_len, new_len, 1)
+        n += 1
+    else:
+        print("  [warn] bulk_build length site not found", file=sys.stderr)
     for old, new in (
         (
             "static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))).le(end))",
@@ -7029,6 +7104,7 @@ def main() -> int:
     codify_merge_push_range_bodies(internal)
     export_peeked_family(internal)
     codify_valmut_next_unchecked(internal)
+    codify_dedup_sorted_iter_next(internal)
     # Phase E (correctness fixes surfaced at instantiation time):
     fix_dormant_mut_ref_from_t(internal)
     fix_dormant_mut_ref_const_ref(internal)
