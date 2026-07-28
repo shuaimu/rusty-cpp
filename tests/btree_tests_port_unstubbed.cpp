@@ -22,6 +22,8 @@ import btree_port.btree.set;
 #include <stdexcept>
 #include <tuple>
 #include <utility>
+#include <vector>
+#include <cstring>
 #include <rusty/alloc.hpp>
 #include <rusty/move.hpp>  // rusty::clone
 
@@ -9205,3 +9207,684 @@ TEST_CASE("test_cursor_empty_unstubbed") {
 // is infinite-recursive — calls this->extend(rusty::map(...)) which
 // dispatches to the same template. Correct impl exists at line 5960
 // inside #if 0. Held until the active impl is replaced.
+
+// ═════════════════════════════════════════════════════════════════════
+// 2026-07 stub-retirement batch 1: the extract_if matrix + retain +
+// set recovery — rustc mod test_extract_if / test_retain /
+// set test_retain / set test_extract_if / set test_recovery.
+// The old "extract_if blocked" notes above are stale: the regenerated
+// port's ExtractIf is functional (probe-verified map+set, mutation
+// through pred included).
+// ═════════════════════════════════════════════════════════════════════
+
+// Drain an extract_if iterator, returning the extracted (k,v) pairs'
+// keys in order (map) — Rust's `.for_each(drop)` / `.eq(...)` stand-in.
+template <typename I>
+static std::vector<int> drain_keys(I it) {
+    std::vector<int> ks;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        ks.push_back(std::get<0>(std::move(v).unwrap()));
+    }
+    return ks;
+}
+template <typename I>
+static std::vector<int> drain_vals_set(I it) {
+    std::vector<int> vs;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        vs.push_back(std::move(v).unwrap());
+    }
+    return vs;
+}
+
+static auto iota_map(int n) {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < n; ++i) m.insert(i, i);
+    return m;
+}
+
+// rustc map/tests.rs::test_extract_if::empty (height() → is_empty here)
+TEST_CASE("extract_if_empty_unstubbed") {
+    auto m = make_map<int, int>();
+    auto drained = drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) -> bool {
+        assert(!"there's nothing to decide on");
+        return false;
+    }));
+    assert(drained.empty());
+    assert(m.is_empty());
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::consumed_keeping_all
+TEST_CASE("consumed_keeping_all_unstubbed") {
+    auto m = iota_map(3);
+    assert(drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) { return false; })).empty());
+    assert(m.len() == 3);
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::consumed_removing_all
+TEST_CASE("consumed_removing_all_unstubbed") {
+    auto m = iota_map(3);
+    auto ks = drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) { return true; }));
+    assert((ks == std::vector<int>{0, 1, 2}));
+    assert(m.is_empty());
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::consumed_removing_some — range
+// arms over x..y and x..=y, extracted set must equal the range.
+TEST_CASE("consumed_removing_some_unstubbed") {
+    auto base = iota_map(3);
+    for (int x = 0; x < 3; ++x) {
+        for (int y = 0; y < 3; ++y) {
+            auto m = rusty::clone(base);
+            auto ks = drain_keys(m.extract_if(rusty::range(x, y), [](auto&&, auto&&) { return true; }));
+            std::vector<int> expect;
+            for (int i = x; i < y; ++i) expect.push_back(i);
+            assert(ks == expect);
+            for (int i = 0; i < 3; ++i) {
+                bool in_range = (i >= x && i < y);
+                assert(m.contains_key(i) != in_range);
+            }
+        }
+    }
+    for (int x = 0; x < 3; ++x) {
+        for (int y = 0; y < 2; ++y) {
+            auto m = rusty::clone(base);
+            auto ks = drain_keys(m.extract_if(rusty::range_inclusive(x, y), [](auto&&, auto&&) { return true; }));
+            std::vector<int> expect;
+            for (int i = x; i <= y; ++i) expect.push_back(i);
+            assert(ks == expect);
+            for (int i = 0; i < 3; ++i) {
+                bool in_range = (i >= x && i <= y);
+                assert(m.contains_key(i) != in_range);
+            }
+        }
+    }
+}
+
+// rustc map/tests.rs::test_extract_if::mutating_and_keeping
+TEST_CASE("mutating_and_keeping_unstubbed") {
+    auto m = iota_map(3);
+    assert(drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&& v) {
+        v += 6;
+        return false;
+    })).empty());
+    for (int i = 0; i < 3; ++i) {
+        assert(m.get(i).unwrap() == i + 6);
+    }
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::mutating_and_removing
+TEST_CASE("mutating_and_removing_unstubbed") {
+    auto m = iota_map(3);
+    auto it = m.extract_if(rusty::range_full{}, [](auto&&, auto&& v) {
+        v += 6;
+        return true;
+    });
+    int expected_k = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto [k, val] = std::move(v).unwrap();
+        assert(k == expected_k);
+        assert(val == expected_k + 6);
+        ++expected_k;
+    }
+    assert(expected_k == 3);
+    assert(m.is_empty());
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::underfull_keeping_all
+TEST_CASE("underfull_keeping_all_unstubbed") {
+    auto m = iota_map(3);
+    drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) { return false; }));
+    for (int i = 0; i < 3; ++i) assert(m.contains_key(i));
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::underfull_removing_one
+TEST_CASE("underfull_removing_one_unstubbed") {
+    for (int doomed = 0; doomed < 3; ++doomed) {
+        auto m = iota_map(3);
+        drain_keys(m.extract_if(rusty::range_full{}, [&](auto&& i, auto&&) { return i == doomed; }));
+        assert(m.len() == 2);
+        check(m);
+    }
+}
+
+// rustc map/tests.rs::test_extract_if::height_0_keeping_all
+TEST_CASE("height_0_keeping_all_unstubbed") {
+    auto m = iota_map(static_cast<int>(NODE_CAPACITY));
+    drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) { return false; }));
+    for (int i = 0; i < static_cast<int>(NODE_CAPACITY); ++i) assert(m.contains_key(i));
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::height_0_removing_one
+TEST_CASE("height_0_removing_one_unstubbed") {
+    for (int doomed = 0; doomed < static_cast<int>(NODE_CAPACITY); ++doomed) {
+        auto m = iota_map(static_cast<int>(NODE_CAPACITY));
+        drain_keys(m.extract_if(rusty::range_full{}, [&](auto&& i, auto&&) { return i == doomed; }));
+        assert(m.len() == NODE_CAPACITY - 1);
+        check(m);
+    }
+}
+
+// rustc map/tests.rs::test_extract_if::height_0_keeping_one
+TEST_CASE("height_0_keeping_one_unstubbed") {
+    for (int sacred = 0; sacred < static_cast<int>(NODE_CAPACITY); ++sacred) {
+        auto m = iota_map(static_cast<int>(NODE_CAPACITY));
+        drain_keys(m.extract_if(rusty::range_full{}, [&](auto&& i, auto&&) { return i != sacred; }));
+        assert(m.len() == 1);
+        assert(m.contains_key(sacred));
+        check(m);
+    }
+}
+
+// rustc map/tests.rs::test_extract_if::height_0_removing_all
+TEST_CASE("height_0_removing_all_unstubbed") {
+    auto m = iota_map(static_cast<int>(NODE_CAPACITY));
+    drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) { return true; }));
+    assert(m.is_empty());
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::height_0_keeping_half
+TEST_CASE("height_0_keeping_half_unstubbed") {
+    auto m = iota_map(16);
+    auto ks = drain_keys(m.extract_if(rusty::range_full{}, [](auto&& i, auto&&) { return i % 2 == 0; }));
+    assert(ks.size() == 8);
+    assert(m.len() == 8);
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::height_2_removing_one (step 12)
+TEST_CASE("height_2_removing_one_unstubbed") {
+    const int n = static_cast<int>(MIN_INSERTS_HEIGHT_2);
+    for (int doomed = 0; doomed < n; doomed += 12) {
+        auto m = iota_map(n);
+        drain_keys(m.extract_if(rusty::range_full{}, [&](auto&& i, auto&&) { return i == doomed; }));
+        assert(m.len() == MIN_INSERTS_HEIGHT_2 - 1);
+        check(m);
+    }
+}
+
+// rustc map/tests.rs::test_extract_if::height_2_keeping_one (step 12)
+TEST_CASE("height_2_keeping_one_unstubbed") {
+    const int n = static_cast<int>(MIN_INSERTS_HEIGHT_2);
+    for (int sacred = 0; sacred < n; sacred += 12) {
+        auto m = iota_map(n);
+        drain_keys(m.extract_if(rusty::range_full{}, [&](auto&& i, auto&&) { return i != sacred; }));
+        assert(m.len() == 1);
+        assert(m.contains_key(sacred));
+        check(m);
+    }
+}
+
+// rustc map/tests.rs::test_extract_if::height_2_removing_all
+TEST_CASE("height_2_removing_all_unstubbed") {
+    auto m = iota_map(static_cast<int>(MIN_INSERTS_HEIGHT_2));
+    drain_keys(m.extract_if(rusty::range_full{}, [](auto&&, auto&&) { return true; }));
+    assert(m.is_empty());
+    check(m);
+}
+
+// rustc map/tests.rs::test_retain
+TEST_CASE("test_retain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int x = 0; x < 100; ++x) m.insert(x, x * 10);
+    m.retain([](auto&& k, auto&&) { return k % 2 == 0; });
+    assert(m.len() == 50);
+    assert(m.get(2).unwrap() == 20);
+    assert(m.get(4).unwrap() == 40);
+    assert(m.get(6).unwrap() == 60);
+}
+
+// rustc set/tests.rs::test_retain
+TEST_CASE("set_test_retain_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {1, 2, 3, 4, 5, 6}) s.insert(v);
+    s.retain([](auto&& k) { return k % 2 == 0; });
+    assert(s.len() == 3);
+    assert(s.contains(2));
+    assert(s.contains(4));
+    assert(s.contains(6));
+}
+
+// rustc set/tests.rs::test_extract_if
+TEST_CASE("set_test_extract_if_unstubbed") {
+    auto x = make_set<int>();
+    auto y = make_set<int>();
+    x.insert(1);
+    y.insert(1);
+    drain_vals_set(x.extract_if(rusty::range_full{}, [](auto&&) { return true; }));
+    drain_vals_set(y.extract_if(rusty::range_full{}, [](auto&&) { return false; }));
+    assert(x.len() == 0);
+    assert(y.len() == 1);
+}
+
+// rustc set/tests.rs::test_recovery — Eq/Ord look only at the string
+// key; replace()/get()/take() must yield the STORED element.
+namespace recovery_detail {
+struct Foo {
+    const char* s;
+    int i;
+    bool operator==(const Foo& o) const { return std::strcmp(s, o.s) == 0; }
+    bool operator<(const Foo& o) const { return std::strcmp(s, o.s) < 0; }
+};
+}  // namespace recovery_detail
+TEST_CASE("set_test_recovery_unstubbed") {
+    using recovery_detail::Foo;
+    auto s = make_set<Foo>();
+    assert(s.replace(Foo{"a", 1}).is_none());
+    assert(s.len() == 1);
+    {
+        auto old = s.replace(Foo{"a", 2});
+        assert(old.is_some());
+        assert(std::move(old).unwrap().i == 1);
+    }
+    assert(s.len() == 1);
+    {
+        auto it = s.iter();
+        auto first = it.next();
+        assert(first.is_some());
+        assert(first.unwrap().i == 2);
+        assert(it.next().is_none());
+    }
+    {
+        auto got = s.get(Foo{"a", 1});
+        assert(got.is_some());
+        assert(got.unwrap().i == 2);
+    }
+    {
+        auto taken = s.take(Foo{"a", 1});
+        assert(taken.is_some());
+        assert(std::move(taken).unwrap().i == 2);
+    }
+    assert(s.len() == 0);
+    assert(s.get(Foo{"a", 1}).is_none());
+    assert(s.take(Foo{"a", 1}).is_none());
+    assert(s.iter().next().is_none());
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// 2026-07 stub-retirement batch 2: the CursorMut family.
+// Bound<const K&> is a variant over reference-holding structs; the
+// decaying rusty::bound_* factories can't produce it, so construct
+// the variant alternatives directly.
+// ═════════════════════════════════════════════════════════════════════
+
+namespace cursor_detail {
+inline rusty::Bound<const int&> excl(const int& k) {
+    return rusty::Bound<const int&>(rusty::Bound_Excluded<const int&>{k});
+}
+inline rusty::Bound<const int&> incl(const int& k) {
+    return rusty::Bound<const int&>(rusty::Bound_Included<const int&>{k});
+}
+inline rusty::Bound<const int&> unbounded() {
+    return rusty::Bound<const int&>(rusty::Bound_Unbounded<const int&>{});
+}
+// peeked Option<tuple<const K&, V&>> equals (k, v)?
+template <typename P>
+inline bool pair_is(P&& p, int k, char v) {
+    if (!p.is_some()) return false;
+    auto t = p.unwrap();
+    return std::get<0>(t) == k && std::get<1>(t) == v;
+}
+// removed Option<tuple<K, V>> equals (k, v)?
+template <typename P>
+inline bool removed_is(P&& p, int k, char v) {
+    if (!p.is_some()) return false;
+    auto t = std::move(p).unwrap();
+    return std::get<0>(t) == k && std::get<1>(t) == v;
+}
+inline auto map_abc() {
+    auto m = make_map<int, char>();
+    m.insert(1, 'a');
+    m.insert(2, 'b');
+    m.insert(3, 'c');
+    return m;
+}
+}  // namespace cursor_detail
+
+// rustc map/tests.rs::test_cursor_mut
+TEST_CASE("test_cursor_mut_unstubbed") {
+    using namespace cursor_detail;
+    auto m = make_map<int, char>();
+    m.insert(1, 'a');
+    m.insert(3, 'c');
+    m.insert(5, 'e');
+    {
+        int three = 3;
+        auto cur = m.lower_bound_mut(excl(three));
+        assert(pair_is(cur.peek_next(), 5, 'e'));
+        assert(pair_is(cur.peek_prev(), 3, 'c'));
+
+        assert(cur.insert_before(4, 'd').is_ok());
+        assert(pair_is(cur.peek_next(), 5, 'e'));
+        assert(pair_is(cur.peek_prev(), 4, 'd'));
+
+        assert(pair_is(cur.next(), 5, 'e'));
+        assert(cur.peek_next().is_none());
+        assert(pair_is(cur.peek_prev(), 5, 'e'));
+        assert(cur.insert_before(6, 'f').is_ok());
+        assert(cur.peek_next().is_none());
+        assert(pair_is(cur.peek_prev(), 6, 'f'));
+        assert(removed_is(cur.remove_prev(), 6, 'f'));
+        assert(removed_is(cur.remove_prev(), 5, 'e'));
+        assert(cur.remove_next().is_none());
+    }
+    {
+        auto expect = make_map<int, char>();
+        expect.insert(1, 'a');
+        expect.insert(3, 'c');
+        expect.insert(4, 'd');
+        assert(m == expect);
+    }
+    {
+        int five = 5;
+        auto cur = m.upper_bound_mut(incl(five));
+        assert(cur.peek_next().is_none());
+        assert(pair_is(cur.prev(), 4, 'd'));
+        assert(pair_is(cur.peek_next(), 4, 'd'));
+        assert(pair_is(cur.peek_prev(), 3, 'c'));
+        assert(removed_is(cur.remove_next(), 4, 'd'));
+    }
+    {
+        auto expect = make_map<int, char>();
+        expect.insert(1, 'a');
+        expect.insert(3, 'c');
+        assert(m == expect);
+    }
+}
+
+// rustc map/tests.rs::test_cursor_mut_key (CursorMutKey via
+// with_mutable_key; members hand-ported by the patcher after their
+// first-ever instantiation surfaced 5 emission bug classes).
+TEST_CASE("test_cursor_mut_key_unstubbed") {
+    using namespace cursor_detail;
+    auto m = make_map<int, char>();
+    m.insert(1, 'a');
+    m.insert(3, 'c');
+    m.insert(5, 'e');
+    {
+        int three = 3;
+        auto cur = m.lower_bound_mut(excl(three)).with_mutable_key();
+        assert(pair_is(cur.peek_next(), 5, 'e'));
+        assert(pair_is(cur.peek_prev(), 3, 'c'));
+
+        assert(cur.insert_before(4, 'd').is_ok());
+        assert(pair_is(cur.peek_next(), 5, 'e'));
+        assert(pair_is(cur.peek_prev(), 4, 'd'));
+
+        assert(pair_is(cur.next(), 5, 'e'));
+        assert(cur.peek_next().is_none());
+        assert(pair_is(cur.peek_prev(), 5, 'e'));
+        assert(cur.insert_before(6, 'f').is_ok());
+        assert(removed_is(cur.remove_prev(), 6, 'f'));
+        assert(removed_is(cur.remove_prev(), 5, 'e'));
+        assert(cur.remove_next().is_none());
+    }
+    auto expect = make_map<int, char>();
+    expect.insert(1, 'a');
+    expect.insert(3, 'c');
+    expect.insert(4, 'd');
+    assert(m == expect);
+}
+
+// rustc map/tests.rs::test_cursor_mut_insert_before_{1..4} — inserting
+// a key that violates cursor ordering must be an Err.
+TEST_CASE("test_cursor_mut_insert_before_1_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_before(0, 'd').is_err());
+}
+TEST_CASE("test_cursor_mut_insert_before_2_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_before(1, 'd').is_err());
+}
+TEST_CASE("test_cursor_mut_insert_before_3_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_before(2, 'd').is_err());
+}
+TEST_CASE("test_cursor_mut_insert_before_4_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_before(3, 'd').is_err());
+}
+
+// rustc map/tests.rs::test_cursor_mut_insert_after_{1..4}
+TEST_CASE("test_cursor_mut_insert_after_1_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_after(1, 'd').is_err());
+}
+TEST_CASE("test_cursor_mut_insert_after_2_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_after(2, 'd').is_err());
+}
+TEST_CASE("test_cursor_mut_insert_after_3_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_after(3, 'd').is_err());
+}
+TEST_CASE("test_cursor_mut_insert_after_4_unstubbed") {
+    using namespace cursor_detail;
+    auto m = map_abc();
+    int two = 2;
+    auto cur = m.upper_bound_mut(incl(two));
+    assert(cur.insert_after(4, 'd').is_err());
+}
+
+// rustc map/tests.rs::cursor_peek_prev_agrees_with_cursor_mut
+TEST_CASE("cursor_peek_prev_agrees_with_cursor_mut_unstubbed") {
+    using namespace cursor_detail;
+    auto m = make_map<int, int>();
+    m.insert(1, 1);
+    m.insert(2, 2);
+    m.insert(3, 3);
+    {
+        int three = 3;
+        auto cursor = m.lower_bound(excl(three));
+        assert(cursor.peek_next().is_none());
+        auto prev = cursor.peek_prev();
+        assert(prev.is_some());
+        assert(std::get<0>(prev.unwrap()) == 3);
+    }
+    {
+        int three = 3;
+        auto cursor = m.lower_bound_mut(excl(three));
+        assert(cursor.peek_next().is_none());
+        auto prev = cursor.peek_prev();
+        assert(prev.is_some());
+        assert(std::get<0>(prev.unwrap()) == 3);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// 2026-07 stub-retirement batch 3: panic-leak family (CrashTestDummy,
+// unwind mode), ord-chaos append/merge, bad-ZST ordering.
+// catch_unwind → try/catch std::exception (rusty panics throw under
+// the default unwind mode; Instance's dtor is noexcept(false) with an
+// uncaught_exceptions guard).
+// ═════════════════════════════════════════════════════════════════════
+
+// rustc map/tests.rs::test_extract_if::pred_panic_leak
+TEST_CASE("pred_panic_leak_unstubbed") {
+    btree_testing::CrashTestDummy a(0), b(1), c(2);
+    auto m = make_map<btree_testing::Instance, Unit>();
+    m.insert(a.spawn(btree_testing::Panic::Never), kUnit);
+    m.insert(b.spawn(btree_testing::Panic::InQuery), kUnit);
+    m.insert(c.spawn(btree_testing::Panic::InQuery), kUnit);
+
+    bool panicked = false;
+    try {
+        auto it = m.extract_if(rusty::range_full{}, [](auto&& dummy, auto&&) { return dummy.query(true); });
+        for (auto v = it.next(); v.is_some(); v = it.next()) {}
+    } catch (const std::exception&) {
+        panicked = true;
+    }
+    assert(panicked);
+
+    assert(a.queried() == 1);
+    assert(b.queried() == 1);
+    assert(c.queried() == 0);
+    assert(a.dropped() == 1);
+    assert(b.dropped() == 0);
+    assert(c.dropped() == 0);
+    assert(m.len() == 2);
+    assert(m.first_entry().unwrap().key().id() == 1);
+    assert(m.last_entry().unwrap().key().id() == 2);
+    check(m);
+}
+
+// rustc map/tests.rs::test_extract_if::pred_panic_reuse — iterator
+// behavior after a panic is unspecified; current impl yields None.
+TEST_CASE("pred_panic_reuse_unstubbed") {
+    btree_testing::CrashTestDummy a(0), b(1), c(2);
+    auto m = make_map<btree_testing::Instance, Unit>();
+    m.insert(a.spawn(btree_testing::Panic::Never), kUnit);
+    m.insert(b.spawn(btree_testing::Panic::InQuery), kUnit);
+    m.insert(c.spawn(btree_testing::Panic::InQuery), kUnit);
+
+    {
+        auto it = m.extract_if(rusty::range_full{}, [](auto&& dummy, auto&&) { return dummy.query(true); });
+        bool panicked = false;
+        try {
+            while (it.next().is_some()) {}
+        } catch (const std::exception&) {
+            panicked = true;
+        }
+        assert(panicked);
+        bool second_ok = false;
+        try {
+            second_ok = it.next().is_none();
+        } catch (const std::exception&) {
+        }
+        assert(second_ok);
+    }
+
+    assert(a.queried() == 1);
+    assert(b.queried() == 1);
+    assert(c.queried() == 0);
+    assert(a.dropped() == 1);
+    assert(b.dropped() == 0);
+    assert(c.dropped() == 0);
+    assert(m.len() == 2);
+    assert(m.first_entry().unwrap().key().id() == 1);
+    assert(m.last_entry().unwrap().key().id() == 2);
+    check(m);
+}
+
+// rustc set/tests.rs::test_extract_if_drop_panic_leak: DEFERRED —
+// KNOWN PORT DIVERGENCE: MaybeUninit::assume_init_read COPIES for
+// copyable T (Rust ptr::read relocates), so the extracted element
+// is a clone whose InDrop panic never fires; making it relocate
+// double-frees on the dying-IntoIter/append teardown (needs
+// dead-slot tracking there first). See maybe_uninit.hpp note.
+
+// rustc set/tests.rs::test_extract_if_pred_panic_leak
+TEST_CASE("set_test_extract_if_pred_panic_leak_unstubbed") {
+    btree_testing::CrashTestDummy a(0), b(1), c(2);
+    auto s = make_set<btree_testing::Instance>();
+    s.insert(a.spawn(btree_testing::Panic::Never));
+    s.insert(b.spawn(btree_testing::Panic::InQuery));
+    s.insert(c.spawn(btree_testing::Panic::InQuery));
+
+    try {
+        auto it = s.extract_if(rusty::range_full{}, [](auto&& dummy) { return dummy.query(true); });
+        for (auto v = it.next(); v.is_some(); v = it.next()) {}
+    } catch (const std::exception&) {
+    }
+
+    assert(a.queried() == 1);
+    assert(b.queried() == 1);
+    assert(c.queried() == 0);
+    assert(a.dropped() == 1);
+    assert(b.dropped() == 0);
+    assert(c.dropped() == 0);
+    assert(s.len() == 2);
+    assert(s.first().unwrap().id() == 1);
+    assert(s.last().unwrap().id() == 2);
+}
+
+// rustc map/tests.rs::test_append_drop_leak: DEFERRED — same
+// assume_init_read clone divergence as above (InDrop never fires
+// during append; drop counts diverge).
+
+// rustc map/tests.rs::test_append_ord_chaos — Cyclic3's Ord violates
+// transitivity; append must not lose or duplicate elements.
+TEST_CASE("test_append_ord_chaos_unstubbed") {
+    using btree_testing::Cyclic3;
+    auto map1 = make_map<Cyclic3, Unit>();
+    map1.insert(Cyclic3::A, kUnit);
+    map1.insert(Cyclic3::B, kUnit);
+    auto map2 = make_map<Cyclic3, Unit>();
+    map2.insert(Cyclic3::A, kUnit);
+    map2.insert(Cyclic3::B, kUnit);
+    map2.insert(Cyclic3::C, kUnit);  // lands first, before A
+    map2.insert(Cyclic3::B, kUnit);  // lands first, before C
+    check(map1);
+    check(map2);
+    assert(map1.len() == 2);
+    assert(map2.len() == 4);
+    map1.append(map2);
+    assert(map1.len() == 5);
+    assert(map2.len() == 0);
+    check(map1);
+    check(map2);
+}
+
+// rustc map/tests.rs::test_merge_ord_chaos
+TEST_CASE("test_merge_ord_chaos_unstubbed") {
+    using btree_testing::Cyclic3;
+    auto map1 = make_map<Cyclic3, Unit>();
+    map1.insert(Cyclic3::A, kUnit);
+    map1.insert(Cyclic3::B, kUnit);
+    auto map2 = make_map<Cyclic3, Unit>();
+    map2.insert(Cyclic3::A, kUnit);
+    map2.insert(Cyclic3::B, kUnit);
+    map2.insert(Cyclic3::C, kUnit);
+    map2.insert(Cyclic3::B, kUnit);
+    assert(map1.len() == 2);
+    assert(map2.len() == 4);
+    map1.merge(std::move(map2), [](auto&&, auto&&, auto&&) -> Unit { return kUnit; });
+    assert(map1.len() == 5);
+    check(map1);
+}
+
+// rustc map/tests.rs::test_bad_zst — a ZST key that is never equal and
+// always compares Less; every insert must land.
+namespace bad_zst_detail {
+struct Bad {
+    bool operator==(const Bad&) const { return false; }
+    bool operator<(const Bad&) const { return true; }
+};
+}  // namespace bad_zst_detail
+TEST_CASE("test_bad_zst_unstubbed") {
+    using bad_zst_detail::Bad;
+    auto m = make_map<Bad, Bad>();
+    for (int i = 0; i < 100; ++i) {
+        m.insert(Bad{}, Bad{});
+    }
+    assert(m.len() == 100);
+    check(m);
+}

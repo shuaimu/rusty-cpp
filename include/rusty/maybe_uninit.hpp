@@ -114,6 +114,16 @@ public:
     // is instantiated with a move-only value type like
     // `std::pair<long, rusty::Function<void()>>`).
     // @unsafe
+    //
+    // KNOWN DIVERGENCE (2026-07, tracked): Rust's `ptr::read` is a
+    // bitwise relocation; this COPIES for copyable T. Consequence:
+    // btree removal paths invoke the copy ctor once per extracted
+    // element (observable with instrumented types — CrashTestDummy's
+    // InDrop panic never travels because the copy resets it), and the
+    // abandoned source is destroyed by node teardown. Switching to
+    // relocation double-frees on the dying-IntoIter/append path whose
+    // teardown DOES destruct source slots — that teardown must learn
+    // dead-slot tracking before this can be Rust-faithful.
     T assume_init_read() const noexcept(std::is_nothrow_copy_constructible_v<T>)
         requires (std::is_copy_constructible_v<T>)
     {

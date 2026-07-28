@@ -1029,6 +1029,30 @@ struct zip_view {
     }
 };
 
+// Heterogeneous-safe comparisons for emitted range-bound gates: the
+// Included/Excluded arm is DEAD at runtime when the bound type can't
+// order against the key (rusty::range_full defaults its bound to
+// size_t), but C++ still type-checks the dead arm. Compare when the
+// types can; otherwise the arm is unreachable and false is safe.
+namespace detail {
+template<typename A, typename B>
+constexpr bool le_or_false(const A& a, const B& b) {
+    if constexpr (requires { { a <= b } -> std::convertible_to<bool>; }) {
+        return a <= b;
+    } else {
+        return false;
+    }
+}
+template<typename A, typename B>
+constexpr bool lt_or_false(const A& a, const B& b) {
+    if constexpr (requires { { a < b } -> std::convertible_to<bool>; }) {
+        return a < b;
+    } else {
+        return false;
+    }
+}
+}  // namespace detail
+
 // Rust-shaped (Option-returning `next()`) iterators — the transpiled
 // port types (map::Iter, set::Iter, …) have no begin()/end(). Adapt
 // them with a prefetching wrapper so zip can walk both worlds.

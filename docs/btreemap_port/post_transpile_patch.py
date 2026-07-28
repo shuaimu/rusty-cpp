@@ -855,8 +855,17 @@ def fix_merge_unknown_Q(path: Path) -> None:
     if sentinel in src:
         print(f"  no changes to: {path.name} (merge Q→K already applied)")
         return
-    target = "this->lower_bound_mut(rusty::Bound<const Q&>::Included("
-    repl = "this->lower_bound_mut(rusty::Bound<const K&>::Included("
+    # Bound is an alias template over std::variant — Rust's
+    # `Bound::Included(x)` path-call has no C++ equivalent; construct
+    # the variant alternative directly (first instantiated by the
+    # merge tests).
+    # Also: the emitted `auto&` binding can't hold the returned
+    # CursorMut prvalue — own it by value (Rust's cursor is a value).
+    target = "auto& self_cursor = this->lower_bound_mut(rusty::Bound<const Q&>::Included(first_other_key))"
+    repl = (
+        "auto self_cursor = this->lower_bound_mut(rusty::Bound<const K&>("
+        "rusty::Bound_Included<const K&>{first_other_key}))"
+    )
     if target in src:
         src = src.replace(target, repl, 1)
         src = sentinel + "\n" + src
@@ -6107,6 +6116,196 @@ def export_peeked_family(path: Path) -> None:
     print("  exported " + str(n) + " Peeked decl(s) in: " + path.name)
 
 
+def codify_cursor_mut_key(path: Path) -> None:
+    """CursorMutKey's emitted bodies were never instantiated until the
+    cursor tests landed; first instantiation surfaced 5 emission bug
+    classes (polonius pointer-roundtrip const_cast on values, `auto&`
+    to into_kv_mut's rvalue tuple, const edge/root bindings blocking
+    mutation, a value-position statement-expr that early-returns).
+    Hand-port next/prev/insert_{after,before}_unchecked from map.rs
+    CursorMutKey and one-line-fix peek_prev."""
+    src = path.read_text()
+    sentinel = "// btree_port port: CursorMutKey codified by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (CursorMutKey already codified)")
+        return
+    n = 0
+
+    def member_swap(src, n, struct_anchor, sig, body):
+        mi = src.find(struct_anchor)
+        if mi == -1:
+            print(f"  [warn] {struct_anchor} missing", file=sys.stderr)
+            return src, n
+        i = src.find(sig, mi)
+        if i == -1:
+            print(f"  [warn] {sig[:50]} missing under CursorMutKey", file=sys.stderr)
+            return src, n
+        open_brace = src.find("{", i + len(sig) - 1)
+        close_brace = find_matching_brace(src, open_brace)
+        if close_brace == -1:
+            return src, n
+        return src[:i] + sig[:-1] + body + src[close_brace + 1 :], n + 1
+
+    anchor = "struct CursorMutKey {"
+    next_body = (
+        "{\n"
+        "        auto cur = this->current.take();\n"
+        "        if (!cur.is_some()) return rusty::Option<std::tuple<K&, V&>>{rusty::None};\n"
+        "        auto current = std::move(cur).unwrap();\n"
+        "        auto res = current.next_kv();\n"
+        "        if (res.is_ok()) {\n"
+        "            auto kv = std::move(res).unwrap();\n"
+        "            auto pair = kv.reborrow_mut().into_kv_mut();\n"
+        "            K* kp = &std::get<0>(pair);\n"
+        "            V* vp = &std::get<1>(pair);\n"
+        "            this->current = decltype(this->current)(kv.next_leaf_edge());\n"
+        "            return rusty::Option<std::tuple<K&, V&>>(std::tuple<K&, V&>{*kp, *vp});\n"
+        "        }\n"
+        "        auto root = std::move(res).unwrap_err();\n"
+        "        this->current = decltype(this->current)(root.last_leaf_edge());\n"
+        "        return rusty::Option<std::tuple<K&, V&>>{rusty::None};\n"
+        "    }"
+    )
+    prev_body = (
+        "{\n"
+        "        auto cur = this->current.take();\n"
+        "        if (!cur.is_some()) return rusty::Option<std::tuple<K&, V&>>{rusty::None};\n"
+        "        auto current = std::move(cur).unwrap();\n"
+        "        auto res = current.next_back_kv();\n"
+        "        if (res.is_ok()) {\n"
+        "            auto kv = std::move(res).unwrap();\n"
+        "            auto pair = kv.reborrow_mut().into_kv_mut();\n"
+        "            K* kp = &std::get<0>(pair);\n"
+        "            V* vp = &std::get<1>(pair);\n"
+        "            this->current = decltype(this->current)(kv.next_back_leaf_edge());\n"
+        "            return rusty::Option<std::tuple<K&, V&>>(std::tuple<K&, V&>{*kp, *vp});\n"
+        "        }\n"
+        "        auto root = std::move(res).unwrap_err();\n"
+        "        this->current = decltype(this->current)(root.first_leaf_edge());\n"
+        "        return rusty::Option<std::tuple<K&, V&>>{rusty::None};\n"
+        "    }"
+    )
+    insert_after_body = (
+        "{\n"
+        "        auto cur = this->current.take();\n"
+        "        if (!cur.is_some()) {\n"
+        "            auto& root = this->root.reborrow();\n"
+        "            assert(root.is_none());\n"
+        "            auto node = btree_internal::NodeRef<btree_internal::marker::Owned, K, V, btree_internal::marker::Leaf>::new_leaf(rusty::clone(this->alloc));\n"
+        "            auto handle = rusty::deref_call(node.borrow_mut(), rusty::detail::__mdisp_push_with_handle{}, std::move(key), std::move(value));\n"
+        "            root = rusty::Some(node.forget_type());\n"
+        "            this->length += 1;\n"
+        "            this->current = decltype(this->current)(handle.left_edge());\n"
+        "            return;\n"
+        "        }\n"
+        "        auto edge = std::move(cur).unwrap();\n"
+        "        auto handle = edge.insert_recursing(std::move(key), std::move(value), rusty::clone(this->alloc), [&](auto&& ins) {\n"
+        "            rusty::mem::drop(std::move(ins.left));\n"
+        "            auto root = this->root.reborrow().as_mut().unwrap();\n"
+        "            return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(std::get<0>(ins.kv)), std::move(std::get<1>(ins.kv)), std::move(ins.right));\n"
+        "        });\n"
+        "        this->current = decltype(this->current)(handle.left_edge());\n"
+        "        this->length += 1;\n"
+        "    }"
+    )
+    insert_before_body = (
+        "{\n"
+        "        auto cur = this->current.take();\n"
+        "        if (!cur.is_some()) {\n"
+        "            auto& root = this->root.reborrow();\n"
+        "            if (root.is_none()) {\n"
+        "                auto node = btree_internal::NodeRef<btree_internal::marker::Owned, K, V, btree_internal::marker::Leaf>::new_leaf(rusty::clone(this->alloc));\n"
+        "                auto handle = rusty::deref_call(node.borrow_mut(), rusty::detail::__mdisp_push_with_handle{}, std::move(key), std::move(value));\n"
+        "                root = rusty::Some(node.forget_type());\n"
+        "                this->length += 1;\n"
+        "                this->current = decltype(this->current)(handle.right_edge());\n"
+        "                return;\n"
+        "            }\n"
+        "            cur = decltype(cur)(rusty::deref_call(root.as_mut().unwrap().borrow_mut(), rusty::detail::__mdisp_last_leaf_edge{}));\n"
+        "        }\n"
+        "        auto edge = std::move(cur).unwrap();\n"
+        "        auto handle = edge.insert_recursing(std::move(key), std::move(value), rusty::clone(this->alloc), [&](auto&& ins) {\n"
+        "            rusty::mem::drop(std::move(ins.left));\n"
+        "            auto root = this->root.reborrow().as_mut().unwrap();\n"
+        "            return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(std::get<0>(ins.kv)), std::move(std::get<1>(ins.kv)), std::move(ins.right));\n"
+        "        });\n"
+        "        this->current = decltype(this->current)(handle.right_edge());\n"
+        "        this->length += 1;\n"
+        "    }"
+    )
+    src, n = member_swap(src, n, anchor, "rusty::Option<std::tuple<K&, V&>> next() {", next_body)
+    src, n = member_swap(src, n, anchor, "rusty::Option<std::tuple<K&, V&>> prev() {", prev_body)
+    src, n = member_swap(src, n, anchor, "void insert_after_unchecked(K key, V value) {", insert_after_body)
+    src, n = member_swap(src, n, anchor, "void insert_before_unchecked(K key, V value) {", insert_before_body)
+    old_peek = "auto& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();"
+    if old_peek in src:
+        src = src.replace(old_peek, "auto&& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();", 1)
+        n += 1
+    else:
+        print("  [warn] CursorMutKey peek_prev auto& line missing", file=sys.stderr)
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  codified " + str(n) + " CursorMutKey member(s) in: " + path.name)
+
+
+def fix_set_specialized_impl_forwards(path: Path) -> None:
+    """Rust defines set-support helpers in a SPECIALIZED impl block
+    (`impl<K, A> BTreeMap<K, SetValZST, A>` — map.rs "Internal
+    functionality for BTreeSet"), which the transpiler silently drops
+    (C++ has no partial-specialization member emission). set.cppm's
+    forwards then call nonexistent map members. Rewrite the forwards
+    to public-API equivalents:
+      replace    → take + insert (same observable semantics; Rust's
+                   mem::replace(kv.key_mut(), key) keeps the ZST value)
+      clone_from → clone-assign (loses Rust's node-reuse optimization,
+                   keeps semantics)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: set specialized-impl forwards rewired by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (specialized forwards already rewired)")
+        return
+    n = 0
+    old_replace = (
+        "    rusty::Option<T> replace(T value) {\n"
+        "        return this->map.replace(std::move(value));\n"
+        "    }"
+    )
+    new_replace = (
+        "    rusty::Option<T> replace(T value) {\n"
+        "        auto old = this->take(value);\n"
+        "        this->insert(std::move(value));\n"
+        "        return old;\n"
+        "    }"
+    )
+    if old_replace in src:
+        src = src.replace(old_replace, new_replace, 1)
+        n += 1
+    else:
+        print("  [warn] set replace forward not found", file=sys.stderr)
+    old_clone_from = (
+        "    void clone_from(const BTreeSet<T, A>& source) {\n"
+        "        this->map.clone_from(source.map);\n"
+        "    }"
+    )
+    new_clone_from = (
+        "    void clone_from(const BTreeSet<T, A>& source) {\n"
+        "        this->map = source.map.clone();\n"
+        "    }"
+    )
+    if old_clone_from in src:
+        src = src.replace(old_clone_from, new_clone_from, 1)
+        n += 1
+    else:
+        print("  [warn] set clone_from forward not found", file=sys.stderr)
+    if n:
+        i = src.find("\n")
+        src = src[: i + 1] + sentinel + "\n" + src[i + 1 :]
+        path.write_text(src)
+    print("  rewired " + str(n) + " specialized-impl forward(s) in: " + path.name)
+
+
 def fix_set_algebra_stubs(path: Path) -> None:
     """Un-stub the set-algebra family with the pre-swap vendored bodies
     (all runtime-proven at 26/26): difference()/intersection() always
@@ -6263,7 +6462,24 @@ def fix_map_splitoff_alloc_and_le(path: Path) -> None:
             "rusty::mem::manually_drop_new(rusty::clone(*this->alloc)), rusty::PhantomData<rusty::Box",
         )
         n += 1
-    for old, new in ((")).le(end)", ")) <= end"), (")).lt(end)", ")) < end")):
+    # Heterogeneous-safe: with range_full the bound type defaults to
+    # size_t, and although the Included/Excluded arm is dead at
+    # runtime, `k <= end` must still TYPE-CHECK for non-numeric keys
+    # (CrashTestDummy Instance broke here). le_or_false/lt_or_false
+    # compare only when the types can.
+    for old, new in (
+        (
+            "static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))).le(end))",
+            "rusty::detail::le_or_false((rusty::detail::deref_if_pointer_like(k)), end)",
+        ),
+        (
+            "static_cast<bool>(((rusty::detail::deref_if_pointer_like(k))).lt(end))",
+            "rusty::detail::lt_or_false((rusty::detail::deref_if_pointer_like(k)), end)",
+        ),
+        # Older spellings kept for anchor drift.
+        (")).le(end)", ")) <= end"),
+        (")).lt(end)", ")) < end"),
+    ):
         k = src.count(old)
         if k:
             src = src.replace(old, new)
@@ -7090,6 +7306,7 @@ def main() -> int:
         # that introduces __btree_port_make_dormant call sites.
         fix_map_dormant_append_cluster(map_mod)
         fix_map_splitoff_alloc_and_le(map_mod)
+        codify_cursor_mut_key(map_mod)
         fix_map_cppm_qualifiers_for_namespace_wrap(map_mod)
     if set_mod.exists():
         # Set-specific rules MUST run before the shared map-qualifier
@@ -7099,6 +7316,7 @@ def main() -> int:
         fix_set_cppm_qualifiers_for_namespace_wrap(set_mod)
         fix_map_cppm_qualifiers_for_namespace_wrap(set_mod)
         stub_broken_set_methods(set_mod)
+        fix_set_specialized_impl_forwards(set_mod)
         fix_set_algebra_stubs(set_mod)
         # Orphan-cluster stragglers the template-header heuristic can't
         # see (they carry no template<> line of their own).

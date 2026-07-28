@@ -223,8 +223,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         arc_tests_port
         rc_tests_port
         string_tests_port
-        btree_set_hash_tests_port
-        btree_tests_port)
+        btree_set_hash_tests_port)
         file(GLOB _CPPM transpiled/${_port}/*.cppm)
         add_library(${_port} STATIC)
         target_sources(${_port}
@@ -234,11 +233,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         target_compile_features(${_port} PUBLIC cxx_std_23)
         target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native)
     endforeach()
-    # btree_tests_port now imports btree_port modules to exercise real
-    # API surface (test bodies are being un-stubbed incrementally).
-    if(TARGET btree_tests_port)
-        target_link_libraries(btree_tests_port PUBLIC btree_port)
-    endif()
+    # btree_tests_port (the SKIP-stub module) was retired 2026-07: the
+    # btree suite is fully translated in tests/btree_tests_port_unstubbed.cpp.
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
@@ -576,8 +572,9 @@ set(TEST_SOURCES
     tests/string_tests_port_module_test.cpp
     # btree_set_hash_tests_port — driver for tests/btree_set_hash.rs (2 tests, stub).
     tests/btree_set_hash_tests_port_module_test.cpp
-    # btree_tests_port — driver for btree/{map,set}/tests.rs
-    # (115 map + 32 set = 147 tests, all stubbed; see docs/btree_tests_port/).
+    # btree_tests_port_module_test — driver for btree/{map,set}/tests.rs.
+    # Fully translated bodies (439 tests, live asserts) live in
+    # tests/btree_tests_port_unstubbed.cpp; the SKIP-stub module retired 2026-07.
     tests/btree_tests_port_module_test.cpp
 
     # binary_heap_port Phase C: push() drive test, iterates on the 6
@@ -759,23 +756,20 @@ foreach(test_source IN LISTS TEST_SOURCES)
         arc_tests_port
         rc_tests_port
         string_tests_port
-        btree_set_hash_tests_port
-        btree_tests_port)
+        btree_set_hash_tests_port)
         if(test_name MATCHES "^${_stub_port}_")
             target_link_libraries(${test_executable} PRIVATE ${_stub_port})
             target_compile_features(${test_executable} PRIVATE cxx_std_23)
-            if(_stub_port STREQUAL "btree_tests_port")
-                # The un-stubbed btree test bodies check results via
-                # assert(); NDEBUG would compile every check out and the
-                # suite would pass vacuously. This is the LAST option
-                # site for the target, so -UNDEBUG wins.
-                target_compile_options(${test_executable} PRIVATE -O3 -march=native -UNDEBUG)
-            else()
-                target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
-            endif()
+            target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
             target_link_options(${test_executable} PRIVATE )
         endif()
     endforeach()
+    # btree_tests_port_module_test no longer links a stub module (retired
+    # 2026-07); its translated bodies check results via assert(), so make
+    # the no-NDEBUG state explicit at this LAST option site.
+    if(test_name STREQUAL "btree_tests_port_module_test")
+        target_compile_options(${test_executable} PRIVATE -UNDEBUG)
+    endif()
     # cell_port_* tests link cell_port (single-file C++20 module).
     if(test_name MATCHES "^cell_port_")
         target_link_libraries(${test_executable} PRIVATE cell_port)
