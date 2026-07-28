@@ -1,0 +1,6 @@
+.vscode/**
+scripts/**
+*.vsix
+server/*.o
+server/*.obj
+node_modules/@types/**
