@@ -3110,6 +3110,26 @@ void clone_from_slice(std::span<DstElem, DstExtent> dst, std::span<SrcElem, SrcE
     }
 }
 
+// Array-operand adapters. Rust arrays coerce to slices, so
+// `raw.copy_from_slice(&buf[..4])` has a `[u8; 4]` destination — the
+// emitted call passes the `std::array` (and often a `std::array`
+// rvalue source, from the to_le_bytes bit_cast lowering) directly,
+// which cannot deduce the span-span core above. View array operands
+// through spans and dispatch. A span over an rvalue source array is
+// consumed within the same full-expression, so it cannot dangle.
+template<typename DstElem, std::size_t N, typename SrcElem, std::size_t M>
+void clone_from_slice(std::array<DstElem, N>& dst, const std::array<SrcElem, M>& src) {
+    clone_from_slice(std::span<DstElem, N>(dst), std::span<const SrcElem, M>(src));
+}
+template<typename DstElem, std::size_t N, typename SrcElem, std::size_t SrcExtent>
+void clone_from_slice(std::array<DstElem, N>& dst, std::span<SrcElem, SrcExtent> src) {
+    clone_from_slice(std::span<DstElem, N>(dst), src);
+}
+template<typename DstElem, std::size_t DstExtent, typename SrcElem, std::size_t M>
+void clone_from_slice(std::span<DstElem, DstExtent> dst, const std::array<SrcElem, M>& src) {
+    clone_from_slice(dst, std::span<const SrcElem, M>(src));
+}
+
 // str-typed slice overloads (declared ahead of the generics so their
 // as_str() branches can call them; defined below).
 template<typename Start>
