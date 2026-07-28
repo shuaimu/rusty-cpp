@@ -5739,6 +5739,30 @@ impl CodeGen {
             // `ns` is guaranteed to be Some here because we only set
             // `cxx_namespace_opened` when it was.
             if let Some(ns) = self.cxx_namespace.clone() {
+                // Re-qualify crate-root item self-references. The expression
+                // emitters conservatively global-qualify crate-local free-fn/
+                // const references as `::<item>` — correct in the legacy
+                // flat-export mode where items land at global scope, but once
+                // this namespace wraps the purview those refs look in the
+                // (empty) global namespace and miss. Same gap
+                // `wrap_module_purview_in_crate_namespace` closes with its
+                // Rule 4; same mechanics here: every declared item name,
+                // C++-escaped to match emission, rewritten `::<item>` →
+                // `::<ns>::<item>` by the boundary-aware
+                // `requalify_crate_root_symbol` (leaves `x::item`, `.item(`,
+                // `>::item`, and already-qualified `::<ns>::item` alone).
+                // Sorted for deterministic output.
+                let mut root_items: Vec<String> = self
+                    .declared_item_names
+                    .iter()
+                    .map(|n| escape_cpp_keyword(n))
+                    .collect();
+                root_items.sort();
+                root_items.dedup();
+                for item in &root_items {
+                    self.output =
+                        Self::requalify_crate_root_symbol(&self.output, &ns, item);
+                }
                 self.writeln(&format!("}} // namespace {}", ns));
             }
         }

@@ -1198,3 +1198,59 @@ fn test_auto_namespace_explicit_override_wins() {
         !cpp.contains("namespace btree_port::btree::map {"),
         "auto-derived namespace should not be used when explicit is given:\n{cpp}"    );
 }
+
+#[test]
+fn test_cxx_namespace_requalifies_crate_root_item_refs() {
+    // Issue #37: the expression emitters conservatively global-qualify
+    // crate-local free-fn references as `::callee` — fine in the legacy
+    // flat-export mode, but once `--cxx-namespace` wraps the purview
+    // those refs look in the (now-empty) global namespace and miss.
+    // The wrap-close must re-qualify them to `::<ns>::callee`, exactly
+    // as `wrap_module_purview_in_crate_namespace` does via its Rule 4.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("ns_requal.rs");
+    let output_path = dir.path().join("ns_requal.cppm");
+
+    std::fs::write(
+        &input,
+        r#"
+pub fn callee(x: i64) -> usize { if x > 0 { 1 } else { 2 } }
+pub fn caller(x: i64) -> usize { callee(x) }
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("--module-name")
+        .arg("foo")
+        .arg("--cxx-namespace")
+        .arg("foo::bar")
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    // The call may be emitted unqualified (resolves within the wrapping
+    // namespace) or fully qualified against it — but a bare global
+    // `::callee(` must NOT survive the wrap.
+    let bare_global = cpp
+        .match_indices("::callee(")
+        .any(|(pos, _)| !cpp[..pos].ends_with("foo::bar") && !cpp[..pos].ends_with("bar"));
+    assert!(
+        !bare_global,
+        "bare global-qualified crate-root call survived the namespace wrap:\n{cpp}"
+    );
+    // And the requalified (or unqualified) call still exists somewhere.
+    assert!(
+        cpp.contains("callee("),
+        "caller lost its call entirely:\n{cpp}"
+    );
+}
