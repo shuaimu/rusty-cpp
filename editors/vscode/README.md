@@ -27,7 +27,13 @@ npm install
 
 Open `editors/vscode` in VS Code and press `F5`. The `Run RustyCpp Extension`
 launch configuration opens the repository in an Extension Development Host.
-Open a C or C++ file there and check:
+Do not also keep the repository root open in another VS Code window: VS Code
+will de-duplicate the folder and leave the Development Host without a workspace.
+Open a C or C++ file in the Development Host and check:
+
+```bash
+code editors/vscode
+```
 
 - The status bar shows `RustyCpp` with a check icon.
 - RustyCpp findings appear as editor squiggles and in the Problems panel.
@@ -39,12 +45,13 @@ Open a C or C++ file there and check:
 Changing a `rustyCpp.lsp` setting automatically restarts the language server.
 `RustyCpp: Restart Language Server` is also available from the Command Palette.
 
-## Package
+## Install Locally
 
-Create an installable VSIX:
+For normal use in the full repository window, package and install the extension:
 
 ```bash
 npm run package
+code --install-extension rusty-cpp-vscode.vsix --force
 ```
 
 The packaging step synchronizes `../../tools/rusty-cpp-lsp.cpp` into the

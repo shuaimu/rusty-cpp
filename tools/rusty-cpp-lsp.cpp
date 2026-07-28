@@ -775,7 +775,8 @@ void parse_initialization_options(const std::string& message) {
     for (const auto& define : find_string_array_field(message, "defines")) {
         g_config.defines.push_back(define);
     }
-    if (auto compile_commands = find_string_field(message, "compileCommands")) {
+    if (auto compile_commands = find_string_field(message, "compileCommands");
+        compile_commands && !compile_commands->empty()) {
         g_config.compile_commands = std::filesystem::path(*compile_commands);
     }
 }

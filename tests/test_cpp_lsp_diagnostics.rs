@@ -55,7 +55,9 @@ void f() {
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "initializationOptions": {}
+                    "initializationOptions": {
+                        "compileCommands": ""
+                    }
                 }
             }),
         );
@@ -104,6 +106,14 @@ void f() {
             .expect("diagnostic message")
             .contains("get_raw_int"),
         "diagnostic should mention unsafe call: {diagnostics}"
+    );
+    assert_eq!(
+        published[0]["range"],
+        json!({
+            "start": {"line": 6, "character": 0},
+            "end": {"line": 6, "character": 18}
+        }),
+        "diagnostic should underline the unsafe call line: {diagnostics}"
     );
 
     {
