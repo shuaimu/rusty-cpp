@@ -6823,6 +6823,21 @@ impl CodeGen {
                                 .insert(sibling_module.clone())
                         {
                             self.writeln(&format!("import {};", sibling_module));
+                            // cxx-namespace mode: the sibling's names live under
+                            // its OWN namespace (`::srpc::wire::varint`), not at
+                            // global scope, so "accessible at the same name after
+                            // import" (the flat-export rationale for dropping the
+                            // using) does not hold there. Bridge the emitted
+                            // `seg::X` path shape with a namespace alias. (Not an
+                            // `import` line, so the module-import hoist leaves it
+                            // inside the namespace where it belongs.)
+                            if self.cxx_namespace.is_some() {
+                                let ns_path = sibling_module.replace('.', "::");
+                                self.writeln(&format!(
+                                    "namespace {} = ::{};",
+                                    first_segment, ns_path
+                                ));
+                            }
                             emitted_as_module_import = true;
                         } else if let Some(first_segment) = using_segments
                             .iter()
@@ -6835,6 +6850,32 @@ impl CodeGen {
                             // skip both the redundant import and the
                             // broken using path.
                             emitted_as_module_import = true;
+                        }
+                        // cxx-namespace mode, single-ITEM sibling import
+                        // (`use super::varint::VARINT_BUF_LEN`): downstream code
+                        // references the item BARE, so the alias alone is not
+                        // enough — emit a real using-declaration against the
+                        // sibling's namespace. (`pub use` re-exports keep their
+                        // `export` so downstream importers see the name.)
+                        if emitted_as_module_import
+                            && self.cxx_namespace.is_some()
+                            && let Some(first_segment) = using_segments
+                                .iter()
+                                .find(|seg| !seg.is_empty())
+                                .copied()
+                            && let Some(sibling_module) =
+                                self.resolve_sibling_module_path(first_segment)
+                            && let Some(item) = using_segments.last().copied()
+                            && !item.is_empty()
+                            && item != first_segment
+                        {
+                            let ns_path = sibling_module.replace('.', "::");
+                            self.writeln(&format!(
+                                "{}using ::{}::{};",
+                                export_prefix,
+                                ns_path,
+                                escape_cpp_keyword(item)
+                            ));
                         }
                         if !emitted_as_module_import {
                             // A plain import of a wrapped DEPENDENCY's MODULE
