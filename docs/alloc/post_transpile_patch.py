@@ -1811,6 +1811,47 @@ def _alloc_specific(cpp_out: Path):
             path.write_text(t)
 
 
+
+SPLICE_DTOR_EAGER = (
+    "                ~Splice() noexcept(false) {\n"
+    "                    if (_rusty_forgotten) { return; }\n"
+    "                    // patcher: EAGER splice-drop protocol (the lazy\n"
+    "                    // fill/move_tail dance needs unemitted Drain members).\n"
+    "                    for (auto vd_v = this->drain.next(); vd_v.is_some(); vd_v = this->drain.next()) { }\n"
+    "                    auto& vd_deque = this->drain.deque.as_mut();\n"
+    "                    const size_t vd_at = vd_deque.len_field;\n"
+    "                    { auto vd_dead = std::move(this->drain); }\n"
+    "                    size_t vd_i = vd_at;\n"
+    "                    for (auto vd_v = this->replace_with.next(); vd_v.is_some(); vd_v = this->replace_with.next()) {\n"
+    "                        vd_deque.insert(vd_i++, rusty::detail::deref_if_pointer_like(std::move(vd_v).unwrap()));\n"
+    "                    }\n"
+    "                }\n"
+)
+
+
+def _replace_splice_dtor(text: str) -> str:
+    marker = "                ~Splice() noexcept(false) {"
+    i = text.find(marker)
+    if i < 0:
+        return text
+    depth = 0
+    j = i
+    started = False
+    while j < len(text):
+        c = text[j]
+        if c == "{":
+            depth += 1
+            started = True
+        elif c == "}":
+            depth -= 1
+            if started and depth == 0:
+                break
+        j += 1
+    # consume trailing newline
+    end = text.find("\n", j) + 1
+    return text[:i] + SPLICE_DTOR_EAGER + text[end:]
+
+
 def _vd_suite_fixes(text: str) -> str:
     """VD_SUITE_FIXES_APPLIED: fixes surfaced by the vec_deque test
     suite instantiating template bodies the int-only smoke never did."""
@@ -1872,9 +1913,9 @@ def _vd_suite_fixes(text: str) -> str:
         "else { return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>()); } }();")
     # (f) extend bodies push the raw pointer carrier — peel it.
     text = text.replace("this->push_unchecked(std::move(element));",
-                        "this->push_unchecked(rusty::detail::deref_if_pointer_like(std::move(element)));")
+                        "this->push_unchecked(std::move(rusty::detail::deref_if_pointer_like(std::move(element))));")
     text = text.replace("this->push_front_unchecked(std::move(element));",
-                        "this->push_front_unchecked(rusty::detail::deref_if_pointer_like(std::move(element)));")
+                        "this->push_front_unchecked(std::move(rusty::detail::deref_if_pointer_like(std::move(element))));")
     # (g) std::array has data(), not as_ptr().
     text = text.replace("(*arr_shadow1).as_ptr()", "(*arr_shadow1).data()")
     # (h) prepend: the rev(iter(...)) adapter chain fails for several
@@ -1913,6 +1954,91 @@ def _vd_suite_fixes(text: str) -> str:
     text = text.replace(
         "                            this->drain.deque.as_mut().extend(this->replace_with);",
         "                            this->drain.deque.as_mut().extend(std::move(this->replace_with));")
+    # (j) Splice dtor: the lazy fill/move_tail protocol needs Drain
+    # members that are not emitted — replace the WHOLE dtor with the
+    # eager protocol (exhaust drain, let its dtor stitch the tail,
+    # insert the replacement at the gap start).
+    text = _replace_splice_dtor(text)
+    # (k) extend_front: the spec_extend_front overload set rejects
+    # several suite iterator shapes — plain push_front loop.
+    text = text.replace(
+        "            void extend_front(I iter) {\n"
+        "                (*this).spec_extend_front(rusty::iter(std::move(iter)));\n"
+        "            }",
+        "            void extend_front(I iter) {\n"
+        "                if constexpr (requires { std::move(iter).into_iter(); }) {\n"
+        "                    auto vd_it2 = std::move(iter).into_iter();\n"
+        "                    for (auto vd_v = vd_it2.next(); vd_v.is_some(); vd_v = vd_it2.next()) {\n"
+        "                        this->push_front(rusty::detail::deref_if_pointer_like(std::move(vd_v).unwrap()));\n"
+        "                    }\n"
+        "                } else if constexpr (requires { iter.next(); }) {\n"
+        "                    for (auto vd_v = iter.next(); vd_v.is_some(); vd_v = iter.next()) {\n"
+        "                        this->push_front(rusty::detail::deref_if_pointer_like(std::move(vd_v).unwrap()));\n"
+        "                    }\n"
+        "                } else if constexpr (std::is_same_v<std::remove_cvref_t<decltype(iter)>, rusty::None_t>) {\n"
+        "                } else {\n"
+        "                    for (auto&& vd_x : iter) { this->push_front(std::move(vd_x)); }\n"
+        "                }\n"
+        "            }")
+    # (l) prepend's array fallback also needs the None_t branch.
+    text = text.replace(
+        "                    else {\n"
+        "                        using VdT = std::remove_cvref_t<decltype(other[static_cast<size_t>(0)])>;",
+        "                    else if constexpr (std::is_same_v<std::remove_cvref_t<decltype(other)>, rusty::None_t>) {\n"
+        "                        return typename rusty::Option<T>::IntoIterOwned{rusty::Option<T>()};\n"
+        "                    }\n"
+        "                    else {\n"
+        "                        using VdT = std::remove_cvref_t<decltype(other[static_cast<size_t>(0)])>;",
+        1)
+    # (m) as_slice() returns a temporary.
+    text = text.replace("auto& slice = iterator.as_slice();",
+                        "auto&& slice = iterator.as_slice();")
+    # (n) slice_ext::range returns std::pair; spec_*_from_within takes
+    # rusty::range<size_t>.
+    text = text.replace("this->spec_extend_from_within(std::move(range));",
+                        "this->spec_extend_from_within(rusty::range<size_t>(range.first, range.second));")
+    text = text.replace("this->spec_prepend_from_within(std::move(range));",
+                        "this->spec_prepend_from_within(rusty::range<size_t>(range.first, range.second));")
+    # (o) nonoverlapping_ranges tuples carry POINTERS — the emitted
+    # destructure wrongly deref_if_pointer-peels them (transpiler bug
+    # class: destructure-deref over pointer-typed tuple fields).
+    text = text.replace(
+        "auto&& src = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));",
+        "auto&& src = std::get<0>(rusty::detail::deref_if_pointer(_for_item));")
+    text = text.replace(
+        "auto&& dst = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));",
+        "auto&& dst = std::get<1>(rusty::detail::deref_if_pointer(_for_item));")
+    # (p) truncate's element-drop path casts a span PRVALUE to span*.
+    # Keep the span by value and destroy elements directly.
+    text = re.sub(
+        r"const auto (drop_[a-z]+) = const_cast<[^;\n]*>\((rusty::slice_to\([A-Za-z_, ]+\)|rusty::slice_from\([A-Za-z_, ]+\))\);",
+        r"auto \1 = \2;",
+        text)
+    text = re.sub(
+        r"const auto (drop_[a-z]+) = &(front|back);",
+        r"auto \1 = \2;",
+        text)
+    text = re.sub(
+        r"rusty::ptr::drop_in_place\(std::move\((drop_[a-z]+)\)\);",
+        r"for (auto& vd_e : \1) { using VdE = std::remove_cvref_t<decltype(vd_e)>; "
+        r"std::destroy_at(const_cast<VdE*>(std::addressof(vd_e))); }",
+        text)
+    # (q) Option-returning receivers routed to the ITERATOR map —
+    # binary_search_by's `back.first().map(f)` (transpiler bug class:
+    # Option receiver + combinator dispatched to the adapter form).
+    text = re.sub(r"rusty::map\(rusty::first\(([a-z_]+)\), ",
+                  r"rusty::first(\1).map(", text)
+    # (q2) same class: Result-returning binary_search_by routed to the
+    # iterator map — use Result's member map.
+    text = re.sub(r"rusty::map\(rusty::binary_search_by\(([a-z_]+), std::move\(f\)\), ",
+                  r"rusty::binary_search_by(\1, std::move(f)).map(", text)
+    # (r) extend_from_within/prepend_from_within: slice_ext::range
+    # yields a std::pair — rusty::len(pair) has no meaning.
+    text = text.replace(
+        "auto range = rusty::slice_ext::range(std::move(src), rusty::range_to(this->len()));\n"
+        "                this->reserve(rusty::len(range));",
+        "auto range = rusty::slice_ext::range(std::move(src), rusty::range_to(this->len()));\n"
+        "                this->reserve(range.second - range.first);")
     # (b) Drain guard body: len -> len_field rename was missed by the
     # emitter inside this one body (transpiler gap).
     text = text.replace("auto head_len = source_deque.len;",

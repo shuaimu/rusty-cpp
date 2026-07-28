@@ -89,11 +89,19 @@ static bool operator==(const std::vector<T>& v, std::span<U, E> s) {
     for (size_t i = 0; i < v.size(); ++i) if (!(v[i] == s[i])) return false;
     return true;
 }
-// as_slices()/as_mut_slices() tuple compares: std::tuple's operator==
-// cannot see the suite-namespace span operators (ADL) — named helper.
+// as_slices()/as_mut_slices() tuple compares: mixed span vs
+// owned_array_slice operands — compare element-wise by size/[].
+template<typename SA, typename SB>
+static bool vd_slice_like_eq(const SA& a, const SB& b) {
+    const size_t n = static_cast<size_t>(a.size());
+    if (n != static_cast<size_t>(b.size())) return false;
+    for (size_t i = 0; i < n; ++i) if (!(a.data()[i] == b.data()[i])) return false;
+    return true;
+}
 template<typename TA, typename TB>
 static bool vd_slices_eq(const TA& a, const TB& b) {
-    return (std::get<0>(a) == std::get<0>(b)) && (std::get<1>(a) == std::get<1>(b));
+    return vd_slice_like_eq(std::get<0>(a), std::get<0>(b))
+        && vd_slice_like_eq(std::get<1>(a), std::get<1>(b));
 }
 // NOTE: any operator== declared in this namespace HIDES the global
 // array.hpp compare helpers for ordinary lookup — so these must cover
@@ -338,6 +346,11 @@ def apply_patches(path: Path) -> None:
     text = text.replace(
         "rusty::Vec<std::remove_cvref_t<decltype((vec))>>::from(std::move(vec))",
         "rusty::collect_range(std::move(vec).into_iter())")
+
+    # test_splice_wrapping: uint8_t deque, int array literal — Rust
+    # unifies the literal; C++ CTAD picks int.
+    text = text.replace("vec.splice(rusty::range(1, 1), std::array{8});",
+                        "vec.splice(rusty::range(1, 1), std::array{static_cast<uint8_t>(8)});")
 
     # Bare `VecDeque<...>` spellings still bind the facade — LAST, so
     # it can't touch the sites already routed above (excludes VecDequeT).

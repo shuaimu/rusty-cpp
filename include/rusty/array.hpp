@@ -444,9 +444,32 @@ struct unknown_container_item<Container, void> {
 // `<C, false, false>`: neither an `Item` alias nor a `value_type`. Avoids the
 // undefined-primary hard error ("implicit instantiation of undefined template")
 // for such a container.
+// Runtime iterator adapters (cloned/map/rev/...) carry neither alias
+// but their Option-like next() payload IS the item — prefer it over
+// the wrapper recursion (which would mis-recurse into the WRAPPED
+// iterator's element, e.g. `cloned<Iter<const int>>` -> `const int`).
+template<typename C, typename = void>
+struct assoc_has_option_next : std::false_type {};
+template<typename C>
+struct assoc_has_option_next<
+    C, std::void_t<decltype(std::declval<C&>().next().is_some())>>
+    : std::true_type {};
+template<typename C>
+struct assoc_item_from_next {
+    using next_payload = std::remove_cv_t<std::remove_reference_t<
+        decltype(std::declval<C&>().next().unwrap())>>;
+    using type = std::conditional_t<
+        std::is_pointer_v<next_payload>,
+        std::remove_cv_t<std::remove_pointer_t<next_payload>>,
+        next_payload>;
+};
+
 template<typename Container>
 struct associated_item_impl<Container, false, false> {
-    using type = typename unknown_container_item<Container>::type;
+    using type = typename std::conditional_t<
+        assoc_has_option_next<Container>::value,
+        assoc_item_from_next<Container>,
+        unknown_container_item<Container>>::type;
 };
 
 template<typename T>
@@ -687,21 +710,24 @@ auto array_from_fn(F&& func) {
 
 template<typename Range>
 void rotate_left(Range&& range, size_t mid) {
-    // Containers with a native rotate (alloc's VecDeque) use it —
-    // the std::begin/end fallback requires contiguity they lack.
+
+    // Containers with a native rotate (alloc's VecDeque) use it — the
+    // std::begin/end fallback requires contiguity they lack. NB: the
+    // fallback must live in the ELSE branch: statements after an
+    // if-constexpr are instantiated regardless of the condition.
     if constexpr (requires { range.rotate_left(mid); }) {
         range.rotate_left(mid);
-        return;
+    } else {
+        auto&& view = range;
+        auto first = std::begin(view);
+        auto last = std::end(view);
+        const auto len = static_cast<size_t>(std::distance(first, last));
+        if (len == 0) {
+            return;
+        }
+        mid %= len;
+        std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(mid)), last);
     }
-    auto&& view = range;
-    auto first = std::begin(view);
-    auto last = std::end(view);
-    const auto len = static_cast<size_t>(std::distance(first, last));
-    if (len == 0) {
-        return;
-    }
-    mid %= len;
-    std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(mid)), last);
 }
 
 /// Rust slice::select_nth_unstable — nth_element then the
@@ -718,23 +744,28 @@ auto select_nth_unstable(Range&& range, size_t n) {
 
 template<typename Range>
 void rotate_right(Range&& range, size_t k) {
+
+    // Containers with a native rotate (alloc's VecDeque) use it — the
+    // std::begin/end fallback requires contiguity they lack. NB: the
+    // fallback must live in the ELSE branch: statements after an
+    // if-constexpr are instantiated regardless of the condition.
     if constexpr (requires { range.rotate_right(k); }) {
         range.rotate_right(k);
-        return;
+    } else {
+        auto&& view = range;
+        auto first = std::begin(view);
+        auto last = std::end(view);
+        const auto len = static_cast<size_t>(std::distance(first, last));
+        if (len == 0) {
+            return;
+        }
+        k %= len;
+        if (k == 0) {
+            return;
+        }
+        const auto pivot = len - k;
+        std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(pivot)), last);
     }
-    auto&& view = range;
-    auto first = std::begin(view);
-    auto last = std::end(view);
-    const auto len = static_cast<size_t>(std::distance(first, last));
-    if (len == 0) {
-        return;
-    }
-    k %= len;
-    if (k == 0) {
-        return;
-    }
-    const auto pivot = len - k;
-    std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(pivot)), last);
 }
 
 template<typename A, typename B>

@@ -883,6 +883,11 @@ public:
     // carrier and construct the reference Option from it directly.
     explicit Option(T* p) : ptr(p) {}
 
+    // Xvalue form: emitted iterator bodies write
+    // `Option<T&>(std::move(_mv0))` where _mv0 names a live slot the
+    // adapter dereferenced — the reference stays valid; accept it.
+    explicit Option(T&& ref) : ptr(&ref) {}
+
     template<typename U>
     requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
           && requires(U& u) { *u; }
