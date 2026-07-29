@@ -1128,6 +1128,13 @@ impl CodeGen {
         if self.declared_item_names.contains(normalized) {
             return false;
         }
+        // A bare lowercase name that is a SIBLING MODULE of this crate
+        // is not unresolved — it is a module import (`use super::time;`).
+        // Dismissing it emitted nothing at all, so call sites referencing
+        // `time::f()` had no declaration for `time`.
+        if self.resolve_crate_module_use_path(normalized).is_some() {
+            return false;
+        }
         normalized
             .chars()
             .next()

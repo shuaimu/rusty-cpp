@@ -40284,3 +40284,44 @@ fn test_user_fn_still_escapes_libc_collision() {
     );
 }
 
+
+#[test]
+fn test_use_naming_sibling_module_emits_import() {
+    // `use super::a;` / `use crate::a;` name a MODULE, not an item in
+    // one. Both previously emitted NOTHING (the bare lowercase name was
+    // dismissed as an unresolved import), so a call site saying
+    // `a::f()` had no declaration for `a`.
+    for path in ["super::a", "crate::a"] {
+        let out = transpile_str_module_with_sibling_modules(
+            &format!("use {path};\npub fn g() -> i32 {{ a::f() }}\n"),
+            "probe.b",
+            &["probe.a", "probe.b"],
+        );
+        assert!(
+            out.contains("import probe.a;"),
+            "`use {path};` must import the sibling module:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn test_use_nested_module_path_prefers_longest_match() {
+    // `use crate::base::time;` names `probe.base.time`. Resolving it to
+    // the PARENT `probe.base` is not merely imprecise — the parent
+    // re-exports its children, so importing it from a child is an
+    // illegal C++20 import CYCLE.
+    let out = transpile_str_module_with_sibling_modules(
+        "use crate::base::time;\npub fn stamp() -> u64 { time::now() }\n",
+        "probe.base.log",
+        &["probe.base", "probe.base.time", "probe.base.log"],
+    );
+    assert!(
+        out.contains("import probe.base.time;"),
+        "must import the named module:\n{out}"
+    );
+    assert!(
+        !out.contains("import probe.base;"),
+        "must NOT import the parent (import cycle):\n{out}"
+    );
+}
+

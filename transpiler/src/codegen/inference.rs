@@ -136,6 +136,48 @@ impl CodeGen {
         None
     }
 
+    /// Resolve a `use` path that names a MODULE of this crate (rather
+    /// than an item inside one) to that module's C++ module name.
+    ///
+    /// Prefers the LONGEST match, which is what makes
+    /// `use crate::base::time;` resolve to `srpc.base.time` and not to
+    /// its parent `srpc.base` — importing the parent is not merely
+    /// imprecise, it is an illegal C++20 import CYCLE, because the
+    /// parent module re-exports its children.
+    ///
+    /// Returns `None` for a path that resolves to an ancestor of the
+    /// current module, for the same cycle reason.
+    pub(super) fn resolve_crate_module_use_path(&self, path: &str) -> Option<String> {
+        let normalized = normalize_use_import_path(path);
+        if normalized.is_empty() || normalized.contains(" = ") {
+            return None;
+        }
+        let segs: Vec<&str> = normalized
+            .trim_start_matches("::")
+            .split("::")
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segs.is_empty() {
+            return None;
+        }
+        let current = self.module_name.as_deref()?;
+        let mut prefix = current;
+        while let Some(dot) = prefix.rfind('.') {
+            prefix = &prefix[..dot];
+            for take in (1..=segs.len()).rev() {
+                let candidate = format!("{}.{}", prefix, segs[..take].join("."));
+                if self.crate_module_names.contains(&candidate)
+                    && candidate != current
+                    // An ancestor import would be the cycle described above.
+                    && !current.starts_with(&format!("{}.", candidate))
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
     /// Walk the type-alias chain from a given tail to its eventual
     /// underlying struct tail. Returns the input tail unchanged if it
     /// is not an alias, or the terminal struct tail. Bounded by an
