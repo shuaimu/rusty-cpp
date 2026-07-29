@@ -15713,6 +15713,18 @@ fn test_tuple_impl_self_index_lowers_to_std_get() {
             fn emit(&self, s: &mut Sink) {
                 self.0.emit(s);
                 self.1.emit(s);
+fn test_hint_spin_loop_lowers_to_rusty_hint() {
+    // The other std::hint entries take an operand and lower to an
+    // identity expression; spin_loop takes none, so it needs a real
+    // callee (a Rust path leaked into C++ as `std::hint::spin_loop()`
+    // before — `std::hint` is not a C++ namespace).
+    let out = transpile_str(
+        r#"
+        pub fn spin(n: u32) {
+            let mut i = 0u32;
+            while i < n {
+                std::hint::spin_loop();
+                i += 1;
             }
         }
         "#,
@@ -15725,6 +15737,39 @@ fn test_tuple_impl_self_index_lowers_to_std_get() {
     assert!(
         !out.contains("self_._0") && !out.contains("self_._1"),
         "std::tuple has no _N members:\n{}",
+        out.contains("rusty::hint::spin_loop()"),
+        "spin_loop must lower to the runtime helper:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("std::hint::"),
+        "no Rust hint path may survive into C++:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_std_time_reference_emits_runtime_helper_block() {
+    // The helper preamble DEFINES rusty::time (Duration/Instant/...);
+    // its emission is gated on a marker scan of the output, and
+    // `rusty::time::` was missing from that list — so a crate whose
+    // only runtime-block reference was a time type emitted
+    // `rusty::time::Instant` with nothing defining it.
+    let out = transpile_str(
+        r#"
+        pub fn later(ms: u64) -> std::time::Duration {
+            std::time::Duration::from_millis(ms)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::time::Duration"),
+        "std::time maps onto rusty::time:\n{}",
+        out
+    );
+    assert!(
+        out.contains("namespace time {"),
+        "the helper block defining rusty::time must be emitted:\n{}",
         out
     );
 }

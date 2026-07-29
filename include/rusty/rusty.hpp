@@ -136,6 +136,36 @@
 namespace rusty {
     using Unit = std::tuple<>;
     using StrView = std::string_view;
+
+    /// Rust's `std::hint` — optimization hints with no semantic effect.
+    ///
+    /// `likely`/`unlikely`/`black_box` lower to identity expressions in
+    /// the emitter (they take an operand); `spin_loop` is a zero-arg
+    /// call, so it needs a real function to lower TO. It emits the
+    /// architecture's pause/yield instruction, matching Rust's
+    /// `core::hint::spin_loop` (busy-wait backoff — SpinLock retry
+    /// loops are the archetypal caller).
+    ///
+    /// The pause is emitted through compiler builtins rather than
+    /// `<immintrin.h>`: that header's `static __inline__` declarations
+    /// can collide in C++23 module GMFs (the reason
+    /// sync/mpsc_lockfree.hpp gates `_mm_pause` behind
+    /// `RUSTY_PORTABLE_INTRINSICS`), and this one lives in the
+    /// umbrella header every module reaches. Emitting nothing is
+    /// always correct — a spin hint has no semantics — so unknown
+    /// targets simply no-op.
+    namespace hint {
+        inline void spin_loop() noexcept {
+#if (defined(__GNUC__) || defined(__clang__)) \
+    && (defined(__x86_64__) || defined(__i386__))
+            __builtin_ia32_pause();
+#elif (defined(__GNUC__) || defined(__clang__)) \
+    && (defined(__aarch64__) || defined(__arm__))
+            __asm__ __volatile__("yield" ::: "memory");
+#endif
+        }
+    }  // namespace hint
+
     template<typename T, std::size_t Extent = std::dynamic_extent>
     using Span = std::span<T, Extent>;
 
