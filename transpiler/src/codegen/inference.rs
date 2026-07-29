@@ -182,6 +182,24 @@ impl CodeGen {
         None
     }
 
+    /// The module that DECLARES the item named by a use path — the
+    /// path minus its final segment, resolved as a module.
+    ///
+    /// `use crate::base::rand::Rng;` is declared by `srpc.base.rand`.
+    /// Resolving from the path's FIRST segment instead reached
+    /// `srpc.base`, whose C++ namespace does not contain `Rng`:
+    /// importing a parent module re-exports the child MODULE, but
+    /// namespaces do not merge across modules, so the emitted
+    /// `using ::srpc::base::Rng;` named nothing.
+    pub(super) fn resolve_item_owner_module(&self, segments: &[&str]) -> Option<String> {
+        let named: Vec<&str> = segments.iter().copied().filter(|s| !s.is_empty()).collect();
+        if named.len() < 2 {
+            return None;
+        }
+        let owner_path = named[..named.len() - 1].join("::");
+        self.resolve_crate_module_use_path(&owner_path)
+    }
+
     /// Walk the type-alias chain from a given tail to its eventual
     /// underlying struct tail. Returns the input tail unchanged if it
     /// is not an alias, or the terminal struct tail. Bounded by an
