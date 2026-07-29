@@ -6846,8 +6846,14 @@ impl CodeGen {
                             .iter()
                             .find(|seg| !seg.is_empty())
                             .copied()
-                            && let Some(sibling_module) =
-                                self.resolve_sibling_module_path(first_segment)
+                            && let Some(sibling_module) = self
+                                // The module that DECLARES the item wins over
+                                // the one named by the path's first segment:
+                                // `crate::base::rand::Rng` lives in
+                                // `srpc.base.rand`, and `srpc.base`'s namespace
+                                // does not contain it.
+                                .resolve_item_owner_module(&using_segments)
+                                .or_else(|| self.resolve_sibling_module_path(first_segment))
                             && self
                                 .sibling_modules_imported
                                 .insert(sibling_module.clone())
@@ -6861,7 +6867,15 @@ impl CodeGen {
                             // `seg::X` path shape with a namespace alias. (Not an
                             // `import` line, so the module-import hoist leaves it
                             // inside the namespace where it belongs.)
-                            if self.cxx_namespace.is_some() {
+                            // Alias only when the FIRST segment is itself the
+                            // module being imported (`use super::varint::X` ->
+                            // `varint::` stays spellable). For a deeper path the
+                            // first segment names an ancestor, and aliasing it to
+                            // the leaf module would misdirect every other use of
+                            // that name.
+                            if self.cxx_namespace.is_some()
+                                && sibling_module.ends_with(&format!(".{}", first_segment))
+                            {
                                 let ns_path = sibling_module.replace('.', "::");
                                 self.writeln(&format!(
                                     "namespace {} = ::{};",
@@ -6893,8 +6907,12 @@ impl CodeGen {
                                 .iter()
                                 .find(|seg| !seg.is_empty())
                                 .copied()
-                            && let Some(sibling_module) =
-                                self.resolve_sibling_module_path(first_segment)
+                            && let Some(sibling_module) = self
+                                // Same precedence as the import above: the
+                                // using-declaration must name the namespace of
+                                // the module that DECLARES the item.
+                                .resolve_item_owner_module(&using_segments)
+                                .or_else(|| self.resolve_sibling_module_path(first_segment))
                             && let Some(item) = using_segments.last().copied()
                             && !item.is_empty()
                             && item != first_segment

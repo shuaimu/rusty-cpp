@@ -40396,3 +40396,27 @@ fn test_c_like_enum_method_call_is_namespace_qualified() {
     );
 }
 
+
+#[test]
+fn test_item_import_names_the_declaring_module() {
+    // `use crate::base::rand::Rng;` — the item is declared by
+    // `probe.base.rand`. Resolving from the path's FIRST segment
+    // imported `probe.base` and emitted `using ::probe::base::Rng;`.
+    // Importing a parent re-exports the child MODULE, but C++
+    // namespaces do not merge across modules, so that using-declaration
+    // named nothing.
+    let out = transpile_str_module_with_sibling_modules(
+        "use crate::base::rand::Rng;\npub fn f(r: &Rng) -> u64 { r.next_u64() }\n",
+        "probe.rpc.reconnect",
+        &["probe.base", "probe.base.rand", "probe.rpc.reconnect"],
+    );
+    assert!(
+        out.contains("import probe.base.rand;"),
+        "must import the DECLARING module:\n{out}"
+    );
+    assert!(
+        !out.contains("using ::probe::base::Rng;"),
+        "the parent namespace does not contain the item:\n{out}"
+    );
+}
+
