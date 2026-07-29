@@ -9430,6 +9430,18 @@ impl CodeGen {
                             | ("resize", 1)
                             | ("splice", 1)
                             | ("extend", 0)
+                            // `MaybeUninit::write` / `ptr::write` value
+                            // slots: the emitter's dedicated `write`
+                            // lowering ALWAYS move-wraps the value arg
+                            // (rusty::ptr::write and the write_/write
+                            // dispatch wrapper), but the signature is
+                            // cross-crate and invisible here — a const
+                            // binding decays that forced move to a copy,
+                            // deleted for move-only payloads (stdlib-btree
+                            // merge: `let parent_key = slice_remove(..);
+                            // ...key_area_mut(..).write(parent_key)` with
+                            // BTreeMap<K, move-only V>).
+                            | ("write", 0)
                     );
                     if (matches!(style, Some(ArgPassStyle::Value))
                         || (matches!(style, None | Some(ArgPassStyle::Mixed)) && heuristic_value))

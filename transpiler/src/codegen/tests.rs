@@ -15666,6 +15666,35 @@ fn test_by_value_self_method_in_macro_args_binds_non_const() {
 }
 
 #[test]
+fn test_maybe_uninit_write_value_arg_binds_non_const() {
+    // The emitter's dedicated `write` lowering always move-wraps the value
+    // argument, but `MaybeUninit::write`'s signature is cross-crate and
+    // invisible to the signature lookups — the binding pass must not emit
+    // `const` for a local consumed through `.write(x)`, or the forced move
+    // decays to a copy (deleted for move-only payloads; stdlib-btree merge
+    // paths hit this with BTreeMap<K, move-only V>).
+    let out = transpile_str(
+        r#"
+        struct Payload { data: Vec<u8> }
+        fn stash(slot: &mut std::mem::MaybeUninit<Payload>, seed: Vec<u8>) {
+            let value = Payload { data: seed };
+            slot.write(value);
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto value ="),
+        "a local consumed by MaybeUninit::write must not bind const:\n{}",
+        out
+    );
+    assert!(
+        out.contains("std::move(value)"),
+        "the write value arg stays move-wrapped:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_iterator_bounded_generic_param_routes_free_fn_adapters() {
     let out = transpile_str(
         r#"
