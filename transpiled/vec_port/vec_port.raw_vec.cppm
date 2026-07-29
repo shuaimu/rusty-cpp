@@ -3972,7 +3972,7 @@ RUSTY_TRY_INTO(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { 
 export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct RawVec {
-    static constexpr size_t MIN_NON_ZERO_CAP = min_non_zero_cap(sizeof(T));
+    static constexpr size_t MIN_NON_ZERO_CAP = min_non_zero_cap(rusty::mem::size_of<T>());
     RawVecInner<A> inner;
     rusty::PhantomData<T> _marker;
     mutable bool _rusty_forgotten = false;
@@ -4060,7 +4060,7 @@ struct RawVec {
         return this->inner.template non_null<T>();
     }
     size_t capacity() const {
-        return this->inner.capacity(sizeof(T));
+        return this->inner.capacity(rusty::mem::size_of<T>());
     }
     const A& allocator() const {
         return this->inner.allocator();

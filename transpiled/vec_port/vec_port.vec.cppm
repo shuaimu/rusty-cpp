@@ -5243,7 +5243,7 @@ return same_bucket(&*current, &*prev); }();
         auto len = this->len_field;
         // @unsafe
         {
-            __builtin_assume(rusty::detail::deref_if_pointer_like(len) <= (static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(T)));
+            __builtin_assume(rusty::detail::deref_if_pointer_like(len) <= (rusty::mem::size_of<T>() == 0 ? std::numeric_limits<std::size_t>::max() : (static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / rusty::mem::size_of<T>())));
         }
         return std::move(len);
     }

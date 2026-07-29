@@ -2486,7 +2486,14 @@ impl CodeGen {
                     self.convert_macro_tokens(cond_text)
                 };
                 if parts.len() <= 1 {
-                    self.writeln(&format!("assert(({}));", cond_cpp));
+                    // Rust's assert! PANICS (unwinds, catchable) — C assert()
+                    // aborts, which catch_unwind-style tests can't observe,
+                    // and silently vanishes under NDEBUG.
+                    self.writeln(&format!(
+                        "if (!({})) {{ rusty::panic::do_panic(\"assertion failed: {}\"); }}",
+                        cond_cpp,
+                        cond_text.replace('\\', "\\\\").replace('"', "\\\"")
+                    ));
                 } else {
                     let msg_parts: Vec<&str> =
                         parts.iter().skip(1).map(|s| s.trim()).collect();
@@ -2538,7 +2545,14 @@ impl CodeGen {
                         )
                     };
                     if parts.len() <= 2 {
-                        self.writeln(&format!("assert(({}));", cond_cpp));
+                        // Panic (unwind), not C assert — see assert! above.
+                        self.writeln(&format!(
+                            "if (!({})) {{ rusty::panic::do_panic(\"assertion failed: {}\"); }}",
+                            cond_cpp,
+                            format!("({}) {} ({})", lhs, op, rhs)
+                                .replace('\\', "\\\\")
+                                .replace('"', "\\\"")
+                        ));
                     } else {
                         // `assert_eq!(a, b, "msg")` / `(a, b, "fmt {}", x)` — the
                         // message tail used to be dropped silently.
@@ -8209,8 +8223,17 @@ impl CodeGen {
                     return format!("{}::from_iter({})", expected_cpp, receiver_for_collect);
                 }
             }
+            // Rust's collect(self) CONSUMES the receiver. For a NAMED local
+            // (e.g. `let it = v.extract_if(..); it.collect()`), drop side
+            // effects (ExtractIf's len fixup) must run at collect time, not
+            // C++ scope end — hand ownership to collect_range via move.
+            let receiver_for_collect_range = if Self::is_simple_ident(&receiver) {
+                format!("std::move({})", receiver)
+            } else {
+                receiver.clone()
+            };
             if unresolved_vec_placeholder_collect {
-                return format!("rusty::collect_range({})", receiver);
+                return format!("rusty::collect_range({})", receiver_for_collect_range);
             }
             if Self::is_range_expression(&mc.receiver) {
                 return format!("rusty::collect_range({})", receiver);
@@ -8218,7 +8241,7 @@ impl CodeGen {
             if self.is_iterator_like_receiver_expr(&mc.receiver)
                 || self.is_probably_iterator_receiver_expr(&mc.receiver)
             {
-                return format!("rusty::collect_range({})", receiver);
+                return format!("rusty::collect_range({})", receiver_for_collect_range);
             }
             // Unknown receiver shape — leave `.collect()` intact rather than
             // blindly rewriting to `rusty::collect_range`.
@@ -12550,7 +12573,14 @@ impl CodeGen {
             // Operator traits are emitted as C++ operators on concrete types.
             // Calling them through `rusty_ext::index(...)` can fail when no local
             // extension shim exists (e.g. delegating to Vec's Index impl).
-            return Some(format!("{}[{}]", all_args[0], args[0]));
+            //
+            // Route through rusty::index rather than a bare subscript: Rust's
+            // slice/Vec Index panics out of bounds, but the C++ receiver here is
+            // typically a std::span, whose operator[] reads out of bounds
+            // silently. rusty::index only adds the length check for integral
+            // indices into length-bearing containers, so map-key and range
+            // (`&v[a..b]`) Index impls keep their existing behaviour.
+            return Some(format!("rusty::index({}, {})", all_args[0], args[0]));
         }
         let should_prefer_runtime_namespace =
             Self::method_prefers_runtime_helper_namespace(&method_name);
@@ -24879,7 +24909,15 @@ impl CodeGen {
                     && ident
                         .chars()
                         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-                if ident_is_all_caps && self.is_const_local_binding_in_scope(&ident) {
+                // Single-letter uppercase const items (`const S: String`)
+                // are Rust consts too — each use is a fresh value, so a
+                // non-Copy const must clone (vec.rs test_flatten_clone
+                // reuses `S` three times).
+                let ident_is_single_upper_const = ident.len() == 1
+                    && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+                if (ident_is_all_caps || ident_is_single_upper_const)
+                    && self.is_const_local_binding_in_scope(&ident)
+                {
                     // Rust const-item uses materialize a fresh value at each use-site.
                     // Cloning avoids deleted copy-ctor failures for move-only payloads.
                     return format!("rusty::clone({})", self.emit_expr_to_string(expr));
@@ -24928,7 +24966,15 @@ impl CodeGen {
                     && ident
                         .chars()
                         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-                if ident_is_all_caps && self.is_const_local_binding_in_scope(&ident) {
+                // Single-letter uppercase const items (`const S: String`)
+                // are Rust consts too — each use is a fresh value, so a
+                // non-Copy const must clone (vec.rs test_flatten_clone
+                // reuses `S` three times).
+                let ident_is_single_upper_const = ident.len() == 1
+                    && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+                if (ident_is_all_caps || ident_is_single_upper_const)
+                    && self.is_const_local_binding_in_scope(&ident)
+                {
                     let inner = self.emit_expr_to_string_with_expected(expr, expected_ty);
                     return format!("rusty::clone({})", inner);
                 }

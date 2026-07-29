@@ -989,6 +989,22 @@ impl CodeGen {
             Some(base) => format!(" : public {}", base),
             None => String::new(),
         };
+        // #[repr(align(N))] must survive into C++: Layout::new_<T>() reads
+        // alignof(T), so dropping it makes over-aligned Vec buffers silently
+        // under-aligned. Rust's repr(align) is raise-only, but a struct-level
+        // alignas(N) below the natural alignment is ILL-FORMED in C++ (rustc's
+        // RcInner uses align(2) with 8-aligned fields) — so emit an empty
+        // over-aligned anchor member instead: member alignas only ever raises.
+        let repr_align: Option<u64> = s.attrs.iter().find_map(|attr| {
+            if !attr.path().is_ident("repr") {
+                return None;
+            }
+            let tokens = attr.meta.require_list().ok()?.tokens.to_string();
+            let rest = &tokens[tokens.find("align")?..];
+            let open = rest.find('(')?;
+            let close = rest.find(')')?;
+            rest.get(open + 1..close)?.trim().parse::<u64>().ok()
+        });
         self.emit_template_declaration_with_type_defaults(
             &s.generics,
             export_prefix,
@@ -1137,6 +1153,19 @@ impl CodeGen {
                 }
             }
             syn::Fields::Unit => {}
+        }
+        // #[repr(align(N))] anchor. Emitted as a TRAILING zero-size member
+        // rather than a struct-level `alignas(N)`: Rust's repr(align) only
+        // ever RAISES alignment, but a struct-level alignas below the type's
+        // natural alignment is ill-formed in C++ (rustc's RcInner declares
+        // align(2) over 8-aligned fields). alignas on a member of an empty
+        // type always raises, so this reproduces Rust's semantics exactly.
+        // Trailing keeps positional/designated aggregate init working.
+        if let Some(n) = repr_align {
+            self.writeln(&format!(
+                "[[no_unique_address]] alignas({}) std::tuple<> _rusty_align_anchor_{{}};",
+                n
+            ));
         }
         self.current_struct = prev_struct_for_fields;
         // Slice-tail VIEW wrappers get the span surface (size/data/begin/
@@ -1498,9 +1527,51 @@ impl CodeGen {
                     self.writeln("}");
                 }
             }
-            self.writeln(
-                "void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }",
-            );
+            // Rust's mem::forget suppresses the whole drop glue recursively —
+            // marking only this struct's flag would still let C++ run MEMBER
+            // dtors (e.g. forget(Splice) must also silence the inner Drain's
+            // tail-restore). Propagate to every non-reference member; the
+            // helper no-ops for types without the hook.
+            let forget_members: Vec<String> = match &s.fields {
+                syn::Fields::Named(fields) => fields
+                    .named
+                    .iter()
+                    .filter(|field| !matches!(&field.ty, syn::Type::Reference(_)))
+                    .filter_map(|field| {
+                        let rust_field_name = field.ident.as_ref()?.to_string();
+                        Some(
+                            named_field_cpp_names
+                                .get(&rust_field_name)
+                                .cloned()
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name)),
+                        )
+                    })
+                    .collect(),
+                syn::Fields::Unnamed(fields) => fields
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| !matches!(&field.ty, syn::Type::Reference(_)))
+                    .map(|(i, _)| format!("_{}", i))
+                    .collect(),
+                syn::Fields::Unit => Vec::new(),
+            };
+            if forget_members.is_empty() {
+                self.writeln(
+                    "void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }",
+                );
+            } else {
+                let member_marks: String = forget_members
+                    .iter()
+                    .map(|m| {
+                        format!(" rusty::detail::mark_forgotten_if_supported(this->{});", m)
+                    })
+                    .collect();
+                self.writeln(&format!(
+                    "void rusty_mark_forgotten() const noexcept {{ _rusty_forgotten = true;{} }}",
+                    member_marks
+                ));
+            }
             self.newline();
         }
 

@@ -92,6 +92,11 @@ public:
         return Option<NonNull<T>>(NonNull<T>(ptr));
     }
 
+    // Rust NonNull::dangling — aligned, non-null, never dereferenced.
+    static NonNull<T> dangling() noexcept {
+        return NonNull<T>(reinterpret_cast<T*>(alignof(T)));
+    }
+
     static constexpr NonNull<T> new_unchecked(T* ptr) noexcept {
         return NonNull<T>(ptr);
     }
@@ -526,7 +531,8 @@ inline void write(T* dst, U&& value) {
     // is the single source of truth. `ptr::write` matches Rust's
     // `ptr::write` semantics: bit-construct a fresh `T` at `dst`
     // without touching whatever was there.
-    std::construct_at(dst, std::forward<U>(value));
+    using RustyWriteT = std::remove_const_t<std::remove_pointer_t<decltype(dst)>>;
+    std::construct_at(const_cast<RustyWriteT*>(dst), std::forward<U>(value));
 }
 
 // Some generated call sites may carry escaped identifier spellings (`write_`)
@@ -585,26 +591,20 @@ inline void copy(const T* src, T* dst, Count count) {
         auto byte_count = element_count * sizeof(T);
         std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
     } else if (dst < src) {
-        // Left-shift overlap: process forward, destroy-then-construct each
-        // slot. The null-state convention makes destruction safe for
-        // moved-from slots (T's destructor sees `_rusty_forgotten == true`
-        // and short-circuits), so we no longer need a side-table to skip.
+        // Rust's ptr::copy never drops the destination — it's raw-memory
+        // semantics, and dst slots may hold ALREADY-DROPPED bits whose
+        // `_rusty_forgotten` is still false (Drain's tail restore); a
+        // destroy_at here re-runs a real drop = double-drop. Overwrite by
+        // move-construct only; the move marks each SOURCE slot forgotten,
+        // which keeps C++ dtors of bookkept-away slots from re-dropping.
+        // Left-shift overlap: process forward.
         for (std::size_t i = 0; i < element_count; ++i) {
-            T* const dst_i = dst + i;
-            T* const src_i = const_cast<T*>(src) + i;
-            std::destroy_at(dst_i);
-            std::construct_at(dst_i, std::move(*src_i));
+            std::construct_at(dst + i, std::move(*(const_cast<T*>(src) + i)));
         }
     } else {
-        // Right-shift overlap: process reverse. Slots beyond the original
-        // source window are uninitialized holes — no destroy_at on those.
+        // Right-shift overlap: process reverse.
         for (std::size_t i = element_count; i-- > 0;) {
-            T* const dst_i = dst + i;
-            T* const src_i = const_cast<T*>(src) + i;
-            if (dst_i < src + element_count) {
-                std::destroy_at(dst_i);
-            }
-            std::construct_at(dst_i, std::move(*src_i));
+            std::construct_at(dst + i, std::move(*(const_cast<T*>(src) + i)));
         }
     }
 }
@@ -740,6 +740,13 @@ requires requires(RangeLike r) { r.data(); r.size(); }
 {
     auto* data = range.data();
     auto count = static_cast<std::size_t>(range.size());
+    // Trivially-destructible elements need no per-element loop — Rust's
+    // drop glue is a no-op (a usize::MAX-length ZST drain would otherwise
+    // spin here forever).
+    using RustyDropElem = std::remove_pointer_t<decltype(data)>;
+    if constexpr (std::is_trivially_destructible_v<RustyDropElem>) {
+        return;
+    }
     // Rust slice drop glue: if one element's drop panics, the
     // REMAINING elements are still dropped, then the panic resumes.
     // (std::destroy_n would stop at the throw.)

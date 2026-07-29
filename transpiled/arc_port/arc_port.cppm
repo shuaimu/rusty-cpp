@@ -4001,12 +4001,12 @@ struct Arc {
     A alloc;
     mutable bool _rusty_forgotten = false;
     Arc(rusty::ptr::NonNull<ArcInner<T>> ptr_init, rusty::PhantomData<ArcInner<T>> phantom_init, A alloc_init) : ptr(std::move(ptr_init)), phantom(std::move(phantom_init)), alloc(std::move(alloc_init)) {}
-    Arc(const Arc&) = default;
+    Arc(const Arc& other) : Arc(other.clone()) {}
     Arc(Arc&& other) noexcept : ptr(std::move(other.ptr)), phantom(std::move(other.phantom)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    Arc& operator=(const Arc&) = default;
+    Arc& operator=(const Arc& other) { if (this != &other) { this->~Arc(); new (this) Arc(other.clone()); } return *this; }
     Arc& operator=(Arc&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4791,12 +4791,12 @@ struct Weak {
     // `Weak::new_()` (which creates a never-upgrading Weak, matching
     // std::sync::Weak::new()). Mirror of the same shim in rc_port.
     Weak() : Weak(Weak<T, A>::new_()) {}
-    Weak(const Weak&) = default;
+    Weak(const Weak& other) : Weak(other.clone()) {}
     Weak(Weak&& other) noexcept : ptr(std::move(other.ptr)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    Weak& operator=(const Weak&) = default;
+    Weak& operator=(const Weak& other) { if (this != &other) { this->~Weak(); new (this) Weak(other.clone()); } return *this; }
     Weak& operator=(Weak&& other) noexcept {
         if (this == &other) {
             return *this;

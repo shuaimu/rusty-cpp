@@ -86,6 +86,24 @@ public:
     Iter& by_ref() { return *this; }
     const Iter& by_ref() const { return *this; }
 
+    // Rust Iterator::partition — split into (matching, rest). Returns
+    // std::vector pairs (this header cannot depend on the module-only
+    // rusty::Vec); consumers compare element-wise.
+    template<typename F>
+    auto partition(F f) {
+        std::vector<elem_type> yes;
+        std::vector<elem_type> no;
+        for (pointer p = cur_; p != end_; ++p) {
+            if (f(*p)) {
+                yes.push_back(*p);
+            } else {
+                no.push_back(*p);
+            }
+        }
+        cur_ = end_;
+        return std::make_tuple(std::move(yes), std::move(no));
+    }
+
     // Rust `Iterator::peekable()` — consume into the caching wrapper. Also
     // satisfies the transpiler's type-position spelling
     // `decltype(std::declval<Iter>().peekable())`.
@@ -384,6 +402,18 @@ constexpr decltype(auto) deref_if_pointer(T&& value) {
         return *std::forward<T>(value);
     } else {
         return std::forward<T>(value);
+    }
+}
+
+/// Rust's mem::forget suppresses the WHOLE drop glue — the value's own
+/// Drop impl AND every field's, recursively. Emitted structs call this
+/// per member from rusty_mark_forgotten(); members without the hook
+/// (pointers, primitives, runtime types) are no-ops. Must be a template
+/// so the false `if constexpr` branch is genuinely discarded.
+template<typename M>
+constexpr void mark_forgotten_if_supported(const M& m) noexcept {
+    if constexpr (requires { m.rusty_mark_forgotten(); }) {
+        m.rusty_mark_forgotten();
     }
 }
 

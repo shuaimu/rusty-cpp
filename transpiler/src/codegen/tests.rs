@@ -2396,7 +2396,8 @@ fn test_leaf4154_drop_struct_literal_uses_constructor_call() {
     assert!(out.contains("this->_rusty_forgotten = other._rusty_forgotten;"));
     assert!(out.contains("other._rusty_forgotten = true;"));
     assert!(out.contains(
-        "void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }"
+        "void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; \
+         rusty::detail::mark_forgotten_if_supported(this->value); }"
     ));
     assert!(out.contains("mutable bool _rusty_forgotten = false;"));
     assert!(!out.contains("rusty::mem::consume_forgotten_address"));
@@ -12045,14 +12046,21 @@ fn test_todo_macro() {
 
 #[test]
 fn test_assert_macro() {
+    // assert! must PANIC (unwind, catchable) like Rust — not C assert (abort).
     let out = transpile_str("fn f() { assert!(x > 0); }");
-    assert!(out.contains("assert("));
+    assert!(
+        out.contains("rusty::panic::do_panic(\"assertion failed:"),
+        "{out}"
+    );
 }
 
 #[test]
 fn test_assert_eq_macro() {
     let out = transpile_str("fn f() { assert_eq!(a, b); }");
-    assert!(out.contains("assert(("), "{out}");
+    assert!(
+        out.contains("rusty::panic::do_panic(\"assertion failed:"),
+        "{out}"
+    );
     assert!(out.contains("=="), "{out}");
     assert!(out.contains("a") && out.contains("b"), "{out}");
 }
@@ -12064,10 +12072,19 @@ fn test_assert_eq_operands_go_through_the_expression_emitter() {
     // emitted invalid C++ (`vec ! []`, `(x .. y) . contains (& i)`). Both sides
     // must be parsed and lowered as real expressions. Scope the checks to the
     // emitted assert line — the surrounding prelude legitimately contains `..`.
+    // The do_panic message quotes the RUST source of the condition (like
+    // Rust's own "assertion failed: <cond>"), so scope checks to the emitted
+    // C++ condition before the panic call.
     let assert_line = |src: &str| -> String {
         transpile_str(src)
             .lines()
-            .find(|l| l.trim_start().starts_with("assert(("))
+            .find(|l| {
+                let t = l.trim_start();
+                t.starts_with("if (!(") && t.contains("assertion failed:")
+            })
+            .unwrap_or_default()
+            .split("rusty::panic::do_panic")
+            .next()
             .unwrap_or_default()
             .to_string()
     };

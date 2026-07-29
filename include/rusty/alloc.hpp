@@ -13,6 +13,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <rusty/mem.hpp>  // rusty::mem::size_of (Rust ZST sizes in Layout)
 #include <rusty/ptr.hpp>
 #include <rusty/result.hpp>
 
@@ -87,21 +88,24 @@ struct Layout {
 
     // Rust's Layout::new::<T>() — `new` is a C++ keyword so the transpiler
     // renames it to `new_`. Keep `for_value<T>` as a readable alias.
+    // Sizes go through rusty::mem::size_of so Rust ZSTs (Unit/tuple<>,
+    // std::array<T,0>) report 0 — raw sizeof gives them 1, which defeats
+    // every `elem_layout.size() == 0` ZST gate in the ported RawVec.
     template<typename T>
     static constexpr Layout new_() noexcept {
-        return Layout{sizeof(T), alignof(T)};
+        return Layout{::rusty::mem::size_of<T>(), alignof(T)};
     }
 
     template<typename T>
     static constexpr Layout for_value() noexcept {
-        return Layout{sizeof(T), alignof(T)};
+        return Layout{::rusty::mem::size_of<T>(), alignof(T)};
     }
 
     // Rust's Layout::array::<T>(n) — does not check for overflow here; callers
     // mirror Rust's behaviour by handling allocation failure downstream.
     template<typename T>
     static constexpr Layout array(std::size_t n) noexcept {
-        return Layout{sizeof(T) * n, alignof(T)};
+        return Layout{::rusty::mem::size_of<T>() * n, alignof(T)};
     }
 
     // Padding needed to round `self.size` up to the next multiple of `align`.

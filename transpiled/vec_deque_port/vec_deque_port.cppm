@@ -4126,7 +4126,7 @@ struct VecDeque {
     }
     void wrap_copy(size_t src, size_t dst, size_t len) {
         if (!((rusty::cmp::min((src > dst ? src - dst : dst - src), this->capacity() - (src > dst ? src - dst : dst - src)) + rusty::detail::deref_if_pointer_like(len)) <= this->capacity())) { throw std::logic_error(std::format("wrc dst={} src={} len={} cap={}", dst, src, len, this->capacity())); }
-        if (((sizeof(T) == 0) || (rusty::detail::deref_if_pointer_like(src) == rusty::detail::deref_if_pointer_like(dst))) || (rusty::detail::deref_if_pointer_like(len) == static_cast<size_t>(0))) {
+        if (((rusty::mem::size_of<T>() == 0) || (rusty::detail::deref_if_pointer_like(src) == rusty::detail::deref_if_pointer_like(dst))) || (rusty::detail::deref_if_pointer_like(len) == static_cast<size_t>(0))) {
             return;
         }
         auto dst_after_src = this->wrap_sub(std::move(dst), std::move(src)) < rusty::detail::deref_if_pointer_like(len);
@@ -4375,7 +4375,7 @@ written += 1; }();
         std::abort();
     }
     size_t capacity() const {
-        if ((sizeof(T) == 0)) {
+        if ((rusty::mem::size_of<T>() == 0)) {
             return std::numeric_limits<size_t>::max();
         } else {
             return this->buf.capacity();
@@ -4463,7 +4463,7 @@ written += 1; }();
     };
     void shrink_to(size_t min_capacity) {
         auto target_cap = rusty::max(min_capacity, this->len_field);
-        if ((sizeof(T) == 0) || (this->capacity() <= rusty::detail::deref_if_pointer_like(target_cap))) {
+        if ((rusty::mem::size_of<T>() == 0) || (this->capacity() <= rusty::detail::deref_if_pointer_like(target_cap))) {
             return;
         }
         const auto tail_outside = rusty::contains((rusty::range_inclusive(rusty::detail::deref_if_pointer_like(target_cap) + 1, this->capacity())), rusty::addr_of_temp((rusty::detail::deref_if_pointer_like(this->head) + rusty::detail::deref_if_pointer_like(this->len_field))));
@@ -4890,7 +4890,7 @@ written += 1; }();
         return std::move(other);
     }
     void append(VecDeque<T, A>& other) {
-        if ((sizeof(T) == 0)) {
+        if ((rusty::mem::size_of<T>() == 0)) {
             this->len_field = [&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(other.len_field)); }().expect("capacity overflow");
             other.len_field = static_cast<size_t>(0);
             other.head = static_cast<size_t>(0);
@@ -5286,7 +5286,7 @@ struct Drain {
             const auto head_len = source_deque.len;
             const auto tail_len = this->_0.tail_len;
             const auto new_len = rusty::detail::deref_if_pointer_like(head_len) + rusty::detail::deref_if_pointer_like(tail_len);
-            if ((sizeof(T) == 0)) {
+            if ((rusty::mem::size_of<T>() == 0)) {
                 source_deque.len = std::move(new_len);
                 return;
             }

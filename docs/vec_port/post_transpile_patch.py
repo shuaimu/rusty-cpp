@@ -727,18 +727,35 @@ def patch_t_max_slice_len_t_layout(cpp_out: Path) -> int:
     for path in cpp_out.glob("*.cppm"):
         text = path.read_text()
         original = text
-        # MAX_SLICE_LEN: isize::MAX / size_of::<T>() in Rust
-        text = text.replace(
-            "rusty::clone(T::MAX_SLICE_LEN)",
-            "(static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(T))",
+        # MAX_SLICE_LEN: isize::MAX / size_of::<T>() in Rust. A ZST divides by
+        # zero here, and clamping the divisor to 1 instead asserts
+        # len <= PTRDIFF_MAX, which a ZST Vec (capacity usize::MAX)
+        # legitimately violates — so branch, matching Rust's "unbounded for
+        # ZSTs".
+        MAX_SLICE_LEN = (
+            "(rusty::mem::size_of<T>() == 0"
+            " ? std::numeric_limits<std::size_t>::max()"
+            " : (static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())"
+            " / rusty::mem::size_of<T>()))"
         )
-        text = text.replace(
-            "T::MAX_SLICE_LEN",
-            "(static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(T))",
-        )
-        # size_of<T>() → sizeof(T)
+        text = text.replace("rusty::clone(T::MAX_SLICE_LEN)", MAX_SLICE_LEN)
+        text = text.replace("T::MAX_SLICE_LEN", MAX_SLICE_LEN)
+        # size_of<T>() → sizeof(T). Must NOT touch an already-qualified
+        # rusty::mem::size_of<T>() — that would produce `rusty::mem::sizeof(T)`,
+        # which does not compile.
         import re
-        text = re.sub(r"\bsize_of<([^>]+)>\(\)", r"sizeof(\1)", text)
+        text = re.sub(r"(?<!rusty::mem::)\bsize_of<([^>]+)>\(\)", r"sizeof(\1)", text)
+        # ...and the ZST-semantic gates must keep the RUST size: C++ sizeof is 1
+        # for an empty type, so feeding it to capacity() makes a ZST Vec report
+        # cap 0, ask to grow, and abort in grow_amortized's ZST guard.
+        text = text.replace(
+            "this->inner.capacity(sizeof(T))",
+            "this->inner.capacity(rusty::mem::size_of<T>())",
+        )
+        text = text.replace(
+            "min_non_zero_cap(sizeof(T))",
+            "min_non_zero_cap(rusty::mem::size_of<T>())",
+        )
         if text != original:
             path.write_text(text)
             n += 1
