@@ -17252,6 +17252,19 @@ impl CodeGen {
                 let inner = self.emit_expr_to_string(&call.args[0]);
                 return format!("({})", inner);
             }
+            if call.args.is_empty()
+                && matches!(
+                    joined.as_str(),
+                    "hint::spin_loop" | "std::hint::spin_loop" | "core::hint::spin_loop"
+                )
+            {
+                // Unlike the other std::hint entries this one takes NO
+                // operand, so there is nothing to pass through as an
+                // identity — it needs a real callee. rusty::hint emits the
+                // architecture's pause/yield instruction (spin-wait
+                // backoff; SpinLock retry loops are the archetypal user).
+                return "rusty::hint::spin_loop()".to_string();
+            }
             if call.args.len() == 3
                 && matches!(
                     joined.as_str(),
