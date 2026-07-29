@@ -1512,6 +1512,17 @@ bool is_empty(const Container& container) {
     }
 }
 
+// Non-integer receivers that provide the operation themselves
+// (rusty::time::Duration and friends) dispatch to their MEMBER; the
+// integral kernel below rejects them outright via static_assert.
+// Identical signature + a stricter constraint means this wins overload
+// resolution exactly when the member exists.
+template<typename T, typename U>
+    requires requires(T a, U b) { a.saturating_add(b); }
+constexpr auto saturating_add(T lhs, U rhs) {
+    return lhs.saturating_add(rhs);
+}
+
 template<typename T, typename U>
 constexpr auto saturating_add(T lhs, U rhs) {
     /* Rust's rhs is always Self — compute in the RECEIVER type. The old
@@ -1540,6 +1551,17 @@ constexpr auto saturating_add(T lhs, U rhs) {
     }
 }
 
+// Non-integer receivers that provide the operation themselves
+// (rusty::time::Duration and friends) dispatch to their MEMBER; the
+// integral kernel below rejects them outright via static_assert.
+// Identical signature + a stricter constraint means this wins overload
+// resolution exactly when the member exists.
+template<typename T, typename U>
+    requires requires(T a, U b) { a.saturating_sub(b); }
+constexpr auto saturating_sub(T lhs, U rhs) {
+    return lhs.saturating_sub(rhs);
+}
+
 template<typename T, typename U>
 constexpr auto saturating_sub(T lhs, U rhs) {
     /* Rust's rhs is always Self — compute in the RECEIVER type. The old
@@ -1565,6 +1587,17 @@ constexpr auto saturating_sub(T lhs, U rhs) {
         }
         return static_cast<R>(a - b);
     }
+}
+
+// Non-integer receivers that provide the operation themselves
+// (rusty::time::Duration and friends) dispatch to their MEMBER; the
+// integral kernel below rejects them outright via static_assert.
+// Identical signature + a stricter constraint means this wins overload
+// resolution exactly when the member exists.
+template<typename T, typename U>
+    requires requires(T a, U b) { a.saturating_mul(b); }
+constexpr auto saturating_mul(T lhs, U rhs) {
+    return lhs.saturating_mul(rhs);
 }
 
 template<typename T, typename U>

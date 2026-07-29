@@ -55333,34 +55333,117 @@ inline const Path& as_ref(std::string_view value) {\n\
 }\n\
 }\n\
 namespace time {\n\
+// Rust's std::time. Duration stores nanoseconds (matching Rust's\n\
+// resolution); Instant is the monotonic clock and SystemTime the\n\
+// wall clock, as in Rust. u128-returning accessors keep Rust's\n\
+// signatures so arithmetic on them cannot silently truncate.\n\
 struct Duration {\n\
     std::chrono::nanoseconds inner;\n\
     static Duration from_secs(unsigned long secs) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(secs))}; }\n\
     static Duration from_millis(unsigned long ms) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(ms))}; }\n\
+    static Duration from_micros(unsigned long us) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds(us))}; }\n\
     static Duration from_nanos(unsigned long ns) { return Duration{std::chrono::nanoseconds(ns)}; }\n\
+    static Duration from_secs_f64(double secs) { return Duration{std::chrono::nanoseconds(static_cast<long long>(secs * 1e9))}; }\n\
+    static const Duration ZERO;\n\
+    static Duration new_(std::uint64_t secs, std::uint32_t nanos) { return Duration{std::chrono::nanoseconds(static_cast<long long>(secs) * 1000000000LL + static_cast<long long>(nanos))}; }\n\
     std::uint64_t as_secs() const {\n\
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(inner).count());\n\
+    }\n\
+    double as_secs_f64() const { return static_cast<double>(inner.count()) / 1e9; }\n\
+    unsigned __int128 as_millis() const {\n\
+        return static_cast<unsigned __int128>(std::chrono::duration_cast<std::chrono::milliseconds>(inner).count());\n\
+    }\n\
+    unsigned __int128 as_micros() const {\n\
+        return static_cast<unsigned __int128>(std::chrono::duration_cast<std::chrono::microseconds>(inner).count());\n\
+    }\n\
+    unsigned __int128 as_nanos() const {\n\
+        return static_cast<unsigned __int128>(inner.count());\n\
+    }\n\
+    bool is_zero() const { return inner.count() == 0; }\n\
+    std::uint32_t subsec_millis() const {\n\
+        const auto secs_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(\n\
+            std::chrono::duration_cast<std::chrono::seconds>(inner));\n\
+        return static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(inner - secs_ns).count());\n\
+    }\n\
+    std::uint32_t subsec_micros() const {\n\
+        const auto secs_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(\n\
+            std::chrono::duration_cast<std::chrono::seconds>(inner));\n\
+        return static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(inner - secs_ns).count());\n\
     }\n\
     std::uint32_t subsec_nanos() const {\n\
         const auto secs_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(\n\
             std::chrono::duration_cast<std::chrono::seconds>(inner));\n\
         return static_cast<std::uint32_t>((inner - secs_ns).count());\n\
     }\n\
+    // Rust's checked_/saturating_ arithmetic: Duration is UNSIGNED, so\n\
+    // a subtraction that would go negative is None / ZERO, never a wrap.\n\
+    rusty::Option<Duration> checked_add(Duration other) const {\n\
+        return rusty::Option<Duration>(Duration{inner + other.inner});\n\
+    }\n\
+    rusty::Option<Duration> checked_sub(Duration other) const {\n\
+        if (inner < other.inner) { return rusty::None; }\n\
+        return rusty::Option<Duration>(Duration{inner - other.inner});\n\
+    }\n\
+    Duration saturating_add(Duration other) const { return Duration{inner + other.inner}; }\n\
+    Duration saturating_sub(Duration other) const {\n\
+        if (inner < other.inner) { return Duration{std::chrono::nanoseconds(0)}; }\n\
+        return Duration{inner - other.inner};\n\
+    }\n\
+    Duration& operator+=(const Duration& rhs) { inner += rhs.inner; return *this; }\n\
+    Duration& operator-=(const Duration& rhs) { inner -= rhs.inner; return *this; }\n\
+    friend Duration operator+(const Duration& lhs, const Duration& rhs) { return Duration{lhs.inner + rhs.inner}; }\n\
+    friend Duration operator-(const Duration& lhs, const Duration& rhs) { return Duration{lhs.inner - rhs.inner}; }\n\
+    friend Duration operator*(const Duration& lhs, std::uint32_t rhs) { return Duration{lhs.inner * rhs}; }\n\
+    friend Duration operator*(std::uint32_t lhs, const Duration& rhs) { return Duration{rhs.inner * lhs}; }\n\
+    friend Duration operator/(const Duration& lhs, std::uint32_t rhs) { return Duration{lhs.inner / rhs}; }\n\
     friend bool operator==(const Duration& lhs, const Duration& rhs) { return lhs.inner == rhs.inner; }\n\
     friend bool operator!=(const Duration& lhs, const Duration& rhs) { return lhs.inner != rhs.inner; }\n\
     friend bool operator<(const Duration& lhs, const Duration& rhs) { return lhs.inner < rhs.inner; }\n\
     friend bool operator<=(const Duration& lhs, const Duration& rhs) { return lhs.inner <= rhs.inner; }\n\
     friend bool operator>(const Duration& lhs, const Duration& rhs) { return lhs.inner > rhs.inner; }\n\
     friend bool operator>=(const Duration& lhs, const Duration& rhs) { return lhs.inner >= rhs.inner; }\n\
+    std::string rusty_debug_string() const {\n\
+        const auto ns = inner.count();\n\
+        if (ns == 0) { return \"0ns\"; }\n\
+        if (ns % 1000000000LL == 0) { return std::to_string(ns / 1000000000LL) + \"s\"; }\n\
+        if (ns % 1000000LL == 0) { return std::to_string(ns / 1000000LL) + \"ms\"; }\n\
+        if (ns % 1000LL == 0) { return std::to_string(ns / 1000LL) + \"us\"; }\n\
+        return std::to_string(ns) + \"ns\";\n\
+    }\n\
     template<typename Rep, typename Period>\n\
     operator std::chrono::duration<Rep, Period>() const { return std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(inner); }\n\
 };\n\
+inline const Duration Duration::ZERO{std::chrono::nanoseconds(0)};\n\
 struct Instant {\n\
     std::chrono::steady_clock::time_point inner;\n\
     static Instant now() { return Instant{std::chrono::steady_clock::now()}; }\n\
     Duration duration_since(Instant earlier) const {\n\
         return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)};\n\
     }\n\
+    Duration elapsed() const {\n\
+        return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - inner)};\n\
+    }\n\
+    Duration saturating_duration_since(Instant earlier) const {\n\
+        if (inner < earlier.inner) { return Duration{std::chrono::nanoseconds(0)}; }\n\
+        return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)};\n\
+    }\n\
+    rusty::Option<Duration> checked_duration_since(Instant earlier) const {\n\
+        if (inner < earlier.inner) { return rusty::None; }\n\
+        return rusty::Option<Duration>(Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)});\n\
+    }\n\
+    rusty::Option<Instant> checked_add(Duration d) const { return rusty::Option<Instant>(Instant{inner + d.inner}); }\n\
+    rusty::Option<Instant> checked_sub(Duration d) const { return rusty::Option<Instant>(Instant{inner - d.inner}); }\n\
+    Instant& operator+=(const Duration& rhs) { inner += rhs.inner; return *this; }\n\
+    Instant& operator-=(const Duration& rhs) { inner -= rhs.inner; return *this; }\n\
+    friend Instant operator+(const Instant& lhs, const Duration& rhs) { return Instant{lhs.inner + rhs.inner}; }\n\
+    friend Instant operator-(const Instant& lhs, const Duration& rhs) { return Instant{lhs.inner - rhs.inner}; }\n\
+    friend Duration operator-(const Instant& lhs, const Instant& rhs) { return lhs.duration_since(rhs); }\n\
+    friend bool operator==(const Instant& lhs, const Instant& rhs) { return lhs.inner == rhs.inner; }\n\
+    friend bool operator!=(const Instant& lhs, const Instant& rhs) { return lhs.inner != rhs.inner; }\n\
+    friend bool operator<(const Instant& lhs, const Instant& rhs) { return lhs.inner < rhs.inner; }\n\
+    friend bool operator<=(const Instant& lhs, const Instant& rhs) { return lhs.inner <= rhs.inner; }\n\
+    friend bool operator>(const Instant& lhs, const Instant& rhs) { return lhs.inner > rhs.inner; }\n\
+    friend bool operator>=(const Instant& lhs, const Instant& rhs) { return lhs.inner >= rhs.inner; }\n\
 };\n\
 struct SystemTime {\n\
     std::chrono::system_clock::time_point inner;\n\
@@ -55372,6 +55455,13 @@ struct SystemTime {\n\
         }\n\
         return rusty::Result<Duration, std::tuple<>>::Err(std::make_tuple());\n\
     }\n\
+    rusty::Result<Duration, std::tuple<>> elapsed() const {\n\
+        return SystemTime{std::chrono::system_clock::now()}.duration_since(*this);\n\
+    }\n\
+    friend bool operator==(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner == rhs.inner; }\n\
+    friend bool operator!=(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner != rhs.inner; }\n\
+    friend bool operator<(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner < rhs.inner; }\n\
+    friend bool operator>(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner > rhs.inner; }\n\
 };\n\
 inline const SystemTime UNIX_EPOCH{std::chrono::system_clock::time_point{}};\n\
 }\n\
@@ -56216,8 +56306,8 @@ rusty::Result<T, rusty::String> parse(const Input& input) {\n\
         return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"invalid float literal\"));\n\
     }\n\
     if constexpr (std::is_same_v<T, bool>) {\n\
-        if (text == \"true\") { return rusty::Result<T, rusty::String>::Ok(true); }\n\
-        if (text == \"false\") { return rusty::Result<T, rusty::String>::Ok(false); }\n\
+        if (text == std::string_view(\"true\")) { return rusty::Result<T, rusty::String>::Ok(true); }\n\
+        if (text == std::string_view(\"false\")) { return rusty::Result<T, rusty::String>::Ok(false); }\n\
         return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"provided string was not `true` or `false`\"));\n\
     }\n\
     if constexpr (std::is_same_v<T, rusty::String>) {\n\
