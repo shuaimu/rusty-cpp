@@ -2508,7 +2508,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             ];
             resolved.extend(segments[3..].iter().cloned());
             for seg in &mut resolved {
-                *seg = escape_cpp_keyword(seg);
+                *seg = escape_cpp_keyword_in_runtime_path(seg);
             }
             return resolved.join("::");
         }
@@ -2516,7 +2516,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             let mut resolved = vec!["rusty".to_string(), "thread".to_string()];
             resolved.extend(segments[2..].iter().cloned());
             for seg in &mut resolved {
-                *seg = escape_cpp_keyword(seg);
+                *seg = escape_cpp_keyword_in_runtime_path(seg);
             }
             return resolved.join("::");
         }
@@ -2527,7 +2527,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             let mut resolved = vec!["rusty".to_string(), "fmt".to_string()];
             resolved.extend(segments[2..].iter().cloned());
             for seg in &mut resolved {
-                *seg = escape_cpp_keyword(seg);
+                *seg = escape_cpp_keyword_in_runtime_path(seg);
             }
             return resolved.join("::");
         }
@@ -2538,7 +2538,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             }
             resolved.extend(segments[1..].iter().cloned());
             for seg in &mut resolved {
-                *seg = escape_cpp_keyword(seg);
+                *seg = escape_cpp_keyword_in_runtime_path(seg);
             }
             return resolved.join("::");
         }
@@ -2588,7 +2588,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             let mut resolved = vec!["rusty".to_string(), "str_runtime".to_string()];
             resolved.extend(segments[2..].iter().cloned());
             for seg in &mut resolved {
-                *seg = escape_cpp_keyword(seg);
+                *seg = escape_cpp_keyword_in_runtime_path(seg);
             }
             return resolved.join("::");
         }
@@ -2768,7 +2768,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             let mut resolved = vec!["rusty".to_string()];
             resolved.extend(segments[1..].iter().cloned());
             for seg in &mut resolved {
-                *seg = escape_cpp_keyword(seg);
+                *seg = escape_cpp_keyword_in_runtime_path(seg);
             }
             return resolved.join("::");
         }

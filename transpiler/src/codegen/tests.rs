@@ -15713,6 +15713,23 @@ fn test_tuple_impl_self_index_lowers_to_std_get() {
             fn emit(&self, s: &mut Sink) {
                 self.0.emit(s);
                 self.1.emit(s);
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::get<0>") && out.contains("std::get<1>"),
+        "tuple-impl self indexing must go through std::get:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("self_._0") && !out.contains("self_._1"),
+        "std::tuple has no _N members:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_hint_spin_loop_lowers_to_rusty_hint() {
     // The other std::hint entries take an operand and lower to an
     // identity expression; spin_loop takes none, so it needs a real
@@ -15730,13 +15747,6 @@ fn test_hint_spin_loop_lowers_to_rusty_hint() {
         "#,
     );
     assert!(
-        out.contains("std::get<0>") && out.contains("std::get<1>"),
-        "tuple-impl self indexing must go through std::get:\n{}",
-        out
-    );
-    assert!(
-        !out.contains("self_._0") && !out.contains("self_._1"),
-        "std::tuple has no _N members:\n{}",
         out.contains("rusty::hint::spin_loop()"),
         "spin_loop must lower to the runtime helper:\n{}",
         out
@@ -15744,6 +15754,51 @@ fn test_hint_spin_loop_lowers_to_rusty_hint() {
     assert!(
         !out.contains("std::hint::"),
         "no Rust hint path may survive into C++:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_runtime_path_keeps_libc_collision_names() {
+    // escape_cpp_keyword renames a handful of libc-colliding names
+    // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function
+    // of that name loses overload resolution to the C library. A path
+    // resolving into the rusty:: runtime is fully QUALIFIED, so that
+    // capture cannot happen — and the runtime defines
+    // rusty::thread::sleep, so the rename emitted a call to a function
+    // that does not exist.
+    let out = transpile_str(
+        r#"
+        pub fn nap(ms: u64) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::thread::sleep("),
+        "runtime path must keep the runtime's own spelling:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("rusty::thread::sleep_("),
+        "the libc-collision rename must not apply to a qualified runtime path:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_user_fn_still_escapes_libc_collision() {
+    // The rename still applies where it was introduced for: a
+    // user-defined, unqualified function named after a libc symbol.
+    let out = transpile_str(
+        r#"
+        pub fn sleep(n: u32) -> u32 { n }
+        pub fn call_it() -> u32 { sleep(3) }
+        "#,
+    );
+    assert!(
+        out.contains("sleep_"),
+        "a user fn named sleep must still be renamed:\n{}",
         out
     );
 }

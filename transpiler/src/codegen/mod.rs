@@ -54585,6 +54585,23 @@ fn escape_cpp_keyword(name: &str) -> String {
     }
 }
 
+/// Escape a segment of a path that resolves into the `rusty::` runtime.
+///
+/// Same as [`escape_cpp_keyword`] except the libc-collision renames do
+/// NOT apply: those exist because an UNQUALIFIED user function loses
+/// overload resolution to the C library's exact match, but a runtime
+/// path is fully qualified (`rusty::thread::sleep`), so `::sleep` can
+/// never be selected — and the runtime defines `sleep`, not `sleep_`,
+/// so renaming produced a call to a function that does not exist.
+/// True C++ keywords are still escaped: the runtime escapes them the
+/// same way on its side (`write` -> `write_`).
+pub(crate) fn escape_cpp_keyword_in_runtime_path(name: &str) -> String {
+    match name {
+        "dup" | "sleep" | "raise" | "kill" | "pause" => name.to_string(),
+        _ => escape_cpp_keyword(name),
+    }
+}
+
 /// Scan a list of statements and collect the names of variables that are reassigned.
 /// This is used for reference rebinding detection: `let mut r = &x; r = &y;`
 /// means `r` should be emitted as a pointer, not a reference.
