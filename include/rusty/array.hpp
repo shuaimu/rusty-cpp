@@ -2,6 +2,7 @@
 #define RUSTY_ARRAY_HPP
 
 #include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
+#include <string>     // std::to_string (rusty::index panic message)
 #include <array>
 #include <vector>
 #include <cstddef>
@@ -847,10 +848,19 @@ template<typename VecLike, typename Item>
 void push_back_collect_item(VecLike& out, Item&& item) {
     using ItemRef = Item&&;
     using ItemValue = std::remove_cvref_t<ItemRef>;
-    if constexpr (requires(VecLike& v, Item&& i) { v.push_back(std::forward<Item>(i)); }) {
+    // ORDER MATTERS: an LVALUE port type (Rc, String, …) must go through
+    // its member clone() — vector's push_back(const&) would invoke the
+    // port's BITWISE default copy ctor, leaving two owners of one inner
+    // (the temporary's drop then frees it under the collected copy).
+    if constexpr (!std::is_lvalue_reference_v<Item>
+                  && requires(VecLike& v, Item&& i) { v.push_back(std::forward<Item>(i)); }) {
         out.push_back(std::forward<Item>(item));
-    } else if constexpr (requires(const ItemValue& value) { value.clone(); }) {
+    } else if constexpr (requires(const ItemValue& value) {
+                             { value.clone() } -> std::same_as<ItemValue>;
+                         }) {
         out.push_back(item.clone());
+    } else if constexpr (requires(VecLike& v, Item&& i) { v.push_back(std::forward<Item>(i)); }) {
+        out.push_back(std::forward<Item>(item));
     } else if constexpr (!std::is_const_v<std::remove_reference_t<ItemRef>>
                          && std::is_move_constructible_v<ItemValue>) {
         out.push_back(std::move(item));
@@ -877,29 +887,42 @@ auto collect_range(Range&& range_like) {
         }
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
-        // Consume option-like iterators through a forwarding reference instead of
-        // by-value local materialization. This avoids creating an extra moved-from
-        // iterator owner whose destructor can race ownership-forget bookkeeping.
-        auto&& iter = range_like;
-        using NextResult = decltype(iter.next());
-        static_assert(
-            requires(NextResult& next_item) {
-                detail::option_has_value(next_item);
-                detail::option_take_value(next_item);
-            },
-            "rusty::collect_range requires next() to return an Option/optional-like value");
-        using Elem = std::decay_t<decltype(detail::option_take_value(
-            std::declval<NextResult&>()))>;
-        std::vector<Elem> out;
-        while (true) {
-            auto item = iter.next();
-            if (!detail::option_has_value(item)) {
-                break;
+        auto collect_via_next = [](auto& iter) {
+            using NextResult = decltype(iter.next());
+            static_assert(
+                requires(NextResult& next_item) {
+                    detail::option_has_value(next_item);
+                    detail::option_take_value(next_item);
+                },
+                "rusty::collect_range requires next() to return an Option/optional-like value");
+            using Elem = std::decay_t<decltype(detail::option_take_value(
+                std::declval<NextResult&>()))>;
+            std::vector<Elem> out;
+            while (true) {
+                auto item = iter.next();
+                if (!detail::option_has_value(item)) {
+                    break;
+                }
+                decltype(auto) value = detail::option_take_value(item);
+                detail::push_back_collect_item(out, std::forward<decltype(value)>(value));
             }
-            decltype(auto) value = detail::option_take_value(item);
-            detail::push_back_collect_item(out, std::forward<decltype(value)>(value));
+            return out;
+        };
+        if constexpr (!std::is_lvalue_reference_v<Range&&>
+                      && std::is_move_constructible_v<std::remove_cvref_t<Range>>) {
+            // Rust's collect(self) CONSUMES the iterator: for rvalue arguments,
+            // own it so its destructor (ExtractIf's retain/len fixup, Drain's
+            // tail restore) runs when collect returns — Rust's drop timing.
+            // (Safe with local `_rusty_forgotten` flags: the moved-from source's
+            // destructor is a no-op; the legacy global forget-table race this
+            // branch once avoided is gone.)
+            auto owned = std::forward<Range>(range_like);
+            return collect_via_next(owned);
+        } else {
+            // Lvalue arguments keep caller-owned lifetime.
+            auto&& iter = range_like;
+            return collect_via_next(iter);
         }
-        return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
         return collect_range(std::forward<Range>(range_like).into_iter());
     } else if constexpr (requires(Range&& r) { r.iter(); }) {
@@ -2447,6 +2470,31 @@ auto as_u8_array(ArrayLike&& value) {
             out[i] = static_cast<uint8_t>(value[i]);
         }
         return out;
+    }
+}
+
+// Rust's `Index`/`IndexMut` on slices and Vec BOUNDS-CHECK and panic; C++
+// `std::span`/array subscript does not, so a lowered `Index::index(s, i)`
+// silently read out of bounds. Route those through here.
+//
+// Only an integral index into a length-bearing container is checked — the
+// same trait also covers map lookups (`map[&key]`, which panics for its own
+// reasons) and range slicing (`&v[a..b]`), so anything else forwards to the
+// container's own subscript unchanged.
+template<typename Container, typename Index>
+constexpr decltype(auto) index(Container&& container, Index&& idx) {
+    using BareIndex = std::remove_cvref_t<Index>;
+    if constexpr (std::is_integral_v<BareIndex> && requires { rusty::len(container); }) {
+        const auto i = static_cast<std::size_t>(idx);
+        const auto n = static_cast<std::size_t>(rusty::len(container));
+        if (i >= n) {
+            rusty::panic::do_panic(
+                "index out of bounds: the len is " + std::to_string(n)
+                + " but the index is " + std::to_string(i));
+        }
+        return std::forward<Container>(container)[i];
+    } else {
+        return std::forward<Container>(container)[std::forward<Index>(idx)];
     }
 }
 

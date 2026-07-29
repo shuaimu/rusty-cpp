@@ -764,16 +764,18 @@ def _alloc_specific(cpp_out: Path):
         )
         # Vec::operator[]/index_mut lower Rust's `Index::index` to `.index()` on
         # the dereffed `*this`, but that derefs to std::span which has no
-        # .index(). Route to `as_slice(*this)[i]` (vendored vec_port does the
-        # same; its rule is anchored to 4-space indent so it misses the single
-        # module — the body expr is indent-independent, replace directly).
+        # .index(). Route through `rusty::index`, NOT a bare `[i]`: Rust's
+        # slice/Vec Index panics out of bounds while std::span::operator[]
+        # reads past the end silently (`vec[len]` was UB, not a panic).
+        # rusty::index only bounds-checks integral indices into length-bearing
+        # containers, so range slicing keeps its existing behaviour.
         t = t.replace(
             "(rusty::detail::deref_if_pointer_like((*this))).index(std::move(index))",
-            "rusty::as_slice((*this))[static_cast<size_t>(index)]",
+            "rusty::index(rusty::as_slice((*this)), static_cast<size_t>(index))",
         )
         t = t.replace(
             "(rusty::detail::deref_if_pointer_like((*this))).index_mut(std::move(index))",
-            "rusty::as_mut_slice((*this))[static_cast<size_t>(index)]",
+            "rusty::index(rusty::as_mut_slice((*this)), static_cast<size_t>(index))",
         )
         # --- instantiation-time fixes (surface when Vec/VecDeque are actually
         # used with a concrete T; the BMI precompile skips these template
@@ -983,13 +985,15 @@ def _alloc_specific(cpp_out: Path):
             "raw_vec::RawVec<Src, rusty::alloc::Global>::from_nonnull_in",
         )
         # handle_error: the TryReserveErrorKind match mis-emitted a unit-variant
-        # arm as a `const auto& Enum::Variant = _m;` binding. Both arms are
-        # infallible-reserve OOM handlers that abort, so collapse to abort.
+        # arm as a `const auto& Enum::Variant = _m;` binding. Rust's arms differ:
+        # CapacityOverflow -> capacity_overflow() PANICS (unwinds, catchable);
+        # only AllocError -> handle_alloc_error aborts the process.
         t = re.sub(
             r"return \[&\]\(\) -> void \{ auto&& _m = e\.kind\(\);.*?"
             r"rusty::collections::TryReserveErrorKind::CapacityOverflow = _m;.*?"
             r"rusty::intrinsics::unreachable\(\); \}\(\); \}\(\);",
-            "(void)e; std::abort();",
+            "if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) "
+            "{ rusty::panicking::panic(\"capacity overflow\"); } std::abort();",
             t,
             flags=re.DOTALL,
         )
@@ -1831,27 +1835,59 @@ SPLICE_DTOR_EAGER = (
 )
 
 
+VEC_SPLICE_DTOR_EAGER = (
+    "            ~Splice() noexcept(false) {\n"
+    "                if (_rusty_forgotten) { return; }\n"
+    "                // patcher: EAGER splice-drop protocol (the lazy\n"
+    "                // fill/move_tail dance needs unemitted Drain members).\n"
+    "                for (auto vs_v = this->drain.next(); vs_v.is_some(); vs_v = this->drain.next()) { }\n"
+    "                auto& vs_vec = this->drain.vec.as_mut();\n"
+    "                const size_t vs_tail = rusty::detail::deref_if_pointer_like(this->drain.tail_len);\n"
+    "                { auto vs_dead = std::move(this->drain); }\n"
+    "                size_t vs_i = vs_vec.len() - vs_tail;\n"
+    "                for (auto vs_v = this->replace_with.next(); vs_v.is_some(); vs_v = this->replace_with.next()) {\n"
+    "                    vs_vec.insert(vs_i++, rusty::detail::deref_if_pointer_like(std::move(vs_v).unwrap()));\n"
+    "                }\n"
+    "            }\n"
+)
+
+
 def _replace_splice_dtor(text: str) -> str:
-    marker = "                ~Splice() noexcept(false) {"
-    i = text.find(marker)
-    if i < 0:
-        return text
-    depth = 0
-    j = i
-    started = False
-    while j < len(text):
-        c = text[j]
-        if c == "{":
-            depth += 1
-            started = True
-        elif c == "}":
-            depth -= 1
-            if started and depth == 0:
-                break
-        j += 1
-    # consume trailing newline
-    end = text.find("\n", j) + 1
-    return text[:i] + SPLICE_DTOR_EAGER + text[end:]
+    # Rewrite EVERY Splice dtor: dispatch deque-vs-vec on the body's
+    # container field (drain.deque vs drain.vec).
+    out = []
+    pos = 0
+    while True:
+        i = text.find("~Splice() noexcept(false) {", pos)
+        if i < 0:
+            out.append(text[pos:])
+            break
+        # line start (keep indentation out of the marker match)
+        ls = text.rfind("\n", 0, i) + 1
+        depth = 0
+        j = i
+        started = False
+        while j < len(text):
+            c = text[j]
+            if c == "{":
+                depth += 1
+                started = True
+            elif c == "}":
+                depth -= 1
+                if started and depth == 0:
+                    break
+            j += 1
+        end = text.find("\n", j) + 1
+        body = text[i:end]
+        out.append(text[pos:ls])
+        if "drain.deque" in body:
+            out.append(SPLICE_DTOR_EAGER)
+        elif "drain.vec" in body:
+            out.append(VEC_SPLICE_DTOR_EAGER)
+        else:
+            out.append(text[ls:end])
+        pos = end
+    return "".join(out)
 
 
 def _vd_suite_fixes(text: str) -> str:
@@ -2047,6 +2083,180 @@ def _vd_suite_fixes(text: str) -> str:
         "rusty::ptr::drop_in_place(std::move(front));",
         "try { rusty::ptr::drop_in_place(std::move(front)); } catch (...) { "
         "try { rusty::ptr::drop_in_place(std::move(back)); } catch (...) {} throw; }")
+    # (a2) vec::Vec::splice — same IntoIterator adaptation as the deque
+    # splice (deref_call+__mdisp_into_iter cannot adapt arrays/Options).
+    text = text.replace(
+        "return vec::splice::Splice<I, A>(this->drain(std::move(range)), "
+        "rusty::deref_call(replace_with, rusty::detail::__mdisp_into_iter{}));",
+        "auto vs_it = [&] {\n"
+        "                if constexpr (requires { std::move(replace_with).into_iter(); }) {\n"
+        "                    return std::move(replace_with).into_iter();\n"
+        "                } else if constexpr (requires { replace_with.next(); }) {\n"
+        "                    return std::move(replace_with);\n"
+        "                } else {\n"
+        "                    using VsT = std::remove_cvref_t<decltype(replace_with[static_cast<size_t>(0)])>;\n"
+        "                    auto av = ::vec::Vec<VsT>::new_();\n"
+        "                    for (auto&& vs_x : replace_with) { av.push(std::move(vs_x)); }\n"
+        "                    return std::move(av).into_iter();\n"
+        "                }\n"
+        "            }();\n"
+        "            return vec::splice::Splice<decltype(vs_it), A>(this->drain(std::move(range)), std::move(vs_it));")
+    # (a3) The emitted Vec/collection classes carry DUPLICATE span ==
+    # overloads (Rust PartialEq for [T], &[T], &mut [T] each lowered to a
+    # span shape): the by-const-ref and by-value forms tie for
+    # span<const T> operands -> every span==Vec compare is ambiguous.
+    # Rename the by-value duplicates out of the operator overload set.
+    text = text.replace(
+        "bool operator==(std::span<const U> other) const {",
+        "bool __rusty_eq_by_value_dup(std::span<const U> other) const {")
+    text = text.replace(
+        "bool operator==(std::span<U> other) const {",
+        "bool __rusty_eq_by_value_dup2(std::span<U> other) const {")
+    # (a4) vec::Vec has no member iter(): rusty::iter's deref dispatch
+    # then returns a passthrough that poisons chain/cloned/zip downstream.
+    # Give it a real slice iterator.
+    text = text.replace(
+        "        static Vec<T, A> from_iter(vec::into_iter::IntoIter<T> iterator) {",
+        "        auto iter() const {\n"
+        "            auto vs_s = *(*this);\n"
+        "            using VsElemT = std::remove_reference_t<decltype(vs_s[static_cast<size_t>(0)])>;\n"
+        "            return rusty::slice_iter::Iter<VsElemT>(vs_s.data(), vs_s.data() + vs_s.size());\n"
+        "        }\n"
+        "        static Vec<T, A> from_iter(vec::into_iter::IntoIter<T> iterator) {")
+    # (a5) extend's while-let pulls items via deref_call(__mdisp_next) —
+    # prefer the direct member when present (suite adapters).
+    text = text.replace(
+        "auto&& _whilelet = rusty::deref_call(iterator, rusty::detail::__mdisp_next{});",
+        "auto&& _whilelet = [&]() -> decltype(auto) { "
+        "if constexpr (requires { iterator.next(); }) { return iterator.next(); } "
+        "else { return rusty::deref_call(iterator, rusty::detail::__mdisp_next{}); } }();")
+    # (a6) split_at_spare_mut internals: unemitted pointer helpers.
+    text = text.replace(
+        "const auto spare_ptr_shadow1 = spare_ptr->cast_uninit();",
+        "const auto spare_ptr_shadow1 = reinterpret_cast<rusty::MaybeUninit<T>*>("
+        "rusty::detail::ptr_or_addr(spare_ptr));")
+    text = text.replace(
+        "rusty::for_each(rusty::iter_ext::zip(std::move(to_clone), spare).map(",
+        "rusty::for_each(rusty::map(rusty::iter_ext::zip(std::move(to_clone), spare), ")
+    # (a7) Drain drop-tail: offset_from_unsigned member on raw pointers.
+    text = text.replace(
+        "auto drop_offset = drop_ptr->offset_from_unsigned(vec_ptr);",
+        "auto drop_offset = static_cast<size_t>("
+        "rusty::detail::ptr_or_addr(drop_ptr) - rusty::detail::ptr_or_addr(vec_ptr));")
+    # (a8) retain drop path: normalize the pointer carrier.
+    text = text.replace(
+        "rusty::ptr::drop_in_place(cur);",
+        "std::destroy_at(rusty::detail::ptr_or_addr(cur));")
+    # (a9) extend_from_within clone path: for_each(map(zip(..))) trips
+    # the map-adapter carrier probe — replace the whole statement with an
+    # eager write loop (same semantics: clone into spare, count len).
+    zip_marker = "rusty::for_each(rusty::map(rusty::iter_ext::zip(std::move(to_clone), spare), "
+    zi = text.find(zip_marker)
+    if zi >= 0:
+        depth = 0
+        j = zi
+        started = False
+        while j < len(text):
+            c = text[j]
+            if c == "(":
+                depth += 1
+                started = True
+            elif c == ")":
+                depth -= 1
+                if started and depth == 0:
+                    break
+            j += 1
+        stmt_end = text.find(";", j) + 1
+        replacement = (
+            "{ auto&& vs_a = to_clone; auto&& vs_b = spare;\n"
+            "              const size_t vs_n = std::min<size_t>(std::size(vs_a), std::size(vs_b));\n"
+            "              for (size_t vs_i = 0; vs_i < vs_n; ++vs_i) {\n"
+            "                  auto&& vs_src = vs_a[vs_i];\n"
+            "                  auto&& vs_dst = vs_b[vs_i];\n"
+            "                  if constexpr (requires { vs_dst.write_(rusty::clone(vs_src)); }) { vs_dst.write_(rusty::clone(vs_src)); }\n"
+            "                  else { vs_dst.write(rusty::clone(vs_src)); }\n"
+            "                  len += 1;\n"
+            "              } }")
+        text = text[:zi] + replacement + text[stmt_end:]
+    # (a10) pop_if/dedup predicates receive typed lvalue refs.
+    text = text.replace(
+        "if (predicate(std::move(last))) {",
+        "if (predicate(rusty::detail::deref_if_pointer_like(last))) {")
+    text = text.replace(
+        "same_bucket(&*read_ptr, &*prev_ptr)",
+        "same_bucket(rusty::detail::deref_if_pointer_like(read_ptr), "
+        "rusty::detail::deref_if_pointer_like(prev_ptr))")
+    # (a11) extend size_hint pull: tolerate adapters without the member.
+    text = text.replace(
+        "rusty::deref_call(iterator, rusty::detail::__mdisp_size_hint{})",
+        "[&]{ if constexpr (requires { iterator.size_hint(); }) { return iterator.size_hint(); } "
+        "else if constexpr (requires { rusty::deref_call(iterator, rusty::detail::__mdisp_size_hint{}); }) "
+        "{ return rusty::deref_call(iterator, rusty::detail::__mdisp_size_hint{}); } "
+        "else { return std::tuple<size_t, rusty::Option<size_t>>{static_cast<size_t>(0), rusty::Option<size_t>{}}; } }()")
+    # (a12) member for_each on generic iterators -> free-fn form.
+    text = text.replace("iterator.for_each(", "rusty::for_each(iterator, ")
+    # (a13) deallocate through the allocator member directly when possible.
+    text = text.replace(
+        "rusty::deref_call(this->alloc, rusty::detail::__mdisp_deallocate{}, "
+        "std::move(ptr_shadow1), std::move(layout))",
+        "[&]{ auto vs_u8 = rusty::ptr::NonNull<uint8_t>(reinterpret_cast<uint8_t*>(rusty::as_ptr(ptr_shadow1))); "
+        "if constexpr (requires { this->alloc.deallocate(vs_u8, layout); }) "
+        "{ this->alloc.deallocate(vs_u8, std::move(layout)); } "
+        "else if constexpr (requires { deallocate(this->alloc, std::move(ptr_shadow1), std::move(layout)); }) "
+        "{ deallocate(this->alloc, std::move(ptr_shadow1), std::move(layout)); } "
+        "else if constexpr (requires { deallocate(this->alloc, vs_u8, std::move(layout)); }) "
+        "{ deallocate(this->alloc, vs_u8, std::move(layout)); } "
+        "else { rusty::deref_call(this->alloc, rusty::detail::__mdisp_deallocate{}, "
+        "std::move(ptr_shadow1), std::move(layout)); } }()")
+    # (a14) from_iter fallback fed a (start, end) PAIR by extend_from_within
+    # range plumbing: iterate the indices.
+    text = text.replace(
+        "auto inputs = rusty::collect_range(rusty::iter(std::move(iter)));",
+        "auto inputs = [&]{ if constexpr (requires { std::get<0>(iter); std::get<1>(iter); } "
+        "&& !requires { iter.next(); }) { std::vector<size_t> vs_r; "
+        "for (size_t vs_i = std::get<0>(iter); vs_i < std::get<1>(iter); ++vs_i) { vs_r.push_back(vs_i); } "
+        "return vs_r; } else { return rusty::collect_range(rusty::iter(std::move(iter))); } }();")
+    # (a15) extend_from_within: the converted range is a (start, end)
+    # pair — len/collect dispatch cannot digest it.
+    text = text.replace(
+        "this->reserve(rusty::len(range));",
+        "this->reserve(std::get<1>(range) - std::get<0>(range));")
+    # (a16) spec_extend write-back: deref the element carrier.
+    text = text.replace(
+        "rusty::ptr::write_(rusty::ptr::add(rusty::as_mut_ptr((*this)), std::move(len)), std::move(element));",
+        "rusty::ptr::write_(rusty::ptr::add(rusty::as_mut_ptr((*this)), std::move(len)), "
+        "rusty::detail::deref_if_pointer_like(std::move(element)));")
+    # (a17) C++ sizeof(EmptyStruct) == 1; Rust ZST semantics require the
+    # runtime's rust_layout size (0 for Unit/tuple<>). Every alloc sizeof
+    # gate (ZST capacity, dangling routing, layout math) must use it.
+    text = re.sub(r"\bsizeof\(T\)", "rusty::mem::size_of<T>()", text)
+    text = re.sub(r"\bsizeof\(Item\)", "rusty::mem::size_of<Item>()", text)
+    # (a17b) After the sizeof rewrite, the emitted Vec::len() assume divides
+    # by size_of<T>() — 0 for ZSTs, so at -O1 it SIGFPEs. Guarding the divisor
+    # with max(1) stops the trap but then ASSERTS len <= PTRDIFF_MAX, which a
+    # ZST Vec legitimately violates (its capacity is usize::MAX) — a false
+    # assume is UB the optimizer may exploit. Rust's bound is "unbounded for
+    # ZSTs", so branch on it.
+    text = text.replace(
+        "(static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())"
+        " / rusty::mem::size_of<T>())",
+        "(rusty::mem::size_of<T>() == 0"
+        " ? std::numeric_limits<std::size_t>::max()"
+        " : (static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())"
+        " / rusty::mem::size_of<T>()))")
+    # (a18) vec Drain DropGuard tail restore: the emission byte-cast the
+    # pointers (uint8_t*) but kept ELEMENT indices and count — for any
+    # non-zero tail it copied 1 byte from byte-offset `tail` onto
+    # byte-offset `start`, corrupting slot 0 and never restoring the tail
+    # (String drains read '' ''). Use element-typed pointer math.
+    text = text.replace(
+        "auto src = rusty::ptr::add(reinterpret_cast<const uint8_t*>("
+        "rusty::as_ptr(source_vec)), std::move(tail));",
+        "auto src = rusty::ptr::add(rusty::as_ptr(source_vec), std::move(tail));")
+    text = text.replace(
+        "auto dst = rusty::ptr::add(reinterpret_cast<uint8_t*>("
+        "rusty::as_mut_ptr(source_vec)), std::move(start));",
+        "auto dst = rusty::ptr::add(rusty::as_mut_ptr(source_vec), std::move(start));")
     # (b) Drain guard body: len -> len_field rename was missed by the
     # emitter inside this one body (transpiler gap).
     text = text.replace("auto head_len = source_deque.len;",

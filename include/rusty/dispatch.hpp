@@ -72,6 +72,9 @@ struct alignas(T) zero_length_array {
     constexpr zero_length_array() noexcept = default;
     // Emitted initializers still spell `std::array<T, 0>{}`.
     constexpr zero_length_array(std::array<T, 0>) noexcept {}
+    // rusty::clone of a std::array<T, 0> field yields this type; emitted
+    // ctors take std::array<T, 0> — convert back losslessly.
+    constexpr operator std::array<T, 0>() const noexcept { return {}; }
     constexpr T* data() noexcept { return nullptr; }
     constexpr const T* data() const noexcept { return nullptr; }
     constexpr std::size_t size() const noexcept { return 0; }

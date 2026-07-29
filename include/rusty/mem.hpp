@@ -49,6 +49,18 @@ struct rust_layout_size {
     static constexpr std::size_t value = sizeof(T);
 };
 
+// Rust ZSTs occupy 0 bytes; C++ gives empty types size 1. The unit type
+// and zero-length arrays are the port's true ZST currencies (crate
+// structs carry the _rusty_forgotten flag and stay 1+ bytes).
+template<>
+struct rust_layout_size<std::tuple<>> {
+    static constexpr std::size_t value = 0;
+};
+template<typename T>
+struct rust_layout_size<std::array<T, 0>> {
+    static constexpr std::size_t value = 0;
+};
+
 template<typename T, typename = void>
 struct rust_layout_align {
     static constexpr std::size_t value = alignof(T);
@@ -341,7 +353,9 @@ inline void swap(T& left, T& right) noexcept(noexcept(std::swap(left, right))) {
 // ScopeGuard<Self, F> swaps against *guard). Mirror it for mixed-type
 // pairs: deref the side whose operator* yields the other.
 template<typename T, typename U>
-    requires (!std::is_same_v<T, U>)
+    requires (!std::is_same_v<T, U>
+              && (requires(T& l, U& r) { swap(l, *r); }
+                  || requires(T& l, U& r) { swap(*l, r); }))
 inline void swap(T& left, U& right) {
     if constexpr (requires(T& l, U& r) { swap(l, *r); }) {
         swap(left, *right);

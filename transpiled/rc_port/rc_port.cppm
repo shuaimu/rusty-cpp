@@ -3887,12 +3887,12 @@ struct Rc {
     A alloc;
     mutable bool _rusty_forgotten = false;
     Rc(rusty::ptr::NonNull<RcInner<T>> ptr_init, rusty::PhantomData<RcInner<T>> phantom_init, A alloc_init) : ptr(std::move(ptr_init)), phantom(std::move(phantom_init)), alloc(std::move(alloc_init)) {}
-    Rc(const Rc&) = default;
+    Rc(const Rc& other) : Rc(other.clone()) {}
     Rc(Rc&& other) noexcept : ptr(std::move(other.ptr)), phantom(std::move(other.phantom)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    Rc& operator=(const Rc&) = default;
+    Rc& operator=(const Rc& other) { if (this != &other) { this->~Rc(); new (this) Rc(other.clone()); } return *this; }
     Rc& operator=(Rc&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4627,12 +4627,12 @@ struct Weak {
           alloc(A{}) {
         this->_rusty_forgotten = true;
     }
-    Weak(const Weak&) = default;
+    Weak(const Weak& other) : Weak(other.clone()) {}
     Weak(Weak&& other) noexcept : ptr(std::move(other.ptr)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    Weak& operator=(const Weak&) = default;
+    Weak& operator=(const Weak& other) { if (this != &other) { this->~Weak(); new (this) Weak(other.clone()); } return *this; }
     Weak& operator=(Weak&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4821,12 +4821,12 @@ struct UniqueRc {
     A alloc;
     mutable bool _rusty_forgotten = false;
     UniqueRc(rusty::ptr::NonNull<RcInner<T>> ptr_init, rusty::PhantomData<RcInner<T>> _marker_init, rusty::PhantomData<std::add_pointer_t<T>> _marker2_init, A alloc_init) : ptr(std::move(ptr_init)), _marker(std::move(_marker_init)), _marker2(std::move(_marker2_init)), alloc(std::move(alloc_init)) {}
-    UniqueRc(const UniqueRc&) = default;
+    UniqueRc(const UniqueRc&) = delete;
     UniqueRc(UniqueRc&& other) noexcept : ptr(std::move(other.ptr)), _marker(std::move(other._marker)), _marker2(std::move(other._marker2)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    UniqueRc& operator=(const UniqueRc&) = default;
+    UniqueRc& operator=(const UniqueRc&) = delete;
     UniqueRc& operator=(UniqueRc&& other) noexcept {
         if (this == &other) {
             return *this;
