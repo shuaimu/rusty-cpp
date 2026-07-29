@@ -51098,6 +51098,14 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::path::Path",
         "rusty::ffi::",
         "rusty::cmp::Ordering",
+        // The helper block also DEFINES `rusty::time` (Duration /
+        // Instant / SystemTime / UNIX_EPOCH), which `std::time::*` maps
+        // onto. Without the marker a crate whose only runtime-block
+        // reference is a time type emitted `rusty::time::Instant` with
+        // nothing defining it ("no member named 'time' in namespace
+        // 'rusty'") — the same silently-missed-family failure the
+        // str_runtime/char_runtime prefix markers below were added for.
+        "rusty::time::",
         // Any str_runtime reference needs the block. The prefix marker covers
         // the whole family (from_utf8/chars/trim/split/split_once/replacen/…);
         // a per-fn list silently missed newly-added helpers.
