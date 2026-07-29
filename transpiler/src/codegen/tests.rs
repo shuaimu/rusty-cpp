@@ -40348,3 +40348,51 @@ fn test_item_import_through_sibling_module_is_not_a_module_import() {
     );
 }
 
+
+/// Module mode WITH a C++ namespace wrap — the shape crate-mode
+/// `--auto-namespace` output takes.
+fn transpile_str_module_with_cxx_namespace(
+    rust_code: &str,
+    module_name: &str,
+    cxx_namespace: &str,
+) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some(cxx_namespace.to_string()));
+    cg.emit_file(&file, Some(module_name));
+    cg.into_output()
+}
+
+#[test]
+fn test_c_like_enum_method_call_is_namespace_qualified() {
+    // A C-like enum's inherent methods lower to FREE functions (C++
+    // enums cannot have members). Calling one unqualified lets a local
+    // of the same name capture it: `let code = self.code();` is
+    // unambiguous Rust (methods and variables are separate namespaces)
+    // but became `const auto code = code(self_);` — a variable in its
+    // own initializer.
+    let out = transpile_str_module_with_cxx_namespace(
+        r#"
+        #[repr(i32)]
+        pub enum E { A = 1, B = 2 }
+        impl E {
+            pub fn code(self) -> i32 { self as i32 }
+            pub fn doubled(self) -> i32 {
+                let code = self.code();
+                code * 2
+            }
+        }
+        "#,
+        "probe.e",
+        "probe::e",
+    );
+    assert!(
+        out.contains("::probe::e::code(self_)"),
+        "the free-fn call must be namespace-qualified:\n{out}"
+    );
+    assert!(
+        !out.contains("= code(self_)"),
+        "an unqualified call is captured by the local:\n{out}"
+    );
+}
+
