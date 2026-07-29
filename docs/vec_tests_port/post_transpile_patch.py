@@ -251,10 +251,19 @@ template<typename Src>
 static auto vt_from(Src&& src) {
     using T = std::remove_cvref_t<decltype(src[static_cast<size_t>(0)])>;
     auto v = VecT<T>::with_capacity(std::size(src));
-    // Port types (Rc &c.) have BITWISE default copies — the transpiler
-    // contract is that copies always go through clone(). rusty::clone
-    // does the right thing for both port types and primitives.
-    for (auto&& x : src) { v.push(rusty::clone(x)); }
+    if constexpr (!std::is_lvalue_reference_v<Src&&>) {
+        // Rvalue source — a collect_range temporary. Rust's collect MOVES,
+        // and it must here too: cloning leaves the temporary holding live
+        // elements, and its destructor (std::vector's, which is noexcept)
+        // then runs their Drop a second time — std::terminate if that Drop
+        // panics. Moving leaves each source _rusty_forgotten instead.
+        for (auto&& x : src) { v.push(std::move(x)); }
+    } else {
+        // Port types (Rc &c.) have BITWISE default copies — the transpiler
+        // contract is that copies always go through clone(). rusty::clone
+        // does the right thing for both port types and primitives.
+        for (auto&& x : src) { v.push(rusty::clone(x)); }
+    }
     return v;
 }
 """
@@ -330,9 +339,6 @@ SKIP_GROUPS: list[tuple[list[str], str]] = [
       "test_collect_after_iterator_clone"],
      "in-place iterator specialization (ptr-identity asserts) is a "
      "rustc-internal optimization the port does not implement"),
-    (["test_retain_drop_panic"],
-     "drop-panic inside retain terminates (second throw during unwind) — "
-     "unwind interplay under investigation"),
     (["test_small_vec_struct"],
      "port Vec carries the _rusty_forgotten move-flag; Rust's 3-word "
      "layout guarantee does not hold"),

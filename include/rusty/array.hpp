@@ -844,10 +844,41 @@ Box<std::span<T>> into_boxed_slice(ArrayRepeatResult<T> values) {
 }
 
 namespace detail {
+/// Relocate `out` into a larger buffer BY MOVE when it is about to grow.
+///
+/// Every emitted port type has a `noexcept(false)` destructor (Rust's Drop
+/// may panic), and that makes `is_nothrow_move_constructible_v` FALSE even
+/// though the move constructor itself is `noexcept`. std::vector's growth
+/// path consults exactly that trait, so it falls back to the COPY ctor —
+/// which for a port type is the BITWISE `= default` one. Two owners of one
+/// inner, Drop side effects re-run on the stale copies, and if a Drop
+/// panics while vector is destroying the old buffer, it terminates.
+///
+/// Doing the relocation ourselves keeps it a move: each source is left
+/// `_rusty_forgotten`, so destroying the old buffer is a no-op.
+template<typename VecLike>
+void collect_relocate_if_full(VecLike& out) {
+    if constexpr (requires { out.capacity(); out.reserve(std::size_t{}); }) {
+        using Elem = typename VecLike::value_type;
+        if constexpr (std::is_move_constructible_v<Elem>
+                      && !std::is_nothrow_move_constructible_v<Elem>) {
+            if (out.size() == out.capacity()) {
+                VecLike grown;
+                grown.reserve(out.empty() ? std::size_t{4} : out.size() * 2);
+                for (auto& existing : out) {
+                    grown.push_back(std::move(existing));
+                }
+                out = std::move(grown);
+            }
+        }
+    }
+}
+
 template<typename VecLike, typename Item>
 void push_back_collect_item(VecLike& out, Item&& item) {
     using ItemRef = Item&&;
     using ItemValue = std::remove_cvref_t<ItemRef>;
+    collect_relocate_if_full(out);
     // ORDER MATTERS: an LVALUE port type (Rc, String, …) must go through
     // its member clone() — vector's push_back(const&) would invoke the
     // port's BITWISE default copy ctor, leaving two owners of one inner
