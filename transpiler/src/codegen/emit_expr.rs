@@ -14805,9 +14805,29 @@ impl CodeGen {
         let elem_cpp = self.map_type(elem_ty);
         let is_mut = reference.mutability.is_some() || expected_ref.mutability.is_some();
 
+        // `&[_]` maps the `_` placeholder to the int32_t default, which then
+        // rejects every non-integer literal: `let s: &[_] = &["a", "b"];` tried
+        // to build a std::array<int32_t, 2> out of string literals. Deduce the
+        // storage instead — but ONLY when the elements are non-numeric literals.
+        // The default is load-bearing elsewhere: `let b: &[_] = &[&0, &1];` is
+        // `&[&i32]` in Rust, yet the port's `iter().collect()` yields VALUES, so
+        // those comparisons rely on the elements collapsing to int32_t.
+        let inferred_non_numeric_elems = matches!(elem_ty, syn::Type::Infer(_))
+            && !array_expr.elems.is_empty()
+            && array_expr.elems.iter().all(|elem| {
+                matches!(
+                    self.peel_paren_group_expr(elem),
+                    syn::Expr::Lit(l) if !matches!(
+                        &l.lit,
+                        syn::Lit::Int(_) | syn::Lit::Float(_)
+                    )
+                )
+            });
         // If the element type references out-of-scope type parameters (e.g., T from
         // a callee's template), fall back to auto-deduced storage to avoid unresolved types.
-        if self.mapped_type_has_out_of_scope_type_params(&elem_cpp) {
+        if inferred_non_numeric_elems
+            || self.mapped_type_has_out_of_scope_type_params(&elem_cpp)
+        {
             let storage_decl = if is_mut {
                 "auto _slice_ref_tmp".to_string()
             } else {

@@ -11,6 +11,7 @@ The tests exercise the ALLOC consolidated module's `vec::Vec` (the
 vendored vec_port stays on its own smoke path). Rules grow from
 compile-error triage exactly like the vec_deque patcher did.
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -350,15 +351,17 @@ SKIP_GROUPS: list[tuple[list[str], str]] = [
     (["vec_macro_repeating_null_raw_fat_pointer"],
      "raw fat-pointer vtable surgery not translatable"),
     (["test_cow_from", "test_from_cow"],
-     "Cow<[T]> alloc-borrow surface not bound in this suite"),
+     "Cow is not a bound type: it lowers to a bare std::variant with no "
+     "from/into surface, so Cow::from(Vec) / Vec::from(Cow) do not exist"),
     (["test_into_flattened_size_overflow"],
      "ZST [(); usize::MAX] arrays exceed C++ constant-evaluation limits"),
     (["test_flatten_clone"],
-     "flat-map adapter clone hits the deleted module-type copy "
-     "(alloc IntoIter Clone not emitted)"),
+     "the flatten adapter has no clone(), so cloning a flattened chain "
+     "falls back to the deleted move-only copy"),
     (["test_into_iter_clone"],
-     "alloc IntoIter Clone impl not emitted; adapter-wrapped clones "
-     "hit the deleted module-type copy"),
+     "the test's fn-local generic `iter_equal<I: Iterator>` lowers to a "
+     "NON-generic lambda, so it cannot take both IntoIter and Rev<IntoIter> "
+     "(IntoIter::clone and Rev::clone themselves are fixed)"),
     (["vec_null_ptr_roundtrip"],
      "strict-provenance raw-pointer methods (with_addr) on primitive "
      "pointers are not lowered"),
@@ -378,8 +381,9 @@ SKIP_GROUPS: list[tuple[list[str], str]] = [
      "allocation-identity (as_ptr) asserts require in-place IntoIter "
      "buffer reuse the port does not guarantee"),
     (["test_peek_mut"],
-     "PeekMut guard-deref needs cross-crate guard classification "
-     "(alloc impl Deref invisible to the suite transpile)"),
+     "Vec::peek_mut's Option<PeekMut> return type is not visible to the "
+     "suite transpile, so the guard binds as `auto* p = &(...unwrap())` — "
+     "the address of a temporary; needs cross-crate return-type metadata"),
 ]
 
 
@@ -725,10 +729,18 @@ def apply_patches(path: Path) -> None:
     text = re.sub(r"(?<![:\w])Vec::from\(", "vt_from(", text)
     text = text.replace("rusty::Vec::from(", "vt_from(")
 
+    # RUSTY_VEC_UNSKIP=name1,name2 (or "all") keeps the named tests live, so a
+    # cited skip can be re-checked for staleness without editing SKIP_GROUPS.
+    unskip = {
+        n.strip() for n in os.environ.get("RUSTY_VEC_UNSKIP", "").split(",") if n.strip()
+    }
     if SKIP_TESTS:
-        text = stub_tests(text, SKIP_TESTS, "pending triage")
+        text = stub_tests(text, [t for t in SKIP_TESTS if t not in unskip],
+                          "pending triage")
     for names, reason in SKIP_GROUPS:
-        text = stub_tests(text, names, reason)
+        live = names if "all" in unskip else [n for n in names if n not in unskip]
+        if live:
+            text = stub_tests(text, live, reason)
 
     # `auto x = vt_of();` — untyped empty vec![]: recover the element type
     # from nearby context (following pushes, sibling literals).

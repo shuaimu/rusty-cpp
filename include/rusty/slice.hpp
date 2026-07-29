@@ -705,6 +705,15 @@ public:
         return std::move(*this);
     }
 
+    // Rust's `Rev<I>` is Clone when `I: Clone`. Without this, `it.rev().clone()`
+    // fell back to copy-construction, which is deleted for move-only port
+    // iterators (Vec's IntoIter).
+    rev_next_iter clone() const
+    requires requires(const Iter& i) { { i.clone() } -> std::same_as<Iter>; }
+    {
+        return rev_next_iter(iter_.clone());
+    }
+
     auto next() {
         using item_type = next_item_t<Iter>;
         using next_result = rusty::Option<item_type>;

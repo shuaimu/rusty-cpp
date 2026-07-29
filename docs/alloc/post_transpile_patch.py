@@ -780,6 +780,19 @@ def _alloc_specific(cpp_out: Path):
         # --- instantiation-time fixes (surface when Vec/VecDeque are actually
         # used with a concrete T; the BMI precompile skips these template
         # bodies). These mirror vec_port/vec_deque_port's file-specific rules. ---
+        # IntoIter::clone: same `std::span::to_vec_in` gap as Vec::clone below,
+        # plus `rusty::iter` (a BORROWING iterator) where Rust has
+        # `.into_iter()` — the clone must own its buffer.
+        t = t.replace(
+            "return rusty::iter(this->as_slice().to_vec_in("
+            "rusty::clone(rusty::deref_ref(this->alloc))));",
+            "auto _src = this->as_slice(); "
+            "auto _out = Vec<T, A>::with_capacity_in(_src.size(), "
+            "rusty::clone(rusty::deref_ref(this->alloc))); "
+            "for (size_t _i = 0; _i < _src.size(); ++_i) "
+            "{ _out.push(rusty::clone(_src[_i])); } "
+            "return std::move(_out).into_iter();",
+        )
         # Vec::clone: `std::span::to_vec_in` doesn't exist; do with_capacity_in
         # + a clone loop (vendored form).
         t = t.replace(
