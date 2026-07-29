@@ -22050,7 +22050,34 @@ impl CodeGen {
                                 .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
                             emitted
                         }
-                        syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                        syn::Member::Unnamed(idx) => {
+                            // `self.N` where the impl's Self is a genuine Rust
+                            // TUPLE ((A, B) — lowered std::tuple, e.g.
+                            // `impl Serialize for (A, B)`): std::tuple has no
+                            // `_N` members, index with std::get<N>. Tuple
+                            // STRUCTS keep their emitted `_N` field names.
+                            let self_is_tuple = self
+                                .current_impl_method_self_tys
+                                .last()
+                                .and_then(|t| t.as_ref())
+                                .is_some_and(|ty| {
+                                    matches!(
+                                        self.peel_reference_paren_group_type(ty),
+                                        syn::Type::Tuple(_)
+                                    )
+                                });
+                            if self_is_tuple {
+                                let self_expr = if let Some(self_name) =
+                                    self.current_self_path_override()
+                                {
+                                    self_name.to_string()
+                                } else {
+                                    "(*this)".to_string()
+                                };
+                                return format!("std::get<{}>({})", idx.index, self_expr);
+                            }
+                            format!("_{}", idx.index)
+                        }
                     };
                     if let Some(self_name) = self.current_self_path_override() {
                         format!("{}.{}", self_name, emitted_member)

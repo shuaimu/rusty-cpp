@@ -15666,6 +15666,41 @@ fn test_by_value_self_method_in_macro_args_binds_non_const() {
 }
 
 #[test]
+fn test_tuple_impl_self_index_lowers_to_std_get() {
+    // `impl Trait for (A, B)` lowers self to a std::tuple parameter —
+    // `self.0` must emit std::get<0>(self_), never `self_._0` (std::tuple
+    // has no `_N` members; only tuple STRUCTS carry those field names).
+    // Surfaced by srpc's `impl Serialize for (A, B)` pair encoder: the
+    // template only fails when INSTANTIATED, so whole-crate compiles
+    // stayed green until a consumer used the pair path.
+    let out = transpile_str(
+        r#"
+        pub struct Sink { pub total: i64 }
+        pub trait Emit { fn emit(&self, s: &mut Sink); }
+        impl Emit for i64 {
+            fn emit(&self, s: &mut Sink) { s.total += *self; }
+        }
+        impl<A: Emit, B: Emit> Emit for (A, B) {
+            fn emit(&self, s: &mut Sink) {
+                self.0.emit(s);
+                self.1.emit(s);
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::get<0>") && out.contains("std::get<1>"),
+        "tuple-impl self indexing must go through std::get:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("self_._0") && !out.contains("self_._1"),
+        "std::tuple has no _N members:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_iterator_bounded_generic_param_routes_free_fn_adapters() {
     let out = transpile_str(
         r#"
