@@ -5481,6 +5481,36 @@ impl CodeGen {
                 self.emit_namespace_alias_import(&namespace_target);
                 continue;
             }
+            // `use super::time;` / `use crate::base::time;` — a use path
+            // naming a MODULE of this crate rather than an item inside
+            // one. The C++ form is an import of that module plus, under
+            // cxx-namespace mode, an alias binding the Rust-visible name
+            // to the module's namespace (its items live under their own
+            // namespace, not at global scope). Item imports through the
+            // same modules were already handled below; a module import
+            // previously emitted nothing, leaving `time::f()` with
+            // nothing declaring `time`.
+            if let Some(sibling_module) = self.resolve_crate_module_use_path(&resolved_path) {
+                if self.sibling_modules_imported.insert(sibling_module.clone()) {
+                    self.writeln(&format!("import {};", sibling_module));
+                }
+                if self.cxx_namespace.is_some() {
+                    let alias = normalize_use_import_path(&resolved_path)
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let ns_path = sibling_module.replace('.', "::");
+                    if !alias.is_empty() {
+                        self.writeln(&format!(
+                            "namespace {} = ::{};",
+                            escape_cpp_keyword(&alias),
+                            ns_path
+                        ));
+                    }
+                }
+                continue;
+            }
             match use_action {
                 UseImportAction::RustOnly => {
                     // Check if this is an enum variant import that we can emit
