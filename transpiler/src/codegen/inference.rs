@@ -6601,6 +6601,20 @@ impl CodeGen {
                 if path.path.segments.is_empty() {
                     return None;
                 }
+                // `self` inside an `impl … for <primitive>` types as that
+                // primitive, so receiver-type-gated numeric lowerings
+                // (to_le_bytes, wrapping_*, …) fire in scalar-impl method
+                // bodies too — e.g. `impl Serialize for i8 { fn
+                // serialize(&self, …) { … self.to_le_bytes() … } }`.
+                // Deliberately narrow — primitive self types only — so
+                // struct-impl `self` inference is untouched.
+                if path.path.is_ident("self")
+                    && let Some(Some(self_ty)) = self.current_impl_method_self_tys.last()
+                    && (self.is_known_integer_like_type(self_ty)
+                        || self.is_known_float_like_type(self_ty))
+                {
+                    return Some(self_ty.clone());
+                }
                 // Primitive associated consts type as their owner (`i32::MAX`
                 // → i32) so receiver-type-gated method lowerings (overflowing_*,
                 // clamp, signum, …) fire on const-path receivers too. BITS-like

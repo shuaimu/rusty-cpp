@@ -7636,8 +7636,11 @@ impl CodeGen {
                 // Byte-array conversions: reinterpret the integer's object
                 // representation as std::array<uint8_t, sizeof(T)>. `to_ne_bytes`
                 // is native order; le/be pick the ordering via std::endian and
-                // std::byteswap (C++23).
-                if is_int && mc.args.is_empty() && method == "to_ne_bytes" {
+                // std::byteswap (C++23). Floats have these methods in Rust too
+                // (f32/f64::to_le_bytes etc.); std::byteswap is integral-only,
+                // so the float variants reverse the byte array instead —
+                // identical object-representation semantics.
+                if (is_int || is_float) && mc.args.is_empty() && method == "to_ne_bytes" {
                     return format!(
                         "([&]() {{ auto __v = {}; return std::bit_cast<std::array<uint8_t, sizeof(__v)>>(__v); }}())",
                         receiver
@@ -7652,6 +7655,18 @@ impl CodeGen {
                 if is_int && mc.args.is_empty() && method == "to_be_bytes" {
                     return format!(
                         "([&]() {{ auto __v = {}; using __A = std::array<uint8_t, sizeof(__v)>; if constexpr (std::endian::native == std::endian::big) {{ return std::bit_cast<__A>(__v); }} else {{ return std::bit_cast<__A>(std::byteswap(__v)); }} }}())",
+                        receiver
+                    );
+                }
+                if is_float && mc.args.is_empty() && method == "to_le_bytes" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; auto __a = std::bit_cast<std::array<uint8_t, sizeof(__v)>>(__v); if constexpr (std::endian::native != std::endian::little) {{ std::reverse(__a.begin(), __a.end()); }} return __a; }}())",
+                        receiver
+                    );
+                }
+                if is_float && mc.args.is_empty() && method == "to_be_bytes" {
+                    return format!(
+                        "([&]() {{ auto __v = {}; auto __a = std::bit_cast<std::array<uint8_t, sizeof(__v)>>(__v); if constexpr (std::endian::native != std::endian::big) {{ std::reverse(__a.begin(), __a.end()); }} return __a; }}())",
                         receiver
                     );
                 }
