@@ -2514,6 +2514,62 @@ impl CodeGen {
         scrutinee_is_as_mut: bool,
         scrutinee_borrow_mode: Option<bool>,
     ) {
+        // Refutable INNER pattern + else: the runtime-variant lowering opens
+        // an extra `if` INSIDE the then-branch (Cluster E), which detaches
+        // any `else` from the refutation — a payload that fails the inner
+        // test (e.g. `Some(Ordering::Greater)` against
+        // `if let Some(Ordering::Equal)`) skips the then-body AND the else,
+        // falling off the end (UB in value position). Fold the refutation
+        // into the outer condition through a NON-DESTRUCTIVE const peek so
+        // the else-chain stays attached; the body still re-extracts with
+        // the original (possibly consuming) unwrap, now only on full match.
+        let mut folded_cond = None;
+        if else_branch.is_some()
+            && let Some(pat) = binding_pat
+            && !matches!(pat, syn::Pat::Ident(pi) if pi.ident != "_" && pi.subpat.is_none()
+                && !Self::pattern_ident_is_bare_unit_variant_name(&pi.ident.to_string()))
+        {
+            let inner_variant_ctx = self.infer_variant_type_context_from_pattern(pat, None);
+            let mut probe_stmts = Vec::new();
+            let mut probe_map = HashMap::new();
+            if let Some(Some(inner_cond)) = self
+                .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                    pat,
+                    "_iflet_payload",
+                    &mut probe_stmts,
+                    &mut probe_map,
+                    inner_variant_ctx.as_ref(),
+                )
+            {
+                let peek_method = if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                    "unwrap"
+                } else {
+                    unwrap_method
+                };
+                // Mirror the body's payload shape (deref for as_mut /
+                // borrowed-mut) but never consume the scrutinee slot.
+                let peek_expr = if scrutinee_is_as_mut {
+                    format!(
+                        "rusty::detail::deref_if_pointer_like({}.{}())",
+                        scrutinee, peek_method
+                    )
+                } else {
+                    match scrutinee_borrow_mode {
+                        Some(true) => format!(
+                            "rusty::detail::deref_if_pointer_like({}.as_mut().{}())",
+                            scrutinee, peek_method
+                        ),
+                        _ => format!("std::as_const({}).{}()", scrutinee, peek_method),
+                    }
+                };
+                folded_cond = Some(format!(
+                    "{} && ([&]() -> bool {{ auto&& _iflet_payload = {}; return static_cast<bool>({}); }})()",
+                    cond, peek_expr, inner_cond
+                ));
+            }
+        }
+        let cond = folded_cond.as_deref().unwrap_or(cond);
+
         let if_header = if let Some(init_expr) = if_init_expr {
             format!("if (auto&& {} = {}; {}) {{", scrutinee, init_expr, cond)
         } else {
@@ -2554,7 +2610,13 @@ impl CodeGen {
         let mut emitted_inner_variant_if = false;
         if let Some(pat) = binding_pat {
             let simple_ident = match pat {
-                syn::Pat::Ident(pi) if pi.ident != "_" && pi.subpat.is_none() => {
+                syn::Pat::Ident(pi)
+                    if pi.ident != "_"
+                        && pi.subpat.is_none()
+                        && !Self::pattern_ident_is_bare_unit_variant_name(
+                            &pi.ident.to_string(),
+                        ) =>
+                {
                     Some(pi.ident.to_string())
                 }
                 _ => None,

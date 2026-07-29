@@ -595,10 +595,18 @@ public:
 
     auto next() {
         using item_type = next_item_t<Iter>;
+        // UNDECAYED payload: a reference-Option (Option<T&> from mut
+        // iterators) must keep the reference in the entry tuple — the
+        // old decayed type silently COPIED items, so `for (i, elt) in
+        // deque.iter_mut().enumerate() { *elt = ...; }` wrote into
+        // temporaries.
+        using taken_type =
+            decltype(option_like_take_value(std::declval<next_result_t<Iter>&>()));
         using entry_item_type = std::conditional_t<
             std::is_pointer_v<item_type>,
             decltype(deref_if_pointer(std::declval<item_type>())),
-            item_type>;
+            std::conditional_t<
+                std::is_lvalue_reference_v<taken_type>, taken_type, item_type>>;
         using entry_type = std::tuple<size_t, entry_item_type>;
         using next_result = rusty::Option<entry_type>;
         auto item = iter_.next();
@@ -3301,25 +3309,89 @@ namespace slice_ext {
 
 // Mirrors `core::slice::range<R: RangeBounds<usize>>(range, ..len)` —
 // converts a generic range expression + bounds into a concrete
-// (start, end) pair. Returns std::pair<size_t, size_t>.
+// (start, end) pair, with Rust's overflow / ordering / length panics.
+// Returns std::pair<size_t, size_t>. Accepts the rusty range structs
+// AND `(Bound, Bound)` tuples (Rust implements RangeBounds for pairs).
 template<typename R, typename Bounds>
-inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) noexcept {
-    std::size_t start = 0;
-    std::size_t end = 0;
+inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) {
+    std::size_t len = 0;
     if constexpr (requires { bounds.end; }) {
-        end = bounds.end;
+        len = bounds.end;
     }
-    if constexpr (requires { r.start; }) {
-        start = r.start;
+    std::size_t start = 0;
+    std::size_t end = len;
+    constexpr bool is_bound_pair = requires {
+        std::variant_size<std::remove_cvref_t<decltype(std::get<0>(r))>>::value;
+        std::variant_size<std::remove_cvref_t<decltype(std::get<1>(r))>>::value;
+    };
+    if constexpr (is_bound_pair) {
+        // Alternative order fixed by the Bound alias:
+        // 0 = Unbounded, 1 = Included, 2 = Excluded.
+        const auto& sb = std::get<0>(r);
+        switch (sb.index()) {
+            case 0: start = 0; break;
+            case 1: start = static_cast<std::size_t>(std::get<1>(sb)._0); break;
+            default: {
+                const auto v = static_cast<std::size_t>(std::get<2>(sb)._0);
+                if (v == std::numeric_limits<std::size_t>::max()) {
+                    rusty::panic::do_panic(
+                        "attempted to index slice from after maximum usize");
+                }
+                start = v + 1;
+                break;
+            }
+        }
+        const auto& eb = std::get<1>(r);
+        switch (eb.index()) {
+            case 0: end = len; break;
+            case 1: {
+                const auto v = static_cast<std::size_t>(std::get<1>(eb)._0);
+                if (v == std::numeric_limits<std::size_t>::max()) {
+                    rusty::panic::do_panic(
+                        "attempted to index slice up to maximum usize");
+                }
+                end = v + 1;
+                break;
+            }
+            default: end = static_cast<std::size_t>(std::get<2>(eb)._0); break;
+        }
+    } else {
+        if constexpr (requires { r.start; }) {
+            start = r.start;
+        }
+        if constexpr (requires { r.end; }) {
+            end = static_cast<std::size_t>(r.end);
+            // `..=n` (RangeToInclusive) keeps a public `end` field but is
+            // an included bound: half-open conversion is [0, n+1).
+            if constexpr (requires { std::remove_cvref_t<R>::rusty_inclusive_range; }) {
+                if (end == std::numeric_limits<std::size_t>::max()) {
+                    rusty::panic::do_panic(
+                        "attempted to index slice up to maximum usize");
+                }
+                end += 1;
+            }
+        } else if constexpr (requires { r.end_value(); }) {
+            // `rusty::range<T>` keeps its end as a private `end_` field
+            // exposed via `end_value()`. Without this branch the caller
+            // sees `bounds.end` (= len), so a partial range like
+            // `range(0, 2)` becomes a full-range drain.
+            end = static_cast<std::size_t>(r.end_value());
+            // `a..=b` converts to the half-open [a, b+1) — Rust
+            // slice::range's Bound::Included(end) => end + 1.
+            if constexpr (requires { std::remove_cvref_t<R>::rusty_inclusive_range; }) {
+                if (end == std::numeric_limits<std::size_t>::max()) {
+                    rusty::panic::do_panic(
+                        "attempted to index slice up to maximum usize");
+                }
+                end += 1;
+            }
+        }
     }
-    if constexpr (requires { r.end; }) {
-        end = r.end;
-    } else if constexpr (requires { r.end_value(); }) {
-        // `rusty::range<T>` keeps its end as a private `end_` field
-        // exposed via `end_value()`. Without this branch the caller
-        // sees `bounds.end` (= len), so a partial range like
-        // `range(0, 2)` becomes a full-range drain.
-        end = r.end_value();
+    if (start > end) {
+        rusty::panic::do_panic("slice index starts at after slice end");
+    }
+    if (end > len) {
+        rusty::panic::do_panic("range end index out of range for slice");
     }
     return {start, end};
 }

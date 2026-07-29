@@ -758,7 +758,9 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace(
             "this->extend(rusty::iter::repeat_n(std::move(value), std::move(extra)));",
             "for (size_t _ri = 0; _ri < rusty::detail::deref_if_pointer_like(extra); ++_ri) "
-            "{ this->push_back(rusty::clone(value)); }",
+            "{ if (_ri + 1 == rusty::detail::deref_if_pointer_like(extra)) "
+            "{ this->push_back(std::move(value)); } "
+            "else { this->push_back(rusty::clone(value)); } }",
         )
         # Vec::operator[]/index_mut lower Rust's `Index::index` to `.index()` on
         # the dereffed `*this`, but that derefs to std::span which has no
@@ -2039,6 +2041,12 @@ def _vd_suite_fixes(text: str) -> str:
         "                this->reserve(rusty::len(range));",
         "auto range = rusty::slice_ext::range(std::move(src), rusty::range_to(this->len()));\n"
         "                this->reserve(range.second - range.first);")
+    # (s) Drain dtor: Rust drops the BACK sub-slice even when the
+    # front's element drop panics (the guard then restores the tail).
+    text = text.replace(
+        "rusty::ptr::drop_in_place(std::move(front));",
+        "try { rusty::ptr::drop_in_place(std::move(front)); } catch (...) { "
+        "try { rusty::ptr::drop_in_place(std::move(back)); } catch (...) {} throw; }")
     # (b) Drain guard body: len -> len_field rename was missed by the
     # emitter inside this one body (transpiler gap).
     text = text.replace("auto head_len = source_deque.len;",

@@ -1854,6 +1854,10 @@ public:
     template<typename>
     friend class range_inclusive;
 
+    // Distinguishes ..= from .. in generic bounds conversions
+    // (rusty::slice_ext::range must add 1 to end_value()).
+    static constexpr bool rusty_inclusive_range = true;
+
     T start;
 
     constexpr range_inclusive(T start_value, T end_value)
@@ -2080,6 +2084,9 @@ struct range_full {
 /// Range to inclusive — equivalent to Rust's `..=end`.
 template<typename T>
 struct range_to_inclusive {
+    // ..=n in generic bounds conversions needs end+1 (see range_inclusive).
+    static constexpr bool rusty_inclusive_range = true;
+
     T end;
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }

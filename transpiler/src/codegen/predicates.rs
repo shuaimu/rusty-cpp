@@ -3867,6 +3867,20 @@ impl CodeGen {
 
     /// Determine whether an expression represents a local variable that should
     /// be wrapped in std::move() when used by value.
+    /// A bare UpperCamelCase ident in refutable-pattern position is a unit
+    /// enum VARIANT (or unit struct), not a fresh binding — Rust bindings
+    /// are snake_case and rustc warns hard on the alternative. Treating it
+    /// as a binding makes the arm a catch-all: `if let Err(CapacityOverflow)
+    /// = r` matched EVERY error (glob-imported runtime enums like
+    /// TryReserveErrorKind have no variant registry entry to catch this).
+    /// Excludes ALL_CAPS consts (own machinery), single letters (type
+    /// params), and the Option/Result constructors.
+    pub(super) fn pattern_ident_is_bare_unit_variant_name(name: &str) -> bool {
+        name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && name.chars().any(|c| c.is_ascii_lowercase())
+            && !matches!(name, "Some" | "None" | "Ok" | "Err" | "Self")
+    }
+
     pub(super) fn should_insert_move(&self, expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Path(path) => {
