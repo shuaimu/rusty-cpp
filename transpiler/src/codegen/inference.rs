@@ -161,18 +161,22 @@ impl CodeGen {
             return None;
         }
         let current = self.module_name.as_deref()?;
+        // The WHOLE path must name a module. A path whose PREFIX
+        // happens to name one (`super::varint::VARINT_BUF_LEN`) is an
+        // ITEM import and belongs to the item-import machinery — a
+        // prefix match here aliased the item's name to the module's
+        // namespace (`namespace VARINT_BUF_LEN = ::srpc::wire::varint;`).
+        let joined = segs.join(".");
         let mut prefix = current;
         while let Some(dot) = prefix.rfind('.') {
             prefix = &prefix[..dot];
-            for take in (1..=segs.len()).rev() {
-                let candidate = format!("{}.{}", prefix, segs[..take].join("."));
-                if self.crate_module_names.contains(&candidate)
-                    && candidate != current
-                    // An ancestor import would be the cycle described above.
-                    && !current.starts_with(&format!("{}.", candidate))
-                {
-                    return Some(candidate);
-                }
+            let candidate = format!("{}.{}", prefix, joined);
+            if self.crate_module_names.contains(&candidate)
+                && candidate != current
+                // An ancestor import would be the cycle described above.
+                && !current.starts_with(&format!("{}.", candidate))
+            {
+                return Some(candidate);
             }
         }
         None

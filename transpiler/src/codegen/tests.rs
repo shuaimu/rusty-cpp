@@ -15799,6 +15799,28 @@ fn test_use_nested_module_path_prefers_longest_match() {
 }
 
 #[test]
+fn test_item_import_through_sibling_module_is_not_a_module_import() {
+    // `use super::varint::VARINT_BUF_LEN;` is an ITEM import that
+    // happens to travel THROUGH a module. Treating a path whose prefix
+    // names a module as a module import aliased the item's own name to
+    // the namespace (`namespace VARINT_BUF_LEN = ::probe::wire::varint;`),
+    // which is not even a valid expression at the use site.
+    let out = transpile_str_module_with_sibling_modules(
+        "use super::varint::VARINT_BUF_LEN;\npub fn n() -> usize { VARINT_BUF_LEN }\n",
+        "probe.wire.serde",
+        &["probe.wire.varint", "probe.wire.serde"],
+    );
+    assert!(
+        !out.contains("namespace VARINT_BUF_LEN"),
+        "an item must not be aliased as a namespace:\n{out}"
+    );
+    assert!(
+        out.contains("import probe.wire.varint;"),
+        "the owning module is still imported:\n{out}"
+    );
+}
+
+#[test]
 fn test_runtime_path_keeps_libc_collision_names() {
     // escape_cpp_keyword renames a handful of libc-colliding names
     // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function
