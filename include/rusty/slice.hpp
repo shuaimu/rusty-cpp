@@ -2550,7 +2550,17 @@ decltype(auto) for_in(Range&& range) {
             detail::dependent_false_v<std::remove_reference_t<Range>>,
             "rusty::for_in requires next() to return an Option/optional-like value"
         );
-    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+    } else if constexpr (
+        !std::is_lvalue_reference_v<Range>
+        && requires { std::forward<Range>(range).into_iter(); }) {
+        // Consuming iteration — but ONLY for rvalues. An lvalue must never
+        // be routed into `into_iter()`: since the port modules' by-value-self
+        // `into_iter()` lost its `&&` qualifier, an lvalue call would
+        // SILENTLY gut the container while it stays in scope (btree map:
+        // emptied tree with a stale `len()`; vec: double free at scope end).
+        // Rust cannot express that state — a consumed container's lifetime
+        // ends at the `for` — so the borrowing branches below are the only
+        // faithful lowering for a still-live lvalue.
         return for_in(std::forward<Range>(range).into_iter());
     } else if constexpr (
         requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }
@@ -2562,6 +2572,12 @@ decltype(auto) for_in(Range&& range) {
         || requires { *std::forward<Range>(range); }
     ) {
         return for_in(iter(std::forward<Range>(range)));
+    } else if constexpr (requires { range.into_iter(); }) {
+        // Lvalue whose ONLY iteration surface is consuming `into_iter()`
+        // (no begin/end, no iter()): keep Rust's consuming for-loop
+        // semantics — such call sites own the container and never touch
+        // it again (a translated `for x in local` last use).
+        return for_in(range.into_iter());
     } else {
         return detail::preserve_for_in_range(std::forward<Range>(range));
     }
