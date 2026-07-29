@@ -153,6 +153,70 @@ public:
         { return inner_.fetch_sub(value, to_std_memory_order(order)); }
     }
 
+    /// Rust's `fetch_min` / `fetch_max` — store the smaller/larger of
+    /// the current and given value, returning the PREVIOUS value.
+    /// `std::atomic` has no such operation, so both are the standard
+    /// CAS loop.
+    template<typename U = T>
+    requires (std::is_integral_v<U> && !std::is_same_v<U, bool>)
+    T fetch_min(U value, Ordering order = Ordering::SeqCst) const noexcept {
+        // @unsafe { std::atomic CAS loop is STL, not borrow-checked }
+        {
+            // Compare in the ATOMIC's type: `U` deduces from the
+            // argument (an `int` for a literal), and the CAS must
+            // operate on `T`.
+            const T desired = static_cast<T>(value);
+            T current = inner_.load(to_std_memory_order(order));
+            while (desired < current
+                   && !inner_.compare_exchange_weak(current, desired,
+                                                    to_std_memory_order(order),
+                                                    std::memory_order_relaxed)) {
+            }
+            return current;
+        }
+    }
+
+    template<typename U = T>
+    requires (std::is_integral_v<U> && !std::is_same_v<U, bool>)
+    T fetch_max(U value, Ordering order = Ordering::SeqCst) const noexcept {
+        // @unsafe { std::atomic CAS loop is STL, not borrow-checked }
+        {
+            const T desired = static_cast<T>(value);
+            T current = inner_.load(to_std_memory_order(order));
+            while (desired > current
+                   && !inner_.compare_exchange_weak(current, desired,
+                                                    to_std_memory_order(order),
+                                                    std::memory_order_relaxed)) {
+            }
+            return current;
+        }
+    }
+
+    /// Rust's `fetch_update`: apply `f` to the current value until the
+    /// CAS succeeds. `f` returns `Option<T>` — `None` aborts the update.
+    /// Returns `Ok(previous)` on success, `Err(current)` if `f` declined.
+    /// `f` may run more than once and must be free of side effects.
+    template<typename F>
+    auto fetch_update(Ordering set_order, Ordering fetch_order, F&& f) const noexcept
+        -> rusty::Result<T, T> {
+        // @unsafe { std::atomic CAS loop is STL, not borrow-checked }
+        {
+            T current = inner_.load(to_std_memory_order(fetch_order));
+            for (;;) {
+                auto next = f(current);
+                if (!next.is_some()) {
+                    return rusty::Result<T, T>::Err(current);
+                }
+                T desired = std::move(next).unwrap();
+                if (inner_.compare_exchange_weak(current, desired,
+                                                 to_std_memory_order(set_order),
+                                                 to_std_memory_order(fetch_order))) {
+                    return rusty::Result<T, T>::Ok(current);
+                }
+            }
+        }
+    }
+
     template<typename U = T>
     requires std::is_pointer_v<U>
     U fetch_add(std::ptrdiff_t value, Ordering order = Ordering::SeqCst) const noexcept {

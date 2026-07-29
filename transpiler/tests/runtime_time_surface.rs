@@ -199,3 +199,50 @@ fn test_integral_saturating_helpers_still_saturate() {
 
     compile_and_run_cpp(source, "integral_saturating");
 }
+
+/// `fetch_min` / `fetch_max` / `fetch_update` — std atomics with no
+/// `std::atomic` counterpart, so each is a CAS loop. srpc's connection
+/// metrics need all three: min/max latency, and a saturating decrement
+/// of the in-flight gauge.
+#[test]
+fn test_atomic_fetch_min_max_update() {
+    let source = r#"
+        #include <rusty/sync/atomic.hpp>
+        #include <rusty/option.hpp>
+        #include <cstdint>
+
+        using rusty::sync::atomic::Ordering;
+
+        int main() {
+            rusty::sync::atomic::AtomicU64 a(10);
+            if (a.fetch_min(3, Ordering::Relaxed) != 10) return 1;   // returns PREVIOUS
+            if (a.load(Ordering::Relaxed) != 3) return 2;
+            if (a.fetch_min(7, Ordering::Relaxed) != 3) return 3;    // larger: no store
+            if (a.load(Ordering::Relaxed) != 3) return 4;
+            if (a.fetch_max(9, Ordering::Relaxed) != 3) return 5;
+            if (a.load(Ordering::Relaxed) != 9) return 6;
+            if (a.fetch_max(1, Ordering::Relaxed) != 9) return 7;    // smaller: no store
+            if (a.load(Ordering::Relaxed) != 9) return 8;
+
+            auto ok = a.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                [](std::uint64_t v) { return rusty::Option<std::uint64_t>(v * 2); });
+            if (!ok.is_ok() || a.load(Ordering::Relaxed) != 18) return 9;
+
+            // None declines the update and reports Err.
+            auto declined = a.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                [](std::uint64_t) { return rusty::Option<std::uint64_t>(rusty::None); });
+            if (!declined.is_err() || a.load(Ordering::Relaxed) != 18) return 10;
+
+            // The saturating-decrement shape: must not wrap at zero.
+            rusty::sync::atomic::AtomicU64 gauge(0);
+            (void)gauge.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                [](std::uint64_t v) {
+                    return rusty::Option<std::uint64_t>(v == 0 ? 0 : v - 1);
+                });
+            if (gauge.load(Ordering::Relaxed) != 0) return 11;
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "atomic_fetch_min_max_update");
+}
