@@ -1668,6 +1668,64 @@ struct bound_unbounded_t {
 };
 inline constexpr bound_unbounded_t bound_unbounded{};
 
+namespace detail {
+
+// `std::cmp_*` accept only non-bool, non-character integer types.
+template<typename T>
+inline constexpr bool is_safe_cmp_integer_v =
+    std::is_integral_v<std::remove_cv_t<T>>
+    && !std::is_same_v<std::remove_cv_t<T>, bool>
+    && !std::is_same_v<std::remove_cv_t<T>, char>
+    && !std::is_same_v<std::remove_cv_t<T>, wchar_t>
+    && !std::is_same_v<std::remove_cv_t<T>, char8_t>
+    && !std::is_same_v<std::remove_cv_t<T>, char16_t>
+    && !std::is_same_v<std::remove_cv_t<T>, char32_t>;
+
+template<typename A, typename B>
+inline constexpr bool range_bound_safe_cmp_v =
+    is_safe_cmp_integer_v<A> && is_safe_cmp_integer_v<B>;
+
+// Rust's `RangeBounds::contains` compares the item against the bounds
+// with no conversion on either side (`T: PartialOrd<U>`), and integer
+// LITERAL INFERENCE makes a range's bound type match the queried item:
+// `(-64..=63).contains(&x)` with `x: i64` is a range of i64. C++ has no
+// such inference — that lowers to `range_inclusive<int>` queried with an
+// `int64_t`, and binding the argument to `const int&` NARROWS it. The
+// bug is silent and answers WRONG rather than failing: 17179869183
+// truncates to -1, which really is inside [-64, 63], so srpc's varint
+// `val_size` chose a 1-byte encoding for a 5-byte value.
+//
+// Compare mixed integer widths/signedness through the C++20 safe
+// comparisons so no bound check can narrow. Non-integer bounds keep
+// their natural operators (and the legacy implicit conversion), since
+// only integers can be silently truncated this way.
+template<typename V, typename B>
+constexpr bool range_value_ge(const V& v, const B& bound) {
+    if constexpr (range_bound_safe_cmp_v<V, B>) {
+        return std::cmp_greater_equal(v, bound);
+    } else {
+        return static_cast<B>(v) >= bound;
+    }
+}
+template<typename V, typename B>
+constexpr bool range_value_le(const V& v, const B& bound) {
+    if constexpr (range_bound_safe_cmp_v<V, B>) {
+        return std::cmp_less_equal(v, bound);
+    } else {
+        return static_cast<B>(v) <= bound;
+    }
+}
+template<typename V, typename B>
+constexpr bool range_value_lt(const V& v, const B& bound) {
+    if constexpr (range_bound_safe_cmp_v<V, B>) {
+        return std::cmp_less(v, bound);
+    } else {
+        return static_cast<B>(v) < bound;
+    }
+}
+
+} // namespace detail
+
 /// Member-call `.rev()` support for ranges with VARIABLE bounds — the
 /// emitter's free-fn rewrite only recognizes literal-bound receivers, so
 /// `(a..b).rev()` reaches the member surface. Self-contained (the free
@@ -1751,6 +1809,14 @@ public:
 
     bool contains(const T& value) const {
         return value >= start && value < end_;
+    }
+    // Wider/narrower integer items must not narrow into `const T&` —
+    // see detail::range_value_ge.
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+    bool contains(const U& value) const {
+        return detail::range_value_ge(value, start)
+            && detail::range_value_lt(value, end_);
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
@@ -1912,6 +1978,12 @@ public:
     bool contains(const T& value) const {
         return value >= start && value <= end_;
     }
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+    bool contains(const U& value) const {
+        return detail::range_value_ge(value, start)
+            && detail::range_value_le(value, end_);
+    }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     rusty::Option<T> next() {
@@ -2016,6 +2088,11 @@ struct range_from {
     bool contains(const T& value) const {
         return value >= start;
     }
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+    bool contains(const U& value) const {
+        return detail::range_value_ge(value, start);
+    }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     rusty::Option<T> next() {
@@ -2066,6 +2143,11 @@ struct range_to {
     bool contains(const T& value) const {
         return value < end;
     }
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+    bool contains(const U& value) const {
+        return detail::range_value_lt(value, end);
+    }
 };
 
 /// Full range — equivalent to Rust's `..`.
@@ -2094,6 +2176,11 @@ struct range_to_inclusive {
 
     bool contains(const T& value) const {
         return value <= end;
+    }
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+    bool contains(const U& value) const {
+        return detail::range_value_le(value, end);
     }
 };
 
