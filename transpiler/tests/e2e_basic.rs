@@ -1198,3 +1198,60 @@ fn test_auto_namespace_explicit_override_wins() {
         !cpp.contains("namespace btree_port::btree::map {"),
         "auto-derived namespace should not be used when explicit is given:\n{cpp}"    );
 }
+
+#[test]
+fn test_primitive_impl_self_receiver_numeric_lowering() {
+    // Issue #40: `self` inside `impl … for <primitive>` must type as the
+    // primitive so the receiver-type-gated byte-conversion lowerings fire
+    // (scalar Serialize impls: `self.to_le_bytes()`); f64 exercises the
+    // float variant (std::byteswap is integral-only — floats reverse the
+    // byte array instead).
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("prim_self.rs");
+    let output_path = dir.path().join("prim_self.cppm");
+
+    std::fs::write(
+        &input,
+        r#"
+pub trait Ser { fn ser(&self) -> u8; }
+impl Ser for i32 {
+    fn ser(&self) -> u8 { self.to_le_bytes()[0] }
+}
+impl Ser for f64 {
+    fn ser(&self) -> u8 { self.to_le_bytes()[0] }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("--module-name")
+        .arg("prim")
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    // The raw member call must be gone in both impls…
+    assert!(
+        !cpp.contains("self_.to_le_bytes()"),
+        "raw member to_le_bytes survived on a scalar receiver:\n{cpp}"
+    );
+    // …replaced by the bit_cast lowering (int form uses byteswap on the
+    // big-endian path; float form reverses the array).
+    assert!(
+        cpp.contains("std::bit_cast"),
+        "bit_cast byte-conversion lowering missing:\n{cpp}"
+    );
+    assert!(
+        cpp.contains("std::reverse"),
+        "float to_le_bytes variant (array reverse) missing:\n{cpp}"
+    );
+}
