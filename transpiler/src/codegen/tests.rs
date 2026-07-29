@@ -40239,3 +40239,48 @@ fn test_std_time_reference_emits_runtime_helper_block() {
     );
 }
 
+#[test]
+fn test_runtime_path_keeps_libc_collision_names() {
+    // escape_cpp_keyword renames a handful of libc-colliding names
+    // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function
+    // of that name loses overload resolution to the C library. A path
+    // resolving into the rusty:: runtime is fully QUALIFIED, so that
+    // capture cannot happen — and the runtime defines
+    // rusty::thread::sleep, so the rename emitted a call to a function
+    // that does not exist.
+    let out = transpile_str(
+        r#"
+        pub fn nap(ms: u64) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::thread::sleep("),
+        "runtime path must keep the runtime's own spelling:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("rusty::thread::sleep_("),
+        "the libc-collision rename must not apply to a qualified runtime path:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_user_fn_still_escapes_libc_collision() {
+    // The rename still applies where it was introduced for: a
+    // user-defined, unqualified function named after a libc symbol.
+    let out = transpile_str(
+        r#"
+        pub fn sleep(n: u32) -> u32 { n }
+        pub fn call_it() -> u32 { sleep(3) }
+        "#,
+    );
+    assert!(
+        out.contains("sleep_"),
+        "a user fn named sleep must still be renamed:\n{}",
+        out
+    );
+}
+
