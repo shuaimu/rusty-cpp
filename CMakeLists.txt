@@ -592,6 +592,9 @@ set(TEST_SOURCES
     # for_in must borrow lvalue containers (consuming into_iter is
     # rvalue-only; lvalue consumption gutted live containers).
     tests/rusty_for_in_lvalue_borrow_test.cpp
+    # Range contains must not narrow the queried item (literal-bound
+    # ranges vs wider items — silent wrong answers).
+    tests/rusty_range_contains_width_test.cpp
     tests/test_traits.cpp
     tests/test_mutex.cpp
     tests/test_thread.cpp
