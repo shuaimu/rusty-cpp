@@ -11746,6 +11746,11 @@ impl CodeGen {
         for item in items {
             match item {
                 syn::Item::Mod(m) => {
+                    // #[cfg(test)] modules are omitted from output; their
+                    // declarations must not enter the registries either.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
@@ -16534,6 +16539,11 @@ impl CodeGen {
                     self.emit_ufcs_trait_impl_block_free_functions(impl_block, module_path);
                 }
                 syn::Item::Mod(m) => {
+                    // #[cfg(test)] modules are omitted from output; their
+                    // declarations must not enter the registries either.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
@@ -16857,6 +16867,11 @@ impl CodeGen {
                     self.emit_ufcs_trait_impl_block_free_function_decls(impl_block, module_path);
                 }
                 syn::Item::Mod(m) => {
+                    // #[cfg(test)] modules are omitted from output; their
+                    // declarations must not enter the registries either.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
@@ -17178,6 +17193,11 @@ impl CodeGen {
                     self.writeln("}");
                 }
                 syn::Item::Mod(m) => {
+                    // #[cfg(test)] modules are omitted from output; their
+                    // declarations must not enter the registries either.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         self.emit_ufcs_trait_default_free_functions(nested);
                     }
@@ -17242,6 +17262,11 @@ impl CodeGen {
                     self.writeln(&format!("using namespace {}_;", trait_name));
                 }
                 syn::Item::Mod(m) => {
+                    // #[cfg(test)] modules are omitted from output; their
+                    // declarations must not enter the registries either.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         self.emit_ufcs_trait_default_free_function_decls(nested);
                     }
@@ -50308,6 +50333,11 @@ impl CodeGen {
                         bare,
                     ),
                     syn::Item::Mod(m) => {
+                        // #[cfg(test)] modules are omitted from output; their
+                        // declarations must not enter the registries either.
+                        if CodeGen::should_skip_cfg_attrs(&m.attrs) {
+                            continue;
+                        }
                         if let Some((_, nested)) = &m.content {
                             prefix.push(m.ident.to_string());
                             collect_host_params(nested, prefix, qualified, bare);

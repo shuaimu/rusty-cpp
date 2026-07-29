@@ -38,6 +38,12 @@ impl CodeGen {
                     out.push(item);
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         Self::collect_struct_enum_items_recursive(nested, out);
                     }
@@ -193,6 +199,12 @@ impl CodeGen {
                     }
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         Self::collect_trait_impl_default_method_dependency_hints(
                             nested,
@@ -871,6 +883,12 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         self.collect_scope_module_dependencies(nested, known_modules, out);
                     }
@@ -1154,6 +1172,12 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         self.collect_scope_module_strict_type_dependencies_with_imports(
                             nested,
@@ -1518,6 +1542,12 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         self.collect_scope_module_hard_dependencies_with_imports(
                             nested,
@@ -4156,6 +4186,12 @@ impl CodeGen {
             match item {
                 syn::Item::Trait(t) => out.push(t),
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         Self::collect_all_traits(nested, out);
                     }
@@ -4329,6 +4365,12 @@ impl CodeGen {
                     }
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         self.collect_extern_crate_aliases(nested);
                     }
@@ -4387,6 +4429,12 @@ impl CodeGen {
                     self.record_module_path_alias_from_use_tree(&u.tree, module_path, modules);
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
@@ -7357,6 +7405,12 @@ impl CodeGen {
                     ));
                 }
                 syn::Item::Mod(m) => {
+                    // A #[cfg(test)] module is omitted from output; collecting
+                    // declarations out of it makes the registries describe types
+                    // that are never emitted.
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
                     if let Some((_, nested)) = &m.content {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
