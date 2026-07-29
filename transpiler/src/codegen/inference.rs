@@ -8483,6 +8483,19 @@ impl CodeGen {
         let method_cpp = escape_cpp_keyword(method_name);
         let owner_segments: Vec<&str> = resolved_owner.split("::").collect();
         if owner_segments.len() <= 1 {
+            // Same-file enum: the free function is emitted into THIS
+            // module's namespace, so qualify the call with it. An
+            // unqualified call is captured by any local of the same
+            // name — and Rust code very commonly writes
+            // `let code = self.code();`, which is unambiguous there
+            // (methods and variables occupy separate namespaces) but
+            // lowered to `const auto code = code(self_);`, a variable
+            // appearing in its own initializer.
+            if let Some(ns) = self.cxx_namespace.as_deref() {
+                if !ns.is_empty() {
+                    return Some(format!("::{}::{}", ns, method_cpp));
+                }
+            }
             return Some(method_cpp);
         }
         let owner_ns_raw = owner_segments[..owner_segments.len() - 1].join("::");
