@@ -506,6 +506,9 @@ set(TEST_SOURCES
     tests/rusty_fmt_parity_test.cpp
     # rusty iterator adapters vs Rust's own (oracle): tests/iter_parity/.
     tests/rusty_iter_parity_test.cpp
+    # Range contains must not narrow the queried item (literal-bound
+    # ranges vs wider items — silent wrong answers).
+    tests/rusty_range_contains_width_test.cpp
     tests/test_traits.cpp
     tests/test_mutex.cpp
     tests/test_thread.cpp
