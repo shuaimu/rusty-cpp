@@ -12839,6 +12839,39 @@ fn test_assert_matches_lowered_not_dropped() {
 }
 
 #[test]
+fn test_cfg_test_module_impls_do_not_leak() {
+    // The emitter omits a #[cfg(test)] module wholesale, but the
+    // cross-file collectors used to descend into it anyway — so a
+    // test-only `impl Trait for LocalType` was emitted into the module
+    // body while the LocalType definition beside it had (correctly)
+    // been dropped, leaving the output referring to a type that does
+    // not exist. srpc's load_balancer tests reproduced it exactly.
+    let out = transpile_str(
+        r#"
+        pub trait Probe { fn value(&self) -> u64; }
+        pub fn total<P: Probe>(ps: &[P]) -> u64 { ps[0].value() }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            struct Peer { v: u64 }
+            impl Probe for Peer {
+                fn value(&self) -> u64 { self.v }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("// #[cfg(test)] module omitted"),
+        "the module itself is still omitted:\n{out}"
+    );
+    assert!(
+        !out.contains("Peer"),
+        "nothing from a cfg(test) module may reach production output:\n{out}"
+    );
+}
+
+#[test]
 fn test_cfg_test_module_omitted() {
     let out = transpile_str("#[cfg(test)]\nmod tests { fn t() {} }");
     assert!(out.contains("// #[cfg(test)] module omitted"));

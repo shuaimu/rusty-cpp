@@ -520,7 +520,7 @@ impl CodeGen {
 
     /// Skip items behind `#[cfg(...)]` when the predicate is known-false in
     /// transpiler mode. Unknown predicates are kept conservatively.
-    pub(super) fn should_skip_cfg_attrs(attrs: &[syn::Attribute]) -> bool {
+    pub(crate) fn should_skip_cfg_attrs(attrs: &[syn::Attribute]) -> bool {
         attrs
             .iter()
             .filter(|a| a.path().is_ident("cfg"))

@@ -445,6 +445,9 @@ fn collect_declared_trait_names_into(
                 out.insert(t.ident.to_string());
             }
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_declared_trait_names_into(nested, out);
                 }
@@ -485,6 +488,9 @@ fn collect_declared_trait_methods_into(
                 }
             }
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_declared_trait_methods_into(nested, out);
                 }
@@ -541,6 +547,9 @@ fn collect_assoc_const_trait_names_into(
                 }
             }
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_assoc_const_trait_names_into(nested, out);
                 }
@@ -614,6 +623,9 @@ fn collect_concrete_trait_impl_method_owners_into(
                 }
             }
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_concrete_trait_impl_method_owners_into(
                         nested,
@@ -667,6 +679,9 @@ fn collect_method_name_uses(
                 }
             }
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_method_name_uses(nested, declared_traits, inherent, trait_named);
                 }
@@ -1871,11 +1886,28 @@ pub fn collect_crate_enum_decls(rust_source: &str) -> Vec<syn::ItemEnum> {
     out
 }
 
+/// Whether a nested module is compiled OUT of production output.
+///
+/// The emitter omits `#[cfg(test)]` modules wholesale, so the cross-file
+/// collectors must not descend into them either: gathering declarations
+/// from a module that will never be emitted makes the registries
+/// describe types that do not exist. Concretely, a test-only
+/// `impl Trait for LocalType` was emitted into the module body while the
+/// `LocalType` definition beside it had been correctly dropped.
+///
+/// Uses the emitter's own predicate so the two cannot drift apart.
+fn module_is_cfg_disabled(m: &syn::ItemMod) -> bool {
+    crate::codegen::CodeGen::should_skip_cfg_attrs(&m.attrs)
+}
+
 fn collect_enum_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemEnum>) {
     for item in items {
         match item {
             syn::Item::Enum(e) => out.push(e.clone()),
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_enum_decls_recursive(nested, out);
                 }
@@ -1905,6 +1937,9 @@ fn collect_impl_blocks_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemImp
         match item {
             syn::Item::Impl(i) => out.push(i.clone()),
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_impl_blocks_recursive(nested, out);
                 }
@@ -1930,6 +1965,9 @@ fn collect_struct_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemSt
         match item {
             syn::Item::Struct(s) => out.push(s.clone()),
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_struct_decls_recursive(nested, out);
                 }
@@ -1955,6 +1993,9 @@ fn collect_type_aliases_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemTy
         match item {
             syn::Item::Type(t) => out.push(t.clone()),
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     collect_type_aliases_recursive(nested, out);
                 }
@@ -1988,6 +2029,9 @@ fn collect_local_declared_types(
             syn::Item::Enum(e) => record_local_type(module_path, &e.ident.to_string(), out),
             syn::Item::Type(t) => record_local_type(module_path, &t.ident.to_string(), out),
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     let mut nested_path = module_path.to_vec();
                     nested_path.push(m.ident.to_string());
@@ -2044,6 +2088,9 @@ fn collect_extension_method_names(
                 }
             }
             syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
                 if let Some((_, nested)) = &m.content {
                     let mut nested_path = module_path.to_vec();
                     nested_path.push(m.ident.to_string());
