@@ -15941,6 +15941,28 @@ fn test_item_import_through_sibling_module_is_not_a_module_import() {
 }
 
 #[test]
+fn test_libc_macro_names_are_escaped() {
+    // errno/stdin/stdout/stderr are MACROS, so an identifier of that
+    // name is textually replaced rather than shadowed: `fn errno()`
+    // emitted verbatim becomes `int (*__errno_location())()`, whose
+    // diagnostic mentions neither errno nor a macro.
+    let out = transpile_str(
+        r#"
+        pub fn errno() -> i32 { 0 }
+        pub fn caller() -> i32 { errno() }
+        "#,
+    );
+    assert!(
+        out.contains("errno_"),
+        "a fn named errno must be escaped:\n{out}"
+    );
+    assert!(
+        !out.contains(" errno()"),
+        "the bare macro name must not survive:\n{out}"
+    );
+}
+
+#[test]
 fn test_runtime_path_keeps_libc_collision_names() {
     // escape_cpp_keyword renames a handful of libc-colliding names
     // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function

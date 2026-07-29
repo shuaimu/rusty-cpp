@@ -54602,6 +54602,13 @@ fn escape_cpp_keyword(name: &str) -> String {
         | "typedef" | "typename" | "union" | "unsigned" | "using" | "virtual" | "void"
         | "volatile" | "wchar_t" | "while" | "write" | "_MM_SHUFFLE" | "NAN" | "INFINITY"
         | "NULL" | "xor" | "xor_eq"
+        // libc MACROS. A macro does not merely shadow the identifier, it
+        // TEXTUALLY REPLACES it: a fn named `errno` emitted verbatim
+        // becomes `int (*__errno_location())()`, which fails with a
+        // diagnostic that names neither errno nor the macro. The runtime
+        // already spells these with a trailing underscore
+        // (rusty::io::stdin_), so escaping here agrees with it.
+        | "errno" | "stdin" | "stdout" | "stderr"
         // libc globals with int-friendly signatures: a user fn of the same
         // name loses overload resolution to the C library's non-template
         // exact match (`::dup(5)` duplicated FILE DESCRIPTOR 5 and returned
