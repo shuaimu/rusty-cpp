@@ -38692,3 +38692,74 @@ fn test_match_switch_guarded_then_fallthrough_arm_emits_balanced_else_chain() {
     }
     assert_eq!(depth, 0, "switch braces do not balance:\n{out}");
 }
+
+#[test]
+fn test_iflet_refutable_inner_pattern_keeps_else_chain_attached() {
+    // Bug #102: `if let Some(Ordering::Equal) = x {..} else if let
+    // Some(Ordering::Less) = x {..} else {..}` used to open the payload
+    // refutation as an INNER `if` inside the then-branch, detaching the
+    // else-chain — `Some(Greater)` skipped every branch and fell off the
+    // end of a value-returning function (UB; VecDeque::binary_search_by).
+    // The refutation must be folded into the OUTER condition via a
+    // non-destructive const peek.
+    let out = transpile_str(
+        r#"
+        use std::cmp::Ordering;
+        fn pick(cmp_back: Option<Ordering>, front_len: usize) -> Result<usize, usize> {
+            if let Some(Ordering::Equal) = cmp_back {
+                Ok(front_len)
+            } else if let Some(Ordering::Less) = cmp_back {
+                Ok(front_len + 1)
+            } else {
+                Err(front_len)
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains(
+            "cmp_back.is_some() && ([&]() -> bool { auto&& _iflet_payload = \
+             std::as_const(cmp_back).unwrap(); return static_cast<bool>(_iflet_payload == \
+             Ordering::Equal); })()"
+        ),
+        "first arm should fold the Equal refutation into the outer condition, got:\n{out}"
+    );
+    assert!(
+        out.contains("_iflet_payload == Ordering::Less); })()"),
+        "second arm should fold the Less refutation into the outer condition, got:\n{out}"
+    );
+    // The else-if arm must attach directly to the folded first arm — the
+    // old shape (`}` closing the inner if, then a detached else) is gone.
+    assert!(
+        out.contains("} else if (cmp_back.is_some() && ([&]"),
+        "else-if chain should attach to the folded condition, got:\n{out}"
+    );
+}
+
+#[test]
+fn test_bare_uppercase_payload_ident_is_variant_refutation_not_binding() {
+    // Bug #103: `if let Err(CapacityOverflow) = r` with a glob-imported
+    // (cross-crate, unregistered) unit variant used to BIND a fresh local
+    // named CapacityOverflow — a catch-all that matched every error and
+    // panicked on AllocError too. The bare UpperCamelCase ident must
+    // refute against the payload's own type instead.
+    let out = transpile_str(
+        r#"
+        fn classify(r: Result<usize, ExternKind>) -> usize {
+            if let Err(NotFound) = r {
+                1
+            } else {
+                0
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(_iflet_payload))>::NotFound"),
+        "payload ident should refute via the payload's own type, got:\n{out}"
+    );
+    assert!(
+        !out.contains("decltype(auto) NotFound ="),
+        "payload ident must not bind a catch-all local, got:\n{out}"
+    );
+}

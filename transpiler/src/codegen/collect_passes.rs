@@ -9418,6 +9418,18 @@ impl CodeGen {
                             // unreachable through the const carrier).
                             | ("chain", 0)
                             | ("zip", 0)
+                            // Collection value-slot args (Vec/VecDeque):
+                            // cross-crate signatures are invisible here, but
+                            // emission still move-wraps the local via
+                            // receiver-type inference — a const binding
+                            // silently decays that move to a copy
+                            // (VecDeque::resize(1, v) cloned v, dropping its
+                            // reserved capacity).
+                            | ("push_back", 0)
+                            | ("push_front", 0)
+                            | ("resize", 1)
+                            | ("splice", 1)
+                            | ("extend", 0)
                     );
                     if (matches!(style, Some(ArgPassStyle::Value))
                         || (matches!(style, None | Some(ArgPassStyle::Mixed)) && heuristic_value))
@@ -10225,6 +10237,20 @@ impl CodeGen {
                             &pi.ident,
                             source_expr,
                             variant_ctx,
+                        )))
+                    } else if Self::pattern_ident_is_bare_unit_variant_name(&ident_name) {
+                        // Unit-variant refutation, qualified through the
+                        // payload's OWN type so no import resolution is
+                        // needed: `p == remove_cvref_t<decltype(p)>::Variant`
+                        // works for any enum-class payload (runtime enums
+                        // included). Data-enum payloads with a variant
+                        // registry entry were handled by the ctx paths
+                        // above; an unregistered one fails to COMPILE here
+                        // rather than silently matching everything.
+                        Some(Some(format!(
+                            "(rusty::detail::deref_if_pointer({}) == \
+                             std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer({}))>::{})",
+                            source_expr, source_expr, ident_name
                         )))
                     } else if self.collect_pattern_binding_stmts_with_cpp_name_map(
                         pat,

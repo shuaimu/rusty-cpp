@@ -73,7 +73,13 @@ struct Layout {
         if (!align_is_power_of_two) {
             return rusty::Result<Layout, LayoutErr>::Err(LayoutErr{});
         }
-        if (size > (std::numeric_limits<std::size_t>::max() - (align - 1))) {
+        // Rust enforces `size <= isize::MAX - (align - 1)` (rounding up to
+        // align must not exceed isize::MAX): objects larger than isize::MAX
+        // are unrepresentable. try_reserve(isize::MAX + 1) relies on this
+        // to report CapacityOverflow rather than reaching the allocator.
+        const std::size_t isize_max =
+            std::numeric_limits<std::size_t>::max() >> 1;
+        if (size > isize_max - (align - 1)) {
             return rusty::Result<Layout, LayoutErr>::Err(LayoutErr{});
         }
         return rusty::Result<Layout, LayoutErr>::Ok(Layout{size, align});
@@ -155,7 +161,9 @@ struct Layout {
             && size > std::numeric_limits<std::size_t>::max() / n) {
             return rusty::Result<Layout, LayoutErr>::Err(LayoutErr{});
         }
-        return rusty::Result<Layout, LayoutErr>::Ok(Layout{size * n, align});
+        // Route through the checked constructor — Rust's repeat_packed
+        // "calls the safe constructor here to enforce the isize size limit".
+        return from_size_align(size * n, align);
     }
 
     // Mirrors Rust's `Layout::dangling`. Returns a dangling-but-aligned

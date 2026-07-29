@@ -758,7 +758,9 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace(
             "this->extend(rusty::iter::repeat_n(std::move(value), std::move(extra)));",
             "for (size_t _ri = 0; _ri < rusty::detail::deref_if_pointer_like(extra); ++_ri) "
-            "{ this->push_back(rusty::clone(value)); }",
+            "{ if (_ri + 1 == rusty::detail::deref_if_pointer_like(extra)) "
+            "{ this->push_back(std::move(value)); } "
+            "else { this->push_back(rusty::clone(value)); } }",
         )
         # Vec::operator[]/index_mut lower Rust's `Index::index` to `.index()` on
         # the dereffed `*this`, but that derefs to std::span which has no
