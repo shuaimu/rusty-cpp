@@ -17805,6 +17805,20 @@ impl CodeGen {
         self.indent += 1;
         let prev_struct = self.current_struct.clone();
         self.current_struct = Some("Self".to_string());
+        // Expose the impl's CONCRETE self type to body emission, mirroring
+        // emit_method's wrapper: infer_simple_expr_type reads the top of
+        // this stack to type a bare `self` receiver, which is what lets
+        // receiver-type-gated numeric lowerings (to_le_bytes, wrapping_*,
+        // …) fire inside primitive-target trait impls
+        // (`impl Serialize for i8 { … self.to_le_bytes() … }`, #40).
+        // A default method's `Self` is a template param — push None there.
+        self.current_impl_method_self_tys.push(
+            if method_spec.self_is_template_param {
+                None
+            } else {
+                Some(method_spec.self_ty.clone())
+            },
+        );
         // §3.2.13 body assoc-type resolution: for a DEFAULT method the body's
         // `Self::Assoc` must qualify to `typename Self_::Assoc` (dependent name),
         // not strip to a bare `Assoc`. Scope the flag to the template-`Self` body
@@ -18138,6 +18152,7 @@ impl CodeGen {
         self.pop_return_type_hint();
         self.pop_return_value_scope();
         self.current_struct_assoc_cpp_types.pop();
+        self.current_impl_method_self_tys.pop();
         self.current_struct = prev_struct;
         self.ufcs_template_self_body = prev_ufcs_template_self_body;
         self.ufcs_free_fn_body = prev_ufcs_free_fn_body;
