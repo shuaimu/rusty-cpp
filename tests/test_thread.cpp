@@ -149,7 +149,9 @@ void test_multiple_threads() {
     std::cout << "Test: Multiple threads... ";
 
     auto counter = Arc<Mutex<int>>::make(0);
-    Vec<thread::JoinHandle<void>> handles;
+    // `spawn` deduces `JoinHandle<()>`, matching Rust — see
+    // `detail::SpawnResultType`.
+    Vec<thread::JoinHandle<std::tuple<>>> handles;  // = JoinHandle<()>
 
     for (int i = 0; i < 5; ++i) {
         auto handle = thread::spawn(
