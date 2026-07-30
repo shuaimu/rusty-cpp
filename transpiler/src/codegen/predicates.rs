@@ -1110,6 +1110,28 @@ impl CodeGen {
         false
     }
 
+    /// Whether any impl in this crate defines a method of this name.
+    ///
+    /// Used to keep name-matched special cases from hijacking a user's
+    /// own method: a rule that rewrites `foo.compact()` on the strength
+    /// of the NAME alone is wrong the moment the crate defines
+    /// `compact` on something.
+    pub(super) fn crate_defines_method_named(&self, method: &str) -> bool {
+        if self
+            .impl_method_receiver_kinds
+            .values()
+            .any(|methods| methods.contains_key(method))
+        {
+            return true;
+        }
+        self.cross_file_impl_blocks.iter().any(|imp| {
+            imp.items.iter().any(|item| match item {
+                syn::ImplItem::Fn(f) => f.sig.ident == method,
+                _ => false,
+            })
+        })
+    }
+
     pub(super) fn should_skip_unresolved_bare_import(&self, path: &str) -> bool {
         if self.module_stack.is_empty() {
             return false;

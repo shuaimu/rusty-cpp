@@ -6609,9 +6609,18 @@ impl CodeGen {
                 }
             }
         }
-        if matches!(mc.method.to_string().as_str(), "compact" | "readable") && mc.args.is_empty() {
-            // serde_test::Configure extension helpers are test-only adapters.
-            // Keep parity execution moving by treating them as identity.
+        if matches!(mc.method.to_string().as_str(), "compact" | "readable")
+            && mc.args.is_empty()
+            // serde_test::Configure extension helpers are test-only
+            // adapters, and treating them as identity keeps parity
+            // execution moving. But the rule matched by NAME ALONE, so
+            // it silently DELETED any zero-arg call with one of these
+            // very common names, on any receiver of any type — srpc's
+            // `Readiness::readable()` vanished, leaving `if (r)`, which
+            // compiles only by accident and means something else.
+            // Elide only when the crate defines no such method itself.
+            && !self.crate_defines_method_named(&mc.method.to_string())
+        {
             return self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
         }
         if mc.method == "next"
