@@ -2557,6 +2557,43 @@ impl CodeGen {
                 // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or rusty::Function for Fn traits
                 if let Some(last_seg) = tp.path.segments.last() {
                     let seg_name = last_seg.ident.to_string();
+                    // Arc<dyn T> / Rc<dyn T> get the SAME interface+adapter
+                    // treatment as Box<dyn T> below. Without this they fell
+                    // through to the generic pointer mapping and became
+                    // `rusty::Arc<void*>`, so every method call on the
+                    // trait object failed to compile. A trait object behind
+                    // a shared pointer is as ordinary as one behind a
+                    // unique pointer — srpc's poll thread holds its
+                    // pollables as Arc<dyn Pollable>.
+                    if seg_name == "Arc" || seg_name == "Rc" {
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
+                            && let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
+                                args.args.first()
+                        {
+                            let trait_paths: Vec<&syn::Path> = to
+                                .bounds
+                                .iter()
+                                .filter_map(|b| match b {
+                                    syn::TypeParamBound::Trait(t) => Some(&t.path),
+                                    _ => None,
+                                })
+                                .collect();
+                            let trait_names: Vec<String> = trait_paths
+                                .iter()
+                                .filter_map(|p| facade_name_for_trait_path(p))
+                                .collect();
+                            if !trait_paths.is_empty() && trait_names.len() == trait_paths.len() {
+                                if trait_names.len() == 1 {
+                                    let trait_cpp = self.interface_trait_cpp_name(trait_paths[0]);
+                                    return format!("rusty::{}<{}>", seg_name, trait_cpp);
+                                }
+                                let mut sorted = trait_names.clone();
+                                sorted.sort();
+                                let combined = self.register_and_synthesize_dyn_multi_name(sorted);
+                                return format!("rusty::{}<{}>", seg_name, combined);
+                            }
+                        }
+                    }
                     if seg_name == "Box" {
                         if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
                             if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
