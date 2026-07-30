@@ -213,6 +213,27 @@ inline void run_into_state(SharedState<JoinState<T>>& state, F&& body) {
     state->cv.notify_all();
 }
 
+/// The handle type `spawn` produces.
+///
+/// Rust has no `void`: a closure that returns nothing returns `()`, and
+/// `()` is `std::tuple<>` throughout this port (see `rusty::Unit`). But
+/// `std::invoke_result_t` of such a closure is `void`, so `spawn` used
+/// to hand back `JoinHandle<void>` where the Rust source says
+/// `JoinHandle<()>` — two types with no conversion between them, so a
+/// transpiled `Option<JoinHandle<()>>` field could not be initialised
+/// from a transpiled `spawn`.
+///
+/// `JoinHandle<void>` itself stays supported (`join()` still has its
+/// void branch, and `Result<void, E>::Ok()` still exists) for code that
+/// names it directly; this only settles what `spawn` DEDUCES, so that
+/// `handle.join()` yields `Result<(), JoinError>` exactly as Rust's
+/// does.
+template<typename F, typename... Args>
+using SpawnResultType = std::conditional_t<
+    std::is_void_v<std::invoke_result_t<F, Args...>>,
+    std::tuple<>,
+    std::invoke_result_t<F, Args...>>;
+
 } // namespace detail
 
 /// Opaque thread identifier.
@@ -365,8 +386,10 @@ public:
 template<typename F, typename... Args>
     requires (Send<std::decay_t<Args>> && ...) &&
              std::invocable<F, Args...>
-auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args...>> {
-    using ReturnType = std::invoke_result_t<F, Args...>;
+auto spawn(F&& func, Args&&... args)
+    -> JoinHandle<detail::SpawnResultType<F, Args...>> {
+    using RawReturn = std::invoke_result_t<F, Args...>;
+    using ReturnType = detail::SpawnResultType<F, Args...>;
 
     auto state = detail::SharedState<detail::JoinState<ReturnType>>::make();
     auto thread_state = state;  // bumps refcount for the spawned thread.
@@ -383,8 +406,13 @@ auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args.
          func = std::forward<F>(func),
          ...args = std::forward<Args>(args)]() mutable {
             auto s = thread_state;
-            detail::run_into_state<ReturnType>(s, [&]() {
-                return std::invoke(func, std::move(args)...);
+            detail::run_into_state<ReturnType>(s, [&]() -> ReturnType {
+                if constexpr (std::is_void_v<RawReturn>) {
+                    std::invoke(func, std::move(args)...);
+                    return ReturnType{};
+                } else {
+                    return std::invoke(func, std::move(args)...);
+                }
             });
         }
     };

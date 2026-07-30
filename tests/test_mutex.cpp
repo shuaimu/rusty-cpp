@@ -95,7 +95,9 @@ void test_thread_safety() {
     std::cout << "Test: Thread safety (10 threads, 1000 increments each)... ";
 
     auto counter = Arc<Mutex<int>>::make(0);
-    Vec<thread::JoinHandle<void>> handles;
+    // `spawn` deduces `JoinHandle<()>`, matching Rust — see
+    // `detail::SpawnResultType`.
+    Vec<thread::JoinHandle<std::tuple<>>> handles;  // = JoinHandle<()>
 
     for (int i = 0; i < 10; ++i) {
         auto handle = thread::spawn(
