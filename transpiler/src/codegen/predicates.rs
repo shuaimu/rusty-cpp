@@ -4100,6 +4100,39 @@ impl CodeGen {
             .any(|scope| scope.contains(name))
     }
 
+    /// Does `ty` carry NO information about the shape of the thing it names —
+    /// i.e. is it, after peeling references/parens, either the inference
+    /// placeholder `_` or a bare in-scope generic parameter `T`?
+    ///
+    /// Both are "known" only in the sense that inference returned `Some`. They
+    /// say nothing about whether the value is a tuple, a struct, or a pointer,
+    /// so a caller must not read them as "concrete type that isn't a tuple".
+    /// `infer_simple_expr_type` yields `&_` whenever it can tell a value is a
+    /// reference but cannot resolve the referent (a method whose owner's
+    /// generic argument was never substituted, for one); it yields a bare `T`
+    /// when it recovers a declared return type without substituting it.
+    ///
+    /// Callers that would otherwise commit to a shape-specific emission use
+    /// this to fall back to a form that resolves at instantiation instead.
+    pub(super) fn type_is_shape_opaque(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        if matches!(ty, syn::Type::Infer(_)) {
+            return true;
+        }
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return false;
+        }
+        let seg = &tp.path.segments[0];
+        // `T<..>` is a generic type applied to arguments, not a bare param.
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return false;
+        }
+        self.is_type_param_in_scope(&seg.ident.to_string())
+    }
+
     pub(super) fn is_std_optional_syn_type(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Path(tp) if tp.qself.is_none() => {

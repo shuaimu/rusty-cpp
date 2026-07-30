@@ -22147,10 +22147,26 @@ impl CodeGen {
                                 // ManuallyDrop's own field is private, so `._N`
                                 // necessarily targets the wrapped value.
                                 format!("(*{})._{}", base_for_field, idx.index)
-                            } else if inferred_base_ty.is_some() {
-                                // Base type is known and not tuple-like — must
-                                // be a transpiler-synthesized tuple-struct
-                                // whose members are named `_0`, `_1`, ….
+                            } else if inferred_base_ty
+                                .as_ref()
+                                .is_some_and(|ty| !self.type_is_shape_opaque(ty))
+                            {
+                                // Base type is known, concrete, and not
+                                // tuple-like — must be a
+                                // transpiler-synthesized tuple-struct whose
+                                // members are named `_0`, `_1`, ….
+                                //
+                                // SHAPE-OPAQUE types (`_`, `&_`, a bare `T`)
+                                // are excluded: inference returns `Some` for
+                                // them but they say nothing about the runtime
+                                // shape. hashbrown's `Iter::next` hits this —
+                                // `x: Bucket<(K, V)>`, `let r = x.as_ref()`
+                                // infers only `&_` — and guessing tuple-struct
+                                // there emitted `r._0` on a `std::tuple`, a
+                                // hard compile error that took out every
+                                // map/set iterator and all the set algebra.
+                                // Fall through to the SFINAE dispatch, which
+                                // picks the right form at instantiation.
                                 format!("{}._{}", base_for_field, idx.index)
                             } else {
                                 // Item 1 (GENERIC_FIXES_PLAN): receiver type

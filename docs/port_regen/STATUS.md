@@ -1,5 +1,45 @@
 # Stdlib-port regen un-rot — status & method
 
+## ★★★ DIRECTION (2026-07-27, user): hash comes from **std**, hashbrown only indirectly
+
+> "I think directly translating hashbrown and using it for rusty hash is for some
+> historical reasons. We should from now on translate from std, and indirectly
+> from hashbrown."
+
+`rusty::HashMap` / `rusty::HashSet` (include/rusty/rusty.cppm) currently alias
+`transpiled/hashbrown_port/`, which is a transpile of **the hashbrown crate
+itself** (`docs/hashbrown_port/prep.sh` takes a hashbrown source dir). That is
+historical, not intended. The target is the `docs/rusty/` pipeline, which
+copies `std/src/collections/hash/{map,set}.rs` out of the rustc sysroot and
+vendors hashbrown 0.16.1 as a **local path dep** so the transpiler recursively
+transpiles it to a sibling module — mirroring Rust's real layering, and giving
+users std's API and std's `RandomState` instead of hashbrown's bare API over a
+xorshift `DefaultHasher` seeded to 0.
+
+Blockers to the swap, in order:
+
+1. **Module name.** The std port emits `export module rusty;` — the same name
+   as the hand-written umbrella in `include/rusty/rusty.cppm`. They cannot
+   coexist in one TU. The endgame below (transpiled std *replaces* the
+   umbrella) resolves this eventually; a coexisting swap needs the port
+   renamed (crate name in `docs/rusty/build.sh` drives the module name).
+2. **Namespace.** The port lands in the GLOBAL namespace
+   (`collections::hash::map::HashMap`), and its hashbrown dep occupies `::map`,
+   `::set`, `::rustc_entry`. Needs wrapping under `rusty::port::` before it can
+   be exported to consumers.
+3. **CMake.** Zero references today — it exists only as a parity-matrix target.
+4. **API coverage.** Measured 2026-07-30 with a per-member probe (54 members of
+   HashMap/HashSet): **46/54 compile**. The 8 gaps are 4 root causes, tracked
+   as follow-ups — `into_iter`/`into_keys`/`into_values`/set `into_iter` (an
+   if/else IIFE whose tail-type inference fails, so the lambda mixes
+   `rusty::None` and `rusty::Some` returns), `retain`/`extract_if` (closure
+   arg passing), `entry` (RustcVacantEntry conversion), and set `extend`
+   (missing `size_hint`).
+
+The direct-hashbrown port being retired still carries an unfixed
+heap-use-after-free — see `docs/hashbrown_port/MEMORY_SAFETY_STATUS.md`. That
+is a reason to finish this swap, not to repair that port.
+
 ## ★★ DIRECTION (2026-07-12, user): translate the Rust std FAMILY, matrix-gated
 
 The end goal is translating Rust's std library **as Rust structures it** —
