@@ -1,4 +1,5 @@
 use super::*;
+use super::predicates::AutoTrait;
 
 impl CodeGen {
     /// Resolve crate-LOCAL type aliases in a forward-declaration's parameter
@@ -912,6 +913,120 @@ impl CodeGen {
             ));
         }
         None
+    }
+
+    /// Restate Rust's auto-derived `Send`/`Sync` as the marker members
+    /// `rusty::is_send` / `rusty::is_sync` consult. See
+    /// [`CodeGen::derived_auto_trait_expr`] for why this is the
+    /// transpiler's job and why it errs toward silence.
+    fn emit_auto_trait_markers(
+        &mut self,
+        name: &str,
+        fields: &syn::Fields,
+        generics: &syn::Generics,
+    ) {
+        let member_types: Vec<&syn::Type> = fields.iter().map(|f| &f.ty).collect();
+        let taken: HashSet<String> = fields
+            .iter()
+            .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+            .collect();
+        self.emit_auto_trait_markers_for_types(name, &member_types, &taken, generics);
+    }
+
+    /// One generated variant struct of a data enum. The enum itself
+    /// lowers to `std::variant<Variant…>`, whose Send/Sync the rusty
+    /// headers compute from the alternatives — so each alternative has
+    /// to state its own.
+    fn emit_variant_auto_trait_markers(
+        &mut self,
+        variant_struct_name: &str,
+        member_types: &[&syn::Type],
+        generics: &syn::Generics,
+    ) {
+        self.emit_auto_trait_markers_for_types(
+            variant_struct_name,
+            member_types,
+            &HashSet::new(),
+            generics,
+        );
+    }
+
+    /// The enum form: an enum is Send/Sync when every type held by every
+    /// variant is.
+    fn emit_auto_trait_markers_for_enum(&mut self, e: &syn::ItemEnum) {
+        let member_types: Vec<&syn::Type> = e
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter().map(|f| &f.ty))
+            .collect();
+        let taken: HashSet<String> = e
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+            .collect();
+        let name = e.ident.to_string();
+        self.emit_auto_trait_markers_for_types(&name, &member_types, &taken, &e.generics);
+    }
+
+    fn emit_auto_trait_markers_for_types(
+        &mut self,
+        name: &str,
+        member_types: &[&syn::Type],
+        taken_member_names: &HashSet<String>,
+        generics: &syn::Generics,
+    ) {
+        let lines =
+            self.auto_trait_marker_lines(name, member_types, taken_member_names, generics);
+        for line in lines {
+            self.writeln(&line);
+        }
+    }
+
+    /// The marker declarations as lines, for callers that write a struct
+    /// body as a single formatted string (the unit variants of a data
+    /// enum) rather than line by line.
+    pub(super) fn auto_trait_marker_lines(
+        &self,
+        name: &str,
+        member_types: &[&syn::Type],
+        taken_member_names: &HashSet<String>,
+        generics: &syn::Generics,
+    ) -> Vec<String> {
+        let type_params: HashSet<String> = generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        let mut lines = Vec::new();
+        for which in [AutoTrait::Send, AutoTrait::Sync] {
+            // A field or const of the same name owns the name; never
+            // shadow the user's own member with a derived one.
+            if taken_member_names.contains(which.member()) {
+                continue;
+            }
+            let Some(expr) =
+                self.derived_auto_trait_expr(name, member_types, &type_params, which)
+            else {
+                continue;
+            };
+            if lines.is_empty() {
+                lines.push(
+                    "// Rust derives Send/Sync from the field types; C++ cannot see them."
+                        .to_string(),
+                );
+            }
+            lines.push(format!(
+                "static constexpr bool {} = {};",
+                which.member(),
+                expr
+            ));
+        }
+        lines
     }
 
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
@@ -2395,6 +2510,7 @@ impl CodeGen {
         {
             self.writeln("using __rusty_has_range_index = void;");
         }
+        self.emit_auto_trait_markers(&name_str, &s.fields, &s.generics);
         self.indent -= 1;
         self.writeln("};");
 
@@ -2752,6 +2868,11 @@ impl CodeGen {
                             self.indent -= 1;
                             self.writeln("}");
                         }
+                        self.emit_variant_auto_trait_markers(
+                            &format!("{}_{}", name, vname),
+                            &fields.named.iter().map(|f| &f.ty).collect::<Vec<_>>(),
+                            &e.generics,
+                        );
                         self.indent -= 1;
                         self.writeln("};");
                     }
@@ -2808,6 +2929,11 @@ impl CodeGen {
                             self.indent -= 1;
                             self.writeln("}");
                         }
+                        self.emit_variant_auto_trait_markers(
+                            &format!("{}_{}", name, vname),
+                            &fields.unnamed.iter().map(|f| &f.ty).collect::<Vec<_>>(),
+                            &e.generics,
+                        );
                         self.indent -= 1;
                         self.writeln("};");
                     }
@@ -2824,12 +2950,28 @@ impl CodeGen {
                         } else {
                             String::new()
                         };
+                        // A unit variant holds nothing, so its derivation is
+                        // vacuously true — but it still needs to SAY so, or
+                        // the enclosing variant is not Send.
+                        let unit_markers = self
+                            .auto_trait_marker_lines(
+                                &format!("{}_{}", name, vname),
+                                &[],
+                                &HashSet::new(),
+                                &e.generics,
+                            )
+                            .into_iter()
+                            .filter(|l| !l.starts_with("//"))
+                            .map(|l| format!(" {}", l))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        let unit_debug = format!("{}{}", unit_debug, unit_markers);
                         let unit_body = if enum_derives_eq {
                             format!(
                                 "{{ bool operator==(const {}_{}&) const = default;{} }};",
                                 name, vname, unit_debug
                             )
-                        } else if enum_derives_debug {
+                        } else if !unit_debug.is_empty() {
                             format!("{{{} }};", unit_debug)
                         } else {
                             "{};".to_string()
@@ -3177,6 +3319,7 @@ impl CodeGen {
                     self.current_struct = prev_struct;
                 }
 
+                self.emit_auto_trait_markers_for_enum(e);
                 self.indent -= 1;
                 self.writeln("};");
             } else {

@@ -3411,6 +3411,24 @@ impl CodeGen {
             match item {
                 syn::Item::Trait(t) => {
                     let trait_name = t.ident.to_string();
+                    // `dyn Trait` is Send/Sync exactly when the trait's
+                    // supertraits say so, so record that here — it is
+                    // dropped everywhere else (marker supertraits are
+                    // filtered out of the emitted base list).
+                    let mut auto_bounds = (false, false);
+                    for bound in t.supertraits.iter() {
+                        if let syn::TypeParamBound::Trait(tb) = bound
+                            && let Some(seg) = tb.path.segments.last()
+                        {
+                            match seg.ident.to_string().as_str() {
+                                "Send" => auto_bounds.0 = true,
+                                "Sync" => auto_bounds.1 = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    std::rc::Rc::make_mut(&mut self.trait_auto_trait_bounds)
+                        .insert(trait_name.clone(), auto_bounds);
                     let scoped_trait_name = qualify_impl_type_name(
                         &trait_name,
                         module_path,

@@ -16537,6 +16537,35 @@ impl CodeGen {
                 );
             }
         }
+        // `mpsc::channel()` is the same shape of problem as the factory
+        // above — a ZERO-arg generic whose element type exists only in the
+        // binding it flows into — but with a worse failure mode. Alongside
+        // `template<Send T> channel()` sits a NON-template `channel()`
+        // overload returning `Sender<std::tuple<>>` for unit channels, so a
+        // bare `channel()` does not fail to compile: it silently resolves to
+        // the unit channel. `let (tx, rx): (Sender<Command>, Receiver<Command>)
+        // = channel()` then reports its error at some later use of `tx`,
+        // naming `std::tuple<>` — a type the Rust source never mentions.
+        // Recover the element type from the expected type and say it.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && call.args.is_empty()
+            && fp.path.segments.last().is_some_and(|s| {
+                s.ident == "channel" && matches!(s.arguments, syn::PathArguments::None)
+            })
+            && (fp.path.segments.len() == 1
+                || fp.path.segments[fp.path.segments.len() - 2].ident == "mpsc")
+            && !self.crate_defines_free_function_named("channel")
+            && let Some(elem_ty) = expected_ty.and_then(|ty| self.mpsc_channel_element_type(ty))
+        {
+            let elem = self.map_type(elem_ty);
+            if elem != "auto"
+                && !elem.contains("/* TODO")
+                && !type_string_has_auto_placeholder(&elem)
+            {
+                let callee = self.emit_expr_to_string(call.func.as_ref());
+                return format!("{callee}<{elem}>()");
+            }
+        }
         // `drop(x)` CONSUMES x — that is its entire meaning. rusty::mem::drop
         // takes its parameter by value, so a copyable argument would silently
         // copy (destroying the copy and dropping nothing), and a move-only

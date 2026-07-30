@@ -53,6 +53,31 @@ template<typename T>
     requires std::is_arithmetic_v<T>
 struct is_send<T> : std::true_type {};
 
+// Enumerations are Send. A C++ enumeration has no members that could be
+// marked, and the Rust fieldless enum it was translated from is Send and
+// Sync by derivation — there is nothing in it to be otherwise.
+template<typename T>
+    requires std::is_enum_v<T>
+struct is_send<T> : std::true_type {};
+
+// Opt-in via a member, the form documented on `channel()` and named by
+// the ChannelState static_assert ("Add: static constexpr bool is_send =
+// true; to your type"). Both documented spellings have to work; until
+// this specialization existed only is_explicitly_send did, so following
+// the documentation left the type not-Send and produced a diagnostic
+// recommending exactly what had just been tried.
+//
+// The member is read, not merely detected, so `is_send = false` stays an
+// expressible opt-OUT.
+template<typename T>
+concept HasIsSendMember = requires {
+    { T::is_send } -> std::convertible_to<bool>;
+};
+
+template<typename T>
+    requires HasIsSendMember<T>
+struct is_send<T> : std::bool_constant<T::is_send> {};
+
 // RUST RULE 1: const T& is Send if T is Sync
 // This mimics Rust's: &T is Send if T is Sync
 template<typename T>
@@ -119,6 +144,25 @@ template<typename T>
     requires std::is_arithmetic_v<T>
 struct is_sync<T> : std::true_type {};
 
+// Enumerations are Sync, for the reason given on the Send side.
+template<typename T>
+    requires std::is_enum_v<T>
+struct is_sync<T> : std::true_type {};
+
+// The Sync counterpart of the `is_send` member opt-in above. Needed for
+// the two to compose the way Rust's do: `is_sync<Arc<T>>` consults
+// `is_send<T> && is_sync<T>`, so a type that opts into Send alone is
+// still not shareable through an Arc — which is where a ported type
+// almost always ends up.
+template<typename T>
+concept HasIsSyncMember = requires {
+    { T::is_sync } -> std::convertible_to<bool>;
+};
+
+template<typename T>
+    requires HasIsSyncMember<T>
+struct is_sync<T> : std::bool_constant<T::is_sync> {};
+
 // RUST RULE 3: const T& is Sync if T is Sync
 // This mimics Rust's: &T is Sync if T is Sync
 template<typename T>
@@ -159,6 +203,7 @@ struct is_sync<Mutex<T>> : is_send<T> {};
 // Cell<T> is NEVER Sync (unsynchronized interior mutability)
 template<typename T>
 struct is_sync<Cell<T>> : std::false_type {};
+
 
 // RefCell<T> is NEVER Sync (unsynchronized interior mutability)
 template<typename T>
