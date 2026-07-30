@@ -27422,6 +27422,27 @@ impl CodeGen {
         let variant_name = self
             .canonical_variant_name(&path.segments.last()?.ident.to_string())
             .to_string();
+        // hashbrown's `rustc_entry` API declares `RustcEntry { Occupied, Vacant }`
+        // (Occupied = 0) — the OPPOSITE of the BTreeMap order hardcoded below.
+        // It always arrives from a DEP crate (std's `HashMap::entry` matches
+        // `base::RustcEntry::Occupied(..)`), so the known-data-enum guard above
+        // has no recorded variant metadata to defer to, and the
+        // `owner.ends_with("Entry")` test below then claims the path and applies
+        // the wrong order. Both the match condition and the payload extraction
+        // read this index, so they swap together and stay mutually consistent —
+        // which is why the arms cross silently instead of mismatching loudly.
+        if path
+            .segments
+            .iter()
+            .nth_back(1)
+            .is_some_and(|seg| seg.ident == "RustcEntry")
+        {
+            return match variant_name.as_str() {
+                "Occupied" => Some(0usize),
+                "Vacant" => Some(1usize),
+                _ => None,
+            };
+        }
         let variant_index = match variant_name.as_str() {
             "Vacant" => 0usize,
             "Occupied" => 1usize,

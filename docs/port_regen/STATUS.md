@@ -28,13 +28,22 @@ Blockers to the swap, in order:
    `::set`, `::rustc_entry`. Needs wrapping under `rusty::port::` before it can
    be exported to consumers.
 3. **CMake.** Zero references today — it exists only as a parity-matrix target.
-4. **API coverage.** Measured 2026-07-30 with a per-member probe (54 members of
-   HashMap/HashSet): **46/54 compile**. The 8 gaps are 4 root causes, tracked
-   as follow-ups — `into_iter`/`into_keys`/`into_values`/set `into_iter` (an
-   if/else IIFE whose tail-type inference fails, so the lambda mixes
-   `rusty::None` and `rusty::Some` returns), `retain`/`extract_if` (closure
-   arg passing), `entry` (RustcVacantEntry conversion), and set `extend`
-   (missing `size_hint`).
+4. **API coverage.** Measured with `docs/rusty/api_coverage.sh` (54 members of
+   HashMap/HashSet, one TU each so failures cannot mask one another):
+   **30/54 → 48/54** over 2026-07-30. Three fixes got it there — the
+   tuple-field shape-opaque guard (+16 on its own: every iterator, all the set
+   algebra, `==`, `extend`), `map_next_iter::size_hint`, and the `RustcEntry`
+   variant-order pin.
+
+   The remaining 6 are 2 root causes, both tracked as follow-ups:
+   - `into_iter` / `into_keys` / `into_values` / set `into_iter` — an if/else
+     IIFE whose tail-type inference fails, so the lambda mixes `rusty::None`
+     and `rusty::Some` returns and deduction fails.
+   - `retain` / `extract_if` — `ref`/`ref mut` pattern bindings treated as
+     owned. Two distinct sites; the `extract_if` one lowers a borrow pattern
+     to a by-value structured binding, so a closure mutating `v` mutates a
+     copy. That copy variant is confined to hashbrown's two `ExtractIf` call
+     sites (swept: zero in alloc/vec/btree/string/vec_deque).
 
 The direct-hashbrown port being retired still carries an unfixed
 heap-use-after-free — see `docs/hashbrown_port/MEMORY_SAFETY_STATUS.md`. That
