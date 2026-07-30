@@ -4258,6 +4258,10 @@ struct RawTable {
     rusty::PhantomData<T> marker;
     mutable bool _rusty_forgotten = false;
     RawTable(RawTableInner table_init, A alloc_init, rusty::PhantomData<T> marker_init) : table(std::move(table_init)), alloc(std::move(alloc_init)), marker(std::move(marker_init)) {}
+    // ⚠️ Bitwise copy of an OWNING table: two owners, and the second
+    // destructor double-frees. Deleting it is the right shape but
+    // rusty::Result's storage currently requires copy-constructibility,
+    // so it breaks unrelated instantiations. See STATUS note.
     RawTable(const RawTable&) = default;
     RawTable(RawTable&& other) noexcept : table(std::move(other.table)), alloc(std::move(other.alloc)), marker(std::move(other.marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -4385,7 +4389,12 @@ struct RawTable {
             return;
         }
         auto&& _let_pat = capacity_to_buckets(std::move(min_size_shadow1), rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
-        auto&& min_buckets = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
+        /* NOT auto&&: the non-const Option::unwrap() returns BY VALUE, so
+           deref_if_pointer yields a reference INTO that temporary, which
+           dies at the end of this full-expression — binding auto&& left a
+           dangling reference (ASan: stack-use-after-scope on the very
+           first insert that rehashes). Bind by value. */
+        auto min_buckets = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
         if (rusty::detail::deref_if_pointer_like(min_buckets) < this->num_buckets()) {
             if (rusty::detail::deref_if_pointer_like(this->table.items) == static_cast<size_t>(0)) {
                 const auto new_inner = RawTableInner::with_capacity(this->alloc, rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)), std::move(min_size_shadow1));
@@ -4655,7 +4664,12 @@ return rusty::Some(std::make_tuple(NonNull<std::remove_pointer_t<std::remove_ref
         if (this->table.is_empty_singleton()) {
             return RawTable<T, A>::new_in(rusty::clone(this->alloc));
         } else {
-            const auto result = RawTable<T, A>::new_uninitialized(rusty::clone(this->alloc), this->table.num_buckets(), Fallibility_Infallible());
+            // NOT const: Result has a const unwrap() returning `const T&`, so a
+            // const scrutinee makes `new_table` COPY-construct and both objects
+            // then own the same allocation — HashMap::clone() double-freed.
+            // Non-const unwrap() moves out. (Stale June emission; the current
+            // transpiler lowers this match to a non-const `auto&&` scrutinee.)
+            auto result = RawTable<T, A>::new_uninitialized(rusty::clone(this->alloc), this->table.num_buckets(), Fallibility_Infallible());
             auto new_table = result.unwrap();
             // @unsafe
             {
@@ -5354,7 +5368,12 @@ template<typename A>
     requires (rusty::alloc::Allocator<A>)
 auto RawTableInner::reserve_rehash_inner(const A& alloc, size_t additional, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, auto fallibility, auto layout, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
     auto&& _let_pat = [&](auto&& _checked_lhs) -> rusty::Option<std::remove_cvref_t<decltype(_checked_lhs)>> { return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }(this->items);
-    auto&& new_items = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
+    /* NOT auto&&: the non-const Option::unwrap() returns BY VALUE, so
+       deref_if_pointer yields a reference INTO that temporary, which
+       dies at the end of this full-expression — binding auto&& left a
+       dangling reference (ASan: stack-use-after-scope on the very
+       first insert that rehashes). Bind by value. */
+    auto new_items = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
     const auto full_capacity = bucket_mask_to_capacity(this->bucket_mask);
     if (rusty::detail::deref_if_pointer_like(new_items) <= (rusty::detail::deref_if_pointer_like(full_capacity) / 2)) {
         // @unsafe
