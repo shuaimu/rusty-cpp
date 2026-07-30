@@ -1,7 +1,11 @@
 #pragma once
 
 #include "send_trait.hpp"
+#include <array>
+#include <optional>
 #include <tuple>
+#include <utility>
+#include <variant>
 
 // Send implementations for rusty types
 // Mark which rusty types are thread-safe to send
@@ -42,5 +46,44 @@ struct is_send<Result<T, E>> : std::bool_constant<
 // std::tuple<Ts...> is Send if all tuple elements are Send.
 template<typename... Ts>
 struct is_send<std::tuple<Ts...>> : std::bool_constant<(is_send<Ts>::value && ...)> {};
+
+// The rest of the structural composites, on the same rule Rust applies
+// to a tuple, an array and an Option: the composite is Send/Sync when
+// every part is. `std::variant` is the load-bearing one — a transpiled
+// data enum lowers to a variant of one struct per variant, so the
+// enum's Send follows from its variants'.
+template<typename... Ts>
+struct is_send<std::variant<Ts...>> : std::bool_constant<(is_send<Ts>::value && ...)> {};
+
+template<typename A, typename B>
+struct is_send<std::pair<A, B>>
+    : std::bool_constant<is_send<A>::value && is_send<B>::value> {};
+
+template<typename T, std::size_t N>
+struct is_send<std::array<T, N>> : is_send<T> {};
+
+template<typename T>
+struct is_send<std::optional<T>> : is_send<T> {};
+
+// The Sync halves. Sync had no composite rules at all, which left an
+// `Arc<EnumType>` un-shareable however its variants were marked.
+template<typename... Ts>
+struct is_sync<std::variant<Ts...>> : std::bool_constant<(is_sync<Ts>::value && ...)> {};
+
+template<typename... Ts>
+struct is_sync<std::tuple<Ts...>> : std::bool_constant<(is_sync<Ts>::value && ...)> {};
+
+template<typename A, typename B>
+struct is_sync<std::pair<A, B>>
+    : std::bool_constant<is_sync<A>::value && is_sync<B>::value> {};
+
+template<typename T, std::size_t N>
+struct is_sync<std::array<T, N>> : is_sync<T> {};
+
+template<typename T>
+struct is_sync<std::optional<T>> : is_sync<T> {};
+
+template<typename T>
+struct is_sync<Option<T>> : is_sync<T> {};
 
 } // namespace rusty

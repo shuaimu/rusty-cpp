@@ -1189,6 +1189,13 @@ pub struct CodeGen {
     /// C-like enum type names (scoped and unscoped Rust paths).
     /// Used to route inherent method calls through free-function lowering.
     pub(crate) c_like_enum_types: HashSet<String>,
+    /// Field types of every struct declared anywhere in this crate,
+    /// from the crate-mode pre-pass. The per-file `struct_field_types`
+    /// is cleared between files (each file gets a fresh CodeGen), but a
+    /// field almost always names a type from a SIBLING module — and
+    /// Rust's Send/Sync derivation has to see through it to decide the
+    /// type that CONTAINS it.
+    pub(crate) cross_file_struct_field_types: HashMap<String, Vec<syn::Type>>,
     /// Inherent method names emitted as free functions for C-like enums.
     /// Used as a fallback when local type inference cannot recover enum types
     /// at method-call sites (for example values extracted inside `std::visit`).
@@ -1260,6 +1267,11 @@ pub struct CodeGen {
     pub(crate) iflet_result_counter: usize,
     /// Named struct field types for local type-context recovery in match lowering.
     pub(crate) struct_field_types: std::rc::Rc<HashMap<String, HashMap<String, syn::Type>>>,
+    /// Per trait name, whether its declared supertraits include `Send`
+    /// and `Sync`. A `dyn Trait` object is Send/Sync exactly when the
+    /// trait says so, and that is the only place the information lives —
+    /// see `CodeGen::derived_auto_trait_expr`.
+    pub(crate) trait_auto_trait_bounds: std::rc::Rc<HashMap<String, (bool, bool)>>,
     /// Type keys (bare + scoped) that derive/impl `Copy`. A `Copy` struct's
     /// fields are all `Copy`, so a by-value-`self` method can never move out of
     /// `self` — it must be emitted as a C++ `const` method (otherwise it can't
@@ -2224,6 +2236,7 @@ impl CodeGen {
             self_sizeof_const_fns: HashSet::new(),
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
+            cross_file_struct_field_types: HashMap::new(),
             c_like_enum_inherent_method_names: HashSet::new(),
             forward_emitted_c_like_enums: HashSet::new(),
             forward_emitted_consts: HashSet::new(),
@@ -2240,6 +2253,7 @@ impl CodeGen {
             unwrap_tmp_counter: std::cell::Cell::new(0),
             iflet_result_counter: 0,
             struct_field_types: std::rc::Rc::new(HashMap::new()),
+            trait_auto_trait_bounds: std::rc::Rc::new(HashMap::new()),
             copy_derived_types: HashSet::new(),
             move_only_types: HashSet::new(),
             pending_local_hoist_fns: Vec::new(),
@@ -4708,6 +4722,17 @@ impl CodeGen {
             .iter()
             .filter(|s| matches!(s.fields, syn::Fields::Unit))
             .map(|s| s.ident.to_string())
+            .collect();
+        // Field types, for the Send/Sync derivation: a field naming a
+        // sibling module's struct must still resolve.
+        self.cross_file_struct_field_types = structs
+            .iter()
+            .map(|s| {
+                (
+                    s.ident.to_string(),
+                    s.fields.iter().map(|f| f.ty.clone()).collect(),
+                )
+            })
             .collect();
         self.cross_file_struct_tails = structs
             .into_iter()

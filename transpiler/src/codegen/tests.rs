@@ -376,7 +376,11 @@ fn test_enum_with_data() {
     assert!(out.contains("double _0;"));
     assert!(out.contains("struct Shape_Rect {"));
     assert!(out.contains("double w;"));
-    assert!(out.contains("struct Shape_None {}"));
+    // The unit variant is no longer literally empty: like every other
+    // alternative it states its derived Send/Sync, without which the
+    // enclosing std::variant is not Send.
+    assert!(out.contains("struct Shape_None {"));
+    assert!(out.contains("struct Shape_None { static constexpr bool is_send = true;"));
     assert!(out.contains("using Shape = std::variant<"));
 }
 
@@ -40536,3 +40540,186 @@ fn test_user_defined_readable_is_not_elided() {
     );
 }
 
+
+
+#[test]
+fn test_channel_gets_its_element_type_from_the_binding() {
+    // `mpsc::channel()` is a zero-arg generic, and alongside the
+    // `template<Send T>` form the headers carry a NON-template
+    // `channel()` returning a unit channel. A bare call therefore does
+    // not fail to compile — it silently resolves to `Sender<tuple<>>`,
+    // and the error surfaces later, naming a type the Rust never wrote.
+    let out = transpile_str(
+        r#"
+        use std::sync::mpsc::{channel, Receiver, Sender};
+        pub struct Command { pub fd: i32 }
+        pub fn make() -> (Sender<Command>, Receiver<Command>) {
+            let (tx, rx): (Sender<Command>, Receiver<Command>) = channel();
+            (tx, rx)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("channel<Command>()"),
+        "channel() must carry its element type:\n{out}"
+    );
+}
+
+#[test]
+fn test_channel_special_case_does_not_hijack_a_crate_function() {
+    let out = transpile_str(
+        r#"
+        pub struct Sender<T> { pub v: T }
+        pub fn channel() -> i32 { 7 }
+        pub fn use_it() -> i32 { channel() }
+        "#,
+    );
+    assert!(
+        out.contains("channel()"),
+        "a crate-defined channel() stays a plain call:\n{out}"
+    );
+    assert!(
+        !out.contains("channel<"),
+        "must not add template args to a crate function:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_are_derived_from_field_types() {
+    // Rust derives Send/Sync from the fields; C++ has no reflection, so
+    // `rusty::is_send` defaults to FALSE and every ported struct arrives
+    // un-sendable. `thread::spawn` and `mpsc::channel<T>` both constrain
+    // on Send, so without this the translation of correct Rust does not
+    // build — and there is nothing in the Rust source to change.
+    let out = transpile_str(
+        r#"
+        pub struct Plain { pub fd: i32, pub name: String }
+        "#,
+    );
+    assert!(
+        out.contains("static constexpr bool is_send = true;"),
+        "an all-Send struct must say so:\n{out}"
+    );
+    assert!(
+        out.contains("static constexpr bool is_sync = true;"),
+        "and the Sync half, or it cannot go through an Arc:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_are_withheld_for_a_non_send_field() {
+    // The one direction that must never be guessed: marking a !Send type
+    // Send would let it cross a thread boundary, which is the exact bug
+    // the trait exists to catch.
+    let out = transpile_str(
+        r#"
+        pub struct Shared { pub inner: std::rc::Rc<i32> }
+        "#,
+    );
+    assert!(
+        !out.contains("is_send"),
+        "an Rc field must leave the type unmarked:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_are_conditional_for_a_generic_struct() {
+    let out = transpile_str(
+        r#"
+        pub struct Wrapper<T> { pub inner: T }
+        "#,
+    );
+    assert!(
+        out.contains("static constexpr bool is_send = rusty::is_send<T>::value;"),
+        "a generic struct stays as conditional as its Rust original:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_treat_recursion_coinductively() {
+    // Rust's auto traits are coinductive: a type reachable from its own
+    // fields does not thereby lose Send.
+    let out = transpile_str(
+        r#"
+        pub struct Node { pub value: i32, pub next: Option<Box<Node>> }
+        "#,
+    );
+    assert!(
+        out.contains("static constexpr bool is_send = true;"),
+        "a recursive type is still Send:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_reach_data_enum_variants() {
+    // A data enum lowers to `std::variant<Variant…>`, whose Send the
+    // headers compute from the alternatives — so each alternative,
+    // including the empty ones, has to state its own.
+    let out = transpile_str(
+        r#"
+        pub enum Event { Wake, Fd(i32), Named { name: String } }
+        "#,
+    );
+    for variant in ["Event_Wake", "Event_Fd", "Event_Named"] {
+        let at = out.find(variant).unwrap_or_else(|| panic!("{variant} missing:\n{out}"));
+        assert!(
+            out[at..].starts_with(variant)
+                && out[at..]
+                    .split("};")
+                    .next()
+                    .is_some_and(|body| body.contains("is_send")),
+            "{variant} must carry its own marker:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn test_auto_trait_markers_follow_a_trait_objects_supertraits() {
+    // `Arc<dyn Pollable>` is Send because `trait Pollable: Send + Sync`
+    // says so. That supertrait is dropped everywhere else in emission,
+    // so it is recorded during collection just for this.
+    let out = transpile_str(
+        r#"
+        use std::sync::Arc;
+        pub trait Pollable: Send + Sync { fn fd(&self) -> i32; }
+        pub struct Registry { pub p: Arc<dyn Pollable> }
+        "#,
+    );
+    assert!(
+        out.contains("static constexpr bool is_send = true;"),
+        "a dyn Trait: Send + Sync clears the struct holding it:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_do_not_shadow_a_user_field() {
+    let out = transpile_str(
+        r#"
+        pub struct Odd { pub is_send: bool }
+        "#,
+    );
+    assert!(
+        !out.contains("static constexpr bool is_send"),
+        "a user field of that name owns it:\n{out}"
+    );
+}
+
+#[test]
+fn test_auto_trait_markers_see_through_a_fieldless_enum_field() {
+    // A fieldless enum lowers to a C++ enumeration, which has no member
+    // that could be marked — so the derivation has to know it is Send by
+    // construction in order to clear the struct that HOLDS one.
+    let out = transpile_str(
+        r#"
+        #[derive(Clone, Copy)]
+        pub enum Mode { Read, Write }
+        pub struct Registration { pub fd: i32, pub mode: Mode }
+        "#,
+    );
+    let at = out.find("struct Registration {").expect("struct missing");
+    let body = out[at..].split("};").next().unwrap_or("");
+    assert!(
+        body.contains("static constexpr bool is_send = true;"),
+        "an enum field must not block the derivation:\n{out}"
+    );
+}

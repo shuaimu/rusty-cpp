@@ -1,5 +1,39 @@
 use super::*;
 
+/// The two auto traits whose derivation the transpiler restates for C++.
+/// See [`CodeGen::derived_auto_trait_expr`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum AutoTrait {
+    Send,
+    Sync,
+}
+
+impl AutoTrait {
+    /// The `rusty` trait query this maps to.
+    pub(super) fn query(self) -> &'static str {
+        match self {
+            AutoTrait::Send => "rusty::is_send",
+            AutoTrait::Sync => "rusty::is_sync",
+        }
+    }
+
+    /// The marker member `rusty::traits` reads.
+    pub(super) fn member(self) -> &'static str {
+        match self {
+            AutoTrait::Send => "is_send",
+            AutoTrait::Sync => "is_sync",
+        }
+    }
+
+    /// The Rust marker trait itself, as written in a bound list.
+    pub(super) fn marker_trait_name(self) -> &'static str {
+        match self {
+            AutoTrait::Send => "Send",
+            AutoTrait::Sync => "Sync",
+        }
+    }
+}
+
 impl CodeGen {
     pub(super) fn should_rewrite_by_value_cycle_field_declaration(
         &self,
@@ -1116,6 +1150,359 @@ impl CodeGen {
     /// own method: a rule that rewrites `foo.compact()` on the strength
     /// of the NAME alone is wrong the moment the crate defines
     /// `compact` on something.
+    /// Rust's auto-derived `Send`/`Sync`, restated as the marker members
+    /// `rusty::is_send` / `rusty::is_sync` read.
+    ///
+    /// Rust derives both from the field types; C++ has no reflection, so
+    /// `rusty::is_send` defaults to FALSE and every ported struct arrives
+    /// un-sendable. That default is backwards from the language being
+    /// ported, and it bites where a port reaches last: `thread::spawn`
+    /// constrains every argument on `Send`, and `mpsc::channel<T>`
+    /// constrains its element. Neither is expressible in the Rust source
+    /// — a plain struct is simply Send there — so without this the
+    /// translation of correct Rust does not build.
+    ///
+    /// Conservative in ONE direction: an unknown field type yields "not
+    /// derivable" and nothing is emitted. A false negative reproduces the
+    /// old behaviour (state it by hand); a false positive would let a
+    /// !Send type cross a thread boundary, which is the bug the trait
+    /// exists to catch. So `Rc`, raw pointers and references are all
+    /// treated as not-derivable rather than guessed at.
+    ///
+    /// Returns a C++ constant-expression: `true` for a concrete type, or
+    /// a dependent expression for a generic one (`struct Wrapper<T>`
+    /// is Send exactly when `T` is).
+    pub(super) fn derived_auto_trait_expr(
+        &self,
+        type_name: &str,
+        member_types: &[&syn::Type],
+        type_params: &HashSet<String>,
+        which: AutoTrait,
+    ) -> Option<String> {
+        // Auto traits are COINDUCTIVE in Rust: a type reachable from its
+        // own field types does not thereby lose Send. `visited` makes the
+        // cycle answer "yes" rather than diverge.
+        let mut visited = HashSet::new();
+        visited.insert(type_name.to_string());
+        let mut terms: Vec<String> = Vec::new();
+        for ty in member_types {
+            let term = self.auto_trait_expr_for_type(ty, type_params, which, &mut visited)?;
+            if term != "true" && !terms.contains(&term) {
+                terms.push(term);
+            }
+        }
+        if terms.is_empty() {
+            return Some("true".to_string());
+        }
+        Some(terms.join(" && "))
+    }
+
+    fn auto_trait_expr_for_type(
+        &self,
+        ty: &syn::Type,
+        type_params: &HashSet<String>,
+        which: AutoTrait,
+        visited: &mut HashSet<String>,
+    ) -> Option<String> {
+        let conj = |parts: Vec<String>| -> String {
+            let mut kept: Vec<String> = Vec::new();
+            for p in parts {
+                if p != "true" && !kept.contains(&p) {
+                    kept.push(p);
+                }
+            }
+            if kept.is_empty() {
+                "true".to_string()
+            } else {
+                kept.join(" && ")
+            }
+        };
+
+        match ty {
+            syn::Type::Paren(p) => {
+                self.auto_trait_expr_for_type(&p.elem, type_params, which, visited)
+            }
+            syn::Type::Group(g) => {
+                self.auto_trait_expr_for_type(&g.elem, type_params, which, visited)
+            }
+            syn::Type::Tuple(t) => {
+                let mut parts = Vec::new();
+                for e in t.elems.iter() {
+                    parts.push(self.auto_trait_expr_for_type(e, type_params, which, visited)?);
+                }
+                Some(conj(parts))
+            }
+            syn::Type::Array(a) => {
+                self.auto_trait_expr_for_type(&a.elem, type_params, which, visited)
+            }
+            syn::Type::Path(tp) => {
+                self.auto_trait_expr_for_path(tp, type_params, which, visited)
+            }
+            // `dyn Trait` carries whatever its bounds carry: either
+            // spelled at the use site (`dyn Trait + Send + Sync`) or
+            // declared once as supertraits (`trait Pollable: Send +
+            // Sync`), which is where a port normally puts them. The
+            // supertrait spelling is dropped everywhere else in
+            // emission, so it is recorded during collection.
+            syn::Type::TraitObject(to) => {
+                let mut satisfied = false;
+                for bound in to.bounds.iter() {
+                    let syn::TypeParamBound::Trait(tb) = bound else {
+                        continue;
+                    };
+                    let Some(seg) = tb.path.segments.last() else {
+                        continue;
+                    };
+                    let name = seg.ident.to_string();
+                    if name == which.marker_trait_name() {
+                        satisfied = true;
+                        break;
+                    }
+                    if let Some((send, sync)) = self.trait_auto_trait_bounds.get(&name) {
+                        let carries = match which {
+                            AutoTrait::Send => *send,
+                            AutoTrait::Sync => *sync,
+                        };
+                        if carries {
+                            satisfied = true;
+                            break;
+                        }
+                    }
+                }
+                satisfied.then(|| "true".to_string())
+            }
+            // References and raw pointers: not guessed at (see the doc
+            // comment). `&T` really is Send-if-Sync in Rust, but the
+            // rusty headers model `T&` differently, and a struct holding
+            // a borrow is not a shape this port produces.
+            _ => None,
+        }
+    }
+
+    fn auto_trait_expr_for_path(
+        &self,
+        tp: &syn::TypePath,
+        type_params: &HashSet<String>,
+        which: AutoTrait,
+        visited: &mut HashSet<String>,
+    ) -> Option<String> {
+        let seg = tp.path.segments.last()?;
+        let leaf = seg.ident.to_string();
+
+        // A bare type parameter defers to the C++ trait query, which is
+        // how a generic struct stays as conditional as its Rust original.
+        if tp.path.segments.len() == 1
+            && type_params.contains(&leaf)
+            && matches!(seg.arguments, syn::PathArguments::None)
+        {
+            return Some(format!("{}<{}>::value", which.query(), leaf));
+        }
+
+        let args: Vec<&syn::Type> = match &seg.arguments {
+            syn::PathArguments::AngleBracketed(ab) => ab
+                .args
+                .iter()
+                .filter_map(|a| match a {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let all = |which: AutoTrait, visited: &mut HashSet<String>| -> Option<Vec<String>> {
+            let mut parts = Vec::new();
+            for a in args.iter() {
+                parts.push(self.auto_trait_expr_for_type(a, type_params, which, visited)?);
+            }
+            Some(parts)
+        };
+        let join = |parts: Vec<String>| -> String {
+            let mut kept: Vec<String> = Vec::new();
+            for p in parts {
+                if p != "true" && !kept.contains(&p) {
+                    kept.push(p);
+                }
+            }
+            if kept.is_empty() {
+                "true".to_string()
+            } else {
+                kept.join(" && ")
+            }
+        };
+
+        match leaf.as_str() {
+            // Both, unconditionally.
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize" | "f32" | "f64" | "bool" | "char" | "String" | "str"
+            | "OsString" | "PathBuf" | "Duration" | "Instant" | "SystemTime" | "AtomicBool"
+            | "AtomicI8" | "AtomicI16" | "AtomicI32" | "AtomicI64" | "AtomicIsize"
+            | "AtomicU8" | "AtomicU16" | "AtomicU32" | "AtomicU64" | "AtomicUsize" => {
+                Some("true".to_string())
+            }
+
+            // Transparent containers: the same trait, of every argument.
+            "Vec" | "VecDeque" | "Option" | "Box" | "Result" | "HashMap" | "HashSet"
+            | "BTreeMap" | "BTreeSet" | "BinaryHeap" => Some(join(all(which, visited)?)),
+
+            // Arc<T> is Send AND Sync exactly when T is Send + Sync.
+            "Arc" => {
+                let mut parts = all(AutoTrait::Send, visited)?;
+                parts.extend(all(AutoTrait::Sync, visited)?);
+                Some(join(parts))
+            }
+
+            // Mutex/RwLock<T>: Send if T is Send, and Sync if T is Send —
+            // the lock is what supplies the synchronization.
+            "Mutex" | "RwLock" => Some(join(all(AutoTrait::Send, visited)?)),
+
+            // Unsynchronized interior mutability: Send with T, never Sync.
+            "Cell" | "RefCell" => match which {
+                AutoTrait::Send => Some(join(all(AutoTrait::Send, visited)?)),
+                AutoTrait::Sync => None,
+            },
+
+            // Rc and its Weak are neither, by construction.
+            "Rc" | "Weak" => None,
+
+            // A fieldless enum declared in this crate. It holds
+            // nothing, so Rust derives both — and the C++ side agrees
+            // via the `is_enum_v` rule, but the derivation still has to
+            // know that to clear the struct that CONTAINS one.
+            _ if self.c_like_enum_types.contains(&leaf)
+                || self
+                    .c_like_enum_types
+                    .iter()
+                    .any(|k| k.rsplit("::").next() == Some(leaf.as_str())) =>
+            {
+                Some("true".to_string())
+            }
+
+            // A struct declared in this crate: recurse structurally
+            // rather than emitting `is_send<ThatStruct>::value`, so a
+            // recursive type resolves here instead of instantiating a
+            // cycle in the C++ trait query.
+            _ => {
+                if !args.is_empty() {
+                    // A generic crate type would need its parameters
+                    // substituted through to its fields. Not derivable.
+                    return None;
+                }
+                if !visited.insert(leaf.clone()) {
+                    return Some("true".to_string()); // coinductive
+                }
+                let fields = self.struct_field_types.get(&leaf).or_else(|| {
+                    self.struct_field_types
+                        .iter()
+                        .find_map(|(k, v)| (k.rsplit("::").next() == Some(leaf.as_str())).then_some(v))
+                });
+                if let Some(fields) = fields {
+                    let mut parts = Vec::new();
+                    for fty in fields.values() {
+                        parts.push(self.auto_trait_expr_for_type(fty, type_params, which, visited)?);
+                    }
+                    return Some(join(parts));
+                }
+                // Declared in this crate but in ANOTHER file: each file
+                // gets a fresh CodeGen, so the per-file map has nothing.
+                // The crate-mode pre-pass collected every sibling
+                // declaration, which is enough to keep recursing.
+                if let Some(field_types) = self
+                    .cross_file_struct_field_types
+                    .get(&leaf)
+                    .or_else(|| {
+                        self.cross_file_struct_field_types
+                            .iter()
+                            .find_map(|(k, v)| {
+                                (k.rsplit("::").next() == Some(leaf.as_str())).then_some(v)
+                            })
+                    })
+                {
+                    let field_types = field_types.clone();
+                    let mut parts = Vec::new();
+                    for fty in field_types.iter() {
+                        parts.push(self.auto_trait_expr_for_type(
+                            fty,
+                            type_params,
+                            which,
+                            visited,
+                        )?);
+                    }
+                    return Some(join(parts));
+                }
+                // A sibling enum: fieldless holds nothing, and a data
+                // enum is the conjunction over every variant's types.
+                if let Some(sibling) = self
+                    .cross_file_enums
+                    .iter()
+                    .find(|e| e.ident == leaf.as_str())
+                {
+                    let variant_types: Vec<syn::Type> = sibling
+                        .variants
+                        .iter()
+                        .flat_map(|v| v.fields.iter().map(|f| f.ty.clone()))
+                        .collect();
+                    let mut parts = Vec::new();
+                    for vty in variant_types.iter() {
+                        parts.push(self.auto_trait_expr_for_type(
+                            vty,
+                            type_params,
+                            which,
+                            visited,
+                        )?);
+                    }
+                    return Some(join(parts));
+                }
+                None
+            }
+        }
+    }
+
+    /// Whether this crate defines a free function of this name.
+    ///
+    /// The free-function counterpart of [`Self::crate_defines_method_named`],
+    /// and used for the same reason: a rule keyed on a bare call name must
+    /// not hijack a user's own function.
+    pub(super) fn crate_defines_free_function_named(&self, name: &str) -> bool {
+        let suffix = format!("::{}", name);
+        self.function_return_types
+            .keys()
+            .any(|key| key == name || key.ends_with(&suffix))
+    }
+
+    /// The `T` of an `mpsc::channel::<T>()` binding, read back out of the
+    /// type the channel flows into: `(Sender<T>, Receiver<T>)`, or a bare
+    /// `Sender<T>` / `Receiver<T>`.
+    pub(super) fn mpsc_channel_element_type<'a>(
+        &self,
+        expected: &'a syn::Type,
+    ) -> Option<&'a syn::Type> {
+        fn endpoint_element(ty: &syn::Type) -> Option<&syn::Type> {
+            let syn::Type::Path(tp) = ty else {
+                return None;
+            };
+            let seg = tp.path.segments.last()?;
+            if !matches!(seg.ident.to_string().as_str(), "Sender" | "Receiver") {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+        }
+
+        let expected = self.peel_reference_paren_group_type(expected);
+        if let syn::Type::Tuple(tup) = expected {
+            // Either half names the element; take the first that does, so
+            // a partially-annotated pair still resolves.
+            return tup.elems.iter().find_map(endpoint_element);
+        }
+        endpoint_element(expected)
+    }
+
     pub(super) fn crate_defines_method_named(&self, method: &str) -> bool {
         if self
             .impl_method_receiver_kinds
