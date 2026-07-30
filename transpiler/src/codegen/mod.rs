@@ -10313,6 +10313,33 @@ impl CodeGen {
                     }
                     emitted_any = true;
                 }
+                syn::Item::Trait(t) if self.interface_traits => {
+                    // A trait lowers to an abstract interface class, and
+                    // anything holding `Arc<dyn T>` / `Box<dyn T>` names
+                    // that class — possibly before it is defined, since
+                    // the holder can precede the trait in source order.
+                    // A smart pointer needs only an INCOMPLETE type, so a
+                    // forward declaration is enough and costs nothing.
+                    let name = escape_cpp_keyword(&t.ident.to_string());
+                    if !emitted_names.insert(name.clone()) {
+                        continue;
+                    }
+                    let export_prefix = if self.should_export_item_at_module_depth(
+                        &t.vis,
+                        module_depth,
+                        &t.ident.to_string(),
+                    ) {
+                        "export "
+                    } else {
+                        ""
+                    };
+                    self.emit_template_declaration_without_type_defaults(
+                        &t.generics,
+                        export_prefix,
+                        &format!("class {};", name),
+                    );
+                    emitted_any = true;
+                }
                 syn::Item::Union(u) => {
                     let name = self.named_module_root_type_decl_cpp_name_at_depth(
                         &u.ident.to_string(),
@@ -10628,6 +10655,33 @@ impl CodeGen {
                     } else {
                         self.emit_data_enum_alias_forward_decl(e, export_prefix);
                     }
+                    emitted_any = true;
+                }
+                syn::Item::Trait(t) if self.interface_traits => {
+                    // A trait lowers to an abstract interface class, and
+                    // anything holding `Arc<dyn T>` / `Box<dyn T>` names
+                    // that class — possibly before it is defined, since a
+                    // holder can precede the trait in source order. A
+                    // smart pointer needs only an INCOMPLETE type, so a
+                    // forward declaration suffices.
+                    let name = escape_cpp_keyword(&t.ident.to_string());
+                    if !emitted_names.insert(name.clone()) {
+                        continue;
+                    }
+                    let export_prefix = if self.should_export_item_at_module_depth(
+                        &t.vis,
+                        module_depth,
+                        &t.ident.to_string(),
+                    ) {
+                        "export "
+                    } else {
+                        ""
+                    };
+                    self.emit_template_declaration_without_type_defaults(
+                        &t.generics,
+                        export_prefix,
+                        &format!("class {};", name),
+                    );
                     emitted_any = true;
                 }
                 _ => continue,

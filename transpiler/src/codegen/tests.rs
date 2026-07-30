@@ -40476,3 +40476,63 @@ fn test_libc_macro_names_are_escaped() {
     );
 }
 
+
+#[test]
+fn test_trait_interface_is_forward_declared() {
+    // A trait lowers to an interface class. A struct holding
+    // Arc<dyn T> can be emitted BEFORE it — srpc's Command::Add held
+    // Arc<dyn Pollable> and the Pollable class landed 70 lines later,
+    // giving 'use of undeclared identifier'. A smart pointer needs only
+    // an incomplete type, so a forward declaration is enough.
+    let out = transpile_str_module(
+        r#"
+        use std::sync::Arc;
+        pub enum Command {
+            Add(Arc<dyn Worker>),
+            Stop,
+        }
+        pub trait Worker: Send + Sync {
+            fn work(&self) -> i32;
+        }
+        "#,
+        "probe",
+    );
+    let fwd = out.find("class Worker;").expect("forward declaration emitted");
+    let holder = out.find("Arc<Worker>").expect("holder names the interface");
+    assert!(
+        fwd < holder,
+        "the forward declaration must precede the first use:\n{out}"
+    );
+}
+
+#[test]
+fn test_user_defined_readable_is_not_elided() {
+    // A name-matched identity rule (added for serde_test's Configure
+    // adapters) silently DELETED any zero-arg call named `readable` or
+    // `compact`, whatever the receiver. srpc's Readiness::readable()
+    // vanished, leaving `if (r)` — code that still compiles and means
+    // something else, which is the worst way for this to fail.
+    let out = transpile_str(
+        r#"
+        #[derive(Clone, Copy)]
+        pub struct Readiness(pub i32);
+        impl Readiness {
+            pub fn readable(self) -> bool { self.0 & 1 != 0 }
+            pub fn compact(self) -> i32 { self.0 }
+        }
+        pub fn check(r: Readiness) -> bool {
+            if r.readable() { true } else { false }
+        }
+        pub fn size(r: Readiness) -> i32 { r.compact() }
+        "#,
+    );
+    assert!(
+        out.contains("r.readable()"),
+        "a crate-defined readable() must survive:\n{out}"
+    );
+    assert!(
+        out.contains("r.compact()"),
+        "a crate-defined compact() must survive:\n{out}"
+    );
+}
+
