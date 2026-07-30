@@ -1432,22 +1432,37 @@ public:
         return result;
     }
     
-    // Convert to uppercase
+    // Convert to uppercase.
+    //
+    // ASCII ONLY, deliberately. The previous byte-wise std::toupper loop
+    // CORRUPTED every multibyte UTF-8 sequence (each continuation byte was
+    // fed to toupper independently) and passed negative `char` values to
+    // toupper, which is UB. Non-ASCII bytes now pass through untouched.
+    // Full Unicode casing (incl. SpecialCasing, e.g. ß -> SS which changes
+    // length) needs the Unicode tables and is not implemented.
     // @lifetime: owned
     String to_uppercase() const {
         String result = clone();
         for (size_t i = 0; i < result.len_; i++) {
-            result.data_[i] = std::toupper(result.data_[i]);
+            const auto byte = static_cast<unsigned char>(result.data_[i]);
+            if (byte < 0x80) {
+                result.data_[i] = static_cast<char>(
+                    std::toupper(static_cast<int>(byte)));
+            }
         }
         return result;
     }
     
-    // Convert to lowercase
+    // Convert to lowercase. ASCII only — see to_uppercase above.
     // @lifetime: owned
     String to_lowercase() const {
         String result = clone();
         for (size_t i = 0; i < result.len_; i++) {
-            result.data_[i] = std::tolower(result.data_[i]);
+            const auto byte = static_cast<unsigned char>(result.data_[i]);
+            if (byte < 0x80) {
+                result.data_[i] = static_cast<char>(
+                    std::tolower(static_cast<int>(byte)));
+            }
         }
         return result;
     }

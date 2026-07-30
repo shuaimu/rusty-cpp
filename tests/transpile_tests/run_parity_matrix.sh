@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TRANSPILER_BIN="${RUSTY_CPP_TRANSPILER_BIN:-${REPO_ROOT}/target/release/rusty-cpp-transpiler}"
 
 declare -a MATRIX_CRATES=(
+    "strpat"
     "either"
     "tap"
     "cfg-if"

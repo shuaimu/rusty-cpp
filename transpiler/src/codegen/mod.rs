@@ -47647,7 +47647,23 @@ inline std::string escape_debug_string(std::string_view input) {
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
             case '\0': out += "\\0"; break;
-            default: out.push_back(ch); break;
+            default: {
+                // Rust's escape_debug also escapes the REST of the control
+                // range as \u{..}; passing them through raw meant {:?} of a
+                // string emitted literal control bytes. Non-ASCII (>= 0x80)
+                // stays raw: Rust keeps printable non-ASCII as-is, and the
+                // bytes here are UTF-8 continuation bytes of one scalar.
+                const auto byte = static_cast<unsigned char>(ch);
+                if (byte < 0x20 || byte == 0x7F) {
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "\\u{%x}",
+                                  static_cast<unsigned>(byte));
+                    out += buf;
+                } else {
+                    out.push_back(ch);
+                }
+                break;
+            }
         }
     }
     return out;
@@ -51035,7 +51051,20 @@ inline std::string escape_debug_string(std::string_view input) {\n\
             case '\\r': out += \"\\\\r\"; break;\n\
             case '\\t': out += \"\\\\t\"; break;\n\
             case '\\0': out += \"\\\\0\"; break;\n\
-            default: out.push_back(ch); break;\n\
+            default: {\n\
+                /* Rust escape_debug also escapes the rest of the control\n\
+                   range as \\u{..}; raw pass-through put literal control\n\
+                   bytes into every {:?} of a string. Non-ASCII stays raw. */\n\
+                const auto byte = static_cast<unsigned char>(ch);\n\
+                if (byte < 0x20 || byte == 0x7F) {\n\
+                    char buf[16];\n\
+                    std::snprintf(buf, sizeof(buf), \"\\\\u{%x}\", static_cast<unsigned>(byte));\n\
+                    out += buf;\n\
+                } else {\n\
+                    out.push_back(ch);\n\
+                }\n\
+                break;\n\
+            }\n\
         }\n\
     }\n\
     return out;\n\
@@ -51957,6 +51986,31 @@ rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {\n\
     }\n\
 }\n\
 namespace str_runtime {\n\
+/* Rust char patterns are CODE POINTS, and this prelude searches BYTES.\n\
+   Every char32_t overload used to do static_cast<char>(ch), truncating any\n\
+   non-ASCII pattern (U+534E -> 0x4E), so \"..中华Việt Nam\".find('华')\n\
+   matched the 'N' of \"Nam\". Encode to UTF-8 and search on the bytes; the\n\
+   pattern length also has to replace the hardcoded +1 in every tail\n\
+   substr, or a multibyte delimiter leaves continuation bytes behind. */\n\
+inline std::string char_pattern_utf8(char32_t ch) {\n\
+    const uint32_t c = static_cast<uint32_t>(ch);\n\
+    std::string out;\n\
+    if (c < 0x80u) { out.push_back(static_cast<char>(c)); }\n\
+    else if (c < 0x800u) {\n\
+        out.push_back(static_cast<char>(0xC0u | (c >> 6)));\n\
+        out.push_back(static_cast<char>(0x80u | (c & 0x3Fu)));\n\
+    } else if (c < 0x10000u) {\n\
+        out.push_back(static_cast<char>(0xE0u | (c >> 12)));\n\
+        out.push_back(static_cast<char>(0x80u | ((c >> 6) & 0x3Fu)));\n\
+        out.push_back(static_cast<char>(0x80u | (c & 0x3Fu)));\n\
+    } else {\n\
+        out.push_back(static_cast<char>(0xF0u | (c >> 18)));\n\
+        out.push_back(static_cast<char>(0x80u | ((c >> 12) & 0x3Fu)));\n\
+        out.push_back(static_cast<char>(0x80u | ((c >> 6) & 0x3Fu)));\n\
+        out.push_back(static_cast<char>(0x80u | (c & 0x3Fu)));\n\
+    }\n\
+    return out;\n\
+}\n\
 // Mirrors core::str::Utf8Error: byte index of the valid prefix plus the\n\
 // invalid-sequence length (None = input ended in the middle of a sequence).\n\
 struct Utf8Error {\n\
@@ -52305,19 +52359,22 @@ inline std::string_view trim(std::string_view s) {\n\
 }\n\
 inline std::string_view trim_start_matches(std::string_view s, char32_t ch) {\n\
     size_t start = 0;\n\
-    while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;\n\
+    const auto _pat = char_pattern_utf8(ch);\n\
+    while (s.size() - start >= _pat.size() && s.compare(start, _pat.size(), _pat) == 0) start += _pat.size();\n\
     return s.substr(start);\n\
 }\n\
 inline std::string_view trim_end_matches(std::string_view s, char32_t ch) {\n\
     size_t end = s.size();\n\
-    while (end > 0 && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;\n\
+    const auto _pat = char_pattern_utf8(ch);\n\
+    while (end >= _pat.size() && s.compare(end - _pat.size(), _pat.size(), _pat) == 0) end -= _pat.size();\n\
     return s.substr(0, end);\n\
 }\n\
 inline std::string_view trim_matches(std::string_view s, char32_t ch) {\n\
+    const auto _pat = char_pattern_utf8(ch);\n\
     size_t start = 0;\n\
-    while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;\n\
+    while (s.size() - start >= _pat.size() && s.compare(start, _pat.size(), _pat) == 0) start += _pat.size();\n\
     size_t end = s.size();\n\
-    while (end > start && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;\n\
+    while (end - start >= _pat.size() && s.compare(end - _pat.size(), _pat.size(), _pat) == 0) end -= _pat.size();\n\
     return s.substr(start, end - start);\n\
 }\n\
 inline std::string_view trim_start_matches(std::string_view s, std::string_view pat) {\n\
@@ -52407,7 +52464,7 @@ inline rusty::Option<std::size_t> find(std::string_view s, std::string_view need
     return rusty::Option<std::size_t>(pos);\n\
 }\n\
 inline rusty::Option<std::size_t> find(std::string_view s, char32_t ch) {\n\
-    const auto pos = s.find(static_cast<char>(ch));\n\
+    const auto pos = s.find(char_pattern_utf8(ch));\n\
     if (pos == std::string_view::npos) {\n\
         return rusty::Option<std::size_t>(rusty::None);\n\
     }\n\
@@ -52415,14 +52472,12 @@ inline rusty::Option<std::size_t> find(std::string_view s, char32_t ch) {\n\
 }\n\
 template<std::size_t N>\n\
 inline rusty::Option<std::size_t> find(std::string_view s, const std::array<char32_t, N>& any_char) {\n\
-    for (std::size_t i = 0; i < s.size(); ++i) {\n\
-        const auto cur = static_cast<char32_t>(static_cast<unsigned char>(s[i]));\n\
-        for (const auto ch : any_char) {\n\
-            if (cur == ch) {\n\
-                return rusty::Option<std::size_t>(i);\n\
-            }\n\
-        }\n\
+    std::size_t best = std::string_view::npos;\n\
+    for (const auto ch : any_char) {\n\
+        const auto p = s.find(char_pattern_utf8(ch));\n\
+        if (p != std::string_view::npos && (best == std::string_view::npos || p < best)) best = p;\n\
     }\n\
+    if (best != std::string_view::npos) return rusty::Option<std::size_t>(best);\n\
     return rusty::Option<std::size_t>(rusty::None);\n\
 }\n\
 template<typename Pred>\n\
@@ -52457,7 +52512,7 @@ inline rusty::Option<std::size_t> rfind(std::string_view s, std::string_view nee
     return rusty::Option<std::size_t>(pos);\n\
 }\n\
 inline rusty::Option<std::size_t> rfind(std::string_view s, char32_t ch) {\n\
-    const auto pos = s.rfind(static_cast<char>(ch));\n\
+    const auto pos = s.rfind(char_pattern_utf8(ch));\n\
     if (pos == std::string_view::npos) {\n\
         return rusty::Option<std::size_t>(rusty::None);\n\
     }\n\
@@ -52492,9 +52547,10 @@ inline rusty::Option<std::string_view> strip_suffix(std::string_view s, char32_t
     return rusty::Option<std::string_view>(rusty::None);\n\
 }\n\
 inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, char32_t delim) {\n\
-    auto pos = s.find(static_cast<char>(delim));\n\
+    const auto _pat = char_pattern_utf8(delim);\n\
+    auto pos = s.find(_pat);\n\
     if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);\n\
-    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));\n\
+    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + _pat.size())));\n\
 }\n\
 inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, std::string_view delim) {\n\
     auto pos = s.find(delim);\n\
@@ -52502,9 +52558,10 @@ inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(
     return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));\n\
 }\n\
 inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, char32_t delim) {\n\
-    auto pos = s.rfind(static_cast<char>(delim));\n\
+    const auto _pat = char_pattern_utf8(delim);\n\
+    auto pos = s.rfind(_pat);\n\
     if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);\n\
-    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + 1)));\n\
+    return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + _pat.size())));\n\
 }\n\
 inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, std::string_view delim) {\n\
     auto pos = s.rfind(delim);\n\
@@ -52575,13 +52632,14 @@ struct SplitIter {\n\
     bool done = false;\n\
     rusty::Option<std::string_view> next() {\n\
         if (done) return rusty::Option<std::string_view>(rusty::None);\n\
-        auto pos = remaining.find(static_cast<char>(delim));\n\
+        const auto _pat = char_pattern_utf8(delim);\n\
+        auto pos = remaining.find(_pat);\n\
         if (pos == std::string_view::npos) {\n\
             done = true;\n\
             return rusty::Option<std::string_view>(remaining);\n\
         }\n\
         auto piece = remaining.substr(0, pos);\n\
-        remaining = remaining.substr(pos + 1);\n\
+        remaining = remaining.substr(pos + _pat.size());\n\
         return rusty::Option<std::string_view>(piece);\n\
     }\n\
     rusty::Option<std::string_view> nth(std::size_t n) {\n\
@@ -52620,12 +52678,13 @@ struct RSplitIter {\n\
     bool done = false;\n\
     rusty::Option<std::string_view> next() {\n\
         if (done) return rusty::Option<std::string_view>(rusty::None);\n\
-        auto pos = remaining.rfind(static_cast<char>(delim));\n\
+        const auto _pat = char_pattern_utf8(delim);\n\
+        auto pos = remaining.rfind(_pat);\n\
         if (pos == std::string_view::npos) {\n\
             done = true;\n\
             return rusty::Option<std::string_view>(remaining);\n\
         }\n\
-        auto piece = remaining.substr(pos + 1);\n\
+        auto piece = remaining.substr(pos + _pat.size());\n\
         remaining = remaining.substr(0, pos);\n\
         return rusty::Option<std::string_view>(piece);\n\
     }\n\
@@ -52679,10 +52738,11 @@ struct SplitNIter {\n\
     rusty::Option<std::string_view> next() {\n\
         if (done) return rusty::Option<std::string_view>(rusty::None);\n\
         if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
-        auto pos = remaining.find(static_cast<char>(delim));\n\
+        const auto _pat = char_pattern_utf8(delim);\n\
+        auto pos = remaining.find(_pat);\n\
         if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
         auto piece = remaining.substr(0, pos);\n\
-        remaining = remaining.substr(pos + 1);\n\
+        remaining = remaining.substr(pos + _pat.size());\n\
         --remaining_count;\n\
         return rusty::Option<std::string_view>(piece);\n\
     }\n\
@@ -52700,9 +52760,10 @@ struct RSplitNIter {\n\
     rusty::Option<std::string_view> next() {\n\
         if (done) return rusty::Option<std::string_view>(rusty::None);\n\
         if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
-        auto pos = remaining.rfind(static_cast<char>(delim));\n\
+        const auto _pat = char_pattern_utf8(delim);\n\
+        auto pos = remaining.rfind(_pat);\n\
         if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }\n\
-        auto piece = remaining.substr(pos + 1);\n\
+        auto piece = remaining.substr(pos + _pat.size());\n\
         remaining = remaining.substr(0, pos);\n\
         --remaining_count;\n\
         return rusty::Option<std::string_view>(piece);\n\
@@ -52759,7 +52820,7 @@ struct MatchesIter {\n\
     }\n\
 };\n\
 inline MatchesIter matches(std::string_view s, std::string_view pat) { return MatchesIter{s, std::string(pat)}; }\n\
-inline MatchesIter matches(std::string_view s, char32_t ch) { return MatchesIter{s, std::string(1, static_cast<char>(ch))}; }\n\
+inline MatchesIter matches(std::string_view s, char32_t ch) { return MatchesIter{s, char_pattern_utf8(ch)}; }\n\
 }\n\
 namespace char_runtime {\n\
 // Rust `char::REPLACEMENT_CHARACTER` (U+FFFD).\n\
