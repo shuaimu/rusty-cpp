@@ -1755,6 +1755,7 @@ struct bound_unbounded_t {
 };
 inline constexpr bound_unbounded_t bound_unbounded{};
 
+
 namespace detail {
 
 // `std::cmp_*` accept only non-bool, non-character integer types.

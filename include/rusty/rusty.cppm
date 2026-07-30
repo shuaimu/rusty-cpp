@@ -132,6 +132,22 @@ export namespace rusty {
 template<typename T, typename A = ::rusty::alloc::Global>
 using Vec = ::rusty::port::vec::Vec<T, A>;
 
+/// Rust's `vec![elem; n]`, i.e. `alloc::vec::from_elem`: a Vec holding
+/// `n` clones of `value`.
+///
+/// Lives here rather than in a header because it names `Vec`, which is
+/// a MODULE alias — a header included in the global module fragment
+/// cannot see it, and the qualified name is looked up when the template
+/// is defined rather than when it is instantiated.
+template<typename T>
+auto vec_from_elem(const T& value, std::size_t n) {
+    auto out = Vec<std::decay_t<T>>::new_();
+    for (std::size_t i = 0; i < n; ++i) {
+        out.push(rusty::clone(value));
+    }
+    return out;
+}
+
 // Legacy hand-written rusty::Rc retired — `rusty::Rc<T,A>` is now the
 // transpiled rustc Rc from `library/alloc/src/rc.rs`. API change:
 // use `Rc<T>::new_(value)` instead of constructor / `make(value)`.

@@ -15941,6 +15941,34 @@ fn test_item_import_through_sibling_module_is_not_a_module_import() {
 }
 
 #[test]
+fn test_vec_repeat_form_lowers_to_from_elem() {
+    // vec![elem; n] fell through to raw token pass-through, which
+    // emitted the semicolon verbatim (`rusty::Vec{elem ; n}`) — not
+    // valid C++. Rust implements this as alloc::vec::from_elem.
+    let out = transpile_str(
+        r#"
+        pub fn zeros(n: usize) -> Vec<u8> {
+            vec![0u8; n]
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::vec_from_elem("),
+        "vec![x; n] must lower to from_elem:\n{out}"
+    );
+    assert!(
+        !out.contains(" ; "),
+        "no stray macro semicolon may survive:\n{out}"
+    );
+}
+
+#[test]
+fn test_vec_list_form_still_lowers_to_a_braced_list() {
+    let out = transpile_str("pub fn xs() -> Vec<i32> { vec![1, 2, 3] }");
+    assert!(out.contains("rusty::Vec{"), "list form unchanged:\n{out}");
+}
+
+#[test]
 fn test_libc_macro_names_are_escaped() {
     // errno/stdin/stdout/stderr are MACROS, so an identifier of that
     // name is textually replaced rather than shadowed: `fn errno()`

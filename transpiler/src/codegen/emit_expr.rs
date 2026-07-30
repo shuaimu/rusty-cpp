@@ -2724,8 +2724,18 @@ impl CodeGen {
                         .map(|e| self.emit_expr_maybe_move(e))
                         .collect();
                     format!("rusty::Vec{{{}}}", items.join(", "))
+                } else if let Ok(rep) =
+                    syn::parse_str::<syn::ExprRepeat>(&format!("[{}]", tokens))
+                {
+                    // vec![elem; n] — Rust's alloc::vec::from_elem. The
+                    // raw token pass-through below emitted the `;`
+                    // verbatim (`rusty::Vec{elem ; n}`), which is not
+                    // valid C++ at all.
+                    let elem = self.emit_expr_maybe_move(&rep.expr);
+                    let count = self.emit_expr_to_string(&rep.len);
+                    format!("rusty::vec_from_elem({}, {})", elem, count)
                 } else {
-                    // Repeat form / unparseable — keep the legacy path.
+                    // Unparseable — keep the legacy path.
                     let items = self.convert_macro_tokens(&tokens);
                     format!("rusty::Vec{{{}}}", items)
                 }
