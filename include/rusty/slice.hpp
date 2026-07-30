@@ -387,6 +387,60 @@ template<typename Iter>
 using next_item_t =
     std::decay_t<decltype(option_like_take_value(std::declval<next_result_t<Iter>&>()))>;
 
+// --- size_hint plumbing shared by the next-iter adapters -------------------
+// Inner hints come in two shapes: `std::tuple<size_t, Option<size_t>>` (the
+// canonical one the transpiler emits) and `filter_size_hint` (`_0`/`_1`
+// members). Normalize both, and fall back to Rust's `Iterator::size_hint`
+// default of `(0, None)` when the inner iterator has no hint at all.
+template<typename Upper>
+rusty::Option<size_t> normalize_size_hint_upper(const Upper& upper) {
+    if constexpr (requires { upper.is_some(); upper.unwrap(); }) {
+        if (upper.is_some()) {
+            return rusty::Option<size_t>(static_cast<size_t>(upper.unwrap()));
+        }
+    } else if constexpr (requires { upper.has_value(); upper.value(); }) {
+        if (upper.has_value()) {
+            return rusty::Option<size_t>(static_cast<size_t>(upper.value()));
+        }
+    } else if constexpr (std::is_integral_v<std::remove_cvref_t<Upper>>) {
+        return rusty::Option<size_t>(static_cast<size_t>(upper));
+    }
+    return rusty::Option<size_t>(rusty::None);
+}
+
+template<typename Hint>
+std::tuple<size_t, rusty::Option<size_t>> normalize_size_hint(const Hint& hint) {
+    size_t lower = 0;
+    if constexpr (requires { std::get<0>(hint); }) {
+        lower = static_cast<size_t>(std::get<0>(hint));
+    } else if constexpr (requires { hint._0; }) {
+        lower = static_cast<size_t>(hint._0);
+    }
+    if constexpr (requires { std::get<1>(hint); }) {
+        return std::make_tuple(lower, normalize_size_hint_upper(std::get<1>(hint)));
+    } else if constexpr (requires { hint._1; }) {
+        return std::make_tuple(lower, normalize_size_hint_upper(hint._1));
+    } else {
+        return std::make_tuple(lower, rusty::Option<size_t>(rusty::None));
+    }
+}
+
+// Forward an inner iterator's hint verbatim (Rust's `Map`/`Inspect`/`Fuse`
+// forwarding), degrading to `(0, None)` when the inner has none.
+template<typename Inner>
+std::tuple<size_t, rusty::Option<size_t>> forwarded_size_hint(const Inner& inner) {
+    if constexpr (requires { inner.size_hint(); }) {
+        return normalize_size_hint(inner.size_hint());
+    } else if constexpr (requires { inner.count(); }) {
+        // Same const-callable `count()` fallback take/scan/filter already use;
+        // for a length-preserving adapter the remaining count is exact.
+        const size_t remaining = static_cast<size_t>(inner.count());
+        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    } else {
+        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::None));
+    }
+}
+
 template<typename T>
 constexpr decltype(auto) deref_if_pointer(T&& value) {
     using deref_value_type = std::remove_reference_t<T>;
@@ -602,6 +656,14 @@ public:
         return next_result(std::invoke(
             func_,
             deref_if_pointer(option_like_take_value(item))));
+    }
+
+    // Rust's `Map::size_hint` forwards the inner iterator's hint unchanged
+    // (mapping is length-preserving). hashbrown's `Extend` reads this to size
+    // its `reserve`, so a missing member is a hard error at the call site —
+    // `HashSet::extend` goes through `rusty::map(...)` and hit exactly that.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return forwarded_size_hint(iter_);
     }
 
 private:
@@ -1469,8 +1531,15 @@ public:
 
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         if constexpr (requires { left_.size_hint(); right_.size_hint(); }) {
-            auto left_hint = left_.size_hint();
-            auto right_hint = right_.size_hint();
+            // Normalize both sides: this branch indexes the hints with
+            // std::get, but `filter_next_iter::size_hint()` returns the
+            // non-tuple `filter_size_hint` aggregate (`_0`/`_1`). Before
+            // `map_next_iter` gained a size_hint, `chain(map(..), filter(..))`
+            // was saved by accident — the `requires` was false and control
+            // fell to the (0, None) tail. Now it is true, so this branch must
+            // be shape-agnostic or that combination stops compiling.
+            auto left_hint = normalize_size_hint(left_.size_hint());
+            auto right_hint = normalize_size_hint(right_.size_hint());
             const auto lower =
                 static_cast<size_t>(std::get<0>(left_hint))
                 + static_cast<size_t>(std::get<0>(right_hint));
