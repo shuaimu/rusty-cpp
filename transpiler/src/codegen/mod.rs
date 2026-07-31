@@ -10530,7 +10530,7 @@ impl CodeGen {
             if return_type.contains("/* TODO") || type_string_has_auto_placeholder(&return_type) {
                 continue;
             }
-            let method_name = escape_cpp_keyword(&method.sig.ident.to_string());
+            let method_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
             let decl_export_prefix = if self.is_exported_at_module_depth(&e.vis, module_depth) {
                 export_prefix
             } else {
@@ -15483,7 +15483,7 @@ impl CodeGen {
             params.push(format!("{} {}", ty, param_name));
         }
 
-        let method_name = escape_cpp_keyword(&method.sig.ident.to_string());
+        let method_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
         let return_type = self.map_return_type(&method.sig.output);
         let return_type_is_concrete = return_type != "auto"
             && !return_type.contains("/* TODO:")
@@ -16815,7 +16815,7 @@ impl CodeGen {
         kind: AdapterStorageKind,
     ) {
         let method_name = method.sig.ident.to_string();
-        let escaped = escape_cpp_keyword(&method_name);
+        let escaped = escape_cpp_keyword_in_member_position(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
             self.writeln(&format!(
@@ -16999,7 +16999,7 @@ impl CodeGen {
         kind: AdapterStorageKind,
     ) {
         let method_name = method.sig.ident.to_string();
-        let escaped = escape_cpp_keyword(&method_name);
+        let escaped = escape_cpp_keyword_in_member_position(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
             self.writeln(&format!(
@@ -17424,7 +17424,7 @@ impl CodeGen {
     ) -> bool {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
-        let escaped_method_name = escape_cpp_keyword(&method_name);
+        let escaped_method_name = escape_cpp_keyword_in_member_position(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
             return false;
@@ -17723,7 +17723,7 @@ impl CodeGen {
     fn emit_extension_trait_free_function(&mut self, method_spec: &ExtensionImplMethod) {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
-        let escaped_method_name = escape_cpp_keyword(&method_name);
+        let escaped_method_name = escape_cpp_keyword_in_member_position(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
             self.writeln(&format!(
@@ -20191,7 +20191,7 @@ impl CodeGen {
 
     fn merged_impl_member_name(&self, item: &syn::ImplItem) -> Option<String> {
         match item {
-            syn::ImplItem::Fn(method) => Some(escape_cpp_keyword(&method.sig.ident.to_string())),
+            syn::ImplItem::Fn(method) => Some(escape_cpp_keyword_in_member_position(&method.sig.ident.to_string())),
             syn::ImplItem::Const(c) => Some(escape_cpp_keyword(&c.ident.to_string())),
             syn::ImplItem::Type(t) => Some(escape_cpp_keyword(&t.ident.to_string())),
             _ => None,
@@ -54698,6 +54698,34 @@ fn escape_cpp_keyword(name: &str) -> String {
             format!("{}_", name)
         }
         _ => name.to_string(),
+    }
+}
+
+/// Escape an identifier emitted in MEMBER position — a method name on a
+/// class, or the method of a member call.
+///
+/// Same as [`escape_cpp_keyword`] except the libc-collision renames
+/// (`dup`/`sleep`/`raise`/`kill`/`pause`) do NOT apply. Those exist
+/// because an UNQUALIFIED free function loses overload resolution to
+/// the C library's exact match — `::dup(5)` really does duplicate file
+/// descriptor 5. A member is looked up in class scope, so `obj.pause()`
+/// can never select `::pause` and there is nothing to escape.
+///
+/// Escaping members anyway is not free: it renames part of the public
+/// API. `ClientConnection::pause` became `pause_`, which breaks every
+/// caller — `src/deptran/communicator.cc` among them. The comment on
+/// `escape_cpp_keyword` already notices that renaming methods "breaks
+/// pins" and mitigates it by keeping the list short; this fixes the
+/// cause instead.
+///
+/// True C++ keywords are still escaped: `obj.delete()` is a syntax
+/// error regardless of scope.
+pub(crate) fn escape_cpp_keyword_in_member_position(name: &str) -> String {
+    match name.strip_prefix("r#").unwrap_or(name) {
+        "dup" | "sleep" | "raise" | "kill" | "pause" => {
+            name.strip_prefix("r#").unwrap_or(name).to_string()
+        }
+        _ => escape_cpp_keyword(name),
     }
 }
 

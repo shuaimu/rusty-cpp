@@ -1044,11 +1044,25 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
+    /// Escape an identifier used as a METHOD name.
+    ///
+    /// Delegates to [`escape_cpp_keyword_in_member_position`], so the
+    /// libc-collision renames (`dup`/`sleep`/`raise`/`kill`/`pause`) do
+    /// NOT apply: those exist because an unqualified free function
+    /// loses overload resolution to the C library's exact match, and a
+    /// member is looked up in class scope where `::pause` can never be
+    /// selected. Renaming members instead renames part of the public
+    /// API — `ClientConnection::pause` became `pause_`, breaking every
+    /// caller including `src/deptran/communicator.cc`.
+    ///
+    /// The `write`/`read` carve-out below is the same idea applied
+    /// earlier and more narrowly: both are in the C++-keyword list, and
+    /// both are safe as members.
     pub(super) fn escape_cpp_method_name(method_name: &str) -> String {
         if matches!(method_name, "write" | "read") {
             method_name.to_string()
         } else {
-            escape_cpp_keyword(method_name)
+            escape_cpp_keyword_in_member_position(method_name)
         }
     }
 

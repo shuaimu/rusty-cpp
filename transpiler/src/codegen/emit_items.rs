@@ -4432,7 +4432,7 @@ impl CodeGen {
             // No-receiver (static) trait methods are not lowered as virtuals.
             // Defer to a later phase.
             let Some(receiver) = receiver else {
-                let m_name = escape_cpp_keyword(&method.sig.ident.to_string());
+                let m_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
                 self.writeln(&format!(
                     "// TODO(interface_traits): static trait method `{}` not yet supported",
                     m_name
@@ -4443,7 +4443,7 @@ impl CodeGen {
             // By-value `self` (consuming receivers) need a different lowering;
             // skip in Phase 1.
             if receiver.reference.is_none() {
-                let m_name = escape_cpp_keyword(&method.sig.ident.to_string());
+                let m_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
                 self.writeln(&format!(
                     "// TODO(interface_traits): by-value `self` method `{}` not yet supported",
                     m_name
@@ -4466,7 +4466,7 @@ impl CodeGen {
             // rather than emit `virtual R m(W w) const = 0;` with `W`
             // unbound in the class scope.
             if !method.sig.generics.params.is_empty() {
-                let m_name = escape_cpp_keyword(&method.sig.ident.to_string());
+                let m_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
                 self.writeln(&format!(
                     "// TODO(interface_traits): generic method `{}` not yet supported",
                     m_name
@@ -4476,7 +4476,7 @@ impl CodeGen {
 
             let is_const = receiver.mutability.is_none();
 
-            let method_name = escape_cpp_keyword(&method.sig.ident.to_string());
+            let method_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
             let return_type = self.map_return_type(&method.sig.output);
 
             let params: Vec<String> = method
@@ -4880,7 +4880,7 @@ impl CodeGen {
                 mapped_return_type.replace("Self_", "std::remove_cvref_t<decltype(self_)>");
             self.writeln(&format!(
                 "static auto {}({}) -> {} {{",
-                escape_cpp_keyword(&method.sig.ident.to_string()),
+                escape_cpp_keyword_in_member_position(&method.sig.ident.to_string()),
                 params.join(", "),
                 signature_return_type
             ));
@@ -4999,7 +4999,7 @@ impl CodeGen {
         self.writeln(&format!(
             "static {} {}({}) {{",
             mapped_return_type,
-            escape_cpp_keyword(&method.sig.ident.to_string()),
+            escape_cpp_keyword_in_member_position(&method.sig.ident.to_string()),
             params.join(", ")
         ));
         self.indent += 1;
@@ -7156,10 +7156,10 @@ impl CodeGen {
             {
                 op.clone()
             } else {
-                escape_cpp_keyword(&method_ident)
+                escape_cpp_keyword_in_member_position(&method_ident)
             }
         } else {
-            escape_cpp_keyword(&method_ident)
+            escape_cpp_keyword_in_member_position(&method_ident)
         };
         let is_deref_method = method_ident == "deref" && name == "operator*";
         let is_deref_mut_method = method_ident == "deref_mut";
