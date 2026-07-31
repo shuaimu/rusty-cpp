@@ -39544,8 +39544,18 @@ fn an_argument_that_is_already_a_pointer_is_not_referenced_again() {
 fn an_extern_fn_signature_reaches_the_call_site() {
     // Foreign fns were emitted but never collected, so a call to one
     // had no declared parameter types and every expected-type rule
-    // silently did nothing there. This is the FFI-seam case the
-    // &mut -> *mut coercion was written for.
+    // silently did nothing there.
+    //
+    // WARNING — THIS TEST IS GREEN AND THE CLI IS NOT. The identical
+    // source through `rusty-cpp-transpiler t.rs -o t.cppm` still emits
+    // `swap_ctx(a, b)` with no address-of. So `transpile_str` and the
+    // CLI do not run the same collection pipeline, and a passing test
+    // here does NOT establish that the tool does the same thing.
+    //
+    // That divergence is the real bug and it is larger than this
+    // feature: any test written against `transpile_str` may be
+    // describing a pipeline no user invokes. Do not delete this note
+    // when the CLI is fixed — replace it with the reason it now holds.
     let out = transpile_str(
         r#"
         #[repr(C)]
