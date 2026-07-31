@@ -4363,14 +4363,100 @@ impl CodeGen {
         true
     }
 
+    /// The condition of a `const _: () = assert!(…);` compile-time
+    /// assertion, or `None` for any other wildcard-const shape.
+    ///
+    /// Returns the CONDITION rather than the macro call because `assert!`
+    /// has no lowering in expression position (only statement position) —
+    /// lowering the macro would emit `/* assert!(…) */`, an empty
+    /// initializer. Lowering its argument sidesteps that entirely.
+    fn wildcard_const_assertion(expr: &syn::Expr) -> Option<syn::Expr> {
+        let syn::Expr::Macro(m) = expr else {
+            return None;
+        };
+        let name = m.mac.path.segments.last()?.ident.to_string();
+        let args = m
+            .mac
+            .parse_body_with(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+            )
+            .ok()?;
+        let mut it = args.into_iter();
+        let first = it.next()?;
+        match name.as_str() {
+            // `assert!(cond, "msg")` — the message is dropped; it is
+            // rebuilt from the source text by the caller.
+            "assert" | "debug_assert" | "const_assert" => Some(first),
+            "assert_eq" | "debug_assert_eq" => {
+                let second = it.next()?;
+                Some(syn::parse_quote!(#first == #second))
+            }
+            "assert_ne" | "debug_assert_ne" => {
+                let second = it.next()?;
+                Some(syn::parse_quote!(#first != #second))
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit a `static_assert` for a compile-time assertion — or a visible
+    /// TODO marker when its condition does not lower.
+    ///
+    /// The fallback is the point. An assertion whose condition cannot be
+    /// expressed must NOT silently disappear (that is the bug) and must
+    /// not emit `static_assert(/* … */)` (that is a syntax error in
+    /// otherwise-valid output). A `// TODO:` marker is picked up by the
+    /// hand-slot scanner, so the gap lands in `rusty_hand_slots.md` where
+    /// it can be audited.
+    fn emit_static_assertion(&mut self, cond: &syn::Expr, original: &syn::Expr) {
+        let source = quote::quote!(#original).to_string();
+        let message = source.replace('\\', "\\\\").replace('"', "\\\"");
+        let emitted = self.emit_expr_to_string(cond);
+        // A lowering that gave up leaves a comment or nothing behind;
+        // either way it cannot go inside static_assert(...).
+        if emitted.trim().is_empty()
+            || emitted.contains("/*")
+            || type_string_has_auto_placeholder(&emitted)
+        {
+            self.writeln(&format!(
+                "// TODO: compile-time assertion could not be lowered: {}",
+                source
+            ));
+            return;
+        }
+        self.writeln(&format!(
+            "static_assert({}, \"{}\");",
+            emitted, message
+        ));
+    }
+
     pub(super) fn emit_type_alias(&mut self, t: &syn::ItemType) {
         let _ = self.emit_type_alias_once(t);
     }
 
     pub(super) fn emit_const(&mut self, c: &syn::ItemConst) {
-        // Skip wildcard const bindings (`const _: () = ...;`) which are
-        // Rust compile-time assertions or macro-internal scope blocks.
+        // A wildcard const (`const _: () = ...;`) is one of two things and
+        // they need different answers.
+        //
+        // Mostly it is a macro-internal scope block — a derive's dummy
+        // const wrapping impls, or bitflags' operator block. Those MUST
+        // stay skipped: several collect passes deliberately recurse into
+        // them (collect_passes.rs harvests the impls, the serde alias and
+        // the use-bindings), so the impls are emitted while the const
+        // itself is not. Emitting it also reintroduces the name collision
+        // this skip was added for in 89bb4c5a — every unnamed const lowers
+        // to a C++ variable literally called `_`, so two in a scope is a
+        // redefinition error.
+        //
+        // But it is also how Rust spells a COMPILE-TIME ASSERTION, and
+        // dropping one of those is not a skip, it is a silent loss of a
+        // guarantee: the Rust side reads as checked while the C++ side
+        // checks nothing. `static_assert` declares no name, so it is
+        // immune to the collision above and can simply be emitted.
         if c.ident == "_" {
+            if let Some(cond) = Self::wildcard_const_assertion(&c.expr) {
+                self.emit_static_assertion(&cond, &c.expr);
+            }
             return;
         }
         if self.is_thread_local_key_type(&c.ty) {
