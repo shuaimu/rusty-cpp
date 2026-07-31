@@ -20812,6 +20812,33 @@ impl CodeGen {
             .map(|(idx, arg)| {
                 let declared_arg_expected_ty =
                     self.lookup_function_arg_expected_type(call.func.as_ref(), idx);
+                // Rust coerces `&mut T` -> `*mut T` (and `&T` ->
+                // `*const T`) implicitly at an FFI call; C++ has no
+                // `T&` -> `T*` conversion, so the address has to be
+                // taken or the call does not compile.
+                //
+                // Keyed on the CALLEE's declared parameter type, which
+                // is the only place the context is unambiguous. An
+                // earlier attempt put this in the generic expected-type
+                // path and was wrong both ways at once: it never saw
+                // this call, and it fired on a local that was already a
+                // pointer.
+                //
+                // Restricted to a bare variable — the FFI-seam shape.
+                // Anything else would need the value category worked
+                // out before `&` is known to be legal.
+                if let Some(expected) = declared_arg_expected_ty
+                    && matches!(expected, syn::Type::Ptr(_))
+                    && matches!(
+                        self.peel_paren_group_expr(arg),
+                        syn::Expr::Path(p) if p.qself.is_none()
+                    )
+                    && self
+                        .infer_simple_expr_type(arg)
+                        .is_some_and(|t| matches!(t, syn::Type::Reference(_)))
+                {
+                    return format!("&{}", self.emit_expr_to_string(arg));
+                }
                 if self
                     .lookup_function_type_param_names(call.func.as_ref())
                     .is_some_and(|params| !params.is_empty())

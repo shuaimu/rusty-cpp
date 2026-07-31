@@ -40812,3 +40812,49 @@ fn a_macro_internal_wildcard_const_block_is_still_skipped() {
         "a scope block is not an assertion:\n{out}"
     );
 }
+
+#[test]
+fn a_reference_coerces_to_a_raw_pointer_at_an_ffi_call() {
+    // Rust does this implicitly; C++ has no T& -> T* conversion, so
+    // without the address-of the emitted call does not compile.
+    //
+    // NOTE the callee is an ordinary fn, not an `extern "C"` one. The
+    // motivating case WAS extern (the fiber context-switch seam), but
+    // extern blocks are only emitted, never collected into
+    // `function_arg_expected_types` — so the declared parameter type is
+    // simply absent there and no rule keyed on it can fire. That is a
+    // separate gap; see the seam probe README.
+    let out = transpile_str(
+        r#"
+        #[repr(C)]
+        pub struct Ctx { pub sp: u64 }
+        pub fn swap_ctx(from: *mut Ctx, to: *mut Ctx) { let _ = (from, to); }
+        pub fn go(a: &mut Ctx, b: &mut Ctx) {
+            swap_ctx(a, b)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("swap_ctx(&a, &b)"),
+        "a &mut argument needs its address taken for a pointer param:\n{out}"
+    );
+}
+
+#[test]
+fn an_argument_that_is_already_a_pointer_is_not_referenced_again() {
+    // The half that killed the previous attempt: it fired here too.
+    let out = transpile_str(
+        r#"
+        #[repr(C)]
+        pub struct Ctx { pub sp: u64 }
+        pub fn swap_ctx(from: *mut Ctx, to: *mut Ctx) { let _ = (from, to); }
+        pub fn go(a: *mut Ctx, b: *mut Ctx) {
+            swap_ctx(a, b)
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("swap_ctx(&a"),
+        "a pointer argument must pass through unchanged:\n{out}"
+    );
+}
