@@ -3,7 +3,7 @@
 // GLOBAL FRAGMENT (unnameable from importers), so Display output cannot be
 // asserted here — the explicit instantiation below gates that all Report<E>
 // members (fmt/fmt_singleline/fmt_multiline/backtrace) at least compile.
-import rusty;
+import std_port;
 #include <cassert>
 #include <cstdio>
 #include <string>

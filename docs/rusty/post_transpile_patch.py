@@ -2,7 +2,7 @@
 """Post-transpile patcher for the std->`rusty` port (docs/rusty/build.sh).
 
 Two files: out/hashbrown/hashbrown.cppm (the recursively-transpiled dep) and
-out/rusty.cppm (the std slice). Rules were characterized by the std-spike
+out/std_port.cppm (the std slice). Rules were characterized by the std-spike
 widening probe (2026-07-12) and target three roots:
 
 hashbrown — the crate-own `mod alloc` vs extern-alloc-crate qualification
@@ -308,8 +308,8 @@ def patch_rusty(path: Path) -> None:
     # (they are emitted as un-exported using-directives, invisible to
     # importers — transpiler gap).
     t = t.replace(
-        "export module rusty;\n",
-        """export module rusty;
+        "export module std_port;\n",
+        """export module std_port;
 import hashbrown;
 namespace hashbrown {
     namespace hash_map {
@@ -329,7 +329,7 @@ namespace hashbrown {
 
 def main(out_dir: Path) -> None:
     hb = out_dir / "hashbrown" / "hashbrown.cppm"
-    ru = out_dir / "rusty.cppm"
+    ru = out_dir / "std_port.cppm"
     patch_hashbrown(hb)
     patch_rusty(ru)
     print("docs/rusty patcher: applied")

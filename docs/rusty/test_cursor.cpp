@@ -2,7 +2,7 @@
 // std::span<uint8_t> (Rust Cursor<&mut [u8]>) — Read/Seek/BufRead/Write
 // surface, error paths included. Instantiates the template bodies that
 // --precompile skipped.
-import rusty;
+import std_port;
 #include <cassert>
 #include <cstdint>
 #include <cstdio>

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Per-member API coverage probe for the transpiled Rust **std** hash port
-# (module `rusty` from docs/rusty/build.sh).
+# (module `std_port` from docs/rusty/build.sh).
 #
 # WHY THIS EXISTS: `rusty::HashMap`/`HashSet` are being retargeted off the
 # direct-hashbrown port onto this std port (see the 2026-07-27 directive at the
@@ -12,24 +12,23 @@
 # Usage: api_coverage.sh <work_dir>          # builds if needed, then probes
 #        REUSE=1 api_coverage.sh <work_dir>  # skip the rebuild
 #
-# Baseline 2026-07-30: 46/54. The 8 gaps are 4 root causes, tracked as
-# follow-ups (if/else-IIFE return deduction ×4, closure-arg passing ×2,
-# Entry conversion ×1, missing size_hint ×1).
+# Baseline 2026-07-30: 48/54. The 6 gaps are 2 root causes, tracked as
+# follow-ups (if/else-IIFE return deduction x4, ref-binding-as-owned x2).
 set -uo pipefail
 W="${1:?usage: api_coverage.sh <work_dir>}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -n "${REUSE:-}" ]] || bash "$REPO/docs/rusty/build.sh" "$W" | tail -3
 OUT="$W/out"
-[[ -f "$OUT/rusty.pcm" && -f "$OUT/hashbrown/hashbrown.pcm" ]] || {
+[[ -f "$OUT/std_port.pcm" && -f "$OUT/hashbrown/hashbrown.pcm" ]] || {
   echo "no BMI — build failed"; exit 1; }
 
 D="$W/api_probes"; rm -rf "$D"; mkdir -p "$D"
 FLAGS="-std=c++23 -DRUSTY_PORTABLE_INTRINSICS=1 -march=native -I$REPO/include"
-MODS="-fmodule-file=rusty=$OUT/rusty.pcm -fmodule-file=hashbrown=$OUT/hashbrown/hashbrown.pcm"
+MODS="-fmodule-file=std_port=$OUT/std_port.pcm -fmodule-file=hashbrown=$OUT/hashbrown/hashbrown.pcm"
 
 emit() { # name, body
   cat > "$D/$1.cpp" <<EOF
-import rusty;
+import std_port;
 #include <string_view>
 using HM = collections::hash::map::HashMap<int,int,::hash::random::RandomState>;
 using HS = collections::hash::set::HashSet<int,::hash::random::RandomState>;

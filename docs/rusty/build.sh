@@ -170,7 +170,7 @@ EOF
 
 cat > "$W/Cargo.toml" <<EOF
 [package]
-name = "rusty"
+name = "std_port"
 version = "0.0.1"
 edition = "2021"
 [lib]
@@ -187,7 +187,7 @@ bash "$HERE/prep.sh" "$W/src" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
 "$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1
 echo "transpile exit=$? ($(tail -1 "$W/transpile.log"))"
-[[ -f "$W/out/rusty.cppm" ]] || { echo "no rusty.cppm — see $W/transpile.log"; exit 1; }
+[[ -f "$W/out/std_port.cppm" ]] || { echo "no std_port.cppm — see $W/transpile.log"; exit 1; }
 [[ -f "$W/out/hashbrown/hashbrown.cppm" ]] || { echo "no hashbrown.cppm (dep not transpiled?)"; exit 1; }
 
 python3 "$HERE/post_transpile_patch.py" "$W/out" || exit 1
@@ -197,9 +197,9 @@ clang++ $FLAGS --precompile -o "$W/out/hashbrown/hashbrown.pcm" \
   "$W/out/hashbrown/hashbrown.cppm" -ferror-limit=0 2> "$W/hb_compile.err"
 echo "hashbrown compile: $(grep -c ' error: ' "$W/hb_compile.err") errors"
 clang++ $FLAGS --precompile -fmodule-file=hashbrown="$W/out/hashbrown/hashbrown.pcm" \
-  -o "$W/out/rusty.pcm" "$W/out/rusty.cppm" -ferror-limit=0 2> "$W/compile.err"
+  -o "$W/out/std_port.pcm" "$W/out/std_port.cppm" -ferror-limit=0 2> "$W/compile.err"
 # NOTE: match ' error: ' — the io slice's type paths contain the substring
 # "error:" (io::error::Error) which inflates a bare 'error:' count via notes.
-echo "rusty compile: $(grep -c ' error: ' "$W/compile.err") errors"
+echo "std_port compile: $(grep -c ' error: ' "$W/compile.err") errors"
 grep -hoE " error: .*" "$W/compile.err" "$W/hb_compile.err" 2>/dev/null \
   | sed -E "s/'[^']*'/'X'/g; s/[0-9]+/N/g" | sort | uniq -c | sort -rn | head -8

@@ -2,7 +2,7 @@
 // std::collections::{HashMap, HashSet} over the recursively-transpiled
 // hashbrown dep, hashed by the std RandomState/DefaultHasher chain
 // (rusty::hash::SipHasher underneath).
-import rusty;
+import std_port;
 #include <cassert>
 #include <cstdio>
 #include <string_view>
