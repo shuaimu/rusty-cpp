@@ -4547,10 +4547,23 @@ impl CodeGen {
         }
         let ty = self.map_type(&s.ty);
         let expr = self.emit_expr_to_string_with_expected(&s.expr, Some(&s.ty));
-        let storage = if self.block_depth > 0 {
-            "static "
-        } else {
-            "inline "
+        // `#[thread_local]` is per-THREAD storage. Dropping the attribute
+        // turns it into one process-wide object shared by every thread —
+        // which compiles, runs, and is silently wrong: threads see each
+        // other's writes. C++ spells it the same way, so carry it over.
+        let is_thread_local = s.attrs.iter().any(|a| {
+            a.path()
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "thread_local")
+        });
+        let storage = match (self.block_depth > 0, is_thread_local) {
+            (true, true) => "static thread_local ",
+            (true, false) => "static ",
+            // `inline` keeps one definition across TUs; `thread_local`
+            // then gives each thread its own copy of that one entity.
+            (false, true) => "inline thread_local ",
+            (false, false) => "inline ",
         };
         self.writeln(&format!("{}{} {} = {};", storage, ty, name, expr));
     }

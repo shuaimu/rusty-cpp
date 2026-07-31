@@ -40723,3 +40723,31 @@ fn test_auto_trait_markers_see_through_a_fieldless_enum_field() {
         "an enum field must not block the derivation:\n{out}"
     );
 }
+
+#[test]
+fn thread_local_attribute_survives_as_thread_local_storage() {
+    // Dropping `#[thread_local]` produced a plain process-global: it
+    // compiled, ran, and let every thread see every other thread's
+    // writes. Silently wrong shared state is the worst outcome
+    // available here, and nothing diagnosed it.
+    let out = transpile_str(
+        r#"
+        #[thread_local]
+        pub static COUNTER: u64 = 0;
+        "#,
+    );
+    assert!(
+        out.contains("thread_local") && out.contains("COUNTER"),
+        "#[thread_local] must carry over to C++ thread_local:\n{out}"
+    );
+}
+
+#[test]
+fn a_plain_static_is_not_made_thread_local() {
+    let out = transpile_str("pub static SHARED: u64 = 0;");
+    assert!(
+        !out.contains("thread_local"),
+        "a plain static must stay process-wide:\n{out}"
+    );
+    assert!(out.contains("SHARED"));
+}
