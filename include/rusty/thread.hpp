@@ -4,6 +4,7 @@
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <chrono>
 #include <utility>
+#include <tuple>      // Unit / detail::SpawnResultType
 #include <atomic>
 #include "platform/threading.hpp"
 #include "result.hpp"
@@ -39,6 +40,22 @@
 // semantics).
 
 namespace rusty::thread {
+
+/// The unit type, spelled here so that callers naming a handle for a
+/// void-returning closure can say what `spawn` actually deduces.
+///
+/// `rusty::Unit` already exists, but only in the <rusty/rusty.hpp>
+/// umbrella — and a file that needs this type needs <rusty/thread.hpp>,
+/// not the umbrella (pulling the umbrella into a gtest TU is its own
+/// problem). Without a spelling here the obvious guess is
+/// `JoinHandle<void>`, which `spawn` never produces: storing a spawn
+/// result into `Option<JoinHandle<void>>` selects Option's
+/// incompatible-type ctor and panics at RUNTIME, and into
+/// `vector<JoinHandle<void>>` fails to compile. Both shapes were live in
+/// this tree. See `detail::SpawnResultType` below.
+///
+/// Identical to the umbrella's alias, so including both is fine.
+using Unit = std::tuple<>;
 
 // Error variants from `JoinHandle<T>::join()`. Mechanical errors only —
 // Rust threads have no exception payload to capture.
