@@ -227,15 +227,20 @@ public:
     }
 
     // Send a value (blocking)
-    Result<Unit, TrySendError> send(T value) {
+    //
+    // const, matching Rust: `mpsc::Sender::send` takes `&self`. Sending is
+    // shared-safe by construction — ChannelState::send takes the channel
+    // mutex itself — so requiring exclusive access here was a deviation
+    // that forced callers holding a shared Sender to const_cast.
+    Result<Unit, TrySendError> send(T value) const {
         if (!state_) {
             return Result<Unit, TrySendError>::Err(TrySendError::Disconnected);
         }
         return state_->send(std::move(value));
     }
 
-    // Try to send a value (non-blocking)
-    Result<Unit, TrySendError> try_send(T value) {
+    // Try to send a value (non-blocking). const for the same reason.
+    Result<Unit, TrySendError> try_send(T value) const {
         if (!state_) {
             return Result<Unit, TrySendError>::Err(TrySendError::Disconnected);
         }
