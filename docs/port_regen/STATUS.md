@@ -18,15 +18,25 @@ xorshift `DefaultHasher` seeded to 0.
 
 Blockers to the swap, in order:
 
-1. **Module name.** The std port emits `export module rusty;` — the same name
-   as the hand-written umbrella in `include/rusty/rusty.cppm`. They cannot
-   coexist in one TU. The endgame below (transpiled std *replaces* the
-   umbrella) resolves this eventually; a coexisting swap needs the port
-   renamed (crate name in `docs/rusty/build.sh` drives the module name).
-2. **Namespace.** The port lands in the GLOBAL namespace
-   (`collections::hash::map::HashMap`), and its hashbrown dep occupies `::map`,
-   `::set`, `::rustc_entry`. Needs wrapping under `rusty::port::` before it can
-   be exported to consumers.
+1. ~~**Module name.**~~ **DONE.** Renamed `rusty` → `std_port`. The module name
+   is just the Cargo.toml package name (`main.rs:253` → `mod.rs:4620`).
+   TRAP found doing it: `post_transpile_patch.py` anchors on the literal
+   `"export module rusty;\n"` to inject `import hashbrown;` + the
+   `namespace hashbrown { using namespace ::map; … }` bridge. The patcher is
+   string replacement, so a stale anchor fails **silently** — the build died
+   with 11 `use of undeclared identifier 'hashbrown'` and looked like a
+   transpiler bug. Check patcher anchors first when a rename "breaks codegen".
+2. **Namespace** — still open, and REQUIRED, not cosmetic: retargeting means
+   the umbrella must `export import std_port;`, which would re-export global
+   `::map` / `::set` / `::collections` to every consumer of `import rusty;`.
+   Measured 2026-07-30 (experiment reverted): `--cxx-namespace rusty::port`
+   applies the wrap to target and dep, but performs **no self-requalification**
+   — hashbrown alone yields **272 errors**, all of the form `no member named
+   'Tag' in namespace 'control::tag'`, because the crate's own qualified
+   self-references now resolve inside the wrap. The requalification lives in
+   `wrap_module_purview_in_crate_namespace` (Rules 1-5), gated on `crate_name`,
+   which is hard-coded `None` at `transpile.rs:942-949` for the `--crate` path.
+   See task #182 for the two routes and the recommendation.
 3. **CMake.** Zero references today — it exists only as a parity-matrix target.
 4. **API coverage.** Measured with `docs/rusty/api_coverage.sh` (54 members of
    HashMap/HashSet, one TU each so failures cannot mask one another):
