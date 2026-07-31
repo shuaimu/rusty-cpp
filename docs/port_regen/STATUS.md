@@ -35,6 +35,25 @@ Blockers to the swap, in order:
    algebra, `==`, `extend`), `map_next_iter::size_hint`, and the `RustcEntry`
    variant-order pin.
 
+   **The swap is a strict improvement — measured, not assumed.**
+   `docs/hashbrown_port/api_coverage.sh` runs the SAME 54 members against the
+   shipped port for an apples-to-apples number:
+
+   | port | coverage |
+   |---|---|
+   | `hashbrown_port` (ships today) | **32/54** |
+   | std port (the target) | **48/54** |
+
+   Every member the std port fails, the shipped port fails too — the failure
+   set is a strict subset, so **there are no regressions**, and 16 members are
+   gained: `get_mut`, `get_key_value`, `remove_entry`, `extend`, `==`, the
+   whole HashSet surface (`iter`, `get`, `take`, `drain`, `retain`, `extend`,
+   `==`) and all the set algebra (`union`, `intersection`, `difference`,
+   `symmetric_difference`).
+
+   So the swap should NOT wait on closing the last 6 gaps: it strictly widens
+   the API *and* moves users off a port with an unfixed heap-use-after-free.
+
    The remaining 6 are 2 root causes, both tracked as follow-ups:
    - `into_iter` / `into_keys` / `into_values` / set `into_iter` — an if/else
      IIFE whose tail-type inference fails, so the lambda mixes `rusty::None`
