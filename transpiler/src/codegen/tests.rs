@@ -39432,3 +39432,64 @@ fn a_plain_static_is_not_made_thread_local() {
     );
     assert!(out.contains("SHARED"));
 }
+
+#[test]
+fn a_compile_time_assertion_becomes_a_static_assert() {
+    // `const _: () = assert!(...)` was dropped along with macro-internal
+    // scope blocks. Dropping it is not a skip, it is a silent loss of a
+    // guarantee: the Rust side reads as checked, the C++ side checks
+    // nothing. This is the drift guard a hand-written asm seam needs.
+    let out = transpile_str(
+        r#"
+        #[repr(C)]
+        pub struct Ctx { pub a: u64, pub b: u64 }
+        const _: () = assert!(core::mem::size_of::<Ctx>() == 16);
+        "#,
+    );
+    assert!(
+        out.contains("static_assert("),
+        "a compile-time assertion must survive:\n{out}"
+    );
+    assert!(
+        out.contains("== 16"),
+        "the condition must be lowered, not the macro:\n{out}"
+    );
+}
+
+#[test]
+fn several_assertions_in_one_scope_do_not_collide() {
+    // The reason wildcard consts were skipped in the first place: every
+    // unnamed const lowers to a C++ variable literally named `_`, so two
+    // in a scope is a redefinition. `static_assert` declares no name, so
+    // this shape is immune — which is what makes the fix safe.
+    let out = transpile_str(
+        r#"
+        const _: () = assert!(core::mem::size_of::<u8>() == 1);
+        const _: () = assert!(core::mem::size_of::<u32>() == 4);
+        "#,
+    );
+    assert_eq!(
+        out.matches("static_assert(").count(),
+        2,
+        "both assertions must be emitted:\n{out}"
+    );
+}
+
+#[test]
+fn a_macro_internal_wildcard_const_block_is_still_skipped() {
+    // Derive dummies and bitflags operator blocks MUST stay skipped:
+    // collect passes recurse into them to harvest the impls, and
+    // emitting the const reintroduces the `_` name collision.
+    let out = transpile_str(
+        r#"
+        pub struct Flags(pub u32);
+        const _: () = {
+            impl Flags { pub fn bits(&self) -> u32 { self.0 } }
+        };
+        "#,
+    );
+    assert!(
+        !out.contains("static_assert("),
+        "a scope block is not an assertion:\n{out}"
+    );
+}
