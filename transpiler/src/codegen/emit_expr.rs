@@ -492,7 +492,7 @@ impl CodeGen {
         if is_static || receiver_shape == Some(false) {
             return None;
         }
-        let escaped = escape_cpp_keyword(&method_name);
+        let escaped = escape_cpp_keyword_in_member_position(&method_name);
         Some(format!(
             "[](auto&& _f, auto&&... _args) -> decltype(auto) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_f)>(_f)).{}(std::forward<decltype(_args)>(_args)...); }}",
             escaped
@@ -6071,7 +6071,7 @@ impl CodeGen {
             let mut static_args = Vec::with_capacity(args.len() + 1);
             static_args.push(receiver);
             static_args.extend(args.iter().cloned());
-            let escaped_method_name = escape_cpp_keyword(method_name);
+            let escaped_method_name = escape_cpp_keyword_in_member_position(method_name);
             let method_call = if let Some(template_args) = method_template_args {
                 format!("template {}{}", escaped_method_name, template_args)
             } else {
@@ -6134,7 +6134,7 @@ impl CodeGen {
         let mut static_args = Vec::with_capacity(args.len() + 1);
         static_args.push(receiver);
         static_args.extend(args.iter().cloned());
-        let escaped_method_name = escape_cpp_keyword(method_name);
+        let escaped_method_name = escape_cpp_keyword_in_member_position(method_name);
         let method_call = if let Some(template_args) = method_template_args {
             format!("template {}{}", escaped_method_name, template_args)
         } else {
@@ -6302,7 +6302,7 @@ impl CodeGen {
                 escape_cpp_keyword(&trait_name)
             )
         };
-        let escaped_method = escape_cpp_keyword(method);
+        let escaped_method = escape_cpp_keyword_in_member_position(method);
         Some(format!(
             "[&]<typename __Owner = {owner}>() -> decltype(auto) {{ if constexpr (requires {{ __Owner::{m}({args}); }}) {{ return __Owner::{m}({args}); }} else {{ return {helper}::template {m}<__Owner>({args}); }} }}()",
             owner = owner_cpp,
@@ -6361,7 +6361,7 @@ impl CodeGen {
         let template_args = self
             .emit_method_call_template_args(mc, &args)
             .unwrap_or_default();
-        let escaped_method_name = escape_cpp_keyword(&method_name);
+        let escaped_method_name = escape_cpp_keyword_in_member_position(&method_name);
         let method_call = if template_args.is_empty() {
             escaped_method_name.clone()
         } else {
@@ -6750,7 +6750,7 @@ impl CodeGen {
                     // Single owner → qualify `<Tr>_::m` (or `<module>::<Tr>_::m`
                     // for a dependency trait, § 3.2.7), so the unqualified
                     // `m(__self)` can't be shadowed by a local of the same name.
-                    let escaped = escape_cpp_keyword(&method_name);
+                    let escaped = escape_cpp_keyword_in_member_position(&method_name);
                     if traits.len() == 1 {
                         let mut callee = format!(
                             "{}::{}",
@@ -12248,7 +12248,7 @@ impl CodeGen {
         if !owner_is_known {
             return None;
         }
-        let escaped_method = escape_cpp_keyword(&method);
+        let escaped_method = escape_cpp_keyword_in_member_position(&method);
         // A receiver-less associated fn (`Location::from_mark(mark)`) is a
         // STATIC taking the mapped value as its argument — a member call on
         // the value would look the method up on the wrong type.
@@ -23590,7 +23590,7 @@ impl CodeGen {
             return Some(format!("rusty::io::{}({}, {})", method, receiver, arg_expr));
         }
 
-        let escaped_method = escape_cpp_keyword(&method);
+        let escaped_method = escape_cpp_keyword_in_member_position(&method);
 
         // Existing normalization for by-reference buffer calls: `read(&buf)`/`write(&buf)` ->
         // `read(rusty::slice_full(buf))`/`write(rusty::slice_full(buf))`.
