@@ -26,21 +26,24 @@ Blockers to the swap, in order:
    string replacement, so a stale anchor fails **silently** — the build died
    with 11 `use of undeclared identifier 'hashbrown'` and looked like a
    transpiler bug. Check patcher anchors first when a rename "breaks codegen".
-2. **Namespace** — still open, and REQUIRED, not cosmetic: retargeting means
-   the umbrella must `export import std_port;`, which would re-export global
-   `::map` / `::set` / `::collections` to every consumer of `import rusty;`.
-   Measured 2026-07-30 (experiment reverted): `--cxx-namespace rusty::port`
-   applies the wrap to target and dep, but performs **no self-requalification**
-   — hashbrown alone yields **272 errors**, all of the form `no member named
-   'Tag' in namespace 'control::tag'`, because the crate's own qualified
-   self-references now resolve inside the wrap. The requalification lives in
-   `wrap_module_purview_in_crate_namespace` (Rules 1-5), gated on `crate_name`,
-   which is hard-coded `None` at `transpile.rs:942-949` for the `--crate` path.
-   See task #182 for the two routes and the recommendation.
+2. ~~**Namespace.**~~ **DONE** (8a5165c0). Required, not cosmetic: retargeting
+   means the umbrella must `export import std_port;`, which would otherwise
+   re-export global `::map`/`::set`/`::collections` to every `import rusty;`
+   consumer. `--cxx-namespace` is a BLUNT textual wrap with no
+   self-requalification — hashbrown alone gave **272 errors** (`no member named
+   'Tag' in namespace 'control::tag'`). The requalifying wrap lives in
+   `wrap_module_purview_in_crate_namespace` (Rules 1-5) but was gated on
+   `crate_name`, hard-coded `None` at `transpile.rs:942-949`; opt-in
+   `--crate-namespace-wrap` (94b48933) routes through it. Result: hashbrown
+   272→0, std_port→0, one namespace per crate (`std_port::…`, `hashbrown::…`).
+   THE PATCHER IS WRAP-SENSITIVE — it cost six silent failures; both patch
+   functions now derive `ns` once and every crate-qualified rule (ANCHORS
+   INCLUDED) is an f-string on it, so the patcher is correct in both modes.
 3. **CMake.** Zero references today — it exists only as a parity-matrix target.
 4. **API coverage.** Measured with `docs/rusty/api_coverage.sh` (54 members of
    HashMap/HashSet, one TU each so failures cannot mask one another):
-   **30/54 → 48/54** over 2026-07-30. Three fixes got it there — the
+   **30/54 → 36/54** over 2026-07-30 (see the correction below). Three fixes
+   got it there — the
    tuple-field shape-opaque guard (+16 on its own: every iterator, all the set
    algebra, `==`, `extend`), `map_next_iter::size_hint`, and the `RustcEntry`
    variant-order pin.
@@ -75,10 +78,10 @@ Blockers to the swap, in order:
    NOT in `TEST_SOURCES` — never built, never run — despite looking like the
    regression guard for completed bug #161. Wire it up.
 
-   So the swap should NOT wait on closing the last 6 gaps: it strictly widens
+   So the swap should NOT wait on closing the remaining gaps: it strictly widens
    the API *and* moves users off a port with an unfixed heap-use-after-free.
 
-   The remaining 6 are 2 root causes, both tracked as follow-ups:
+   The known root causes, both tracked as follow-ups (#180, #179):
    - `into_iter` / `into_keys` / `into_values` / set `into_iter` — an if/else
      IIFE whose tail-type inference fails, so the lambda mixes `rusty::None`
      and `rusty::Some` returns and deduction fails.
