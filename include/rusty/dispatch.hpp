@@ -100,8 +100,13 @@ constexpr decltype(auto) ptr_or_addr(T&& v) {
 /// @brief Rust unary `!`: logical for bool, BITWISE for integers. Used when
 /// the transpiler cannot type the operand (C++ `!` on an integer would
 /// collapse it to 0/1 — hashbrown's `BitMask(!mask.0)` became an empty mask).
+/// Takes a forwarding reference, NOT by value: the operand may be a
+/// move-only type whose `operator!` is a validity check rather than a
+/// negation (`rusty::Function` has a deleted copy ctor, so `!f` on a
+/// by-value parameter failed to compile). Nothing here needs ownership —
+/// every branch only reads the operand.
 template<typename T>
-constexpr auto rust_not(T v) {
+constexpr auto rust_not(T&& v) {
     if constexpr (std::is_same_v<std::remove_cvref_t<T>, bool>) {
         return !v;
     } else if constexpr (std::is_integral_v<std::remove_cvref_t<T>>) {
