@@ -29093,7 +29093,7 @@ impl CodeGen {
     }
 
     fn match_expr_unreachable_fallback(&self) -> &'static str {
-        "rusty::intrinsics::unreachable()"
+        "rusty::intrinsics::unreachable_panic()"
     }
 
     /// Map a dependent type and accept the result ONLY when it is fully
@@ -29227,7 +29227,7 @@ impl CodeGen {
                 return self.match_expr_unreachable_fallback().to_string();
             }
             return format!(
-                "[&]() -> {} {{ rusty::intrinsics::unreachable(); }}()",
+                "[&]() -> {} {{ rusty::intrinsics::unreachable_panic(); }}()",
                 fallback_cpp
             );
         }
@@ -43704,7 +43704,7 @@ impl CodeGen {
             String::new()
         } else {
             format!(
-                "if (!({})) {{ rusty::intrinsics::unreachable(); }} ",
+                "if (!({})) {{ rusty::intrinsics::unreachable_panic(); }} ",
                 return_cond
             )
         };
@@ -50338,7 +50338,7 @@ impl CodeGen {
     /// every if-let path — all of which match on the condition being exactly
     /// an `Expr::Let` — declines it, and the bare `Expr::Let` operands reach
     /// generic expression emission, where they have no lowering and become
-    /// void `rusty::intrinsics::unreachable()` placeholders. The result does
+    /// void `rusty::intrinsics::unreachable_panic()` placeholders. The result does
     /// not compile. Rust's own std uses let-chains (`BTreeSet::difference`).
     ///
     /// Returns `None` when the file contains no let-chain, so the common case

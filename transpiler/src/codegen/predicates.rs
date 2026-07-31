@@ -3583,7 +3583,7 @@ impl CodeGen {
             "rusty::panicking::panic"
                 | "rusty::panicking::panic_fmt"
                 | "rusty::panicking::assert_failed"
-                | "rusty::intrinsics::unreachable"
+                | "rusty::intrinsics::unreachable_panic"
         )
     }
 

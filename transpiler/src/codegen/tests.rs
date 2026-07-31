@@ -3851,7 +3851,7 @@ fn test_leaf415432_empty_array_index_lowers_to_index_oob_panic_fallback() {
             "[&]() -> int32_t { rusty::panicking::panic(\"index out of bounds\"); }()"
         )
     );
-    assert!(!out.contains("rusty::intrinsics::unreachable()[0]"));
+    assert!(!out.contains("rusty::intrinsics::unreachable_panic()[0]"));
 }
 
 #[test]
@@ -4019,7 +4019,7 @@ fn test_leaf523_empty_match_expr_lowers_to_typed_unreachable() {
         "#,
     );
     assert!(
-        out.contains("[&]() -> int32_t { rusty::intrinsics::unreachable(); }()"),
+        out.contains("[&]() -> int32_t { rusty::intrinsics::unreachable_panic(); }()"),
         "empty match should lower to typed unreachable, got:\n{}",
         out
     );
@@ -4504,7 +4504,7 @@ fn test_leaf1056_tuple_bool_match_uses_value_conditions_not_visit() {
         out
     );
     assert!(
-        !out.contains("return rusty::intrinsics::unreachable();"),
+        !out.contains("return rusty::intrinsics::unreachable_panic();"),
         "tuple value-match fallback should not emit return-unreachable in non-void lambda, got:\n{}",
         out
     );
@@ -4724,7 +4724,7 @@ fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_stmt_match_uses
     // form (`if (!_m.is_err()) unreachable;`).
     assert!(
         out.contains("if (_m.is_err())")
-            || out.contains("if (!(_m.is_err())) { rusty::intrinsics::unreachable(); }"),
+            || out.contains("if (!(_m.is_err())) { rusty::intrinsics::unreachable_panic(); }"),
         "Result payload struct-pattern statement match should use runtime is_err dispatch, got:\n{}",
         out
     );
@@ -6028,14 +6028,14 @@ fn test_leaf5119_unsafe_tail_match_keeps_value_return_path() {
     );
     assert!(
         out.contains(
-            "static_cast<void>([&]() { if (true) { rusty::panicking::panic(\"entered unreachable code\"); } else { rusty::intrinsics::unreachable(); } }())"
+            "static_cast<void>([&]() { if (true) { rusty::panicking::panic(\"entered unreachable code\"); } else { rusty::intrinsics::unreachable_panic(); } }())"
         ) || (out.contains("rusty::panicking::panic(\"entered unreachable code\")")
-            && out.contains("rusty::intrinsics::unreachable()")),
+            && out.contains("rusty::intrinsics::unreachable_panic()")),
         "{out}"
     );
     assert!(
         out.contains(
-            "[&]() -> std::tuple<int32_t, size_t> { rusty::intrinsics::unreachable(); }()"
+            "[&]() -> std::tuple<int32_t, size_t> { rusty::intrinsics::unreachable_panic(); }()"
         ),
         "{out}"
     );
@@ -6074,7 +6074,7 @@ fn test_unit_variant_match_infers_common_data_enum_owner_with_unsafe_unreachable
         "{out}"
     );
     assert!(
-        out.contains("[&]() -> CharEscape { rusty::intrinsics::unreachable(); }();"),
+        out.contains("[&]() -> CharEscape { rusty::intrinsics::unreachable_panic(); }();"),
         "{out}"
     );
 }
@@ -12906,16 +12906,16 @@ fn test_leaf441_tuple_visit_unreachable_fallback_is_typed_for_bool() {
     // Codegen produces either the std::visit catch-all
     // `[&](const auto&...) { return [&]() -> bool { ... unreachable(); }(); }`
     // (legacy) or an IIFE-typed fallback
-    // `[&]() -> bool { rusty::intrinsics::unreachable(); }()` alongside
+    // `[&]() -> bool { rusty::intrinsics::unreachable_panic(); }()` alongside
     // the index-based dispatch (current). Either way the return type is
     // pinned to `bool`.
     assert!(
         out.contains(
-            "[&](const auto&...) { return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }"
-        ) || out.contains("[&]() -> bool { rusty::intrinsics::unreachable(); }()"),
+            "[&](const auto&...) { return [&]() -> bool { rusty::intrinsics::unreachable_panic(); }(); }"
+        ) || out.contains("[&]() -> bool { rusty::intrinsics::unreachable_panic(); }()"),
         "{out}"
     );
-    assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable(); }"));
+    assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable_panic(); }"));
 }
 
 #[test]
@@ -12931,8 +12931,8 @@ fn test_leaf441_variant_guard_unreachable_fallback_is_typed_for_bool() {
         }
     "#,
     );
-    assert!(out.contains("return [&]() -> bool { rusty::intrinsics::unreachable(); }();"));
-    assert!(!out.contains("return rusty::intrinsics::unreachable();"));
+    assert!(out.contains("return [&]() -> bool { rusty::intrinsics::unreachable_panic(); }();"));
+    assert!(!out.contains("return rusty::intrinsics::unreachable_panic();"));
 }
 
 #[test]
@@ -12953,16 +12953,16 @@ fn test_leaf441_logical_binary_propagates_bool_expected_type_to_match_rhs() {
     // Codegen produces either the std::visit catch-all
     // `[&](const auto&...) { return [&]() -> bool { ... unreachable(); }(); }`
     // (legacy) or an IIFE-typed fallback
-    // `[&]() -> bool { rusty::intrinsics::unreachable(); }()` alongside
+    // `[&]() -> bool { rusty::intrinsics::unreachable_panic(); }()` alongside
     // the index-based dispatch (current). Either way the return type is
     // pinned to `bool`.
     assert!(
         out.contains(
-            "[&](const auto&...) { return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }"
-        ) || out.contains("[&]() -> bool { rusty::intrinsics::unreachable(); }()"),
+            "[&](const auto&...) { return [&]() -> bool { rusty::intrinsics::unreachable_panic(); }(); }"
+        ) || out.contains("[&]() -> bool { rusty::intrinsics::unreachable_panic(); }()"),
         "{out}"
     );
-    assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable(); }"));
+    assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable_panic(); }"));
 }
 
 #[test]
@@ -12980,8 +12980,8 @@ fn test_leaf441_unsafe_unreachable_arm_is_typed_in_logical_match_rhs() {
     "#,
     );
     assert!(out.contains("return true &&"));
-    assert!(out.contains("[&]() -> bool { rusty::intrinsics::unreachable(); }()"));
-    assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable(); }"));
+    assert!(out.contains("[&]() -> bool { rusty::intrinsics::unreachable_panic(); }()"));
+    assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable_panic(); }"));
 }
 
 #[test]
@@ -17988,7 +17988,7 @@ fn test_leaf4154333333352_array_literal_expr_lowers_to_std_array_instead_of_unre
             || out.contains("std::array{U'a', U'b'}"),
         "array literal lowering: {out}"
     );
-    assert!(!out.contains("rusty::intrinsics::unreachable()"));
+    assert!(!out.contains("rusty::intrinsics::unreachable_panic()"));
 }
 
 #[test]
@@ -19106,7 +19106,7 @@ fn test_while_let_range_pattern_emits_runtime_condition() {
     );
     assert!(out.contains("_whilelet >="), "{out}");
     assert!(
-        !out.contains("while (rusty::intrinsics::unreachable())"),
+        !out.contains("while (rusty::intrinsics::unreachable_panic())"),
         "{out}"
     );
 }
@@ -21829,7 +21829,7 @@ fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
     );
     assert!(
         !out.contains(
-            "[&](const auto&) { return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }"
+            "[&](const auto&) { return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable_panic(); }(); }"
         ),
         "struct-variant debug arms should lower to typed lambdas, got:\n{}",
         out
@@ -21873,7 +21873,7 @@ fn test_leaf10534_empty_block_expr_lowers_to_unit_tuple_value() {
     );
     assert!(out.contains("const auto got = std::make_tuple();")
         || out.contains("auto got = std::make_tuple();"));
-    assert!(!out.contains("const auto got = rusty::intrinsics::unreachable();"));
+    assert!(!out.contains("const auto got = rusty::intrinsics::unreachable_panic();"));
 }
 
 #[test]
@@ -22046,7 +22046,7 @@ fn test_leaf4154333333333_drop_while_let_lowers_without_unreachable_bool_conditi
     assert!(out.contains("auto&& _whilelet = this->next();"));
     assert!(out.contains("if (!(_whilelet.is_some())) { break; }"));
     assert!(out.contains("decltype(auto) v = _whilelet.unwrap();"));
-    assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
+    assert!(!out.contains("while (rusty::intrinsics::unreachable_panic())"));
 }
 
 #[test]
@@ -22089,8 +22089,8 @@ fn test_leaf10514_while_let_option_ref_payload_binds_without_unreachable_conditi
             || out.contains("auto&& digit = _whilelet.unwrap();"),
         "{out}"
     );
-    assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
-    assert!(!out.contains("if (!(rusty::intrinsics::unreachable()))"));
+    assert!(!out.contains("while (rusty::intrinsics::unreachable_panic())"));
+    assert!(!out.contains("if (!(rusty::intrinsics::unreachable_panic()))"));
 }
 
 #[test]
@@ -22153,7 +22153,7 @@ fn test_unreachable_macro_lowers_to_rusty_intrinsics_call_not_comment() {
     // aborting) and expression context (wraps to `/* ... */` which
     // isn't even a value).
     //
-    // Verify both contexts now lower to `rusty::intrinsics::unreachable()`
+    // Verify both contexts now lower to `rusty::intrinsics::unreachable_panic()`
     // (defined as `[[noreturn]] inline void unreachable()` in the
     // runtime helper boilerplate).
     let stmt_out = transpile_str(
@@ -22167,7 +22167,7 @@ fn test_unreachable_macro_lowers_to_rusty_intrinsics_call_not_comment() {
         }
         "#,
     );
-    assert!(stmt_out.contains("rusty::intrinsics::unreachable()"), "{stmt_out}");
+    assert!(stmt_out.contains("rusty::intrinsics::unreachable_panic()"), "{stmt_out}");
     assert!(!stmt_out.contains("/* unreachable!() */;"), "{stmt_out}");
 
     let expr_out = transpile_str(
@@ -22181,7 +22181,7 @@ fn test_unreachable_macro_lowers_to_rusty_intrinsics_call_not_comment() {
         }
         "#,
     );
-    assert!(expr_out.contains("rusty::intrinsics::unreachable()"), "{expr_out}");
+    assert!(expr_out.contains("rusty::intrinsics::unreachable_panic()"), "{expr_out}");
     assert!(!expr_out.contains("/* unreachable!() */"), "{expr_out}");
 }
 
@@ -22725,7 +22725,7 @@ fn test_cluster_b_ptr_read_let_binding_drops_const_qualifier() {
 fn test_cluster_d_const_block_elided_not_lowered_to_unreachable() {
     // Cluster D: Rust 2024 `const { assert!(EXPR) }` is a compile-time
     // fence. Before the fix, the inner assert!() (with EXPR the transpiler
-    // couldn't lower) fell back to emitting `rusty::intrinsics::unreachable()`,
+    // couldn't lower) fell back to emitting `rusty::intrinsics::unreachable_panic()`,
     // making the surrounding function an unconditional panic.
     // BTreeMap's `NodeRef::ascend()` starts with such a const block;
     // without this fix the destructor's deallocating walk hits the
@@ -23372,7 +23372,7 @@ fn test_box_leak_lowers_to_receiver_form_method_call() {
 fn test_while_let_custom_variant_lowers_to_runtime_variant_check() {
     // `while let CustomVariant(x) = e` for a non-Option/Result enum must
     // produce a real runtime check (index()-equality or variant_holds),
-    // not `while (rusty::intrinsics::unreachable())` or an unconditional
+    // not `while (rusty::intrinsics::unreachable_panic())` or an unconditional
     // `while (true) { ... }`.
     let out = transpile_str(
         r#"
@@ -23393,7 +23393,7 @@ fn test_while_let_custom_variant_lowers_to_runtime_variant_check() {
     );
     assert!(out.contains("if (!("), "{out}");
     assert!(out.contains("{ break; }"), "{out}");
-    assert!(!out.contains("while (rusty::intrinsics::unreachable())"), "{out}");
+    assert!(!out.contains("while (rusty::intrinsics::unreachable_panic())"), "{out}");
 }
 
 #[test]
@@ -23478,7 +23478,7 @@ fn test_leaf48_typed_slice_array_reference_materializes_static_span_backing() {
                 && out.contains("_result_ref_value = (std::string_view(\"foo\"))")),
         "{out}"
     );
-    assert!(!out.contains("= &rusty::intrinsics::unreachable()"));
+    assert!(!out.contains("= &rusty::intrinsics::unreachable_panic()"));
 }
 
 #[test]
@@ -23500,7 +23500,7 @@ fn test_leaf48_typed_mut_slice_array_reference_materializes_mutable_span_backing
             ),
         "{out}"
     );
-    assert!(!out.contains("= &rusty::intrinsics::unreachable()"));
+    assert!(!out.contains("= &rusty::intrinsics::unreachable_panic()"));
 }
 
 #[test]
@@ -24353,7 +24353,7 @@ fn test_leaf518_std_hint_and_ops_imports_are_rust_only() {
     );
     assert!(out.contains("// Rust-only: using std::hint::unreachable_unchecked;"));
     assert!(out.contains("// Rust-only: using std::ops;"));
-    assert!(out.contains("rusty::intrinsics::unreachable();"));
+    assert!(out.contains("rusty::intrinsics::unreachable_panic();"));
     assert!(!out.contains("\nusing std::hint::unreachable_unchecked;"));
     assert!(!out.contains("\nusing std::ops;"));
 }
@@ -30912,7 +30912,7 @@ fn test_leaf433_if_let_expr_lowers_without_unreachable_condition() {
         }
     "#,
     );
-    assert!(!out.contains("rusty::intrinsics::unreachable() ?"));
+    assert!(!out.contains("rusty::intrinsics::unreachable_panic() ?"));
     assert!(out.contains("auto&& _iflet = rusty::str_runtime::from_utf8("));
     assert!(out.contains("rusty::str_runtime::parse<int32_t>(\"x\")"));
     assert!(!out.contains("std::str::from_utf8("));
@@ -31101,7 +31101,7 @@ fn test_leaf5202_missing_visit_method_fallback_is_typed_from_expected_result() {
 
     assert!(
         out.contains(
-            "rusty::Result<typename __TargetVisitorT::Value, Error> { rusty::intrinsics::unreachable(); }()"
+            "rusty::Result<typename __TargetVisitorT::Value, Error> { rusty::intrinsics::unreachable_panic(); }()"
         ),
         "missing visit fallback should preserve the expected Result type, got:\n{}",
         out
@@ -31193,7 +31193,7 @@ fn test_leaf5202_missing_visit_method_fallback_uses_return_result_error_hint() {
     );
     assert!(
         out.contains(
-            "rusty::Result<typename __TargetVisitorT::Value, Error> { rusty::intrinsics::unreachable(); }()"
+            "rusty::Result<typename __TargetVisitorT::Value, Error> { rusty::intrinsics::unreachable_panic(); }()"
         ),
         "missing visit fallback should preserve the return Result error type, got:\n{}",
         out
@@ -31227,7 +31227,7 @@ fn test_leaf5202_missing_visit_method_fallback_uses_result_alias_error_hint() {
     );
     assert!(
         out.contains(
-            "rusty::Result<typename __TargetVisitorT::Value, Error> { rusty::intrinsics::unreachable(); }()"
+            "rusty::Result<typename __TargetVisitorT::Value, Error> { rusty::intrinsics::unreachable_panic(); }()"
         ),
         "missing visit fallback should preserve the aliased Result error type, got:\n{}",
         out
@@ -31545,7 +31545,7 @@ fn test_if_let_slice_rest_binding_expression_lowers_runtime_condition() {
     );
     assert!(out.contains(">= 1"), "{out}");
     assert!(out.contains("tail"), "{out}");
-    assert!(!out.contains("rusty::intrinsics::unreachable() ?"), "{out}");
+    assert!(!out.contains("rusty::intrinsics::unreachable_panic() ?"), "{out}");
 }
 
 #[test]
@@ -32688,7 +32688,7 @@ fn test_leaf438_match_unreachable_arm_in_nonvoid_context_is_typed() {
         }
     "#,
     );
-    assert!(out.contains("return [&]() -> int32_t { rusty::intrinsics::unreachable(); }();"));
+    assert!(out.contains("return [&]() -> int32_t { rusty::intrinsics::unreachable_panic(); }();"));
 }
 
 #[test]

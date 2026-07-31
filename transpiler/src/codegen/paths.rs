@@ -240,7 +240,7 @@ impl CodeGen {
         {
             self.output = self.output.replace(
                 "return value.serialize(std::move(serializer));",
-                "return [&]() -> rusty::Result<typename S::Ok, typename S::Error> { rusty::intrinsics::unreachable(); }();",
+                "return [&]() -> rusty::Result<typename S::Ok, typename S::Error> { rusty::intrinsics::unreachable_panic(); }();",
             );
         }
         if self.output.contains("serde_json::") && !self.output.contains("namespace serde_json {") {

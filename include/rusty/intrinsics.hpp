@@ -6,14 +6,36 @@
 // transpiled core_slice_port lives here; expand as other ports surface
 // new intrinsic refs.
 
+#include <stdexcept>
 #include <utility>
 
 namespace rusty {
 namespace intrinsics {
 
-// Note: `unreachable()` is emitted inline by the transpiler in each
-// cppm — don't redeclare it here (would conflict on noexcept). Only
-// the surface that the transpiler does NOT emit lives here.
+// `unreachable_panic()` — the fallthrough arm of an exhaustive `match`.
+//
+// The transpiler used to emit `unreachable()` into each generated
+// cppm's runtime boilerplate and call that. It works for whole-file
+// transpilation, but the inline-Rust DSL rewrites a GEN block *in
+// place* and emits no boilerplate, so DSL blocks called a function
+// nothing defined ("no member named 'unreachable' in namespace
+// rusty::intrinsics"). Both paths include <rusty/rusty.hpp>, which
+// includes this header, so the definition belongs here.
+//
+// It is spelled `unreachable_panic` rather than `unreachable` because
+// the 49 pre-transpiled ports under transpiled/ still carry the old
+// boilerplate; a header `unreachable()` would redefine theirs. Those
+// ports remain self-consistent (they define and call their own), while
+// everything newly emitted calls this one.
+//
+// Throws rather than invoking UB, matching what the boilerplate did:
+// DSL bodies are reached from hand-written C++, where an out-of-range
+// enum value is possible.
+[[noreturn]] inline void unreachable_panic() {
+    throw std::runtime_error("unreachable");
+}
+
+// The genuinely-unchecked form, for callers that have proved the case.
 [[noreturn]] inline void unreachable_unchecked() { __builtin_unreachable(); }
 
 // `assume(cond)` — hint to the optimiser. C++23 has `[[assume]]`; we
