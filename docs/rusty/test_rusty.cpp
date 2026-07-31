@@ -7,8 +7,8 @@ import std_port;
 #include <cstdio>
 #include <string_view>
 
-using HM = collections::hash::map::HashMap<int, int, ::hash::random::RandomState>;
-using HS = collections::hash::set::HashSet<int, ::hash::random::RandomState>;
+using HM = std_port::collections::hash::map::HashMap<int, int, std_port::hash::random::RandomState>;
+using HS = std_port::collections::hash::set::HashSet<int, std_port::hash::random::RandomState>;
 
 int main() {
     auto m = HM::new_();
@@ -29,7 +29,7 @@ int main() {
 
 
     // String keys: content-hashed through DefaultHasher/SipHasher
-    using HMS = collections::hash::map::HashMap<std::string_view, int, ::hash::random::RandomState>;
+    using HMS = std_port::collections::hash::map::HashMap<std::string_view, int, std_port::hash::random::RandomState>;
     auto sm = HMS::new_();
     sm.insert("alpha", 1);
     sm.insert("beta", 2);

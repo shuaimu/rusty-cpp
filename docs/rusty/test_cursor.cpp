@@ -3,6 +3,8 @@
 // surface, error paths included. Instantiates the template bodies that
 // --precompile skipped.
 import std_port;
+// Purview is wrapped (--crate-namespace-wrap); these name its modules bare.
+using namespace std_port;
 #include <cassert>
 #include <cstdint>
 #include <cstdio>

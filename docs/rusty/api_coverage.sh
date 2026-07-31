@@ -30,8 +30,8 @@ emit() { # name, body
   cat > "$D/$1.cpp" <<EOF
 import std_port;
 #include <string_view>
-using HM = collections::hash::map::HashMap<int,int,::hash::random::RandomState>;
-using HS = collections::hash::set::HashSet<int,::hash::random::RandomState>;
+using HM = std_port::collections::hash::map::HashMap<int,int,std_port::hash::random::RandomState>;
+using HS = std_port::collections::hash::set::HashSet<int,std_port::hash::random::RandomState>;
 int main() {
 $2
   return 0;
@@ -70,8 +70,8 @@ emit map_extend        '  auto m = HM::new_(); auto n = HM::new_(); m.extend(std
 emit map_clone         '  auto m = HM::new_(); m.insert(1,10); auto c = m.clone(); (void)c.len();'
 emit map_eq            '  auto a = HM::new_(); auto b = HM::new_(); (void)(a == b);'
 emit map_hasher        '  auto m = HM::new_(); (void)m.hasher();'
-emit map_with_hasher   '  auto m = HM::with_hasher(::hash::random::RandomState::new_()); (void)m.len();'
-emit map_strkey        '  using M = collections::hash::map::HashMap<std::string_view,int,::hash::random::RandomState>;
+emit map_with_hasher   '  auto m = HM::with_hasher(std_port::hash::random::RandomState::new_()); (void)m.len();'
+emit map_strkey        '  using M = std_port::collections::hash::map::HashMap<std::string_view,int,std_port::hash::random::RandomState>;
   auto m = M::new_(); m.insert("a",1); (void)m.get("a").unwrap();'
 
 # ---- HashSet ----

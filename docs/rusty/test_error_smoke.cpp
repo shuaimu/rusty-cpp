@@ -4,6 +4,8 @@
 // asserted here — the explicit instantiation below gates that all Report<E>
 // members (fmt/fmt_singleline/fmt_multiline/backtrace) at least compile.
 import std_port;
+// Purview is wrapped (--crate-namespace-wrap); these name its modules bare.
+using namespace std_port;
 #include <cassert>
 #include <cstdio>
 #include <string>

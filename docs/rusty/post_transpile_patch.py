@@ -24,11 +24,16 @@ from pathlib import Path
 
 def patch_hashbrown(path: Path) -> None:
     t = path.read_text()
+    # Same wrap-sensitivity as patch_rusty: under --crate-namespace-wrap the
+    # dep's purview is `namespace hashbrown`, and the transpiler requalifies
+    # its own refs (e.g. it emits
+    # `export using ::hashbrown::raw::alloc::inner::Global;`) but not ours.
+    ns = "::hashbrown" if "\nnamespace hashbrown {" in t else ""
     t = t.replace("::alloc::alloc::Layout", "::rusty::alloc::Layout")
     t = re.sub(r"([^:])alloc::alloc::Layout", r"\1::rusty::alloc::Layout", t)
     t = t.replace(
         "export using ::alloc::do_alloc;",
-        "export using ::raw::alloc::inner::do_alloc;",
+        f"export using {ns}::raw::alloc::inner::do_alloc;",
     )
     t = t.replace(
         "NonNull<uint8_t>::new_(alloc(std::move(layout)))",
@@ -126,18 +131,27 @@ def patch_hashbrown(path: Path) -> None:
 
 def patch_rusty(path: Path) -> None:
     t = path.read_text()
+    # The port is emitted either at global scope or wrapped in
+    # `namespace std_port` (--crate-namespace-wrap). The transpiler requalifies
+    # the references IT emits, but never sees text a patcher inserts or
+    # matches — so every rule below that mentions a crate-qualified path has to
+    # follow the wrap itself. Parameterize on the prefix rather than
+    # hand-editing each spelling (that route cost five separate silent
+    # failures: a stale anchor here just does nothing).
+    ns = "::std_port" if "\nnamespace std_port {" in t else ""
     # (b) the crate defines its own RandomState — undo the builtin mapping.
-    t = t.replace("::hashbrown::DefaultHashBuilder", "::hash::random::RandomState")
+    t = t.replace("::hashbrown::DefaultHashBuilder", f"{ns}::hash::random::RandomState")
     # (io-cursor) same class of hijack for the crate's own io module: the
     # builtin io::->rusty::io mapping requalifies intra-crate io::error::*
     # refs into the runtime namespace, which has no `error` submodule.
-    t = t.replace("rusty::io::error::", "::io::error::")
+    t = t.replace("rusty::io::error::", f"{ns}::io::error::")
     # (io-cursor) `pub(crate) use error::const_error;` re-exports a macro —
     # expanded away by cargo-expand, so no C++ entity exists to alias.
     # Emitted unqualified pre-error-slice; `::error::`-qualified once the
     # top-level error module exists.
     t = t.replace("    export using error::const_error;\n", "")
     t = t.replace("    export using ::error::const_error;\n", "")
+    t = t.replace(f"    export using {ns}::error::const_error;\n", "")
     # (io-cursor) the crate now DECLARES an io::Write trait, so the
     # Hasher::write/io::Write::write name collision emits a 3-tier UFCS
     # dispatch lambda whose fallback (Write_::write_) is unviable for
@@ -214,14 +228,14 @@ def patch_rusty(path: Path) -> None:
     # protocol doesn't cover these types. Rust's Default here IS
     # with_hasher(RandomState::default()) — spell that directly.
     t = t.replace(
-        "return rusty::default_value<HashMap<K, V, ::hash::random::RandomState>>();",
-        "return HashMap<K, V, ::hash::random::RandomState>::with_hasher("
-        "::hash::random::RandomState::new_());",
+        f"return rusty::default_value<HashMap<K, V, {ns}::hash::random::RandomState>>();",
+        f"return HashMap<K, V, {ns}::hash::random::RandomState>::with_hasher("
+        f"{ns}::hash::random::RandomState::new_());",
     )
     t = t.replace(
-        "return rusty::default_value<HashSet<T, ::hash::random::RandomState>>();",
-        "return HashSet<T, ::hash::random::RandomState>::with_capacity_and_hasher("
-        "0, ::hash::random::RandomState::new_());",
+        f"return rusty::default_value<HashSet<T, {ns}::hash::random::RandomState>>();",
+        f"return HashSet<T, {ns}::hash::random::RandomState>::with_capacity_and_hasher("
+        f"0, {ns}::hash::random::RandomState::new_());",
     )
     # (d) AllocError carries a Layout payload in Rust; the runtime ctor takes
     # (Kind, size, align).
@@ -307,9 +321,25 @@ def patch_rusty(path: Path) -> None:
     # (a) import the recursively-transpiled dep + bridge its glob re-exports
     # (they are emitted as un-exported using-directives, invisible to
     # importers — transpiler gap).
-    t = t.replace(
-        "export module std_port;\n",
-        """export module std_port;
+    # The bridge's SHAPE, not just its spelling, depends on the wrap. Wrapped,
+    # the dep's own purview IS `namespace hashbrown`, so it already supplies
+    # hashbrown::{map,set,rustc_entry,raw}, a real hash_map, and
+    # `export namespace hash_set = set;` — an ALIAS, so re-declaring it here is
+    # a hard error ("redefinition of 'hash_set' as different kind of symbol"),
+    # and the TryReserveError using-declarations become self-referential. All
+    # that remains genuinely missing is hash_map's glob re-export.
+    if ns:
+        bridge = """export module std_port;
+import hashbrown;
+namespace hashbrown {
+    namespace hash_map {
+        using namespace ::hashbrown::map;
+        using namespace ::hashbrown::rustc_entry;
+    }
+}
+"""
+    else:
+        bridge = """export module std_port;
 import hashbrown;
 namespace hashbrown {
     namespace hash_map {
@@ -321,9 +351,8 @@ namespace hashbrown {
     using ::TryReserveError_CapacityOverflow;
     using ::TryReserveError_AllocError;
 }
-""",
-        1,
-    )
+"""
+    t = t.replace("export module std_port;\n", bridge, 1)
     path.write_text(t)
 
 

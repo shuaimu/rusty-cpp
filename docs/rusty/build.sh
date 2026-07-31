@@ -185,7 +185,7 @@ EOF
 
 bash "$HERE/prep.sh" "$W/src" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
-"$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1
+"$TRANSPILER" --crate "$W/Cargo.toml" --expand --crate-namespace-wrap --output-dir "$W/out" > "$W/transpile.log" 2>&1
 echo "transpile exit=$? ($(tail -1 "$W/transpile.log"))"
 [[ -f "$W/out/std_port.cppm" ]] || { echo "no std_port.cppm — see $W/transpile.log"; exit 1; }
 [[ -f "$W/out/hashbrown/hashbrown.cppm" ]] || { echo "no hashbrown.cppm (dep not transpiled?)"; exit 1; }
