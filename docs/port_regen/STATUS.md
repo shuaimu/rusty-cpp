@@ -45,21 +45,35 @@ Blockers to the swap, in order:
    algebra, `==`, `extend`), `map_next_iter::size_hint`, and the `RustcEntry`
    variant-order pin.
 
-   **The swap is a strict improvement — measured, not assumed.**
+   **The swap is a strict improvement — but the FIRST measurement was wrong.**
    `docs/hashbrown_port/api_coverage.sh` runs the SAME 54 members against the
-   shipped port for an apples-to-apples number:
+   shipped port. Corrected 2026-07-30:
 
    | port | coverage |
    |---|---|
-   | `hashbrown_port` (ships today) | **32/54** |
-   | std port (the target) | **48/54** |
+   | `hashbrown_port` (ships today) | **26/54** |
+   | std port (the target) | **36/54** |
 
    Every member the std port fails, the shipped port fails too — the failure
-   set is a strict subset, so **there are no regressions**, and 16 members are
-   gained: `get_mut`, `get_key_value`, `remove_entry`, `extend`, `==`, the
-   whole HashSet surface (`iter`, `get`, `take`, `drain`, `retain`, `extend`,
-   `==`) and all the set algebra (`union`, `intersection`, `difference`,
-   `symmetric_difference`).
+   set is a strict subset, so **no regressions** — and 10 members are gained:
+   `get_mut`, `get_key_value`, `remove_entry`, `extend`, `operator==` on both,
+   and HashSet's `get` / `take` / `retain` / `extend` / `==`.
+
+   ⚠️ SUPERSEDED NUMBERS: this file, commit 0d968a45, and both script headers
+   previously said 32/54 and 48/54. Those were WRONG. The hashbrown probe was
+   written by copying the std probe's idioms, which baked std's API shape into
+   the definition of "working": the std port yields `.next()`-style iterators
+   while hashbrown_port is range-for / `rusty::count` compatible, so probing
+   with one spelling reported the other port's working members as missing.
+   Both probes now use an idiom-agnostic `RC_DRAIN` macro that accepts either,
+   which is STRICTER than either original (it requires iteration to genuinely
+   work) and so lowered BOTH numbers. The conclusion — strict superset, no
+   regressions — survives; the magnitudes do not.
+
+   What exposed it: `tests/hashset_set_algebra_test.cpp` uses
+   `rusty::count(a.union_(b))` where the probe demanded `.next()`. That test is
+   NOT in `TEST_SOURCES` — never built, never run — despite looking like the
+   regression guard for completed bug #161. Wire it up.
 
    So the swap should NOT wait on closing the last 6 gaps: it strictly widens
    the API *and* moves users off a port with an unfixed heap-use-after-free.

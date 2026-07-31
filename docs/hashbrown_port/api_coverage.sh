@@ -7,6 +7,8 @@
 # 2026-07-27 directive at the top of docs/port_regen/STATUS.md), and that swap
 # is only safe if the std port covers at least what this one does. Same 54
 # members, same one-TU-per-member method, so the two numbers are comparable.
+# Baseline 2026-07-30: 26/54 (CORRECTED from 32/54 — see docs/port_regen/STATUS.md;
+# the first version copied the std probe idioms and undercounted this port).
 #
 # Requires the hashbrown_port BMIs to exist:
 #   cmake --build .rusty-modules-cache/build --target hashbrown_port
@@ -33,6 +35,15 @@ using rusty::port::collections::hashbrown::HashMap;
 using rusty::port::collections::hashbrown::HashSet;
 using HM = HashMap<int,int>;
 using HS = HashSet<int>;
+// Idiom-agnostic iterator drain. The two ports expose iteration DIFFERENTLY —
+// the std port yields `.next()`-style iterators, hashbrown_port is range-for /
+// rusty::count compatible. Probing with one spelling reports the other port's
+// working members as missing, which is exactly the error this harness made on
+// its first run (it undercounted hashbrown_port by ~7 members). Test the
+// CAPABILITY, not the spelling.
+#define RC_DRAIN(expr) do { auto __it = (expr); \
+    if constexpr (requires { __it.next(); }) { (void)__it.next(); } \
+    else { for (auto&& __v : __it) { (void)__v; } } } while (0)
 int main() {
 $2
   return 0;
@@ -55,18 +66,18 @@ emit map_reserve       '  auto m = HM::new_(); m.reserve(32);'
 emit map_try_reserve   '  auto m = HM::new_(); (void)m.try_reserve(32).is_ok();'
 emit map_shrink_to_fit '  auto m = HM::new_(); m.shrink_to_fit();'
 emit map_shrink_to     '  auto m = HM::new_(); m.shrink_to(4);'
-emit map_keys          '  auto m = HM::new_(); m.insert(1,10); auto k = m.keys(); (void)k.next().is_some();'
-emit map_values        '  auto m = HM::new_(); m.insert(1,10); auto v = m.values(); (void)v.next().is_some();'
-emit map_values_mut    '  auto m = HM::new_(); m.insert(1,10); auto v = m.values_mut(); (void)v.next().is_some();'
-emit map_iter          '  auto m = HM::new_(); m.insert(1,10); auto it = m.iter(); (void)it.next().is_some();'
-emit map_iter_mut      '  auto m = HM::new_(); m.insert(1,10); auto it = m.iter_mut(); (void)it.next().is_some();'
-emit map_into_iter     '  auto m = HM::new_(); m.insert(1,10); auto it = std::move(m).into_iter(); (void)it.next().is_some();'
-emit map_into_keys     '  auto m = HM::new_(); m.insert(1,10); auto it = std::move(m).into_keys(); (void)it.next().is_some();'
-emit map_into_values   '  auto m = HM::new_(); m.insert(1,10); auto it = std::move(m).into_values(); (void)it.next().is_some();'
+emit map_keys 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.keys());'
+emit map_values 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.values());'
+emit map_values_mut 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.values_mut());'
+emit map_iter 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.iter());'
+emit map_iter_mut 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.iter_mut());'
+emit map_into_iter 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(std::move(m).into_iter());'
+emit map_into_keys 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(std::move(m).into_keys());'
+emit map_into_values 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(std::move(m).into_values());'
 emit map_entry         '  auto m = HM::new_(); auto e = m.entry(1); (void)sizeof(e);'
 emit map_retain        '  auto m = HM::new_(); m.insert(1,10); m.retain([](auto&, auto&){ return true; });'
-emit map_drain         '  auto m = HM::new_(); m.insert(1,10); auto d = m.drain(); (void)d.next().is_some();'
-emit map_extract_if    '  auto m = HM::new_(); m.insert(1,10); auto d = m.extract_if([](auto&, auto&){ return true; }); (void)d.next().is_some();'
+emit map_drain 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.drain());'
+emit map_extract_if 'auto m = HM::new_(); m.insert(1,10); RC_DRAIN(m.extract_if([](auto&&...){ return true; }));'
 emit map_extend        '  auto m = HM::new_(); auto n = HM::new_(); m.extend(std::move(n));'
 emit map_clone         '  auto m = HM::new_(); m.insert(1,10); auto c = m.clone(); (void)c.len();'
 emit map_eq            '  auto a = HM::new_(); auto b = HM::new_(); (void)(a == b);'
@@ -83,14 +94,14 @@ emit set_remove        '  auto s = HS::new_(); (void)s.remove(1);'
 emit set_take          '  auto s = HS::new_(); (void)s.take(1).is_some();'
 emit set_get           '  auto s = HS::new_(); (void)s.get(1).is_some();'
 emit set_clear         '  auto s = HS::new_(); s.clear();'
-emit set_iter          '  auto s = HS::new_(); s.insert(1); auto it = s.iter(); (void)it.next().is_some();'
-emit set_into_iter     '  auto s = HS::new_(); s.insert(1); auto it = std::move(s).into_iter(); (void)it.next().is_some();'
-emit set_drain         '  auto s = HS::new_(); s.insert(1); auto d = s.drain(); (void)d.next().is_some();'
+emit set_iter 'auto s = HS::new_(); s.insert(1); RC_DRAIN(s.iter());'
+emit set_into_iter 'auto s = HS::new_(); s.insert(1); RC_DRAIN(std::move(s).into_iter());'
+emit set_drain 'auto s = HS::new_(); s.insert(1); RC_DRAIN(s.drain());'
 emit set_retain        '  auto s = HS::new_(); s.insert(1); s.retain([](auto&){ return true; });'
-emit set_union         '  auto a = HS::new_(); auto b = HS::new_(); auto u = a.union_(b); (void)u.next().is_some();'
-emit set_intersection  '  auto a = HS::new_(); auto b = HS::new_(); auto u = a.intersection(b); (void)u.next().is_some();'
-emit set_difference    '  auto a = HS::new_(); auto b = HS::new_(); auto u = a.difference(b); (void)u.next().is_some();'
-emit set_symdiff       '  auto a = HS::new_(); auto b = HS::new_(); auto u = a.symmetric_difference(b); (void)u.next().is_some();'
+emit set_union 'auto a = HS::new_(); auto b = HS::new_(); RC_DRAIN(a.union_(b));'
+emit set_intersection 'auto a = HS::new_(); auto b = HS::new_(); RC_DRAIN(a.intersection(b));'
+emit set_difference 'auto a = HS::new_(); auto b = HS::new_(); RC_DRAIN(a.difference(b));'
+emit set_symdiff 'auto a = HS::new_(); auto b = HS::new_(); RC_DRAIN(a.symmetric_difference(b));'
 emit set_is_subset     '  auto a = HS::new_(); auto b = HS::new_(); (void)a.is_subset(b);'
 emit set_is_superset   '  auto a = HS::new_(); auto b = HS::new_(); (void)a.is_superset(b);'
 emit set_is_disjoint   '  auto a = HS::new_(); auto b = HS::new_(); (void)a.is_disjoint(b);'
