@@ -39556,6 +39556,21 @@ fn an_extern_fn_signature_reaches_the_call_site() {
     // feature: any test written against `transpile_str` may be
     // describing a pipeline no user invokes. Do not delete this note
     // when the CLI is fixed — replace it with the reason it now holds.
+    //
+    // NARROWED so far (each tested, not assumed):
+    //   - NOT the crate pipeline: single-file CLI fails too.
+    //   - NOT a scoped-name mismatch, NOT a parameter-name collision.
+    //   - NOT the source: identical text passes here, fails via CLI.
+    //   - `collect_call_arg_pass_styles` runs from `emit_file`, so BOTH
+    //     paths do collect it (mod.rs ~4453).
+    // So the cause is in what the CLI sets and this helper does not:
+    //   `CodeGen::with_type_map(..)` vs `CodeGen::new()`, plus ~20
+    //   `set_*` calls in transpile.rs ~1060-1085 (crate_name,
+    //   auto_namespace, interface_traits, prefer_rusty_unit_alias,
+    //   prefer_rusty_view_aliases, is_dependency, cross_file_*, ...).
+    // TO BISECT: copy this test, swap in `CodeGen::with_type_map`, then
+    // add those setters one at a time until the assertion flips. One
+    // rebuild per few options; the flip identifies the culprit.
     let out = transpile_str(
         r#"
         #[repr(C)]
