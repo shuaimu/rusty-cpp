@@ -14084,6 +14084,41 @@ impl CodeGen {
                 .and_then(|name| name.rsplit("::").next().map(ToString::to_string))
                 .unwrap_or(owner_tail);
         }
+        // A Rust primitive can never own a data-enum variant constructor.
+        //
+        // The `owner_maps_to_bare_ident` guard below accidentally covers the
+        // primitives whose C++ spelling is unchanged (`bool`, `char`), because
+        // there `mapped_owner == owner_tail`. It does NOT cover the ones that
+        // get renamed: `i32` maps to `int32_t`, so the guard is skipped and an
+        // uppercase-initial call inherits the fn's return type as its expected
+        // owner:
+        //
+        //     fn f() -> i32 { Log_warn("x"); 0i32 }
+        //       ->  int32_t::Log_warn("x");     // no such member
+        //
+        // That blocked converting any int-returning function that logs, since
+        // every Log_* is uppercase-initial.
+        if matches!(
+            owner_tail.as_str(),
+            "i8" | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+                | "f32"
+                | "f64"
+                | "bool"
+                | "char"
+                | "str"
+        ) {
+            return None;
+        }
         let mapped_owner = self.map_type(expected_ty);
         let owner_maps_to_bare_ident = mapped_owner == owner_tail
             && !mapped_owner.contains("::")
