@@ -39539,3 +39539,27 @@ fn an_argument_that_is_already_a_pointer_is_not_referenced_again() {
         "a pointer argument must pass through unchanged:\n{out}"
     );
 }
+
+#[test]
+fn an_extern_fn_signature_reaches_the_call_site() {
+    // Foreign fns were emitted but never collected, so a call to one
+    // had no declared parameter types and every expected-type rule
+    // silently did nothing there. This is the FFI-seam case the
+    // &mut -> *mut coercion was written for.
+    let out = transpile_str(
+        r#"
+        #[repr(C)]
+        pub struct Ctx { pub sp: u64 }
+        extern "C" {
+            fn swap_ctx(from: *mut Ctx, to: *mut Ctx);
+        }
+        pub fn go(a: &mut Ctx, b: &mut Ctx) {
+            unsafe { swap_ctx(a, b) }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("swap_ctx(&a, &b)"),
+        "an extern fn's pointer params must reach the call site:\n{out}"
+    );
+}
