@@ -6086,6 +6086,33 @@ impl CodeGen {
     pub(super) fn collect_call_arg_pass_styles(&mut self, items: &[syn::Item], module_path: &[String]) {
         for item in items {
             match item {
+                // `extern "C" { fn f(p: *mut T); }` — foreign fns were
+                // EMITTED but never collected, so a call to one had no
+                // declared parameter types and every rule keyed on them
+                // silently did nothing. That is the whole reason the
+                // `&mut T` -> `*mut T` coercion could not reach an FFI
+                // seam, which is where it is needed most.
+                syn::Item::ForeignMod(fm) => {
+                    for fi in &fm.items {
+                        let syn::ForeignItem::Fn(f) = fi else {
+                            continue;
+                        };
+                        let fn_name = f.sig.ident.to_string();
+                        let scoped_name = if module_path.is_empty() {
+                            fn_name.clone()
+                        } else {
+                            format!("{}::{}", module_path.join("::"), fn_name)
+                        };
+                        let styles =
+                            self.collect_arg_pass_styles_from_inputs(&f.sig.inputs, false);
+                        self.record_function_arg_pass_styles(&scoped_name, styles);
+                        let expected_types =
+                            self.collect_arg_expected_types_from_inputs(&f.sig.inputs, false);
+                        self.record_function_arg_expected_types(&scoped_name, expected_types);
+                        let return_ty = self.collect_return_type_from_output(&f.sig.output);
+                        self.record_function_return_type(&scoped_name, return_ty);
+                    }
+                }
                 syn::Item::Fn(f) => {
                     let fn_name = f.sig.ident.to_string();
                     let scoped_name = if module_path.is_empty() {
