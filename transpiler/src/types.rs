@@ -548,7 +548,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
 
         // Expanded-Rust runtime compatibility shims.
         "core::intrinsics::discriminant_value" => Some("rusty::intrinsics::discriminant_value"),
-        "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
+        "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable_panic"),
         "core::intrinsics::abort" | "intrinsics::abort" | "std::intrinsics::abort" => {
             Some("rusty::intrinsics::abort")
         }
@@ -699,7 +699,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "unreachable_unchecked"
         | "hint::unreachable_unchecked"
         | "std::hint::unreachable_unchecked"
-        | "core::hint::unreachable_unchecked" => Some("rusty::intrinsics::unreachable"),
+        | "core::hint::unreachable_unchecked" => Some("rusty::intrinsics::unreachable_panic"),
         "alloc::alloc" | "std::alloc::alloc" | "core::alloc::alloc" => Some("rusty::alloc::alloc"),
         "alloc::dealloc" | "std::alloc::dealloc" | "core::alloc::dealloc" => {
             Some("rusty::alloc::dealloc")
@@ -1410,11 +1410,11 @@ mod tests {
         assert_eq!(map_function_path("Add::add"), Some("rusty::ops::add_fn"));
         assert_eq!(
             map_function_path("std::hint::unreachable_unchecked"),
-            Some("rusty::intrinsics::unreachable")
+            Some("rusty::intrinsics::unreachable_panic")
         );
         assert_eq!(
             map_function_path("unreachable_unchecked"),
-            Some("rusty::intrinsics::unreachable")
+            Some("rusty::intrinsics::unreachable_panic")
         );
         assert_eq!(
             map_function_path("core::ops::Add::add"),

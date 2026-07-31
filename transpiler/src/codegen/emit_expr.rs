@@ -2448,17 +2448,17 @@ impl CodeGen {
             }
             "unreachable" => {
                 // Mirror Rust's `unreachable!()` macro: a noreturn call.
-                // Lower to `rusty::intrinsics::unreachable()` (defined in the
+                // Lower to `rusty::intrinsics::unreachable_panic()` (defined in the
                 // runtime helper boilerplate as `[[noreturn]] inline void
                 // unreachable() { throw ... }`) so the program aborts
                 // loudly at runtime if the arm is ever reached, instead of
                 // silently no-op'ing as `/* unreachable!() */;`.
                 if tokens.is_empty() {
-                    self.writeln("rusty::intrinsics::unreachable();");
+                    self.writeln("rusty::intrinsics::unreachable_panic();");
                 } else {
                     let args = self.convert_format_args(&tokens);
                     self.writeln(&format!("std::println(stderr, {});", args));
-                    self.writeln("rusty::intrinsics::unreachable();");
+                    self.writeln("rusty::intrinsics::unreachable_panic();");
                 }
             }
             "assert" | "debug_assert" => {
@@ -2766,11 +2766,11 @@ impl CodeGen {
                 // Wrap in an IIFE so the noreturn helper can appear where any
                 // value would have been; the type comes from context.
                 if tokens.is_empty() {
-                    "rusty::intrinsics::unreachable()".to_string()
+                    "rusty::intrinsics::unreachable_panic()".to_string()
                 } else {
                     let args = self.convert_format_args(&tokens);
                     format!(
-                        "([&]() {{ std::println(stderr, {}); rusty::intrinsics::unreachable(); }}())",
+                        "([&]() {{ std::println(stderr, {}); rusty::intrinsics::unreachable_panic(); }}())",
                         args
                     )
                 }
@@ -3506,7 +3506,7 @@ impl CodeGen {
         }
 
         out.push_str(
-            "if (!_m_matched) { rusty::intrinsics::unreachable(); } std::move(_match_value).value(); })",
+            "if (!_m_matched) { rusty::intrinsics::unreachable_panic(); } std::move(_match_value).value(); })",
         );
         Some(out)
     }
@@ -4480,7 +4480,7 @@ impl CodeGen {
                 self.match_expr_unreachable_fallback_with_expected(Some(match_expected_ty))
             ));
         } else {
-            out.push_str("rusty::intrinsics::unreachable(); }()");
+            out.push_str("rusty::intrinsics::unreachable_panic(); }()");
         }
         out
     }
@@ -4822,7 +4822,7 @@ impl CodeGen {
                 self.match_expr_unreachable_fallback_with_expected(Some(match_expected_ty))
             ));
         } else {
-            out.push_str("rusty::intrinsics::unreachable(); }()");
+            out.push_str("rusty::intrinsics::unreachable_panic(); }()");
         }
         out
     }
@@ -5043,7 +5043,7 @@ impl CodeGen {
         self.writeln("}");
         if success_cond != "true" {
             self.writeln(&format!(
-                "if (!({})) {{ rusty::intrinsics::unreachable(); }}",
+                "if (!({})) {{ rusty::intrinsics::unreachable_panic(); }}",
                 success_cond
             ));
         }
@@ -5194,7 +5194,7 @@ impl CodeGen {
             self.writeln("}");
         }
 
-        self.writeln("if (!_m_matched) { rusty::intrinsics::unreachable(); }");
+        self.writeln("if (!_m_matched) { rusty::intrinsics::unreachable_panic(); }");
         self.indent -= 1;
         self.writeln("}");
         true
@@ -6222,7 +6222,7 @@ impl CodeGen {
         }
         let missing_visit_return = inferred_err_cpp.as_ref().map(|err_cpp| {
             format!(
-                "return [&]() -> rusty::Result<typename __TargetVisitorT::Value, {}> {{ rusty::intrinsics::unreachable(); }}();",
+                "return [&]() -> rusty::Result<typename __TargetVisitorT::Value, {}> {{ rusty::intrinsics::unreachable_panic(); }}();",
                 err_cpp
             )
         });
@@ -6244,7 +6244,7 @@ impl CodeGen {
         if let Some(missing_visit_return) = missing_visit_return {
             value_dispatch.push_str(&format!(" else {{ {} }}", missing_visit_return));
         } else {
-            value_dispatch.push_str(" else { rusty::intrinsics::unreachable(); }");
+            value_dispatch.push_str(" else { rusty::intrinsics::unreachable_panic(); }");
         }
         Some(format!(
             "([&](auto&& __visitor) -> decltype(auto) {{ using __TargetVisitorT = std::remove_cv_t<std::remove_reference_t<decltype({})>>; if constexpr (requires {{ typename __TargetVisitorT::Value; }}) {{ {} }} else {{ return {}; }} }}({}))",

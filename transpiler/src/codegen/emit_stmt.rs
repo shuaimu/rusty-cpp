@@ -316,7 +316,7 @@ impl CodeGen {
                 // contains references the transpiler can't lower (e.g.
                 // `assert!(size_of::<T>() == N)` against opaque template
                 // params), the fallback used to emit
-                // `rusty::intrinsics::unreachable()`, turning the surrounding
+                // `rusty::intrinsics::unreachable_panic()`, turning the surrounding
                 // function into an unconditional panic at the first
                 // instruction (BTreeMap's `ascend()` was hit by this).
                 // Elide const-blocks at the statement level — leave a
@@ -1927,12 +1927,12 @@ impl CodeGen {
             // The generic fallback maps the (unresolved) expected type — use
             // the recovery's resolved spelling instead.
             out.push_str(&format!(
-                "return [&]() -> {} {{ rusty::intrinsics::unreachable(); }}(); }}()",
+                "return [&]() -> {} {{ rusty::intrinsics::unreachable_panic(); }}(); }}()",
                 resolved
             ));
         } else if let Some(expected) = runtime_match_expected {
             if runtime_match_return_annotation.is_empty() {
-                out.push_str("rusty::intrinsics::unreachable(); }()");
+                out.push_str("rusty::intrinsics::unreachable_panic(); }()");
             } else {
                 out.push_str(&format!(
                     "return {}; }}()",
@@ -1940,7 +1940,7 @@ impl CodeGen {
                 ));
             }
         } else {
-            out.push_str("rusty::intrinsics::unreachable(); }()");
+            out.push_str("rusty::intrinsics::unreachable_panic(); }()");
         }
         // A DEDUCED-return lambda whose arms mix `rusty::Option<T>(…)` and
         // the bare `rusty::None` tag is ill-formed (conflicting deductions):
