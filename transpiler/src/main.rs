@@ -97,6 +97,18 @@ struct Cli {
     #[arg(long = "cxx-namespace")]
     cxx_namespace: Option<String>,
 
+    /// Wrap the crate's emitted purview in `namespace <crate> { … }` AND
+    /// requalify the crate's own qualified self-references (the Rules 1-5 in
+    /// `wrap_module_purview_in_crate_namespace`). Unlike `--cxx-namespace`,
+    /// which is a blunt textual wrap that does no requalification, this is the
+    /// path every non-stdlib matrix crate already takes.
+    ///
+    /// Opt-in because the `--crate` entry points are shared with the `alloc`
+    /// and `path` stdlib ports, which are emitted UNWRAPPED today and are green
+    /// in the parity matrix; off by default keeps their emission unchanged.
+    #[arg(long = "crate-namespace-wrap")]
+    crate_namespace_wrap: bool,
+
     /// Auto-derive the C++ namespace from `--module-name` (replace `.`
     /// with `::`) AND emit namespace aliases for each imported sibling
     /// module — the spec-correct rendering of Rust's module tree as
@@ -4130,6 +4142,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_type_aliases: Vec::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: None,
+        crate_namespace_wrap: false,
         auto_namespace: false,
     };
 
@@ -4725,6 +4738,7 @@ fn main() {
         cross_file_type_aliases: Vec::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: cli.cxx_namespace.clone(),
+        crate_namespace_wrap: cli.crate_namespace_wrap,
         auto_namespace: cli.auto_namespace,
     };
 

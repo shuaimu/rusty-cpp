@@ -200,6 +200,21 @@ fn default_cpp_module_symbol_index_version() -> u32 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranspileOptions {
+    /// Enable `CodeGen::set_crate_name` on the `--crate` path (using the module
+    /// name, which IS the crate name there), otherwise hard-coded to `None`.
+    ///
+    /// Setting it enables `wrap_module_purview_in_crate_namespace` — the wrap
+    /// that ALSO requalifies the crate's own qualified self-references (Rules
+    /// 1-5). That distinguishes it from the blunt `--cxx-namespace` textual
+    /// wrap, which does no requalification and leaves a crate referring to
+    /// `control::tag::Tag` from inside the wrap looking for
+    /// `<ns>::control::tag::control::tag::Tag` (272 such errors on hashbrown).
+    ///
+    /// OPT-IN ON PURPOSE: the `--crate` entry points are shared with the
+    /// `alloc` and `path` stdlib ports, which are emitted unwrapped today and
+    /// are green in the parity matrix. Default `None` keeps their emission
+    /// byte-identical.
+    pub crate_namespace_wrap: bool,
     /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
     /// Default is `false`.
     pub by_value_cycle_breaking_prototype: bool,
@@ -679,6 +694,7 @@ fn collect_method_name_uses(
 impl Default for TranspileOptions {
     fn default() -> Self {
         Self {
+            crate_namespace_wrap: false,
             by_value_cycle_breaking_prototype: false,
             is_dependency: false,
             cpp_module_symbol_index: None,
@@ -944,7 +960,11 @@ pub fn transpile_with_type_map_and_extension_hints_and_options(
         module_name,
         type_map,
         extension_method_hints,
-        None,
+        // Was hard-coded `None`, which is why the `--crate` path never got the
+        // requalifying namespace wrap. Opt-in via TranspileOptions so alloc and
+        // path (same entry points, unwrapped, matrix-green) are unaffected.
+        // On this path the module name IS the crate name (main.rs:253 -> :328).
+        if options.crate_namespace_wrap { module_name } else { None },
         options,
     )
 }
