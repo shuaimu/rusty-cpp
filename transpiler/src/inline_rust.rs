@@ -419,13 +419,45 @@ fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> 
     Ok(blocks)
 }
 
-fn render_generated_region(block: &ParsedBlock) -> Result<String, String> {
-    let generated_cpp = transpile_payload_to_cpp(block)?;
+/// Every `enum` declared by ANY inline-Rust block in this file.
+///
+/// Blocks are transpiled one at a time, so a block that merely *uses* an
+/// enum declared in a sibling block has no way to know it is a local
+/// C-like enum. Codegen's CamelCase fallback then guesses it is an
+/// externally-transpiled data enum and emits `E::Variant()` — a call on
+/// an enumerator, which does not compile. In Rust every item in a module
+/// is visible to every other, so feeding the siblings back in via the
+/// existing `cross_file_enums` seam restores the real language rule.
+fn collect_file_enums(blocks: &[ParsedBlock]) -> Vec<syn::ItemEnum> {
+    let mut enums = Vec::new();
+    for block in blocks {
+        let Ok(file) = syn::parse_file(&block.rust_payload_normalized) else {
+            continue;
+        };
+        for item in file.items {
+            if let syn::Item::Enum(item_enum) = item {
+                enums.push(item_enum);
+            }
+        }
+    }
+    enums
+}
+
+fn render_generated_region(
+    block: &ParsedBlock,
+    file_enums: &[syn::ItemEnum],
+) -> Result<String, String> {
+    let generated_cpp = transpile_payload_to_cpp(block, file_enums)?;
     Ok(render_generated_region_with_cpp(block, &generated_cpp))
 }
 
-fn transpile_payload_to_cpp(block: &ParsedBlock) -> Result<String, String> {
+fn transpile_payload_to_cpp(
+    block: &ParsedBlock,
+    file_enums: &[syn::ItemEnum],
+) -> Result<String, String> {
     let options = transpile::TranspileOptions {
+        // Sibling blocks in the same file are this block's module scope.
+        cross_file_enums: file_enums.to_vec(),
         // Inline-rust blocks are spliced into a TU that `import rusty;`, and may
         // sit inside a consumer namespace — suppress the redundant runtime
         // preamble that would otherwise shadow `::rusty`.
@@ -521,10 +553,13 @@ fn render_rust_block(block: &ParsedBlock) -> String {
     out
 }
 
-fn render_block_rewrite(block: &ParsedBlock) -> Result<String, String> {
+fn render_block_rewrite(
+    block: &ParsedBlock,
+    file_enums: &[syn::ItemEnum],
+) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(&render_rust_block(block));
-    out.push_str(&render_generated_region(block)?);
+    out.push_str(&render_generated_region(block, file_enums)?);
     Ok(out)
 }
 
@@ -687,13 +722,15 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
         return Ok(content.to_string());
     }
 
+    let file_enums = collect_file_enums(blocks);
+
     let mut out = String::with_capacity(content.len() + blocks.len() * 128);
     let mut cursor = 0usize;
     let mut dispatch_methods: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     for block in blocks {
         out.push_str(&content[cursor..block.replace_start]);
-        let mut rewritten = render_block_rewrite(block).map_err(|e| {
+        let mut rewritten = render_block_rewrite(block, &file_enums).map_err(|e| {
             format!(
                 "{}:{}: failed to transpile inline block id={}: {}",
                 path.display(),
