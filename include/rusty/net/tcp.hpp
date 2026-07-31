@@ -426,7 +426,9 @@ class TcpStream {
 
     // @safe - Set the socket's non-blocking mode via
     // fcntl(F_GETFL/F_SETFL). Mirrors `std::net::TcpStream::set_nonblocking`.
-    rusty::Result<void, rusty::io::Error> set_nonblocking(bool nonblocking) {
+    // const, matching Rust's `set_nonblocking(&self)` — fcntl on the fd,
+    // no member mutation.
+    rusty::Result<void, rusty::io::Error> set_nonblocking(bool nonblocking) const {
         if (!fd_.is_valid()) {
             return rusty::Result<void, rusty::io::Error>::Err(
                 rusty::io::Error(rusty::io::Error::Kind::InvalidInput,
@@ -541,8 +543,10 @@ class TcpListener {
     // @safe - Accept a single incoming connection. Mirrors
     // `std::net::TcpListener::accept` — returns
     // `(TcpStream, SocketAddrV4)` on success.
+    // const, matching Rust's `accept(&self)`: this reads fd_ and calls
+    // ::accept; the kernel-side state changes, the C++ object does not.
     rusty::Result<std::pair<TcpStream, SocketAddrV4>, rusty::io::Error>
-    accept() {
+    accept() const {
         if (!fd_.is_valid()) {
             return rusty::Err<std::pair<TcpStream, SocketAddrV4>, rusty::io::Error>(
                 rusty::io::Error(rusty::io::Error::Kind::InvalidInput,
@@ -577,7 +581,9 @@ class TcpListener {
 
     // @safe - Set the listener's non-blocking mode. Mirrors
     // `std::net::TcpListener::set_nonblocking`.
-    rusty::Result<void, rusty::io::Error> set_nonblocking(bool nonblocking) {
+    // const, matching Rust's `set_nonblocking(&self)` — fcntl on the fd,
+    // no member mutation.
+    rusty::Result<void, rusty::io::Error> set_nonblocking(bool nonblocking) const {
         if (!fd_.is_valid()) {
             return rusty::Result<void, rusty::io::Error>::Err(
                 rusty::io::Error(rusty::io::Error::Kind::InvalidInput,
