@@ -39546,31 +39546,9 @@ fn an_extern_fn_signature_reaches_the_call_site() {
     // had no declared parameter types and every expected-type rule
     // silently did nothing there.
     //
-    // WARNING — THIS TEST IS GREEN AND THE CLI IS NOT. The identical
-    // source through `rusty-cpp-transpiler t.rs -o t.cppm` still emits
-    // `swap_ctx(a, b)` with no address-of. So `transpile_str` and the
-    // CLI do not run the same collection pipeline, and a passing test
-    // here does NOT establish that the tool does the same thing.
-    //
-    // That divergence is the real bug and it is larger than this
-    // feature: any test written against `transpile_str` may be
-    // describing a pipeline no user invokes. Do not delete this note
-    // when the CLI is fixed — replace it with the reason it now holds.
-    //
-    // NARROWED so far (each tested, not assumed):
-    //   - NOT the crate pipeline: single-file CLI fails too.
-    //   - NOT a scoped-name mismatch, NOT a parameter-name collision.
-    //   - NOT the source: identical text passes here, fails via CLI.
-    //   - `collect_call_arg_pass_styles` runs from `emit_file`, so BOTH
-    //     paths do collect it (mod.rs ~4453).
-    // So the cause is in what the CLI sets and this helper does not:
-    //   `CodeGen::with_type_map(..)` vs `CodeGen::new()`, plus ~20
-    //   `set_*` calls in transpile.rs ~1060-1085 (crate_name,
-    //   auto_namespace, interface_traits, prefer_rusty_unit_alias,
-    //   prefer_rusty_view_aliases, is_dependency, cross_file_*, ...).
-    // TO BISECT: copy this test, swap in `CodeGen::with_type_map`, then
-    // add those setters one at a time until the assertion flips. One
-    // rebuild per few options; the flip identifies the culprit.
+    // Verified end to end through the CLI as well, not just this
+    // helper: `rusty-cpp-transpiler t.rs -o t.cppm` emits
+    // `::swap_ctx(&a, &b)`.
     let out = transpile_str(
         r#"
         #[repr(C)]
