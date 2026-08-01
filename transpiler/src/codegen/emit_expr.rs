@@ -24867,11 +24867,28 @@ impl CodeGen {
             },
             _ => self.emit_closure_destructure_pat_to_string(&pr.pat),
         };
+        // `auto` COPIES. When the pattern binds by reference — `ref` / `ref mut`,
+        // as in hashbrown's `|&mut (ref mut k, ref mut v)|` — the bindings have
+        // to alias the caller's storage. A by-value structured binding lifts the
+        // pair OUT of the hash table, so the user's closure mutates a temporary
+        // copy and the edit never reaches the map: silently wrong, not a compile
+        // error (#179).
+        //
+        // Gated on an EXPLICIT `ref`: a plain `|&mut (a, b)|` over Copy fields
+        // legitimately binds by value, and Rust would reject a move-out for
+        // non-Copy ones, so only the `ref` forms need the reference binding.
+        let mut pat_ref_binding_names = HashSet::new();
+        self.collect_pattern_explicit_ref_binding_names(&pr.pat, &mut pat_ref_binding_names);
+        let binding_decl = if pat_ref_binding_names.is_empty() {
+            "auto"
+        } else {
+            "auto&&"
+        };
         (
             format!("auto&& {}", raw_name),
             Some(format!(
-                "auto {} = rusty::detail::deref_if_pointer_like({});",
-                binding_name, raw_name
+                "{} {} = rusty::detail::deref_if_pointer_like({});",
+                binding_decl, binding_name, raw_name
             )),
         )
     }

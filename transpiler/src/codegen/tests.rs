@@ -38969,3 +38969,107 @@ fn test_bare_uppercase_payload_ident_is_variant_refutation_not_binding() {
         "payload ident must not bind a catch-all local, got:\n{out}"
     );
 }
+
+/// `ref` / `ref mut` bindings in a destructuring `let` are BORROWS — Rust can
+/// never move out of one — but every USE was being wrapped in std::move.
+/// For a `&mut V` closure parameter that does not even compile (an `int32_t&&`
+/// will not bind to `int32_t&`), which is what blocked HashMap::retain.
+///
+/// The declarations were already correct (`const auto&` / `auto&`); only the
+/// use sites were wrong, so assert on the CALL, not on the binding.
+#[test]
+fn test_ref_pattern_let_bindings_are_not_moved_at_use_sites() {
+    let out = transpile_str(
+        r#"
+        pub struct M;
+        impl M {
+            pub fn retain<F>(&mut self, mut f: F)
+            where
+                F: FnMut(&i32, &mut i32) -> bool,
+            {
+                let mut pair = (1i32, 2i32);
+                let &mut (ref key, ref mut value) = &mut pair;
+                if !f(key, value) {
+                    let _ = key;
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("f(key, value)"),
+        "`ref` / `ref mut` let-bindings must be passed as borrows, got:\n{out}"
+    );
+    assert!(
+        !out.contains("f(std::move(key)"),
+        "`ref` binding must not be std::move'd, got:\n{out}"
+    );
+    assert!(
+        !out.contains("std::move(value)"),
+        "`ref mut` binding must not be std::move'd, got:\n{out}"
+    );
+}
+
+/// The silent-wrong half: a closure PARAMETER pattern that binds by reference
+/// (`|&mut (ref k, ref mut v)|` — hashbrown's ExtractIf::next) was lowered to a
+/// BY-VALUE structured binding, lifting the pair out of the hash table so the
+/// user's closure mutated a temporary copy and the edit never reached the map.
+/// Compiles either way, so only an emission assertion catches it.
+#[test]
+fn test_ref_pattern_closure_params_bind_by_reference() {
+    let out = transpile_str(
+        r#"
+        pub struct Inner;
+        impl Inner {
+            pub fn next<F: FnMut(&mut (i32, i32)) -> bool>(&mut self, mut f: F) -> bool {
+                let mut pair = (1i32, 2i32);
+                f(&mut pair)
+            }
+        }
+        pub struct ExtractIf<F> { pub inner: Inner, pub f: F }
+        impl<F: FnMut(&i32, &mut i32) -> bool> ExtractIf<F> {
+            pub fn next(&mut self) -> bool {
+                self.inner.next(|&mut (ref k, ref mut v)| (self.f)(k, v))
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto&& [k, v] ="),
+        "a by-reference closure-param pattern must not copy the payload out, got:\n{out}"
+    );
+    assert!(
+        !out.contains("auto [k, v] ="),
+        "by-value structured binding copies out of the container, got:\n{out}"
+    );
+    assert!(
+        out.contains("(this->f)(k, v)"),
+        "`ref` closure-param bindings must be passed as borrows, got:\n{out}"
+    );
+}
+
+/// Guard the gate: a closure param that binds by VALUE keeps the by-value
+/// structured binding. Rust would reject a move-out for non-Copy fields, and
+/// binding Copy fields by value is correct, so only an explicit `ref` should
+/// switch the emission to a reference.
+#[test]
+fn test_by_value_closure_param_pattern_still_binds_by_value() {
+    let out = transpile_str(
+        r#"
+        pub struct Inner;
+        impl Inner {
+            pub fn go<F: FnMut(&mut (i32, i32)) -> bool>(&mut self, mut f: F) -> bool {
+                let mut pair = (1i32, 2i32);
+                f(&mut pair)
+            }
+        }
+        pub fn run(inner: &mut Inner) -> bool {
+            inner.go(|&mut (a, b)| a < b)
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("auto&& [a, b] ="),
+        "a by-value pattern must not be widened to a reference binding, got:\n{out}"
+    );
+}

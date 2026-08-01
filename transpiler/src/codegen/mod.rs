@@ -29101,6 +29101,32 @@ impl CodeGen {
             self.writeln(&stmt);
         }
 
+        // `ref x` / `ref mut x` bind by BORROW — Rust can never move out of
+        // one. The declarations above already carry the right `const auto&` /
+        // `auto&` prefix, but nothing recorded the borrow, so consuming-argument
+        // emission treated the names as owned values and wrapped every USE in
+        // std::move (#179):
+        //     let &mut (ref key, ref mut value) = &mut pair;
+        //     f(key, value)                 =>  f(std::move(key), std::move(value))
+        // For a `&mut V` parameter that is a hard error (an `int32_t&&` will not
+        // bind to `int32_t&`); where it does compile it silently copies out of
+        // the container instead of borrowing, so the callee mutates a temporary
+        // and the change never reaches the map (hashbrown's ExtractIf::next).
+        //
+        // Registered on local_reference_bindings rather than the type map
+        // because a destructuring `let` usually records NO type at all — the
+        // initializer below infers nothing for a plain tuple local, which is why
+        // should_insert_move's type-keyed borrowed-binding guard never fired.
+        // local_reference_bindings is pushed/popped at block boundaries, so this
+        // stays correctly scoped.
+        let mut ref_binding_names = HashSet::new();
+        self.collect_pattern_explicit_ref_binding_names(pat, &mut ref_binding_names);
+        if let Some(scope) = self.local_reference_bindings.last_mut() {
+            for name in ref_binding_names {
+                scope.insert(name);
+            }
+        }
+
         if let Some(value_ty) = self.infer_local_binding_type_from_initializer(init_expr) {
             let mut env = HashMap::new();
             self.bind_pattern_types_into_env(pat, &value_ty, &mut env);
@@ -43077,6 +43103,22 @@ impl CodeGen {
 
 
     fn bind_closure_params_for_emission(&mut self, closure: &syn::ExprClosure) {
+        // `ref` / `ref mut` bindings in a closure PARAMETER pattern borrow the
+        // argument, so uses of them inside the body must not be std::move'd out
+        // of the caller's storage. Registered here, before the body is emitted,
+        // because this runs on the body-local emitter (#179).
+        let mut ref_binding_names = HashSet::new();
+        for input in &closure.inputs {
+            self.collect_pattern_explicit_ref_binding_names(input, &mut ref_binding_names);
+        }
+        if !ref_binding_names.is_empty() {
+            if let Some(scope) = self.local_reference_bindings.last_mut() {
+                scope.extend(ref_binding_names);
+            } else {
+                self.local_reference_bindings.push(ref_binding_names);
+            }
+        }
+
         // Declared impl-Fn param types (extracted from the callee's Fn-trait
         // bound) type EVERY param; they outrank the single-param map-input
         // hint below.

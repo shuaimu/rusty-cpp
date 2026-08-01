@@ -3919,6 +3919,22 @@ impl CodeGen {
                     return false;
                 }
 
+                // A `ref` / `ref mut` pattern binding, or a local bound to a
+                // reference, is a BORROW. Rust can never move out of one, and
+                // moving it in C++ either fails to bind (an `int32_t&&` will not
+                // bind to a `&mut i32` parameter's `int32_t&`) or silently
+                // copies the referent where Rust copied only the borrow.
+                //
+                // Checked BEFORE the type-keyed guard below because that guard
+                // only fires when a type was recorded, and destructuring `let`s
+                // frequently record none at all — which is exactly why #179
+                // survived three earlier attempts aimed at the type map.
+                if self.is_pattern_ref_binding_in_scope(&name)
+                    || self.is_local_reference_binding_in_scope(&name)
+                {
+                    return false;
+                }
+
                 // Borrowed bindings (`&T` / `&mut T`) should not be moved.
                 if let Some(local_ty) = self.lookup_local_binding_type(&name) {
                     if matches!(
