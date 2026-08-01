@@ -53,7 +53,7 @@ cp $RUSTSRC/string.rs /tmp/string_port/string_crate/src/lib.rs
 cp docs/string_port/Cargo.toml.template /tmp/string_port/string_crate/Cargo.toml
 bash docs/binary_heap_port/prep.sh /tmp/string_port/string_crate/src/lib.rs
 ./target/release/rusty-cpp-transpiler --crate /tmp/string_port/string_crate/Cargo.toml \
-    --output-dir /tmp/string_port/cpp_out --auto-namespace
+    --output-dir /tmp/string_port/cpp_out --auto-namespace --in-umbrella-closure
 cp /tmp/string_port/cpp_out/*.cppm transpiled/string_port/
 ```
 

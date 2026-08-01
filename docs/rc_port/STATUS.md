@@ -74,7 +74,7 @@ cp $RUSTSRC/rc.rs /tmp/rc_port/rc_crate/src/lib.rs
 cp docs/rc_port/Cargo.toml.template /tmp/rc_port/rc_crate/Cargo.toml
 bash docs/rc_port/prep.sh /tmp/rc_port/rc_crate/src/lib.rs
 ./target/release/rusty-cpp-transpiler --crate /tmp/rc_port/rc_crate/Cargo.toml \
-    --output-dir /tmp/rc_port/cpp_out --auto-namespace
+    --output-dir /tmp/rc_port/cpp_out --auto-namespace --in-umbrella-closure
 cp /tmp/rc_port/cpp_out/*.cppm transpiled/rc_port/
 python3 docs/rc_port/post_transpile_patch.py transpiled/rc_port/
 ```

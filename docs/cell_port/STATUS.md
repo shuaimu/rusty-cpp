@@ -77,7 +77,7 @@ cp $RUSTSRC/cell.rs /tmp/cell_port/cell_crate/src/lib.rs
 cp docs/cell_port/Cargo.toml.template /tmp/cell_port/cell_crate/Cargo.toml
 bash docs/cell_port/prep.sh /tmp/cell_port/cell_crate/src/lib.rs
 ./target/release/rusty-cpp-transpiler --crate /tmp/cell_port/cell_crate/Cargo.toml \
-    --output-dir /tmp/cell_port/cpp_out --auto-namespace
+    --output-dir /tmp/cell_port/cpp_out --auto-namespace --in-umbrella-closure
 cp /tmp/cell_port/cpp_out/*.cppm transpiled/cell_port/
 python3 docs/cell_port/post_transpile_patch.py transpiled/cell_port/
 cmake --build build_cell --target cell_port_module_test.out

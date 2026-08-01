@@ -30,7 +30,7 @@ cp $RUSTSRC/sync.rs /tmp/arc_port/arc_crate/src/lib.rs
 cp docs/arc_port/Cargo.toml.template /tmp/arc_port/arc_crate/Cargo.toml
 bash docs/arc_port/prep.sh /tmp/arc_port/arc_crate/src/lib.rs
 ./target/release/rusty-cpp-transpiler --crate /tmp/arc_port/arc_crate/Cargo.toml \
-    --output-dir /tmp/arc_port/cpp_out --auto-namespace
+    --output-dir /tmp/arc_port/cpp_out --auto-namespace --in-umbrella-closure
 cp /tmp/arc_port/cpp_out/*.cppm transpiled/arc_port/
 ```
 

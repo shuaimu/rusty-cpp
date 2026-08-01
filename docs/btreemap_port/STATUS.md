@@ -1588,7 +1588,7 @@ EOF
 
 # 4. Transpile.
 target/debug/rusty-cpp-transpiler --crate /tmp/btree_port/btree_crate/Cargo.toml \
-   --output-dir /tmp/btree_port/cpp_out
+   --output-dir /tmp/btree_port/cpp_out --in-umbrella-closure
 
 # 5. Build.
 cd /tmp/btree_port/cpp_out
