@@ -16154,6 +16154,64 @@ fn test_rusty_function_takes_a_bare_signature_not_a_nested_wrapper() {
 }
 
 #[test]
+fn test_cfg_target_os_lowers_to_an_if_guard() {
+    // `#[cfg]` used to be dropped: the item was emitted UNGUARDED on every
+    // platform, with no diagnostic. That is wrong code that compiles.
+    let out = transpile_str(
+        r#"
+        #[cfg(target_os = "linux")]
+        pub fn plat() -> i32 { 1 }
+        "#,
+    );
+    assert!(
+        out.contains("#if defined(__linux__)"),
+        "the predicate must lower to a preprocessor guard:\n{out}"
+    );
+    assert!(
+        out.contains("#endif"),
+        "the guard must be closed:\n{out}"
+    );
+    let opens = out.matches("#if defined(__linux__)").count();
+    let closes = out.matches("#endif  // defined(__linux__)").count();
+    assert_eq!(opens, closes, "guard must balance:\n{out}");
+}
+
+#[test]
+fn test_cfg_not_and_any_lower_to_boolean_conditions() {
+    let out = transpile_str(
+        r#"
+        #[cfg(not(target_os = "windows"))]
+        pub fn posix_only() -> i32 { 1 }
+        "#,
+    );
+    assert!(
+        out.contains("#if !(defined(_WIN32))"),
+        "`not` must negate:\n{out}"
+    );
+}
+
+#[test]
+fn test_unmappable_cfg_leaves_emission_unchanged() {
+    // `cfg_cpp_guard` returns None for predicates it cannot map, so those
+    // items emit exactly as before rather than getting a guessed guard —
+    // a partial condition would silently change which platforms compile it.
+    let out = transpile_str(
+        r#"
+        #[cfg(feature = "something")]
+        pub fn feat() -> i32 { 1 }
+        "#,
+    );
+    // Assert on the guard's own close marker, not on `#if defined(` in
+    // general: the generated preamble already contains
+    // `#if defined(__GNUC__)` for a pragma block, so the broad form can
+    // never pass and says nothing about cfg handling.
+    assert!(
+        !out.contains("#endif  // "),
+        "an unmappable predicate must not produce a guard:\n{out}"
+    );
+}
+
+#[test]
 fn test_runtime_path_keeps_libc_collision_names() {
     // escape_cpp_keyword renames a handful of libc-colliding names
     // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function

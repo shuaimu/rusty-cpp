@@ -277,9 +277,11 @@ impl CodeGen {
                 return;
             }
         }
-        // Skip #[cfg(test)] functions in non-test output
-        // (they'll be emitted separately as test cases)
-
+        // A `#[cfg(target_os = ...)]` / `target_arch` predicate lowers to the
+        // matching `#if`. Without this the item was emitted UNGUARDED on every
+        // platform -- the attribute was neither honoured nor reported, which is
+        // wrong code that compiles. `cfg_cpp_guard` returns None for anything it
+        // cannot map, leaving emission exactly as before.
         // Anchor for relocated local trait-adapter specializations: they must
         // be DEFINED before the first function body that materializes one at
         // a `&dyn Trait` call site (see emit_local_trait_adapter_specializations).
@@ -290,6 +292,14 @@ impl CodeGen {
         if self.is_rust_libtest_main(f) {
             self.writeln("// Rust-only libtest main omitted");
             return;
+        }
+
+        // Opened AFTER the early returns above so there is exactly ONE exit
+        // path left to close it on. An unbalanced `#if` would break every
+        // downstream TU, so the open must not sit above a `return`.
+        let cfg_guard = Self::cfg_cpp_guard(&f.attrs);
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#if {}", cond));
         }
 
         // Phase 4a (inference engine plumbing — see
@@ -810,6 +820,9 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#endif  // {}", cond));
+        }
     }
 
     pub(super) fn emit_foreign_mod(&mut self, fm: &syn::ItemForeignMod) {
