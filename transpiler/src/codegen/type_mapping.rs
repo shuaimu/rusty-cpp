@@ -124,10 +124,28 @@ impl CodeGen {
         let syn::Type::Path(tp) = ty else {
             return false;
         };
-        tp.path
-            .segments
-            .last()
-            .is_some_and(|seg| Self::is_pointer_like_autoderef_owner_name(&seg.ident.to_string()))
+        let Some(seg) = tp.path.segments.last() else {
+            return false;
+        };
+        let name = seg.ident.to_string();
+        if Self::is_pointer_like_autoderef_owner_name(&name) {
+            return true;
+        }
+        // Resolve one hop through a C++ `using X = Y;` from the surrounding
+        // TU. Matching the last path segment BY NAME cannot see that mako's
+        // `WeakClientConnection` is a `rusty::sync::Weak<..>`, which left the
+        // closure-mutability analysis inert on exactly the captures it
+        // targets. One hop is deliberate: alias chains are rare here, and an
+        // unbounded walk would need cycle detection for no practical gain.
+        self.cpp_type_aliases
+            .get(&name)
+            .is_some_and(|target| {
+                // `rusty::sync::Weak<ClientConnection>` -> owner name `Weak`
+                let head = target.split('<').next().unwrap_or(target);
+                head.rsplit("::")
+                    .next()
+                    .is_some_and(|owner| Self::is_pointer_like_autoderef_owner_name(owner.trim()))
+            })
     }
 
     pub(super) fn type_has_drop_impl(&self, type_name: &str) -> bool {

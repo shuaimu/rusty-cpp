@@ -4109,6 +4109,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     }
     let transpile_options = transpile::TranspileOptions {
+        cpp_type_aliases: std::collections::HashMap::new(),
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         is_dependency: false,
         cpp_module_symbol_index,
@@ -4704,6 +4705,7 @@ fn main() {
         }
     };
     let transpile_options = transpile::TranspileOptions {
+        cpp_type_aliases: std::collections::HashMap::new(),
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
         is_dependency: false,
         cpp_module_symbol_index,

@@ -886,6 +886,8 @@ pub struct CodeGen {
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     pub(crate) local_declared_types: HashSet<String>,
+    /// C++ `using X = Y;` aliases from the surrounding TU (inline-rust mode).
+    pub(crate) cpp_type_aliases: HashMap<String, String>,
     /// Ambient scope for module-dependency collection (`order_items_for_emission`
     /// topo sort): while collecting edges for root module X, holds X's name plus
     /// the type and nested-module names declared anywhere in X's subtree. Names
@@ -1942,6 +1944,7 @@ impl CodeGen {
             user_deref_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
+            cpp_type_aliases: HashMap::new(),
             module_dep_scope: std::cell::RefCell::new(None),
             split_deferred_extension_scopes: std::cell::RefCell::new(HashSet::new()),
             iflet_hint_scrutinees: std::cell::RefCell::new(Vec::new()),
@@ -3983,6 +3986,12 @@ impl CodeGen {
     ) {
         self.name_resolver
             .set_external_crate_aliases(external_crate_module_aliases);
+    }
+
+    /// C++ `using X = Y;` aliases from the TU an inline-rust block is
+    /// spliced into (see `TranspileOptions::cpp_type_aliases`).
+    pub fn set_cpp_type_aliases(&mut self, cpp_type_aliases: HashMap<String, String>) {
+        self.cpp_type_aliases = cpp_type_aliases;
     }
 
     pub fn set_use_import_std_in_modules(&mut self, enabled: bool) {

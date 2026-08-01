@@ -211,6 +211,12 @@ pub struct TranspileOptions {
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
+    /// C++ `using X = Y;` aliases from the translation unit an inline-rust
+    /// block is spliced into. Lets type predicates see through a C++ alias
+    /// to the underlying rusty type (`WeakClientConnection` ->
+    /// `rusty::sync::Weak<..>`), which name-based matching cannot do.
+    /// Empty outside inline-rust mode.
+    pub cpp_type_aliases: HashMap<String, String>,
     /// UFCS cross-crate (book § 3.2.7): when set, write a `UfcsTraitManifest`
     /// JSON here after emission (records this crate's declared traits + the
     /// actually-emitted `<Tr>_::m` owner map). No-op unless a path is set.
@@ -699,6 +705,7 @@ impl Default for TranspileOptions {
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             external_crate_module_aliases: HashMap::new(),
+            cpp_type_aliases: HashMap::new(),
             emit_ufcs_trait_manifest_path: None,
             dependency_ufcs_trait_manifests: Vec::new(),
             use_import_std_in_modules: false,
@@ -1068,6 +1075,7 @@ pub fn transpile_full_with_options(
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
+    codegen.set_cpp_type_aliases(options.cpp_type_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
     codegen.set_auto_namespace(options.auto_namespace);
