@@ -428,6 +428,42 @@ fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> 
 /// an enumerator, which does not compile. In Rust every item in a module
 /// is visible to every other, so feeding the siblings back in via the
 /// existing `cross_file_enums` seam restores the real language rule.
+/// Collect C++ `using X = Y;` alias declarations from the surrounding
+/// translation unit.
+///
+/// The DSL blocks are spliced into a real C++ file, and that file's
+/// aliases are part of the context the block is written against. mako
+/// spells its captures `WeakClientConnection`, a `using` alias for
+/// `rusty::sync::Weak<ClientConnection>`; without the alias the
+/// pointer-like predicate matches the last path segment by NAME, sees
+/// "WeakClientConnection", and cannot tell it is a Weak. That made the
+/// closure-mutability analysis inert on exactly the code it exists for.
+///
+/// Deliberately a line scanner, not a C++ parser: it recognises the one
+/// shape that matters (`using NAME = TARGET;` on one line) and ignores
+/// everything else. A missed alias degrades to today's behaviour.
+fn collect_cpp_type_aliases(content: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in content.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("using ") else {
+            continue;
+        };
+        let Some((name, target)) = rest.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let target = target.trim().trim_end_matches(';').trim();
+        // `using X = Y;` only — skip `using namespace N;` and
+        // using-DECLARATIONS (`using rusty::foo;`), which have no `=`.
+        if name.is_empty() || target.is_empty() || name.contains(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            continue;
+        }
+        out.insert(name.to_string(), target.to_string());
+    }
+    out
+}
+
 fn collect_file_enums(blocks: &[ParsedBlock]) -> Vec<syn::ItemEnum> {
     let mut enums = Vec::new();
     for block in blocks {
@@ -446,18 +482,23 @@ fn collect_file_enums(blocks: &[ParsedBlock]) -> Vec<syn::ItemEnum> {
 fn render_generated_region(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
+    cpp_aliases: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
-    let generated_cpp = transpile_payload_to_cpp(block, file_enums)?;
+    let generated_cpp = transpile_payload_to_cpp(block, file_enums, cpp_aliases)?;
     Ok(render_generated_region_with_cpp(block, &generated_cpp))
 }
 
 fn transpile_payload_to_cpp(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
+    cpp_aliases: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     let options = transpile::TranspileOptions {
         // Sibling blocks in the same file are this block's module scope.
         cross_file_enums: file_enums.to_vec(),
+        // Surrounding-TU `using` aliases, so pointer-like detection can see
+        // through `WeakClientConnection` to `rusty::sync::Weak<..>`.
+        cpp_type_aliases: cpp_aliases.clone(),
         // Inline-rust blocks are spliced into a TU that `import rusty;`, and may
         // sit inside a consumer namespace — suppress the redundant runtime
         // preamble that would otherwise shadow `::rusty`.
@@ -556,10 +597,11 @@ fn render_rust_block(block: &ParsedBlock) -> String {
 fn render_block_rewrite(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
+    cpp_aliases: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(&render_rust_block(block));
-    out.push_str(&render_generated_region(block, file_enums)?);
+    out.push_str(&render_generated_region(block, file_enums, cpp_aliases)?);
     Ok(out)
 }
 
@@ -723,6 +765,7 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
     }
 
     let file_enums = collect_file_enums(blocks);
+    let cpp_aliases = collect_cpp_type_aliases(content);
 
     let mut out = String::with_capacity(content.len() + blocks.len() * 128);
     let mut cursor = 0usize;
@@ -730,7 +773,7 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
         std::collections::BTreeSet::new();
     for block in blocks {
         out.push_str(&content[cursor..block.replace_start]);
-        let mut rewritten = render_block_rewrite(block, &file_enums).map_err(|e| {
+        let mut rewritten = render_block_rewrite(block, &file_enums, &cpp_aliases).map_err(|e| {
             format!(
                 "{}:{}: failed to transpile inline block id={}: {}",
                 path.display(),
@@ -954,5 +997,33 @@ fn add(a: i32, b: i32) -> i32 {
         let dup = format!("{}\n{}", single, single);
         let err = parse_blocks(Path::new("dup.hpp"), &dup).expect_err("duplicate should fail");
         assert!(err.contains("duplicate inline block id=demo.add"));
+    }
+}
+
+
+#[cfg(test)]
+mod cpp_alias_tests {
+    use super::collect_cpp_type_aliases;
+
+    #[test]
+    fn scans_using_alias_declarations() {
+        let src = r#"
+namespace rrr {
+using WeakClientConnection = rusty::sync::Weak<ClientConnection>;
+using OnFrameCallback = detail::CallbackWrapper<void(const ChannelFrame&) const>;
+using namespace Serialize_;
+using rusty::sync::atomic::Ordering;
+}
+"#;
+        let m = collect_cpp_type_aliases(src);
+        assert_eq!(
+            m.get("WeakClientConnection").map(String::as_str),
+            Some("rusty::sync::Weak<ClientConnection>")
+        );
+        assert!(m.contains_key("OnFrameCallback"));
+        // `using namespace N;` and using-DECLARATIONS have no `=` and must
+        // not be mistaken for aliases.
+        assert!(!m.contains_key("namespace"));
+        assert_eq!(m.len(), 2, "only the two `using X = Y;` forms: {m:?}");
     }
 }
