@@ -16128,6 +16128,32 @@ fn test_use_of_a_rusty_runtime_path_emits_a_real_using_declaration() {
 }
 
 #[test]
+fn test_rusty_function_takes_a_bare_signature_not_a_nested_wrapper() {
+    // rusty::Function is parameterised by a SIGNATURE. Mapping its argument
+    // with the ordinary rules produced rusty::Function<std::function<void()>>
+    // -- a different type that still COMPILES, so the error was invisible in
+    // the GEN block. Rust's Fn/FnMut split carries const-callability.
+    let out = transpile_str(
+        r#"
+        type Cb = rusty::Function<dyn FnMut()>;
+        type ConstCb = rusty::Function<dyn Fn(i32, i32)>;
+        "#,
+    );
+    assert!(
+        out.contains("using Cb = rusty::Function<void()>;"),
+        "FnMut lowers to a non-const bare signature:\n{out}"
+    );
+    assert!(
+        out.contains("using ConstCb = rusty::Function<void(int32_t, int32_t) const>;"),
+        "Fn is callable through &self, so it lowers const-qualified:\n{out}"
+    );
+    assert!(
+        !out.contains("std::function"),
+        "no wrapper may be nested inside rusty::Function:\n{out}"
+    );
+}
+
+#[test]
 fn test_runtime_path_keeps_libc_collision_names() {
     // escape_cpp_keyword renames a handful of libc-colliding names
     // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function
