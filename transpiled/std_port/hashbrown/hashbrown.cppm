@@ -7295,8 +7295,8 @@ return f(std::move(acc), std::move(v));
 
         rusty::Option<Item> next() {
             return this->inner.next([&](auto&& _closure_ref_param0) {
-auto [k, v] = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
-return (this->f)(std::move(k), std::move(v));
+auto&& [k, v] = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
+return (this->f)(k, v);
 });
         }
         std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
@@ -7623,7 +7623,7 @@ return std::move(val);
                     auto&& _let_pat = item.as_mut();
                     const auto& key = std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_pat)));
                     auto& value = std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_pat)));
-                    if (!f(std::move(key), std::move(value))) {
+                    if (!f(key, value)) {
                         this->table.erase(std::move(item));
                     }
                 }
@@ -8154,7 +8154,7 @@ return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_po
         }
         template<typename F>
         V& or_insert_with_key(F default_) {
-            return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> V& { auto value = default_(std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.key); }) { return (__r.key); } else if constexpr (requires { (__r.key_field); }) { return (__r.key_field); } else if constexpr (requires { ((*__r).key); }) { return ((*__r).key); } else { return ((*__r).key_field); } }(entry)));
+            return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> V& { auto value = default_([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.key); }) { return (__r.key); } else if constexpr (requires { (__r.key_field); }) { return (__r.key_field); } else if constexpr (requires { ((*__r).key); }) { return ((*__r).key); } else { return ((*__r).key_field); } }(entry));
 return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
         }
         const Q& key() const {
@@ -8640,8 +8640,8 @@ return std::move(k);
 
         rusty::Option<Item> next() {
             return this->inner.next([&](auto&& _closure_ref_param0) {
-auto [k, _] = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
-return (this->f)(std::move(k));
+auto&& [k, _] = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
+return (this->f)(k);
 }).map([&](auto&& _destruct_param0) -> Item {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
@@ -10408,7 +10408,7 @@ namespace control::tag {
 
 namespace control::tag {
         constexpr Tag Tag::full(uint64_t hash) {
-            constexpr size_t MIN_HASH_LEN = (rusty::mem::size_of<size_t>() < rusty::mem::size_of<uint64_t>() ? rusty::mem::size_of<size_t>() : rusty::mem::size_of<uint64_t>());
+            static constexpr size_t MIN_HASH_LEN = (rusty::mem::size_of<size_t>() < rusty::mem::size_of<uint64_t>() ? rusty::mem::size_of<size_t>() : rusty::mem::size_of<uint64_t>());
             const auto top7 = rusty::detail::deref_if_pointer_like(hash) >> (((rusty::detail::deref_if_pointer_like(MIN_HASH_LEN) * 8) - 7));
             return Tag(static_cast<uint8_t>((rusty::detail::deref_if_pointer_like(top7) & 127)));
         }

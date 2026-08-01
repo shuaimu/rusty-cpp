@@ -5964,7 +5964,8 @@ namespace collections {
             export template<typename K, typename V>
             struct Iter {
                 using Item = std::tuple<const K&, const V&>;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::Iter<K, V> base;
@@ -6018,7 +6019,8 @@ namespace collections {
             export template<typename K, typename V>
             struct IterMut {
                 using Item = std::tuple<const K&, V&>;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::IterMut<K, V> base;
@@ -6071,7 +6073,8 @@ namespace collections {
                 requires (rusty::alloc::Allocator<A>)
             struct IntoIter {
                 using Item = std::tuple<K, V>;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::IntoIter<K, V, A> base;
@@ -6123,7 +6126,8 @@ namespace collections {
             export template<typename K, typename V>
             struct Keys {
                 using Item = const K&;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 Iter<K, V> inner;
@@ -6181,7 +6185,8 @@ return f(std::move(acc), std::move(k));
             export template<typename K, typename V>
             struct Values {
                 using Item = const V&;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 Iter<K, V> inner;
@@ -6240,7 +6245,8 @@ return f(std::move(acc), std::move(v));
                 requires (rusty::alloc::Allocator<A>)
             struct Drain {
                 using Item = std::tuple<K, V>;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::Drain<K, V, A> base;
@@ -6319,7 +6325,8 @@ return f(std::move(acc), std::move(v));
             export template<typename K, typename V>
             struct ValuesMut {
                 using Item = V&;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 IterMut<K, V> inner;
@@ -7166,7 +7173,8 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
             export template<typename K>
             struct Iter {
                 using Item = const K&;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::Iter<K> base;
@@ -7220,7 +7228,8 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 requires (rusty::alloc::Allocator<A>)
             struct IntoIter {
                 using Item = K;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::IntoIter<K, A> base;
@@ -7269,7 +7278,8 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 requires (rusty::alloc::Allocator<A>)
             struct Drain {
                 using Item = K;
-                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::Drain<K, A> base;
@@ -7804,10 +7814,8 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 requires (rusty::alloc::Allocator<A>)
             struct Intersection {
                 using Item = const T&;
-                // Range-for over this view (`for (auto& v : a.intersection(b))`).
-                // Rust-shaped iterators expose next(); C++ range-for needs
-                // begin()/end(). Members, not free fns: ADL for this type
-                // reaches rusty::alloc (allocator arg), never rusty.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 Iter<T> iter;
@@ -7866,10 +7874,8 @@ if (rusty::contains(this->other, std::move(elt))) {
                 requires (rusty::alloc::Allocator<A>)
             struct Difference {
                 using Item = const T&;
-                // Range-for over this view (`for (auto& v : a.intersection(b))`).
-                // Rust-shaped iterators expose next(); C++ range-for needs
-                // begin()/end(). Members, not free fns: ADL for this type
-                // reaches rusty::alloc (allocator arg), never rusty.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 Iter<T> iter;
@@ -7928,10 +7934,8 @@ if (rusty::contains(this->other, std::move(elt))) {
                 requires (rusty::alloc::Allocator<A>)
             struct SymmetricDifference {
                 using Item = const T&;
-                // Range-for over this view (`for (auto& v : a.intersection(b))`).
-                // Rust-shaped iterators expose next(); C++ range-for needs
-                // begin()/end(). Members, not free fns: ADL for this type
-                // reaches rusty::alloc (allocator arg), never rusty.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 rusty::Chain<Difference<T, S, A>, Difference<T, S, A>> iter;
@@ -7976,10 +7980,8 @@ if (rusty::contains(this->other, std::move(elt))) {
                 requires (rusty::alloc::Allocator<A>)
             struct Union {
                 using Item = const T&;
-                // Range-for over this view (`for (auto& v : a.intersection(b))`).
-                // Rust-shaped iterators expose next(); C++ range-for needs
-                // begin()/end(). Members, not free fns: ADL for this type
-                // reaches rusty::alloc (allocator arg), never rusty.
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
                 rusty::Chain<Iter<T>, Difference<T, S, A>> iter;

@@ -190,19 +190,30 @@ static void test_lots_of_insertions_drops() {
     std::printf("  test_lots_of_insertions_drops ok\n");
 }
 
-// map/tests.rs::test_retain — DISABLED, and the reason is a real shipped bug.
-// std_port's retain() bottoms out in hashbrown.cppm:7626, which emits
-//     if (!f(std::move(key), std::move(value)))
-// for Rust's `let &mut (ref key, ref mut value)`. `std::move(value)` yields
-// `V&&`, which will not bind to the `V&` a retain predicate takes, so
-// HashMap::retain does not compile at all on the shipped path.
-//
-// That is bug #179 — fixed in the EMITTER today (fefdffe0); the vendored
-// std_port/hashbrown.cppm simply predates the fix and needs regenerating.
-// Re-enable this test once the port is regenerated; it is the regression guard.
-#if 0
-static void test_retain_drops() { /* see above */ }
-#endif
+// map/tests.rs::test_retain — retain drops exactly the rejected half.
+// This was DISABLED because std_port's retain() did not compile at all:
+// hashbrown.cppm:7626 emitted `f(std::move(key), std::move(value))` for Rust's
+// `let &mut (ref key, ref mut value)`, and a `V&&` will not bind to the `V&` a
+// retain predicate takes. That is bug #179, fixed in the emitter (fefdffe0);
+// this test came back when the port was regenerated to pick the fix up.
+static void test_retain_drops() {
+    const size_t N = 100;
+    reset_drops(N);
+    {
+        auto m = HMap<size_t, Droppable>::new_();
+        for (size_t i = 0; i < N; ++i) m.insert(i, Droppable(i));
+        CHECK(all_slots(0, N, 1));
+
+        m.retain([](const size_t& k, Droppable&) { return k % 2 == 0; });
+        CHECK(m.len() == N / 2);
+        // Exactly the rejected half is destroyed; the kept half survives.
+        for (size_t i = 0; i < N; ++i) {
+            CHECK(DROP_VECTOR[i] == (i % 2 == 0 ? 1 : 0));
+        }
+    }
+    CHECK(all_slots(0, N, 0));
+    std::printf("  test_retain_drops ok\n");
+}
 
 // map/tests.rs::test_reserve_shrink_to_fit — capacity churn must not disturb
 // element ownership.
@@ -241,6 +252,7 @@ int main() {
     test_clone_independence();
     test_insert_overwrite_drops();
     test_lots_of_insertions_drops();
+    test_retain_drops();
     test_reserve_drops();
     std::printf("std_port HashMap drop/ownership: all checks passed\n");
     return 0;
