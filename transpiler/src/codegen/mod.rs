@@ -58797,6 +58797,47 @@ fn count_var_uses_in_expr(expr: &syn::Expr, counts: &mut std::collections::HashM
     }
 }
 
+/// Locals that appear as the RECEIVER of a method call anywhere in the
+/// block (`x.foo(..)`, including through parens/groups).
+///
+/// Used by the closure-mutability analysis: a `move` closure only needs
+/// `mutable` if its body can modify a capture, and a method call is the
+/// case a reassignment scan misses (`v.push(1)` mutates without assigning).
+/// Deliberately conservative — it does not ask whether the method takes
+/// `&mut self`, because that needs the receiver's type resolved, and
+/// guessing wrong here produces a lambda that will not convert to a
+/// const-callable target. Over-reporting only costs a redundant `mutable`.
+fn collect_method_receiver_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+    use syn::visit::Visit;
+    struct Recv(std::collections::HashSet<String>);
+    impl<'ast> Visit<'ast> for Recv {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let mut recv: &syn::Expr = &node.receiver;
+            loop {
+                match recv {
+                    syn::Expr::Paren(p) => recv = &p.expr,
+                    syn::Expr::Group(g) => recv = &g.expr,
+                    syn::Expr::Reference(r) => recv = &r.expr,
+                    syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => recv = &u.expr,
+                    _ => break,
+                }
+            }
+            if let syn::Expr::Path(p) = recv
+                && p.qself.is_none()
+                && let Some(id) = p.path.get_ident()
+            {
+                self.0.insert(id.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut v = Recv(std::collections::HashSet::new());
+    for stmt in stmts {
+        v.visit_stmt(stmt);
+    }
+    v.0
+}
+
 fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
     let mut result = std::collections::HashSet::new();
     for stmt in stmts {
