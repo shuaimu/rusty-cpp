@@ -73,30 +73,37 @@ static bool all_slots(size_t lo, size_t hi, int want) {
     return true;
 }
 
-// map/tests.rs::test_drops — DISABLED: this test FOUND bug #186 and is its
-// regression guard.
+// map/tests.rs::test_drops — insert 100, remove 50, verify accounting at each
+// stage, then let the map die and verify EVERY slot returns to 0.
 //
-// std_port's HashMap::remove() SKIPS THE DESTRUCTOR of the vacated table slot.
-// rusty::ptr::read (ptr.hpp:514) is `return std::move(*src);` — a move-CONSTRUCT
-// leaving a live moved-from husk — whereas Rust's ptr::read RELOCATES (source
-// logically dead, never dropped). The erase path then marks the slot empty and
-// never destroys the husk: exactly one skipped destructor per remove().
-//
-// NOT a heap leak, and it was mis-filed as one at first. Measured with a type
-// holding `new int` whose move ctor nulls its source:
-//     10 inserts, map dropped : live_allocs=0  OK
-//     10 inserts + 10 removes : live_allocs=0  OK
-// For any type that empties its source on move (String, Vec, Box, unique_ptr)
-// nothing is lost. It bites types whose destructor has effects independent of
-// moved-from state — counters, RAII unlock/close/log — which is exactly what
-// the Droppable accounting below detects.
-//
-// Isolation: insert / map-drop / clear() / overwrite are all CORRECT; only
-// remove() is affected. Re-enable once #186 is fixed — this asserts the
-// correct behaviour and will pass then.
-#if 0
-static void test_drops() { /* see above */ }
-#endif
+// This test FOUND bug #186 (erase paths skipped the husk destructor, one per
+// removed element, across every port) and is now its regression guard. Fixed by
+// giving rusty::ptr::read relocate semantics for non-trivially-destructible T.
+static void test_drops() {
+    reset_drops(200);
+    {
+        auto m = HMap<size_t, Droppable>::new_();
+        CHECK(all_slots(0, 200, 0));
+
+        for (size_t i = 0; i < 100; ++i) {
+            m.insert(i, Droppable(i + 100));
+        }
+        CHECK(all_slots(100, 200, 1));
+
+        for (size_t i = 0; i < 50; ++i) {
+            auto removed = m.remove(i);
+            CHECK(removed.is_some());
+            // `removed` owns the value; the vacated slot must NOT still hold one.
+            CHECK(DROP_VECTOR[i + 100] == 1);
+        }
+        CHECK(m.len() == 50);
+        CHECK(all_slots(100, 150, 0));
+        CHECK(all_slots(150, 200, 1));
+    }
+    // Nothing may leak (1) and nothing may double-drop (<0).
+    CHECK(all_slots(0, 200, 0));
+    std::printf("  test_drops ok\n");
+}
 
 // map/tests.rs::test_into_iter_drops — DISABLED: HashMap::into_iter() does not
 // compile AT ALL on the shipped path, for any element type.
@@ -230,6 +237,7 @@ static void test_reserve_drops() {
 }
 
 int main() {
+    test_drops();
     test_clone_independence();
     test_insert_overwrite_drops();
     test_lots_of_insertions_drops();

@@ -510,17 +510,46 @@ inline Option<T&> as_mut(T* ptr) {
     return Option<T&>(*ptr);
 }
 
+// Rust's `ptr::read` RELOCATES: it copies the bytes out and the source becomes
+// logically uninitialized — it is never dropped. C++ has no such move; a
+// move-CONSTRUCT leaves a live moved-from husk at the source that still owes a
+// destructor call. Transpiled erase paths mirror Rust faithfully (read the
+// element out, mark the slot dead, never destroy it), so before this the husk's
+// destructor was simply skipped — one per removed element, across every port:
+//     HashMap::remove  1 per call      Vec::pop  1 per call
+//     Vec::remove(0)   many (shifting) — see task #186
+// No heap leak for types that empty their source on move (String, Vec, Box,
+// unique_ptr), but a silently skipped destructor for anything whose destructor
+// has effects independent of moved-from state (refcounts, RAII unlock/close/
+// log), and a lifetime that ends without a destructor either way.
+//
+// So: end the husk's lifetime here, which is what Rust's semantics mean.
+//
+// GATED ON NON-TRIVIAL DESTRUCTIBILITY, and that gate is load-bearing. Several
+// call sites read the SAME source twice —
+//     auto self1 = ptr::read(&(*this));   // btree_internal.cppm:6543
+//     auto self2 = ptr::read(&(*this));   // :6544
+// — and dozens read `&x.alloc` out of a struct that is still managed. Those are
+// all pointer-shaped handles and empty allocators, i.e. trivially destructible,
+// where destroy_at is a no-op and the old behaviour is preserved exactly. Only
+// types that actually own something take the new path.
+template<typename T>
+inline T read(T* src) {
+    if constexpr (std::is_trivially_destructible_v<T>) {
+        return std::move(*src);
+    } else {
+        T out(std::move(*src));
+        std::destroy_at(src);
+        return out;
+    }
+}
+
 template<typename T>
 inline T read(const T* src) {
     // Mirror Rust `ptr::read` move-out semantics even from `*const T`-shaped
     // call sites. This surface is intentionally unsafe: callers must guarantee
     // source validity and single-drop discipline.
-    return std::move(*const_cast<T*>(src));
-}
-
-template<typename T>
-inline T read(T* src) {
-    return std::move(*src);
+    return read(const_cast<T*>(src));
 }
 
 template<typename T, typename U>
