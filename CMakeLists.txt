@@ -632,6 +632,9 @@ set(TEST_SOURCES
     # rustc's map/tests.rs. The shipped rusty::HashMap path had no runtime test
     # at all before this (see task #184).
     tests/std_port_map_drop_test.cpp
+    # Behavioural (value-semantics) coverage for std_port's HashMap — the
+    # companion to the drop/ownership file above. Both #184.
+    tests/std_port_map_api_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
