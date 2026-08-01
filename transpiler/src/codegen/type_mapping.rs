@@ -119,6 +119,29 @@ impl CodeGen {
         }
     }
 
+    /// Type-level form of `is_non_mutating_handle_name`, resolving one hop
+    /// through a C++ `using` alias. Used only by the closure-mutability
+    /// analysis — see that predicate for why it is not the autoderef set.
+    pub(super) fn type_is_non_mutating_handle_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        let Some(seg) = tp.path.segments.last() else {
+            return false;
+        };
+        let name = seg.ident.to_string();
+        if Self::is_non_mutating_handle_name(&name) {
+            return true;
+        }
+        self.cpp_type_aliases.get(&name).is_some_and(|target| {
+            let head = target.split('<').next().unwrap_or(target);
+            head.rsplit("::")
+                .next()
+                .is_some_and(|owner| Self::is_non_mutating_handle_name(owner.trim()))
+        })
+    }
+
     pub(super) fn type_is_pointer_like_owner_type(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
