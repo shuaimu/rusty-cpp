@@ -24347,7 +24347,41 @@ impl CodeGen {
             // including shadowing patterns like `let x = &x` inside closures.
             "&".to_string()
         };
-        let lambda_mutability = if is_move_closure { " mutable" } else { "" };
+        // `mutable` is only NEEDED when the closure body can modify a
+        // capture. It is actively harmful otherwise: a mutable lambda's
+        // operator() is non-const, so it will not convert to a
+        // const-callable target (`CallbackWrapper<void(..) const>`,
+        // `rusty::Function<.. const>`) — which is every callback slot in the
+        // rrr channel layer.
+        //
+        // Narrow, type-driven exemption: if every capture is a RAW POINTER,
+        // the body can only reach the pointee through a dereference, which
+        // does not touch the captured pointer itself. Reassigning the
+        // pointer variable would need `mutable`, so that case is excluded
+        // explicitly. Anything else keeps `mutable` — getting this wrong
+        // fails to COMPILE rather than silently misbehaving.
+        // Empty capture list trivially satisfies this: a closure with no
+        // captures cannot mutate one.
+        let all_captures_are_raw_pointers = outer_captures.iter().all(|cpp_name| {
+                self.lookup_rust_binding_name_for_cpp_name(cpp_name)
+                    .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
+                    .is_some_and(|ty| matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_)))
+        });
+        let body_reassigns_a_capture = {
+            let stmts = match closure.body.as_ref() {
+                syn::Expr::Block(block) => block.block.stmts.clone(),
+                other => vec![syn::Stmt::Expr(other.clone(), None)],
+            };
+            let reassigned = collect_reassigned_vars(&stmts);
+            outer_captures.iter().any(|cpp_name| {
+                self.lookup_rust_binding_name_for_cpp_name(cpp_name)
+                    .is_some_and(|rust_name| reassigned.contains(&rust_name))
+                    || reassigned.contains(cpp_name)
+            })
+        };
+        let needs_mutable =
+            is_move_closure && !(all_captures_are_raw_pointers && !body_reassigns_a_capture);
+        let lambda_mutability = if needs_mutable { " mutable" } else { "" };
 
         // A callable-shaped expected type means this closure IS the callable.
         // Type its params from the signature (so body casts see the real

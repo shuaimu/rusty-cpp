@@ -8404,7 +8404,14 @@ fn test_leaf41543333333327331_closure_ref_pattern_expr_body_uses_deref_prelude()
 #[test]
 fn test_closure_move_capture() {
     let out = transpile_str("fn f() { let c = move || 42; }");
-    assert!(out.contains("[=]() mutable"));
+    // No `mutable`: this closure captures nothing, so there is nothing for
+    // `mutable` to permit. Emitting it was not merely redundant — a mutable
+    // lambda's operator() is non-const, so it will not convert to a
+    // const-callable target (`CallbackWrapper<void(..) const>`), which is
+    // every callback slot in mako's channel layer. `mutable` is now emitted
+    // only when the body can actually modify a capture.
+    assert!(out.contains("[=]()"), "{out}");
+    assert!(!out.contains("[=]() mutable"), "{out}");
 }
 
 #[test]
