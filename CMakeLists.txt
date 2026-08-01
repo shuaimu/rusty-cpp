@@ -628,6 +628,10 @@ set(TEST_SOURCES
     # compiles in ~2s. Keep both: this one tests behaviour, that one tests
     # that the rusty::HashSet alias is still reachable through the umbrella.
     tests/std_port_set_algebra_test.cpp
+    # Drop-accounting / ownership tests for std_port's HashMap, translated from
+    # rustc's map/tests.rs. The shipped rusty::HashMap path had no runtime test
+    # at all before this (see task #184).
+    tests/std_port_map_drop_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
