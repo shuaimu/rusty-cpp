@@ -90,14 +90,13 @@ static void test_conflict_remove() {
 // map/tests.rs::test_empty_remove / test_is_empty
 static void test_empty_remove_and_is_empty() {
     auto m = HMap<int, bool>::new_();
-    // UPSTREAM LINE, DISABLED — it crashes on the shipped path (bug #187):
-    //     CHECK(m.remove(0).is_none());
-    // remove() on a NEVER-ALLOCATED (capacity-0) map throws instead of
-    // returning None — "Went past end of probe sequence". get() and
-    // contains_key() handle the empty singleton correctly; remove() walks the
-    // probe sequence off the end of the zero-length control block. Narrow:
-    // with_capacity(4)+remove is fine, and a map emptied BY remove is fine —
-    // only the pristine state. Re-enable when #187 lands; it is the guard.
+    // This line found bug #187 and is now its regression guard. remove() on a
+    // NEVER-ALLOCATED (capacity-0) map used to throw "Went past end of probe
+    // sequence": hashbrown's empty-table singleton returns a reference to a
+    // fn-local Rust `const`, which the emitter lowered to a plain C++ local, so
+    // the control pointer dangled into dead stack and the garbage read as
+    // "occupied". Fixed by emitting fn-local const items as `static`.
+    CHECK(m.remove(0).is_none());
     CHECK(m.get(0).is_none());
     CHECK(!m.contains_key(0));
     CHECK(m.is_empty());

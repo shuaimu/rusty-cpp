@@ -3671,14 +3671,32 @@ impl CodeGen {
         let type_requires_runtime_const_storage =
             ty.contains("rusty::range_inclusive<") || ty.contains("rusty::range<");
         let storage = if self.block_depth > 0 {
+            // STATIC storage duration is required, not merely const. A Rust `const`
+            // item declared inside a function is 'static-PROMOTED, so returning a
+            // reference to it is sound:
+            //     pub fn static_empty() -> &'static [Tag; W] {
+            //         const TAGS: [Tag; W] = [Tag::EMPTY; W];
+            //         &TAGS
+            //     }
+            // Emitting a plain local made that reference DANGLE into dead stack.
+            // hashbrown's empty-table singleton is exactly this shape, so every
+            // capacity-0 HashMap pointed its control block at freed memory; the
+            // garbage read as "occupied", so the probe loop never saw an empty
+            // slot and ran off the end ("Went past end of probe sequence") — task
+            // #187, a crash on `HashMap::new().remove(k)`.
+            //
+            // `static` is safe here in general: a Rust const item cannot depend on
+            // function parameters, so there is nothing to capture, and C++ magic
+            // statics make the one-time init thread-safe. C++23 permits `static`
+            // in a constexpr function (P2647), which the hashbrown case needs.
             if (is_numeric_cpp_scalar_type(&ty)
                 || matches!(ty.as_str(), "bool" | "float" | "double" | "long double"))
                 && !expr_requires_runtime_storage
                 && !type_requires_runtime_const_storage
             {
-                "constexpr"
+                "static constexpr"
             } else {
-                "const"
+                "static const"
             }
         } else {
             if ty.contains('*')

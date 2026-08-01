@@ -39073,3 +39073,52 @@ fn test_by_value_closure_param_pattern_still_binds_by_value() {
         "a by-value pattern must not be widened to a reference binding, got:\n{out}"
     );
 }
+
+/// A Rust `const` item declared INSIDE a function is 'static-promoted, so
+/// returning a reference to it is sound. Emitting a plain C++ local made that
+/// reference dangle into dead stack.
+///
+/// hashbrown's empty-table singleton is exactly this shape, so every capacity-0
+/// HashMap pointed its control block at freed memory; the garbage read as
+/// "occupied", the probe loop never saw an empty slot and ran off the end —
+/// `HashMap::new().remove(k)` threw "Went past end of probe sequence" (#187).
+#[test]
+fn test_fn_local_const_item_gets_static_storage() {
+    let out = transpile_str(
+        r#"
+        pub struct Tag(pub u8);
+        impl Tag { pub const EMPTY: Tag = Tag(255); }
+        pub fn static_empty() -> &'static [Tag; 4] {
+            const TAGS: [Tag; 4] = [Tag::EMPTY; 4];
+            &TAGS
+        }
+        "#,
+    );
+    assert!(
+        out.contains("static const std::array<Tag, 4> TAGS ="),
+        "fn-local const must get STATIC storage or the returned reference \
+         dangles, got:\n{out}"
+    );
+}
+
+/// The scalar branch of the same decision must also be static — a `const` item
+/// is 'static-promoted regardless of whether it happens to be constexpr-able.
+#[test]
+fn test_fn_local_scalar_const_item_gets_static_storage() {
+    let out = transpile_str(
+        r#"
+        pub fn limit() -> &'static usize {
+            const N: usize = 7;
+            &N
+        }
+        "#,
+    );
+    assert!(
+        out.contains("static constexpr") || out.contains("static const"),
+        "fn-local scalar const must get STATIC storage, got:\n{out}"
+    );
+    assert!(
+        !out.contains("    constexpr size_t N ="),
+        "must not emit a plain automatic-storage local, got:\n{out}"
+    );
+}

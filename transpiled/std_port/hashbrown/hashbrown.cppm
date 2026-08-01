@@ -10441,7 +10441,7 @@ namespace control::group::sse2 {
                     [[no_unique_address]] rusty::detail::zero_length_array<Group> _align;
                     std::array<::hashbrown::control::tag::Tag, rusty::sanitize_array_capacity<Group::WIDTH()>()> tags;
                 };
-                const AlignedTags ALIGNED_TAGS = AlignedTags{._align = std::array<Group, 0>{}, .tags = [](auto _seed) { std::array<::hashbrown::control::tag::Tag, rusty::sanitize_array_capacity<Group::WIDTH()>()> _repeat{}; _repeat.fill(_seed); return _repeat; }(rusty::clone(Tag::EMPTY))};
+                static const AlignedTags ALIGNED_TAGS = AlignedTags{._align = std::array<Group, 0>{}, .tags = [](auto _seed) { std::array<::hashbrown::control::tag::Tag, rusty::sanitize_array_capacity<Group::WIDTH()>()> _repeat{}; _repeat.fill(_seed); return _repeat; }(rusty::clone(Tag::EMPTY))};
                 return ALIGNED_TAGS.tags;
             }
 }
