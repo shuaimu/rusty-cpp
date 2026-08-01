@@ -3116,6 +3116,32 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             {
                 return escape_cpp_keyword(&name);
             }
+            // A libc MACRO name in REFERENCE position that the DSL does not
+            // itself bind is a deliberate read of the macro — emit it bare.
+            //
+            // `escape_cpp_keyword` renames errno/stdin/stdout/stderr because a
+            // DECLARATION of that name is textually replaced by the macro and
+            // fails with a diagnostic naming neither. A reference is the
+            // opposite case: a bare `errno` the DSL never declared can only
+            // mean libc's, since an undeclared identifier would not compile at
+            // all — and `errno_` names nothing, so escaping it broke every
+            // syscall kernel that reads errno.
+            //
+            // The rule is therefore SCOPE-driven, not position-driven: escape
+            // iff the DSL binds the name. A local/param named `errno` already
+            // returned escaped above; a DSL `fn errno` is caught by the
+            // known-free-function check here and still escapes at its call
+            // sites, so definition and reference stay consistent.
+            if is_libc_macro_name(&name)
+                && !self.is_known_free_function_path(&name)
+                && !self.is_known_free_function_path(&format!(
+                    "{}::{}",
+                    self.module_stack.join("::"),
+                    name
+                ))
+            {
+                return name;
+            }
             if name
                 .chars()
                 .next()

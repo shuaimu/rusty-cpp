@@ -40889,3 +40889,45 @@ fn an_extern_fn_signature_reaches_the_call_site() {
         "an extern fn's pointer params must reach the call site:\n{out}"
     );
 }
+
+#[test]
+fn test_libc_macro_reference_the_dsl_does_not_declare_stays_bare() {
+    // The counterpart to test_libc_macro_names_are_escaped. There, `errno`
+    // is DECLARED by the DSL, so both the declaration and its call site
+    // must be renamed. Here nothing declares it, so the bare identifier can
+    // only mean libc's macro — which is exactly what a syscall kernel
+    // reading errno intends. Renaming it emitted `errno_`, which names
+    // nothing and does not compile.
+    let out = transpile_str(
+        r#"
+        pub fn last_error() -> i32 { errno }
+        "#,
+    );
+    // Assert the RENAME, not the surrounding codegen: the return value is
+    // independently wrapped in std::move, which is orthogonal to escaping.
+    assert!(
+        !out.contains("errno_"),
+        "nothing declares errno, so it must not be renamed:\n{out}"
+    );
+    assert!(
+        out.contains("errno"),
+        "the errno read must survive:\n{out}"
+    );
+}
+
+#[test]
+fn test_libc_macro_name_bound_as_a_local_is_still_escaped() {
+    // Scope-driven, not position-driven: a LOCAL named errno is a
+    // declaration, so it and its uses are renamed together. Left bare, the
+    // macro would textually replace the declaration.
+    let out = transpile_str(
+        r#"
+        pub fn f() -> i32 { let errno: i32 = 7; errno }
+        "#,
+    );
+    assert!(
+        out.contains("errno_"),
+        "a local named errno is a declaration and must be escaped:\n{out}"
+    );
+}
+
