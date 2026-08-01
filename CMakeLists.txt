@@ -635,6 +635,9 @@ set(TEST_SOURCES
     # Behavioural (value-semantics) coverage for std_port's HashMap — the
     # companion to the drop/ownership file above. Both #184.
     tests/std_port_map_api_test.cpp
+    # HashSet behavioural coverage — the surface the set-algebra file above
+    # does not touch (membership, take/replace/get, extend, clear). #184.
+    tests/std_port_set_api_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
