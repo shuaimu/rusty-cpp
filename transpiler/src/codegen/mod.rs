@@ -54701,6 +54701,23 @@ fn escape_cpp_keyword(name: &str) -> String {
     }
 }
 
+/// The libc MACRO names that [`escape_cpp_keyword`] renames.
+///
+/// Split out as its own predicate so REFERENCE-position emission can ask
+/// the question without duplicating the list — the two must never drift.
+///
+/// These differ from every other name in `escape_cpp_keyword` in a way
+/// that matters: a macro is not merely shadowed, it TEXTUALLY REPLACES
+/// the identifier. That makes the rename mandatory at a DECLARATION
+/// (`fn errno` cannot compile) and *wrong* at a reference the DSL never
+/// declared, where reading libc's macro is the whole point.
+pub(crate) fn is_libc_macro_name(name: &str) -> bool {
+    matches!(
+        name.strip_prefix("r#").unwrap_or(name),
+        "errno" | "stdin" | "stdout" | "stderr"
+    )
+}
+
 /// Escape an identifier emitted in MEMBER position — a method name on a
 /// class, or the method of a member call.
 ///
