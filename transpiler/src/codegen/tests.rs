@@ -14,6 +14,18 @@ fn transpile_str_module(rust_code: &str, module_name: &str) -> String {
     cg.into_output()
 }
 
+/// Module-mode variant for a crate INSIDE the `rusty` umbrella's re-export
+/// closure — what the port pipelines pass via `--in-umbrella-closure`. The
+/// only observable difference is the deep-path rewrite in
+/// `inject_rusty_module_import_if_needed`.
+fn transpile_str_module_in_umbrella_closure(rust_code: &str, module_name: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_in_umbrella_closure(true);
+    cg.emit_file(&file, Some(module_name));
+    cg.into_output()
+}
+
 /// Module-mode variant that lets the test simulate a multi-file
 /// crate by seeding the codegen's view of sibling module names.
 /// Used by the cross-module use-path resolution tests so they can
@@ -11210,12 +11222,13 @@ fn test_late_pub_mod_export_import_is_hoisted_into_the_preamble() {
 #[test]
 fn test_use_statement() {
     let out = transpile_str_module("use std::collections::HashMap;", "my_crate");
-    // `my_crate` is a CONSUMER, not a stdlib port (`module_is_std_port`), so the
-    // use site keeps the spelling it was written with — `rusty::HashMap` — and
-    // the name is supplied by a using-declaration onto the narrowly-imported
-    // port rather than by the `rusty` umbrella (which SIGSEGVs clang 22.1.8).
-    // Only `*_port` modules get their use sites rewritten to the deep path; see
-    // `test_std_port_module_gets_deep_path_and_narrow_import`.
+    // `my_crate` is a CONSUMER — outside the umbrella's re-export closure
+    // (`in_umbrella_closure` defaults to false) — so the use site keeps the
+    // spelling it was written with, `rusty::HashMap`, and the name is supplied
+    // by a using-declaration onto the narrowly-imported port rather than by the
+    // `rusty` umbrella (which SIGSEGVs clang 22.1.8). Only crates INSIDE the
+    // closure get their use sites rewritten to the deep path; see
+    // `test_in_umbrella_closure_module_gets_deep_path_and_narrow_import`.
     assert!(out.contains("using rusty::HashMap;"));
     assert!(out.contains(
         "namespace rusty { using ::rusty::port::collections::hashbrown::HashMap; }"
@@ -11225,27 +11238,63 @@ fn test_use_statement() {
     assert!(!out.contains("using std::collections::HashMap;"));
 }
 
-/// The GATE (`module_is_std_port`). Identical Rust source, two module names:
-/// a stdlib PORT has its use sites REWRITTEN to the deep path; a CONSUMER keeps
-/// every `rusty::Vec` exactly as written and gets a using-declaration instead.
+/// The GATE (`TranspileOptions::in_umbrella_closure`, CLI
+/// `--in-umbrella-closure`). Identical Rust source AND identical module name,
+/// only the flag differing: a crate INSIDE the umbrella's re-export closure has
+/// its use sites REWRITTEN to the deep path; a consumer keeps every
+/// `rusty::Vec` exactly as written and gets a using-declaration instead.
+///
+/// Same-name/opposite-classification is the case a module-name heuristic could
+/// not express and the reason this is an explicit flag: `hashbrown` is
+/// transpiled both as `std_port`'s vendored path dep (inside the closure) and
+/// as a standalone parity-matrix crate (outside it).
 ///
 /// Both sides import narrowly. `import rusty;` is not an option for either:
 /// since the umbrella started pulling in `std_port` it SIGSEGVs the clang
 /// 22.1.8 frontend (measured on the `either` parity target — exit 139 with the
 /// umbrella, exit 0 with the narrow import, same TU and flags).
 #[test]
-fn test_std_port_module_gets_deep_path_and_narrow_import() {
+fn test_in_umbrella_closure_module_gets_deep_path_and_narrow_import() {
     const SRC: &str = "pub fn f() -> Vec<i32> { Vec::new() }";
 
-    let port = transpile_str_module(SRC, "string_tests_port");
-    assert!(port.contains("import vec_port.vec;"), "{port}");
-    assert!(port.contains("::rusty::port::vec::Vec<"), "{port}");
-    assert!(!port.contains("import rusty;"), "{port}");
+    let inside = transpile_str_module_in_umbrella_closure(SRC, "hashbrown");
+    assert!(inside.contains("import vec_port.vec;"), "{inside}");
+    assert!(inside.contains("::rusty::port::vec::Vec<"), "{inside}");
+    assert!(!inside.contains("import rusty;"), "{inside}");
+    assert!(
+        !inside.contains("namespace rusty { using ::rusty::port::vec::Vec; }"),
+        "in-closure crates rewrite in place, they do not re-seat the alias:\n{inside}"
+    );
 
-    // Sub-modules of a port are ports too (root segment decides).
-    let sub = transpile_str_module(SRC, "hashbrown_port.raw");
+    // Same module name, flag off -> the consumer shape.
+    let outside = transpile_str_module(SRC, "hashbrown");
+    assert!(outside.contains("import vec_port.vec;"), "{outside}");
+    assert!(
+        !outside.contains("::rusty::port::vec::Vec<"),
+        "use site was rewritten without the flag:\n{outside}"
+    );
+    assert!(
+        outside.contains("namespace rusty { using ::rusty::port::vec::Vec; }"),
+        "{outside}"
+    );
+
+    // The flag applies to sub-modules the same way — nothing keys off the name.
+    let sub = transpile_str_module_in_umbrella_closure(SRC, "hashbrown_port.raw");
     assert!(sub.contains("import vec_port.vec;"), "{sub}");
     assert!(sub.contains("::rusty::port::vec::Vec<"), "{sub}");
+
+    // A `*_port` module name no longer classifies anything by itself: without
+    // the flag it is an ordinary consumer. (Under the old name heuristic this
+    // was the PORT shape.)
+    let port_named_consumer = transpile_str_module(SRC, "string_tests_port");
+    assert!(
+        !port_named_consumer.contains("::rusty::port::vec::Vec<"),
+        "module name still drives the gate:\n{port_named_consumer}"
+    );
+    assert!(
+        port_named_consumer.contains("namespace rusty { using ::rusty::port::vec::Vec; }"),
+        "{port_named_consumer}"
+    );
 }
 
 /// The CONSUMER side of the gate: use sites are untouched, the name is supplied
@@ -11281,18 +11330,33 @@ fn test_consumer_crate_keeps_alias_spelling_via_using_declaration() {
 /// pair is deleted while the declaration half survives and names a namespace
 /// nothing declares. Regression guard for the alloc parity failure introduced
 /// by the narrow-import change.
+///
+/// Asserted in BOTH flag states: `IMPORT_STRIPPING_STDLIB_CRATES` is a separate
+/// and independent concern from `in_umbrella_closure`, and their pipelines
+/// (docs/alloc/build.sh, docs/path/build.sh) do pass `--in-umbrella-closure`.
 #[test]
 fn test_import_stripping_stdlib_crates_get_no_injection() {
     for module in ["alloc", "pathmod"] {
-        let out = transpile_str_module("pub fn f() -> Vec<i32> { Vec::new() }", module);
-        assert!(
-            !out.contains("namespace rusty { using ::rusty::port::"),
-            "{module}: orphan using-declaration would survive the pipeline sed:\n{out}"
-        );
-        assert!(!out.contains("import vec_port.vec;"), "{module}: {out}");
-        assert!(!out.contains("import rusty;"), "{module}: {out}");
-        // the use site is left alone for the crate's own patcher to retarget
-        assert!(out.contains("rusty::Vec<"), "{module}: {out}");
+        for out in [
+            transpile_str_module("pub fn f() -> Vec<i32> { Vec::new() }", module),
+            transpile_str_module_in_umbrella_closure(
+                "pub fn f() -> Vec<i32> { Vec::new() }",
+                module,
+            ),
+        ] {
+            assert!(
+                !out.contains("namespace rusty { using ::rusty::port::"),
+                "{module}: orphan using-declaration would survive the pipeline sed:\n{out}"
+            );
+            assert!(!out.contains("import vec_port.vec;"), "{module}: {out}");
+            assert!(!out.contains("import rusty;"), "{module}: {out}");
+            // the use site is left alone for the crate's own patcher to retarget
+            assert!(out.contains("rusty::Vec<"), "{module}: {out}");
+            assert!(
+                !out.contains("::rusty::port::vec::Vec<"),
+                "{module}: use site was rewritten:\n{out}"
+            );
+        }
     }
 }
 
@@ -13558,9 +13622,10 @@ fn test_leaf223_cpp_and_rust_imports_coexist() {
     );
 
     assert!(out.contains("import std;"));
-    // `my_crate` is a CONSUMER, not a stdlib port: its `rusty::HashMap` spelling
-    // is preserved verbatim and re-seated by a using-declaration onto the
-    // narrowly-imported port (see `module_is_std_port`).
+    // `my_crate` is a CONSUMER — outside the umbrella's re-export closure — so
+    // its `rusty::HashMap` spelling is preserved verbatim and re-seated by a
+    // using-declaration onto the narrowly-imported port (see
+    // `inject_rusty_module_import_if_needed` / `in_umbrella_closure`).
     assert!(out.contains("using rusty::HashMap;"));
     assert!(out.contains(
         "namespace rusty { using ::rusty::port::collections::hashbrown::HashMap; }"

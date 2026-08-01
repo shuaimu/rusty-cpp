@@ -215,6 +215,36 @@ pub struct TranspileOptions {
     /// are green in the parity matrix. Default `None` keeps their emission
     /// byte-identical.
     pub crate_namespace_wrap: bool,
+    /// Is this crate INSIDE the `rusty` umbrella module's re-export closure?
+    ///
+    /// The C++20 umbrella (`include/rusty/rusty.cppm`) `export import`s the
+    /// ported collection modules (`vec_port`, `rc_port`, `std_port`, …). So a
+    /// crate that the umbrella re-exports must NOT import the umbrella back —
+    /// that is a module cycle — and therefore has to name every collection by
+    /// its DEEP path (`::rusty::port::vec::Vec`) over a NARROW import of the
+    /// declaring module. A crate OUTSIDE the closure is an ordinary CONSUMER of
+    /// rusty: `rusty::Vec` is its stable spelling and must survive verbatim
+    /// (re-seated by a using-declaration onto the same narrow import).
+    ///
+    /// This is a property of the BUILD GRAPH, not of the Rust source — nothing
+    /// in the source can decide it, which is why it is an explicit flag set by
+    /// the invoking pipeline rather than a heuristic on the module name. It
+    /// replaces the former `module_is_std_port` name heuristic (`*_port`
+    /// suffix), which could not express the case that actually occurs:
+    /// `hashbrown` is transpiled BOTH as `std_port`'s vendored path dependency
+    /// (inside the closure -> deep paths) AND as a standalone parity-matrix
+    /// crate (outside -> alias spelling), under the same module name and with
+    /// opposite classification.
+    ///
+    /// Default `false` = outside the closure = consumer, the safe default for
+    /// every third-party crate.
+    ///
+    /// Set by: `docs/rusty/build.sh`, `docs/alloc/build.sh`,
+    /// `docs/path/build.sh`, `docs/port_regen/regen_diff.sh` (CLI
+    /// `--in-umbrella-closure`). NOT set by the parity matrix
+    /// (`tests/transpile_tests/run_parity_matrix.sh`), whose crates are
+    /// consumers.
+    pub in_umbrella_closure: bool,
     /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
     /// Default is `false`.
     pub by_value_cycle_breaking_prototype: bool,
@@ -695,6 +725,8 @@ impl Default for TranspileOptions {
     fn default() -> Self {
         Self {
             crate_namespace_wrap: false,
+            // Outside the umbrella's re-export closure = ordinary consumer.
+            in_umbrella_closure: false,
             by_value_cycle_breaking_prototype: false,
             is_dependency: false,
             cpp_module_symbol_index: None,
@@ -1074,6 +1106,7 @@ pub fn transpile_full_with_options(
     codegen.set_is_dependency_module(options.is_dependency);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
+    codegen.set_in_umbrella_closure(options.in_umbrella_closure);
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
     codegen.set_auto_namespace(options.auto_namespace);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);

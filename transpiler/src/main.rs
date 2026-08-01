@@ -109,6 +109,25 @@ struct Cli {
     #[arg(long = "crate-namespace-wrap")]
     crate_namespace_wrap: bool,
 
+    /// This crate is INSIDE the `rusty` umbrella module's re-export closure —
+    /// i.e. `include/rusty/rusty.cppm` `export import`s it (directly or through
+    /// another port). Such a crate must NOT import the umbrella back (module
+    /// cycle), so every `rusty::X` collection spelling is rewritten to its deep
+    /// path (`::rusty::port::vec::Vec`) over a narrow import of the declaring
+    /// module.
+    ///
+    /// Off by default: a crate outside the closure is an ordinary CONSUMER of
+    /// rusty, keeps its `rusty::X` spelling verbatim, and gets a
+    /// using-declaration onto the same narrow import instead.
+    ///
+    /// Set by the port pipelines (docs/rusty, docs/alloc, docs/path,
+    /// docs/port_regen); NOT set by the parity matrix. It is a property of the
+    /// build graph, so only the invoking pipeline can know it — this replaced a
+    /// `*_port` module-name heuristic that could not express `hashbrown` being
+    /// transpiled both ways under one name.
+    #[arg(long = "in-umbrella-closure")]
+    in_umbrella_closure: bool,
+
     /// Auto-derive the C++ namespace from `--module-name` (replace `.`
     /// with `::`) AND emit namespace aliases for each imported sibling
     /// module — the spec-correct rendering of Rust's module tree as
@@ -4143,6 +4162,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         crate_module_names: Vec::new(),
         cxx_namespace: None,
         crate_namespace_wrap: false,
+        // Parity-matrix crates are CONSUMERS of rusty — outside the umbrella's
+        // re-export closure — so they keep their `rusty::X` spelling. The port
+        // pipelines (docs/*/build.sh, docs/port_regen) pass
+        // `--in-umbrella-closure` instead; this path never does.
+        in_umbrella_closure: false,
         auto_namespace: false,
     };
 
@@ -4739,6 +4763,7 @@ fn main() {
         crate_module_names: Vec::new(),
         cxx_namespace: cli.cxx_namespace.clone(),
         crate_namespace_wrap: cli.crate_namespace_wrap,
+        in_umbrella_closure: cli.in_umbrella_closure,
         auto_namespace: cli.auto_namespace,
     };
 

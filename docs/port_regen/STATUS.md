@@ -202,6 +202,22 @@ patches for no benefit. So per port:
 6. Eventually: a CI guard running `regen_diff.sh` that fails if
    `only_vendored.txt` has real (non-prelude) content — prevents re-rot.
 
+**Every port regen must pass `--in-umbrella-closure`.** A port is RE-EXPORTED by
+the `rusty` umbrella (`include/rusty/rusty.cppm`), so it must not import the
+umbrella back — that is a module cycle — and has to name collections by their
+deep path (`::rusty::port::vec::Vec`) over a narrow import of the declaring
+module. The transpiler defaults to the CONSUMER shape (keep `rusty::Vec`, re-seat
+it with a using-declaration), which is right for third-party crates and wrong
+for a port. This is a build-graph fact no source-level signal can carry, which
+is why it is an explicit flag rather than a rule on the module name: `hashbrown`
+is transpiled BOTH as `std_port`'s vendored path dep (inside the closure) and as
+a standalone parity-matrix crate (outside it) under the same module name.
+`regen_diff.sh` and `docs/{rusty,alloc,path}/build.sh` already pass it; ad-hoc
+regen command lines quoted in the per-port `STATUS.md` files predate the flag
+and need it added when re-run. (`alloc`/`pathmod` are additionally on
+`IMPORT_STRIPPING_STDLIB_CRATES` — they get no injection of either shape because
+their build scripts sed module imports away — so for them the flag is a no-op.)
+
 ## vec_port re-baseline — in progress (resume here)
 
 Recipe now takes the fresh regen from wildly-broken to **5 compile errors**,

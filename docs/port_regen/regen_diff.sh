@@ -58,8 +58,13 @@ printf '#![allow(unused)]\n%s\n' "$mods" > "$WORK/crate/src/lib.rs"
 
 # ── Transpile + patch ────────────────────────────────────────────────────
 echo "== transpiling $PORT (pinned $(rustc --version | awk '{print $2}')) =="
+# --in-umbrella-closure: every port under this harness is RE-EXPORTED by the
+# `rusty` umbrella (include/rusty/rusty.cppm), so it must not import the
+# umbrella back — a module cycle — and names sibling collections by their deep
+# path (`::rusty::port::vec::Vec`) over narrow imports. That is a build-graph
+# fact only this pipeline knows; the transpiler defaults to the CONSUMER shape.
 "$REPO_ROOT/target/release/rusty-cpp-transpiler" \
-  --crate "$WORK/crate/Cargo.toml" --output-dir "$WORK/out" > "$WORK/transpile.log" 2>&1
+  --crate "$WORK/crate/Cargo.toml" --in-umbrella-closure --output-dir "$WORK/out" > "$WORK/transpile.log" 2>&1
 tx=$?
 echo "transpile exit=$tx  ($(grep -c error: "$WORK/transpile.log" 2>/dev/null) error lines)"
 [[ -f "$PATCHER" ]] && python3 "$PATCHER" "$WORK/out" > "$WORK/patch.log" 2>&1

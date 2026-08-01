@@ -13,7 +13,12 @@ rm -rf "$W"; mkdir -p "$W"
 cp "$SYS/std/src/path.rs" "$W/path.rs"
 bash "$REPO/docs/path/prep.sh" "$W/path.rs" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
-"$TRANSPILER" "$W/path.rs" -m pathmod -o "$W/path.cppm" > "$W/transpile.log" 2>&1
+# --in-umbrella-closure: pathmod is a stdlib port, inside the `rusty` umbrella's
+# re-export closure, so it must not import the umbrella back. (Practically a
+# no-op here — pathmod is also on IMPORT_STRIPPING_STDLIB_CRATES and gets no
+# injection at all, which is why the sed below exists — but the flag states the
+# crate's real position in the build graph rather than leaving it to a name.)
+"$TRANSPILER" "$W/path.rs" -m pathmod --in-umbrella-closure -o "$W/path.cppm" > "$W/transpile.log" 2>&1
 echo "transpile exit=$? ($(tail -1 "$W/transpile.log"))"
 CPPM="$W/path.cppm"
 [[ -f "$CPPM" ]] || { echo "no output — see $W/transpile.log"; exit 1; }

@@ -59,7 +59,12 @@ MODS+='pub mod borrow;\npub mod rc;\npub mod sync;\npub mod collections;\npub mo
 printf "$MODS" > "$W/src/lib.rs"
 bash "$REPO/docs/alloc/prep.sh" "$W/src" >/dev/null
 TRANSPILER="${RUSTY_CPP_TRANSPILER_BIN:-$REPO/target/release/rusty-cpp-transpiler}"
-"$TRANSPILER" --crate "$W/Cargo.toml" --expand --output-dir "$W/out" > "$W/transpile.log" 2>&1
+# --in-umbrella-closure: `alloc` is a stdlib port, i.e. inside the `rusty`
+# umbrella's re-export closure, so it must never import the umbrella back
+# (module cycle) and names collections by their deep path. (Practically a no-op
+# for alloc, which is additionally on IMPORT_STRIPPING_STDLIB_CRATES and gets no
+# injection at all — but the flag states the crate's real position in the graph.)
+"$TRANSPILER" --crate "$W/Cargo.toml" --expand --in-umbrella-closure --output-dir "$W/out" > "$W/transpile.log" 2>&1
 echo "transpile exit=$? ($(tail -1 "$W/transpile.log"))"
 CPPM="$W/out/alloc.cppm"
 [[ -f "$CPPM" ]] || { echo "no single-module output — see $W/transpile.log"; exit 1; }
