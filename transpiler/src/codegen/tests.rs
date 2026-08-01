@@ -11210,14 +11210,104 @@ fn test_late_pub_mod_export_import_is_hoisted_into_the_preamble() {
 #[test]
 fn test_use_statement() {
     let out = transpile_str_module("use std::collections::HashMap;", "my_crate");
-    // Module mode spells the collection by its DEEP path and imports only the
-    // owning port — no `import rusty;` umbrella (that over-import SIGSEGVs
-    // clang 22.1.8 once std_port is in the graph). Semantically identical
-    // using-declaration. Single-file mode still emits `using rusty::HashMap;`.
-    assert!(out.contains("using ::rusty::port::collections::hashbrown::HashMap;"));
+    // `my_crate` is a CONSUMER, not a stdlib port (`module_is_std_port`), so the
+    // use site keeps the spelling it was written with — `rusty::HashMap` — and
+    // the name is supplied by a using-declaration onto the narrowly-imported
+    // port rather than by the `rusty` umbrella (which SIGSEGVs clang 22.1.8).
+    // Only `*_port` modules get their use sites rewritten to the deep path; see
+    // `test_std_port_module_gets_deep_path_and_narrow_import`.
+    assert!(out.contains("using rusty::HashMap;"));
+    assert!(out.contains(
+        "namespace rusty { using ::rusty::port::collections::hashbrown::HashMap; }"
+    ));
     assert!(out.contains("import hashbrown_port.map;"));
     assert!(!out.contains("import rusty;"));
     assert!(!out.contains("using std::collections::HashMap;"));
+}
+
+/// The GATE (`module_is_std_port`). Identical Rust source, two module names:
+/// a stdlib PORT has its use sites REWRITTEN to the deep path; a CONSUMER keeps
+/// every `rusty::Vec` exactly as written and gets a using-declaration instead.
+///
+/// Both sides import narrowly. `import rusty;` is not an option for either:
+/// since the umbrella started pulling in `std_port` it SIGSEGVs the clang
+/// 22.1.8 frontend (measured on the `either` parity target — exit 139 with the
+/// umbrella, exit 0 with the narrow import, same TU and flags).
+#[test]
+fn test_std_port_module_gets_deep_path_and_narrow_import() {
+    const SRC: &str = "pub fn f() -> Vec<i32> { Vec::new() }";
+
+    let port = transpile_str_module(SRC, "string_tests_port");
+    assert!(port.contains("import vec_port.vec;"), "{port}");
+    assert!(port.contains("::rusty::port::vec::Vec<"), "{port}");
+    assert!(!port.contains("import rusty;"), "{port}");
+
+    // Sub-modules of a port are ports too (root segment decides).
+    let sub = transpile_str_module(SRC, "hashbrown_port.raw");
+    assert!(sub.contains("import vec_port.vec;"), "{sub}");
+    assert!(sub.contains("::rusty::port::vec::Vec<"), "{sub}");
+}
+
+/// The CONSUMER side of the gate: use sites are untouched, the name is supplied
+/// by a using-declaration. A using-DECLARATION rather than an alias template so
+/// the port's own default template arguments carry over without being restated.
+#[test]
+fn test_consumer_crate_keeps_alias_spelling_via_using_declaration() {
+    for module in [
+        "smallvec",
+        // `alloc` (the `--expand` consolidated crate, whose patcher anchors on
+        // the literal `rusty::Vec<`) and `pathmod` are stdlib code but sit on
+        // the consumer side of the `_port` rule on purpose.
+        "alloc",
+        "pathmod",
+    ] {
+        let out = transpile_str_module("pub fn f() -> Vec<i32> { Vec::new() }", module);
+        assert!(out.contains("rusty::Vec<"), "{module}: {out}");
+        assert!(
+            !out.contains("::rusty::port::vec::Vec<"),
+            "{module}: use site was rewritten:\n{out}"
+        );
+        assert!(
+            out.contains("namespace rusty { using ::rusty::port::vec::Vec; }"),
+            "{module}: missing the re-seating using-declaration:\n{out}"
+        );
+        assert!(out.contains("import vec_port.vec;"), "{module}: {out}");
+        assert!(!out.contains("import rusty;"), "{module}: {out}");
+    }
+}
+
+/// C++20 requires every import to sit in the purview's import section, so the
+/// consumer using-declaration must land AFTER the crate's own imports.
+#[test]
+fn test_consumer_alias_shim_lands_after_the_import_section() {
+    let out = transpile_str_module(
+        "use cpp::std;\npub fn f() -> Vec<i32> { Vec::new() }",
+        "my_crate",
+    );
+    let shim = out
+        .find("namespace rusty { using ::rusty::port::vec::Vec; }")
+        .unwrap_or_else(|| panic!("no shim emitted:\n{out}"));
+    let last_import = out
+        .rfind("\nimport ")
+        .unwrap_or_else(|| panic!("no imports emitted:\n{out}"));
+    assert!(
+        last_import < shim,
+        "shim precedes an import, which is ill-formed:\n{out}"
+    );
+}
+
+/// Guard the rule the table's own doc-comment states: keys are QUALIFIED
+/// namespace prefixes, never bare identifiers. A bare `Drain` key would import
+/// a port module on any crate that happens to declare its own `Drain`.
+#[test]
+fn test_port_namespace_imports_are_qualified_prefixes_only() {
+    for (ns, module) in PORT_NAMESPACE_IMPORTS {
+        assert!(
+            ns.contains("::") && ns.ends_with("::"),
+            "key must be a qualified namespace prefix ending at a `::` boundary: {ns}"
+        );
+        assert!(!module.is_empty(), "{ns} has no owning module");
+    }
 }
 
 #[test]
@@ -13448,11 +13538,13 @@ fn test_leaf223_cpp_and_rust_imports_coexist() {
     );
 
     assert!(out.contains("import std;"));
-    // Module mode spells the collection by its DEEP path and imports only the
-    // owning port — no `import rusty;` umbrella (that over-import SIGSEGVs
-    // clang 22.1.8 once std_port is in the graph). Semantically identical
-    // using-declaration. Single-file mode still emits `using rusty::HashMap;`.
-    assert!(out.contains("using ::rusty::port::collections::hashbrown::HashMap;"));
+    // `my_crate` is a CONSUMER, not a stdlib port: its `rusty::HashMap` spelling
+    // is preserved verbatim and re-seated by a using-declaration onto the
+    // narrowly-imported port (see `module_is_std_port`).
+    assert!(out.contains("using rusty::HashMap;"));
+    assert!(out.contains(
+        "namespace rusty { using ::rusty::port::collections::hashbrown::HashMap; }"
+    ));
     assert!(out.contains("import hashbrown_port.map;"));
     assert!(!out.contains("import rusty;"));
 }

@@ -45265,12 +45265,40 @@ const RUSTY_MODULE_TRIGGERS: &[RustyModuleTrigger] = &[
 /// Keying on the QUALIFIED prefix — never a bare identifier — is what makes this
 /// safe: `rusty::port::vec::` cannot collide with a user type the way a bare
 /// `Drain` could (the hazard the trigger-table comment above warns about).
+/// Every entry was derived by reading the vendored ports, not guessed:
+///     for f in transpiled/*/*.cppm; do
+///       <module name of $f> + `grep -o 'namespace <deep>::' $f`
+///     done
+/// so each prefix is the namespace some SHIPPED port module actually declares,
+/// and each module is a real `add_library(<name>)` target in CMakeLists.txt.
+/// Anything not on that list must not be added — emitting an import of a module
+/// the build does not contain fails with "module not found", which is strictly
+/// worse than the missing-declaration error this table exists to prevent.
 const PORT_NAMESPACE_IMPORTS: &[(&str, &str)] = &[
     ("rusty::port::vec::", "vec_port.vec"),
     ("rusty::port::rc::", "rc_port"),
     ("rusty::port::collections::vec_deque::", "vec_deque_port"),
     ("rusty::port::collections::linked_list::", "linked_list_port"),
     ("rusty::port::collections::binary_heap::", "binary_heap_port"),
+    // The remaining `rusty::port::*` namespaces the shipped ports declare.
+    // Same class as `Drain`: a fully-qualified name whose only declaration
+    // source was the ambient umbrella.
+    ("rusty::port::sync::", "arc_port"),
+    ("rusty::port::cell::", "cell_port"),
+    ("rusty::port::string::", "string_port"),
+    // btree's deep namespaces are NOT under `rusty::port::` — the port wraps
+    // itself in `namespace btree_port::btree::X` (see CMakeLists.txt:120), so
+    // the qualified spelling a crate writes is `btree_port::btree::map::Entry`.
+    // `set::entry::` is listed separately from `set::` because it is a distinct
+    // module. Note `btree_port.btree.set.entry` DOES reference `set::` (×2) and
+    // must NOT import `btree_port.btree.set` — set imports set.entry, so that
+    // would close a module cycle. The existing `is_self_import` guard already
+    // covers it: it treats a PARENT module name as a self-import
+    // (`own.starts_with("{m}.")`), so a child never imports its parent.
+    ("btree_port::btree::map::", "btree_port.btree.map"),
+    ("btree_port::btree::set::entry::", "btree_port.btree.set.entry"),
+    ("btree_port::btree::set::", "btree_port.btree.set"),
+    ("btree_port::btree::btree_internal::", "btree_port.btree.btree_internal"),
     // hashbrown is deliberately absent: its deep namespace spans TWO modules
     // (hashbrown_port.map / .set), so the prefix alone cannot pick one. The
     // HashMap/HashSet triggers already import the right one.
@@ -45287,6 +45315,122 @@ fn rusty_trigger_occurrences(purview: &str, alias: &str) -> bool {
     purview.contains(&format!("{alias}<"))
         || purview.contains(&format!("{alias}{{"))
         || purview.contains(&format!("using {alias};"))
+}
+
+/// GATE: is the module being emitted one of the transpiled Rust-STDLIB PORTS,
+/// as opposed to a third-party crate that merely CONSUMES the rusty runtime?
+///
+/// The deep-path rewrite above is only correct for the former. A port IS the
+/// implementation, so naming a sibling port's deep path is the accurate
+/// spelling and it avoids a port importing the umbrella that re-exports it. A
+/// consumer (smallvec, serde, indexmap, arrayvec, …) is in the opposite
+/// position: `rusty::Vec` is the stable, documented spelling it was written
+/// against, and dropping `import rusty;` also drops everything ELSE the
+/// umbrella re-exported that the crate may depend on. Rewriting a consumer
+/// hard-codes it onto an internal layout it never asked for.
+///
+/// SIGNAL. There is no first-class "this is a stdlib port" notion anywhere in
+/// the transpiler — not a field, not a flag, not a path (codegen has no
+/// filesystem access at all: `transpile_full_with_options` receives source +
+/// module name + hints, and the input/output paths never leave `main.rs`).
+/// The candidates were checked and rejected:
+///   * `crate_name` is `None` for THREE of the four port pipelines (it is only
+///     populated under `--crate-namespace-wrap`) and `Some(..)` for every
+///     consumer — i.e. it correlates INVERSELY with the meaning we want, and
+///     only by accident.
+///   * `is_dependency_module` means "recursively transpiled path dep", which is
+///     orthogonal; `crate_module_names` is empty on the `--expand` and
+///     single-file paths.
+/// So this is the deliberately CONSERVATIVE fallback: a name allowlist over the
+/// module's own root segment, which is the one thing populated on every
+/// pipeline. It is checked against the shipped ports rather than invented —
+/// every module name in `transpiled/*/*.cppm` matches, and no matrix consumer
+/// crate does.
+///
+/// Two names on the std side are deliberately EXCLUDED, and both are load-bearing:
+///   * `alloc` — Rust's own `alloc` crate, emitted as ONE consolidated module
+///     via `--expand`. It DEFINES `Vec` itself (`namespace vec { … struct Vec; }`
+///     in its own purview) and `docs/alloc/post_transpile_patch.py` maps
+///     `rusty::Vec<` onto that local declaration. Rewriting first turns all 86
+///     sites into `::rusty::port::vec::Vec`, the patcher's anchor string stops
+///     matching, its `str.replace` silently no-ops, and the module names a
+///     namespace it neither imports nor declares. It also has zero module
+///     dependencies (`docs/alloc/build.sh` seds every injected import away and
+///     precompiles with headers only), so it gains nothing from the rewrite.
+///   * `pathmod` — `docs/path` is single-file and its build.sh likewise strips
+///     the injected imports, so the rewrite is pure churn there.
+/// Both fall out of the `_port` suffix rule for free; they are named here so a
+/// future widening of the rule does not silently re-break them.
+///
+/// WHAT THE CONSUMER SIDE DOES *NOT* DO, and why — this was measured, not
+/// assumed. The obvious "keep the previous behaviour" answer is to put back
+/// `import rusty;` and leave `rusty::Vec` alone. That is not available:
+///   * `rusty::Vec` is declared ONLY in the umbrella's module purview
+///     (include/rusty/rusty.cppm:135 `using Vec = ::rusty::port::vec::Vec<T,A>`).
+///     It is not in any header, so a crate that spells `rusty::Vec` and does not
+///     import the umbrella has no declaration for it at all.
+///   * and the umbrella can no longer be imported. Since the umbrella started
+///     pulling in `std_port`, `import rusty;` CRASHES the clang 22.1.8 frontend.
+///     Measured on the real `either` parity target, same TU, same flags, only
+///     the preamble differing:
+///         import rusty;          -> exit 139 (SIGSEGV) in 3s
+///         import vec_port.vec;   -> exit 0, 0 errors, in 3s
+/// So the two halves are inseparable — dropping the umbrella is forced for
+/// EVERY crate, port or not.
+///
+/// What the gate therefore selects is how the crate's own SPELLING survives:
+///   * port     — rewrite `rusty::Vec<` to the deep path in place.
+///   * consumer — leave every use site EXACTLY as written and re-seat the name
+///                with one `namespace rusty { using ::rusty::port::vec::Vec; }`
+///                after the import section. A using-DECLARATION, not an alias
+///                template, so the port's own default template arguments carry
+///                over verbatim and no arity has to be restated here.
+/// That keeps the consumer's stable `rusty::X` API intact — the actual point of
+/// the gate — without hard-coding it onto an internal layout, and without the
+/// crash. Verified on `either`: exit 0, 0 errors.
+///
+/// KNOWN LIMIT, stated plainly: this is a name heuristic. A third-party crate
+/// literally named `*_port` would be misclassified. The robust fix is an
+/// explicit opt-in (`TranspileOptions::std_port_deep_paths`, mirroring
+/// `crate_namespace_wrap`) set by the four port pipelines — the invoking
+/// pipeline is the only ground truth — but that spans transpile.rs, main.rs and
+/// the build scripts. This predicate is the in-file approximation; swapping it
+/// for the flag is a one-line change at its single call site.
+fn module_is_std_port(own_module: &str) -> bool {
+    // Root segment only: `vec_port.vec` -> `vec_port`,
+    // `btree_port.btree.map` -> `btree_port`. Sub-modules of a port are ports.
+    own_module
+        .split('.')
+        .next()
+        .is_some_and(|root| root.ends_with("_port"))
+}
+
+/// Byte offset in a module PURVIEW just past its leading import section.
+///
+/// C++20 requires every `import`/`export import` to sit in the import section
+/// immediately after the module declaration, so a namespace-scope declaration
+/// (the consumer using-declaration above) must go AFTER the crate's own imports
+/// — dropping it at the top of the purview would put a declaration in front of
+/// `import std;` and make the TU ill-formed. Returns 0 when the purview opens
+/// with something other than an import, which is the correct insertion point in
+/// that case.
+fn import_section_end(purview: &str) -> usize {
+    let mut scanned = 0usize;
+    let mut end = 0usize;
+    for line in purview.split_inclusive('\n') {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") {
+            scanned += line.len();
+            continue;
+        }
+        if t.starts_with("import ") || t.starts_with("export import ") {
+            scanned += line.len();
+            end = scanned;
+            continue;
+        }
+        break;
+    }
+    end
 }
 
 /// If the output references any `rusty::*` type that lives only in the
@@ -45386,7 +45530,17 @@ fn inject_deref_dispatch_functors(output: &str) -> String {
     result
 }
 
+/// Make every `rusty::*` collection spelling in a module purview resolve.
+///
+/// Two shapes, chosen by `module_is_std_port` on the module's own name:
+///   * stdlib PORT  — import only the owning port module and rewrite the alias
+///                    to its deep path (`RUSTY_MODULE_TRIGGERS`), plus a module
+///                    import for each deep namespace already spelled
+///                    fully-qualified (`PORT_NAMESPACE_IMPORTS`).
+///   * CONSUMER crate — inject the `rusty` umbrella and touch nothing else.
 fn inject_rusty_module_import_if_needed(output: &str) -> String {
+    // Idempotency guard: a crate that already imports the umbrella (the
+    // consumer shape below, or a hand-written source) is left alone.
     if output.contains("\nimport rusty;\n") {
         return output.to_string();
     }
@@ -45411,6 +45565,13 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string();
+
+    // GATE. Only the stdlib ports get their use sites REWRITTEN to the deep
+    // path; a consumer crate keeps every `rusty::X` exactly as written and gets
+    // a using-declaration instead. Both sides import narrowly — see
+    // `module_is_std_port` for the measurement that forces that.
+    let is_std_port = module_is_std_port(&own_module);
+
     let is_self_import = |m: &str| {
         !own_module.is_empty()
             && (m == own_module
@@ -45423,8 +45584,30 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
     // not from any module, and rewriting it would be wrong.
     let (prefix, purview) = output.split_at(insert_at);
 
+    // Imports the crate ALREADY declares, so we never emit a second copy of a
+    // line that is already there. The crate's own `use` statements make the
+    // transpiler emit e.g. `import btree_port.btree.btree_internal;`, and
+    // btree's map/set/set.entry all also REFERENCE that deep namespace — so the
+    // namespace table below would otherwise duplicate the import. Duplicate
+    // imports are legal C++20, but the per-port `post_transpile_patch.py`
+    // scripts regex over these lines and should not have to cope with dupes.
+    let existing_imports: std::collections::HashSet<&str> = purview
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("import "))
+        .filter_map(|rest| rest.trim().strip_suffix(';'))
+        .map(str::trim)
+        .collect();
+
     let mut imports: Vec<&str> = Vec::new();
     let mut rewritten = purview.to_string();
+    // Whether ANY trigger fired for this crate — i.e. whether the crate really
+    // is dropping the umbrella. Tracked separately from `imports`, which can
+    // legitimately stay empty when every module needed is already imported: in
+    // that case there is still a deep-path rewrite to emit.
+    let mut triggered = false;
+    // Consumer side only: the using-declarations that re-seat the crate's own
+    // `rusty::X` spellings onto the narrowly-imported port.
+    let mut alias_shims: Vec<String> = Vec::new();
     for t in RUSTY_MODULE_TRIGGERS {
         if !rusty_trigger_occurrences(&rewritten, t.alias) {
             continue;
@@ -45432,11 +45615,19 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
         if is_self_import(t.module) {
             continue;
         }
-        if !imports.contains(&t.module) {
+        triggered = true;
+        if !imports.contains(&t.module) && !existing_imports.contains(t.module) {
             imports.push(t.module);
         }
         if t.deep.is_empty() {
             continue; // import-only: the port declares this alias itself
+        }
+        if !is_std_port {
+            // Leave every use site alone; declare the name instead. Each
+            // rewriting trigger's alias is `rusty::<Name>`, so one reopened
+            // `namespace rusty` per trigger is all it takes.
+            alias_shims.push(format!("namespace rusty {{ using {}; }}\n", t.deep));
+            continue;
         }
         // Order matters: rewrite the `using` form FIRST. Doing `alias<` first
         // is harmless, but `using alias;` must not be left behind — it names a
@@ -45449,26 +45640,40 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
 
     // Only once we have actually dropped the umbrella for this crate do the
     // ambient re-exports disappear — so only then must fully-qualified deep
-    // names name their own module. Guarding on `!imports.is_empty()` keeps this
-    // from touching crates that never had the umbrella in the first place.
-    if !imports.is_empty() {
+    // names name their own module. Guarding on `triggered` keeps this from
+    // touching crates that never had the umbrella in the first place.
+    if triggered {
         for (ns, module) in PORT_NAMESPACE_IMPORTS {
-            if rewritten.contains(ns) && !is_self_import(module) && !imports.contains(module) {
+            if rewritten.contains(ns)
+                && !is_self_import(module)
+                && !imports.contains(module)
+                && !existing_imports.contains(module)
+            {
                 imports.push(module);
             }
         }
     }
 
-    if imports.is_empty() {
+    if !triggered {
         return output.to_string();
+    }
+
+    // The using-declarations must land AFTER the crate's own import section —
+    // a declaration in front of `import std;` makes the purview ill-formed.
+    if !alias_shims.is_empty() {
+        let at = import_section_end(&rewritten);
+        let block = format!("\n{}\n", alias_shims.concat());
+        rewritten.insert_str(at, &block);
     }
 
     let mut result = String::with_capacity(output.len() + 64);
     result.push_str(prefix);
-    for m in &imports {
-        result.push_str(&format!("import {m};\n"));
+    if !imports.is_empty() {
+        for m in &imports {
+            result.push_str(&format!("import {m};\n"));
+        }
+        result.push('\n');
     }
-    result.push('\n');
     result.push_str(&rewritten);
     result
 }
