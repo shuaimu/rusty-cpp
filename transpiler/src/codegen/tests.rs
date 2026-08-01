@@ -11253,14 +11253,14 @@ fn test_std_port_module_gets_deep_path_and_narrow_import() {
 /// the port's own default template arguments carry over without being restated.
 #[test]
 fn test_consumer_crate_keeps_alias_spelling_via_using_declaration() {
-    for module in [
-        "smallvec",
-        // `alloc` (the `--expand` consolidated crate, whose patcher anchors on
-        // the literal `rusty::Vec<`) and `pathmod` are stdlib code but sit on
-        // the consumer side of the `_port` rule on purpose.
-        "alloc",
-        "pathmod",
-    ] {
+    // NOTE: `alloc` and `pathmod` are deliberately NOT here. They looked like
+    // consumers, but their build pipelines STRIP module imports
+    // (docs/alloc/build.sh:68, docs/path/build.sh:21), which deletes the import
+    // half of the pair and leaves the using-declaration half orphaned —
+    // "no member named 'port' in namespace 'rusty'". That single orphan was the
+    // whole alloc regression. They get no injection at all; see
+    // IMPORT_STRIPPING_STDLIB_CRATES and the test below.
+    for module in ["smallvec"] {
         let out = transpile_str_module("pub fn f() -> Vec<i32> { Vec::new() }", module);
         assert!(out.contains("rusty::Vec<"), "{module}: {out}");
         assert!(
@@ -11273,6 +11273,26 @@ fn test_consumer_crate_keeps_alias_spelling_via_using_declaration() {
         );
         assert!(out.contains("import vec_port.vec;"), "{module}: {out}");
         assert!(!out.contains("import rusty;"), "{module}: {out}");
+    }
+}
+
+/// `alloc` and `pathmod` must get NOTHING injected — no narrow import and no
+/// using-declaration. Their pipelines strip imports, so the import half of the
+/// pair is deleted while the declaration half survives and names a namespace
+/// nothing declares. Regression guard for the alloc parity failure introduced
+/// by the narrow-import change.
+#[test]
+fn test_import_stripping_stdlib_crates_get_no_injection() {
+    for module in ["alloc", "pathmod"] {
+        let out = transpile_str_module("pub fn f() -> Vec<i32> { Vec::new() }", module);
+        assert!(
+            !out.contains("namespace rusty { using ::rusty::port::"),
+            "{module}: orphan using-declaration would survive the pipeline sed:\n{out}"
+        );
+        assert!(!out.contains("import vec_port.vec;"), "{module}: {out}");
+        assert!(!out.contains("import rusty;"), "{module}: {out}");
+        // the use site is left alone for the crate's own patcher to retarget
+        assert!(out.contains("rusty::Vec<"), "{module}: {out}");
     }
 }
 

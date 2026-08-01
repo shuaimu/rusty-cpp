@@ -45274,6 +45274,18 @@ const RUSTY_MODULE_TRIGGERS: &[RustyModuleTrigger] = &[
 /// Anything not on that list must not be added — emitting an import of a module
 /// the build does not contain fails with "module not found", which is strictly
 /// worse than the missing-declaration error this table exists to prevent.
+/// Consolidated stdlib crates whose build pipeline STRIPS module imports from
+/// the emitted `.cppm`, so nothing may be injected into them at all.
+///
+/// Both precompile with headers only and pass no `-fprebuilt-module-path`, so a
+/// surviving `import …_port…;` is a hard "module not found":
+///   docs/alloc/build.sh:68  sed -i '/^import rusty;$/d; /^import [a-z_]*_port\./d'
+///   docs/path/build.sh:21   same, plus /^import pathmod;$/d
+/// They are neither `*_port` ports nor ordinary consumers — they DEFINE the
+/// types (alloc defines Vec/String/Box) and their own patchers retarget
+/// `rusty::Vec<` onto the crate-local spelling.
+const IMPORT_STRIPPING_STDLIB_CRATES: &[&str] = &["alloc", "pathmod"];
+
 const PORT_NAMESPACE_IMPORTS: &[(&str, &str)] = &[
     ("rusty::port::vec::", "vec_port.vec"),
     ("rusty::port::rc::", "rc_port"),
@@ -45565,6 +45577,32 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string();
+
+    // `alloc` is a THIRD case the port/consumer split does not model: it is not
+    // a `*_port` port, and it is not a consumer either — it is the consolidated
+    // stdlib crate that DEFINES Vec/String/Box, and it has no module deps at all
+    // (docs/alloc/build.sh:69 precompiles it with headers only, passing no
+    // -fprebuilt-module-path, so ANY surviving `import …_port…;` is a hard
+    // "module not found"). Its own pipeline already retargets `rusty::Vec<` onto
+    // the crate-local `vec::Vec` (docs/alloc/post_transpile_patch.py:590) and
+    // strips the imports (build.sh:68).
+    //
+    // Injecting anything here is therefore wrong in BOTH halves:
+    //   - the import half is deleted by that sed, and
+    //   - the using-declaration half SURVIVES it, leaving
+    //       namespace rusty { using ::rusty::port::vec::Vec; }
+    //     naming a namespace nothing declares -> "no member named 'port' in
+    //     namespace 'rusty'". That single orphan is the whole alloc regression
+    //     from the narrow-import change.
+    // The sed also only strips DOTTED `_port` imports, so an undotted
+    // `import rc_port;` would survive and fail; skipping outright closes that
+    // latent hazard too.
+    // `pathmod` is the same shape: docs/path/build.sh:21 runs the identical sed
+    // (plus `/^import pathmod;$/d`). Its orphan is masked today only because the
+    // `path` matrix target already fails for unrelated Component-view reasons.
+    if IMPORT_STRIPPING_STDLIB_CRATES.contains(&own_module.as_str()) {
+        return output.to_string();
+    }
 
     // GATE. Only the stdlib ports get their use sites REWRITTEN to the deep
     // path; a consumer crate keeps every `rusty::X` exactly as written and gets
