@@ -96,9 +96,17 @@ export import btree_port.btree.map;  // namespace: btree_port::btree::map
 export import btree_port.btree.set;  // namespace: btree_port::btree::set
 export import rc_port;
 export import binary_heap_port;  // exports rusty::collections::BinaryHeap alias
-export import hashbrown_port.hasher;  // exports rusty::port::collections::hashbrown::DefaultHasher
-export import hashbrown_port.map;
-export import hashbrown_port.set;
+// NOTE: plain `import`, NOT `export import`. The HashMap/HashSet alias
+// templates below are exported, and the std_port declarations they name are
+// REACHABLE to our importers — which is all a type alias needs. Re-exporting
+// std_port wholesale instead makes every `import rusty;` consumer merge the
+// full std slice, and clang 22.1.8 SIGSEGVs in ASTReader::ReadAST doing so
+// (rc_tests_port / string_tests_port). Keep this un-exported.
+import std_port;  // transpiled Rust std: collections::hash (HashMap/HashSet)
+// hashbrown_port is NO LONGER re-exported here — std_port replaces it, and it
+// sits on its own recursively-transpiled hashbrown. Consumers that still want
+// the old crate-port reach it via `import hashbrown_port.*` directly (as
+// tests/hashbrown_port_{map,set}_test.cpp do).
 export import vec_deque_port;  // exports rusty::collections::VecDeque alias
 export import linked_list_port;  // exports rusty::collections::LinkedList alias
 export import cell_port;
@@ -159,17 +167,22 @@ using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
 template<typename T, typename A = ::rusty::alloc::Global>
 using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
 
-// rusty::HashMap / rusty::HashSet alias the transpiled rustc hashbrown
-// port. These match Rust's `std::collections::HashMap` / `HashSet` at
-// the top level. The `rusty::collections::HashMap` / `HashSet` aliases
-// (declared below) are kept for code that prefers the namespaced form.
+// rusty::HashMap / rusty::HashSet alias the transpiled Rust std slice
+// (`std_port` = std/src/collections/hash/{map,set}.rs), which itself sits
+// on a recursively-transpiled hashbrown — the same std → hashbrown
+// layering Rust has. These match Rust's `std::collections::HashMap` /
+// `HashSet` at the top level. The `rusty::collections::HashMap` / `HashSet`
+// aliases (declared below) are kept for code that prefers the namespaced
+// form. Note the hasher is std's randomly-seeded RandomState, so iteration
+// order varies per run (as in Rust); the old hashbrown_port port used a
+// fixed-seed hasher and happened to be deterministic.
 template<typename K, typename V,
-         typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
-using HashMap = ::rusty::port::collections::hashbrown::HashMap<K, V, S>;
+         typename S = ::std_port::hash::random::RandomState>
+using HashMap = ::std_port::collections::hash::map::HashMap<K, V, S>;
 
 template<typename T,
-         typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
-using HashSet = ::rusty::port::collections::hashbrown::HashSet<T, S>;
+         typename S = ::std_port::hash::random::RandomState>
+using HashSet = ::std_port::collections::hash::set::HashSet<T, S>;
 
 // rusty::port — namespace hierarchy mirroring Rust std's layout
 // (port = transpiled-from-rustc). Each transpiled module lives under
@@ -191,14 +204,14 @@ namespace port::collections {
 
 // User-facing `rusty::collections::*` aliases. End users write
 // `rusty::collections::HashMap<K,V>` / `HashSet<T>` to match Rust's
-// `std::collections::*`. HashMap/HashSet come from hashbrown_port,
-// now deep-migrated to `rusty::port::collections::hashbrown::*` via
-// the `--cxx-namespace` transpiler flag.
+// `std::collections::*`. HashMap/HashSet come from the transpiled Rust std
+// slice (module `std_port`), which sits on its own recursively transpiled
+// hashbrown — see the top-level aliases above.
 namespace collections {
-    template<typename K, typename V, typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
-    using HashMap = ::rusty::port::collections::hashbrown::HashMap<K, V, S>;
-    template<typename T, typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
-    using HashSet = ::rusty::port::collections::hashbrown::HashSet<T, S>;
+    template<typename K, typename V, typename S = ::std_port::hash::random::RandomState>
+    using HashMap = ::std_port::collections::hash::map::HashMap<K, V, S>;
+    template<typename T, typename S = ::std_port::hash::random::RandomState>
+    using HashSet = ::std_port::collections::hash::set::HashSet<T, S>;
     template<typename K, typename V, typename A = ::rusty::alloc::Global>
     using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
     template<typename T, typename A = ::rusty::alloc::Global>

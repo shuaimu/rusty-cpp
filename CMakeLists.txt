@@ -550,6 +550,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_options(rusty PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(rusty PUBLIC
         rusty_async
+        std_port
         vec_port
         btree_port
         rc_port
