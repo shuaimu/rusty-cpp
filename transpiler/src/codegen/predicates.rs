@@ -565,6 +565,114 @@ impl CodeGen {
         Self::should_skip_cfg_attrs(attrs)
     }
 
+    /// Lower a `#[cfg(...)]` predicate to a C++ preprocessor condition.
+    ///
+    /// `should_skip_cfg_attrs` drops items whose predicate is known-FALSE
+    /// (`#[cfg(test)]`), and keeps everything else. "Keeps" is conservative
+    /// for presence and WRONG for correctness on a platform predicate:
+    /// `#[cfg(target_os = "linux")] fn f()` was emitted on every platform,
+    /// unguarded and undiagnosed. Lowering it to `#if` preserves the
+    /// author's intent and keeps the generated output portable — the same
+    /// thing a hand-written platform split does.
+    ///
+    /// Returns `None` when nothing in the attribute list is a lowerable
+    /// platform predicate, so callers emit exactly as before.
+    pub(crate) fn cfg_cpp_guard(attrs: &[syn::Attribute]) -> Option<String> {
+        let conds: Vec<String> = attrs
+            .iter()
+            .filter(|a| a.path().is_ident("cfg"))
+            .filter_map(|a| match &a.meta {
+                syn::Meta::List(list) => list
+                    .parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                    )
+                    .ok()
+                    .and_then(|args| args.first().and_then(Self::cfg_meta_to_cpp)),
+                _ => None,
+            })
+            .collect();
+        if conds.is_empty() {
+            return None;
+        }
+        // Multiple #[cfg] attributes on one item are AND-ed, matching Rust.
+        Some(if conds.len() == 1 {
+            conds[0].clone()
+        } else {
+            conds
+                .iter()
+                .map(|c| format!("({})", c))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        })
+    }
+
+    /// One `cfg` predicate -> C++ condition. `None` for anything not
+    /// recognised, which propagates up and leaves the item unguarded
+    /// rather than guessing.
+    fn cfg_meta_to_cpp(meta: &syn::Meta) -> Option<String> {
+        match meta {
+            // target_os = "linux" / target_arch = "x86_64" / ...
+            syn::Meta::NameValue(nv) => {
+                let key = nv.path.get_ident()?.to_string();
+                let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                else {
+                    return None;
+                };
+                let val = s.value();
+                let macro_name = match (key.as_str(), val.as_str()) {
+                    ("target_os", "linux") => "__linux__",
+                    ("target_os", "macos") => "__APPLE__",
+                    ("target_os", "windows") => "_WIN32",
+                    ("target_os", "freebsd") => "__FreeBSD__",
+                    ("target_arch", "x86_64") => "__x86_64__",
+                    ("target_arch", "aarch64") => "__aarch64__",
+                    ("target_arch", "arm") => "__arm__",
+                    ("target_family", "unix") => "__unix__",
+                    ("target_family", "windows") => "_WIN32",
+                    _ => return None,
+                };
+                Some(format!("defined({})", macro_name))
+            }
+            syn::Meta::List(list) => {
+                let args = list
+                    .parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                    )
+                    .ok()?;
+                let joiner = if list.path.is_ident("all") {
+                    " && "
+                } else if list.path.is_ident("any") {
+                    " || "
+                } else if list.path.is_ident("not") {
+                    let inner = Self::cfg_meta_to_cpp(args.first()?)?;
+                    return Some(format!("!({})", inner));
+                } else {
+                    return None;
+                };
+                // An unmappable member makes the whole group unmappable:
+                // emitting a partial condition would silently change which
+                // platforms the item is compiled on.
+                let parts: Option<Vec<String>> =
+                    args.iter().map(Self::cfg_meta_to_cpp).collect();
+                let parts = parts?;
+                if parts.is_empty() {
+                    return None;
+                }
+                Some(
+                    parts
+                        .iter()
+                        .map(|p| format!("({})", p))
+                        .collect::<Vec<_>>()
+                        .join(joiner),
+                )
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn is_rust_libtest_metadata_type(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Path(tp) => {
