@@ -621,6 +621,13 @@ set(TEST_SOURCES
     # actually run. Its count/range-for idiom is also what exposed the
     # api_coverage probes measuring the wrong thing.
     tests/hashset_set_algebra_test.cpp
+    # Same set-algebra surface, but reached via `import std_port;` directly
+    # instead of the `rusty` umbrella. Post-retarget the umbrella TU above
+    # costs >10 min to compile (was ~3.7s pre-retarget), so the FUNCTIONAL
+    # coverage — range-for over all four lazy views — lives here where the TU
+    # compiles in ~2s. Keep both: this one tests behaviour, that one tests
+    # that the rusty::HashSet alias is still reachable through the umbrella.
+    tests/std_port_set_algebra_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
@@ -773,7 +780,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # on rusty::Rc (which lives in rc_port post-legacy-retirement).
     set(_rc_consuming_tests test_traits)
     list(FIND _rc_consuming_tests "${test_name}" _rc_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|btree_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port|ascii_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|btree_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port|ascii_port|std_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1
         OR NOT _rc_consume_idx EQUAL -1)
@@ -804,6 +811,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # re-exports std_port, so rusty::HashMap/HashSet resolve through it.
     if(test_name STREQUAL "hashset_set_algebra_test")
         target_link_libraries(${test_executable} PRIVATE rusty)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
+    endif()
+    # Tests that `import std_port;` directly (no umbrella) link the std port.
+    # std_port PUBLIC-links std_port_hashbrown, so that comes along.
+    if(test_name MATCHES "^std_port_")
+        target_link_libraries(${test_executable} PRIVATE std_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
     endif()

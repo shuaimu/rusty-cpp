@@ -353,6 +353,51 @@ namespace hashbrown {
 }
 """
     t = t.replace("export module std_port;\n", bridge, 1)
+
+    # --- range-for over the set-algebra views -------------------------------
+    # std's HashSet::{union,intersection,difference,symmetric_difference} return
+    # LAZY VIEWS. In Rust they are Iterators, so `for x in a.intersection(&b)`
+    # works; the transpiled views are next()-shaped and C++ range-for needs
+    # begin()/end(), so `for (auto& v : a.intersection(b))` failed with
+    #     invalid range expression of type 'Intersection<…>'; no viable 'begin'
+    # `rusty::count(...)` worked all along because it is next()-based, which is
+    # what made this look like a smaller gap than it is.
+    #
+    # MEMBERS, not free functions: ADL for `Intersection<T, S, rusty::alloc::
+    # Global>` reaches `rusty::alloc` (from the allocator arg), NOT `rusty`, so
+    # a free begin()/end() in namespace rusty is never found. Verified.
+    #
+    # Safe against the aggregate initialization the transpiler emits for these
+    # structs (`Intersection<T,S,A>{.iter = …, .other = …}`) because member
+    # FUNCTIONS do not affect aggregate-ness — only data members would.
+    range_for_bridge = """                // Range-for over this lazy view. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
+"""
+    patched_views = 0
+    for view in ("Intersection", "Difference", "SymmetricDifference", "Union"):
+        # anchor on the DEFINITION (has a body + the Item typedef), never the
+        # forward declarations — there are several of each.
+        needle = "struct %s {\n" % view
+        idx = t.find(needle)
+        if idx < 0:
+            continue
+        after = idx + len(needle)
+        eol = t.find("\n", after) + 1
+        if "using Item" not in t[after:eol]:
+            continue
+        if "rust_range_begin" in t[after:after + 600]:
+            patched_views += 1   # already patched (idempotent re-run)
+            continue
+        t = t[:eol] + range_for_bridge + t[eol:]
+        patched_views += 1
+    if patched_views != 4:
+        raise SystemExit(
+            "docs/rusty patcher: expected to add range-for to 4 set-algebra "
+            "views, added %d — the struct shape moved, fix this rule rather "
+            "than shipping silently-unpatched output" % patched_views
+        )
+
     path.write_text(t)
 
 

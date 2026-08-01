@@ -1178,6 +1178,42 @@ struct next_range {
     sentinel end() { return sentinel{}; }
 };
 
+// Range-for bridge for Rust-shaped iterators that are USED IN PLACE rather
+// than wrapped. `next_range` above OWNS its iterator, which is right for zip
+// but wrong for a port type that wants to hand out begin()/end() for itself
+// (`for (auto& v : a.intersection(b))`). These let such a type add
+//     auto begin() { return rusty::rust_range_begin(*this); }
+//     auto end()   { return rusty::rust_range_sentinel{}; }
+// without copying itself or growing a data member (which would break the
+// aggregate initialization the transpiler emits for these structs).
+//
+// Free begin()/end() cannot do this job: for a port view like
+// `Intersection<T, S, rusty::alloc::Global>` the associated namespace ADL
+// reaches is `rusty::alloc` (from the allocator argument), NOT `rusty`, so
+// functions declared here are never found. Members always are.
+struct rust_range_sentinel {};
+
+template<typename It>
+struct rust_range_iter {
+    It* src;
+    using next_t = decltype(std::declval<It&>().next());
+    // mutable: operator* is const but unwrap() mutates the Option payload,
+    // same reason next_range::iterator::cur is mutable.
+    mutable next_t cur;
+    decltype(auto) operator*() const { return cur.unwrap(); }
+    rust_range_iter& operator++() {
+        cur = src->next();
+        return *this;
+    }
+    bool operator==(rust_range_sentinel) const { return !cur.is_some(); }
+    bool operator!=(rust_range_sentinel s) const { return !(*this == s); }
+};
+
+template<typename It>
+rust_range_iter<It> rust_range_begin(It& it) {
+    return rust_range_iter<It>{&it, it.next()};
+}
+
 // Pick the walkable form of a zip side: std-iterables pass through
 // (LVALUES BY REFERENCE — a BTreeMap side must not be copied; its copy
 // ctor is deleted and a copyable container would double-free-free on a
