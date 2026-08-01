@@ -40931,3 +40931,30 @@ fn test_libc_macro_name_bound_as_a_local_is_still_escaped() {
     );
 }
 
+
+#[test]
+fn test_use_of_a_rusty_runtime_path_emits_a_real_using_declaration() {
+    // `rusty` is the runtime this transpiler emits INTO, not an external
+    // crate awaiting a type mapping. Classifying it as external dropped the
+    // import and left only a comment, so anything naming the symbol failed
+    // to compile with no hint why.
+    let out = transpile_str(
+        r#"
+        use rusty::sync::atomic::Ordering;
+        pub fn f() -> i32 { 0 }
+        "#,
+    );
+    assert!(
+        out.contains("using rusty::sync::atomic::Ordering;"),
+        "the using-declaration must be emitted as code:\n{out}"
+    );
+    assert!(
+        !out.contains("// Rust-only unresolved import: using rusty::"),
+        "a rusty:: path must not be treated as an unresolved import:\n{out}"
+    );
+    assert!(
+        !out.contains("// TODO: external crate 'rusty'"),
+        "rusty is the runtime, not an external crate:\n{out}"
+    );
+}
+

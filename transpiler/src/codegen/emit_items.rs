@@ -6502,7 +6502,12 @@ impl CodeGen {
             .is_some();
         let is_external = !matches!(
             root_ident.as_str(),
-            "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp"
+            // `rusty` belongs with the built-in roots: it is the RUNTIME this
+            // transpiler emits into, always available in a generated TU, so it
+            // needs neither a type mapping nor a transpiled dependency. Left
+            // out, it was reported as an unmapped external crate and its
+            // imports were dropped (docs 7.29 gap 2).
+            "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp" | "rusty"
         ) && root_ident.chars().next().is_some_and(|c| c.is_lowercase())
             && self.crate_name.as_deref() != Some(root_ident.as_str())
             && !self.declared_item_names.contains(&root_ident)
@@ -6700,6 +6705,22 @@ impl CodeGen {
                     "// Rust-only macro import: using {};",
                     resolved_path
                 ));
+                continue;
+            }
+            // `use rusty::...;` is NOT an unresolved external crate. `rusty`
+            // is the RUNTIME — the namespace this transpiler emits into — and
+            // every generated TU already includes it, so the name is always
+            // available. Classifying it as external dropped the import and
+            // emitted only a comment, silently deleting a using-declaration
+            // the rest of the block depended on; anything naming the imported
+            // symbol then failed to compile with no hint as to why.
+            //
+            // Emit the using-DECLARATION form (`using rusty::a::b::C;`), not a
+            // type alias (`using C = rusty::a::b::C;`): the declaration form
+            // binds functions as well as types, and the alias form is
+            // ill-formed for a function.
+            if resolved_path.trim_start_matches("::").starts_with("rusty::") {
+                self.writeln(&format!("using {};", resolved_path.trim_start_matches("::")));
                 continue;
             }
             if self.should_skip_unresolved_bare_import(&resolved_path) {
