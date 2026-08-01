@@ -45952,6 +45952,50 @@ impl CodeGen {
         }
     }
 
+    /// Map an `Fn`/`FnMut`/`FnOnce` bound to a BARE C++ signature
+    /// (`R(Args...)`), with no `std::function` / `rusty::Function` wrapper.
+    ///
+    /// This is what belongs inside `rusty::Function<…>`, which is
+    /// parameterised by a SIGNATURE rather than by a type. Mapping the
+    /// argument with the ordinary rules nests a wrapper inside the wrapper —
+    /// `rusty::Function<std::function<void()>>` — which is a different type
+    /// from the intended `rusty::Function<void()>` and compiles, so the
+    /// mistake is invisible in the GEN block.
+    ///
+    /// Const-qualification follows Rust's own distinction, which lines up
+    /// exactly with C++ callable constness:
+    ///   * `Fn`      — callable through `&self`      → `R(Args...) const`
+    ///   * `FnMut`   — callable through `&mut self`  → `R(Args...)`
+    ///   * `FnOnce`  — consuming; no C++ spelling, treated as `FnMut`
+    fn try_map_fn_trait_bare_signature(&self, tb: &syn::TraitBound) -> Option<String> {
+        let last_seg = tb.path.segments.last()?;
+        let trait_name = last_seg.ident.to_string();
+        let const_suffix = match trait_name.as_str() {
+            "Fn" => " const",
+            "FnMut" | "FnOnce" => "",
+            _ => return None,
+        };
+        let syn::PathArguments::Parenthesized(args) = &last_seg.arguments else {
+            // `Fn` without parens is a regular trait, not a callable bound.
+            return None;
+        };
+        let param_types: Vec<String> = args
+            .inputs
+            .iter()
+            .map(|t| self.map_callable_surface_type(t))
+            .collect();
+        let return_type = match &args.output {
+            syn::ReturnType::Default => "void".to_string(),
+            syn::ReturnType::Type(_, ty) => self.map_callable_surface_type(ty),
+        };
+        Some(format!(
+            "{}({}){}",
+            return_type,
+            param_types.join(", "),
+            const_suffix
+        ))
+    }
+
     /// Map Box<dyn Fn/FnMut/FnOnce> to the appropriate C++ function type.
     /// All Box<dyn Fn*> → rusty::Function since Box implies ownership.
     fn try_map_fn_trait_boxed(&self, tb: &syn::TraitBound) -> Option<String> {

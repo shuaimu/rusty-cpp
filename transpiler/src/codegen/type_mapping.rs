@@ -2756,6 +2756,31 @@ impl CodeGen {
                                 }
                             }
                         }
+                        // `rusty::Function<…>` is parameterised by a SIGNATURE,
+                        // not by a type, so its argument must lower to a bare
+                        // `R(Args...)`. Mapping it with the ordinary rules
+                        // nests a wrapper inside the wrapper
+                        // (`rusty::Function<std::function<void()>>`), which is
+                        // a different type, and it COMPILES — so the mistake is
+                        // invisible in the GEN block. Rust's Fn/FnMut split
+                        // carries the const-callability (see
+                        // try_map_fn_trait_bare_signature).
+                        //
+                        // Without this, the only correct spelling was
+                        // hand-written C++: every Rust spelling either failed
+                        // to parse (`rusty::Function<void()>` — not Rust
+                        // grammar) or silently produced the wrong type.
+                        if tp.path.segments.len() >= 2
+                            && tp.path.segments.last().is_some_and(|s| s.ident == "Function")
+                            && tp.path.segments.first().is_some_and(|s| s.ident == "rusty")
+                            && args.args.len() == 1
+                            && let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
+                                args.args.first()
+                            && let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first()
+                            && let Some(sig) = self.try_map_fn_trait_bare_signature(tb)
+                        {
+                            return format!("rusty::Function<{}>", sig);
+                        }
                         self.type_arg_nesting.set(self.type_arg_nesting.get() + 1);
                         let mut generic_args: Vec<String> = args
                             .args
