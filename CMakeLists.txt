@@ -641,6 +641,9 @@ set(TEST_SOURCES
     # Entry-API and drain coverage — the highest-risk untested surfaces
     # (Entry holds a reference into the table; drain mutates while iterating). #184.
     tests/std_port_map_entry_test.cpp
+    # Mutation-through-iterator (values_mut/iter_mut) — the class that was
+    # already proven broken in retain/ExtractIf by #179. #184.
+    tests/std_port_map_mut_iter_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
