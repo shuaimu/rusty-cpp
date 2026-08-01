@@ -4836,11 +4836,15 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module vec_tests_port;
+import vec_port.vec;
+import rc_port;
+import btree_port.btree.map;
+import hashbrown_port.map;
+import hashbrown_port.set;
 
 // patcher-injected module imports:
 import alloc;
 import vec_port.vec.into_iter;
-import rusty;
 
 
 namespace vec_tests_port {
@@ -5149,7 +5153,7 @@ using rusty::Bound;
 using rusty::panic::AssertUnwindSafe;
 using rusty::panic::catch_unwind;
 
-using rusty::Rc;
+using ::rusty::port::rc::Rc;
 
 using rusty::sync::atomic::AtomicU32;
 using rusty::sync::atomic::Ordering;
@@ -5311,9 +5315,9 @@ struct Foo_L145 {
 };
 
 struct Wrap {
-    rusty::Rc<int32_t> _0;
+    ::rusty::port::rc::Rc<int32_t> _0;
     mutable bool _rusty_forgotten = false;
-    Wrap(rusty::Rc<int32_t> _0_init) : _0(std::move(_0_init)) {}
+    Wrap(::rusty::port::rc::Rc<int32_t> _0_init) : _0(std::move(_0_init)) {}
     Wrap(const Wrap&) = default;
     Wrap(Wrap&& other) noexcept : _0(std::move(other._0)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -5401,9 +5405,9 @@ struct Foo_L1369 {
 
 struct Check_L1562 {
     size_t index;
-    rusty::Rc<rusty::Mutex<VecT<size_t>>> drop_counts;
+    ::rusty::port::rc::Rc<rusty::Mutex<VecT<size_t>>> drop_counts;
     mutable bool _rusty_forgotten = false;
-    Check_L1562(size_t index_init, rusty::Rc<rusty::Mutex<VecT<size_t>>> drop_counts_init) : index(std::move(index_init)), drop_counts(std::move(drop_counts_init)) {}
+    Check_L1562(size_t index_init, ::rusty::port::rc::Rc<rusty::Mutex<VecT<size_t>>> drop_counts_init) : index(std::move(index_init)), drop_counts(std::move(drop_counts_init)) {}
     Check_L1562(const Check_L1562&) = delete;
     Check_L1562(Check_L1562&& other) noexcept : index(std::move(other.index)), drop_counts(std::move(other.drop_counts)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -5426,9 +5430,9 @@ struct Check_L1562 {
 
 struct Check_L1613 {
     size_t index;
-    rusty::Rc<rusty::Mutex<VecT<size_t>>> drop_counts;
+    ::rusty::port::rc::Rc<rusty::Mutex<VecT<size_t>>> drop_counts;
     mutable bool _rusty_forgotten = false;
-    Check_L1613(size_t index_init, rusty::Rc<rusty::Mutex<VecT<size_t>>> drop_counts_init) : index(std::move(index_init)), drop_counts(std::move(drop_counts_init)) {}
+    Check_L1613(size_t index_init, ::rusty::port::rc::Rc<rusty::Mutex<VecT<size_t>>> drop_counts_init) : index(std::move(index_init)), drop_counts(std::move(drop_counts_init)) {}
     Check_L1613(const Check_L1613&) = delete;
     Check_L1613(Check_L1613&& other) noexcept : index(std::move(other.index)), drop_counts(std::move(other.drop_counts)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -5542,7 +5546,7 @@ struct Panic_L2517 {
 };
 
 struct ZstTracker {
-    rusty::RefCell<std::tuple<rusty::HashSet<size_t>, size_t>> state;
+    rusty::RefCell<std::tuple<::rusty::port::collections::hashbrown::HashSet<size_t>, size_t>> state;
 };
 
 struct Thing {
@@ -5581,9 +5585,9 @@ struct C_L2238 {
 
 // macro_rules! assert_partial_eq_valid { ... }
 
-using rusty::BTreeMap;
+using ::btree_port::btree::map::BTreeMap;
 // Rust-only: using std::collections::BinaryHeap;
-using rusty::HashMap;
+using ::rusty::port::collections::hashbrown::HashMap;
 // Rust-only: using std::collections::LinkedList;
 using rusty::VecDeque;
 
@@ -5806,7 +5810,7 @@ return std::move(to_keep);
 }
 
 TEST_CASE("test_retain_pred_panic_with_hole") {
-    auto v = vt_from(rusty::collect_range(rusty::map((rusty::range(0, 5)), [](auto r) { return rusty::Rc<int32_t>::new_(r); })));
+    auto v = vt_from(rusty::collect_range(rusty::map((rusty::range(0, 5)), [](auto r) { return ::rusty::port::rc::Rc<int32_t>::new_(r); })));
     catch_unwind(AssertUnwindSafe([&]() {
 auto v_shadow1 = rusty::clone(v);
 v_shadow1.retain([&](auto&& r) { return [&]() -> bool { auto&& _m = rusty::detail::deref_if_pointer_like(rusty::deref_mut(r)); if (_m == 0) return true;
@@ -5814,17 +5818,17 @@ if (_m == 1) return false;
 if (_m == 2) return true;
 rusty::panic::do_panic("explicit panic"); }(); });
 })).unwrap_err();
-    if (!(rusty::all(rusty::iter(v), [&](auto&& r) { return rusty::Rc<int32_t>::strong_count(r) == 1; }))) { rusty::panic::do_panic("assertion failed: v . iter () . all (| r | Rc :: strong_count (r) == 1)"); }
+    if (!(rusty::all(rusty::iter(v), [&](auto&& r) { return ::rusty::port::rc::Rc<int32_t>::strong_count(r) == 1; }))) { rusty::panic::do_panic("assertion failed: v . iter () . all (| r | Rc :: strong_count (r) == 1)"); }
 }
 
 TEST_CASE("test_retain_pred_panic_no_hole") {
-    auto v = vt_from(rusty::collect_range(rusty::map((rusty::range(0, 5)), [](auto r) { return rusty::Rc<int32_t>::new_(r); })));
+    auto v = vt_from(rusty::collect_range(rusty::map((rusty::range(0, 5)), [](auto r) { return ::rusty::port::rc::Rc<int32_t>::new_(r); })));
     catch_unwind(AssertUnwindSafe([&]() {
 auto v_shadow1 = rusty::clone(v);
 v_shadow1.retain([&](auto&& r) { return [&]() -> bool { auto&& _m = rusty::detail::deref_if_pointer_like(rusty::deref_mut(r)); if (_m == 0 || _m == 1 || _m == 2) return true;
 rusty::panic::do_panic("explicit panic"); }(); });
 })).unwrap_err();
-    if (!(rusty::all(rusty::iter(v), [&](auto&& r) { return rusty::Rc<int32_t>::strong_count(r) == 1; }))) { rusty::panic::do_panic("assertion failed: v . iter () . all (| r | Rc :: strong_count (r) == 1)"); }
+    if (!(rusty::all(rusty::iter(v), [&](auto&& r) { return ::rusty::port::rc::Rc<int32_t>::strong_count(r) == 1; }))) { rusty::panic::do_panic("assertion failed: v . iter () . all (| r | Rc :: strong_count (r) == 1)"); }
 }
 
 TEST_CASE("test_retain_drop_panic") {
@@ -5837,7 +5841,7 @@ if (_m == 2) return true;
 if (_m == 3) return false;
 return true; }(); });
 })).unwrap_err();
-    if (!(rusty::all(rusty::iter(v), [&](auto&& r) { return rusty::Rc<int32_t>::strong_count(r) == 1; }))) { rusty::panic::do_panic("assertion failed: v . iter () . all (| r | Rc :: strong_count (r) == 1)"); }
+    if (!(rusty::all(rusty::iter(v), [&](auto&& r) { return ::rusty::port::rc::Rc<int32_t>::strong_count(r) == 1; }))) { rusty::panic::do_panic("assertion failed: v . iter () . all (| r | Rc :: strong_count (r) == 1)"); }
 }
 
 TEST_CASE("test_retain_maybeuninits") {
@@ -6741,10 +6745,10 @@ TEST_CASE("extract_if_complex") {
 }
 
 TEST_CASE("extract_if_consumed_panic") {
-    using rusty::Rc;
+    using ::rusty::port::rc::Rc;
     using rusty::Mutex;
     const auto check_count = 10;
-    const auto drop_counts = rusty::Rc<rusty::Mutex<VecT<size_t>>>::new_(rusty::Mutex<VecT<size_t>>::new_(vt_repeat(static_cast<size_t>(0), check_count)));
+    const auto drop_counts = ::rusty::port::rc::Rc<rusty::Mutex<VecT<size_t>>>::new_(rusty::Mutex<VecT<size_t>>::new_(vt_repeat(static_cast<size_t>(0), check_count)));
     VecT<Check_L1562> data = VecT<Check_L1562>::from_iter(rusty::map((rusty::range(0, check_count)), [&](auto&& index) -> Check_L1562 { return Check_L1562(std::move(index), rusty::clone(drop_counts)); }));
     static_cast<void>(rusty::panic::catch_unwind([=, data = std::move(data)]() mutable {
 const auto filter = [&](Check_L1562& c) {
@@ -6769,10 +6773,10 @@ for (auto _fe = drain_shadow1.next(); _fe.is_some(); _fe = drain_shadow1.next())
 }
 
 TEST_CASE("extract_if_unconsumed_panic") {
-    using rusty::Rc;
+    using ::rusty::port::rc::Rc;
     using rusty::Mutex;
     const auto check_count = 10;
-    const auto drop_counts = rusty::Rc<rusty::Mutex<VecT<size_t>>>::new_(rusty::Mutex<VecT<size_t>>::new_(vt_repeat(static_cast<size_t>(0), check_count)));
+    const auto drop_counts = ::rusty::port::rc::Rc<rusty::Mutex<VecT<size_t>>>::new_(rusty::Mutex<VecT<size_t>>::new_(vt_repeat(static_cast<size_t>(0), check_count)));
     VecT<Check_L1613> data = VecT<Check_L1613>::from_iter(rusty::map((rusty::range(0, check_count)), [&](auto&& index) -> Check_L1613 { return Check_L1613(std::move(index), rusty::clone(drop_counts)); }));
     static_cast<void>(rusty::panic::catch_unwind([=, data = std::move(data)]() mutable {
 const auto filter = [&](Check_L1613& c) {

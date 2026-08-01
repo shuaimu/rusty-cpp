@@ -4799,7 +4799,8 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module string_tests_port;
-import rusty;
+import vec_port.vec;
+
 
 
 namespace string_tests_port {
@@ -4817,7 +4818,7 @@ inline bool operator==(const rusty::String& s, const rusty::Cow& c) {
 inline bool operator==(const rusty::Cow& c, const rusty::String& s) { return s == c; }
 inline bool operator!=(const rusty::String& s, const rusty::Cow& c) { return !(s == c); }
 inline bool operator!=(const rusty::Cow& c, const rusty::String& s) { return !(s == c); }
-inline bool operator==(const std::vector<uint8_t>& v, const rusty::Vec<uint8_t>& rv) {
+inline bool operator==(const std::vector<uint8_t>& v, const ::rusty::port::vec::Vec<uint8_t>& rv) {
     if (v.size() != rusty::len(rv)) return false;
     for (size_t i = 0; i < v.size(); ++i) {
         if (v[i] != rv[i]) return false;
@@ -4908,16 +4909,16 @@ TEST_CASE("test_unsized_to_string") {
 }
 
 TEST_CASE("test_from_utf8") {
-    auto xs = rusty::Vec<std::remove_cvref_t<decltype(*std::begin(std::array<uint8_t, 5>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f }}))>>::from_iter(std::array<uint8_t, 5>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f }});
+    auto xs = ::rusty::port::vec::Vec<std::remove_cvref_t<decltype(*std::begin(std::array<uint8_t, 5>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f }}))>>::from_iter(std::array<uint8_t, 5>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f }});
     assert(((rusty::String::from_utf8(std::move(xs)).unwrap()) == (rusty::String::from("hello"))));
-    auto xs_shadow1 = rusty::Vec<uint8_t>::from_iter(rusty::as_bytes("ศไทย中华Việt Nam"));
+    auto xs_shadow1 = ::rusty::port::vec::Vec<uint8_t>::from_iter(rusty::as_bytes("ศไทย中华Việt Nam"));
     assert(((rusty::String::from_utf8(std::move(xs_shadow1)).unwrap()) == (rusty::String::from("ศไทย中华Việt Nam"))));
-    auto xs_shadow2 = rusty::Vec<std::remove_cvref_t<decltype(*std::begin(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }}))>>::from_iter(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }});
+    auto xs_shadow2 = ::rusty::port::vec::Vec<std::remove_cvref_t<decltype(*std::begin(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }}))>>::from_iter(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }});
     auto err = rusty::String::from_utf8(std::move(xs_shadow2)).unwrap_err();
     assert(((rusty::as_bytes(err)) == (std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }})));
     const auto err_clone = rusty::clone(err);
     assert((rusty::detail::deref_if_pointer_like((err)) == rusty::detail::deref_if_pointer_like((err_clone))));
-    assert(((err.into_bytes()) == (rusty::Vec<std::remove_cvref_t<decltype(*std::begin(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }}))>>::from_iter(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }}))));
+    assert(((err.into_bytes()) == (::rusty::port::vec::Vec<std::remove_cvref_t<decltype(*std::begin(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }}))>>::from_iter(std::array<uint8_t, 6>{{ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xff }}))));
     assert(((err_clone.utf8_error().valid_up_to()) == (5)));
 }
 
@@ -5228,11 +5229,11 @@ TEST_CASE("test_simple_types") {
 }
 
 TEST_CASE("test_vectors") {
-    const rusty::Vec<int32_t> x = rusty::Vec<int32_t>{};
+    const ::rusty::port::vec::Vec<int32_t> x = ::rusty::port::vec::Vec<int32_t>{};
     assert(((std::format("{0}", rusty::to_debug_string(x))) == ("[]")));
-    assert(((std::format("{}", rusty::to_debug_string(rusty::Vec{1}))) == ("[1]")));
-    assert(((std::format("{}", rusty::to_debug_string(rusty::Vec{1, 2, 3}))) == ("[1, 2, 3]")));
-    assert((std::format("{}", rusty::to_debug_string(rusty::Vec{rusty::Vec<int32_t>{}, rusty::Vec{1}, rusty::Vec{1, 1}})) == "[[], [1], [1, 1]]"));
+    assert(((std::format("{}", rusty::to_debug_string(::rusty::port::vec::Vec{1}))) == ("[1]")));
+    assert(((std::format("{}", rusty::to_debug_string(::rusty::port::vec::Vec{1, 2, 3}))) == ("[1, 2, 3]")));
+    assert((std::format("{}", rusty::to_debug_string(::rusty::port::vec::Vec{::rusty::port::vec::Vec<int32_t>{}, ::rusty::port::vec::Vec{1}, ::rusty::port::vec::Vec{1, 1}})) == "[[], [1], [1, 1]]"));
 }
 
 TEST_CASE("test_from_iterator") {

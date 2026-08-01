@@ -45208,23 +45208,86 @@ fn dedup_consecutive_defaulted_operators(output: &str) -> String {
     out
 }
 
-/// Types whose `rusty::*` spelling now resolves only via `import rusty;`
-/// (the C++20 umbrella module re-exporting `vec_port`, `rc_port`,
-/// `btree_port`, `hashbrown_port`, `vec_deque_port`, `linked_list_port`,
-/// `binary_heap_port`).  Each entry is a substring we scan for in the
-/// finalized output — the trailing `<` rules out matches in alias
-/// definitions, comments, or namespace forwards.
-const RUSTY_MODULE_TRIGGERS: &[&str] = &[
-    "rusty::Vec<",
-    "rusty::Rc<",
-    "rusty::BTreeMap<",
-    "rusty::BTreeSet<",
-    "rusty::HashMap<",
-    "rusty::HashSet<",
-    "rusty::collections::VecDeque<",
-    "rusty::collections::LinkedList<",
-    "rusty::collections::BinaryHeap<",
+/// A `rusty::*` collection spelling that a module-mode crate cannot resolve on
+/// its own, and how to make it resolve WITHOUT the `rusty` umbrella.
+///
+/// We used to inject `import rusty;` for any of these. That pulls the umbrella's
+/// entire re-export closure into a crate that typically needs ONE name
+/// (rc_tests_port wants only `rusty::Rc`, string_tests_port only `rusty::Vec`),
+/// and under clang 22.1.8 it SIGSEGVs the frontend while precompiling such a
+/// crate once `std_port` is in the graph. Measured on a real `cmake --build`
+/// with the retarget applied: rewriting these two crates to the deep path took
+/// the build from 4 failures to 2 (the two that flipped are exactly the two
+/// rewritten), and their BMIs shrank 22-24% because the umbrella closure stops
+/// being serialized into every consumer.
+///
+/// So: import ONLY the owning module, and (where needed) spell the type by its
+/// deep path instead of the umbrella alias.
+struct RustyModuleTrigger {
+    /// Alias spelling WITHOUT the trailing `<` — e.g. `rusty::Rc`.
+    alias: &'static str,
+    /// The one module that declares the underlying type.
+    module: &'static str,
+    /// Deep path to rewrite the alias to, or `""` for IMPORT-ONLY triggers.
+    ///
+    /// Import-only applies to VecDeque/LinkedList/BinaryHeap: each of those
+    /// ports emits its OWN `export namespace rusty::collections { using X = …; }`,
+    /// so importing the port makes the `rusty::collections::X` spelling resolve
+    /// as-is. Rewriting them would be churn at best and wrong at worst.
+    deep: &'static str,
+}
+
+const RUSTY_MODULE_TRIGGERS: &[RustyModuleTrigger] = &[
+    RustyModuleTrigger { alias: "rusty::Vec",      module: "vec_port.vec",         deep: "::rusty::port::vec::Vec" },
+    RustyModuleTrigger { alias: "rusty::Rc",       module: "rc_port",              deep: "::rusty::port::rc::Rc" },
+    RustyModuleTrigger { alias: "rusty::BTreeMap", module: "btree_port.btree.map", deep: "::btree_port::btree::map::BTreeMap" },
+    RustyModuleTrigger { alias: "rusty::BTreeSet", module: "btree_port.btree.set", deep: "::btree_port::btree::set::BTreeSet" },
+    RustyModuleTrigger { alias: "rusty::HashMap",  module: "hashbrown_port.map",   deep: "::rusty::port::collections::hashbrown::HashMap" },
+    RustyModuleTrigger { alias: "rusty::HashSet",  module: "hashbrown_port.set",   deep: "::rusty::port::collections::hashbrown::HashSet" },
+    // Import-only — the port declares the `rusty::collections::X` alias itself.
+    RustyModuleTrigger { alias: "rusty::collections::VecDeque",   module: "vec_deque_port",   deep: "" },
+    RustyModuleTrigger { alias: "rusty::collections::LinkedList", module: "linked_list_port", deep: "" },
+    RustyModuleTrigger { alias: "rusty::collections::BinaryHeap", module: "binary_heap_port", deep: "" },
 ];
+
+/// Deep port NAMESPACES -> the module that declares them, for names a crate
+/// already spells fully-qualified (`rusty::port::vec::Drain<…>`).
+///
+/// These used to resolve off the ambient `import rusty;`: the umbrella
+/// re-exported every port, so any `rusty::port::X::Whatever` was visible without
+/// the crate naming a module. Dropping the umbrella removes that ambient source,
+/// so a crate referencing e.g. `Drain` (declared in `vec_port.vec`, and NOT one
+/// of the nine collection aliases) loses its declaration:
+///     error: declaration of 'Drain' must be imported from module 'vec_port.vec'
+///            before it is required
+/// vec_tests_port hit exactly this.
+///
+/// Keying on the QUALIFIED prefix — never a bare identifier — is what makes this
+/// safe: `rusty::port::vec::` cannot collide with a user type the way a bare
+/// `Drain` could (the hazard the trigger-table comment above warns about).
+const PORT_NAMESPACE_IMPORTS: &[(&str, &str)] = &[
+    ("rusty::port::vec::", "vec_port.vec"),
+    ("rusty::port::rc::", "rc_port"),
+    ("rusty::port::collections::vec_deque::", "vec_deque_port"),
+    ("rusty::port::collections::linked_list::", "linked_list_port"),
+    ("rusty::port::collections::binary_heap::", "binary_heap_port"),
+    // hashbrown is deliberately absent: its deep namespace spans TWO modules
+    // (hashbrown_port.map / .set), so the prefix alone cannot pick one. The
+    // HashMap/HashSet triggers already import the right one.
+];
+
+/// The spellings a trigger can appear as in emitted C++. A naive `alias<` scan
+/// misses two of these and leaves the crate referencing a name it no longer
+/// imports:
+///   `rusty::Rc<T>`      — the obvious one
+///   `using rusty::Rc;`  — bare using-declaration, no trailing `<`
+///   `rusty::Vec{…}`     — CTAD spelling, no angle brackets at all
+/// Both of the latter occur in the shipped vendored ports (2 and 5 sites).
+fn rusty_trigger_occurrences(purview: &str, alias: &str) -> bool {
+    purview.contains(&format!("{alias}<"))
+        || purview.contains(&format!("{alias}{{"))
+        || purview.contains(&format!("using {alias};"))
+}
 
 /// If the output references any `rusty::*` type that lives only in the
 /// C++20 umbrella module `rusty`, inject `import rusty;` immediately
@@ -45335,16 +45398,78 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
         return output.to_string();
     };
     let insert_at = after_line_start + rel_eol + 1;
-    let referenced = RUSTY_MODULE_TRIGGERS
-        .iter()
-        .any(|needle| output[insert_at..].contains(needle));
-    if !referenced {
+
+    // The crate's own module name, so we never import ourselves. btree_port's
+    // `set` module emitting `rusty::BTreeMap` used to inject `import rusty;`,
+    // and `rusty` re-exports btree_port — a cycle. Narrow imports can form the
+    // same cycle (btree_port.btree.set importing btree_port.btree.map), so
+    // guard on the crate's own module name and its parents.
+    let own_module = output[after_line_start..insert_at]
+        .trim()
+        .strip_prefix("export module ")
+        .and_then(|rest| rest.split(';').next())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let is_self_import = |m: &str| {
+        !own_module.is_empty()
+            && (m == own_module
+                || own_module.starts_with(&format!("{m}."))
+                || m.starts_with(&format!("{own_module}.")))
+    };
+
+    // Only the PURVIEW is rewritten. The global module fragment keeps its
+    // header spellings — `rusty::Vec` there resolves from <rusty/rusty.hpp>,
+    // not from any module, and rewriting it would be wrong.
+    let (prefix, purview) = output.split_at(insert_at);
+
+    let mut imports: Vec<&str> = Vec::new();
+    let mut rewritten = purview.to_string();
+    for t in RUSTY_MODULE_TRIGGERS {
+        if !rusty_trigger_occurrences(&rewritten, t.alias) {
+            continue;
+        }
+        if is_self_import(t.module) {
+            continue;
+        }
+        if !imports.contains(&t.module) {
+            imports.push(t.module);
+        }
+        if t.deep.is_empty() {
+            continue; // import-only: the port declares this alias itself
+        }
+        // Order matters: rewrite the `using` form FIRST. Doing `alias<` first
+        // is harmless, but `using alias;` must not be left behind — it names a
+        // symbol the crate no longer imports and fails to compile.
+        rewritten = rewritten
+            .replace(&format!("using {};", t.alias), &format!("using {};", t.deep))
+            .replace(&format!("{}<", t.alias), &format!("{}<", t.deep))
+            .replace(&format!("{}{{", t.alias), &format!("{}{{", t.deep));
+    }
+
+    // Only once we have actually dropped the umbrella for this crate do the
+    // ambient re-exports disappear — so only then must fully-qualified deep
+    // names name their own module. Guarding on `!imports.is_empty()` keeps this
+    // from touching crates that never had the umbrella in the first place.
+    if !imports.is_empty() {
+        for (ns, module) in PORT_NAMESPACE_IMPORTS {
+            if rewritten.contains(ns) && !is_self_import(module) && !imports.contains(module) {
+                imports.push(module);
+            }
+        }
+    }
+
+    if imports.is_empty() {
         return output.to_string();
     }
-    let mut result = String::with_capacity(output.len() + 16);
-    result.push_str(&output[..insert_at]);
-    result.push_str("import rusty;\n\n");
-    result.push_str(&output[insert_at..]);
+
+    let mut result = String::with_capacity(output.len() + 64);
+    result.push_str(prefix);
+    for m in &imports {
+        result.push_str(&format!("import {m};\n"));
+    }
+    result.push('\n');
+    result.push_str(&rewritten);
     result
 }
 

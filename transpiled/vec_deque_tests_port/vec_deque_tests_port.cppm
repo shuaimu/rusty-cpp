@@ -4836,10 +4836,10 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module vec_deque_tests_port;
+import vec_port.vec;
 
 // patcher-injected module imports:
 import alloc;
-import rusty;
 
 
 namespace vec_deque_tests_port {
@@ -4971,7 +4971,7 @@ static bool operator==(const VecDequeT<T, A>& d, const VecDequeT<U, B>& e) {
 }
 // vector vs rusty::Vec (collect_range results vs Vec literals).
 template<typename T, typename U>
-static bool operator==(const std::vector<T>& v, const rusty::Vec<U>& r) {
+static bool operator==(const std::vector<T>& v, const ::rusty::port::vec::Vec<U>& r) {
     if (v.size() != rusty::len(r)) return false;
     for (size_t i = 0; i < v.size(); ++i) {
         if (!(v[i] == r[i])) return false;
@@ -5538,7 +5538,7 @@ void test_parameterized(T a, T b, T c, T d) {
 }
 
 TEST_CASE("test_pop_if") {
-    auto deq = vd_from(rusty::Vec{0, 1, 2, 3, 4});
+    auto deq = vd_from(::rusty::port::vec::Vec{0, 1, 2, 3, 4});
     const auto pred = [&](int32_t& x) { return (x % static_cast<int32_t>(2)) == static_cast<int32_t>(0); };
     if (!((deq.pop_front_if(std::move(pred))) == (rusty::Option<int32_t>(0)))) { rusty::panic::do_panic("assertion failed: (deq . pop_front_if (pred)) == (Some (0))"); }
     if (!(rusty::detail::deref_if_pointer_like((deq)) == (std::array{1, 2, 3, 4}))) { rusty::panic::do_panic("assertion failed: (deq) == ([1 , 2 , 3 , 4])"); }
@@ -5558,7 +5558,7 @@ TEST_CASE("test_pop_if_empty") {
 }
 
 TEST_CASE("test_pop_if_mutates") {
-    auto v = vd_from(rusty::Vec{-1, 1});
+    auto v = vd_from(::rusty::port::vec::Vec{-1, 1});
     const auto pred = [&](int32_t& x) {
 x *= 2;
 return false;
@@ -5612,7 +5612,7 @@ TEST_CASE("test_index_out_of_bounds") {
 TEST_CASE("test_range_start_overflow") {
     bool rusty_should_panic_hit = false;
     try {
-        const auto deq = vd_from(rusty::Vec{1, 2, 3});
+        const auto deq = vd_from(::rusty::port::vec::Vec{1, 2, 3});
         deq.range(std::make_tuple(rusty::bound_included(0), rusty::bound_included(std::numeric_limits<size_t>::max())));
     } catch (const std::exception& rusty_should_panic_ex) {
         rusty_should_panic_hit = true;
@@ -5623,7 +5623,7 @@ TEST_CASE("test_range_start_overflow") {
 TEST_CASE("test_range_end_overflow") {
     bool rusty_should_panic_hit = false;
     try {
-        const auto deq = vd_from(rusty::Vec{1, 2, 3});
+        const auto deq = vd_from(::rusty::port::vec::Vec{1, 2, 3});
         deq.range(std::make_tuple(rusty::bound_excluded(std::numeric_limits<size_t>::max()), rusty::bound_included(0)));
     } catch (const std::exception& rusty_should_panic_ex) {
         rusty_should_panic_hit = true;
@@ -5762,7 +5762,7 @@ TEST_CASE("test_mut_rev_iter_wrap") {
     d.push_back(3);
     if (!((d.pop_front()) == (rusty::Option<int32_t>(1)))) { rusty::panic::do_panic("assertion failed: (d . pop_front ()) == (Some (1))"); }
     d.push_back(4);
-    if (!((rusty::collect_range(rusty::map(rusty::rev(rusty::iter_mut(d)), [&](auto&& x) { return x; }))) == (rusty::Vec{4, 3, 2}))) { rusty::panic::do_panic("assertion failed: (d . iter_mut () . rev () . map (| x | * x) . collect ::< Vec < _ >> ()) == (vec ! [4 , 3 , 2])"); }
+    if (!((rusty::collect_range(rusty::map(rusty::rev(rusty::iter_mut(d)), [&](auto&& x) { return x; }))) == (::rusty::port::vec::Vec{4, 3, 2}))) { rusty::panic::do_panic("assertion failed: (d . iter_mut () . rev () . map (| x | * x) . collect ::< Vec < _ >> ()) == (vec ! [4 , 3 , 2])"); }
 }
 
 TEST_CASE("test_mut_iter") {
@@ -5820,7 +5820,7 @@ TEST_CASE("test_into_iter") {
         for (auto&& i : rusty::for_in(rusty::range(0, 5))) {
             d.push_back(std::move(i));
         }
-        const auto b = rusty::Vec{0, 1, 2, 3, 4};
+        const auto b = ::rusty::port::vec::Vec{0, 1, 2, 3, 4};
         if (!((rusty::collect_range(d.into_iter())) == rusty::detail::deref_if_pointer_like((b)))) { rusty::panic::do_panic("assertion failed: (d . into_iter () . collect ::< Vec < _ >> ()) == (b)"); }
     }
     {
@@ -5831,7 +5831,7 @@ TEST_CASE("test_into_iter") {
         for (auto&& i : rusty::for_in(rusty::range(6, 9))) {
             d.push_front(std::move(i));
         }
-        const auto b = rusty::Vec{8, 7, 6, 0, 1, 2, 3, 4};
+        const auto b = ::rusty::port::vec::Vec{8, 7, 6, 0, 1, 2, 3, 4};
         if (!((rusty::collect_range(d.into_iter())) == rusty::detail::deref_if_pointer_like((b)))) { rusty::panic::do_panic("assertion failed: (d . into_iter () . collect ::< Vec < _ >> ()) == (b)"); }
     }
     {
@@ -5864,9 +5864,9 @@ TEST_CASE("test_into_iter") {
         if (!((it.next()) == (rusty::Option<int32_t>(7)))) { rusty::panic::do_panic("assertion failed: (it . next ()) == (Some (7))"); }
         if (!((it.advance_back_by(1)) == (rusty::Ok(std::make_tuple())))) { rusty::panic::do_panic("assertion failed: (it . advance_back_by (1)) == (Ok (()))"); }
         if (!((it.next_back()) == (rusty::Option<int32_t>(3)))) { rusty::panic::do_panic("assertion failed: (it . next_back ()) == (Some (3))"); }
-        auto it_shadow1 = rusty::iter(vd_from(rusty::Vec{1, 2, 3, 4, 5}));
+        auto it_shadow1 = rusty::iter(vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5}));
         if (!((it_shadow1.advance_by(10)) == (rusty::Err(rusty::num::NonZero<size_t>::new_(5).unwrap())))) { rusty::panic::do_panic("assertion failed: (it . advance_by (10)) == (Err (NonZero :: new (5) . unwrap ()))"); }
-        auto it_shadow2 = rusty::iter(vd_from(rusty::Vec{1, 2, 3, 4, 5}));
+        auto it_shadow2 = rusty::iter(vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5}));
         if (!((it_shadow2.advance_back_by(10)) == (rusty::Err(rusty::num::NonZero<size_t>::new_(5).unwrap())))) { rusty::panic::do_panic("assertion failed: (it . advance_back_by (10)) == (Err (NonZero :: new (5) . unwrap ()))"); }
     }
 }
@@ -5924,7 +5924,7 @@ TEST_CASE("test_drain") {
 }
 
 TEST_CASE("test_from_iter") {
-    const auto v = rusty::Vec{1, 2, 3, 4, 5, 6, 7};
+    const auto v = ::rusty::port::vec::Vec{1, 2, 3, 4, 5, 6, 7};
     const auto deq = rusty::collect_range(rusty::cloned(rusty::iter(v)));
     const auto u = rusty::collect_range(rusty::cloned(rusty::iter(deq)));
     if (!(rusty::detail::deref_if_pointer_like((u)) == rusty::detail::deref_if_pointer_like((v)))) { rusty::panic::do_panic("assertion failed: (u) == (v)"); }
@@ -6056,7 +6056,7 @@ TEST_CASE("test_ord") {
 TEST_CASE("test_show") {
     const VecDequeT<int32_t> ringbuf = VecDequeT<int32_t>::from_iter((rusty::range(0, 10)));
     if (!((std::format("{0}", rusty::to_debug_string(ringbuf))) == ("[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"))) { rusty::panic::do_panic("assertion failed: (format ! (\"{ringbuf:?}\")) == (\"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\")"); }
-    const auto ringbuf_shadow1 = rusty::collect_range(rusty::cloned(rusty::iter(rusty::Vec{"just", "one", "test", "more"})));
+    const auto ringbuf_shadow1 = rusty::collect_range(rusty::cloned(rusty::iter(::rusty::port::vec::Vec{"just", "one", "test", "more"})));
     if (!((std::format("{0}", rusty::to_debug_string(ringbuf_shadow1))) == ("[\"just\", \"one\", \"test\", \"more\"]"))) { rusty::panic::do_panic("assertion failed: (format ! (\"{ringbuf:?}\")) == (\"[\\\"just\\\", \\\"one\\\", \\\"test\\\", \\\"more\\\"]\")"); }
 }
 
@@ -6222,15 +6222,15 @@ TEST_CASE("test_as_slices") {
     for (auto&& i : rusty::for_in(rusty::range(0, first))) {
         ring.push_back(std::move(i));
         auto [left, right] = rusty::detail::deref_if_pointer_like(ring.as_slices());
-        const rusty::Vec<int32_t> expected = rusty::Vec<int32_t>::from_iter((rusty::range_inclusive(0, i)));
+        const ::rusty::port::vec::Vec<int32_t> expected = ::rusty::port::vec::Vec<int32_t>::from_iter((rusty::range_inclusive(0, i)));
         if (!(rusty::detail::deref_if_pointer_like((left)) == rusty::slice_full(expected))) { rusty::panic::do_panic("assertion failed: (left) == (& expected [..])"); }
         if (!(rusty::detail::deref_if_pointer_like((right)) == (std::array<int, 0>{}))) { rusty::panic::do_panic("assertion failed: (right) == ([])"); }
     }
     for (auto&& j : rusty::for_in(rusty::range(-last, 0))) {
         ring.push_front(std::move(j));
         auto [left, right] = rusty::detail::deref_if_pointer_like(ring.as_slices());
-        const rusty::Vec<int32_t> expected_left = rusty::Vec<int32_t>::from_iter(rusty::rev((rusty::range_inclusive(-last, j))));
-        const rusty::Vec<int32_t> expected_right = rusty::Vec<int32_t>::from_iter((rusty::range(0, first)));
+        const ::rusty::port::vec::Vec<int32_t> expected_left = ::rusty::port::vec::Vec<int32_t>::from_iter(rusty::rev((rusty::range_inclusive(-last, j))));
+        const ::rusty::port::vec::Vec<int32_t> expected_right = ::rusty::port::vec::Vec<int32_t>::from_iter((rusty::range(0, first)));
         if (!(rusty::detail::deref_if_pointer_like((left)) == rusty::slice_full(expected_left))) { rusty::panic::do_panic("assertion failed: (left) == (& expected_left [..])"); }
         if (!(rusty::detail::deref_if_pointer_like((right)) == rusty::slice_full(expected_right))) { rusty::panic::do_panic("assertion failed: (right) == (& expected_right [..])"); }
     }
@@ -6246,15 +6246,15 @@ TEST_CASE("test_as_mut_slices") {
     for (auto&& i : rusty::for_in(rusty::range(0, first))) {
         ring.push_back(std::move(i));
         auto [left, right] = rusty::detail::deref_if_pointer_like(ring.as_mut_slices());
-        const rusty::Vec<int32_t> expected = rusty::Vec<int32_t>::from_iter((rusty::range_inclusive(0, i)));
+        const ::rusty::port::vec::Vec<int32_t> expected = ::rusty::port::vec::Vec<int32_t>::from_iter((rusty::range_inclusive(0, i)));
         if (!(rusty::detail::deref_if_pointer_like((left)) == rusty::slice_full(expected))) { rusty::panic::do_panic("assertion failed: (left) == (& expected [..])"); }
         if (!(rusty::detail::deref_if_pointer_like((right)) == (std::array<int, 0>{}))) { rusty::panic::do_panic("assertion failed: (right) == ([])"); }
     }
     for (auto&& j : rusty::for_in(rusty::range(-last, 0))) {
         ring.push_front(std::move(j));
         auto [left, right] = rusty::detail::deref_if_pointer_like(ring.as_mut_slices());
-        const rusty::Vec<int32_t> expected_left = rusty::Vec<int32_t>::from_iter(rusty::rev((rusty::range_inclusive(-last, j))));
-        const rusty::Vec<int32_t> expected_right = rusty::Vec<int32_t>::from_iter((rusty::range(0, first)));
+        const ::rusty::port::vec::Vec<int32_t> expected_left = ::rusty::port::vec::Vec<int32_t>::from_iter(rusty::rev((rusty::range_inclusive(-last, j))));
+        const ::rusty::port::vec::Vec<int32_t> expected_right = ::rusty::port::vec::Vec<int32_t>::from_iter((rusty::range(0, first)));
         if (!(rusty::detail::deref_if_pointer_like((left)) == rusty::slice_full(expected_left))) { rusty::panic::do_panic("assertion failed: (left) == (& expected_left [..])"); }
         if (!(rusty::detail::deref_if_pointer_like((right)) == rusty::slice_full(expected_right))) { rusty::panic::do_panic("assertion failed: (right) == (& expected_right [..])"); }
     }
@@ -6305,7 +6305,7 @@ TEST_CASE("test_append_permutations") {
                                 for (auto&& dst_pop_front : rusty::for_in(rusty::range(0, ((rusty::detail::deref_if_pointer_like(dst_push_back) + rusty::detail::deref_if_pointer_like(dst_push_front)) - rusty::detail::deref_if_pointer_like(dst_pop_back))))) {
                                     auto dst = construct_vec_deque(std::move(dst_push_back), std::move(dst_pop_back), std::move(dst_push_front), std::move(dst_pop_front));
                                     auto src_shadow1 = rusty::clone(src);
-                                    const auto correct = rusty::Vec<size_t>::from_iter(rusty::cloned(rusty::chain(rusty::iter(dst), rusty::iter(src_shadow1))));
+                                    const auto correct = ::rusty::port::vec::Vec<size_t>::from_iter(rusty::cloned(rusty::chain(rusty::iter(dst), rusty::iter(src_shadow1))));
                                     dst.append(src_shadow1);
                                     if (!(rusty::detail::deref_if_pointer_like((dst)) == rusty::detail::deref_if_pointer_like((correct)))) { rusty::panic::do_panic("assertion failed: (dst) == (correct)"); }
                                     if (!(rusty::is_empty(src_shadow1))) { rusty::panic::do_panic("assertion failed: src . is_empty ()"); }
@@ -6763,11 +6763,11 @@ TEST_CASE("test_drain_leak") {
 }
 
 TEST_CASE("test_binary_search") {
-    const auto deque = vd_from(rusty::Vec{1, 2, 3, 5, 6});
+    const auto deque = vd_from(::rusty::port::vec::Vec{1, 2, 3, 5, 6});
     if (!(rusty::is_empty(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })(deque.as_slices()))))) { rusty::panic::do_panic("assertion failed: deque . as_slices () . 1 . is_empty ()"); }
     if (!((deque.binary_search(*rusty::addr_of_temp(3))) == (rusty::Ok(2)))) { rusty::panic::do_panic("assertion failed: (deque . binary_search (& 3)) == (Ok (2))"); }
     if (!((deque.binary_search(*rusty::addr_of_temp(4))) == (rusty::Err(3)))) { rusty::panic::do_panic("assertion failed: (deque . binary_search (& 4)) == (Err (3))"); }
-    auto deque_shadow1 = vd_from(rusty::Vec{5, 6});
+    auto deque_shadow1 = vd_from(::rusty::port::vec::Vec{5, 6});
     deque_shadow1.push_front(3);
     deque_shadow1.push_front(2);
     deque_shadow1.push_front(1);
@@ -6782,7 +6782,7 @@ TEST_CASE("test_binary_search") {
 }
 
 TEST_CASE("test_binary_search_by") {
-    const auto deque = vd_from(rusty::Vec{std::make_tuple(static_cast<int32_t>(1)), std::make_tuple(static_cast<int32_t>(2)), std::make_tuple(static_cast<int32_t>(3)), std::make_tuple(static_cast<int32_t>(5)), std::make_tuple(static_cast<int32_t>(6))});
+    const auto deque = vd_from(::rusty::port::vec::Vec{std::make_tuple(static_cast<int32_t>(1)), std::make_tuple(static_cast<int32_t>(2)), std::make_tuple(static_cast<int32_t>(3)), std::make_tuple(static_cast<int32_t>(5)), std::make_tuple(static_cast<int32_t>(6))});
     if (!((rusty::binary_search_by(deque, [&](auto&& _closure_ref_param0) {
 auto [v] = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
 return rusty::cmp::cmp(v, 3);
@@ -6794,7 +6794,7 @@ return rusty::cmp::cmp(v, 4);
 }
 
 TEST_CASE("test_binary_search_by_key") {
-    const auto deque = vd_from(rusty::Vec{std::make_tuple(static_cast<int32_t>(1)), std::make_tuple(static_cast<int32_t>(2)), std::make_tuple(static_cast<int32_t>(3)), std::make_tuple(static_cast<int32_t>(5)), std::make_tuple(static_cast<int32_t>(6))});
+    const auto deque = vd_from(::rusty::port::vec::Vec{std::make_tuple(static_cast<int32_t>(1)), std::make_tuple(static_cast<int32_t>(2)), std::make_tuple(static_cast<int32_t>(3)), std::make_tuple(static_cast<int32_t>(5)), std::make_tuple(static_cast<int32_t>(6))});
     if (!((rusty::binary_search_by_key(deque, rusty::addr_of_temp(3), [&](auto&& _closure_ref_param0) {
 auto [v] = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
 return std::move(v);
@@ -6806,13 +6806,13 @@ return std::move(v);
 }
 
 TEST_CASE("test_partition_point") {
-    const auto deque = vd_from(rusty::Vec{1, 2, 3, 5, 6});
+    const auto deque = vd_from(::rusty::port::vec::Vec{1, 2, 3, 5, 6});
     if (!(rusty::is_empty(rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else if constexpr (requires { std::get<1>(std::forward<decltype(__t)>(__t)); }) return std::get<1>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._1; }) return ((*std::forward<decltype(__t)>(__t))._1); else return std::get<1>(*std::forward<decltype(__t)>(__t)); })(deque.as_slices()))))) { rusty::panic::do_panic("assertion failed: deque . as_slices () . 1 . is_empty ()"); }
     if (!((rusty::partition_point(deque, [&](auto&& _closure_ref_param0) {
 auto v = rusty::detail::deref_if_pointer_like(_closure_ref_param0);
 return rusty::detail::deref_if_pointer_like(v) <= 3;
 })) == (3))) { rusty::panic::do_panic("assertion failed: (deque . partition_point (|& v | v <= 3)) == (3)"); }
-    auto deque_shadow1 = vd_from(rusty::Vec{5, 6});
+    auto deque_shadow1 = vd_from(::rusty::port::vec::Vec{5, 6});
     deque_shadow1.push_front(3);
     deque_shadow1.push_front(2);
     deque_shadow1.push_front(1);
@@ -6850,15 +6850,15 @@ TEST_CASE("test_zero_sized_push") {
 }
 
 TEST_CASE("test_from_zero_sized_vec") {
-    auto v = rusty::Vec<std::tuple<>>::new_();
+    auto v = ::rusty::port::vec::Vec<std::tuple<>>::new_();
     for (int vd_i = 0; vd_i < 100; ++vd_i) v.push(std::make_tuple());
     const auto queue = vd_from(std::move(v));
     if (!((rusty::len(queue)) == (100))) { rusty::panic::do_panic("assertion failed: (queue . len ()) == (100)"); }
 }
 
 TEST_CASE("test_resize_keeps_reserved_space_from_item") {
-    auto v = rusty::Vec<int32_t>::with_capacity(1234);
-    auto d = VecDequeT<rusty::Vec<int32_t>>::new_();
+    auto v = ::rusty::port::vec::Vec<int32_t>::with_capacity(1234);
+    auto d = VecDequeT<::rusty::port::vec::Vec<int32_t>>::new_();
     d.resize(1, std::move(v));
     if (!((d[static_cast<size_t>(0)].capacity()) == (1234))) { rusty::panic::do_panic("assertion failed: (d [0] . capacity ()) == (1234)"); }
 }
@@ -6983,10 +6983,10 @@ TEST_CASE("test_extend_front") {
     auto v_shadow2 = VecDequeT<int32_t>::new_();
     v_shadow2.extend_front(std::array<int, 0>{});
     v_shadow2.extend_front(rusty::None);
-    v_shadow2.extend_front(rusty::Vec<int32_t>{});
+    v_shadow2.extend_front(::rusty::port::vec::Vec<int32_t>{});
     v_shadow2.prepend(std::array<int, 0>{});
     v_shadow2.prepend(rusty::None);
-    v_shadow2.prepend(rusty::Vec<int32_t>{});
+    v_shadow2.prepend(::rusty::port::vec::Vec<int32_t>{});
     if (!((v_shadow2.capacity()) == (0))) { rusty::panic::do_panic("assertion failed: (v . capacity ()) == (0)"); }
     v_shadow2.extend_front(rusty::Option<int32_t>(123));
     if (!(rusty::detail::deref_if_pointer_like((v_shadow2)) == (std::array{123}))) { rusty::panic::do_panic("assertion failed: (v) == ([123])"); }
@@ -6994,16 +6994,16 @@ TEST_CASE("test_extend_front") {
 
 TEST_CASE("test_extend_front_specialization_vec_into_iter") {
     auto v = VecDequeT<int32_t>::with_capacity(4);
-    v.prepend(rusty::Vec{1, 2, 3});
+    v.prepend(::rusty::port::vec::Vec{1, 2, 3});
     if (!(rusty::detail::deref_if_pointer_like((v)) == (std::array{1, 2, 3}))) { rusty::panic::do_panic("assertion failed: (v) == ([1 , 2 , 3])"); }
     v.pop_back();
-    v.prepend(rusty::Vec{-1, 0});
+    v.prepend(::rusty::port::vec::Vec{-1, 0});
     if (!(vd_slices_eq(v.as_slices(), std::make_tuple(rusty::as_slice(std::array{-1}), rusty::as_slice(std::array{0, 1, 2}))))) { rusty::panic::do_panic("assertion failed: (v . as_slices ()) == (([- 1] . as_slice () , [0 , 1 , 2] . as_slice ()))"); }
     auto v_shadow1 = VecDequeT<int32_t>::with_capacity(4);
-    v_shadow1.extend_front(rusty::Vec{1, 2, 3});
+    v_shadow1.extend_front(::rusty::port::vec::Vec{1, 2, 3});
     if (!(rusty::detail::deref_if_pointer_like((v_shadow1)) == (std::array{3, 2, 1}))) { rusty::panic::do_panic("assertion failed: (v) == ([3 , 2 , 1])"); }
     v_shadow1.pop_back();
-    v_shadow1.extend_front(rusty::Vec{4, 5});
+    v_shadow1.extend_front(::rusty::port::vec::Vec{4, 5});
     if (!(vd_slices_eq(v_shadow1.as_slices(), std::make_tuple(rusty::as_slice(std::array{5}), rusty::as_slice(std::array{4, 3, 2}))))) { rusty::panic::do_panic("assertion failed: (v . as_slices ()) == (([5] . as_slice () , [4 , 3 , 2] . as_slice ()))"); }
 }
 
@@ -7085,7 +7085,7 @@ TEST_CASE("test_extend_front_specialization_deque_drain") {
 }
 
 TEST_CASE("test_splice") {
-    auto v = vd_from(rusty::Vec{1, 2, 3, 4, 5});
+    auto v = vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5});
     auto a = std::array{10, 11, 12};
     v.splice(rusty::range(2, 4), std::move(a));
     if (!(rusty::detail::deref_if_pointer_like((v)) == std::array{1, 2, 10, 11, 12, 5})) { rusty::panic::do_panic("assertion failed: (v) == (& [1 , 2 , 10 , 11 , 12 , 5])"); }
@@ -7094,7 +7094,7 @@ TEST_CASE("test_splice") {
 }
 
 TEST_CASE("test_splice_inclusive_range") {
-    auto v = vd_from(rusty::Vec{1, 2, 3, 4, 5});
+    auto v = vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5});
     auto a = std::array{10, 11, 12};
     const auto t1 = rusty::collect_range(v.splice(rusty::range_inclusive(2, 3), std::move(a)));
     if (!(rusty::detail::deref_if_pointer_like((v)) == std::array{1, 2, 10, 11, 12, 5})) { rusty::panic::do_panic("assertion failed: (v) == (& [1 , 2 , 10 , 11 , 12 , 5])"); }
@@ -7105,7 +7105,7 @@ TEST_CASE("test_splice_inclusive_range") {
 }
 
 TEST_CASE("test_splice_inclusive_range2") {
-    auto v = vd_from(rusty::Vec{1, 2, 10, 11, 12, 5});
+    auto v = vd_from(::rusty::port::vec::Vec{1, 2, 10, 11, 12, 5});
     const auto t2 = rusty::collect_range(v.splice(rusty::range_inclusive(1, 2), rusty::Option<int32_t>(20)));
     if (!(rusty::detail::deref_if_pointer_like((v)) == std::array{1, 20, 11, 12, 5})) { rusty::panic::do_panic("assertion failed: (v) == (& [1 , 20 , 11 , 12 , 5])"); }
     if (!(rusty::detail::deref_if_pointer_like((t2)) == std::array{2, 10})) { rusty::panic::do_panic("assertion failed: (t2) == (& [2 , 10])"); }
@@ -7114,7 +7114,7 @@ TEST_CASE("test_splice_inclusive_range2") {
 TEST_CASE("test_splice_out_of_bounds") {
     bool rusty_should_panic_hit = false;
     try {
-        auto v = vd_from(rusty::Vec{1, 2, 3, 4, 5});
+        auto v = vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5});
         auto a = std::array{10, 11, 12};
         v.splice(rusty::range(5, 6), std::move(a));
     } catch (const std::exception& rusty_should_panic_ex) {
@@ -7126,7 +7126,7 @@ TEST_CASE("test_splice_out_of_bounds") {
 TEST_CASE("test_splice_inclusive_out_of_bounds") {
     bool rusty_should_panic_hit = false;
     try {
-        auto v = vd_from(rusty::Vec{1, 2, 3, 4, 5});
+        auto v = vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5});
         auto a = std::array{10, 11, 12};
         v.splice(rusty::range_inclusive(5, 5), std::move(a));
     } catch (const std::exception& rusty_should_panic_ex) {
@@ -7136,15 +7136,15 @@ TEST_CASE("test_splice_inclusive_out_of_bounds") {
 }
 
 TEST_CASE("test_splice_items_zero_sized") {
-    auto vec = vd_from(rusty::Vec{std::make_tuple(), std::make_tuple(), std::make_tuple()});
-    const auto vec2 = vd_from(rusty::Vec<std::tuple<>>{});
+    auto vec = vd_from(::rusty::port::vec::Vec{std::make_tuple(), std::make_tuple(), std::make_tuple()});
+    const auto vec2 = vd_from(::rusty::port::vec::Vec<std::tuple<>>{});
     const auto t = rusty::collect_range(vec.splice(rusty::range(1, 2), rusty::cloned(rusty::iter(vec2))));
     if (!(rusty::detail::deref_if_pointer_like((vec)) == std::array{std::make_tuple(), std::make_tuple()})) { rusty::panic::do_panic("assertion failed: (vec) == (& [() , ()])"); }
     if (!(rusty::detail::deref_if_pointer_like((t)) == std::array{std::make_tuple()})) { rusty::panic::do_panic("assertion failed: (t) == (& [()])"); }
 }
 
 TEST_CASE("test_splice_unbounded") {
-    auto vec = vd_from(rusty::Vec{1, 2, 3, 4, 5});
+    auto vec = vd_from(::rusty::port::vec::Vec{1, 2, 3, 4, 5});
     const auto t = rusty::collect_range(vec.splice(rusty::range_full(), rusty::None));
     if (!(rusty::detail::deref_if_pointer_like((vec)) == std::array<int, 0>{})) { rusty::panic::do_panic("assertion failed: (vec) == (& [])"); }
     if (!(rusty::detail::deref_if_pointer_like((t)) == std::array{1, 2, 3, 4, 5})) { rusty::panic::do_panic("assertion failed: (t) == (& [1 , 2 , 3 , 4 , 5])"); }

@@ -4799,8 +4799,9 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module rc_tests_port;
+import rc_port;
+
 import vec_port.vec.into_iter;
-import rusty;
 
 
 namespace pin_coerce_unsized {}
@@ -4833,7 +4834,7 @@ using rusty::RefCell;
 
 namespace mem = rusty::mem;
 
-using rusty::Rc;
+using ::rusty::port::rc::Rc;
 // Rust-only: using rusty::rc::UniqueRc;
 using rusty::rc::Weak;
 
@@ -4843,7 +4844,7 @@ namespace pin_coerce_unsized {
 // [rc_tests_port] dropped (pin-coercion helper)
 // [rc_tests_port] dropped (pin-coercion helper)
 
-    using rusty::Rc;
+    using ::rusty::port::rc::Rc;
     // Rust-only: using rusty::rc::UniqueRc;
 
     // Rust-only: using std::pin::Pin;
@@ -4885,7 +4886,7 @@ TEST_CASE("trait_object") {
 }
 
 TEST_CASE("float_nan_ne") {
-    const auto x = rusty::Rc<float>::new_(std::numeric_limits<float>::quiet_NaN());
+    const auto x = ::rusty::port::rc::Rc<float>::new_(std::numeric_limits<float>::quiet_NaN());
     assert((rusty::detail::deref_if_pointer_like(x) != rusty::detail::deref_if_pointer_like(x)));
     assert((!(rusty::detail::deref_if_pointer_like(x) == rusty::detail::deref_if_pointer_like(x))));
 }
@@ -4946,19 +4947,19 @@ TEST_CASE("panic_no_leak") {
 }
 
 TEST_CASE("test_clone") {
-    const auto x = rusty::Rc<rusty::RefCell<int32_t>>::new_(rusty::RefCell<int32_t>::new_(static_cast<int32_t>(5)));
+    const auto x = ::rusty::port::rc::Rc<rusty::RefCell<int32_t>>::new_(rusty::RefCell<int32_t>::new_(static_cast<int32_t>(5)));
     const auto y = rusty::clone(x);
     *x->borrow_mut() = 20;
     assert(((*y->borrow()) == (20)));
 }
 
 TEST_CASE("test_simple") {
-    const auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    const auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     assert(((rusty::detail::deref_if_pointer_like(x)) == (5)));
 }
 
 TEST_CASE("test_simple_clone") {
-    const auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    const auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     const auto y = rusty::clone(x);
     assert(((rusty::detail::deref_if_pointer_like(x)) == (5)));
     assert(((rusty::detail::deref_if_pointer_like(y)) == (5)));
@@ -4970,13 +4971,13 @@ TEST_CASE("test_destructor") {
 }
 
 TEST_CASE("test_live") {
-    const auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    const auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     const auto y = std::remove_cvref_t<decltype((x))>::downgrade(x);
     assert((y.upgrade().is_some()));
 }
 
 TEST_CASE("test_dead") {
-    auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     const auto y = std::remove_cvref_t<decltype((x))>::downgrade(x);
     rusty::mem::drop(std::move(x));
     assert((y.upgrade().is_none()));
@@ -4986,7 +4987,7 @@ TEST_CASE("weak_self_cyclic") {
     struct Cycle {
         rusty::RefCell<rusty::Option<rusty::rc::Weak<Cycle>>> x;
     };
-    const auto a = rusty::Rc<Cycle>::new_(Cycle{.x = rusty::RefCell<rusty::Option<rusty::rc::Weak<Cycle>>>::new_(rusty::Option<rusty::rc::Weak<Cycle>>{rusty::None})});
+    const auto a = ::rusty::port::rc::Rc<Cycle>::new_(Cycle{.x = rusty::RefCell<rusty::Option<rusty::rc::Weak<Cycle>>>::new_(rusty::Option<rusty::rc::Weak<Cycle>>{rusty::None})});
     auto b = std::remove_cvref_t<decltype((rusty::clone(a)))>::downgrade(rusty::clone(a));
     *(*a).x.borrow_mut() = rusty::Some(std::move(b));
 }
@@ -4995,7 +4996,7 @@ TEST_CASE("is_unique") {
     const auto is_unique = [](const auto& this_) -> bool {
         return (std::remove_cvref_t<decltype(this_)>::weak_count(this_) == 0) && (std::remove_cvref_t<decltype(this_)>::strong_count(this_) == 1);
     };
-    const auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(3));
+    const auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(3));
     assert((is_unique(x)));
     auto y = rusty::clone(x);
     assert((rusty::detail::rust_not(is_unique(x))));
@@ -5008,7 +5009,7 @@ TEST_CASE("is_unique") {
 }
 
 TEST_CASE("test_strong_count") {
-    auto a = rusty::Rc<int32_t>::new_(static_cast<int32_t>(0));
+    auto a = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(0));
     assert((Rc<int32_t>::strong_count(a) == 1));
     auto w = std::remove_cvref_t<decltype((a))>::downgrade(a);
     assert((Rc<int32_t>::strong_count(a) == 1));
@@ -5024,7 +5025,7 @@ TEST_CASE("test_strong_count") {
 }
 
 TEST_CASE("test_weak_count") {
-    const auto a = rusty::Rc<int32_t>::new_(static_cast<int32_t>(0));
+    const auto a = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(0));
     assert((Rc<int32_t>::strong_count(a) == 1));
     assert((Rc<int32_t>::weak_count(a) == 0));
     auto w = std::remove_cvref_t<decltype((a))>::downgrade(a);
@@ -5042,7 +5043,7 @@ TEST_CASE("test_weak_count") {
 TEST_CASE("weak_counts") {
     assert((((Weak<uint64_t>::new_()).weak_count()) == (0)));
     assert((((Weak<uint64_t>::new_()).strong_count()) == (0)));
-    auto a = rusty::Rc<int32_t>::new_(static_cast<int32_t>(0));
+    auto a = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(0));
     auto w = std::remove_cvref_t<decltype((a))>::downgrade(a);
     assert(((w.strong_count()) == (1)));
     assert(((w.weak_count()) == (1)));
@@ -5065,30 +5066,30 @@ TEST_CASE("weak_counts") {
 }
 
 TEST_CASE("try_unwrap") {
-    auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(3));
+    auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(3));
     assert(((Rc<int32_t>::try_unwrap(std::move(x))) == (rusty::Ok(3))));
-    auto x_shadow1 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(4));
+    auto x_shadow1 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(4));
     const auto _y = rusty::clone(x_shadow1);
     assert(((Rc<int32_t>::try_unwrap(std::move(x_shadow1))) == (rusty::Err(Rc<int32_t>::new_(4)))));
-    auto x_shadow2 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    auto x_shadow2 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     const auto _w = std::remove_cvref_t<decltype((x_shadow2))>::downgrade(x_shadow2);
     assert(((Rc<int32_t>::try_unwrap(std::move(x_shadow2))) == (rusty::Ok(5))));
 }
 
 TEST_CASE("into_inner") {
-    auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(3));
+    auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(3));
     assert(((std::remove_cvref_t<decltype((x))>::into_inner(std::move(x))) == (rusty::Option<int32_t>(3))));
-    auto x_shadow1 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(4));
+    auto x_shadow1 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(4));
     auto y = rusty::clone(x_shadow1);
     assert(((std::remove_cvref_t<decltype((x_shadow1))>::into_inner(std::move(x_shadow1))) == rusty::detail::deref_if_pointer_like((rusty::None))));
     assert(((std::remove_cvref_t<decltype((y))>::into_inner(std::move(y))) == (rusty::Option<int32_t>(4))));
-    auto x_shadow2 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    auto x_shadow2 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     const auto _w = std::remove_cvref_t<decltype((x_shadow2))>::downgrade(x_shadow2);
     assert(((std::remove_cvref_t<decltype((x_shadow2))>::into_inner(std::move(x_shadow2))) == (rusty::Option<int32_t>(5))));
 }
 
 TEST_CASE("into_from_raw") {
-    auto x = rusty::Rc<rusty::Box<std::string_view>>::new_(rusty::Box<std::string_view>::new_(std::string_view("hello")));
+    auto x = ::rusty::port::rc::Rc<rusty::Box<std::string_view>>::new_(rusty::Box<std::string_view>::new_(std::string_view("hello")));
     auto y = rusty::clone(x);
     auto x_ptr = std::remove_cvref_t<decltype((x))>::into_raw(std::move(x));
     rusty::mem::drop(std::move(y));
@@ -5108,7 +5109,7 @@ TEST_CASE("test_into_from_raw_unsized") {
 }
 
 TEST_CASE("into_from_weak_raw") {
-    auto x = rusty::Rc<rusty::Box<std::string_view>>::new_(rusty::Box<std::string_view>::new_(std::string_view("hello")));
+    auto x = ::rusty::port::rc::Rc<rusty::Box<std::string_view>>::new_(rusty::Box<std::string_view>::new_(std::string_view("hello")));
     auto y = std::remove_cvref_t<decltype((x))>::downgrade(x);
     auto y_ptr = std::move(y).into_raw();
     // @unsafe
@@ -5129,7 +5130,7 @@ TEST_CASE("test_into_from_weak_raw_unsized") {
 }
 
 TEST_CASE("get_mut") {
-    auto x = rusty::Rc<int32_t>::new_(static_cast<int32_t>(3));
+    auto x = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(3));
     rusty::detail::deref_if_pointer_like(Rc<int32_t>::get_mut(x).unwrap()) = 4;
     assert(((rusty::detail::deref_if_pointer_like(x)) == (4)));
     auto y = rusty::clone(x);
@@ -5141,7 +5142,7 @@ TEST_CASE("get_mut") {
 }
 
 TEST_CASE("test_cowrc_clone_make_unique") {
-    auto cow0 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(75));
+    auto cow0 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(75));
     auto cow1 = rusty::clone(cow0);
     auto cow2 = rusty::clone(cow1);
     assert((75 == rusty::detail::deref_if_pointer_like(Rc<int32_t>::make_mut(cow0))));
@@ -5159,7 +5160,7 @@ TEST_CASE("test_cowrc_clone_make_unique") {
 }
 
 TEST_CASE("test_cowrc_clone_unique2") {
-    auto cow0 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(75));
+    auto cow0 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(75));
     const auto cow1 = rusty::clone(cow0);
     const auto cow2 = rusty::clone(cow1);
     assert((75 == rusty::detail::deref_if_pointer_like(cow0)));
@@ -5175,7 +5176,7 @@ TEST_CASE("test_cowrc_clone_unique2") {
 }
 
 TEST_CASE("test_cowrc_clone_weak") {
-    auto cow0 = rusty::Rc<int32_t>::new_(static_cast<int32_t>(75));
+    auto cow0 = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(75));
     const auto cow1_weak = std::remove_cvref_t<decltype((cow0))>::downgrade(cow0);
     assert((75 == rusty::detail::deref_if_pointer_like(cow0)));
     assert((75 == rusty::detail::deref_if_pointer_like(cow1_weak.upgrade().unwrap())));
@@ -5192,7 +5193,7 @@ TEST_CASE("test_cowrc_unsized") {
 }
 
 TEST_CASE("test_show") {
-    const auto foo = rusty::Rc<int32_t>::new_(static_cast<int32_t>(75));
+    const auto foo = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(75));
     assert(((std::format("{0}", rusty::to_debug_string(foo))) == ("75")));
 }
 
@@ -5220,9 +5221,9 @@ TEST_CASE("test_new_weak") {
 }
 
 TEST_CASE("test_ptr_eq") {
-    const auto five = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    const auto five = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     const auto same_five = rusty::clone(five);
-    const auto other_five = rusty::Rc<int32_t>::new_(static_cast<int32_t>(5));
+    const auto other_five = ::rusty::port::rc::Rc<int32_t>::new_(static_cast<int32_t>(5));
     assert((Rc<int32_t>::ptr_eq(five, same_five)));
     assert((rusty::detail::rust_not(Rc<int32_t>::ptr_eq(five, other_five))));
 }
@@ -5253,7 +5254,7 @@ TEST_CASE("test_clone_from_slice_panic") {
 
 TEST_CASE("test_from_box") {
     rusty::Box<uint32_t> b = rusty::Box<uint32_t>::new_(static_cast<uint32_t>(123));
-    const rusty::Rc<uint32_t> r = rusty::Rc<uint32_t>::from(std::move(b));
+    const ::rusty::port::rc::Rc<uint32_t> r = ::rusty::port::rc::Rc<uint32_t>::from(std::move(b));
     assert(((rusty::detail::deref_if_pointer_like(r)) == (123)));
 }
 

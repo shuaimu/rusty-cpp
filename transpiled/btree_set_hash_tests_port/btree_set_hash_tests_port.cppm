@@ -32,12 +32,13 @@ module;
 #endif
 
 export module btree_set_hash_tests_port;
-import rusty;
+import btree_port.btree.set;
+
 
 
 namespace btree_set_hash_tests_port {
 
-using rusty::BTreeSet;
+using ::btree_port::btree::set::BTreeSet;
 
 // Rust-only namespace re-export: using hash;
 
@@ -62,8 +63,8 @@ static uint64_t hash_pair(const A& a, const B& b) {
 
 
 TEST_CASE("test_hash") {
-    auto x = rusty::BTreeSet<int32_t>::new_();
-    auto y = rusty::BTreeSet<int32_t>::new_();
+    auto x = ::btree_port::btree::set::BTreeSet<int32_t>::new_();
+    auto y = ::btree_port::btree::set::BTreeSet<int32_t>::new_();
     x.insert(1);
     x.insert(2);
     x.insert(3);
@@ -74,8 +75,8 @@ TEST_CASE("test_hash") {
 }
 
 TEST_CASE("test_prefix_free") {
-    const auto x = rusty::BTreeSet<int32_t>::from(std::array{1, 2, 3});
-    const auto y = rusty::BTreeSet<int32_t>::new_();
+    const auto x = ::btree_port::btree::set::BTreeSet<int32_t>::from(std::array{1, 2, 3});
+    const auto y = ::btree_port::btree::set::BTreeSet<int32_t>::new_();
     assert(((hash_pair(x, y)) != (hash_pair(y, x))));
 }
 

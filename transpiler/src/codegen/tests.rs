@@ -11210,7 +11210,13 @@ fn test_late_pub_mod_export_import_is_hoisted_into_the_preamble() {
 #[test]
 fn test_use_statement() {
     let out = transpile_str_module("use std::collections::HashMap;", "my_crate");
-    assert!(out.contains("using rusty::HashMap;"));
+    // Module mode spells the collection by its DEEP path and imports only the
+    // owning port — no `import rusty;` umbrella (that over-import SIGSEGVs
+    // clang 22.1.8 once std_port is in the graph). Semantically identical
+    // using-declaration. Single-file mode still emits `using rusty::HashMap;`.
+    assert!(out.contains("using ::rusty::port::collections::hashbrown::HashMap;"));
+    assert!(out.contains("import hashbrown_port.map;"));
+    assert!(!out.contains("import rusty;"));
     assert!(!out.contains("using std::collections::HashMap;"));
 }
 
@@ -13442,7 +13448,13 @@ fn test_leaf223_cpp_and_rust_imports_coexist() {
     );
 
     assert!(out.contains("import std;"));
-    assert!(out.contains("using rusty::HashMap;"));
+    // Module mode spells the collection by its DEEP path and imports only the
+    // owning port — no `import rusty;` umbrella (that over-import SIGSEGVs
+    // clang 22.1.8 once std_port is in the graph). Semantically identical
+    // using-declaration. Single-file mode still emits `using rusty::HashMap;`.
+    assert!(out.contains("using ::rusty::port::collections::hashbrown::HashMap;"));
+    assert!(out.contains("import hashbrown_port.map;"));
+    assert!(!out.contains("import rusty;"));
 }
 
 #[test]
