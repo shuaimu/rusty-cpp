@@ -74,17 +74,26 @@ static bool all_slots(size_t lo, size_t hi, int want) {
 }
 
 // map/tests.rs::test_drops — DISABLED: this test FOUND bug #186 and is its
-// regression guard. std_port's HashMap::remove() leaks exactly one element per
-// call: it moves the value out into the returned Option but never destroys the
-// in-table instance. Controlled reproduction (scratchpad/rmprobe2.cpp):
-//     insert only, map dropped   net=0   OK
-//     insert + remove            net=1   LEAK
-//     10 inserts + 10 removes    net=10  LEAK  (one per remove)
-//     10 inserts + clear()       net=0   OK
-//     overwrite same key         net=0   OK
-// So insert / drop / clear / overwrite are correct; the defect is isolated to
-// remove(). Re-enable the moment #186 is fixed — it asserts the CORRECT
-// behaviour and will pass then.
+// regression guard.
+//
+// std_port's HashMap::remove() SKIPS THE DESTRUCTOR of the vacated table slot.
+// rusty::ptr::read (ptr.hpp:514) is `return std::move(*src);` — a move-CONSTRUCT
+// leaving a live moved-from husk — whereas Rust's ptr::read RELOCATES (source
+// logically dead, never dropped). The erase path then marks the slot empty and
+// never destroys the husk: exactly one skipped destructor per remove().
+//
+// NOT a heap leak, and it was mis-filed as one at first. Measured with a type
+// holding `new int` whose move ctor nulls its source:
+//     10 inserts, map dropped : live_allocs=0  OK
+//     10 inserts + 10 removes : live_allocs=0  OK
+// For any type that empties its source on move (String, Vec, Box, unique_ptr)
+// nothing is lost. It bites types whose destructor has effects independent of
+// moved-from state — counters, RAII unlock/close/log — which is exactly what
+// the Droppable accounting below detects.
+//
+// Isolation: insert / map-drop / clear() / overwrite are all CORRECT; only
+// remove() is affected. Re-enable once #186 is fixed — this asserts the
+// correct behaviour and will pass then.
 #if 0
 static void test_drops() { /* see above */ }
 #endif
