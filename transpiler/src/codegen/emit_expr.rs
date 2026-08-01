@@ -24406,7 +24406,7 @@ impl CodeGen {
                         .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
                         .is_some_and(|ty| {
                             matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_))
-                                || self.type_is_pointer_like_owner_type(&ty)
+                                || self.type_is_non_mutating_handle_type(&ty)
                         })
                 })
                 .any(|cpp_name| {

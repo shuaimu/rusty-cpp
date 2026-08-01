@@ -246,6 +246,19 @@ impl CodeGen {
         )
     }
 
+    /// Handles on which a method call cannot mutate the HANDLE itself.
+    ///
+    /// Distinct from `is_pointer_like_autoderef_owner_name` on purpose.
+    /// That one drives auto-deref of a receiver, and `Weak` must NOT be in
+    /// it — Rust makes you `.upgrade()` first, so auto-dereffing a `Weak`
+    /// would be wrong. But for the closure-mutability analysis the question
+    /// is different: does `w.upgrade()` modify `w`? It does not — the call
+    /// is `&self` and reaches the referent, not the handle. So `Weak`
+    /// belongs here and nowhere else.
+    pub(super) fn is_non_mutating_handle_name(name: &str) -> bool {
+        Self::is_pointer_like_autoderef_owner_name(name) || matches!(name, "Weak")
+    }
+
     pub(super) fn should_insert_move_for_deref_expected_value(
         &self,
         expr: &syn::Expr,
