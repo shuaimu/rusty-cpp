@@ -5964,6 +5964,9 @@ namespace collections {
             export template<typename K, typename V>
             struct Iter {
                 using Item = std::tuple<const K&, const V&>;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::Iter<K, V> base;
 
                 Iter<K, V> clone() const {
@@ -6015,6 +6018,9 @@ namespace collections {
             export template<typename K, typename V>
             struct IterMut {
                 using Item = std::tuple<const K&, V&>;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::IterMut<K, V> base;
 
                 Iter<K, V> iter() const {
@@ -6065,6 +6071,9 @@ namespace collections {
                 requires (rusty::alloc::Allocator<A>)
             struct IntoIter {
                 using Item = std::tuple<K, V>;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::IntoIter<K, V, A> base;
 
                 Iter<K, V> iter() const {
@@ -6114,6 +6123,9 @@ namespace collections {
             export template<typename K, typename V>
             struct Keys {
                 using Item = const K&;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 Iter<K, V> inner;
 
                 Keys<K, V> clone() const {
@@ -6169,6 +6181,9 @@ return f(std::move(acc), std::move(k));
             export template<typename K, typename V>
             struct Values {
                 using Item = const V&;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 Iter<K, V> inner;
 
                 Values<K, V> clone() const {
@@ -6225,6 +6240,9 @@ return f(std::move(acc), std::move(v));
                 requires (rusty::alloc::Allocator<A>)
             struct Drain {
                 using Item = std::tuple<K, V>;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::Drain<K, V, A> base;
 
                 Iter<K, V> iter() const {
@@ -6301,6 +6319,9 @@ return f(std::move(acc), std::move(v));
             export template<typename K, typename V>
             struct ValuesMut {
                 using Item = V&;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 IterMut<K, V> inner;
 
                 static ValuesMut<K, V> default_() {
@@ -7145,6 +7166,9 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
             export template<typename K>
             struct Iter {
                 using Item = const K&;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::Iter<K> base;
 
                 static Iter<K> default_() {
@@ -7196,6 +7220,9 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 requires (rusty::alloc::Allocator<A>)
             struct IntoIter {
                 using Item = K;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::IntoIter<K, A> base;
 
                 static IntoIter<K, A> default_() {
@@ -7242,6 +7269,9 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 requires (rusty::alloc::Allocator<A>)
             struct Drain {
                 using Item = K;
+                // Range-for over this Rust-shaped iterator. See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::Drain<K, A> base;
 
                 rusty::Option<K> next() {

@@ -354,49 +354,66 @@ namespace hashbrown {
 """
     t = t.replace("export module std_port;\n", bridge, 1)
 
-    # --- range-for over the set-algebra views -------------------------------
-    # std's HashSet::{union,intersection,difference,symmetric_difference} return
-    # LAZY VIEWS. In Rust they are Iterators, so `for x in a.intersection(&b)`
-    # works; the transpiled views are next()-shaped and C++ range-for needs
-    # begin()/end(), so `for (auto& v : a.intersection(b))` failed with
-    #     invalid range expression of type 'Intersection<…>'; no viable 'begin'
+    # --- range-for over the Rust-shaped iterators and lazy views ----------
+    # std's HashSet set-algebra methods return LAZY VIEWS, and iter()/keys()/
+    # values()/drain()/into_iter() return Rust-shaped ITERATORS. All are
+    # next()-shaped, so C++ range-for (which needs begin()/end()) does not work
+    # on any of them:
+    #     for (auto& v : a.intersection(b))   // and even  for (v : s.iter())
+    #     error: invalid range expression of type 'Iter<int>'; no viable 'begin'
     # `rusty::count(...)` worked all along because it is next()-based, which is
-    # what made this look like a smaller gap than it is.
+    # what made this look smaller than it was.
     #
-    # MEMBERS, not free functions: ADL for `Intersection<T, S, rusty::alloc::
-    # Global>` reaches `rusty::alloc` (from the allocator arg), NOT `rusty`, so
-    # a free begin()/end() in namespace rusty is never found. Verified.
+    # MEMBERS, not free functions: ADL for `Iter<T, S, rusty::alloc::Global>`
+    # reaches `rusty::alloc` (from the allocator arg), NOT `rusty`, so a free
+    # begin()/end() in namespace rusty is never found. Verified.
     #
     # Safe against the aggregate initialization the transpiler emits for these
-    # structs (`Intersection<T,S,A>{.iter = …, .other = …}`) because member
-    # FUNCTIONS do not affect aggregate-ness — only data members would.
-    range_for_bridge = """                // Range-for over this lazy view. See post_transpile_patch.py.
+    # structs (`Intersection<T,S,A>{.iter = …}`) because member FUNCTIONS do not
+    # affect aggregate-ness — only data members would.
+    range_for_bridge = """                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
                 auto begin() { return rusty::rust_range_begin(*this); }
                 auto end() { return rusty::rust_range_sentinel{}; }
 """
-    patched_views = 0
-    for view in ("Intersection", "Difference", "SymmetricDifference", "Union"):
-        # anchor on the DEFINITION (has a body + the Item typedef), never the
-        # forward declarations — there are several of each.
-        needle = "struct %s {\n" % view
-        idx = t.find(needle)
-        if idx < 0:
-            continue
-        after = idx + len(needle)
-        eol = t.find("\n", after) + 1
-        if "using Item" not in t[after:eol]:
-            continue
-        if "rust_range_begin" in t[after:after + 600]:
-            patched_views += 1   # already patched (idempotent re-run)
-            continue
-        t = t[:eol] + range_for_bridge + t[eol:]
-        patched_views += 1
-    if patched_views != 4:
-        raise SystemExit(
-            "docs/rusty patcher: expected to add range-for to 4 set-algebra "
-            "views, added %d — the struct shape moved, fix this rule rather "
-            "than shipping silently-unpatched output" % patched_views
-        )
+    # (name, expected number of DEFINITIONS). Definitions are `struct X {`
+    # followed by a `using Item = …` line; the many forward declarations are
+    # `struct X;` and cannot match. Counts are asserted so that a shape change
+    # fails loudly instead of silently shipping an unpatched port.
+    RANGE_FOR_TYPES = [
+        ("Intersection", 1), ("Difference", 1), ("SymmetricDifference", 1),
+        ("Union", 1),
+        ("Iter", 2),          # map's Iter<K,V> and set's Iter<K>
+        ("Keys", 1), ("Values", 1), ("ValuesMut", 1), ("IterMut", 1),
+        ("Drain", 2), ("IntoIter", 2),
+    ]
+    for type_name, expected in RANGE_FOR_TYPES:
+        needle = "struct %s {\n" % type_name
+        patched = 0
+        pos = 0
+        while True:
+            idx = t.find(needle, pos)
+            if idx < 0:
+                break
+            after = idx + len(needle)
+            eol = t.find("\n", after) + 1
+            if "using Item" not in t[after:eol]:
+                pos = after          # a nested/other struct of the same name
+                continue
+            if "rust_range_begin" in t[after:after + 600]:
+                patched += 1         # already patched (idempotent re-run)
+                pos = after
+                continue
+            t = t[:eol] + range_for_bridge + t[eol:]
+            patched += 1
+            pos = eol + len(range_for_bridge)
+        if patched != expected:
+            raise SystemExit(
+                "docs/rusty patcher: expected %d range-for definition(s) of "
+                "%s, found %d — the struct shape moved. Fix this rule rather "
+                "than shipping silently-unpatched output."
+                % (expected, type_name, patched)
+            )
 
     path.write_text(t)
 

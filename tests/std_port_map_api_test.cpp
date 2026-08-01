@@ -18,6 +18,7 @@ import std_port;
 #include <cstdlib>
 #include <vector>
 #include <algorithm>
+#include <tuple>
 #include <rusty/rusty.hpp>
 
 // NOT assert(): these targets compile with -DNDEBUG. fflush before abort or the
@@ -220,6 +221,31 @@ static void test_capacity_and_reserve() {
     std::printf("  test_capacity_and_reserve ok\n");
 }
 
+// Range-for over keys() / values() / iter() — the regression guard for #188.
+// Before that fix only the four set-algebra views had begin()/end(), so the
+// most basic iteration form over a map did not compile at all. Sums, not
+// sequences: RandomState makes the order vary per run.
+static void test_range_for_iteration() {
+    auto m = HMap<int, int>::new_();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+
+    int ksum = 0; size_t kn = 0;
+    for (const auto& k : m.keys()) { ksum += k; ++kn; }
+    CHECK(kn == 5);
+    CHECK(ksum == 1 + 2 + 3 + 4 + 5);
+
+    int vsum = 0; size_t vn = 0;
+    for (const auto& v : m.values()) { vsum += v; ++vn; }
+    CHECK(vn == 5);
+    CHECK(vsum == 10 + 20 + 30 + 40 + 50);
+
+    int isum = 0; size_t in = 0;
+    for (const auto& kv : m.iter()) { isum += std::get<0>(kv) + std::get<1>(kv); ++in; }
+    CHECK(in == 5);
+    CHECK(isum == 15 + 150);
+    std::printf("  test_range_for_iteration ok\n");
+}
+
 int main() {
     test_insert();
     test_insert_overwrite();
@@ -233,6 +259,7 @@ int main() {
     test_entry();
     test_clone();
     test_capacity_and_reserve();
+    test_range_for_iteration();
     std::printf("std_port HashMap API: all checks passed\n");
     return 0;
 }

@@ -106,15 +106,12 @@ static void test_iterate() {
     CHECK(s.len() == 32);
     int expected = 0;
     for (int i = 0; i < 32; ++i) { CHECK(s.contains(i)); expected += i; }
-    // NOTE: `for (auto& v : s.iter())` does NOT compile —
-    //   error: invalid range expression of type 'Iter<int>'; no viable 'begin'
-    // The four set-algebra VIEWS got begin()/end() in 6588f65b, but plain
-    // iter() did not, so the most basic iteration form is still unavailable.
-    // Tracked in #188. Using the next()-based form until then.
+    // Range-for over iter() — the regression guard for #188. Before that fix
+    // only the four set-algebra views had begin()/end(), so the most basic
+    // iteration form over a set did not compile at all.
     int total = 0;
     size_t seen = 0;
-    auto it = s.iter();
-    for (auto e = it.next(); e.is_some(); e = it.next()) { total += e.unwrap(); ++seen; }
+    for (const auto& v : s.iter()) { total += v; ++seen; }
     CHECK(seen == 32);
     CHECK(total == expected);
     std::printf("  test_iterate ok\n");
