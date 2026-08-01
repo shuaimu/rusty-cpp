@@ -24379,8 +24379,45 @@ impl CodeGen {
                     || reassigned.contains(cpp_name)
             })
         };
-        let needs_mutable =
-            is_move_closure && !(all_captures_are_raw_pointers && !body_reassigns_a_capture);
+        // Widened from "every capture is a raw pointer" to "no capture can be
+        // MUTATED". A capture is safe when the body neither reassigns it nor
+        // calls a method on it; raw pointers and pointer-like owners
+        // (Arc/Box/Rc/Weak/guards) stay safe even under a method call, because
+        // the call reaches the pointee through a const-correct deref rather
+        // than touching the captured handle.
+        //
+        // Conservative by construction: anything not provably unmutated keeps
+        // `mutable`. Over-reporting costs a redundant `mutable`; under-reporting
+        // produces a lambda that will not convert to a const-callable target,
+        // which is the bug this analysis exists to avoid.
+        let body_calls_method_on_a_capture = {
+            let stmts = match closure.body.as_ref() {
+                syn::Expr::Block(block) => block.block.stmts.clone(),
+                other => vec![syn::Stmt::Expr(other.clone(), None)],
+            };
+            let receivers = collect_method_receiver_vars(&stmts);
+            outer_captures
+                .iter()
+                .filter(|cpp_name| {
+                    // pointer-like handles are exempt: a method call goes
+                    // through the deref, not the capture itself
+                    !self
+                        .lookup_rust_binding_name_for_cpp_name(cpp_name)
+                        .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
+                        .is_some_and(|ty| {
+                            matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_))
+                                || self.type_is_pointer_like_owner_type(&ty)
+                        })
+                })
+                .any(|cpp_name| {
+                    self.lookup_rust_binding_name_for_cpp_name(cpp_name)
+                        .is_some_and(|rust_name| receivers.contains(&rust_name))
+                        || receivers.contains(cpp_name)
+                })
+        };
+        let no_capture_is_mutated = !body_reassigns_a_capture && !body_calls_method_on_a_capture;
+        let needs_mutable = is_move_closure
+            && !(no_capture_is_mutated || (all_captures_are_raw_pointers && !body_reassigns_a_capture));
         let lambda_mutability = if needs_mutable { " mutable" } else { "" };
 
         // A callable-shaped expected type means this closure IS the callable.
