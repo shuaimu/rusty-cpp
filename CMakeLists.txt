@@ -638,6 +638,9 @@ set(TEST_SOURCES
     # HashSet behavioural coverage — the surface the set-algebra file above
     # does not touch (membership, take/replace/get, extend, clear). #184.
     tests/std_port_set_api_test.cpp
+    # Entry-API and drain coverage — the highest-risk untested surfaces
+    # (Entry holds a reference into the table; drain mutates while iterating). #184.
+    tests/std_port_map_entry_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
