@@ -885,7 +885,19 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         let (last, prefix_segments) = segments.split_last().unwrap();
         let prefix = prefix_segments.join("::");
         let renamed_prefix = self.escape_and_rename_qualified_name(&prefix);
-        format!("{}::{}", renamed_prefix, escape_cpp_keyword(last))
+        // The trailing segment is QUALIFIED by everything before it, so the
+        // libc-collision renames (dup/sleep/raise/kill/pause) must not apply:
+        // they exist because an unqualified `sleep(x)` loses overload
+        // resolution to the C library's exact match, which `Fiber::sleep(x)`
+        // cannot. Renaming produced calls to members that do not exist
+        // ("no member named 'sleep_' in 'rrr::Fiber'"). This is the same
+        // exemption escape_cpp_keyword_in_runtime_path already makes for
+        // `rusty::thread::sleep`. True C++ keywords are still escaped.
+        format!(
+            "{}::{}",
+            renamed_prefix,
+            escape_cpp_keyword_in_member_position(last)
+        )
     }
 
     pub(super) fn normalize_impl_method_receiver_for_reference_self(
