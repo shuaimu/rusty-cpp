@@ -261,8 +261,15 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     )
     target_include_directories(std_port_hashbrown PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(std_port_hashbrown PUBLIC cxx_std_23)
-    target_compile_options(std_port_hashbrown PRIVATE
-        -march=native -DRUSTY_PORTABLE_INTRINSICS=1)
+    # NOTE (#183): these flags MUST match every other port target and the
+    # `rusty` umbrella exactly. A flag delta here makes CMake synthesise a
+    # SECOND BMI for this module (CMakeFiles/std_port@synth_N.dir/*.bmi), so
+    # `rusty.pcm` ends up built against one std_port BMI while consumers
+    # resolve `std_port` to a different one. Clang then merges two full copies
+    # of the same module and either hangs in ASTReader or SIGSEGVs in codegen.
+    # (The old -DRUSTY_PORTABLE_INTRINSICS=1 was a no-op here: it is only read
+    # by rusty/sync/mpsc_lockfree.hpp, which std_port never includes.)
+    target_compile_options(std_port_hashbrown PRIVATE -O3 -DNDEBUG -march=native)
     # Deliberately NOT linked against the `rusty` target: these modules only
     # #include <rusty/*.hpp>, they never `import rusty`. Linking it would make
     # a target cycle once the umbrella links std_port to re-export HashMap.
@@ -274,8 +281,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     )
     target_include_directories(std_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(std_port PUBLIC cxx_std_23)
-    target_compile_options(std_port PRIVATE
-        -march=native -DRUSTY_PORTABLE_INTRINSICS=1)
+    # Same flags as std_port_hashbrown and every other port target — see the
+    # #183 note above; a delta here forks the BMI and breaks `import rusty;`.
+    target_compile_options(std_port PRIVATE -O3 -DNDEBUG -march=native)
     target_link_libraries(std_port PUBLIC std_port_hashbrown)
 endif()
 

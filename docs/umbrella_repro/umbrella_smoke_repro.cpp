@@ -1,8 +1,8 @@
-// Minimal reproduction for #183. NOT wired into CMake on purpose — it CRASHES
-// the compiler, so adding it to TEST_SOURCES would break `ninja` for everyone.
+// Regression guard for #183: `import rusty;` must compile, and compile FAST.
 //
-// Build it by hand (from .rusty-modules-cache/build), reusing the hashset
-// test's modmap so the module-file set is guaranteed consistent:
+// NOT wired into CMake — it exists so the umbrella can be smoke-tested by hand
+// without paying for a full test TU. Build it from .rusty-modules-cache/build,
+// reusing the hashset test's modmap so the module-file set is consistent:
 //
 //   cd .rusty-modules-cache/build
 //   clang++ -I ../../include -std=c++23 -Wall -Wextra -Wpedantic \
@@ -14,18 +14,36 @@
 // spurious "compiled with target feature '+64bit'" errors that look like a
 // different bug.)
 //
-// EXPECTED, as of 2026-08-01 at HEAD:
-//   clang++: error: clang frontend command failed with exit code 139  (SIGSEGV)
-//   ...in ASTContext::getInlineVariableDefinitionKind, reached from
-//      CodeGenModule::EmitGlobal -> DeclMustBeEmitted -> GetGVALinkageForVariable
-//   i.e. codegen of a module-owned global VARIABLE, AFTER the import completes
-//   (the crash reports `current parser token 'int'`, meaning it got to main()).
+// EXPECTED: exit 0, no diagnostics, well under a second.
 //
-// WITH A PRE-#187 std_port it HANGS instead of crashing (>300s, no output).
-// Both are broken; the fix changed which clang bug is hit first.
+// ── WHAT THIS CAUGHT (#183, fixed 2026-08-01) ───────────────────────────────
+// This used to SIGSEGV clang 22.1.8 in ASTContext::getInlineVariableDefinitionKind
+// (via CodeGenModule::EmitGlobal -> DeclMustBeEmitted), or hang for 40+ minutes
+// in ASTReader::PassInterestingDeclsToConsumer — nondeterministically, from the
+// same inputs.
 //
-// This file exists because the full hashset TU takes >40 MINUTES to fail, which
-// makes bisecting impossible. This one fails in under a second.
+// The cause was NOT in this file's C++, nor in clang's handling of any construct
+// we emit. `rusty.pcm` was built against ONE std_port BMI while every consumer
+// resolved `std_port` to a DIFFERENT file:
+//
+//   rusty's modmap:    std_port = CMakeFiles/std_port@synth_3.dir/<hash>.bmi (39.6 MB)
+//   consumers' modmap: std_port = CMakeFiles/std_port.dir/std_port.pcm       (29.9 MB)
+//
+// Clang had to merge two complete copies of the same module; the reported decl
+// (std::dynamic_extent) was collateral, just the first module-owned inline
+// variable codegen happened to touch.
+//
+// CMake forks a module's BMI into CMakeFiles/<target>@synth_N.dir/*.bmi when the
+// producing target's compile options differ from its consumer's. std_port and
+// std_port_hashbrown were the only module targets whose flags didn't match the
+// rest (they lacked -O3 -DNDEBUG and carried a -DRUSTY_PORTABLE_INTRINSICS=1
+// that std_port never actually reads). Aligning them in CMakeLists.txt removed
+// the second BMI.
+//
+// THE GENERAL RULE, which this file exists to keep honest: every C++20 module
+// target in this project must carry byte-identical compile options. A flag delta
+// on any module target silently forks its BMI, and the failure surfaces far away
+// as a compiler hang or crash with no reference to the flag that caused it.
 import rusty;
 
 int main() { return 0; }

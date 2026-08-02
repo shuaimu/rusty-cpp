@@ -13,7 +13,11 @@
 // through the iterator: a mutation applied to a copy would still look correct
 // if you only re-read the copy.
 //
-// `import std_port;` DIRECTLY — the `import rusty;` umbrella path hangs (#183).
+// `import std_port;` DIRECTLY, not via the `import rusty;` umbrella: these tests
+// target the std port itself, so they should not depend on the umbrella's
+// re-export aliases. (The umbrella used to hang here — #183, a forked std_port
+// BMI from a CMake flag delta — but that is fixed; this is now a choice, not a
+// workaround.)
 import std_port;
 
 #include <cstdio>

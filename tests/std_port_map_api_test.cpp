@@ -5,7 +5,11 @@
 // surface. This file covers the value semantics: insert/find/remove, mutation
 // through get_mut, iteration, the entry API, clone, and capacity.
 //
-// `import std_port;` DIRECTLY — the `import rusty;` umbrella path hangs (#183).
+// `import std_port;` DIRECTLY, not via the `import rusty;` umbrella: these tests
+// target the std port itself, so they should not depend on the umbrella's
+// re-export aliases. (The umbrella used to hang here — #183, a forked std_port
+// BMI from a CMake flag delta — but that is fixed; this is now a choice, not a
+// workaround.)
 //
 // ORDER INDEPENDENCE IS MANDATORY HERE: std's RandomState is randomly seeded, so
 // HashMap iteration order legitimately differs between runs (as in Rust). Every

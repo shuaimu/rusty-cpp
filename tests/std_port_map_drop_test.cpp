@@ -10,9 +10,12 @@
 // essentially nothing. This file starts closing that gap, leading with the
 // drop/ownership surface where a silent bug would actually live.
 //
-// `import std_port;` DIRECTLY, not `import rusty;` — the umbrella path
-// currently hangs in ASTReader::ReadAST (see task #183). This TU compiles in
-// ~2s. See tests/std_port_set_algebra_test.cpp for the same shape.
+// `import std_port;` DIRECTLY, not via the `import rusty;` umbrella: these tests
+// target the std port itself, so they should not depend on the umbrella's
+// re-export aliases. (The umbrella used to hang in ASTReader::ReadAST — #183, a
+// forked std_port BMI from a CMake flag delta — but that is fixed; this is now a
+// choice, not a workaround.) See tests/std_port_set_algebra_test.cpp for the
+// same shape.
 import std_port;
 
 #include <cstdio>
