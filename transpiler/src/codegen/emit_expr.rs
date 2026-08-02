@@ -723,6 +723,12 @@ impl CodeGen {
         let decltype_element_overrides =
             self.collect_collection_decltype_element_overrides(&block.stmts, &placeholder_hints);
         self.local_placeholder_type_hints.push(placeholder_hints);
+        // #180: pushed for EVERY block so the stack stays aligned, but the
+        // collector self-gates to the return-hint owner's body (see its doc) —
+        // plain nested blocks get an empty frame, which is what stops them
+        // inheriting the enclosing fn's return type.
+        self.tail_returned_local_type_hints
+            .push(self.collect_tail_returned_local_type_hints(&block.stmts));
         self.int_literal_usage_type_hints
             .push(self.collect_int_literal_usage_type_hints(&block.stmts));
         self.collection_ctor_usage_type_hints
@@ -993,6 +999,7 @@ impl CodeGen {
         self.local_manually_drop_bindings.pop();
         self.recursive_nested_fns_in_scope.pop();
         self.local_placeholder_type_hints.pop();
+        self.tail_returned_local_type_hints.pop();
         self.int_literal_usage_type_hints.pop();
         self.collection_ctor_usage_type_hints.pop();
         self.collection_decltype_element_overrides.pop();

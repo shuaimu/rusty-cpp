@@ -25109,9 +25109,170 @@ fn test_value_if_iife_does_not_return_non_tail_brace_statements() {
         "non-tail brace statement must not lower to a returned unit value\n{out}"
     );
     // The inner if is present as a bare statement, and the genuine tail returns.
+    // The literal is width-cast since #180: `out` is tail-returned from the fn
+    // body, so it now carries the fn's return type (u64) as its expected type,
+    // and the unsuffixed `1` emits as `static_cast<uint64_t>(1)`.
     assert!(
-        out.contains("> 10) {") && out.contains("return rusty::detail::deref_if_pointer_like(n) + 1"),
+        out.contains("> 10) {")
+            && out.contains(
+                "return rusty::detail::deref_if_pointer_like(n) + static_cast<uint64_t>(1)"
+            ),
         "inner if must be a statement; only the tail expression returns\n{out}"
+    );
+    // And the #180 hint itself: the IIFE is annotated with the fn return type.
+    assert!(
+        out.contains("[&]() -> uint64_t {"),
+        "tail-returned if-initialized local must annotate its IIFE\n{out}"
+    );
+}
+
+#[test]
+fn test_leaf180_tail_returned_if_local_gets_fn_return_type() {
+    // #180: `let x = if .. { None } else { .. Some(..) }; x` — the un-annotated
+    // local is what the fn returns, so its type IS the fn return type. Without
+    // the tail_returned_local_type_hints pass the IIFE either stays unannotated
+    // (C++ cannot deduce across `return rusty::None;` / `return rusty::Some(..)`
+    // arms — the hashbrown RawTable::into_allocation compile failure) or gets
+    // an i32-defaulted payload guess (`Option<int32_t>` around u64 data —
+    // silent truncation through Option's converting ctor).
+    let out = transpile_str(
+        r#"
+        pub struct H { items: Vec<u64> }
+        impl H {
+            pub fn tail_form(self, flag: bool) -> Option<u64> {
+                let alloc = if flag {
+                    None
+                } else {
+                    let base = self.items[0];
+                    Some(base + 1)
+                };
+                alloc
+            }
+            pub fn return_form(self, flag: bool) -> Option<u64> {
+                let alloc = if flag {
+                    None
+                } else {
+                    let base = self.items[0];
+                    Some(base + 2)
+                };
+                return alloc;
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.matches("-> rusty::Option<uint64_t> {").count() >= 2,
+        "both forms must annotate the IIFE with the FN return type\n{out}"
+    );
+    assert!(
+        !out.contains("Option<int32_t>"),
+        "the i32-defaulted payload guess must be gone\n{out}"
+    );
+}
+
+#[test]
+fn test_leaf180_nested_block_local_does_not_inherit_fn_return_type() {
+    // The hazard that kept #180 deferred: a plain nested block's prologue sees
+    // the ENCLOSING fn's return hint, but its tail flows to the enclosing
+    // expression, not the return. The depth gate in
+    // collect_tail_returned_local_type_hints must keep `r` (an i32) from being
+    // stamped rusty::Option<uint64_t>.
+    let out = transpile_str(
+        r#"
+        pub struct H { items: Vec<u64> }
+        impl H {
+            pub fn hazard(&self, flag: bool) -> Option<u64> {
+                let inner: i32 = {
+                    let r = if flag {
+                        7i32
+                    } else {
+                        let b = 1i32;
+                        9i32 + b
+                    };
+                    r
+                };
+                if inner > 0 { Some(self.items[0]) } else { None }
+            }
+        }
+        "#,
+    );
+    // The nested-block local's IIFE keeps its own (i32) typing...
+    assert!(
+        out.contains("[&]() -> int32_t {"),
+        "nested-block if local must keep its own type\n{out}"
+    );
+    // ...and never picks up the fn return type. The fn's Option<uint64_t>
+    // appears only in signatures/returns, so assert on the local binding shape.
+    assert!(
+        !out.contains("rusty::Option<uint64_t> r"),
+        "nested-block local must NOT inherit the enclosing fn's return type\n{out}"
+    );
+}
+
+#[test]
+fn test_leaf180_closure_body_local_uses_closure_return_type() {
+    // A closure body IS a return-hint owner's body, so its tail-returned
+    // if-initialized local gets the CLOSURE's return type — not the enclosing
+    // fn's. Before #180 this shape emitted an unannotated `[&]() {` lambda
+    // with None/Some arms: a hard C++ deduction error.
+    let out = transpile_str(
+        r#"
+        pub struct H { items: Vec<u64> }
+        impl H {
+            pub fn go(&self, flag: bool) -> Option<u64> {
+                let f = |x: i32| -> Option<i32> {
+                    let alloc = if flag {
+                        None
+                    } else {
+                        let y = x * 2;
+                        Some(y)
+                    };
+                    alloc
+                };
+                let got = f(3);
+                if got.is_some() { Some(self.items[0]) } else { None }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("-> rusty::Option<int32_t> {\nif (flag)")
+            || out.contains("[&]() -> rusty::Option<int32_t> {"),
+        "closure-body local must use the CLOSURE's return type\n{out}"
+    );
+    // The failure mode: an unannotated value-IIFE over None/Some arms.
+    assert!(
+        !out.contains("auto alloc = [&]() {\n"),
+        "the None/Some IIFE must not be left unannotated\n{out}"
+    );
+}
+
+#[test]
+fn test_leaf180_not_returned_if_local_is_untouched() {
+    // Fill-only: a local that is NOT returned must not receive the fn return
+    // type — its Option payload is unrelated to the fn's u64.
+    let out = transpile_str(
+        r#"
+        pub struct H { items: Vec<u64> }
+        impl H {
+            pub fn count(&self, flag: bool) -> u64 {
+                let alloc = if flag {
+                    None
+                } else {
+                    let base = self.items[0];
+                    Some(base + 3)
+                };
+                if alloc.is_some() { 1 } else { 0 }
+            }
+        }
+        "#,
+    );
+    // Whatever inference does here, the fn return type must not be stamped on:
+    // a `u64`-typed alloc (or Option<u64>-from-return-hint... the return type
+    // is u64, not an Option, so the giveaway would be `uint64_t alloc`).
+    assert!(
+        !out.contains("uint64_t alloc ="),
+        "non-returned local must not receive the fn return type\n{out}"
     );
 }
 

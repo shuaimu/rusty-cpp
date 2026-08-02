@@ -1204,6 +1204,29 @@ pub struct CodeGen {
     /// (for example `let mut v = ArrayVec::<_, 3>::new(); v.push(x);`).
     /// Used to recover `_` generic arguments in constructor call sites.
     pub(crate) local_placeholder_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// #180: un-annotated locals initialized from an if/else EXPRESSION whose
+    /// value is returned by the current return-hint OWNER's body — mapped to
+    /// that owner's full return type. Rust typing makes this exact: if the
+    /// local is what the fn/closure returns, its type IS the return type.
+    /// Feeds `inferred_binding_ty` so the local is declared concretely and the
+    /// expected type reaches `emit_if_expr_as_iife`, which otherwise leaves
+    /// the IIFE lambda unannotated (C++ deduction then dies on
+    /// `return rusty::None;` vs `return rusty::Some(..);`) or guesses the
+    /// payload from an i32-defaulted branch tail (silent truncation).
+    ///
+    /// A dedicated map, NOT a widening of `local_placeholder_type_hints`
+    /// (~25 read sites) — and looked up in the INNERMOST frame only: nested
+    /// plain blocks push an empty frame (see the `return_type_hint_push_depths`
+    /// gate in the collector), so a nested block's local can never inherit the
+    /// enclosing fn's return type. That inheritance is exactly the hazard that
+    /// kept this fix deferred.
+    pub(crate) tail_returned_local_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// `block_depth` recorded at each `push_return_type_hint`, parallel to
+    /// `return_type_hints`. A block prologue whose `block_depth` equals the
+    /// top entry IS the body of the fn/closure that owns the current return
+    /// hint; any deeper block is a plain nested block whose tail does NOT
+    /// flow to that return.
+    pub(crate) return_type_hint_push_depths: Vec<usize>,
     /// Scoped hints for untyped integer-literal locals (`let mut pos = 0;`)
     /// whose `&mut pos` / `&pos` is later used as an integer-reference struct
     /// field (`DeserializerFromEvents { pos: &mut pos }` where the field is
@@ -2011,6 +2034,8 @@ impl CodeGen {
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
+            tail_returned_local_type_hints: Vec::new(),
+            return_type_hint_push_depths: Vec::new(),
             int_literal_usage_type_hints: Vec::new(),
             collection_ctor_usage_type_hints: Vec::new(),
             pending_map_closure_input_type: std::cell::RefCell::new(None),
@@ -22062,6 +22087,116 @@ impl CodeGen {
         if option_none_candidates.contains(&tail_name) && !hints.contains_key(&tail_name) {
             hints.insert(tail_name, option_inner_ty);
         }
+    }
+
+    /// #180: map un-annotated, if/else-initialized locals that the CURRENT
+    /// return-hint owner's body returns to that owner's full return type.
+    ///
+    /// Soundness: if `let x = if .. { .. } else { .. };` is un-annotated and
+    /// `x` is what the fn/closure returns, Rust typing pins `x`'s type to the
+    /// return type — there is nothing to infer. The hint feeds
+    /// `inferred_binding_ty`, so the local is declared concretely and the
+    /// expected type reaches `emit_if_expr_as_iife`; without it the lambda is
+    /// either left unannotated (C++ cannot deduce across `return rusty::None;`
+    /// / `return rusty::Some(..);` arms — the hashbrown
+    /// `RawTable::into_allocation` failure) or annotated from an i32-defaulted
+    /// branch-tail guess (`Option<int32_t>` wrapping a u64 payload — silent
+    /// truncation).
+    ///
+    /// THE HAZARD GATE (why this was deferred, and how it is closed): this
+    /// collector runs in every block prologue, but `current_return_type_hint`
+    /// belongs to the enclosing fn/closure even inside a plain nested block —
+    /// whose tail does NOT flow to that return. Collecting there would stamp
+    /// the enclosing return type onto an unrelated local. So collect ONLY when
+    /// this block IS the hint owner's body: `push_return_type_hint` records
+    /// `block_depth` at push time, and the owner's body prologue is the one
+    /// whose depth equals that record (fn bodies push at their own depth;
+    /// nested blocks are always deeper). Closure bodies match against the
+    /// CLOSURE's own return type — the correct hint for them. Consumption is
+    /// innermost-frame-only for the same reason.
+    fn collect_tail_returned_local_type_hints(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> HashMap<String, syn::Type> {
+        let mut hints: HashMap<String, syn::Type> = HashMap::new();
+        if self.return_type_hint_push_depths.last() != Some(&self.block_depth) {
+            return hints;
+        }
+        let Some(return_ty) = self.current_return_type_hint() else {
+            return hints;
+        };
+        // Same concreteness guards as the generic-ctor return-hint consumer:
+        // an unresolved or generic-holed return type would annotate wrongly.
+        // (Single-letter generics bound by an enclosing impl are fine —
+        // type_contains_unbound_single_letter_generic consults the in-scope
+        // type params, so `A` inside `impl<T, A> RawTable<T, A>` passes.)
+        if self.type_contains_infer(return_ty)
+            || self.type_contains_unresolved_placeholder_like(return_ty)
+            || self.type_contains_unbound_single_letter_generic(return_ty)
+        {
+            return hints;
+        }
+        let return_ty = return_ty.clone();
+
+        // Names this block returns: the tail expression when it is a bare
+        // local, plus any top-level `return <local>;`. Deeper returns (inside
+        // nested ifs/blocks) are deliberately not chased — fill-only pass,
+        // missing one keeps the status quo.
+        let mut returned: HashSet<String> = HashSet::new();
+        if let Some(syn::Stmt::Expr(tail, None)) = stmts.last()
+            && let Some(name) = extract_simple_local_ident(self.peel_paren_group_expr(tail))
+        {
+            returned.insert(name);
+        }
+        for stmt in stmts {
+            if let syn::Stmt::Expr(syn::Expr::Return(ret), _) = stmt
+                && let Some(inner) = ret.expr.as_deref()
+                && let Some(name) = extract_simple_local_ident(self.peel_paren_group_expr(inner))
+            {
+                returned.insert(name);
+            }
+        }
+        if returned.is_empty() {
+            return hints;
+        }
+
+        // A name bound by more than one `let` in this block is shadowed: the
+        // returned value is the LAST binding, but the map is keyed by name and
+        // would annotate the first too. Skip shadowed names outright.
+        let mut bind_counts: HashMap<String, usize> = HashMap::new();
+        for stmt in stmts {
+            if let syn::Stmt::Local(local) = stmt
+                && let Some(name) = local_binding_name(local)
+            {
+                *bind_counts.entry(name).or_insert(0) += 1;
+            }
+        }
+
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() {
+                continue;
+            }
+            let Some(init) = local.init.as_ref() else {
+                continue;
+            };
+            if !matches!(self.peel_paren_group_expr(&init.expr), syn::Expr::If(_)) {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if bind_counts.get(&name).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            if !returned.contains(&name) {
+                continue;
+            }
+            hints.insert(name, return_ty.clone());
+        }
+        hints
     }
 
     fn option_some_payload_local_name(&self, expr: &syn::Expr) -> Option<String> {
@@ -43653,6 +43788,11 @@ impl CodeGen {
     }
 
     fn push_return_type_hint(&mut self, output: &syn::ReturnType) {
+        // Record the block depth alongside every push (paired in pop below):
+        // a block prologue whose block_depth equals the top entry is the BODY
+        // of the fn/closure that owns this hint. See
+        // `collect_tail_returned_local_type_hints`.
+        self.return_type_hint_push_depths.push(self.block_depth);
         match output {
             syn::ReturnType::Default => self.return_type_hints.push(None),
             syn::ReturnType::Type(_, ty) => self.return_type_hints.push(Some((**ty).clone())),
@@ -43660,6 +43800,7 @@ impl CodeGen {
     }
 
     fn pop_return_type_hint(&mut self) {
+        self.return_type_hint_push_depths.pop();
         self.return_type_hints.pop();
     }
 

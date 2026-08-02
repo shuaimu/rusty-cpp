@@ -3239,6 +3239,22 @@ impl CodeGen {
                             inferred_binding_ty =
                                 self.lookup_local_placeholder_type_hint(&name_str).cloned();
                         }
+                        // #180: if/else-initialized local returned by the
+                        // hint owner's body — its type IS the return type.
+                        // INNERMOST frame only: outer frames belong to outer
+                        // blocks, and consulting them would re-open the
+                        // nested-block inheritance hazard the collector's
+                        // depth gate closes. Fill-only: real usage-derived
+                        // hints above win.
+                        if inferred_binding_ty.is_none()
+                            && let Some(hint) = self
+                                .tail_returned_local_type_hints
+                                .last()
+                                .and_then(|frame| frame.get(&name_str))
+                                .cloned()
+                        {
+                            inferred_binding_ty = Some(hint);
+                        }
                         if inferred_binding_ty.is_none()
                             && has_generic_ctor_init
                             && let Some(owner_target) = generic_ctor_owner_target.as_ref()
