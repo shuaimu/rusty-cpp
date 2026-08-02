@@ -25248,6 +25248,38 @@ fn test_leaf180_closure_body_local_uses_closure_return_type() {
 }
 
 #[test]
+fn test_leaf53_ok_none_inner_pattern_uses_is_none_not_bare_none() {
+    // `Ok(None)` — the inner `None` pattern's payload ctx can project to the
+    // OUTER Result's ctx; the ctx-derived kind (Result) pairs with nothing
+    // for "None", and the old lookup then never tried the variant-name kind,
+    // so the pattern fell through to the const-value branch and emitted a
+    // bare `_mv == None` (undeclared identifier — the last raw-precompile
+    // error on a fresh btree_internal retranspile). The inner check must be
+    // `.is_none()`.
+    let out = transpile_str(
+        r#"
+        pub fn f(r: Result<Option<u32>, i32>) -> bool {
+            match r {
+                Ok(None) => true,
+                _ => false,
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains(".is_none()"),
+        "inner None pattern must lower to is_none()\n{out}"
+    );
+    // Match the precise broken shape (`_mv0 == None`) rather than a bare
+    // `== None` substring — the emitted prelude legitimately contains that
+    // text in a COMMENT (`error_len() == None`).
+    assert!(
+        !out.contains("_mv0 == None"),
+        "bare `_mv == None` comparison must not be emitted\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf180_not_returned_if_local_is_untouched() {
     // Fill-only: a local that is NOT returned must not receive the fn return
     // type — its Option payload is unrelated to the fn's u64.

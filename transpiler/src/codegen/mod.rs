@@ -26379,18 +26379,38 @@ impl CodeGen {
         let variant_name = self
             .canonical_variant_name(&ident.ident.to_string())
             .to_string();
-        let kind = variant_ctx
+        let pair = |kind: RuntimeMatchEnumKind| -> Option<&'static str> {
+            match (kind, variant_name.as_str()) {
+                (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+                (RuntimeMatchEnumKind::Option, "Some") => Some("is_some"),
+                (RuntimeMatchEnumKind::Result, "Ok") => Some("is_ok"),
+                (RuntimeMatchEnumKind::Result, "Err") => Some("is_err"),
+                (RuntimeMatchEnumKind::Entry, "Vacant") => Some("is_vacant"),
+                (RuntimeMatchEnumKind::Entry, "Occupied") => Some("is_occupied"),
+                _ => None,
+            }
+        };
+        // Prefer the ctx-derived kind, but only while its (kind, variant)
+        // pairing is VALID. A present-but-mismatched ctx must not veto the
+        // by-variant-name route: for `Ok(None)` the payload ctx projection can
+        // fall back to the OUTER Result's ctx, and the old `?`-chained lookup
+        // then evaluated (Result, "None") -> no method, WITHOUT ever trying
+        // the variant-name kind — so the `None` pattern fell through to the
+        // const-value branch and emitted a bare `_mv == None` (undeclared
+        // identifier; found on the fresh btree_internal retranspile, its one
+        // remaining raw-precompile error). "None" is never a Result variant,
+        // so consulting the variant-name kind when the ctx pairing is invalid
+        // is strictly more correct; a ctx whose enum is NOT a runtime kind
+        // (user data enums) reaches the variant-name fallback exactly as
+        // before.
+        if let Some(method) = variant_ctx
             .and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
-            .or_else(|| self.runtime_match_enum_kind_by_variant_name(&variant_name))?;
-        match (kind, variant_name.as_str()) {
-            (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
-            (RuntimeMatchEnumKind::Option, "Some") => Some("is_some"),
-            (RuntimeMatchEnumKind::Result, "Ok") => Some("is_ok"),
-            (RuntimeMatchEnumKind::Result, "Err") => Some("is_err"),
-            (RuntimeMatchEnumKind::Entry, "Vacant") => Some("is_vacant"),
-            (RuntimeMatchEnumKind::Entry, "Occupied") => Some("is_occupied"),
-            _ => None,
+            .and_then(pair)
+        {
+            return Some(method);
         }
+        self.runtime_match_enum_kind_by_variant_name(&variant_name)
+            .and_then(pair)
     }
 
     fn match_expr_has_callable_passthrough_arm(&self, match_expr: &syn::ExprMatch) -> bool {
