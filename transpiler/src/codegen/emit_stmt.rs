@@ -4689,7 +4689,11 @@ impl CodeGen {
                     // `let x: T;` can be initialized later; emit mutable storage.
                     if let Some(inferred_ty) = uninitialized_inferred_ty.as_ref() {
                         if self.should_use_optional_delayed_init_storage(inferred_ty) {
-                            self.mark_delayed_init_local(&name_str);
+                            // #84: register by the RESOLVED C++ name, not the Rust
+                            // name — a later SHADOW of this name is a different,
+                            // plain local (vec -> vec_shadow1) and must not pick
+                            // up the optional-wrapper .value()/.emplace protocol.
+                            self.mark_delayed_init_local(&cpp_name);
                             self.writeln(&format!("std::optional<{}> {};", type_str, cpp_name));
                         } else {
                             self.writeln(&format!("{} {};", type_str, cpp_name));
@@ -5513,7 +5517,8 @@ impl CodeGen {
                     } else {
                         // `let x: T;` can be initialized later; emit mutable storage.
                         if self.should_use_optional_delayed_init_storage(&pat_type.ty) {
-                            self.mark_delayed_init_local(&name.to_string());
+                            // #84: keyed by cpp name — see the sibling site above.
+                            self.mark_delayed_init_local(&cpp_name);
                             self.writeln(&format!("std::optional<{}> {};", ty, cpp_name));
                         } else {
                             self.writeln(&format!("{} {};", ty, cpp_name));

@@ -3004,7 +3004,11 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 return "(*this)".to_string();
             }
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
-                if self.is_delayed_init_local(&name) {
+                // #84: membership is keyed by the RESOLVED cpp name. A shadow
+                // of a delayed-init local resolves to its _shadowN name, which
+                // was never registered, so it correctly reads as a plain local
+                // instead of getting a bogus `.value()`.
+                if self.is_delayed_init_local(&mapped) {
                     return format!("{}.value()", mapped);
                 }
                 if self.is_rebind_reference_binding(&name) {

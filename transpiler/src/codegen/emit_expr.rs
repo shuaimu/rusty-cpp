@@ -22343,7 +22343,13 @@ impl CodeGen {
                 let expected_ty = match self.peel_paren_group_expr(&a.left) {
                     syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                         let name = path.path.segments[0].ident.to_string();
-                        if self.is_delayed_init_local(&name) {
+                        // #84: resolve to the cpp name BEFORE the membership
+                        // test — the registry is cpp-name-keyed so shadows of
+                        // a delayed-init local don't inherit `.emplace()`.
+                        if self
+                            .lookup_local_binding_cpp_name(&name)
+                            .is_some_and(|cpp| self.is_delayed_init_local(&cpp))
+                        {
                             delayed_init_local = Some(name.clone());
                         }
                         self.lookup_local_binding_type(&name).map(|local_ty| {
