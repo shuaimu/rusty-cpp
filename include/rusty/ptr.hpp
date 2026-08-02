@@ -619,21 +619,46 @@ inline void copy(const T* src, T* dst, Count count) {
     if constexpr (std::is_trivially_copyable_v<T>) {
         auto byte_count = element_count * sizeof(T);
         std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
-    } else if (dst < src) {
-        // Rust's ptr::copy never drops the destination — it's raw-memory
-        // semantics, and dst slots may hold ALREADY-DROPPED bits whose
-        // `_rusty_forgotten` is still false (Drain's tail restore); a
-        // destroy_at here re-runs a real drop = double-drop. Overwrite by
-        // move-construct only; the move marks each SOURCE slot forgotten,
-        // which keeps C++ dtors of bookkept-away slots from re-dropping.
-        // Left-shift overlap: process forward.
-        for (std::size_t i = 0; i < element_count; ++i) {
-            std::construct_at(dst + i, std::move(*(const_cast<T*>(src) + i)));
-        }
     } else {
-        // Right-shift overlap: process reverse.
-        for (std::size_t i = element_count; i-- > 0;) {
-            std::construct_at(dst + i, std::move(*(const_cast<T*>(src) + i)));
+        // RELOCATE each element: move-construct the destination, then destroy
+        // the source. That is what a memmove of non-trivially-copyable objects
+        // has to mean in C++ — the block of live objects ends up at `dst`, and
+        // `src \ dst` is left as raw memory.
+        //
+        // The destination is NEVER destroyed first. Rust's ptr::copy is
+        // raw-memory semantics and does not drop the destination; more
+        // concretely, dst here may hold ALREADY-DROPPED bits whose
+        // `_rusty_forgotten` is still false (Drain's tail restore), so a
+        // destroy_at on dst would re-run a real drop = double-drop. Every
+        // caller in the ports has the same shape: src is live, dst is raw or
+        // logically dead (see Splice::move_tail, Drain's restore, Vec::insert
+        // / remove / swap_remove / retain).
+        //
+        // Destroying the SOURCE is the part that was missing, and it is safe
+        // precisely because we just moved out of it ourselves: for a
+        // transpiler-emitted type the move set `_rusty_forgotten`, so the
+        // destructor short-circuits and nothing changes; for an ordinary C++
+        // type this is the destructor that used to be skipped. Measured before
+        // the fix: five `Vec::remove(0)` calls on a 10-element Vec of a
+        // destructor-counting type leaked 40 destructor calls (a Vec built and
+        // dropped without removals leaked none).
+        //
+        // Ordering makes each destination raw by the time we construct into it.
+        // Left shift (dst < src, delta = src - dst): going FORWARD, slot
+        // dst+i+delta is destroyed as the source of step i, which runs before
+        // step i+delta constructs into it. Right shift: the mirror image, going
+        // in reverse. So construct_at never lands on a live object we made.
+        T* source = const_cast<T*>(src);
+        if (dst < src) {
+            for (std::size_t i = 0; i < element_count; ++i) {
+                std::construct_at(dst + i, std::move(source[i]));
+                std::destroy_at(source + i);
+            }
+        } else {
+            for (std::size_t i = element_count; i-- > 0;) {
+                std::construct_at(dst + i, std::move(source[i]));
+                std::destroy_at(source + i);
+            }
         }
     }
 }
@@ -657,6 +682,16 @@ inline void copy_nonoverlapping(const T* src, T* dst, Count count) {
         auto byte_count = element_count * sizeof(T);
         std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
     } else {
+        // NOT a relocation, unlike `copy` above: this one deliberately leaves
+        // the source alive. `copy` can destroy its source because every caller
+        // shifts within one buffer and treats the vacated slots as raw
+        // afterwards. copy_nonoverlapping does not have that property — it is
+        // called with the address of a LOCAL (vec_port's dedup hole loop does
+        // `copy_nonoverlapping(&cur, hole_slot, 1)`), and destroying a local
+        // here would double-drop when its own destructor runs at scope exit.
+        // So a moved-from husk can still be left behind on this path; that is
+        // the remaining half of #186 and needs per-caller review, not a blanket
+        // destroy.
         for (std::size_t i = 0; i < element_count; ++i) {
             std::construct_at(dst + i, std::move(const_cast<T&>(src[i])));
         }
