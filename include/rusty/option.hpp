@@ -145,10 +145,20 @@ public:
         }
     }
 
-    // Move constructor
+    // Move constructor.
+    //
+    // The moved-from payload must be DESTROYED, not just flagged away:
+    // `other.has_value = false` makes ~Option skip it, so without the explicit
+    // ~T() the moved-from husk's destructor never runs. For a payload whose
+    // moved-from state still owns something (fd, lock, buffer) that is a real
+    // resource leak — measured as exactly one skipped destructor per un-elided
+    // Option move (Vec::remove leaked 1 per call through try_remove's
+    // `ret = Option<T>(...)`). unwrap() below always had the destroy; these two
+    // move paths were the only sites missing it (#189).
     Option(Option&& other) noexcept : has_value(other.has_value) {
         if (has_value) {
             new (&value) T(std::move(other.value));
+            other.value.~T();
             other.has_value = false;
         }
     }
@@ -185,6 +195,8 @@ public:
             has_value = other.has_value;
             if (has_value) {
                 new (&value) T(std::move(other.value));
+                // Destroy the moved-from payload — see the move ctor's comment.
+                other.value.~T();
                 other.has_value = false;
             }
         }
