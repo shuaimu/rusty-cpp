@@ -42,34 +42,14 @@ if(RUSTY_PLATFORM_POSIX)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
-# hashbrown_port — RETIRED FOR CONSUMERS (#177/#178/#185). rusty::HashMap /
-# HashSet now come from std_port (the transpiled Rust std hash slice); the
-# umbrella and the transpiler's module triggers both route there. Do NOT
-# import hashbrown_port.* in new code: beyond the documented memory-safety
-# state (docs/hashbrown_port/MEMORY_SAFETY_STATUS.md), its entry API does
-# not compile (VacantEntry has no into_mut; OccupiedEntry::insert is not
-# const-correct — verified during #185).
-#
-# The target survives ONLY because transpiled/vec_tests_port (the 151-test
-# vec suite) still imports hashbrown_port.{map,set}; its migration to
-# std_port is regeneration work. When that lands, delete this target,
-# tests/hashbrown_port_{map,set}_test.cpp, and the -lhashbrown_port line in
-# transpiler/src/main.rs together.
-#
-# Sources live in transpiled/hashbrown_port/*.cppm, vendored from the
-# transpiler+patcher pipeline (docs/hashbrown_port/).
+# hashbrown_port — TARGET DELETED (#177, 2026-08-02). rusty::HashMap/HashSet
+# come from std_port; the last consumer (vec_tests_port's ZstTracker/HashMap
+# references) was migrated to std_port and its 151 tests pass. The vendored
+# sources remain at transpiled/hashbrown_port/ (no target builds them) purely
+# as the artifact docs/hashbrown_port/MEMORY_SAFETY_STATUS.md describes.
+# Do not resurrect: its entry API does not compile and RawTable's defaulted
+# copy ctor bitwise-copies an owning type (HashMap::clone UAF, never fixed).
 # ──────────────────────────────────────────────────────────────────────
-file(GLOB HASHBROWN_PORT_CPPM transpiled/hashbrown_port/*.cppm)
-add_library(hashbrown_port STATIC)
-target_sources(hashbrown_port
-    PUBLIC FILE_SET CXX_MODULES FILES ${HASHBROWN_PORT_CPPM}
-)
-target_include_directories(hashbrown_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-# Hashbrown_port uses std::println, std::span etc. — needs C++23.
-# Rest of the repo stays at C++20 to avoid touching unrelated tests.
-target_compile_features(hashbrown_port PUBLIC cxx_std_23)
-# Match the bench build: O3+LTO so the module-boundary inlining works.
-target_compile_options(hashbrown_port PRIVATE -O3 -DNDEBUG -march=native )
 
 # ──────────────────────────────────────────────────────────────────────
 # vec_port — transpiled rustc-stdlib Vec port, exposed as C++20 modules.
@@ -575,7 +555,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         btree_port
         rc_port
         binary_heap_port
-        hashbrown_port
         vec_deque_port
         linked_list_port
         cell_port
@@ -630,12 +609,8 @@ set(TEST_SOURCES
     # tests/rusty_btreemap_test.cpp  (deleted with the legacy header)
     # tests/btree_port_facade_test.cpp  (tested the deleted std::map facade)
 
-    # HashMap/HashSet now exposed via the transpiled hashbrown_port
-    # C++20 module (transpiled/hashbrown_port/*.cppm). Tests import
-    # the module directly; the old hand-written
-    # include/rusty/{hashmap,hashset}.hpp is deleted.
-    tests/hashbrown_port_map_test.cpp
-    tests/hashbrown_port_set_test.cpp
+    # tests/hashbrown_port_{map,set}_test.cpp — deleted with the
+    # hashbrown_port target (#177); std_port's suites cover the surface.
     # Was orphaned: present in tests/ but absent from TEST_SOURCES, so the
     # regression guard for bug #161 (HashSet set-algebra members) had never
     # actually run. Its count/range-for idiom is also what exposed the
@@ -866,13 +841,6 @@ foreach(test_source IN LISTS TEST_SOURCES)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
     endif()
     # Tests that import hashbrown_port.* link against the module library.
-    if(test_name MATCHES "^hashbrown_port_")
-        target_link_libraries(${test_executable} PRIVATE hashbrown_port)
-        # Match the library's release flags so the module BMIs are compatible.
-        target_compile_features(${test_executable} PRIVATE cxx_std_23)
-        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
-        target_link_options(${test_executable} PRIVATE )
-    endif()
     # Tests that import btree_port.* link against the (clang-only) module
     # library. Same release-flag matching as hashbrown_port.
     if(test_name MATCHES "^btree_port_")

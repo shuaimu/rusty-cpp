@@ -3455,9 +3455,9 @@ fn run_stage_d_module_build(
             .arg("-lrc_port")
             .arg("-larc_port")
             .arg("-lbinary_heap_port")
-            .arg("-lhashbrown_port")
-            // The std hash port (HashMap/HashSet) and the hashbrown it sits on.
-            // std_port_hashbrown is a separate target from hashbrown_port above.
+            // hashbrown_port was deleted with #177 — the std hash port below
+            // (HashMap/HashSet over the recursively transpiled hashbrown)
+            // replaced it everywhere.
             .arg("-lstd_port")
             .arg("-lstd_port_hashbrown")
             .arg("-lvec_deque_port")

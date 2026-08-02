@@ -9,17 +9,17 @@ from the bugs below, its entry API does not even compile
 (`VacantEntry` has no `into_mut`; `OccupiedEntry::insert` is not
 const-correct — verified empirically during #185).
 
-The CMake target still BUILDS because two consumers remain:
-  1. `transpiled/vec_tests_port/vec_tests_port.cppm` — the 151-test vec suite
-     imports `hashbrown_port.{map,set}` (a drop-tracking test holds a
-     `HashSet<size_t>`). Removing the target breaks that suite; migrating it
-     to std_port is regeneration work (the un-rot pipeline task), not a
-     hand-patch.
-  2. `tests/hashbrown_port_{map,set}_test.cpp` — the port's own regression
-     tests, kept green so the vendored code stays honest until (1) lands.
-Neither consumer calls `.clone()`, so the one UNFIXED bug below is unreachable
-from live code. When (1) migrates, delete the target, both tests, and the
-`-lhashbrown_port` link line in transpiler/src/main.rs together.
+**THE CMAKE TARGET IS DELETED (2026-08-02).** The last consumer —
+`transpiled/vec_tests_port`'s `ZstTracker` member and `use std::collections::
+HashMap` translation — turned out to need only type-completeness (the HashMap
+using-decl had zero call sites and ZstTracker is never instantiated; its test
+is SKIP'd), so it was migrated to std_port by three one-line substitutions and
+its 151 tests pass unchanged. With that, the target, its two regression tests
+(tests/hashbrown_port_{map,set}_test.cpp), and the `-lhashbrown_port` link
+line in transpiler/src/main.rs were deleted together, per the checklist.
+
+The vendored sources below remain in transpiled/hashbrown_port/ as the
+artifact this document describes — nothing builds them.
 
 --- Original status (pre-retirement context) follows. ---
 

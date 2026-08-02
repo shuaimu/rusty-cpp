@@ -4839,8 +4839,7 @@ export module vec_tests_port;
 import vec_port.vec;
 import rc_port;
 import btree_port.btree.map;
-import hashbrown_port.map;
-import hashbrown_port.set;
+import std_port;
 
 // patcher-injected module imports:
 import alloc;
@@ -5546,7 +5545,7 @@ struct Panic_L2517 {
 };
 
 struct ZstTracker {
-    rusty::RefCell<std::tuple<::rusty::port::collections::hashbrown::HashSet<size_t>, size_t>> state;
+    rusty::RefCell<std::tuple<::std_port::collections::hash::set::HashSet<size_t>, size_t>> state;
 };
 
 struct Thing {
@@ -5587,7 +5586,7 @@ struct C_L2238 {
 
 using ::btree_port::btree::map::BTreeMap;
 // Rust-only: using std::collections::BinaryHeap;
-using ::rusty::port::collections::hashbrown::HashMap;
+using ::std_port::collections::hash::map::HashMap;
 // Rust-only: using std::collections::LinkedList;
 using rusty::VecDeque;
 
