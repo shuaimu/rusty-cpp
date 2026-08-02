@@ -629,6 +629,13 @@ set(TEST_SOURCES
     # actually run. Its count/range-for idiom is also what exposed the
     # api_coverage probes measuring the wrong thing.
     tests/hashset_set_algebra_test.cpp
+    # rusty::HashMap through the `import rusty;` UMBRELLA. Until this landed the
+    # line above was the only umbrella-importing test and it covers HashSet
+    # only, so the rusty::HashMap alias — the one #183 (forked BMI) and #185
+    # (trigger pointed at the retired hashbrown port) both broke — had no
+    # coverage at all. The six std_port_*.cpp suites cannot substitute: they
+    # `import std_port;` directly and bypass the alias.
+    tests/rusty_umbrella_hashmap_test.cpp
     # Same set-algebra surface, but reached via `import std_port;` directly
     # instead of the `rusty` umbrella. Post-retarget the umbrella TU above
     # costs >10 min to compile (was ~3.7s pre-retarget), so the FUNCTIONAL
@@ -833,7 +840,8 @@ foreach(test_source IN LISTS TEST_SOURCES)
     target_link_libraries(${test_executable} PRIVATE Threads::Threads)
     # Tests that `import rusty;` need the umbrella module library. The umbrella
     # re-exports std_port, so rusty::HashMap/HashSet resolve through it.
-    if(test_name STREQUAL "hashset_set_algebra_test")
+    if(test_name STREQUAL "hashset_set_algebra_test"
+       OR test_name STREQUAL "rusty_umbrella_hashmap_test")
         target_link_libraries(${test_executable} PRIVATE rusty)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
