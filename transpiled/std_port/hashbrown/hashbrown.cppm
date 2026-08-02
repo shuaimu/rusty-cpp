@@ -6483,12 +6483,12 @@ return this->find(hashes.at(i), [&](auto&& k) -> bool { return eq(std::move(i), 
             return RawIntoIter<T, A>(std::move(iter), std::move(allocation), rusty::PhantomData<T>{});
         }
         rusty::Option<std::tuple<rusty::ptr::NonNull<uint8_t>, ::rusty::alloc::Layout, A>> into_allocation() {
-            auto alloc = [&]() {
+            auto alloc = [&]() -> rusty::Option<std::tuple<rusty::ptr::NonNull<uint8_t>, ::rusty::alloc::Layout, A>> {
 if (this->table.is_empty_singleton()) {
-return rusty::None;
+return rusty::Option<std::tuple<rusty::ptr::NonNull<uint8_t>, ::rusty::alloc::Layout, A>>{rusty::None};
 } else {
 auto [layout, ctrl_offset] = rusty::detail::deref_if_pointer_like([&]() -> std::tuple<::rusty::alloc::Layout, size_t> { auto&& _m = RawTable<T, A>::TABLE_LAYOUT.calculate_layout_for(this->table.buckets()); if (rusty::detail::deref_if_pointer(_m).is_some()) { return rusty::detail::deref_if_pointer(_m).unwrap(); } if (rusty::detail::deref_if_pointer(_m).is_none()) { return [&]() -> std::tuple<::rusty::alloc::Layout, size_t> { rusty::intrinsics::unreachable(); }(); } return [&]() -> std::tuple<::rusty::alloc::Layout, size_t> { rusty::intrinsics::unreachable(); }(); }());
-return rusty::Some(std::make_tuple(NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((rusty::ptr::cast(rusty::ptr::sub(rusty::as_ptr(this->table.ctrl_field), ctrl_offset))))>>>::new_unchecked(rusty::ptr::cast(rusty::ptr::sub(rusty::as_ptr(this->table.ctrl_field), ctrl_offset))), std::move(layout), rusty::ptr::read(&this->alloc)));
+return rusty::Option<std::tuple<rusty::ptr::NonNull<uint8_t>, ::rusty::alloc::Layout, A>>(std::make_tuple(rusty::ptr::NonNull<uint8_t>::new_unchecked(rusty::ptr::cast(rusty::ptr::sub(rusty::as_ptr(this->table.ctrl_field), ctrl_offset))), std::move(layout), rusty::ptr::read(&this->alloc)));
 }
 }();
             rusty::mem::forget(std::move((*this)));

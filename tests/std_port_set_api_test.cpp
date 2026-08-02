@@ -163,6 +163,25 @@ static void test_extend_and_reserve() {
     std::printf("  test_extend_and_reserve ok\n");
 }
 
+// set/tests.rs — into_iter CONSUMES the set and yields every element. This is
+// the fourth #180-unlocked member (with map into_iter/into_keys/into_values):
+// it routes through RawTable::into_allocation, whose unannotated None/Some
+// IIFE did not compile until 79400f43. Sum-asserted: RandomState order varies.
+static void test_into_iter() {
+    auto s = HSet<int>::new_();
+    for (int i = 0; i < 16; ++i) s.insert(i);
+    auto it = std::move(s).into_iter();
+    int total = 0;
+    size_t n = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        total += v.unwrap();
+        ++n;
+    }
+    CHECK(n == 16);
+    CHECK(total == 120);  // 0+1+..+15
+    std::printf("  test_into_iter ok\n");
+}
+
 static void test_clear() {
     auto s = HSet<int>::new_();
     for (int i = 0; i < 16; ++i) s.insert(i);
@@ -187,6 +206,7 @@ int main() {
     test_lots_of_insertions();
     test_clone_independence();
     test_extend_and_reserve();
+    test_into_iter();
     test_clear();
     std::printf("std_port HashSet API: all checks passed\n");
     return 0;

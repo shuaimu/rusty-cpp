@@ -108,20 +108,74 @@ static void test_drops() {
     std::printf("  test_drops ok\n");
 }
 
-// map/tests.rs::test_into_iter_drops — DISABLED: HashMap::into_iter() does not
-// compile AT ALL on the shipped path, for any element type.
-//   into_iter -> RawTable::into_iter_from -> RawTable::into_allocation
-//   (hashbrown.cppm:7862 -> 6575 -> 6482)
-// into_allocation's emitted IIFE returns `rusty::None` in one branch and
-// `rusty::Some(std::make_tuple(...))` in the other with NO explicit return type:
-//   error: return type 'Option<...>' must match previous return type 'None_t'
-//          when lambda expression has unspecified explicit return type
-// The deduction failure is type-independent, so every HashMap<K,V>::into_iter()
-// instantiation fails. That is bug #180, and it went unnoticed because nothing
-// on the shipped path ever called into_iter. Re-enable once #180 lands.
-#if 0
-static void test_into_iter_drops() { /* see above */ }
-#endif
+// map/tests.rs::test_into_iter_drops — RE-ENABLED: this was disabled because
+// HashMap::into_iter() did not compile at all (into_iter -> into_iter_from ->
+// into_allocation, whose emitted IIFE mixed `return rusty::None;` and
+// `return rusty::Some(..);` with no explicit return type — bug #180). #180
+// landed (79400f43: tail-returned if/else locals carry the fn return type) and
+// the port was re-vendored with the annotated IIFE; this test is now the
+// regression guard for that whole chain.
+//
+// Consume HALF the iterator, check the yielded elements dropped and the
+// unyielded half is still live inside the iterator, then drop the iterator —
+// its Drop must release the rest (that is into_allocation's actual job).
+static void test_into_iter_drops() {
+    reset_drops(200);
+    {
+        auto m = HMap<size_t, Droppable>::new_();
+        for (size_t i = 0; i < 100; ++i) m.insert(i, Droppable(i + 100));
+        CHECK(all_slots(100, 200, 1));
+        {
+            auto it = std::move(m).into_iter();
+            for (size_t taken = 0; taken < 50; ++taken) {
+                auto kv = it.next();
+                CHECK(kv.is_some());
+                // kv (Option<tuple<K, Droppable>>) dies at the end of this
+                // iteration, dropping the yielded value.
+            }
+            // RandomState randomizes WHICH 50 were yielded — count, not slots.
+            int live = 0;
+            for (size_t i = 100; i < 200; ++i) live += DROP_VECTOR[i];
+            CHECK(live == 50);
+        } // iterator dropped: the unyielded 50 must be released here
+        CHECK(all_slots(100, 200, 0));
+        // `m` was consumed by into_iter; its scope-exit dtor must be a no-op.
+    }
+    CHECK(all_slots(100, 200, 0));
+    std::printf("  test_into_iter_drops ok\n");
+}
+
+// into_keys / into_values — the other two #180-unlocked consuming iterators.
+// into_keys must DROP every value even though none is ever yielded;
+// into_values the mirror image.
+static void test_into_keys_into_values_drop() {
+    reset_drops(200);
+    {
+        auto m = HMap<size_t, Droppable>::new_();
+        for (size_t i = 0; i < 20; ++i) m.insert(i, Droppable(i + 100));
+        auto ks = std::move(m).into_keys();
+        size_t n = 0, ksum = 0;
+        for (auto k = ks.next(); k.is_some(); k = ks.next()) {
+            ksum += k.unwrap();
+            ++n;
+        }
+        CHECK(n == 20);
+        CHECK(ksum == 190);  // 0+1+..+19
+    }
+    CHECK(all_slots(100, 120, 0));  // values dropped despite never being yielded
+
+    reset_drops(200);
+    {
+        auto m = HMap<size_t, Droppable>::new_();
+        for (size_t i = 0; i < 20; ++i) m.insert(i, Droppable(i + 100));
+        auto vs = std::move(m).into_values();
+        size_t n = 0;
+        for (auto v = vs.next(); v.is_some(); v = vs.next()) ++n;
+        CHECK(n == 20);
+    }
+    CHECK(all_slots(100, 120, 0));
+    std::printf("  test_into_keys_into_values_drop ok\n");
+}
 
 // map/tests.rs::test_clone — a clone must be independent; dropping one must not
 // disturb the other's elements.
@@ -232,19 +286,21 @@ static void test_reserve_drops() {
         CHECK(m.len() == N);
         CHECK(all_slots(0, N, 1));
 
-        // The shrink half of this test needed remove(), which leaks (#186), so
-        // it is omitted rather than asserted wrongly. Growth is still covered.
-        // Also NOT calling m.shrink_to_fit() — it instantiates RawTable::
-        // into_allocation(), whose emitted IIFE returns `rusty::None` in one
-        // branch and `rusty::Some(...)` in the other with NO explicit return
-        // type, so clang cannot deduce it:
-        //   error: return type 'Option<...>' must match previous return type
-        //          'None_t' when lambda expression has unspecified return type
-        // That is bug #180, still open, and it means HashMap::shrink_to_fit
-        // does not compile on the shipped path either. Restore the call here
-        // once #180 lands — this is its regression guard.
-        CHECK(m.len() == N);
-        CHECK(all_slots(0, N, 1));
+        // The shrink half, RESTORED. It was omitted twice over: remove()
+        // leaked a destructor per call (#186/#189, fixed — ptr::copy relocates
+        // and Option's move destroys the moved-from payload), and
+        // shrink_to_fit did not even compile (it instantiates RawTable::
+        // into_allocation, the #180 unannotated-IIFE failure, fixed in
+        // 79400f43 and re-vendored). This block is the regression guard for
+        // all three.
+        for (size_t i = 0; i < N / 2; ++i) CHECK(m.remove(i).is_some());
+        CHECK(m.len() == N / 2);
+        CHECK(all_slots(0, N / 2, 0));      // removed half fully dropped
+        CHECK(all_slots(N / 2, N, 1));      // kept half intact
+        m.shrink_to_fit();                  // rebuild at smaller capacity
+        CHECK(m.len() == N / 2);
+        CHECK(all_slots(0, N / 2, 0));
+        CHECK(all_slots(N / 2, N, 1));      // shrink moved, didn't drop/dupe
     }
     CHECK(all_slots(0, N, 0));
     std::printf("  test_reserve_drops ok\n");
@@ -252,6 +308,8 @@ static void test_reserve_drops() {
 
 int main() {
     test_drops();
+    test_into_iter_drops();
+    test_into_keys_into_values_drop();
     test_clone_independence();
     test_insert_overwrite_drops();
     test_lots_of_insertions_drops();
