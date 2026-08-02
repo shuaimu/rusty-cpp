@@ -246,17 +246,31 @@ impl CodeGen {
         )
     }
 
-    /// Handles on which a method call cannot mutate the HANDLE itself.
+    /// Handles on which a method call through a CONST capture still works.
     ///
     /// Distinct from `is_pointer_like_autoderef_owner_name` on purpose.
     /// That one drives auto-deref of a receiver, and `Weak` must NOT be in
     /// it — Rust makes you `.upgrade()` first, so auto-dereffing a `Weak`
     /// would be wrong. But for the closure-mutability analysis the question
-    /// is different: does `w.upgrade()` modify `w`? It does not — the call
-    /// is `&self` and reaches the referent, not the handle. So `Weak`
-    /// belongs here and nowhere else.
+    /// is C++-mechanical: in a non-`mutable` lambda every by-value capture
+    /// is const, so the exemption holds only for handles whose CONST
+    /// deref still yields the same access a non-const one would:
+    ///
+    ///   * const-only shared handles — `Arc`, `Rc`, `Weak`, `Ref`,
+    ///     `RwLockReadGuard` expose exactly one (const) operator-> /
+    ///     operator*, so lambda constness cannot change what compiles;
+    ///   * const-transparent `RefMut` — its `operator*() const` returns
+    ///     `T&`, so even a const capture reaches the mutable pointee.
+    ///
+    /// `Box` and the mutex/write guards are OUT: they PROPAGATE constness
+    /// (`const T* operator->() const` beside a non-const overload), so a
+    /// const capture downgrades the pointee to const and a `&mut self`
+    /// method call stops compiling — such captures must keep `mutable`.
     pub(super) fn is_non_mutating_handle_name(name: &str) -> bool {
-        Self::is_pointer_like_autoderef_owner_name(name) || matches!(name, "Weak")
+        matches!(
+            name,
+            "Arc" | "Rc" | "Weak" | "Ref" | "RefMut" | "RwLockReadGuard"
+        )
     }
 
     pub(super) fn should_insert_move_for_deref_expected_value(

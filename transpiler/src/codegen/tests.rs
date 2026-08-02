@@ -8556,6 +8556,63 @@ fn test_phantom_pinned_drop_struct_deletes_moves_instead_of_forgotten_flag_move(
 }
 
 #[test]
+fn test_move_closure_box_capture_method_call_keeps_mutable() {
+    // A `Box` capture with a method call must KEEP `mutable`: rusty::Box
+    // PROPAGATES constness (`const T* operator->() const` beside the
+    // non-const overload), so in a non-mutable lambda the const capture
+    // downgrades the pointee and a `&mut self` method (e.g. the channel
+    // listener's `close()`) stops compiling. The pointer-like exemption is
+    // only sound for const-only shared handles (Arc/Rc/Weak/Ref) and the
+    // const-transparent RefMut.
+    let out = transpile_str(
+        r#"
+        struct Gadget;
+        impl Gadget {
+            fn close(&mut self) {}
+        }
+        fn f(b: Box<Gadget>) {
+            let mut owned = b;
+            let _c = move || {
+                owned.close();
+            };
+        }
+        "#,
+    );
+    assert!(
+        out.contains("owned = std::move(owned)]() mutable"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_move_closure_arc_capture_method_call_stays_const_callable() {
+    // The Arc exemption must SURVIVE the Box fix: rusty::Arc exposes only
+    // const access (`const T* operator->() const`), so lambda constness
+    // cannot change what compiles — and dropping `mutable` keeps the
+    // lambda convertible to the const-callable rusty::Function slots the
+    // rrr channel layer uses for its callbacks.
+    let out = transpile_str(
+        r#"
+        struct Gadget;
+        impl Gadget {
+            fn poke(&self) {}
+        }
+        fn f(a: Arc<Gadget>) {
+            let owned = a;
+            let _c = move || {
+                owned.poke();
+            };
+        }
+        "#,
+    );
+    assert!(
+        out.contains("owned = std::move(owned)]()"),
+        "{out}"
+    );
+    assert!(!out.contains("mutable"), "{out}");
+}
+
+#[test]
 fn test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda() {
     let out = transpile_str(
         r#"
