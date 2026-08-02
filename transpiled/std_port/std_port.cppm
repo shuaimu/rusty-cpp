@@ -6292,6 +6292,10 @@ return f(std::move(acc), std::move(v));
                 requires (rusty::alloc::Allocator<A>)
             struct ExtractIf {
                 using Item = std::tuple<K, V>;
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_map::ExtractIf<K, V, F, A> base;
 
                 rusty::Option<std::tuple<K, V>> next() {
@@ -6385,6 +6389,10 @@ return std::move(val);
                 requires (rusty::alloc::Allocator<A>)
             struct IntoKeys {
                 using Item = K;
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 IntoIter<K, V, A> inner;
 
                 static IntoKeys<K, V, A> default_() {
@@ -6441,6 +6449,10 @@ return std::move(k);
                 requires (rusty::alloc::Allocator<A>)
             struct IntoValues {
                 using Item = V;
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 IntoIter<K, V, A> inner;
 
                 static IntoValues<K, V, A> default_() {
@@ -7321,6 +7333,10 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 requires (rusty::alloc::Allocator<A>)
             struct ExtractIf {
                 using Item = K;
+                // Range-for over this lazy view / Rust-shaped iterator.
+                // See post_transpile_patch.py.
+                auto begin() { return rusty::rust_range_begin(*this); }
+                auto end() { return rusty::rust_range_sentinel{}; }
                 hashbrown::hash_set::ExtractIf<K, F, A> base;
 
                 rusty::Option<K> next() {

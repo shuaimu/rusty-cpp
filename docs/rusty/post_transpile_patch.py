@@ -386,6 +386,15 @@ namespace hashbrown {
         ("Iter", 2),          # map's Iter<K,V> and set's Iter<K>
         ("Keys", 1), ("Values", 1), ("ValuesMut", 1), ("IterMut", 1),
         ("Drain", 2), ("IntoIter", 2),
+        # The #180-unlocked family. These were unreachable when this table was
+        # written — into_keys/into_values/extract_if all route through
+        # RawTable::into_allocation, whose unannotated None/Some IIFE did not
+        # compile until the transpiler carried tail-returned locals' return
+        # types (79400f43). Now that they instantiate, give them the same
+        # range-for bridge; api_coverage's map_into_keys/map_into_values/
+        # map_extract_if probes are the guard.
+        ("IntoKeys", 1), ("IntoValues", 1),
+        ("ExtractIf", 2),     # map's tuple<K,V> and set's K
     ]
     for type_name, expected in RANGE_FOR_TYPES:
         needle = "struct %s {\n" % type_name

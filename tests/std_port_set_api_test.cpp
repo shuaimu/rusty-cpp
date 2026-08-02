@@ -179,6 +179,16 @@ static void test_into_iter() {
     }
     CHECK(n == 16);
     CHECK(total == 120);  // 0+1+..+15
+
+    // Same, via range-for (IntoIter's begin()/end() bridge; safe over the
+    // moved-from temporary in C++23 — P2718 extends range-init temporaries).
+    auto s2 = HSet<int>::new_();
+    for (int i = 0; i < 16; ++i) s2.insert(i);
+    int total2 = 0;
+    size_t n2 = 0;
+    for (const auto& v : std::move(s2).into_iter()) { total2 += v; ++n2; }
+    CHECK(n2 == 16);
+    CHECK(total2 == 120);
     std::printf("  test_into_iter ok\n");
 }
 

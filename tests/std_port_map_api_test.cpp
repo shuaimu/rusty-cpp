@@ -247,6 +247,38 @@ static void test_range_for_iteration() {
     for (const auto& kv : m.iter()) { isum += std::get<0>(kv) + std::get<1>(kv); ++in; }
     CHECK(in == 5);
     CHECK(isum == 15 + 150);
+
+    // The #180-unlocked consuming iterators, via range-for (their begin()/end()
+    // came from the patcher's extended RANGE_FOR_TYPES table; api_coverage
+    // map_into_keys/map_into_values/map_extract_if went FAIL -> ok with it).
+    // Range-for over `std::move(m2).into_keys()` is safe in C++23: P2718
+    // lifetime-extends every temporary in the range-initializer.
+    auto m2 = HMap<int, int>::new_();
+    for (int i = 1; i <= 5; ++i) m2.insert(i, i * 10);
+    int iksum = 0; size_t ikn = 0;
+    for (const auto& k : std::move(m2).into_keys()) { iksum += k; ++ikn; }
+    CHECK(ikn == 5);
+    CHECK(iksum == 15);
+
+    auto m3 = HMap<int, int>::new_();
+    for (int i = 1; i <= 5; ++i) m3.insert(i, i * 10);
+    int ivsum = 0; size_t ivn = 0;
+    for (const auto& v : std::move(m3).into_values()) { ivsum += v; ++ivn; }
+    CHECK(ivn == 5);
+    CHECK(ivsum == 150);
+
+    // extract_if borrows &mut self: evens are extracted and yielded, odds stay.
+    auto m4 = HMap<int, int>::new_();
+    for (int i = 1; i <= 6; ++i) m4.insert(i, i);
+    int esum = 0; size_t en = 0;
+    for (const auto& kv : m4.extract_if([](const int& k, int&) { return k % 2 == 0; })) {
+        esum += std::get<0>(kv);
+        ++en;
+    }
+    CHECK(en == 3);
+    CHECK(esum == 2 + 4 + 6);
+    CHECK(m4.len() == 3);                 // odds survived
+    for (int i = 1; i <= 6; i += 2) CHECK(m4.contains_key(i));
     std::printf("  test_range_for_iteration ok\n");
 }
 
