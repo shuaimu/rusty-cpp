@@ -24581,9 +24581,17 @@ fn test_leaf_serde_tuple_self_reference_deref_collapses() {
         }
         "#,
     );
-    // RHS may be bare `v` or wrapped in `std::move(v)`.
+    // RHS may be bare `v` or wrapped in `std::move(v)`. The LHS deref may
+    // collapse away entirely, or (since the inference-failure default was
+    // made non-collapsing) lower through `deref_if_pointer_like`, which is
+    // a real deref for a pointer-lowered `&mut` field and the identity
+    // otherwise — both spell a write THROUGH the reference. Only a bare
+    // `*this->_0` (raw star on a maybe-reference member) is wrong.
     assert!(
-        out.contains("this->_0 = v;") || out.contains("this->_0 = std::move(v);"),
+        out.contains("this->_0 = v;")
+            || out.contains("this->_0 = std::move(v);")
+            || out.contains("rusty::detail::deref_if_pointer_like(this->_0) = v;")
+            || out.contains("rusty::detail::deref_if_pointer_like(this->_0) = std::move(v);"),
         "{out}"
     );
     assert!(!out.contains("*this->_0 = v;"), "{out}");
@@ -32165,7 +32173,17 @@ fn test_leaf5204_deref_of_reference_returning_method_call_collapses() {
         }
     "#,
     );
-    assert!(out.contains("c.get_mut().unwrap() += 2;"), "{out}");
+    // The deref may collapse away entirely, or (since the inference-failure
+    // default was made non-collapsing) lower through `deref_if_pointer_like`
+    // — `decltype(auto)` identity for the `int&` that `unwrap()` returns, so
+    // the compound assignment still writes through the reference. Only a
+    // bare `*` on the call chain (ill-formed on `int&`) is wrong.
+    assert!(
+        out.contains("c.get_mut().unwrap() += 2;")
+            || out
+                .contains("rusty::detail::deref_if_pointer_like(c.get_mut().unwrap()) += 2;"),
+        "{out}"
+    );
     assert!(!out.contains("*c.get_mut().unwrap() += 2;"), "{out}");
 }
 
@@ -32186,7 +32204,17 @@ fn test_leaf5204_deref_collapse_works_with_placeholder_inferred_receiver_type() 
         }
     "#,
     );
-    assert!(out.contains("c.get_mut().unwrap() += 2;"), "{out}");
+    // The deref may collapse away entirely, or (since the inference-failure
+    // default was made non-collapsing) lower through `deref_if_pointer_like`
+    // — `decltype(auto)` identity for the `int&` that `unwrap()` returns, so
+    // the compound assignment still writes through the reference. Only a
+    // bare `*` on the call chain (ill-formed on `int&`) is wrong.
+    assert!(
+        out.contains("c.get_mut().unwrap() += 2;")
+            || out
+                .contains("rusty::detail::deref_if_pointer_like(c.get_mut().unwrap()) += 2;"),
+        "{out}"
+    );
     assert!(!out.contains("*c.get_mut().unwrap() += 2;"), "{out}");
 }
 
