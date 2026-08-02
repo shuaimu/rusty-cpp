@@ -24,6 +24,8 @@ build-tests/
 .rusty-parity-matrix/
 .rusty-parity-matrix*/
 gcm.cache/
+tests/transpile_tests/hashbrown/
+tests/transpile_tests/indexmap/
 tests/transpile_tests/pollster/
 tests/transpile_tests/serde_bytes/
 tests/transpile_tests/serde_repr/
