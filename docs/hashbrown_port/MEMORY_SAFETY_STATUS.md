@@ -1,8 +1,27 @@
 # hashbrown_port memory-safety status
 
-`rusty::HashMap` / `rusty::HashSet` (include/rusty/rusty.cppm:168,172) alias
-`rusty::port::collections::hashbrown::HashMap` / `HashSet` from this port, so
-everything here is what users get.
+**RETIRED FOR CONSUMERS (2026-08-02, #177/#178/#185).** `rusty::HashMap` /
+`rusty::HashSet` no longer alias this port: since the std-port retarget they
+alias `::std_port::collections::hash::{map,set}` (include/rusty/rusty.cppm),
+and the transpiler routes `rusty::HashMap`/`HashSet` at `std_port` too
+(RUSTY_MODULE_TRIGGERS). Nothing new should import `hashbrown_port.*` — apart
+from the bugs below, its entry API does not even compile
+(`VacantEntry` has no `into_mut`; `OccupiedEntry::insert` is not
+const-correct — verified empirically during #185).
+
+The CMake target still BUILDS because two consumers remain:
+  1. `transpiled/vec_tests_port/vec_tests_port.cppm` — the 151-test vec suite
+     imports `hashbrown_port.{map,set}` (a drop-tracking test holds a
+     `HashSet<size_t>`). Removing the target breaks that suite; migrating it
+     to std_port is regeneration work (the un-rot pipeline task), not a
+     hand-patch.
+  2. `tests/hashbrown_port_{map,set}_test.cpp` — the port's own regression
+     tests, kept green so the vendored code stays honest until (1) lands.
+Neither consumer calls `.clone()`, so the one UNFIXED bug below is unreachable
+from live code. When (1) migrates, delete the target, both tests, and the
+`-lhashbrown_port` link line in transpiler/src/main.rs together.
+
+--- Original status (pre-retirement context) follows. ---
 
 **The vendored .cppm files are a stale June emission.** The current transpiler
 does not reproduce the bugs below — verified for the match-move case: a

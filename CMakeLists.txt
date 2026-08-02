@@ -42,10 +42,22 @@ if(RUSTY_PLATFORM_POSIX)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
-# hashbrown_port — transpiled Rust hashbrown port, exposed as C++20 modules.
-# Replaces the old hand-written include/rusty/hashmap.hpp / hashset.hpp.
-# Sources live in transpiled/hashbrown_port/*.cppm and are vendored from
-# the transpiler+patcher pipeline (docs/hashbrown_port/).
+# hashbrown_port — RETIRED FOR CONSUMERS (#177/#178/#185). rusty::HashMap /
+# HashSet now come from std_port (the transpiled Rust std hash slice); the
+# umbrella and the transpiler's module triggers both route there. Do NOT
+# import hashbrown_port.* in new code: beyond the documented memory-safety
+# state (docs/hashbrown_port/MEMORY_SAFETY_STATUS.md), its entry API does
+# not compile (VacantEntry has no into_mut; OccupiedEntry::insert is not
+# const-correct — verified during #185).
+#
+# The target survives ONLY because transpiled/vec_tests_port (the 151-test
+# vec suite) still imports hashbrown_port.{map,set}; its migration to
+# std_port is regeneration work. When that lands, delete this target,
+# tests/hashbrown_port_{map,set}_test.cpp, and the -lhashbrown_port line in
+# transpiler/src/main.rs together.
+#
+# Sources live in transpiled/hashbrown_port/*.cppm, vendored from the
+# transpiler+patcher pipeline (docs/hashbrown_port/).
 # ──────────────────────────────────────────────────────────────────────
 file(GLOB HASHBROWN_PORT_CPPM transpiled/hashbrown_port/*.cppm)
 add_library(hashbrown_port STATIC)
