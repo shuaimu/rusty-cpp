@@ -288,7 +288,7 @@ impl CodeGen {
             "new" => Some(format!("[&]() {{ return {}::new_(); }}", ret_cpp)),
             "new_" => Some(format!("[&]() {{ return {}::new_(); }}", ret_cpp)),
             "default" | "default_" => Some(format!(
-                "[&]() {{ return rusty::default_value<{}>(); }}",
+                "[&]() {{ return rusty::default_like<{}>(); }}",
                 ret_cpp
             )),
             _ => None,
@@ -8850,7 +8850,7 @@ impl CodeGen {
                         && !type_string_has_auto_placeholder(&inner_cpp)
                     {
                         args.push(format!(
-                            "[&]() {{ return rusty::default_value<{}>(); }}",
+                            "[&]() {{ return rusty::default_like<{}>(); }}",
                             inner_cpp
                         ));
                         continue;
@@ -8858,7 +8858,7 @@ impl CodeGen {
                 }
                 let receiver_cpp = self.emit_expr_to_string(&mc.receiver);
                 args.push(format!(
-                    "[&]() {{ using _rusty_opt_t = std::remove_cvref_t<decltype({})>; using _rusty_inner_t = std::remove_cvref_t<typename _rusty_opt_t::value_type>; return rusty::default_value<_rusty_inner_t>(); }}",
+                    "[&]() {{ using _rusty_opt_t = std::remove_cvref_t<decltype({})>; using _rusty_inner_t = std::remove_cvref_t<typename _rusty_opt_t::value_type>; return rusty::default_like<_rusty_inner_t>(); }}",
                     receiver_cpp
                 ));
                 continue;
@@ -9954,7 +9954,7 @@ impl CodeGen {
                     && !fallback_cpp.contains("/* TODO")
                     && !type_string_has_auto_placeholder(&fallback_cpp)
                 {
-                    let fallback_arg = format!("rusty::default_value<{}>()", fallback_cpp);
+                    let fallback_arg = format!("rusty::default_like<{}>()", fallback_cpp);
                     return self.emit_receiver_member_call(
                         &mc.receiver,
                         "unwrap_or",
@@ -19743,7 +19743,7 @@ impl CodeGen {
                     return default_expr;
                 }
                 let expected_cpp = self.map_type(&expected);
-                return format!("rusty::default_value<{}>()", expected_cpp);
+                return format!("rusty::default_like<{}>()", expected_cpp);
             }
         }
         // Map Ok(x) and Err(x) for Result.

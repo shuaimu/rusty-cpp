@@ -17390,7 +17390,7 @@ fn test_struct_update_bare_default_resolves_through_target() {
         "#,
     );
     assert!(
-        out.contains("rusty::default_value<Cfg>()"),
+        out.contains("rusty::default_like<Cfg>()"),
         "bare Default::default() base must resolve through the target type:\n{}",
         out
     );
@@ -26741,7 +26741,7 @@ fn test_leaf4154333333332761_default_trait_call_uses_expected_default_value_help
         }
     "#,
     );
-    assert!(out.contains("const int32_t x = rusty::default_value<int32_t>();"));
+    assert!(out.contains("const int32_t x = rusty::default_like<int32_t>();"));
     assert!(!out.contains("Default::default_()"));
 }
 
@@ -26769,7 +26769,7 @@ fn test_leaf4154333333332761_net_tcpstream_type_maps_and_default_call_is_context
     "#,
     );
     assert!(out.contains("// Rust-only: using std::net;"));
-    assert!(out.contains("const rusty::Vec<rusty::net::TcpStream> _v = rusty::default_value<rusty::Vec<rusty::net::TcpStream>>();"));
+    assert!(out.contains("const rusty::Vec<rusty::net::TcpStream> _v = rusty::default_like<rusty::Vec<rusty::net::TcpStream>>();"));
 }
 
 #[test]
