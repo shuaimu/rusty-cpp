@@ -142,6 +142,53 @@ impl CodeGen {
         })
     }
 
+    /// Owners whose `*x` is a real dereference: the pointer-likes plus the
+    /// RAII guards. Wider than [`Self::is_pointer_like_autoderef_owner_name`],
+    /// which drives autoderef — a guard must deref but must not autoderef.
+    pub(super) fn is_deref_owner_or_guard_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Box"
+                | "Rc"
+                | "Arc"
+                | "Lazy"
+                | "Ref"
+                | "RefMut"
+                | "MutexGuard"
+                | "SpinMutexGuard"
+                | "RwLockReadGuard"
+                | "RwLockWriteGuard"
+        )
+    }
+
+    /// [`Self::is_deref_owner_or_guard_name`] applied to a type, resolving one
+    /// hop through a C++ `using X = Y;` the same way
+    /// [`Self::type_is_pointer_like_owner_type`] does.
+    ///
+    /// Without the alias hop, a local declared as mako's
+    /// `ChannelConnectionProxy` (= `rusty::Box<ChannelConnectionBase>`) does
+    /// not read as a deref owner, and `*ch` collapses to `ch` — emitting
+    /// `ch.method()`, a dot on a Box.
+    pub(super) fn type_is_deref_owner_or_guard_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        let Some(seg) = tp.path.segments.last() else {
+            return false;
+        };
+        let name = seg.ident.to_string();
+        if Self::is_deref_owner_or_guard_name(&name) {
+            return true;
+        }
+        self.cpp_type_aliases.get(&name).is_some_and(|target| {
+            let head = target.split('<').next().unwrap_or(target);
+            head.rsplit("::")
+                .next()
+                .is_some_and(|owner| Self::is_deref_owner_or_guard_name(owner.trim()))
+        })
+    }
+
     pub(super) fn type_is_pointer_like_owner_type(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
