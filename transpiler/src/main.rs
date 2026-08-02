@@ -2476,6 +2476,75 @@ fn find_repo_root_with_cmake(include_dir: &Path) -> Option<PathBuf> {
 /// Returns `None` if the repo root can't be located or the build fails;
 /// callers should fall back to module-less behavior (mostly a no-op for
 /// crates that don't reference `rusty::Vec` / `rusty::Rc` / etc.).
+/// The cache-hit test for the shared rusty module cache, extracted so the
+/// locked slow path in `ensure_rusty_modules_pcm_dir` can re-run it after
+/// acquiring the build lock (double-checked locking).
+///
+/// A hit requires the marker .pcm to exist AND be at least as new as every
+/// runtime source that feeds the umbrella module (textually included headers
+/// under include/, port module interfaces under transpiled/, and
+/// CMakeLists.txt itself). A stale pcm is worse than a miss: `import rusty;`
+/// then deserializes an OLD class definition which clang merges with the NEW
+/// textual include in the same TU — duplicate overload sets ("call to
+/// 'from_utf8' is ambiguous") with line numbers from the pre-edit header.
+///
+/// Freshness is compared against the stamp written after the last (re)build
+/// attempt rather than the pcm's own mtime: when a rebuild turns out to be a
+/// Ninja no-op (mtime-only touch, or an edited source no target consumes) the
+/// pcm keeps its old mtime and comparing against it would re-trigger the
+/// build on every call.
+fn rusty_module_cache_is_fresh(
+    repo_root: &Path,
+    cache_root: &Path,
+    rusty_pcm_marker: &Path,
+) -> bool {
+    if !rusty_pcm_marker.exists() {
+        return false;
+    }
+    let freshness_stamp = cache_root.join("freshness.stamp");
+    let marker_mtime = fs::metadata(&freshness_stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .or_else(|| {
+            fs::metadata(rusty_pcm_marker)
+                .and_then(|m| m.modified())
+                .ok()
+        });
+    let mut newest_source: Option<std::time::SystemTime> =
+        fs::metadata(repo_root.join("CMakeLists.txt"))
+            .and_then(|m| m.modified())
+            .ok();
+    let mut stack = vec![repo_root.join("include"), repo_root.join("transpiled")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let relevant = matches!(
+                p.extension().and_then(|s| s.to_str()),
+                Some("hpp") | Some("h") | Some("cppm")
+            );
+            if !relevant {
+                continue;
+            }
+            if let Ok(modified) = fs::metadata(&p).and_then(|m| m.modified()) {
+                newest_source = Some(match newest_source {
+                    Some(existing) if existing >= modified => existing,
+                    _ => modified,
+                });
+            }
+        }
+    }
+    match (marker_mtime, newest_source) {
+        (Some(marker), Some(source)) => marker >= source,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
     let repo_root = find_repo_root_with_cmake(include_dir)?;
     let cache_root = repo_root.join(".rusty-modules-cache");
@@ -2483,70 +2552,46 @@ fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
     let pcm_flat_dir = cache_root.join("pcm");
     let rusty_pcm_marker = pcm_flat_dir.join("rusty.pcm");
 
-    // Cache hit: the marker .pcm must exist AND be at least as new as every
-    // runtime source that feeds the umbrella module (textually included
-    // headers under include/, port module interfaces under transpiled/, and
-    // CMakeLists.txt itself). A stale pcm is worse than a miss: `import
-    // rusty;` then deserializes an OLD class definition which clang merges
-    // with the NEW textual include in the same TU — duplicate overload sets
-    // ("call to 'from_utf8' is ambiguous") with line numbers from the
-    // pre-edit header. The Ninja re-build below is incremental, so a
-    // freshness rebuild only recompiles what the edit actually touched.
-    if rusty_pcm_marker.exists() {
-        // Prefer the stamp written after our last (re)build attempt: when a
-        // rebuild turns out to be a Ninja no-op (mtime-only touch, or an
-        // edited source no target consumes) the pcm keeps its old mtime and
-        // comparing against it would re-trigger the build on every call.
-        let freshness_stamp = cache_root.join("freshness.stamp");
-        let marker_mtime = fs::metadata(&freshness_stamp)
-            .and_then(|m| m.modified())
-            .ok()
-            .or_else(|| {
-                fs::metadata(&rusty_pcm_marker)
-                    .and_then(|m| m.modified())
-                    .ok()
-            });
-        let mut newest_source: Option<std::time::SystemTime> = fs::metadata(
-            repo_root.join("CMakeLists.txt"),
-        )
-        .and_then(|m| m.modified())
-        .ok();
-        let mut stack = vec![repo_root.join("include"), repo_root.join("transpiled")];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    stack.push(p);
-                    continue;
-                }
-                let relevant = matches!(
-                    p.extension().and_then(|s| s.to_str()),
-                    Some("hpp") | Some("h") | Some("cppm")
-                );
-                if !relevant {
-                    continue;
-                }
-                if let Ok(modified) = fs::metadata(&p).and_then(|m| m.modified()) {
-                    newest_source = Some(match newest_source {
-                        Some(existing) if existing >= modified => existing,
-                        _ => modified,
-                    });
-                }
-            }
-        }
-        match (marker_mtime, newest_source) {
-            (Some(marker), Some(source)) if marker >= source => {
-                return Some(pcm_flat_dir);
-            }
-            (Some(_), None) => return Some(pcm_flat_dir),
-            _ => {
-                eprintln!(
-                    "  rusty module cache is older than runtime sources; rebuilding..."
-                );
-            }
-        }
+    // Fast path, lock-free: a fresh cache is read-only shared state.
+    if rusty_module_cache_is_fresh(&repo_root, &cache_root, &rusty_pcm_marker) {
+        return Some(pcm_flat_dir);
     }
+
+    // Slow path: the cache is stale or absent and must be (re)built. This is
+    // the parity matrix's BMI RACE when unserialized: the matrix forks ~12
+    // parity-test processes at once, an edited header makes every one of them
+    // see "stale" simultaneously, and 12 concurrent `cmake --build`s in ONE
+    // Ninja build dir corrupt each other — truncated .pcm files that surface
+    // in OTHER crates as phantom "module 'vec_port.vec' not found" failures
+    // (8-9 per run, reproduced across five matrix runs). flock(2) serializes
+    // the rebuild; the lock is per-open-file, so it releases automatically
+    // even if the process is SIGKILLed mid-build.
+    fs::create_dir_all(&cache_root).ok()?;
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cache_root.join(".build.lock"))
+        .ok()?;
+    let lock_ok = unsafe {
+        use std::os::unix::io::AsRawFd;
+        libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) == 0
+    };
+    if !lock_ok {
+        eprintln!("  Warning: could not lock the rusty module cache; proceeding unserialized");
+    }
+    // Double-checked: whoever held the lock before us most likely just
+    // rebuilt. Re-test freshness so the other ~11 waiters return without
+    // launching their own (now no-op, but not free) cmake --build.
+    if rusty_module_cache_is_fresh(&repo_root, &cache_root, &rusty_pcm_marker) {
+        return Some(pcm_flat_dir);
+    }
+    if rusty_pcm_marker.exists() {
+        eprintln!("  rusty module cache is older than runtime sources; rebuilding...");
+    }
+    // NOTE: `lock_file` is held (by being in scope) through the rest of this
+    // function — configure, build, and the symlink refresh are one critical
+    // section. Dropped on every return path below.
 
     fs::create_dir_all(&cmake_build_dir).ok()?;
     fs::create_dir_all(&pcm_flat_dir).ok()?;
@@ -2583,17 +2628,39 @@ fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
         .arg(".")
         .arg("--target")
         .arg("rusty")
+        // Cap the rebuild's parallelism. Ninja's default is every core, but
+        // this rebuild runs WHILE ~12 matrix crate processes are compiling;
+        // on a 15 GB box the combined footprint SIGBUSes clang (exit 135)
+        // mid-.pcm-write, the build fails without stamping, and the crate
+        // falls back module-less — surfacing as "module 'vec_port.vec' not
+        // found". -j3 is the empirically reliable ceiling here.
+        .arg("--parallel")
+        .arg("3")
         .current_dir(&cmake_build_dir)
         .output()
         .ok()?;
     if !cmake_build.status.success() {
+        // Ninja routes the failing COMPILER's output to stdout; stderr often
+        // carries only its own warnings ("premature end of file; recovering").
+        // Print the tail of both or the real error is invisible.
+        let stdout_tail = String::from_utf8_lossy(&cmake_build.stdout)
+            .lines()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
         eprintln!(
-            "  Warning: CMake build of `rusty` target failed:\n{}",
+            "  Warning: CMake build of `rusty` target failed (status {:?}):\n  stderr: {}\n  stdout tail:\n{}",
+            cmake_build.status.code(),
             String::from_utf8_lossy(&cmake_build.stderr)
                 .lines()
                 .take(5)
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join(" | "),
+            stdout_tail
         );
         return None;
     }

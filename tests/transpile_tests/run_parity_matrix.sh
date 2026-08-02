@@ -179,6 +179,21 @@ MODULE_CACHE=0
 # Keep --work-root on a roomy filesystem (not a small tmpfs).
 _matrix_cores="$(nproc 2>/dev/null || echo 4)"
 JOBS=$(( (_matrix_cores * 6 + 5) / 10 ))
+# Crate concurrency is MEMORY-binding, not CPU-binding (see the note above),
+# so clamp the cores-derived default by available RAM as well: the heavy
+# crates peak around ~3 GB of clang per job, and on a small-RAM host the
+# cores-only default runs the box out of memory — clang dies with SIGBUS
+# (exit 135) mid-.pcm-write, which then surfaces in OTHER crates as phantom
+# "module 'X' not found" failures. Measured on a 20-core/15 GB host: the old
+# default of 12 produced 4+ SIGBUS kills and 3 phantom module failures per
+# cold-cache run; the clamp brings it to ~4 jobs. An explicit --jobs still
+# overrides both.
+_matrix_mem_kb="$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+if [[ "${_matrix_mem_kb}" -gt 0 ]]; then
+    _matrix_mem_jobs=$(( _matrix_mem_kb / (3 * 1024 * 1024) ))
+    [[ "${_matrix_mem_jobs}" -lt 1 ]] && _matrix_mem_jobs=1
+    [[ "${_matrix_mem_jobs}" -lt "${JOBS}" ]] && JOBS="${_matrix_mem_jobs}"
+fi
 [[ "${JOBS}" -lt 1 ]] && JOBS=1
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
