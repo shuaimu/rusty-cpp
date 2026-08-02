@@ -3172,6 +3172,17 @@ impl CodeGen {
         {
             self.writeln("using __rusty_has_range_index = void;");
         }
+        // `PhantomPinned` makes a type `!Unpin` in Rust -- it must not be
+        // moved after construction. Restate that as deleted move operations:
+        // a struct of `Cell`/`RefCell` fields otherwise lowers to a plain
+        // aggregate which IS move-constructible, so without this the C++
+        // silently permits a move the Rust type forbids. Declaring the move
+        // ctor deleted also suppresses the implicit copy ctor, giving the
+        // "neither copyable nor movable" shape such types want.
+        if self.struct_fields_have_phantom_pinned(&s.fields) {
+            self.writeln(&format!("{n}({n}&&) = delete;", n = name_str));
+            self.writeln(&format!("{n}& operator=({n}&&) = delete;", n = name_str));
+        }
         self.emit_auto_trait_markers(&name_str, &s.fields, &s.generics);
         self.indent -= 1;
         self.writeln("};");

@@ -14320,6 +14320,24 @@ impl CodeGen {
 
 
 
+    /// Returns true if any field is a `PhantomPinned` marker.
+    ///
+    /// In Rust that marker makes the type `!Unpin`: it must not be moved
+    /// after construction. C++ has no equivalent notion, and a struct whose
+    /// fields are `Cell`/`RefCell` otherwise lowers to a plain aggregate
+    /// that IS move-constructible — silently permitting a move the Rust
+    /// type forbids. Callers restate it as deleted move operations.
+    ///
+    /// Matches the last path segment so both `PhantomPinned` and
+    /// `rusty::marker::PhantomPinned` are recognised.
+    pub(super) fn struct_fields_have_phantom_pinned(&self, fields: &syn::Fields) -> bool {
+        fields.iter().any(|field| {
+            matches!(&field.ty, syn::Type::Path(tp)
+                if tp.path.segments.last()
+                    .is_some_and(|seg| seg.ident == "PhantomPinned"))
+        })
+    }
+
     /// Returns true if any field of the struct contains a known non-copyable
     /// wrapper type, meaning the implicit copy ctor and copy assignment would
     /// be deleted anyway. Caller uses this to emit `= delete;` instead of
