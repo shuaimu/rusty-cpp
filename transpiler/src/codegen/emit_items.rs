@@ -2091,6 +2091,16 @@ impl CodeGen {
                     ));
                     self.writeln(&copy_ctor_line);
 
+                    // `PhantomPinned` (!Unpin) forbids moving: emit deleted
+                    // move operations instead of the forgotten-flag move
+                    // machinery. The flag itself stays (rusty_mark_forgotten
+                    // can still set it; the destructor still gates on it).
+                    if self.struct_fields_have_phantom_pinned(&s.fields) {
+                        self.writeln(&format!("{}({}&&) = delete;", name, name));
+                        self.writeln(&copy_assign_line);
+                        self.writeln(&format!("{}& operator=({}&&) = delete;", name, name));
+                    } else {
+
                     let move_inits: Vec<String> = fields
                         .named
                         .iter()
@@ -2148,6 +2158,7 @@ impl CodeGen {
                     self.writeln("return *this;");
                     self.indent -= 1;
                     self.writeln("}");
+                    }
                 }
                 syn::Fields::Unnamed(fields) => {
                     let first_field_has_drop_impl = fields
@@ -3179,7 +3190,10 @@ impl CodeGen {
         // silently permits a move the Rust type forbids. Declaring the move
         // ctor deleted also suppresses the implicit copy ctor, giving the
         // "neither copyable nor movable" shape such types want.
-        if self.struct_fields_have_phantom_pinned(&s.fields) {
+        if self.struct_fields_have_phantom_pinned(&s.fields)
+            && !self.output[struct_body_scan_start..]
+                .contains(&format!("{n}({n}&&", n = name_str))
+        {
             self.writeln(&format!("{n}({n}&&) = delete;", n = name_str));
             self.writeln(&format!("{n}& operator=({n}&&) = delete;", n = name_str));
         }
