@@ -45299,8 +45299,18 @@ const RUSTY_MODULE_TRIGGERS: &[RustyModuleTrigger] = &[
     RustyModuleTrigger { alias: "rusty::Rc",       module: "rc_port",              deep: "::rusty::port::rc::Rc" },
     RustyModuleTrigger { alias: "rusty::BTreeMap", module: "btree_port.btree.map", deep: "::btree_port::btree::map::BTreeMap" },
     RustyModuleTrigger { alias: "rusty::BTreeSet", module: "btree_port.btree.set", deep: "::btree_port::btree::set::BTreeSet" },
-    RustyModuleTrigger { alias: "rusty::HashMap",  module: "hashbrown_port.map",   deep: "::rusty::port::collections::hashbrown::HashMap" },
-    RustyModuleTrigger { alias: "rusty::HashSet",  module: "hashbrown_port.set",   deep: "::rusty::port::collections::hashbrown::HashSet" },
+    // HashMap/HashSet come from the transpiled Rust **std** port, not from the
+    // direct hashbrown port (2026-07-27 directive: translate from std, reach
+    // hashbrown only as std's dependency). Both live in the single `std_port`
+    // module, so the two triggers share one import; the dedup below handles it.
+    //
+    // The retired hashbrown_port path is not merely off-directive, it is broken:
+    // `m.entry(k).or_insert(0)` — the most basic HashMap idiom — fails to
+    // compile against it (`VacantEntry` has no `into_mut`, and `OccupiedEntry::
+    // insert` is not const-correct). std_port has a working entry API, covered
+    // by tests/std_port_map_entry_test.cpp.
+    RustyModuleTrigger { alias: "rusty::HashMap",  module: "std_port",             deep: "::std_port::collections::hash::map::HashMap" },
+    RustyModuleTrigger { alias: "rusty::HashSet",  module: "std_port",             deep: "::std_port::collections::hash::set::HashSet" },
     // Import-only — the port declares the `rusty::collections::X` alias itself.
     RustyModuleTrigger { alias: "rusty::collections::VecDeque",   module: "vec_deque_port",   deep: "" },
     RustyModuleTrigger { alias: "rusty::collections::LinkedList", module: "linked_list_port", deep: "" },
@@ -45368,9 +45378,12 @@ const PORT_NAMESPACE_IMPORTS: &[(&str, &str)] = &[
     ("btree_port::btree::set::entry::", "btree_port.btree.set.entry"),
     ("btree_port::btree::set::", "btree_port.btree.set"),
     ("btree_port::btree::btree_internal::", "btree_port.btree.btree_internal"),
-    // hashbrown is deliberately absent: its deep namespace spans TWO modules
-    // (hashbrown_port.map / .set), so the prefix alone cannot pick one. The
-    // HashMap/HashSet triggers already import the right one.
+    // The std hash port, in one module — so unlike the retired hashbrown_port
+    // (whose deep namespace spanned hashbrown_port.map / .set, leaving the
+    // prefix unable to pick one) a single prefix entry is exact here. This
+    // covers deep spellings the HashMap/HashSet triggers do not, e.g. a crate
+    // naming `std_port::collections::hash::map::Entry` fully-qualified.
+    ("std_port::collections::hash::", "std_port"),
 ];
 
 /// The spellings a trigger can appear as in emitted C++. A naive `alias<` scan

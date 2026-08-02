@@ -11226,14 +11226,17 @@ fn test_use_statement() {
     // (`in_umbrella_closure` defaults to false) — so the use site keeps the
     // spelling it was written with, `rusty::HashMap`, and the name is supplied
     // by a using-declaration onto the narrowly-imported port rather than by the
-    // `rusty` umbrella (which SIGSEGVs clang 22.1.8). Only crates INSIDE the
-    // closure get their use sites rewritten to the deep path; see
+    // `rusty` umbrella — narrow imports keep consumer BMIs small. Only crates
+    // INSIDE the closure get their use sites rewritten to the deep path; see
     // `test_in_umbrella_closure_module_gets_deep_path_and_narrow_import`.
+    //
+    // The port is the transpiled Rust **std** hash slice, not the retired
+    // direct hashbrown port (2026-07-27 directive; #185).
     assert!(out.contains("using rusty::HashMap;"));
     assert!(out.contains(
-        "namespace rusty { using ::rusty::port::collections::hashbrown::HashMap; }"
+        "namespace rusty { using ::std_port::collections::hash::map::HashMap; }"
     ));
-    assert!(out.contains("import hashbrown_port.map;"));
+    assert!(out.contains("import std_port;"));
     assert!(!out.contains("import rusty;"));
     assert!(!out.contains("using std::collections::HashMap;"));
 }
@@ -13628,9 +13631,9 @@ fn test_leaf223_cpp_and_rust_imports_coexist() {
     // `inject_rusty_module_import_if_needed` / `in_umbrella_closure`).
     assert!(out.contains("using rusty::HashMap;"));
     assert!(out.contains(
-        "namespace rusty { using ::rusty::port::collections::hashbrown::HashMap; }"
+        "namespace rusty { using ::std_port::collections::hash::map::HashMap; }"
     ));
-    assert!(out.contains("import hashbrown_port.map;"));
+    assert!(out.contains("import std_port;"));
     assert!(!out.contains("import rusty;"));
 }
 
@@ -25821,9 +25824,20 @@ fn test_leaf415433333333271_hashmap_new_omitted_owner_recovers_from_insert_usage
     "#,
     );
     assert!(out.contains("ArrayString<16>::new_()"), "{out}");
-    assert!(out.contains("HashMap<ArrayString<16>, int32_t>()"), "{out}");
+    // THE POINT OF THIS TEST: `HashMap::new()` is written with no turbofish, so
+    // the owner's generics must be RECOVERED from the later `.insert(s, 1)` —
+    // hence the concrete `<ArrayString<16>, int32_t>` below. The bare-owner
+    // assertion guards the failure mode where recovery silently does nothing.
+    assert!(
+        out.contains("rusty::HashMap<ArrayString<16>, int32_t>::new_()"),
+        "{out}"
+    );
     assert!(!out.contains("HashMap::new_()"), "{out}");
-    assert!(!out.contains("rusty::HashMap<ArrayString<16>, int32_t>::new_()"), "{out}");
+    // Value construction (`HashMap<…>()`) was correct only while rusty::HashMap
+    // was a hand-written wrapper with a defaulted ctor. It now aliases the
+    // transpiled Rust std port (#185): default ctor deleted, `new_()` is the
+    // constructor, so the old spelling would not compile.
+    assert!(!out.contains("HashMap<ArrayString<16>, int32_t>()"), "{out}");
 }
 
 #[test]

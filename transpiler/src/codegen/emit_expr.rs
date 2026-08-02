@@ -14477,11 +14477,21 @@ impl CodeGen {
             );
             return Some(format!("{}::{}({})", owner_cpp, method, coerced));
         }
+        // `HashMap::new()` -> `rusty::HashMap<K, V>::new_()`. This is the live
+        // path for the common `let m: HashMap<K, V> = HashMap::new();` shape;
+        // there is a second copy of this rule further down (search
+        // `is_hashmap_assoc_new`) covering the associated-path call form. Both
+        // must agree.
+        //
+        // Value construction here was correct only while `rusty::HashMap` was a
+        // hand-written wrapper with a defaulted constructor. It now aliases the
+        // transpiled Rust std port (#185), which follows Rust: default ctor
+        // deleted, `new_()` is the constructor.
         if owner_cpp.starts_with("rusty::HashMap")
             && matches!(method.as_str(), "new" | "new_")
             && args.is_empty()
         {
-            return Some(format!("{}()", owner_cpp));
+            return Some(format!("{}::new_()", owner_cpp));
         }
         if owner_cpp.starts_with("rusty::Vec<") && method == "from_iter" && args.len() == 1 {
             // `Vec::from_iter(X)` is a Vec in Rust, but `collect_range` yields a
@@ -19299,9 +19309,20 @@ impl CodeGen {
             }
         }
 
-        // `rusty::HashMap` exposes constructor/make surfaces instead of `new_`.
-        // Lower associated `HashMap::new()` calls to direct value construction
-        // after owner-template recovery so omitted generics become concrete.
+        // `HashMap::new()` -> `rusty::HashMap<K, V>::new_()`.
+        //
+        // This block exists for the OWNER-TEMPLATE RECOVERY: `func` has already
+        // been resolved to the concrete `rusty::HashMap<K, V>` spelling, so the
+        // generics Rust left implicit are spelled out here even when the call
+        // site wrote a bare `HashMap::new()`.
+        //
+        // It used to emit `rusty::HashMap<K, V>()` — value construction — back
+        // when `rusty::HashMap` was a hand-written wrapper with a defaulted
+        // constructor. It is now an alias for the transpiled Rust std port
+        // (#185), whose HashMap follows Rust: the default constructor is
+        // deleted and `new_()` is the constructor. Value-init stopped
+        // compiling at all ("call to implicitly-deleted default constructor").
+        // HashSet already lowered to `::new_()` via the general path.
         if call.args.is_empty() {
             let is_hashmap_assoc_new = if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                 if path_expr.path.segments.len() >= 2 {
@@ -19323,7 +19344,7 @@ impl CodeGen {
             if is_hashmap_assoc_new {
                 if let Some((owner_cpp, _)) = func.rsplit_once("::") {
                     if owner_cpp.starts_with("rusty::HashMap") {
-                        return format!("{}()", owner_cpp);
+                        return format!("{}::new_()", owner_cpp);
                     }
                 }
             }

@@ -68,9 +68,10 @@
 #include "rusty/arch.hpp"
 #include "rusty/fn.hpp"
 #include "rusty/function.hpp"
-// rusty::HashMap / HashSet replaced by hashbrown_port C++20 modules.
-// Consumers `import hashbrown_port.map;` or `import hashbrown_port.set;`
-// directly. See docs/rusty-std-book.md §5 for the migration story.
+// rusty::HashMap / HashSet are C++20 modules, not headers: the transpiled Rust
+// std port (std_port), aliased in rusty.cppm. See task #185.
+// Consumers `import std_port;` directly (it carries both map and set). See
+// docs/rusty-std-book.md §5 for the migration story.
 // #include "rusty/hashmap.hpp"  // deleted
 // #include "rusty/hashset.hpp"  // deleted
 //
