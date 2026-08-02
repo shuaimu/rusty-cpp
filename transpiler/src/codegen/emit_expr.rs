@@ -13319,26 +13319,13 @@ impl CodeGen {
                                 false
                             } else {
                                 let local_ty = self.lookup_local_binding_type(&local_name);
+                                // Resolves one alias hop, so a local declared
+                                // through a `using P = rusty::Box<T>;` still
+                                // reads as a deref owner and `*p` is not
+                                // collapsed into `p.method()`.
                                 let local_is_known_deref_owner =
                                     local_ty.as_ref().is_some_and(|local_ty| {
-                                        let peeled_local =
-                                            self.peel_reference_paren_group_type(local_ty);
-                                        matches!(peeled_local, syn::Type::Path(tp)
-                                        if tp.path.segments.last().is_some_and(|seg| {
-                                            matches!(
-                                                seg.ident.to_string().as_str(),
-                                                "Box"
-                                                    | "Rc"
-                                                    | "Arc"
-                                                    | "Lazy"
-                                                    | "Ref"
-                                                    | "RefMut"
-                                                    | "MutexGuard"
-                                                    | "SpinMutexGuard"
-                                                    | "RwLockReadGuard"
-                                                    | "RwLockWriteGuard"
-                                            )
-                                        }))
+                                        self.type_is_deref_owner_or_guard_type(local_ty)
                                     });
                                 let local_is_known_pointer =
                                     local_ty.as_ref().is_some_and(|local_ty| {
@@ -22868,26 +22855,13 @@ impl CodeGen {
                                 false
                             } else {
                                 let local_ty = self.lookup_local_binding_type(&local_name);
+                                // Resolves one alias hop, so a local declared
+                                // through a `using P = rusty::Box<T>;` still
+                                // reads as a deref owner and `*p` is not
+                                // collapsed into `p.method()`.
                                 let local_is_known_deref_owner =
                                     local_ty.as_ref().is_some_and(|local_ty| {
-                                        let peeled_local =
-                                            self.peel_reference_paren_group_type(local_ty);
-                                        matches!(peeled_local, syn::Type::Path(tp)
-                                        if tp.path.segments.last().is_some_and(|seg| {
-                                            matches!(
-                                                seg.ident.to_string().as_str(),
-                                                "Box"
-                                                    | "Rc"
-                                                    | "Arc"
-                                                    | "Lazy"
-                                                    | "Ref"
-                                                    | "RefMut"
-                                                    | "MutexGuard"
-                                                    | "SpinMutexGuard"
-                                                    | "RwLockReadGuard"
-                                                    | "RwLockWriteGuard"
-                                            )
-                                        }))
+                                        self.type_is_deref_owner_or_guard_type(local_ty)
                                     });
                                 let local_is_known_pointer =
                                     local_ty.as_ref().is_some_and(|local_ty| {
