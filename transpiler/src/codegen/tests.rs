@@ -8415,6 +8415,59 @@ fn test_closure_move_capture() {
 }
 
 #[test]
+fn test_phantom_pinned_aggregate_struct_deletes_moves() {
+    // A `PhantomPinned` field makes the Rust type `!Unpin`; the faithful
+    // C++ lowering deletes the move operations (which also suppresses the
+    // implicit copies) so the emitted struct is neither movable nor
+    // copyable. Without this a Cell-field aggregate would silently stay
+    // MOVE-constructible — wrong for pinned, thread-affine types.
+    let out = transpile_str(
+        r#"
+        struct Pinned {
+            v: Cell<i32>,
+            _pin: rusty::marker::PhantomPinned,
+        }
+        "#,
+    );
+    assert!(out.contains("Pinned(Pinned&&) = delete;"), "{out}");
+    assert!(out.contains("Pinned& operator=(Pinned&&) = delete;"), "{out}");
+    // Exactly once — the close-site emission must not duplicate a deletion
+    // already emitted by another path.
+    assert_eq!(out.matches("Pinned(Pinned&&) = delete;").count(), 1, "{out}");
+}
+
+#[test]
+fn test_phantom_pinned_drop_struct_deletes_moves_instead_of_forgotten_flag_move() {
+    // The Drop machinery normally emits a forgotten-flag MOVE constructor.
+    // For a PhantomPinned struct that move must not exist: the deleted
+    // declarations replace it, exactly once, and the destructor stays.
+    let out = transpile_str(
+        r#"
+        struct Pinned {
+            v: Cell<i32>,
+            _pin: rusty::marker::PhantomPinned,
+        }
+        impl Drop for Pinned {
+            fn drop(&mut self) {
+                let _ = self.v.get();
+            }
+        }
+        "#,
+    );
+    assert!(out.contains("Pinned(Pinned&&) = delete;"), "{out}");
+    assert!(out.contains("Pinned& operator=(Pinned&&) = delete;"), "{out}");
+    assert_eq!(out.matches("Pinned(Pinned&&) = delete;").count(), 1, "{out}");
+    assert_eq!(
+        out.matches("Pinned& operator=(Pinned&&) = delete;").count(),
+        1,
+        "{out}"
+    );
+    // No forgotten-flag move ctor body sneaking in beside the deletion.
+    assert!(!out.contains("Pinned(Pinned&& other)"), "{out}");
+    assert!(out.contains("~Pinned()"), "{out}");
+}
+
+#[test]
 fn test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda() {
     let out = transpile_str(
         r#"
