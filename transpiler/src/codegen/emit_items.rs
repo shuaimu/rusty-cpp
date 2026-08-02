@@ -10094,7 +10094,7 @@ impl CodeGen {
                 // Bare `..Default::default()` has no Self in C++ — resolve it
                 // through the target type instead of leaking `Default::default_()`.
                 let base_str = if Self::struct_update_rest_is_bare_default_call(rest_expr) {
-                    format!("rusty::default_value<{}>()", target_name)
+                    format!("rusty::default_like<{}>()", target_name)
                 } else {
                     self.emit_expr_to_string(rest_expr)
                 };
