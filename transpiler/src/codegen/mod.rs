@@ -13250,7 +13250,14 @@ impl CodeGen {
             .infer_simple_expr_type(expr)
             .or_else(|| self.infer_local_binding_type_from_initializer(expr));
         let Some(inferred) = inferred else {
-            return !matches!(self.peel_paren_group_expr(expr), syn::Expr::Path(_));
+            // Inference failed, so we do NOT know whether the referent is
+            // pointer-like. Collapsing is the unsound answer: for a
+            // `&Box<T>` it drops a real dereference and emits `box.method()`.
+            // Not collapsing is safe either way, because the fallthrough
+            // wraps the operand in `deref_if_pointer_like`, which is the
+            // identity for anything that is not pointer-like -- so a plain
+            // `&T` lowers the same as it did when collapsed.
+            return false;
         };
         let inferred = self.peel_paren_group_type(&inferred);
         if self.type_is_pointer_like_owner_type(inferred) {
