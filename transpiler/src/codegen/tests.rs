@@ -30042,12 +30042,19 @@ fn test_leaf5191_tuple_match_deref_temporary_materializes_before_address() {
     "#,
     );
     // Deref of pointer-like return values may use C-style `*` or the
-    // `rusty::detail::deref_if_pointer_like(...)` helper.
+    // `rusty::detail::deref_if_pointer_like(...)` helper; the wrapper form
+    // binds the OWNER first so a view-producing deref can't dangle (#84).
     assert!(
         out.contains("auto _m0_tmp = *mk();")
             || out.contains("auto _m0_tmp = *::mk();")
-            || out.contains("auto _m0_tmp = rusty::detail::deref_if_pointer_like(mk());")
-            || out.contains("auto _m0_tmp = rusty::detail::deref_if_pointer_like(::mk());"),
+            || (out.contains("auto&& _m0_own = mk();")
+                && out.contains(
+                    "auto&& _m0_tmp = rusty::detail::deref_if_pointer_like(_m0_own);"
+                ))
+            || (out.contains("auto&& _m0_own = ::mk();")
+                && out.contains(
+                    "auto&& _m0_tmp = rusty::detail::deref_if_pointer_like(_m0_own);"
+                )),
         "{out}"
     );
     assert!(out.contains("auto _m0 = &_m0_tmp;"), "{out}");
@@ -30084,15 +30091,15 @@ fn test_leaf5191_tuple_match_deref_method_call_temporary_materializes_before_add
     );
     // Deref of method-call return may use C-style `*` or the
     // `deref_if_pointer_like` helper; the literal may be wrapped in
-    // `static_cast<size_t>(...)`.
+    // `static_cast<size_t>(...)`. The wrapper form binds the OWNER first so
+    // a view-producing deref can't dangle (#84).
     assert!(
         out.contains("auto _m0_tmp = *v.swap_remove(1);")
-            || out.contains(
-                "auto _m0_tmp = rusty::detail::deref_if_pointer_like(v.swap_remove(1));"
-            )
-            || out.contains(
-                "auto _m0_tmp = rusty::detail::deref_if_pointer_like(v.swap_remove(static_cast<size_t>(1)));"
-            ),
+            || ((out.contains("auto&& _m0_own = v.swap_remove(1);")
+                || out.contains("auto&& _m0_own = v.swap_remove(static_cast<size_t>(1));"))
+                && out.contains(
+                    "auto&& _m0_tmp = rusty::detail::deref_if_pointer_like(_m0_own);"
+                )),
         "{out}"
     );
     assert!(
@@ -39327,5 +39334,62 @@ fn test_fn_local_scalar_const_item_gets_static_storage() {
     assert!(
         !out.contains("    constexpr size_t N ="),
         "must not emit a plain automatic-storage local, got:\n{out}"
+    );
+}
+
+/// #84 bug (b): Rule 4 of the crate-namespace wrap requalifies crate-root FREE
+/// FUNCTIONS referenced bare (`::smallvec()` → `::smallvec::smallvec()`), but a
+/// fn symbol match followed by `::` is a namespace/type QUALIFIER use — the
+/// smallvec macro test declares `fn smallvec()`, and the plain rewrite turned
+/// the already-crate-qualified `::smallvec::SmallVec` into
+/// `::smallvec::smallvec::SmallVec`.
+#[test]
+fn test_requalify_crate_root_fn_symbol_skips_qualifier_uses() {
+    let text = "auto v = ::smallvec::SmallVec<int>::new_();\n::smallvec();\n";
+    let out = CodeGen::requalify_crate_root_fn_symbol(text, "smallvec", "smallvec");
+    assert!(
+        out.contains("auto v = ::smallvec::SmallVec<int>::new_();"),
+        "qualified path must stay single-qualified, got:\n{out}"
+    );
+    assert!(
+        out.contains("::smallvec::smallvec();"),
+        "the bare fn CALL must still requalify, got:\n{out}"
+    );
+    // The TYPE variant must keep requalifying qualifier uses: a bare crate-root
+    // type used as a static-method owner (`::SmallVec::from_elem`) genuinely
+    // needs the crate prefix.
+    let ty = CodeGen::requalify_crate_root_symbol("x = ::SmallVec::from_elem(0, 0);", "smallvec", "SmallVec");
+    assert!(
+        ty.contains("::smallvec::SmallVec::from_elem"),
+        "type-symbol qualifier uses must still requalify, got:\n{ty}"
+    );
+}
+
+/// #84 bug (c): the assert_eq! deref-shape peer recovery
+/// (`&*vec` vs `&*Vec::new()`) must resolve the empty Vec's element through
+/// `rusty::as_ptr` — the peer can be a transpiled PORT container with no
+/// `begin()` member (smallvec's `SmallVec`), where `*std::begin(peer)` fails
+/// to compile.
+#[test]
+fn test_assert_eq_deref_peer_element_recovery_uses_as_ptr() {
+    let out = transpile_str(
+        r#"
+        struct SmallVec<A>;
+        fn f(vec: SmallVec<[i32; 2]>) {
+            match (&*vec, &*Vec::new()) {
+                (left_val, right_val) => {
+                    if !(*left_val == *right_val) {}
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("*rusty::as_ptr("),
+        "peer element recovery must go through rusty::as_ptr, got:\n{out}"
+    );
+    assert!(
+        !out.contains("*std::begin("),
+        "must not require std::begin on the peer container, got:\n{out}"
     );
 }

@@ -561,7 +561,29 @@ inline void write(T* dst, U&& value) {
     // `ptr::write` semantics: bit-construct a fresh `T` at `dst`
     // without touching whatever was there.
     using RustyWriteT = std::remove_const_t<std::remove_pointer_t<decltype(dst)>>;
-    std::construct_at(const_cast<RustyWriteT*>(dst), std::forward<U>(value));
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<U>>
+                  && !std::is_pointer_v<RustyWriteT>) {
+        using RustyWritePointee = std::remove_pointer_t<std::remove_cvref_t<U>>;
+        if constexpr (!std::is_constructible_v<RustyWriteT, U&&>
+                      && std::is_trivially_copyable_v<RustyWriteT>
+                      && std::is_constructible_v<RustyWriteT, RustyWritePointee&>) {
+            // Degraded borrowing-bridge protocol: a generic `into_iter()` lowers
+            // to the borrowing `rusty::iter(...)` bridge, whose items are `T*`
+            // where the Rust source moved `T` by value (#84: `SmallVec::extend`
+            // over the `ArrayRepeatResult` bridge → `ptr::write(p, out)` with
+            // `out: int*`). The destination element type disambiguates: `T` is
+            // not constructible from the pointer but is from its pointee, so
+            // write the pointee. Only for trivially-copyable `T`, where the copy
+            // is indistinguishable from Rust's move — non-trivial types still
+            // fail loudly below rather than silently cloning (drop-count
+            // divergence).
+            std::construct_at(const_cast<RustyWriteT*>(dst), *value);
+        } else {
+            std::construct_at(const_cast<RustyWriteT*>(dst), std::forward<U>(value));
+        }
+    } else {
+        std::construct_at(const_cast<RustyWriteT*>(dst), std::forward<U>(value));
+    }
 }
 
 // Some generated call sites may carry escaped identifier spellings (`write_`)

@@ -2005,9 +2005,50 @@ impl CodeGen {
                         ) {
                             // `&*<rvalue>` can borrow through a temporary owner (e.g.
                             // `*v.swap_remove(1)`). Binding `auto&&` would preserve that
-                            // borrow and dangle once the owner is destroyed. Materialize
-                            // the deref result by value before taking an address.
-                            self.writeln(&format!("auto {} = {};", tmp_name, inner_raw));
+                            // borrow and dangle once the owner is destroyed.
+                            //
+                            // When the emission is the plain deref wrapper over the owner,
+                            // bind the OWNER first (direct prvalue binding → real lifetime
+                            // extension to end of block) and deref the lvalue. A by-value
+                            // materialization of the deref RESULT is not enough when the
+                            // deref yields a VIEW: `deref_if_pointer_like(into_vec(...))`
+                            // produces a `std::span` into the Vec temporary, which dies at
+                            // the semicolon — the macro_smallvec assert then compared
+                            // freed memory (silent-wrong, #84).
+                            const DEREF_WRAP: &str = "rusty::detail::deref_if_pointer_like(";
+                            let owner_raw = inner_raw
+                                .strip_prefix(DEREF_WRAP)
+                                .and_then(|rest| rest.strip_suffix(')'))
+                                .filter(|owner| {
+                                    // The stripped suffix must close the WRAPPER call, not
+                                    // some inner paren (`deref…(x).foo()` must not match).
+                                    let mut depth = 0i32;
+                                    for b in owner.bytes() {
+                                        match b {
+                                            b'(' => depth += 1,
+                                            b')' => {
+                                                depth -= 1;
+                                                if depth < 0 {
+                                                    return false;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    depth == 0
+                                });
+                            if let Some(owner_raw) = owner_raw {
+                                let own_name = format!("_m{}_own", idx);
+                                self.writeln(&format!("auto&& {} = {};", own_name, owner_raw));
+                                self.writeln(&format!(
+                                    "auto&& {} = rusty::detail::deref_if_pointer_like({});",
+                                    tmp_name, own_name
+                                ));
+                            } else {
+                                // Unrecognized composed emission: keep the by-value
+                                // materialization of the deref result.
+                                self.writeln(&format!("auto {} = {};", tmp_name, inner_raw));
+                            }
                         } else {
                             self.writeln(&format!("auto&& {} = {};", tmp_name, inner_raw));
                         }

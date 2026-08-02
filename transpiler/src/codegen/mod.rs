@@ -2557,8 +2557,16 @@ impl CodeGen {
             if ns == &crate_name {
                 // The crate's SELF-NAMED module (`mod arrayvec` in crate `arrayvec`): `::arrayvec::X`
                 // is ambiguous — `arrayvec` is both the crate-namespace prefix (the transpiler emits
-                // `crate::` as `::<crate>::`) and a module name. Disambiguate by X.
-                wrapped = self.requalify_self_named_module(&wrapped, &crate_name);
+                // `crate::` as `::<crate>::`) and a module name. Disambiguate by X — but ONLY when
+                // this TU genuinely declares `mod <crate>`. A TEST target of crate `smallvec` picks
+                // up "smallvec" in `exclusive` through the DEP LIB's type paths
+                // (`local_type_module_path`: `smallvec::SmallVec`), yet declares no such module —
+                // there, `::smallvec::SmallVec` is already the correct absolute path into the
+                // wrapped dep namespace, and the member rewrite would corrupt it to
+                // `::smallvec::smallvec::SmallVec` (#84 bug b).
+                if self.declared_module_names.contains(crate_name.as_str()) {
+                    wrapped = self.requalify_self_named_module(&wrapped, &crate_name);
+                }
             } else {
                 wrapped = Self::requalify_top_level_namespace(&wrapped, &crate_name, ns, "::");
             }
@@ -2687,8 +2695,11 @@ impl CodeGen {
             .collect();
         crate_root_fns.sort();
         for name in &crate_root_fns {
-            wrapped =
-                Self::requalify_crate_root_symbol(&wrapped, &crate_name, &escape_cpp_keyword(name));
+            wrapped = Self::requalify_crate_root_fn_symbol(
+                &wrapped,
+                &crate_name,
+                &escape_cpp_keyword(name),
+            );
         }
         // Rule 5 — cross-crate (xcrate) test-harness self-references. The harness emits helper
         // functions named `rusty_libtest_<…>` and calls them via a global `::rusty_libtest_<…>()`.
@@ -2713,7 +2724,7 @@ impl CodeGen {
             set
         };
         for f in &harness_fns {
-            wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, f);
+            wrapped = Self::requalify_crate_root_fn_symbol(&wrapped, &crate_name, f);
         }
         // Gap (a): `rusty_ext` stays IN the purview (not relocated), so its references
         // must NOT be globalized — Rule 1 above already requalified `::de::rusty_ext::X`
@@ -2974,6 +2985,25 @@ impl CodeGen {
     }
 
     fn requalify_crate_root_symbol(text: &str, crate_name: &str, sym: &str) -> String {
+        Self::requalify_crate_root_symbol_impl(text, crate_name, sym, false)
+    }
+
+    /// Variant for crate-root FREE-FUNCTION symbols (Rules 4/5): a match followed by
+    /// `::` is a namespace/type QUALIFIER use, never a function reference — e.g. the
+    /// smallvec macro test declares `fn smallvec()`, and the plain rewrite would turn
+    /// the crate-qualified `::smallvec::SmallVec` into `::smallvec::smallvec::SmallVec`
+    /// (#84 bug b). Function references are `::f(…)`, `::f<T>(…)`, `&::f` — none is
+    /// followed by `::`.
+    fn requalify_crate_root_fn_symbol(text: &str, crate_name: &str, sym: &str) -> String {
+        Self::requalify_crate_root_symbol_impl(text, crate_name, sym, true)
+    }
+
+    fn requalify_crate_root_symbol_impl(
+        text: &str,
+        crate_name: &str,
+        sym: &str,
+        skip_qualifier_uses: bool,
+    ) -> String {
         let needle = format!("::{}", sym);
         let repl = format!("::{}::{}", crate_name, sym);
         let bytes = text.as_bytes();
@@ -2993,8 +3023,11 @@ impl CodeGen {
                     || bytes[pos - 1] == b'>');
             let after_ok = after >= text.len()
                 || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            let qualifier_use = skip_qualifier_uses
+                && after + 1 < text.len()
+                && &text[after..after + 2] == "::";
             out.push_str(&text[i..pos]);
-            if before_ok && after_ok {
+            if before_ok && after_ok && !qualifier_use {
                 out.push_str(&repl);
             } else {
                 out.push_str(&needle);
@@ -23296,7 +23329,13 @@ impl CodeGen {
             {
                 return None;
             }
-            let elem = format!("std::remove_cvref_t<decltype(*std::begin({}))>", peer);
+            // `rusty::as_ptr` (array.hpp) rather than `std::begin`: the peer can be
+            // a transpiled PORT container with no `begin()` member (smallvec's
+            // `SmallVec` — #84 bug c). The dispatcher resolves member `as_ptr()`
+            // (port containers), `.data()` (span/array), or pointer `begin()`, and
+            // every peer this deref shape admits is contiguous (Rust `&*` to a
+            // slice), so the element pointer always exists.
+            let elem = format!("std::remove_cvref_t<decltype(*rusty::as_ptr({}))>", peer);
             Some(format!(
                 "rusty::detail::deref_if_pointer_like(rusty::Vec<{}>::new_())",
                 elem
