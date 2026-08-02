@@ -324,6 +324,18 @@ fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> 
     let lines = collect_line_spans(content);
     let mut blocks = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
+    // Every id already present in a GEN marker anywhere in the file --
+    // including ones we have not reached yet. Auto-id minting must skip
+    // these: ids are positional (`file.N`), so inserting a NEW block in the
+    // MIDDLE of a file otherwise mints an id a downstream marker already
+    // owns and parsing dies with "duplicate inline block id". Existing
+    // blocks keep their marker ids; only new blocks mint, and they mint the
+    // first index not taken anywhere in the file.
+    let all_marker_ids: HashSet<String> = lines
+        .iter()
+        .filter_map(|span| parse_gen_begin_marker(line_trimmed(content, span)))
+        .map(|m| m.id)
+        .collect();
     let mut i = 0usize;
     while i < lines.len() {
         if line_trimmed(content, &lines[i]) != IF_RUSTYCPP_RUST {
@@ -383,7 +395,16 @@ fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> 
         let id_from_gen = generated_region.as_ref().map(|g| g.id.clone());
         let id = match id_from_gen {
             Some(id) => id,
-            None => make_auto_id(path, blocks.len() + 1),
+            None => {
+                let mut n = blocks.len() + 1;
+                loop {
+                    let candidate = make_auto_id(path, n);
+                    if !all_marker_ids.contains(&candidate) && !seen_ids.contains(&candidate) {
+                        break candidate;
+                    }
+                    n += 1;
+                }
+            }
         };
 
         if !seen_ids.insert(id.clone()) {
