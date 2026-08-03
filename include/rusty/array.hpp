@@ -1065,6 +1065,33 @@ decltype(auto) as_ref_ptr(const T& value) {
 
 // Lazy zip view — Rust's `a.zip(b)` semantics. Eager vector
 // materialization hangs on unbounded sides (indexmap's
+// Lazy mapped view over a zip_view (or any begin/end range): exposes the
+// std::optional-shaped next() the slice.hpp adapter machinery duck-types
+// (option_like_has_value/take_value), so downstream .next()/for_in/collect
+// all work. std-only — this header is self-contained.
+template<typename View, typename F>
+struct zip_map_view {
+    View view;
+    F func;
+    using base_iter = decltype(std::begin(std::declval<View&>()));
+    std::optional<base_iter> cur{};
+
+    using mapped_type = std::decay_t<decltype(std::invoke(
+        std::declval<F&>(), *std::declval<base_iter&>()))>;
+
+    std::optional<mapped_type> next() {
+        if (!cur) {
+            cur.emplace(std::begin(view));
+        }
+        if (*cur == std::end(view)) {
+            return std::nullopt;
+        }
+        std::optional<mapped_type> value(std::invoke(func, **cur));
+        ++*cur;
+        return value;
+    }
+};
+
 // `(start..).zip(end..)` shift loops zip two `range_from`s and are
 // bounded only by the OUTER zip with the entries vector).
 template<typename Left, typename Right>
@@ -1124,19 +1151,13 @@ struct zip_view {
     }
 
     // Rust `a.zip(b).map(f)` chains call .map on the zip result — zip_view
-    // is a bare range view with no adapter members. Materialize the mapped
-    // items eagerly (std-only: this header is self-contained and cannot
-    // reach the rusty::map dispatcher in slice.hpp).
+    // is a bare range view with no adapter members. Return the LAZY
+    // zip_map_view (an eager std::vector broke downstream `.next()` calls
+    // on the mapped result).
     template<typename F>
     auto map(F&& func) {
-        using item_ref = decltype(*std::begin(*this));
-        using mapped_type =
-            std::decay_t<decltype(std::invoke(func, std::declval<item_ref>()))>;
-        std::vector<mapped_type> out;
-        for (auto&& item : *this) {
-            out.push_back(std::invoke(func, std::forward<decltype(item)>(item)));
-        }
-        return out;
+        return zip_map_view<zip_view, std::decay_t<F>>{
+            std::move(*this), std::forward<F>(func)};
     }
 };
 
