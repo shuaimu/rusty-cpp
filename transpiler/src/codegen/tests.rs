@@ -8468,6 +8468,25 @@ fn test_phantom_pinned_drop_struct_deletes_moves_instead_of_forgotten_flag_move(
 }
 
 #[test]
+fn test_ufcs_serde_mut_ref_out_arg_collapses() {
+    // Cross-file UFCS serde dispatch: every param of the Serialize_/
+    // Deserialize_ overload family is a reference, but the definitions
+    // live in another file, so no signature is collected here. The
+    // synthesized reference expected type must collapse a `&mut v`
+    // out-arg to the bare lvalue (a leaked `&v` cannot bind `T&`).
+    let out = transpile_str(
+        r#"
+        fn f(ar: &mut BinaryReadArchive) {
+            let mut v_xid = v64::new(0);
+            Deserialize_::deserialize(&mut v_xid, ar);
+        }
+        "#,
+    );
+    assert!(!out.contains("deserialize(&v_xid"), "{out}");
+    assert!(out.contains("deserialize(v_xid"), "{out}");
+}
+
+#[test]
 fn test_move_closure_invoking_captured_function_keeps_mutable() {
     // Direct invocation of a captured callable is a method call on it in
     // C++: rusty::Function's operator() is non-const (unless the

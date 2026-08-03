@@ -17714,6 +17714,38 @@ impl CodeGen {
             }
         }
 
+        // mako-rrr serde UFCS dispatch: `Serialize_::serialize(&x, ar)` /
+        // `Deserialize_::deserialize(&mut x, ar)` name a FREE-FN overload
+        // family (static dispatch by C++ overload resolution — the trait
+        // impls lower to free fns, there are no members), so the general
+        // desugar below would emit `x.deserialize(ar)`, a member call that
+        // does not exist. Keep the qualified free-fn form. Every parameter
+        // of the family is a reference by construction, so reference-shaped
+        // args collapse to bare lvalues; other args emit without a move
+        // wrap (archives are never consumed, and value temporaries bind
+        // const& without one).
+        if let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) {
+            let segs = &path_expr.path.segments;
+            if segs.len() >= 2 {
+                let owner = segs[segs.len() - 2].ident.to_string();
+                let method = segs[segs.len() - 1].ident.to_string();
+                if (owner == "Serialize_" && method == "serialize")
+                    || (owner == "Deserialize_" && method == "deserialize")
+                {
+                    let path = self.emit_path_to_string(&path_expr.path);
+                    let args: Vec<String> = call
+                        .args
+                        .iter()
+                        .map(|a| match self.peel_paren_group_expr(a) {
+                            syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                            _ => self.emit_expr_to_string(a),
+                        })
+                        .collect();
+                    return format!("{}({})", path, args.join(", "));
+                }
+            }
+        }
+
         // Phase 18 Blocker 2 (leaf 2): Rewrite UFCS trait-method calls from:
         // `Trait::method(&receiver, args...)` to `receiver.method(args...)`.
         if let Some(ufcs) = self.detect_ufcs_trait_method_call(call) {
