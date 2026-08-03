@@ -2987,6 +2987,32 @@ impl CodeGen {
                 syn::parse_str::<syn::Type>("f64").ok(),
             );
         }
+        // `let adaptor = to_adaptor(counter);` where `to_adaptor: T` and
+        // `T: Fn(..) -> A` — the call's result type is the Fn-bound's OUTPUT
+        // (itertools' no_collect_test, #33). Record it when it is a bare
+        // in-scope type param: iterator-method routing
+        // (is_probably_iterator_receiver_expr checks `A: Iterator`) needs
+        // the binding type, and the usage-hint machinery doesn't own
+        // type-param-typed locals (no literal-width concerns).
+        if let syn::Pat::Ident(pi) = pat
+            && pi.subpat.is_none()
+            && let Some(init) = &local.init
+            && init.diverge.is_none()
+            && let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr)
+            && let syn::Expr::Path(callee) = self.peel_paren_group_expr(&call.func)
+            && callee.qself.is_none()
+            && callee.path.segments.len() == 1
+        {
+            let callee_name = callee.path.segments[0].ident.to_string();
+            if let Some(callee_ty) = self.lookup_local_binding_type(&callee_name)
+                && let Some(ret_ty) = self.extract_callable_return_type_from_type(&callee_ty)
+                && matches!(&ret_ty, syn::Type::Path(tp) if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string()))
+            {
+                self.register_local_binding(pi.ident.to_string(), Some(ret_ty));
+            }
+        }
         // `let (k1, k2) = (&mut 1, other);` — the blanket registration types
         // tuple-destructured bindings as None. When the initializer is a
         // matching-arity tuple literal, type each ident binding from its own

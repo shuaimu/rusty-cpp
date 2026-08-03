@@ -39393,3 +39393,59 @@ fn test_assert_eq_deref_peer_element_recovery_uses_as_ptr() {
         "must not require std::begin on the peer container, got:\n{out}"
     );
 }
+
+/// #33: an untyped local bound from a call of an Fn-bound callable param
+/// (`let adaptor = to_adaptor(counter);` with `T: Fn(Counter) -> A`,
+/// `A: Iterator`) carries the bound's OUTPUT type — iterator-method routing
+/// then sends `.take(5)` through rusty::take instead of a member call that
+/// user Iterator types don't have (itertools no_collect_test).
+#[test]
+fn test_fn_bound_call_result_local_types_as_output_param() {
+    let out = transpile_str(
+        r#"
+        struct Counter { n: usize }
+        impl Iterator for Counter {
+            type Item = usize;
+            fn next(&mut self) -> Option<usize> { None }
+        }
+        fn harness<A, T>(f: T)
+        where
+            A: Iterator,
+            T: Fn(Counter) -> A,
+        {
+            let c = Counter { n: 0 };
+            let a = f(c);
+            for _ in a.take(5) {}
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::take(a, "),
+        "Fn-bound-result local must route take through rusty::take, got:\n{out}"
+    );
+    assert!(!out.contains("a.take("), "must not emit a member take, got:\n{out}");
+}
+
+/// #33: type-position `Fuse<I>` routes through the rusty::fuse free
+/// dispatcher (member-less user Iterator types get the runtime adapter;
+/// the dispatcher prefers the member spelling when it exists).
+#[test]
+fn test_fuse_type_position_uses_free_dispatcher() {
+    let out = transpile_str_module(
+        r#"
+        use std::iter::Fuse;
+        pub struct LazyBuffer<I: Iterator> {
+            pub it: Fuse<I>,
+        }
+        "#,
+        "leaffuse",
+    );
+    assert!(
+        out.contains("decltype(rusty::fuse(std::declval<I>()))"),
+        "Fuse<I> must map through rusty::fuse, got:\n{out}"
+    );
+    assert!(
+        !out.contains("std::declval<I>().fuse()"),
+        "must not require a member fuse, got:\n{out}"
+    );
+}

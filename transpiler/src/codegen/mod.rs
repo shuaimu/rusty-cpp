@@ -42775,9 +42775,15 @@ impl CodeGen {
                     "decltype(rusty::skip(std::declval<{}>(), std::declval<size_t>()))",
                     iter_ty
                 )),
-                ("Fuse", [iter_ty]) => {
-                    Some(format!("decltype(std::declval<{}>().fuse())", iter_ty))
-                }
+                ("Fuse", [iter_ty]) => Some(format!(
+                    // rusty::fuse (slice.hpp) prefers the member spelling and
+                    // wraps member-less user Iterator types in the runtime
+                    // fuse adapter — a bare `.fuse()` fails for e.g.
+                    // itertools' LazyBuffer<I> instantiated with a test-TU
+                    // iterator (#33 PanickingCounter).
+                    "decltype(rusty::fuse(std::declval<{}>()))",
+                    iter_ty
+                )),
                 ("Rev", [iter_ty]) => Some(format!("decltype(std::declval<{}>().rev())", iter_ty)),
                 ("Cycle", [iter_ty]) => {
                     Some(format!("decltype(std::declval<{}>().cycle())", iter_ty))
@@ -42924,8 +42930,10 @@ impl CodeGen {
                 && (!self.local_declared_types.contains("Fuse")
                     || !self.local_declared_type_has_matching_arity("Fuse", 1))
             {
+                // See the ("Fuse", [iter_ty]) arm: the free dispatcher covers
+                // member-less user Iterator types.
                 return Some(format!(
-                    "decltype(std::declval<{}>().fuse())",
+                    "decltype(rusty::fuse(std::declval<{}>()))",
                     mapped_args[0]
                 ));
             }
