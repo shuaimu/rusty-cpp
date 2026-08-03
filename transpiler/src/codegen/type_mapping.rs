@@ -1840,6 +1840,61 @@ impl CodeGen {
                 if Self::type_is_primitive_str_path(&syn::Type::Path(tp.clone())) {
                     return "std::string_view".to_string();
                 }
+                // `Self::MergeResult` inside a trait-impl METHOD whose impl
+                // binds the assoc (`type MergeResult = EitherOrBoth<L, R>;`
+                // with L/R the method's fn-template params): the class-level
+                // alias is correctly SKIPPED (unbound generics at class
+                // scope), so the bare tail resolves to NOTHING — spell the
+                // binding itself. Without this the deduced return keeps the
+                // VARIANT STRUCT instead of the enum.
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 2
+                    && tp.path.segments[0].ident == "Self"
+                    && matches!(tp.path.segments[1].arguments, syn::PathArguments::None)
+                    && let Some(scope) = self.current_struct_assoc_cpp_types.last()
+                {
+                    let assoc = tp.path.segments[1].ident.to_string();
+                    if let Some(bound) = scope
+                        .get(&assoc)
+                        .or_else(|| scope.get(&escape_cpp_keyword(&assoc)))
+                        && !bound.is_empty()
+                        && bound != "auto"
+                        && !bound.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(bound)
+                        && self.cpp_type_mentions_in_scope_type_param(bound)
+                    {
+                        // ONLY when the class-level alias was skipped: the
+                        // binding must mention a param OUTSIDE the class's own
+                        // params (the impl's extra generics, valid only in the
+                        // method's fn-template scope). Bindings over class
+                        // params (vec's `IntoIter<T, A>`) keep their
+                        // established resolution paths — hijacking them broke
+                        // alloc's String/Vec conversions.
+                        let class_params: Vec<String> = self
+                            .current_struct
+                            .as_ref()
+                            .and_then(|name| {
+                                self.declared_type_params.get(name).cloned().or_else(|| {
+                                    name.rsplit("::").next().and_then(|tail| {
+                                        self.declared_type_params.get(tail).cloned()
+                                    })
+                                })
+                            })
+                            .unwrap_or_default();
+                        let mentions_non_class_param = self
+                            .ordered_type_params_in_scope()
+                            .into_iter()
+                            .filter(|param| !class_params.contains(param))
+                            .any(|param| {
+                                let escaped = escape_cpp_keyword(&param);
+                                Self::replace_cpp_path_alias_tokens(bound, &escaped, "\u{1}")
+                                    != *bound
+                            });
+                        if mentions_non_class_param {
+                            return bound.clone();
+                        }
+                    }
+                }
                 if !self.in_forward_decl_signature
                     && let Some(scope_bound_ty) = self.try_map_scope_bound_type_path(tp)
                 {

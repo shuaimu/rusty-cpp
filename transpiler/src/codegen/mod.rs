@@ -784,6 +784,12 @@ pub struct CodeGen {
     /// the emitted `<Trait>_::method` free fn.
     pub(crate) trait_assoc_method_projections:
         HashMap<(String, String), (String, Vec<syn::Type>, Vec<String>)>,
+    /// (trait, method) for NO-receiver trait methods where some trait generic
+    /// does not appear in the method's param types (OrderingOrBool's
+    /// `fn left(left: L) -> Self::MergeResult` misses R): the emitted static
+    /// is a function template whose params C++ cannot deduce, so call sites
+    /// on a bounded type param must pass the bound's args explicitly.
+    pub(crate) trait_static_undeducible_methods: HashSet<(String, String)>,
     /// Per-scope mapping from callable type-param name (`F`) to callable-bound
     /// return type (`T` in `F: FnOnce() -> T`).
     pub(crate) callable_type_param_return_scopes: Vec<HashMap<String, syn::Type>>,
@@ -1960,6 +1966,7 @@ impl CodeGen {
             trait_bound_type_param_scopes: Vec::new(),
             trait_bound_args_scopes: Vec::new(),
             trait_assoc_method_projections: HashMap::new(),
+            trait_static_undeducible_methods: HashSet::new(),
             callable_type_param_return_scopes: Vec::new(),
             callable_type_param_arg_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
@@ -39714,6 +39721,17 @@ impl CodeGen {
             .unwrap_or_default();
         if !explicit_args.is_empty() {
             return format!("{}<{}>", variant_base, explicit_args.join(", "));
+        }
+        // `fn left(left: L) -> Self::MergeResult` with impl assoc
+        // `MergeResult = EitherOrBoth<L, R>`: the RETURN-HINT binding carries
+        // the variant's real args; the ordered-scope fill below would take
+        // the CLASS params (F, T) — silent-wrong payload types.
+        if let Some(enum_leaf) = variant_base
+            .rsplit_once('_')
+            .map(|(base, _)| base.rsplit("::").next().unwrap_or(base))
+            && let Some(args) = self.variant_args_from_return_hint_assoc_for_enum(enum_leaf)
+        {
+            return format!("{}<{}>", variant_base, args.join(", "));
         }
         if let Some(recovered) =
             self.recover_omitted_local_generic_type_args(&enum_base_path, &variant_base)

@@ -39645,6 +39645,82 @@ fn test_all_underscore_tuple_turbofish_threads_arity() {
     );
 }
 
+/// #33 family B: trait statics whose params don't mention every trait
+/// generic (`OrderingOrBool::left(left: L)` misses R) emit as UNDEDUCIBLE
+/// function templates. A call on a bounded type param must pass the bound's
+/// args explicitly: `F::left(x)` with `F: OrderingOrBool<I::Item, J::Item>`
+/// → `F::template left<Item, Item>(x)`.
+#[test]
+fn test_undeducible_trait_static_call_passes_bound_args() {
+    let out = transpile_str(
+        r#"
+        pub trait OrderingOrBool<L, R> {
+            type MergeResult;
+            fn left(left: L) -> Self::MergeResult;
+            fn right(right: R) -> Self::MergeResult;
+        }
+        pub struct MergeBy<I, J, F> { pub a: I, pub b: J, pub f: F }
+        impl<I, J, F> MergeBy<I, J, F>
+        where
+            I: Iterator,
+            J: Iterator,
+            F: OrderingOrBool<I::Item, J::Item>,
+        {
+            pub fn probe(&mut self, l: Option<I::Item>) -> Option<F::MergeResult> {
+                match l {
+                    Some(left) => Some(F::left(left)),
+                    None => None,
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("F::template left<rusty::detail::associated_item_t<I>, rusty::detail::associated_item_t<J>>("),
+        "undeducible trait static must get explicit bound args, got:\n{out}"
+    );
+}
+
+/// #33 family B (def side): a trait-impl static whose return is
+/// `Self::MergeResult` with the impl binding `MergeResult = EitherOrBoth<L,
+/// R>` (L/R = the method's fn-template params). The class-level alias is
+/// correctly skipped (unbound at class scope) — the METHOD must still spell
+/// the binding: return type `EitherOrBoth<L, R>` (so the variant member
+/// struct converts into the enum) and ctor args `<L, R>` (the ordered-scope
+/// fill produced the CLASS params `<F, T>` — silent-wrong payload types).
+#[test]
+fn test_trait_impl_static_body_uses_assoc_binding_args() {
+    let out = transpile_str(
+        r#"
+        use std::cmp::Ordering;
+        pub enum EitherOrBoth<A, B> { Left(A), Right(B), Both(A, B) }
+        pub trait OrderingOrBool<L, R> {
+            type MergeResult;
+            fn left(left: L) -> Self::MergeResult;
+        }
+        pub struct MergeFuncLR<F, T>(F, std::marker::PhantomData<T>);
+        impl<L, R, F: FnMut(&L, &R) -> Ordering> OrderingOrBool<L, R> for MergeFuncLR<F, Ordering> {
+            type MergeResult = EitherOrBoth<L, R>;
+            fn left(left: L) -> Self::MergeResult {
+                EitherOrBoth::Left(left)
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("EitherOrBoth_Left<L, R>{std::move(left)}"),
+        "variant ctor must carry the assoc binding's args, got:\n{out}"
+    );
+    assert!(
+        out.contains("static EitherOrBoth<L, R> left(L left)"),
+        "the static's return must spell the assoc binding, got:\n{out}"
+    );
+    assert!(
+        !out.contains("EitherOrBoth_Left<F, T>"),
+        "class-param args must not leak into the variant ctor, got:\n{out}"
+    );
+}
+
 /// #33: a user module named `std` (itertools' macros_hygiene declares a DECOY
 /// `mod std {}` to test macro hygiene) must not emit `namespace std` — inside
 /// the crate wrap it would shadow the global ::std for every later

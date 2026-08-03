@@ -12445,7 +12445,48 @@ impl CodeGen {
         if !owner_is_type_param {
             return None;
         }
-        if owner == "Self" || !self.extension_method_names.contains(&method_name) {
+        if owner == "Self" {
+            return None;
+        }
+        // UNDEDUCIBLE trait static (`F::left(x)` where `F: OrderingOrBool<A,
+        // B>` and the trait's `fn left(left: L) -> Self::MergeResult` never
+        // mentions R): the emitted member static is a function template C++
+        // cannot deduce — pass the BOUND's args explicitly. The impl's
+        // fn-template params mirror the trait args positionally for the
+        // member-emitting impls (merge_join's two MergeFuncLR impls), so the
+        // bound args fill them left-to-right.
+        if let Some((bound_trait, bound_args)) = self
+            .trait_bound_args_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&owner))
+            && !bound_args.is_empty()
+            && self
+                .trait_static_undeducible_methods
+                .contains(&(bound_trait.clone(), method_name.clone()))
+        {
+            let mapped: Vec<String> = bound_args.iter().map(|t| self.map_type(t)).collect();
+            if mapped.iter().all(|t| {
+                !t.is_empty()
+                    && t != "auto"
+                    && !t.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(t)
+            }) {
+                let args: Vec<String> = call
+                    .args
+                    .iter()
+                    .map(|arg| self.emit_expr_maybe_move(arg))
+                    .collect();
+                return Some(format!(
+                    "{}::template {}<{}>({})",
+                    owner,
+                    escape_cpp_keyword(&method_name),
+                    mapped.join(", "),
+                    args.join(", ")
+                ));
+            }
+        }
+        if !self.extension_method_names.contains(&method_name) {
             return None;
         }
         // Only when the method provably takes `self` is the first argument a
@@ -20958,6 +20999,67 @@ impl CodeGen {
         Some(self.emit_path_to_string(&path_expr.path))
     }
 
+    /// Split `Owner<A, B>`'s top-level template args from a C++ type string.
+    fn split_top_level_template_args(cpp: &str) -> Option<Vec<String>> {
+        let cpp = cpp.trim();
+        let open = cpp.find('<')?;
+        if !cpp.ends_with('>') {
+            return None;
+        }
+        let inner = &cpp[open + 1..cpp.len() - 1];
+        let mut depth = 0usize;
+        let mut current = String::new();
+        let mut out = Vec::new();
+        for ch in inner.chars() {
+            match ch {
+                '<' | '(' | '[' => depth += 1,
+                '>' | ')' | ']' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(current.trim().to_string());
+                    current.clear();
+                    continue;
+                }
+                _ => {}
+            }
+            current.push(ch);
+        }
+        if !current.trim().is_empty() {
+            out.push(current.trim().to_string());
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// `fn left(left: L) -> Self::MergeResult` with impl assoc
+    /// `MergeResult = EitherOrBoth<L, R>`: the RETURN-HINT binding carries the
+    /// variant's real args. Scope recovery would pick the CLASS params
+    /// (`EitherOrBoth_Left<F, T>` — silent-wrong payload types).
+    pub(super) fn variant_args_from_return_hint_assoc_for_enum(
+        &self,
+        enum_leaf: &str,
+    ) -> Option<Vec<String>> {
+        let hint = self.current_return_type_hint()?;
+        let syn::Type::Path(htp) = self.peel_reference_paren_group_type(hint) else {
+            return None;
+        };
+        if htp.qself.is_some()
+            || htp.path.segments.len() != 2
+            || htp.path.segments[0].ident != "Self"
+        {
+            return None;
+        }
+        let assoc_name = htp.path.segments[1].ident.to_string();
+        let scope = self.current_struct_assoc_cpp_types.last()?;
+        let assoc_cpp = scope
+            .get(&assoc_name)
+            .or_else(|| scope.get(&escape_cpp_keyword(&assoc_name)))?;
+        // The binding's leaf must BE this enum.
+        let base = assoc_cpp.split('<').next().unwrap_or("").trim();
+        if base.rsplit("::").next().map(|l| l.trim()) != Some(enum_leaf) {
+            return None;
+        }
+        Self::split_top_level_template_args(assoc_cpp)
+    }
+
     pub(super) fn try_emit_variant_constructor_call_with_recovered_hints(
         &self,
         call: &syn::ExprCall,
@@ -20978,8 +21080,13 @@ impl CodeGen {
             return None;
         }
 
-        let args = self
-            .lookup_constructor_template_args(&ctor_name)
+        let args = func_path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .and_then(|leaf| self.variant_args_from_return_hint_assoc_for_enum(&leaf))
+            .or_else(|| self.lookup_constructor_template_args(&ctor_name))
             .or_else(|| {
                 if func_path.segments.len() < 2 {
                     return None;

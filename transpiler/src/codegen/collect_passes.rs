@@ -3482,6 +3482,27 @@ impl CodeGen {
                         let method_name = method.sig.ident.to_string();
                         let has_receiver =
                             matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
+                        // NO-receiver methods whose param types don't mention
+                        // every trait generic emit as UNDEDUCIBLE function
+                        // templates — call sites must pass explicit args.
+                        if !has_receiver && !trait_generic_names.is_empty() {
+                            struct IdentCollector(HashSet<String>);
+                            impl<'a> syn::visit::Visit<'a> for IdentCollector {
+                                fn visit_ident(&mut self, i: &'a syn::Ident) {
+                                    self.0.insert(i.to_string());
+                                }
+                            }
+                            let mut seen = IdentCollector(HashSet::new());
+                            for arg in &method.sig.inputs {
+                                if let syn::FnArg::Typed(pt) = arg {
+                                    syn::visit::Visit::visit_type(&mut seen, &pt.ty);
+                                }
+                            }
+                            if trait_generic_names.iter().any(|g| !seen.0.contains(g)) {
+                                self.trait_static_undeducible_methods
+                                    .insert((trait_name.clone(), method_name.clone()));
+                            }
+                        }
                         std::rc::Rc::make_mut(&mut self.trait_method_has_receiver)
                             .insert(format!("{}::{}", trait_name, method_name), has_receiver);
                         std::rc::Rc::make_mut(&mut self.trait_method_has_receiver).insert(
