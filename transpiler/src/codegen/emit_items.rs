@@ -7620,6 +7620,29 @@ impl CodeGen {
         if self.emit_type_alias_impl_block(i) {
             return;
         }
+        // A trait impl whose trait is UFCS-declared in this crate was
+        // ALREADY fully lowered to `<Trait>_`/`rusty_ext` free functions
+        // (with a proper `self_` parameter) — the member-style orphan
+        // stub below would be a dead `#if 0` duplicate whose
+        // `(*this)` bodies read as live bugs to anyone grepping. Skip it.
+        if let Some((trait_name, _)) = Self::ufcs_trait_impl_specs(i)
+            && self.ufcs_declared_trait_names.contains(&trait_name)
+        {
+            self.writeln(&format!(
+                "// trait impl for `{}` lowered via the {}_ free functions above",
+                Self::impl_self_type_path(i.self_ty.as_ref())
+                    .map(|tp| tp
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::"))
+                    .unwrap_or_else(|| "?".to_string()),
+                trait_name
+            ));
+            return;
+        }
         // This is called for impl blocks whose struct wasn't found in the same file.
         // Emit methods as free-standing functions (fallback).
         let type_name = if let Some(tp) = Self::impl_self_type_path(i.self_ty.as_ref()) {

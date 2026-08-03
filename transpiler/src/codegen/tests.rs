@@ -759,7 +759,11 @@ fn test_leaf411_extension_impl_body_self_assoc_has_local_self_alias() {
         out.contains("using Self = std::remove_reference_t<decltype(self_)>;"),
         "{out}"
     );
-    assert!(out.contains("rusty::Option<typename Self::Item>"), "{out}");
+    // The LIVE emission (UFCS free fn) spells the blanket param
+    // concretely; the old `typename Self::Item` spelling only ever
+    // appeared in the dead orphan-stub duplicate, which is no longer
+    // emitted for UFCS-consumed trait impls.
+    assert!(out.contains("rusty::Option<typename T::Item>"), "{out}");
 }
 
 #[test]
@@ -1006,8 +1010,11 @@ fn test_leaf132_extension_trait_callable_bound_preserves_borrow_shape_for_inner_
                 .contains("auto& val = rusty::detail::deref_if_pointer_like(_iflet_scrutinee.unwrap_err())"),
         "{out}"
     );
-    // The `&mut val` arg must reach the callee unchanged.
-    assert!(out.contains("static_cast<void>(f(&val));"), "{out}");
+    // The `&mut val` borrow reaches the callee as the lvalue itself
+    // (the live UFCS free fn binds `val` as a reference; the old
+    // `f(&val)` address-of spelling only appeared in the dead
+    // orphan-stub duplicate, which is no longer emitted).
+    assert!(out.contains("static_cast<void>(f(val));"), "{out}");
 }
 
 #[test]
@@ -1064,7 +1071,8 @@ fn test_leaf133_tap_err_call_shape_keeps_deref_closure_param() {
         }
         "#,
     );
-    assert!(out.contains("static_cast<void>(f(&val));"));
+    // Same live-emission spelling note as the test above: `f(val)`.
+    assert!(out.contains("static_cast<void>(f(val));"));
     assert!(out.contains("rusty_ext::tap_err("));
     assert!(
         out.contains("foo += *error") || out.contains("foo += rusty::deref_mut(error)"),
@@ -8593,6 +8601,52 @@ fn test_move_closure_consuming_captured_box_as_arg_keeps_mutable() {
         "#,
     );
     assert!(out.contains("b = std::move(b)]() mutable"), "{out}");
+}
+
+#[test]
+fn test_ufcs_generic_container_impl_body_uses_self_param() {
+    // impl<T> Trait for Vec<T> — the emitted free fn takes `self_`; a
+    // bare `self` in the body must lower to `self_`, not `(*this)`
+    // (there is no enclosing class in free-function form).
+    let out = transpile_str(
+        r#"
+        pub trait WireSer {
+            fn ser(&self, n: i32);
+        }
+        impl<T> WireSer for std::list<T> {
+            fn ser(&self, n: i32) {
+                for e in self {
+                    let _e = e;
+                }
+            }
+        }
+        impl<T> WireSer for Vec<T> {
+            fn ser(&self, n: i32) {
+                let mut i: usize = 0usize;
+                while i < self.len() {
+                    let _x = self[i];
+                    i += 1usize;
+                }
+            }
+        }
+        impl<T> WireSer for std::vector<T> {
+            fn ser(&self, n: i32) {
+                let mut i: usize = 0usize;
+                while i < self.size() {
+                    let _x = self[i];
+                    i += 1usize;
+                }
+            }
+        }
+    "#,
+    );
+    // The functional emissions (rusty_ext + Trait_ free fns) must use the
+    // self_ parameter; and no dead member-style orphan stub may be
+    // emitted for a UFCS-consumed trait impl (its `(*this)` bodies read
+    // as live bugs).
+    assert!(out.contains("rusty::len(self_)"), "{out}");
+    assert!(!out.contains("(*this)"), "{out}");
+    assert!(!out.contains("orphan impl"), "{out}");
 }
 
 #[test]
