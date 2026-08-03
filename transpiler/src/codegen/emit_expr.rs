@@ -20986,6 +20986,24 @@ impl CodeGen {
             .nth_back(1)
             .map(|seg| seg.ident.to_string())
             .unwrap_or_default();
+        // Left/Right of a LOCAL data enum (merge_join's `EitherOrBoth::Left`)
+        // collide with the runtime Either's ctor names — the bare `Left<..>(..)`
+        // emitted below names nothing for a struct-wrapper enum. Defer to the
+        // ordinary data-enum ctor path (which spells the variant correctly in
+        // both single-file and module modes).
+        if matches!(ctor_name.as_str(), "Left" | "Right")
+            && owner_name != "Either"
+            && self
+                .data_enum_variants_by_enum
+                .iter()
+                .any(|(known, variants)| {
+                    (known == &owner_name
+                        || known.ends_with(&format!("::{}", owner_name)))
+                        && variants.contains(&ctor_name)
+                })
+        {
+            return None;
+        }
         let ctor_cpp = if owner_name == "Either" {
             format!("rusty::either::{}", ctor_name)
         } else {
@@ -21028,6 +21046,24 @@ impl CodeGen {
             .nth_back(1)
             .map(|seg| seg.ident.to_string())
             .unwrap_or_default();
+        // Left/Right of a LOCAL data enum (merge_join's `EitherOrBoth::Left`)
+        // collide with the runtime Either's ctor names — the bare `Left<..>(..)`
+        // emitted below names nothing for a struct-wrapper enum. Defer to the
+        // ordinary data-enum ctor path (which spells the variant correctly in
+        // both single-file and module modes).
+        if matches!(ctor_name.as_str(), "Left" | "Right")
+            && owner_name != "Either"
+            && self
+                .data_enum_variants_by_enum
+                .iter()
+                .any(|(known, variants)| {
+                    (known == &owner_name
+                        || known.ends_with(&format!("::{}", owner_name)))
+                        && variants.contains(&ctor_name)
+                })
+        {
+            return None;
+        }
         let ctor_cpp = if owner_name == "Either" {
             format!("rusty::either::{}", ctor_name)
         } else {
@@ -21685,6 +21721,47 @@ impl CodeGen {
             expected_args[1].as_str()
         };
         let is_left_or_right_ctor = matches!(ctor_name.as_str(), "Left" | "Right");
+        // A LOCAL data enum that declares this variant (merge_join's
+        // `EitherOrBoth::Left(left)`) must construct through the ordinary
+        // data-enum ctor path — its spelling differs by mode (member struct
+        // `EitherOrBoth_Left<L, R>{..}` single-file, namespace-qualified
+        // factory in module mode), and the bare `Left<L, R>(..)` this arm
+        // would emit names nothing. Only the RUNTIME Either keeps the
+        // rusty::either factory below.
+        if !(is_left_or_right_ctor && self.map_type(expected_ty).starts_with("rusty::Either<")) {
+            // The enum can be named by the EXPECTED type or by the CALL PATH
+            // owner — check both. merge_join's `EitherOrBoth::Left(left)` sits
+            // in a tuple whose expected element is the UNRESOLVED
+            // `Self::MergeResult` (leaf "MergeResult"), so only the owner
+            // identifies the enum there.
+            let expected_enum_leaf = self
+                .expected_type_path(expected_ty)
+                .and_then(|p| p.segments.last().map(|s| s.ident.to_string()));
+            let owner_enum_leaf = func_path
+                .segments
+                .iter()
+                .nth_back(1)
+                .map(|seg| seg.ident.to_string())
+                .filter(|owner| owner != "Either");
+            // A LOCAL enum literally named `Either` (leaf423) keeps its
+            // bare-factory spelling — the either-compat machinery emits those;
+            // only OTHER enums' Left/Right collide wrongly.
+            let declares = |leaf: &str| {
+                leaf != "Either"
+                    && self
+                        .data_enum_variants_by_enum
+                        .iter()
+                        .any(|(known, variants)| {
+                            (known == leaf || known.ends_with(&format!("::{}", leaf)))
+                                && variants.contains(&ctor_name)
+                        })
+            };
+            if expected_enum_leaf.as_deref().is_some_and(&declares)
+                || owner_enum_leaf.as_deref().is_some_and(&declares)
+            {
+                return None;
+            }
+        }
 
         let args: Vec<String> = call
             .args

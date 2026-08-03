@@ -39534,6 +39534,47 @@ fn test_ref_mut_catch_all_binding_is_mutable_alias() {
     );
 }
 
+/// #33: `EitherOrBoth::Left(left)` — a LOCAL data enum whose variant names
+/// collide with the runtime Either's Left/Right. The expected-args ctor
+/// specializers emitted a bare `Left<L, R>(..)`, which names nothing for a
+/// struct-wrapper enum (its variants are member structs). The enum is named
+/// by the CALL-PATH owner here (the expected element type is the unresolved
+/// `Self::MergeResult`), so the specializers must defer to the ordinary
+/// data-enum ctor path.
+#[test]
+fn test_local_enum_left_right_variants_not_hijacked_by_either_ctor() {
+    let out = transpile_str(
+        r#"
+        use std::cmp::Ordering;
+        pub enum Either<A, B> { Left(A), Right(B) }
+        pub enum EitherOrBoth<A, B> { Left(A), Right(B), Both(A, B) }
+        pub trait OrderingOrBool<L, R> {
+            type MergeResult;
+            fn merge(&mut self, left: L, right: R) -> (Option<Either<L, R>>, Self::MergeResult);
+        }
+        pub struct MergeFuncLR<F, T>(F, std::marker::PhantomData<T>);
+        impl<L, R, F: FnMut(&L, &R) -> Ordering> OrderingOrBool<L, R> for MergeFuncLR<F, Ordering> {
+            type MergeResult = EitherOrBoth<L, R>;
+            fn merge(&mut self, left: L, right: R) -> (Option<Either<L, R>>, Self::MergeResult) {
+                match self.0(&left, &right) {
+                    Ordering::Equal => (None, EitherOrBoth::Both(left, right)),
+                    Ordering::Less => (Some(Either::Right(right)), EitherOrBoth::Left(left)),
+                    Ordering::Greater => (Some(Either::Left(left)), EitherOrBoth::Right(right)),
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("EitherOrBoth_Left<") && out.contains("EitherOrBoth_Right<"),
+        "EitherOrBoth::Left/Right must construct through the variant member structs, got:\n{out}"
+    );
+    assert!(
+        !out.contains(", Left<") && !out.contains(", Right<"),
+        "bare Left/Right ctor spellings must not survive, got:\n{out}"
+    );
+}
+
 /// #33: a user module named `std` (itertools' macros_hygiene declares a DECOY
 /// `mod std {}` to test macro hygiene) must not emit `namespace std` — inside
 /// the crate wrap it would shadow the global ::std for every later
