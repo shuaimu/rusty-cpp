@@ -8556,6 +8556,25 @@ fn test_phantom_pinned_drop_struct_deletes_moves_instead_of_forgotten_flag_move(
 }
 
 #[test]
+fn test_move_closure_invoking_captured_function_keeps_mutable() {
+    // Direct invocation of a captured callable is a method call on it in
+    // C++: rusty::Function's operator() is non-const (unless the
+    // signature says const), so a const capture cannot invoke it. The
+    // mutability analysis must count `f(x)` on a capture, not only
+    // `f.method(x)`.
+    let out = transpile_str(
+        r#"
+        fn g(f: rusty::Function<dyn FnMut(i32) -> bool>) {
+            let _c = move || {
+                let _r = f(1);
+            };
+        }
+        "#,
+    );
+    assert!(out.contains("f = std::move(f)]() mutable"), "{out}");
+}
+
+#[test]
 fn test_move_closure_box_capture_method_call_keeps_mutable() {
     // A `Box` capture with a method call must KEEP `mutable`: rusty::Box
     // PROPAGATES constness (`const T* operator->() const` beside the
