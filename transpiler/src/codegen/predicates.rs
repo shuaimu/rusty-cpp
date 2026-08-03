@@ -3237,6 +3237,7 @@ impl CodeGen {
                         | "rev"
                         | "take"
                         | "take_while"
+                        | "peeking_take_while"
                         | "skip"
                         | "skip_while"
                         | "peekable"
