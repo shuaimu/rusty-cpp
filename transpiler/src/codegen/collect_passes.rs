@@ -6113,7 +6113,21 @@ impl CodeGen {
                         .template_param_is_already_visible_for_emission(&tp.ident.to_string()) =>
                 {
                     if include_type_defaults && let Some(default) = &tp.default {
-                        let default_ty = self.map_type(default);
+                        // A Verbatim default carries an already-C++ spelling
+                        // (Iterator-Item projection defaults, e.g.
+                        // `typename rusty::detail::next_item_t<Self_>::ok_type`)
+                        // — render it literally; map_type would mangle it.
+                        let default_ty = if let syn::Type::Verbatim(tokens) = default {
+                            tokens
+                                .to_string()
+                                .replace(" :: ", "::")
+                                .replace(":: ", "::")
+                                .replace(" ::", "::")
+                                .replace(" < ", "<")
+                                .replace(" >", ">")
+                        } else {
+                            self.map_type(default)
+                        };
                         params.push(format!("typename {} = {}", tp.ident, default_ty));
                     } else {
                         params.push(format!("typename {}", tp.ident));

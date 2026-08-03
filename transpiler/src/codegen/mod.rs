@@ -17393,6 +17393,152 @@ impl CodeGen {
         })
     }
 
+    /// Default-method UFCS free fns can carry template params deducible only
+    /// from a `Self: Iterator<Item = …>` where-clause — itertools'
+    /// `flatten_ok<T, E>(self) where Self: Iterator<Item = Result<T, E>>`
+    /// emits `template<typename Self_, typename T, typename E>` where T/E
+    /// appear only in the RETURN type, so every call site fails deduction
+    /// ("couldn't infer template argument 'T'"). Give such params DEFAULTS
+    /// projected from the receiver's item type:
+    ///   Item = P            → P = rusty::detail::next_item_t<Self_>
+    ///   Item = Result<A, B> → A = typename …::ok_type, B = typename …::err_type
+    ///   Item = Option<A>    → A = typename …::value_type
+    /// Only params NOT mentioned in any value-argument type (those deduce
+    /// normally) and without an existing default are touched. Applied to the
+    /// DECLARATION pass only — C++ forbids repeating a default on a
+    /// redeclaration, so the definition renders without defaults.
+    fn apply_iterator_item_projection_defaults(
+        &self,
+        free_generics: &mut syn::Generics,
+        original_sig: &syn::Signature,
+    ) {
+        let Some(where_clause) = &original_sig.generics.where_clause else {
+            return;
+        };
+        // Params deducible from value args keep normal deduction.
+        let mut deducible: HashSet<String> = HashSet::new();
+        for arg in &original_sig.inputs {
+            if let syn::FnArg::Typed(pt) = arg {
+                for param in &free_generics.params {
+                    if let syn::GenericParam::Type(tp) = param {
+                        let name = tp.ident.to_string();
+                        if self.type_mentions_named_type_param(&pt.ty, &name) {
+                            deducible.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+        let item_source = "rusty::detail::next_item_t<Self_>";
+        let mut defaults: Vec<(String, String)> = Vec::new();
+        for predicate in &where_clause.predicates {
+            let syn::WherePredicate::Type(pt) = predicate else {
+                continue;
+            };
+            let syn::Type::Path(bounded) = &pt.bounded_ty else {
+                continue;
+            };
+            if bounded.qself.is_some() || !bounded.path.is_ident("Self") {
+                continue;
+            }
+            for bound in &pt.bounds {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    continue;
+                };
+                let Some(seg) = trait_bound.path.segments.last() else {
+                    continue;
+                };
+                if seg.ident != "Iterator" && seg.ident != "DoubleEndedIterator" {
+                    continue;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                    continue;
+                };
+                for arg in &args.args {
+                    let syn::GenericArgument::AssocType(assoc) = arg else {
+                        continue;
+                    };
+                    if assoc.ident != "Item" {
+                        continue;
+                    }
+                    match &assoc.ty {
+                        syn::Type::Path(tp)
+                            if tp.qself.is_none() && tp.path.segments.len() == 1 =>
+                        {
+                            let seg = &tp.path.segments[0];
+                            let name = seg.ident.to_string();
+                            match &seg.arguments {
+                                syn::PathArguments::None => {
+                                    defaults.push((name, item_source.to_string()));
+                                }
+                                syn::PathArguments::AngleBracketed(inner)
+                                    if matches!(name.as_str(), "Result" | "Option") =>
+                                {
+                                    let projections: &[&str] = if name == "Result" {
+                                        &["ok_type", "err_type"]
+                                    } else {
+                                        &["value_type"]
+                                    };
+                                    for (idx, inner_arg) in inner
+                                        .args
+                                        .iter()
+                                        .filter_map(|a| match a {
+                                            syn::GenericArgument::Type(t) => Some(t),
+                                            _ => None,
+                                        })
+                                        .enumerate()
+                                    {
+                                        let Some(proj) = projections.get(idx) else {
+                                            break;
+                                        };
+                                        if let syn::Type::Path(ptp) = inner_arg
+                                            && ptp.qself.is_none()
+                                            && ptp.path.segments.len() == 1
+                                            && matches!(
+                                                ptp.path.segments[0].arguments,
+                                                syn::PathArguments::None
+                                            )
+                                        {
+                                            defaults.push((
+                                                ptp.path.segments[0].ident.to_string(),
+                                                format!(
+                                                    "typename {}::{}",
+                                                    item_source, proj
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for (name, default_cpp) in defaults {
+            if deducible.contains(&name) {
+                continue;
+            }
+            // The projection spelling is C++ (`typename …::ok_type`), not
+            // parseable Rust — carry it as a Verbatim token stream; the
+            // template-parts collector renders Verbatim defaults literally.
+            let Ok(tokens) = default_cpp.parse::<proc_macro2::TokenStream>() else {
+                continue;
+            };
+            for param in free_generics.params.iter_mut() {
+                if let syn::GenericParam::Type(tp) = param
+                    && tp.ident == name.as_str()
+                    && tp.default.is_none()
+                {
+                    tp.eq_token = Some(Default::default());
+                    tp.default = Some(syn::Type::Verbatim(tokens.clone()));
+                }
+            }
+        }
+    }
+
     fn emit_extension_trait_free_function_declaration(
         &mut self,
         method_spec: &ExtensionImplMethod,
@@ -17413,6 +17559,9 @@ impl CodeGen {
         if method_spec.self_is_template_param {
             // Default method (§ 3.2.13): `Self` is the leading template param.
             free_generics.params.insert(0, syn::parse_quote!(Self_));
+            // Item-projection defaults for params only the where-clause binds
+            // (declaration pass only; the definition renders without defaults).
+            self.apply_iterator_item_projection_defaults(&mut free_generics, &method.sig);
         }
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;

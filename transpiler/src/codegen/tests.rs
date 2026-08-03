@@ -39504,3 +39504,46 @@ fn test_duplicate_closure_pattern_binders_dedup() {
         "exactly one binding keeps the original name, got:\n{out}"
     );
 }
+
+/// #33: default-method UFCS free fns whose extra params only a
+/// `Self: Iterator<Item = Result<T, E>>` where-clause binds get projection
+/// DEFAULTS on the forward declaration (`T = typename
+/// rusty::detail::next_item_t<Self_>::ok_type`) so call sites deduce; the
+/// definition renders without defaults (C++ forbids repeating them).
+#[test]
+fn test_iterator_item_projection_defaults_on_ufcs_decl() {
+    let out = transpile_str_module(
+        r#"
+        pub struct FlattenOk<I, T, E> {
+            iter: I,
+            inner: Option<T>,
+            _e: std::marker::PhantomData<E>,
+        }
+        pub trait Itertools: Iterator {
+            fn flatten_ok<T, E>(self) -> FlattenOk<Self, T, E>
+            where
+                Self: Iterator<Item = Result<T, E>> + Sized,
+                T: IntoIterator,
+            {
+                FlattenOk { iter: self, inner: None, _e: std::marker::PhantomData }
+            }
+        }
+        "#,
+        "leaffok",
+    );
+    assert!(
+        out.contains(
+            "typename T = typename rusty::detail::next_item_t<Self_>::ok_type"
+        ) && out.contains(
+            "typename E = typename rusty::detail::next_item_t<Self_>::err_type"
+        ),
+        "declaration must carry Item-projection defaults, got:\n{out}"
+    );
+    // Exactly ONE occurrence of the defaulted spelling: the definition must
+    // not repeat the defaults.
+    assert_eq!(
+        out.matches("::ok_type").count(),
+        1,
+        "defaults belong to the declaration only, got:\n{out}"
+    );
+}
