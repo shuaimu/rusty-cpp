@@ -6612,12 +6612,38 @@ impl CodeGen {
                         if let Some(turbofish) = &mc.turbofish
                             && !callee.contains('<')
                         {
+                            // An all-underscore TUPLE turbofish carries only
+                            // the ARITY (`.tuple_windows::<(_, _)>()`): Rust
+                            // infers the element as the iterator Item, so
+                            // spell `std::tuple<Item x N>` via the runtime
+                            // next-item alias on the receiver.
+                            let tuple_arity_item = |ty: &syn::Type| -> Option<String> {
+                                let syn::Type::Tuple(tt) = ty else {
+                                    return None;
+                                };
+                                if tt.elems.is_empty()
+                                    || !tt
+                                        .elems
+                                        .iter()
+                                        .all(|e| matches!(e, syn::Type::Infer(_)))
+                                {
+                                    return None;
+                                }
+                                let item = format!(
+                                    "rusty::detail::next_item_t<std::remove_cvref_t<decltype({})>>",
+                                    receiver
+                                );
+                                Some(format!(
+                                    "std::tuple<{}>",
+                                    vec![item; tt.elems.len()].join(", ")
+                                ))
+                            };
                             let mapped: Vec<String> = turbofish
                                 .args
                                 .iter()
                                 .filter_map(|arg| match arg {
                                     syn::GenericArgument::Type(ty) => {
-                                        Some(self.map_type(ty))
+                                        tuple_arity_item(ty).or_else(|| Some(self.map_type(ty)))
                                     }
                                     _ => None,
                                 })

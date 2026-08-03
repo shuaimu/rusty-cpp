@@ -39614,6 +39614,37 @@ fn test_trait_assoc_method_projection_spells_decltype_of_ufcs_call() {
     );
 }
 
+/// #33: an all-underscore TUPLE turbofish carries only the ARITY —
+/// `.tuple_windows::<(_, _)>()` (itertools laziness). Rust infers the
+/// element as the iterator Item; dropping the turbofish left T undeducible
+/// (`couldn't infer template argument 'T'`). Must spell
+/// `std::tuple<next_item_t<recv> x N>` through the explicit-args callee.
+#[test]
+fn test_all_underscore_tuple_turbofish_threads_arity() {
+    let out = transpile_str_module(
+        r#"
+        pub struct TupleWindows<I, T> { pub iter: I, pub last: Option<T> }
+        pub trait Itertools: Iterator {
+            fn tuple_windows<T>(self) -> TupleWindows<Self, T>
+            where
+                Self: Sized,
+            {
+                todo!()
+            }
+        }
+        impl<T: Iterator> Itertools for T {}
+        pub fn probe<I: Iterator>(it: I) {
+            let _ = it.tuple_windows::<(_, _)>();
+        }
+        "#,
+        "leaftw",
+    );
+    assert!(
+        out.contains("std::tuple<rusty::detail::next_item_t<std::remove_cvref_t<decltype(it)>>, rusty::detail::next_item_t<std::remove_cvref_t<decltype(it)>>>"),
+        "arity-2 underscore tuple turbofish must spell tuple of next_item_t, got:\n{out}"
+    );
+}
+
 /// #33: a user module named `std` (itertools' macros_hygiene declares a DECOY
 /// `mod std {}` to test macro hygiene) must not emit `namespace std` — inside
 /// the crate wrap it would shadow the global ::std for every later
