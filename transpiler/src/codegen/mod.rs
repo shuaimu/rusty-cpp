@@ -54974,6 +54974,21 @@ fn collect_method_receiver_vars(stmts: &[syn::Stmt]) -> std::collections::HashSe
             }
             syn::visit::visit_expr_method_call(self, node);
         }
+        // A DIRECT INVOCATION of a captured callable (`f(args)`) is a
+        // method call on it in C++ — `rusty::Function`'s `operator()` is
+        // non-const unless the signature says `const`, so a const capture
+        // cannot invoke it. Same conservative direction as the receiver
+        // case: over-reporting costs a redundant `mutable`; missing it
+        // emits a lambda whose body cannot call its own capture.
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = node.func.as_ref()
+                && p.qself.is_none()
+                && let Some(id) = p.path.get_ident()
+            {
+                self.0.insert(id.to_string());
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
     }
     let mut v = Recv(std::collections::HashSet::new());
     for stmt in stmts {
