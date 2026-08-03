@@ -1641,7 +1641,16 @@ impl CodeGen {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                         binding_map.insert(pi.ident.to_string(), cpp_name.clone());
                         out.push_str("if (true) { ");
-                        out.push_str(&format!("const auto& {} = _m; ", cpp_name));
+                        // `ref mut some => some.take()` (itertools PutBack)
+                        // mutably borrows the scrutinee PLACE — a const alias
+                        // rejects every mutating member and SFINAE-kills the
+                        // enclosing next().
+                        let binder = if pi.by_ref.is_some() && pi.mutability.is_some() {
+                            "auto&"
+                        } else {
+                            "const auto&"
+                        };
+                        out.push_str(&format!("{} {} = _m; ", binder, cpp_name));
                     }
                     let body = {
                         let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(

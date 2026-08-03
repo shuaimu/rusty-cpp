@@ -39507,6 +39507,33 @@ fn test_blanket_fn_assoc_projection_lowers_to_invoke_result() {
     );
 }
 
+/// #33: `ref mut some => some.take()` (itertools PutBack::next) mutably
+/// borrows the scrutinee PLACE. All four if-chain match lowerings bound the
+/// catch-all ident as `const auto&`, so the non-const take() was rejected —
+/// which SFINAE-killed next() and cascaded into collect_range's
+/// static-assert. A ref-mut binding must alias mutably.
+#[test]
+fn test_ref_mut_catch_all_binding_is_mutable_alias() {
+    let out = transpile_str(
+        r#"
+        pub struct PutBack<I: Iterator> { top: Option<I::Item>, iter: I }
+        impl<I: Iterator> Iterator for PutBack<I> {
+            type Item = I::Item;
+            fn next(&mut self) -> Option<I::Item> {
+                match self.top {
+                    None => self.iter.next(),
+                    ref mut some => some.take(),
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto& some = _m;") && !out.contains("const auto& some = _m;"),
+        "ref-mut catch-all must bind as a mutable alias, got:\n{out}"
+    );
+}
+
 /// #33: a user module named `std` (itertools' macros_hygiene declares a DECOY
 /// `mod std {}` to test macro hygiene) must not emit `namespace std` — inside
 /// the crate wrap it would shadow the global ::std for every later

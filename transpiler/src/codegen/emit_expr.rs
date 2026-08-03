@@ -1554,7 +1554,17 @@ impl CodeGen {
                                     )
                                 });
                             arm_binding_map.insert(rust_name, cpp_name.clone());
-                            arm_binding_lines.push(format!("const auto& {} = _m;", cpp_name));
+                            // `ref mut some => some.take()` (itertools PutBack)
+                            // mutably borrows the scrutinee PLACE — a const
+                            // alias rejects every mutating member and SFINAE-
+                            // kills the enclosing next().
+                            let binder = if pi.by_ref.is_some() && pi.mutability.is_some() {
+                                "auto&"
+                            } else {
+                                "const auto&"
+                            };
+                            arm_binding_lines
+                                .push(format!("{} {} = _m;", binder, cpp_name));
                         }
                         "true".to_string()
                     }
@@ -3114,11 +3124,20 @@ impl CodeGen {
                                 cmp, ret_prefix, body
                             ));
                         } else {
-                            // Catch-all with binding: `cmp => cmp` → declare alias to scrutinee
+                            // Catch-all with binding: `cmp => cmp` → declare alias to scrutinee.
+                            // `ref mut some => some.take()` (itertools PutBack)
+                            // mutably borrows the scrutinee PLACE — a const
+                            // alias rejects every mutating member and SFINAE-
+                            // kills the enclosing next().
                             let cpp_name = escape_cpp_keyword(&ident_str);
+                            let binder = if pi.by_ref.is_some() && pi.mutability.is_some() {
+                                "auto&"
+                            } else {
+                                "const auto&"
+                            };
                             parts.push(format!(
-                                "{{ const auto& {} = _m; {}{};  }}",
-                                cpp_name, ret_prefix, body
+                                "{{ {} {} = _m; {}{};  }}",
+                                binder, cpp_name, ret_prefix, body
                             ));
                         }
                     }
@@ -3519,9 +3538,14 @@ impl CodeGen {
                         ));
                     } else {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                        let binder = if pi.by_ref.is_some() && pi.mutability.is_some() {
+                            "auto&"
+                        } else {
+                            "const auto&"
+                        };
                         out.push_str(&format!(
-                            "if (!_m_matched) {{ const auto& {} = _m; {} }} ",
-                            cpp_name, arm_body_stmt
+                            "if (!_m_matched) {{ {} {} = _m; {} }} ",
+                            binder, cpp_name, arm_body_stmt
                         ));
                     }
                 }
