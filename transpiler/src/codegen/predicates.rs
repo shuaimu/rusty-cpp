@@ -3443,6 +3443,31 @@ impl CodeGen {
         any_known
     }
 
+    /// Receiver shape for `Trait::method` from dependency UFCS manifests —
+    /// OWNER-AWARE, unlike `trait_method_name_always_has_receiver`. A
+    /// crate-qualified trait-path call (`itertools::Itertools::cartesian_product(a, b)`)
+    /// has no local `trait_method_has_receiver` entry; the dependency's
+    /// manifest is the only source that knows the method takes `self`.
+    /// Returns the manifest consensus, or None when unknown or the deps
+    /// disagree.
+    pub(super) fn dependency_trait_method_receiver_shape(
+        &self,
+        owner_leaf: &str,
+        method: &str,
+    ) -> Option<bool> {
+        let key = format!("{}::{}", owner_leaf, method);
+        let mut seen: Option<bool> = None;
+        for manifest in &self.dependency_ufcs_trait_manifests {
+            if let Some(v) = manifest.trait_method_has_receiver.get(&key) {
+                if seen.is_some_and(|prev| prev != *v) {
+                    return None;
+                }
+                seen = Some(*v);
+            }
+        }
+        seen
+    }
+
     /// A bare value-binding receiver (local or closure param) whose type the
     /// engine cannot pin to anything member-bearing — no recorded type at
     /// all, or a type headed by an in-scope generic param (`I`,

@@ -21350,6 +21350,7 @@ impl CodeGen {
             .or(trait_receiver_shape)
             .or_else(|| self.trait_method_has_receiver.get(&key_scoped).copied())
             .or_else(|| self.trait_method_has_receiver.get(&key_unscoped).copied())
+            .or_else(|| self.dependency_trait_method_receiver_shape(&owner_leaf, &method_name))
             .unwrap_or(fallback_trait_receiver)
             || private_runtime_owner_alias;
         if !has_receiver {

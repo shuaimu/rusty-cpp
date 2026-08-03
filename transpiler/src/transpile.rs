@@ -2909,6 +2909,72 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_by_value_receiver_crate_qualified_trait_path_call() {
+        // #33 part 8: `depcrate::Trait::method(recv, arg)` where the RECEIVER IS
+        // BY VALUE (no `&recv`). The reference-form detector bails on the
+        // non-reference first argument, so the by-value handler must route the
+        // call through the `<Tr>_::method` shim — its receiver shape comes ONLY
+        // from the dependency manifest's `trait_method_has_receiver` (there is
+        // no local trait declaration). Regression shape: itertools'
+        // `::itertools::Itertools::cartesian_product(0..6, 0..9)`.
+        let manifest = UfcsTraitManifest {
+            declared_trait_modules: std::collections::BTreeMap::new(),
+            version: 1,
+            module: "depmod".to_string(),
+            declared_traits: vec!["Greet".to_string()],
+            declared_trait_methods: std::collections::BTreeMap::from([(
+                "Greet".to_string(),
+                vec!["consume".to_string()],
+            )]),
+            trait_method_has_receiver: std::collections::BTreeMap::from([(
+                "Greet::consume".to_string(),
+                true,
+            )]),
+            method_owners: std::collections::BTreeMap::from([(
+                "consume".to_string(),
+                vec!["Greet".to_string()],
+            )]),
+            declared_types: Vec::new(),
+            hygiene_aliases: std::collections::BTreeMap::new(),
+            declared_macros: Vec::new(),
+            declared_modules: Vec::new(),
+            rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
+            c_like_enum_variants: std::collections::BTreeMap::new(),
+            cross_crate_reexports: std::collections::BTreeMap::new(),
+        };
+        let path = std::env::temp_dir().join("rusty_ufcs_manifest_byvalue_test.json");
+        std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+        let src = r#"
+            struct Local { id: i32 }
+            fn use_it(x: Local) -> i32 { depmod::Greet::consume(x, 1) }
+        "#;
+        let options = TranspileOptions {
+            dependency_ufcs_trait_manifests: vec![path.clone()],
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            Some("target"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            on.contains("Greet_::consume("),
+            "by-value `depmod::Greet::consume(x, 1)` must route to the Greet_::consume shim\nGot: {on}"
+        );
+        assert!(
+            !on.contains("Greet::consume("),
+            "the verbatim associated-call form must not survive\nGot: {on}"
+        );
+    }
+
+    #[test]
     fn test_cross_crate_c_like_enum_variants_roundtrip_and_crate_rename_alias() {
         // Producer: a C-like enum's variants land in the manifest with the
         // enum-qualified crate-relative path (Rust variant glob re-exports
