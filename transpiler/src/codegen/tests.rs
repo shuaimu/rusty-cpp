@@ -8575,6 +8575,27 @@ fn test_move_closure_invoking_captured_function_keeps_mutable() {
 }
 
 #[test]
+fn test_move_closure_consuming_captured_box_as_arg_keeps_mutable() {
+    // A capture MOVED as a value argument (`f(cap)` where the slot takes
+    // ownership — the emitter writes `std::move(cap)`) cannot be const:
+    // std::move on a const capture selects the deleted copy constructor
+    // for move-only types like Box. Hit by the server's slow-path fiber
+    // spawn, which hands its boxed Request to a dispatch free fn.
+    let out = transpile_str(
+        r#"
+        struct Req;
+        fn dispatch_it(r: Box<Req>) {}
+        fn f(b: Box<Req>) {
+            let _c = move || {
+                dispatch_it(b);
+            };
+        }
+        "#,
+    );
+    assert!(out.contains("b = std::move(b)]() mutable"), "{out}");
+}
+
+#[test]
 fn test_move_closure_box_capture_method_call_keeps_mutable() {
     // A `Box` capture with a method call must KEEP `mutable`: rusty::Box
     // PROPAGATES constness (`const T* operator->() const` beside the
