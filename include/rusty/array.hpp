@@ -1846,8 +1846,10 @@ public:
     requires std::is_convertible_v<U, T>
         : start(static_cast<T>(other.start)), end_(static_cast<T>(other.end_)) {}
 
-    range into_iter() {
-        return std::move(*this);
+    // Rust's by-value IntoIterator; ranges are trivially copyable, so a
+    // const receiver (emitted const locals) just copies.
+    range into_iter() const {
+        return *this;
     }
 
     struct iterator {
@@ -2012,8 +2014,10 @@ public:
           end_(static_cast<T>(other.end_)),
           done_(other.done_) {}
 
-    range_inclusive into_iter() {
-        return std::move(*this);
+    // Rust's by-value IntoIterator; ranges are trivially copyable, so a
+    // const receiver (emitted const locals) just copies.
+    range_inclusive into_iter() const {
+        return *this;
     }
 
     struct iterator {
@@ -2133,8 +2137,10 @@ template<typename T>
 struct range_from {
     T start;
 
-    range_from into_iter() {
-        return std::move(*this);
+    // Rust's by-value IntoIterator; ranges are trivially copyable, so a
+    // const receiver (emitted const locals) just copies.
+    range_from into_iter() const {
+        return *this;
     }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
