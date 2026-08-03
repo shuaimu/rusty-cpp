@@ -3835,7 +3835,56 @@ impl CodeGen {
                 repls.push((format!("{}::{}", m.module, name), qualified));
             }
         }
-        if repls.is_empty() {
+        // A wrapped dependency's MODULE referenced absolutely with the crate
+        // segment stripped: `use itertools::free::merge_join_by;` lowers to
+        // `using ::free::merge_join_by;`, but the dep's `free` module lives at
+        // `::itertools::free` under the wrap (#33 merge_join). The type rules
+        // above only cover manifest declared_types — cover the dep's declared
+        // top-level MODULES too, so function/const imports through them
+        // requalify. Guards: skip modules this crate declares locally (the
+        // path is genuinely its own) and module names claimed by MORE THAN
+        // ONE wrapped dep (ambiguous). Needles carry no trailing `::` —
+        // boundary_replace_path's after-check rejects an alphanumeric
+        // successor, and the following `:` of a longer path passes it.
+        let local_top_modules: HashSet<String> = self
+            .declared_module_paths
+            .iter()
+            .filter_map(|p| p.split("::").next())
+            .map(escape_cpp_keyword)
+            .collect();
+        let mut dep_module_owners: HashMap<String, Vec<String>> = HashMap::new();
+        for m in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                continue;
+            }
+            let mut tops: Vec<String> = m
+                .declared_modules
+                .iter()
+                .filter_map(|p| p.split("::").next())
+                .map(escape_cpp_keyword)
+                .collect();
+            tops.sort();
+            tops.dedup();
+            for top in tops {
+                dep_module_owners.entry(top).or_default().push(m.module.clone());
+            }
+        }
+        // Module-rule replacements apply to the PURVIEW only: the global
+        // module fragment's prelude references the GLOBAL rusty_ext
+        // dispatchers through the same spellings (`::de::rusty_ext::…`), and
+        // the dep's namespace is not even visible before `import <dep>;` —
+        // rewriting there broke serde's visit_some prelude helpers.
+        let mut purview_repls: Vec<(String, String)> = Vec::new();
+        for (top, owners) in &dep_module_owners {
+            if top.is_empty() || owners.len() != 1 || local_top_modules.contains(top) {
+                continue;
+            }
+            purview_repls.push((
+                format!("::{}", top),
+                format!("::{}::{}", owners[0], top),
+            ));
+        }
+        if repls.is_empty() && purview_repls.is_empty() {
             return;
         }
         // Longest stripped form first (`::de::value::X` before any shorter overlap).
@@ -3846,6 +3895,31 @@ impl CodeGen {
                 output = Self::boundary_replace_path(&output, from, to);
             }
         }
+        if !purview_repls.is_empty()
+            && let Some(export_idx) = output.find("\nexport module ")
+        {
+            let purview_start = output[export_idx + 1..]
+                .find('\n')
+                .map(|rel| export_idx + 1 + rel + 1)
+                .unwrap_or(output.len());
+            purview_repls.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+            let mut purview = output.split_off(purview_start);
+            for (from, to) in &purview_repls {
+                if purview.contains(from.as_str()) {
+                    // `::de::rusty_ext::…` / `::ser::rusty_ext::…` reference the
+                    // GLOBAL dispatcher prelude even in the purview — the dep's
+                    // wrapped rusty_ext overloads are module-internal ("must be
+                    // imported from module 'serde_core'"). Keep those bare.
+                    purview = Self::boundary_replace_path_excluding_follower(
+                        &purview,
+                        from,
+                        to,
+                        "::rusty_ext",
+                    );
+                }
+            }
+            output.push_str(&purview);
+        }
         self.output = output;
     }
 
@@ -3853,6 +3927,40 @@ impl CodeGen {
     /// identifier boundaries: the char before the leading `::` is non-identifier/non-`:`
     /// (so the tail of `::serde_core::de::Ident` is not matched) and the char after the
     /// trailing identifier is non-identifier.
+    /// `boundary_replace_path`, but a match whose FOLLOWING text starts with
+    /// `excluded_follower` is left alone (`::de` followed by `::rusty_ext` —
+    /// the global dispatcher prelude — must not requalify to a wrapped dep).
+    fn boundary_replace_path_excluding_follower(
+        text: &str,
+        from: &str,
+        to: &str,
+        excluded_follower: &str,
+    ) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(from) {
+            let pos = i + rel;
+            let after = pos + from.len();
+            let before_ok = pos == 0 || {
+                let c = bytes[pos - 1];
+                !(c.is_ascii_alphanumeric() || c == b'_' || c == b':')
+            };
+            let after_ok = after >= text.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            let follower_excluded = text[after..].starts_with(excluded_follower);
+            out.push_str(&text[i..pos]);
+            out.push_str(if before_ok && after_ok && !follower_excluded {
+                to
+            } else {
+                from
+            });
+            i = after;
+        }
+        out.push_str(&text[i..]);
+        out
+    }
+
     fn boundary_replace_path(text: &str, from: &str, to: &str) -> String {
         let bytes = text.as_bytes();
         let mut out = String::with_capacity(text.len());
