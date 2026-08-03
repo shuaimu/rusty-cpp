@@ -19,6 +19,9 @@ namespace iter_adapters {
 template <typename I>
 struct Peekable {
     using OptItem = std::remove_cvref_t<decltype(std::declval<I&>().next())>;
+    // Rust's `Peekable<I>::Item` — transpiled trait impls on Peekable spell
+    // their return as `Option<typename Peekable<I>::Item>` (PeekingNext).
+    using Item = typename OptItem::value_type;
 
     I iter{};
     OptItem peeked_{rusty::None};

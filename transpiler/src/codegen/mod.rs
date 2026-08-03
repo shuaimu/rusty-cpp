@@ -43253,7 +43253,11 @@ impl CodeGen {
                     Some(format!("decltype(std::declval<{}>().cloned())", iter_ty))
                 }
                 ("Peekable", [iter_ty]) => {
-                    Some(format!("decltype(std::declval<{}>().peekable())", iter_ty))
+                    // The named adapter (what every peekable() route returns).
+                    // The decltype-of-member form put the iterator param in a
+                    // NON-DEDUCED context, killing UFCS trait overloads whose
+                    // self is `Peekable<I>&` (PeekingNext).
+                    Some(format!("rusty::iter_adapters::Peekable<{}>", iter_ty))
                 }
                 // `Chain` has a named runtime type (alias over what `rusty::chain`
                 // returns), unlike the method-decltype adapters above — use it so
@@ -43423,8 +43427,11 @@ impl CodeGen {
                 && (!self.local_declared_types.contains("Peekable")
                     || !self.local_declared_type_has_matching_arity("Peekable", 1))
             {
+                // Named adapter, not decltype-of-member — the latter is a
+                // non-deduced context (see the arm in
+                // adapter_type_name_from_rust_path above).
                 return Some(format!(
-                    "decltype(std::declval<{}>().peekable())",
+                    "rusty::iter_adapters::Peekable<{}>",
                     mapped_args[0]
                 ));
             }
