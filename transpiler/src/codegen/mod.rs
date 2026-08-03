@@ -1450,6 +1450,10 @@ pub struct CodeGen {
     /// `inject_rusty_module_import_if_needed`. See that function and the
     /// TranspileOptions field for the full rationale.
     pub(crate) in_umbrella_closure: bool,
+    /// `TranspileOptions::lenient_auto_template_args`: return `<auto>`-broken
+    /// output instead of panicking, so the parity harness's skip logic can
+    /// drop the (skippable) target gracefully.
+    pub(crate) lenient_auto_template_args: bool,
     /// Prefer `rusty::Unit` spelling for Rust unit `()` in generated type
     /// positions to reduce direct `std::tuple<>` surface in output.
     pub(crate) prefer_rusty_unit_alias: bool,
@@ -2084,6 +2088,7 @@ impl CodeGen {
             auto_namespace: false,
             use_import_std_in_modules: false,
             in_umbrella_closure: false,
+            lenient_auto_template_args: false,
             prefer_rusty_unit_alias: false,
             prefer_rusty_view_aliases: false,
             // Pro/proxy facade lowering removed — interface+adapter is
@@ -3258,7 +3263,17 @@ impl CodeGen {
                 // `RUSTY_CPP_DUMP_AUTO` is set, emit the leak to stderr and let
                 // the (broken) output through so the surrounding context can be
                 // inspected, instead of panicking.
-                if std::env::var("RUSTY_CPP_DUMP_AUTO").is_ok() {
+                if self.lenient_auto_template_args {
+                    // Skippable parity test target: hand the broken output back
+                    // so the harness's `cpp_has_invalid_codegen_pattern` check
+                    // skips this target instead of the panic aborting the whole
+                    // parity run (itertools' quickcheck-based `quick`).
+                    eprintln!(
+                        "rusty-cpp: invalid `auto` template argument at output \
+                         line {line_no} (lenient mode, target will be skipped): \
+                         `{text}`"
+                    );
+                } else if std::env::var("RUSTY_CPP_DUMP_AUTO").is_ok() {
                     eprintln!(
                         "rusty-cpp DUMP_AUTO: invalid `auto` template argument at \
                          output line {line_no}: `{text}`"
@@ -35997,6 +36012,12 @@ impl CodeGen {
         }
         if mapped_inner_cpp.contains("/* TODO")
             || type_string_has_auto_placeholder(&mapped_inner_cpp)
+            // A Rust-only iterator-adapter path that mapped verbatim
+            // (`Option<Fuse<J>::Item>` → `typename std::iter::Fuse::Item`,
+            // itertools MergeBy::fold) can never name a C++ type — fall back
+            // to the deduced `rusty::Some(arg)` emission.
+            || mapped_inner_cpp.contains("std::iter::")
+            || mapped_inner_cpp.contains("core::iter::")
         {
             return None;
         }
@@ -36044,6 +36065,10 @@ impl CodeGen {
         if expected_cpp.starts_with("rusty::Option<")
             && !expected_cpp.contains("/* TODO")
             && !type_string_has_auto_placeholder(&expected_cpp)
+            // Rust-only iterator-adapter paths never name C++ types (see
+            // option_ctor_inner_cpp_type).
+            && !expected_cpp.contains("std::iter::")
+            && !expected_cpp.contains("core::iter::")
         {
             Some(expected_cpp)
         } else {
@@ -36056,6 +36081,13 @@ impl CodeGen {
             return false;
         }
         if self.mapped_assoc_type_contains_unbound_placeholder(inner_cpp) {
+            return false;
+        }
+        // A Rust-only iterator-adapter path mapped verbatim can never name a
+        // C++ type (`Option<Fuse<J>::Item>` → `typename std::iter::Fuse::Item`,
+        // itertools MergeBy::fold). Reject it so the caller falls back to the
+        // deduced `rusty::Some(arg)` / bare `rusty::None` emission.
+        if inner_cpp.contains("std::iter::") || inner_cpp.contains("core::iter::") {
             return false;
         }
         let trimmed = inner_cpp.trim();

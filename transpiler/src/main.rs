@@ -4212,6 +4212,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     }
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
+        lenient_auto_template_args: false,
         is_dependency: false,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
@@ -4498,6 +4499,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 external_crate_module_aliases: flattened_dependency_aliases.clone(),
                 dependency_ufcs_trait_manifests,
                 emit_ufcs_trait_manifest_path: Some(target_dir.join("ufcs-traits.json")),
+                // A skippable target's `<auto>` leak must reach the
+                // cpp_has_invalid_codegen_pattern skip check below, not abort
+                // the whole parity run inside codegen.
+                lenient_auto_template_args: is_skippable_target,
                 use_import_std_in_modules: opt_import_std,
                 prefer_rusty_unit_alias: opt_prefer_unit,
                 prefer_rusty_view_aliases: opt_prefer_views,
@@ -4813,6 +4818,7 @@ fn main() {
     };
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
+        lenient_auto_template_args: false,
         is_dependency: false,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),

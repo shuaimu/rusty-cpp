@@ -245,6 +245,14 @@ pub struct TranspileOptions {
     /// (`tests/transpile_tests/run_parity_matrix.sh`), whose crates are
     /// consumers.
     pub in_umbrella_closure: bool,
+    /// Don't PANIC on an `<auto>` template-argument leak — return the (broken)
+    /// output instead. Set by the parity harness for SKIPPABLE test targets:
+    /// their `cpp_has_invalid_codegen_pattern` check skips such a target
+    /// gracefully, but only if transpilation returns at all. Without this, one
+    /// unbuildable target (itertools' quickcheck-based `quick`) aborts the
+    /// whole parity run before the skip logic can see it. Essential units
+    /// (libs, deps) keep the loud panic.
+    pub lenient_auto_template_args: bool,
     /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
     /// Default is `false`.
     pub by_value_cycle_breaking_prototype: bool,
@@ -727,6 +735,7 @@ impl Default for TranspileOptions {
             crate_namespace_wrap: false,
             // Outside the umbrella's re-export closure = ordinary consumer.
             in_umbrella_closure: false,
+            lenient_auto_template_args: false,
             by_value_cycle_breaking_prototype: false,
             is_dependency: false,
             cpp_module_symbol_index: None,
@@ -1107,6 +1116,7 @@ pub fn transpile_full_with_options(
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_in_umbrella_closure(options.in_umbrella_closure);
+    codegen.lenient_auto_template_args = options.lenient_auto_template_args;
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
     codegen.set_auto_namespace(options.auto_namespace);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);

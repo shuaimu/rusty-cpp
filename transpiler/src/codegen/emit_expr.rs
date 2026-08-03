@@ -19679,6 +19679,12 @@ impl CodeGen {
                         && inferred_inner_cpp != "auto"
                         && !inferred_inner_cpp.contains("/* TODO")
                         && !type_string_has_auto_placeholder(&inferred_inner_cpp)
+                        // A Rust-only iterator-adapter path mapped verbatim
+                        // (`typename std::iter::Fuse::Item`, itertools
+                        // MergeBy::fold `right = Some(r)`) can never name a
+                        // C++ type — fall through to `rusty::Some(arg)`.
+                        && !inferred_inner_cpp.contains("std::iter::")
+                        && !inferred_inner_cpp.contains("core::iter::")
                     {
                         return format!("rusty::Option<{}>({})", inferred_inner_cpp, arg);
                     }
@@ -19695,6 +19701,10 @@ impl CodeGen {
                     && mapped_inner != "auto"
                     && !mapped_inner.contains("/* TODO")
                     && !type_string_has_auto_placeholder(&mapped_inner)
+                    // Rust-only iterator-adapter paths never name C++ types
+                    // (see the inferred-payload guard above).
+                    && !mapped_inner.contains("std::iter::")
+                    && !mapped_inner.contains("core::iter::")
                 {
                     return format!("rusty::Option<{}>({})", mapped_inner, arg);
                 }
