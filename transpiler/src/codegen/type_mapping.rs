@@ -488,7 +488,20 @@ impl CodeGen {
             let self_substituted = if self_cpp_ty.is_empty() {
                 None
             } else {
-                syn::parse_str::<syn::Type>(self_cpp_ty).ok().map(|self_syn| {
+                // For a default-method template param, a NESTED `Self` (an
+                // adaptor type argument — `PeekingTakeWhile<Self, F>`) must
+                // decay: `Self_` is a forwarding-deduced param, so an lvalue
+                // receiver makes it `T&`, and `PeekingTakeWhile<T&, F>` is a
+                // DIFFERENT type from the `PeekingTakeWhile<T, F>` the inner
+                // free fn returns (Rust `Self: Sized` is always the value
+                // type). Plain `-> Self` returns are handled above and stay
+                // as-is.
+                let self_spelling = if self_cpp_ty == "Self_" {
+                    "std::remove_reference_t<Self_>"
+                } else {
+                    self_cpp_ty
+                };
+                syn::parse_str::<syn::Type>(self_spelling).ok().map(|self_syn| {
                     let mut cloned = ty.clone();
                     let mut replacer = super::collect_passes::TypeIdentReplacer {
                         from: "Self".to_string(),
