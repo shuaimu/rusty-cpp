@@ -24884,6 +24884,56 @@ impl CodeGen {
         }
     }
 
+    /// Hygiene-stripped macro output can bind the SAME identifier twice in one
+    /// closure pattern (itertools' izip! hygiene test expands to
+    /// `|((a, b), b)| (a, b, b)`) — normal Rust rejects the shape outright
+    /// (E0416), so it only reaches us through cargo-expand's hygiene loss. C++
+    /// rejects the redeclaration; keep the LAST binding under the original name
+    /// (Rust's shadowing convention, so body references see the later binder)
+    /// and rename earlier duplicates to fresh `_hyg`-suffixed spellings.
+    fn dedup_duplicate_pattern_binding_names(stmts: Vec<String>) -> Vec<String> {
+        fn declared_ident_span(s: &str) -> Option<(usize, usize)> {
+            let rest = s
+                .strip_prefix("auto&& ")
+                .or_else(|| s.strip_prefix("auto "))?;
+            let start = s.len() - rest.len();
+            let len = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            (len > 0).then_some((start, start + len))
+        }
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for s in &stmts {
+            if let Some((a, b)) = declared_ident_span(s) {
+                *counts.entry(s[a..b].to_string()).or_default() += 1;
+            }
+        }
+        if counts.values().all(|&n| n <= 1) {
+            return stmts;
+        }
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        stmts
+            .into_iter()
+            .map(|s| {
+                let Some((a, b)) = declared_ident_span(&s) else {
+                    return s;
+                };
+                let name = s[a..b].to_string();
+                let total = counts.get(&name).copied().unwrap_or(0);
+                if total <= 1 {
+                    return s;
+                }
+                let occurrence = seen.entry(name.clone()).or_default();
+                *occurrence += 1;
+                if *occurrence < total {
+                    format!("{}{}_hyg{}{}", &s[..a], name, *occurrence - 1, &s[b..])
+                } else {
+                    s
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn emit_closure_param_with_prelude(
         &self,
         pat: &syn::Pat,
@@ -24929,7 +24979,7 @@ impl CodeGen {
                 &mut binding_name_map,
             ) && !binding_stmts.is_empty()
             {
-                binding_stmts.join("\n")
+                Self::dedup_duplicate_pattern_binding_names(binding_stmts).join("\n")
             } else {
                 let binding = self.emit_closure_destructure_pat_to_string(pat);
                 if binding.trim() == "[]" {

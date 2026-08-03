@@ -39478,3 +39478,29 @@ fn test_user_mod_std_renamed_without_alias() {
     );
     assert!(out.contains("std_mod"), "expected the renamed spelling, got:\n{out}");
 }
+
+/// #33: hygiene-stripped macro output can bind the same identifier twice in
+/// one closure pattern (itertools izip! hygiene test: `|((a, b), b)|`) —
+/// invalid as written Rust (E0416), reachable only through cargo-expand's
+/// hygiene loss. Earlier duplicates rename to `_hyg` spellings; the LAST
+/// binding keeps the name so body references follow Rust's shadowing.
+#[test]
+fn test_duplicate_closure_pattern_binders_dedup() {
+    let out = transpile_str(
+        r#"
+        fn f() {
+            let it = (0..6)
+                .zip(0..9)
+                .zip(0..12)
+                .map(|((a, b), b)| (a, b, b));
+            let _ = it;
+        }
+        "#,
+    );
+    assert!(out.contains("auto&& b_hyg0 = "), "earlier dup must rename, got:\n{out}");
+    assert_eq!(
+        out.matches("auto&& b = ").count(),
+        1,
+        "exactly one binding keeps the original name, got:\n{out}"
+    );
+}
