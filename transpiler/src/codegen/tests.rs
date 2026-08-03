@@ -39449,3 +39449,32 @@ fn test_fuse_type_position_uses_free_dispatcher() {
         "must not require a member fuse, got:\n{out}"
     );
 }
+
+/// #33: a user module named `std` (itertools' macros_hygiene declares a DECOY
+/// `mod std {}` to test macro hygiene) must not emit `namespace std` — inside
+/// the crate wrap it would shadow the global ::std for every later
+/// unqualified `std::` reference — and must not get a compat alias either
+/// (visible through `using namespace rusty_module_aliases`, it makes `std::`
+/// AMBIGUOUS). No Rust reference shape needs the alias: bare `std::` in Rust
+/// always means the real std.
+#[test]
+fn test_user_mod_std_renamed_without_alias() {
+    let out = transpile_str(
+        r#"
+        mod std {}
+        fn f() {
+            let a = std::cmp::max(1, 2);
+            let _ = a;
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("namespace std {"),
+        "user mod std must not emit namespace std, got:\n{out}"
+    );
+    assert!(
+        !out.contains("namespace std = "),
+        "must not alias std back to the renamed module, got:\n{out}"
+    );
+    assert!(out.contains("std_mod"), "expected the renamed spelling, got:\n{out}");
+}

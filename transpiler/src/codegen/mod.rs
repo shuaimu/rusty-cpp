@@ -5320,6 +5320,15 @@ impl CodeGen {
                 if raw.contains("::") {
                     return None;
                 }
+                // Never alias `std` back to a renamed user module: the alias
+                // (visible via `using namespace rusty_module_aliases`) makes
+                // every later unqualified `std::` reference AMBIGUOUS against
+                // the real ::std. No Rust reference shape needs it either —
+                // bare `std::` in Rust always means the real std (a user
+                // `mod std` is only reachable via `self::`/`crate::`).
+                if raw == "std" {
+                    return None;
+                }
                 let alias = escape_cpp_keyword(raw);
                 if alias.is_empty() || alias == *renamed {
                     return None;
@@ -8536,7 +8545,13 @@ impl CodeGen {
         // `mod tee` produced `namespace tee {}` at module purview and
         // clang rejected it as "redefinition of 'tee' as different kind
         // of symbol". Same shape as `read`/`write`/`free`/`sync`.
-        matches!(name, "free" | "sync" | "read" | "write" | "tee")
+        //
+        // `std`: a user module named std (itertools' macros_hygiene declares
+        // a DECOY `mod std {}` to test macro hygiene) emits `namespace std {}`
+        // inside the crate wrap — `<crate>::std` then shadows the global
+        // `::std` for every later unqualified `std::` reference in the
+        // purview (`no template named 'get' in namespace 'itertools::std'`).
+        matches!(name, "free" | "sync" | "read" | "write" | "tee" | "std")
     }
 
 
