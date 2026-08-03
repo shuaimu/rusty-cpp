@@ -49,6 +49,46 @@ pub(crate) struct ExtensionImplMethod {
     self_is_template_param: bool,
 }
 
+/// How a trait-assoc projection method takes its receiver — decides the
+/// spelling of the projection call (`<Trait>_::method` free fn with a
+/// by-value/by-ref `declval` self, or the receiverless `F::template
+/// method<…>` static member form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssocProjectionReceiver {
+    Bare,
+    Value,
+    Ref,
+}
+
+/// A trait method usable to SPELL an associated-type projection `P::Assoc`
+/// (P a type param bound by the trait): the assoc IS (part of) the method's
+/// return type, so `decltype(call)` names it. See
+/// `trait_assoc_method_projections`.
+#[derive(Debug, Clone)]
+pub(crate) struct AssocMethodProjection {
+    pub(crate) method: String,
+    pub(crate) non_self_params: Vec<syn::Type>,
+    pub(crate) trait_generics: Vec<String>,
+    pub(crate) receiver: AssocProjectionReceiver,
+    /// `Some(i)` when the assoc appears as tuple element `i` of the return
+    /// type rather than being the whole return type.
+    pub(crate) tuple_idx: Option<usize>,
+}
+
+impl AssocMethodProjection {
+    /// Higher ranks give truer C++ types: a receiver method's emitted
+    /// `<Trait>_::method` overloads carry real (annotated) return types,
+    /// while a receiverless static's deduced return can be a variant member
+    /// struct standing in for the enum its assoc binds.
+    pub(crate) fn rank(&self) -> u8 {
+        match (self.receiver, self.tuple_idx) {
+            (AssocProjectionReceiver::Bare, _) => 1,
+            (_, Some(_)) => 2,
+            (_, None) => 3,
+        }
+    }
+}
+
 /// Storage shape for a `--interface-traits` Adapter specialization.
 /// Determines the `value_` field type, the constructor signature, and
 /// whether `&mut self` trait methods can be delegated through the
@@ -777,13 +817,17 @@ pub struct CodeGen {
     /// spell assoc projections on dependent owners as decltype-of-method
     /// calls (the args substitute into the method's param types).
     pub(crate) trait_bound_args_scopes: Vec<HashMap<String, (String, Vec<syn::Type>)>>,
-    /// (trait, assoc) → (method, non-self param types, trait generic param
-    /// names) for trait methods whose return type is exactly `Self::Assoc`
-    /// (iter_index's `fn index(self, from: I) -> Self::Output`). The
-    /// projection `R::Output` (R bound by the trait) IS the call result of
-    /// the emitted `<Trait>_::method` free fn.
-    pub(crate) trait_assoc_method_projections:
-        HashMap<(String, String), (String, Vec<syn::Type>, Vec<String>)>,
+    /// (trait, assoc) → projection method for trait methods whose return type
+    /// names `Self::Assoc` directly (iter_index's `fn index(self, from: I) ->
+    /// Self::Output`) or in a tuple position (OrderingOrBool's `fn merge(&mut
+    /// self, …) -> (Option<Either<L, R>>, Self::MergeResult)`). Receiver
+    /// methods spell through the emitted `<Trait>_::method` free fn (whose
+    /// per-impl overloads carry the REAL return types); receiverless statics
+    /// spell the `F::template method<Args…>(…)` member-template form. Ranked:
+    /// receiver-direct > receiver-tuple > receiverless-direct — the deduced
+    /// return of an emitted receiverless static can be a variant member
+    /// struct rather than the enum the assoc actually binds.
+    pub(crate) trait_assoc_method_projections: HashMap<(String, String), AssocMethodProjection>,
     /// (trait, method) for NO-receiver trait methods where some trait generic
     /// does not appear in the method's param types (OrderingOrBool's
     /// `fn left(left: L) -> Self::MergeResult` misses R): the emitted static
@@ -20848,6 +20892,14 @@ impl CodeGen {
             && self.type_references_current_struct_assoc_projection(ty)
             && !self.type_current_struct_assoc_aliases_emitted(ty)
         {
+            // A dependent assoc that resolves all the way to a projection
+            // spelling (no `typename` fallback, no Self residue) is safe to
+            // annotate — MergeBy::next's `Option<Self::Item>` becomes
+            // `rusty::Option<std::tuple_element_t<…>>`; anything less than
+            // fully resolved keeps the softened (deduced) return.
+            if let Some(mapped) = self.fully_resolved_dependent_spelling(ty) {
+                return format!(" -> {}", mapped);
+            }
             return String::new();
         }
         let mapped = self.map_type_with_explicit_owner_generic_recovery(ty);
@@ -27675,25 +27727,92 @@ impl CodeGen {
         "rusty::intrinsics::unreachable()"
     }
 
+    /// Map a dependent type and accept the result ONLY when it is fully
+    /// resolved C++ — no deduction placeholders, no `typename` fallback
+    /// spelling, no `Self` residue. Used to open the soften gates for
+    /// dependent-assoc types that the projection machinery can spell exactly
+    /// (anything less keeps the softened/deduced behavior).
+    fn fully_resolved_dependent_spelling(&self, ty: &syn::Type) -> Option<String> {
+        let mapped = self.map_type_with_explicit_owner_generic_recovery(ty);
+        // `decltype(…)` spans are opaque, fully-resolved expressions — the
+        // projection dispatcher inside one legitimately contains `auto`
+        // lambda params and `decltype(auto)`. Mask them before scanning for
+        // unresolved-spelling markers.
+        let residue = Self::mask_decltype_spans(&mapped);
+        if std::env::var("RUSTY_CPP_TRAP_TVC").is_ok() {
+            eprintln!("FRDS-TRAP: mapped={:?} residue={:?}", mapped, residue);
+        }
+        let clean = mapped != "auto"
+            && !mapped.contains("/* TODO")
+            && !type_string_has_auto_placeholder(&residue)
+            && !self.mapped_assoc_type_contains_unbound_placeholder(&residue)
+            && !residue.contains("typename ")
+            && !residue.contains("Self");
+        clean.then_some(mapped)
+    }
+
+    /// Replace every balanced `decltype(…)` span in a mapped type string with
+    /// a placeholder token, so marker scans only see the surrounding type
+    /// syntax.
+    fn mask_decltype_spans(mapped: &str) -> String {
+        let mut out = String::with_capacity(mapped.len());
+        let bytes = mapped.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if mapped[i..].starts_with("decltype(") {
+                let mut depth = 0usize;
+                let mut j = i + "decltype".len();
+                loop {
+                    match bytes.get(j) {
+                        Some(b'(') => depth += 1,
+                        Some(b')') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                    j += 1;
+                }
+                out.push_str("__masked_decltype__");
+                i = j;
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
     fn match_expr_unreachable_fallback_with_expected(
         &self,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        let typed_unreachable = |cpp: String| {
+            format!("[&]() -> {} {{ rusty::intrinsics::unreachable(); }}()", cpp)
+        };
         if let Some(expected) = expected_ty {
             if self.type_contains_unresolved_self_type_path(expected) {
-                return self.match_expr_unreachable_fallback().to_string();
+                return match self.fully_resolved_dependent_spelling(expected) {
+                    Some(cpp) => typed_unreachable(cpp),
+                    None => self.match_expr_unreachable_fallback().to_string(),
+                };
             }
             let fallback_ty = self
                 .extract_callable_return_type_from_type(expected)
                 .unwrap_or_else(|| expected.clone());
-            if self.type_contains_unresolved_self_type_path(&fallback_ty) {
-                return self.match_expr_unreachable_fallback().to_string();
-            }
-            if self.should_soften_dependent_assoc_mode()
-                && self.type_references_current_struct_assoc_projection(&fallback_ty)
-                && !self.type_current_struct_assoc_aliases_emitted(&fallback_ty)
+            if self.type_contains_unresolved_self_type_path(&fallback_ty)
+                || (self.should_soften_dependent_assoc_mode()
+                    && self.type_references_current_struct_assoc_projection(&fallback_ty)
+                    && !self.type_current_struct_assoc_aliases_emitted(&fallback_ty))
             {
-                return self.match_expr_unreachable_fallback().to_string();
+                return match self.fully_resolved_dependent_spelling(&fallback_ty) {
+                    Some(cpp) => typed_unreachable(cpp),
+                    None => self.match_expr_unreachable_fallback().to_string(),
+                };
             }
             let fallback_cpp = self.map_type_with_explicit_owner_generic_recovery(&fallback_ty);
             if fallback_cpp == "auto"
@@ -45064,10 +45183,10 @@ impl CodeGen {
             .iter()
             .rev()
             .find_map(|scope| scope.get(first))?;
-        let (method, non_self_params, trait_generics) = self
+        let proj = self
             .trait_assoc_method_projections
             .get(&(bound_trait.clone(), assoc_name.to_string()))?;
-        if bound_args.len() != trait_generics.len() {
+        if bound_args.len() != proj.trait_generics.len() {
             return None;
         }
         let subst = |ty: &syn::Type| -> String {
@@ -45076,30 +45195,89 @@ impl CodeGen {
                 && ip.path.segments.len() == 1
             {
                 let ident = ip.path.segments[0].ident.to_string();
-                if let Some(idx) = trait_generics.iter().position(|g| g == &ident) {
+                if let Some(idx) = proj.trait_generics.iter().position(|g| g == &ident) {
                     return self.map_type(&bound_args[idx]);
                 }
             }
             self.map_type(ty)
         };
-        let mut declvals = vec![format!("std::declval<{}>()", first)];
-        for pty in non_self_params {
-            let cpp = subst(pty);
-            if cpp.is_empty()
+        let spell_check = |cpp: &str| -> bool {
+            !(cpp.is_empty()
                 || cpp == "auto"
                 || cpp.contains("/* TODO")
-                || type_string_has_auto_placeholder(&cpp)
-            {
+                || type_string_has_auto_placeholder(cpp))
+        };
+        let mut declvals = match proj.receiver {
+            AssocProjectionReceiver::Bare => Vec::new(),
+            AssocProjectionReceiver::Value => vec![format!("std::declval<{}>()", first)],
+            // `&self`/`&mut self` UFCS overloads take `Self&`/`const Self&` —
+            // an lvalue declval binds to both.
+            AssocProjectionReceiver::Ref => vec![format!("std::declval<{}&>()", first)],
+        };
+        for pty in &proj.non_self_params {
+            let cpp = subst(pty);
+            if !spell_check(&cpp) {
                 return None;
             }
             declvals.push(format!("std::declval<{}>()", cpp));
         }
-        Some(format!(
-            "decltype({}::{}({}))",
-            self.ufcs_trait_namespace(bound_trait),
-            method,
-            declvals.join(", ")
-        ))
+        let mut template_args = Vec::new();
+        for arg in bound_args {
+            let cpp = self.map_type(arg);
+            if !spell_check(&cpp) {
+                return None;
+            }
+            template_args.push(cpp);
+        }
+        let call = if proj.receiver == AssocProjectionReceiver::Bare {
+            // Receiverless trait static: the UFCS free fn can't deduce Self_,
+            // so spell the impl's static member template with the bound's
+            // args made explicit — the same form part-15 call sites emit
+            // (`F::template left<Args…>(x)`).
+            format!(
+                "{}::template {}<{}>({})",
+                first,
+                escape_cpp_keyword(&proj.method),
+                template_args.join(", "),
+                declvals.join(", ")
+            )
+        } else if proj.receiver == AssocProjectionReceiver::Ref {
+            // `&self`/`&mut self` method: member-template first, UFCS free fn
+            // as the fallback — the usual 3-branch-dispatcher shape. Calling
+            // the UFCS overload set directly is AMBIGUOUS when a blanket
+            // closure impl's catch-all overload ties with an impl-specific
+            // one (OrderingOrBool_::merge); the member branch resolves inside
+            // the impl type alone, and a bare-closure receiver (no member)
+            // degrades to the UFCS branch where only the blanket matches.
+            let method = escape_cpp_keyword(&proj.method);
+            format!(
+                "([](auto& __self, auto&&... __args) -> decltype(auto) {{ \
+                 if constexpr (requires {{ __self.template {}<{}>(std::forward<decltype(__args)>(__args)...); }}) {{ \
+                 return __self.template {}<{}>(std::forward<decltype(__args)>(__args)...); }} \
+                 else {{ return {}::{}(__self, std::forward<decltype(__args)>(__args)...); }} }})({})",
+                method,
+                template_args.join(", "),
+                method,
+                template_args.join(", "),
+                self.ufcs_trait_namespace(bound_trait),
+                method,
+                declvals.join(", ")
+            )
+        } else {
+            format!(
+                "{}::{}({})",
+                self.ufcs_trait_namespace(bound_trait),
+                proj.method,
+                declvals.join(", ")
+            )
+        };
+        Some(match proj.tuple_idx {
+            Some(i) => format!(
+                "std::tuple_element_t<{}, std::remove_cvref_t<decltype({})>>",
+                i, call
+            ),
+            None => format!("decltype({})", call),
+        })
     }
 
     fn maybe_prefix_typename_for_dependent_path(&self, path: String) -> String {

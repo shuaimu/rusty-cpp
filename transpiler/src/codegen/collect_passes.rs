@@ -3515,32 +3515,73 @@ impl CodeGen {
                         // is the call result of the `<Trait>_::method` free fn
                         // — collected HERE (not at trait emission) so the
                         // early forward-decl passes can already spell it.
-                        if has_receiver
-                            && let syn::ReturnType::Type(_, ret_ty) = &method.sig.output
-                            && let syn::Type::Path(rp) = ret_ty.as_ref()
-                            && rp.qself.is_none()
-                            && rp.path.segments.len() == 2
-                            && rp.path.segments[0].ident == "Self"
-                        {
-                            let assoc = rp.path.segments[1].ident.to_string();
-                            if assoc_names.iter().any(|n| n == &assoc) {
-                                let non_self_params: Vec<syn::Type> = method
-                                    .sig
-                                    .inputs
-                                    .iter()
-                                    .skip(1)
-                                    .filter_map(|arg| match arg {
-                                        syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
-                                        _ => None,
+                        let self_assoc_leaf = |ty: &syn::Type| -> Option<String> {
+                            if let syn::Type::Path(rp) = ty
+                                && rp.qself.is_none()
+                                && rp.path.segments.len() == 2
+                                && rp.path.segments[0].ident == "Self"
+                            {
+                                Some(rp.path.segments[1].ident.to_string())
+                            } else {
+                                None
+                            }
+                        };
+                        let assoc_ret: Option<(String, Option<usize>)> =
+                            if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output {
+                                self_assoc_leaf(ret_ty).map(|a| (a, None)).or_else(|| {
+                                    let syn::Type::Tuple(t) = ret_ty.as_ref() else {
+                                        return None;
+                                    };
+                                    t.elems.iter().enumerate().find_map(|(i, elem)| {
+                                        self_assoc_leaf(elem).map(|a| (a, Some(i)))
                                     })
-                                    .collect();
-                                self.trait_assoc_method_projections
-                                    .entry((trait_name.clone(), assoc))
-                                    .or_insert((
-                                        method_name.clone(),
-                                        non_self_params,
-                                        trait_generic_names.clone(),
-                                    ));
+                                })
+                            } else {
+                                None
+                            };
+                        if let Some((assoc, tuple_idx)) = assoc_ret
+                            && assoc_names.iter().any(|n| n == &assoc)
+                            // Receiverless tuple projections stay unregistered:
+                            // the static member form can't recover a tuple slot
+                            // from a deduced-return factory body reliably.
+                            && !(tuple_idx.is_some() && !has_receiver)
+                        {
+                            let non_self_params: Vec<syn::Type> = method
+                                .sig
+                                .inputs
+                                .iter()
+                                .skip(if has_receiver { 1 } else { 0 })
+                                .filter_map(|arg| match arg {
+                                    syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            let receiver = match method.sig.inputs.first() {
+                                Some(syn::FnArg::Receiver(r)) if r.reference.is_some() => {
+                                    AssocProjectionReceiver::Ref
+                                }
+                                Some(syn::FnArg::Receiver(_)) => AssocProjectionReceiver::Value,
+                                _ => AssocProjectionReceiver::Bare,
+                            };
+                            let candidate = AssocMethodProjection {
+                                method: method_name.clone(),
+                                non_self_params,
+                                trait_generics: trait_generic_names.clone(),
+                                receiver,
+                                tuple_idx,
+                            };
+                            match self
+                                .trait_assoc_method_projections
+                                .entry((trait_name.clone(), assoc))
+                            {
+                                std::collections::hash_map::Entry::Occupied(mut o) => {
+                                    if candidate.rank() > o.get().rank() {
+                                        o.insert(candidate);
+                                    }
+                                }
+                                std::collections::hash_map::Entry::Vacant(v) => {
+                                    v.insert(candidate);
+                                }
                             }
                         }
                     }

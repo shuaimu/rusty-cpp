@@ -4196,6 +4196,16 @@ impl CodeGen {
         let match_expected_ty = concrete_expected_ty.or(inferred_match_ty.as_ref());
         let lambda_return_annotation =
             self.expected_lambda_return_annotation(match_expected_ty, true);
+        if std::env::var("RUSTY_CPP_TRAP_TVC").is_ok() && lambda_return_annotation.is_empty() {
+            eprintln!(
+                "TVC1-TRAP: expected_ty={:?} inferred={:?} scrutinee={}",
+                expected_ty.map(|t| quote::quote!(#t).to_string()),
+                inferred_match_ty
+                    .as_ref()
+                    .map(|t| quote::quote!(#t).to_string()),
+                quote::quote!(#tuple_scrutinee),
+            );
+        }
         let mut out = format!("[&](){} {{ ", lambda_return_annotation);
         for (idx, expr) in tuple_scrutinee.elems.iter().enumerate() {
             if let syn::Expr::Reference(reference_expr) = self.peel_paren_group_expr(expr) {
@@ -4576,6 +4586,16 @@ impl CodeGen {
         let match_expected_ty = concrete_expected_ty.or(inferred_match_ty.as_ref());
         let lambda_return_annotation =
             self.expected_lambda_return_annotation(match_expected_ty, true);
+        if std::env::var("RUSTY_CPP_TRAP_TVC").is_ok() && lambda_return_annotation.is_empty() {
+            eprintln!(
+                "TVC2-TRAP: expected_ty={:?} inferred={:?} scrutinee={}",
+                expected_ty.map(|t| quote::quote!(#t).to_string()),
+                inferred_match_ty
+                    .as_ref()
+                    .map(|t| quote::quote!(#t).to_string()),
+                quote::quote!(#tuple_scrutinee_expr),
+            );
+        }
         let mut out = format!("[&](){} {{ ", lambda_return_annotation);
         let scrutinee = self.emit_expr_to_string(tuple_scrutinee_expr);
         out.push_str(&format!("auto&& _m_tuple = {}; ", scrutinee));
@@ -21038,26 +21058,39 @@ impl CodeGen {
         enum_leaf: &str,
     ) -> Option<Vec<String>> {
         let hint = self.current_return_type_hint()?;
-        let syn::Type::Path(htp) = self.peel_reference_paren_group_type(hint) else {
-            return None;
+        let assoc_from_type = |ty: &syn::Type| -> Option<String> {
+            let syn::Type::Path(htp) = self.peel_reference_paren_group_type(ty) else {
+                return None;
+            };
+            if htp.qself.is_some()
+                || htp.path.segments.len() != 2
+                || htp.path.segments[0].ident != "Self"
+            {
+                return None;
+            }
+            Some(htp.path.segments[1].ident.to_string())
         };
-        if htp.qself.is_some()
-            || htp.path.segments.len() != 2
-            || htp.path.segments[0].ident != "Self"
+        // A `Self::Assoc` element nested in a tuple return hint (e.g.
+        // `(Option<Either<L, R>>, Self::MergeResult)`) identifies the enum
+        // just as well as a top-level one.
+        let mut candidates: Vec<String> = assoc_from_type(hint).into_iter().collect();
+        if candidates.is_empty()
+            && let syn::Type::Tuple(tuple) = self.peel_reference_paren_group_type(hint)
         {
-            return None;
+            candidates.extend(tuple.elems.iter().filter_map(assoc_from_type));
         }
-        let assoc_name = htp.path.segments[1].ident.to_string();
         let scope = self.current_struct_assoc_cpp_types.last()?;
-        let assoc_cpp = scope
-            .get(&assoc_name)
-            .or_else(|| scope.get(&escape_cpp_keyword(&assoc_name)))?;
-        // The binding's leaf must BE this enum.
-        let base = assoc_cpp.split('<').next().unwrap_or("").trim();
-        if base.rsplit("::").next().map(|l| l.trim()) != Some(enum_leaf) {
-            return None;
-        }
-        Self::split_top_level_template_args(assoc_cpp)
+        candidates.into_iter().find_map(|assoc_name| {
+            let assoc_cpp = scope
+                .get(&assoc_name)
+                .or_else(|| scope.get(&escape_cpp_keyword(&assoc_name)))?;
+            // The binding's leaf must BE this enum.
+            let base = assoc_cpp.split('<').next().unwrap_or("").trim();
+            if base.rsplit("::").next().map(|l| l.trim()) != Some(enum_leaf) {
+                return None;
+            }
+            Self::split_top_level_template_args(assoc_cpp)
+        })
     }
 
     pub(super) fn try_emit_variant_constructor_call_with_recovered_hints(
