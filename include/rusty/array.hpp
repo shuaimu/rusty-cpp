@@ -1122,6 +1122,22 @@ struct zip_view {
         }
         return false;
     }
+
+    // Rust `a.zip(b).map(f)` chains call .map on the zip result — zip_view
+    // is a bare range view with no adapter members. Materialize the mapped
+    // items eagerly (std-only: this header is self-contained and cannot
+    // reach the rusty::map dispatcher in slice.hpp).
+    template<typename F>
+    auto map(F&& func) {
+        using item_ref = decltype(*std::begin(*this));
+        using mapped_type =
+            std::decay_t<decltype(std::invoke(func, std::declval<item_ref>()))>;
+        std::vector<mapped_type> out;
+        for (auto&& item : *this) {
+            out.push_back(std::invoke(func, std::forward<decltype(item)>(item)));
+        }
+        return out;
+    }
 };
 
 // Heterogeneous-safe comparisons for emitted range-bound gates: the
