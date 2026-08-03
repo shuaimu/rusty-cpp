@@ -106,22 +106,30 @@ impl CodeGen {
         // definition: params replaced by deduced callable-return aliases in
         // the def (see emit_function) must be dropped here too, or the
         // decl/def pair diverges and calls go ambiguous/unmatched.
+        let fn_deduced_aliases = self.deduced_callable_return_type_aliases_for_function(
+            &f.sig.generics,
+            &f.sig.inputs,
+            &f.sig.output,
+        );
         {
-            let deduced_alias_names: HashSet<String> = self
-                .deduced_callable_return_type_aliases_for_function(
-                    &f.sig.generics,
-                    &f.sig.inputs,
-                    &f.sig.output,
-                )
-                .into_iter()
+            let deduced_alias_names: HashSet<String> = fn_deduced_aliases
+                .iter()
+                .cloned()
                 .filter(|(alias_name, alias_expr)| {
                     !Self::cpp_type_expr_mentions_identifier(alias_expr, alias_name)
                 })
-                .filter(|(alias_name, _)| match &f.sig.output {
-                    syn::ReturnType::Type(_, ret_ty) => {
-                        !self.type_mentions_named_type_param(ret_ty, alias_name)
-                    }
-                    syn::ReturnType::Default => true,
+                .filter(|(alias_name, alias_expr)| {
+                    // A `__from_source` alias is signature-spellable — it is
+                    // SUBSTITUTED into the return spelling below, so it drops
+                    // from the head even when the return names it (multizip's
+                    // `Zip<T>`).
+                    alias_expr.contains("__from_source<")
+                        || match &f.sig.output {
+                            syn::ReturnType::Type(_, ret_ty) => {
+                                !self.type_mentions_named_type_param(ret_ty, alias_name)
+                            }
+                            syn::ReturnType::Default => true,
+                        }
                 })
                 .map(|(name, _)| name)
                 .collect();
@@ -202,6 +210,8 @@ impl CodeGen {
         if is_async {
             return_type = format!("rusty::Task<{}>", return_type);
         }
+        return_type =
+            Self::substitute_from_source_aliases_in_type(return_type, &fn_deduced_aliases);
         let abi_prefix = if let Some(abi) = &f.sig.abi {
             if let Some(name) = &abi.name {
                 if name.value() == "C" {
@@ -388,11 +398,16 @@ impl CodeGen {
             .filter(|(alias_name, alias_expr)| {
                 !Self::cpp_type_expr_mentions_identifier(alias_expr, alias_name)
             })
-            .filter(|(alias_name, _)| match &f.sig.output {
-                syn::ReturnType::Type(_, ret_ty) => {
-                    !self.type_mentions_named_type_param(ret_ty, alias_name)
-                }
-                syn::ReturnType::Default => true,
+            .filter(|(alias_name, alias_expr)| {
+                // `__from_source` aliases are substituted into the return
+                // spelling (see below) — keep them droppable from the head.
+                alias_expr.contains("__from_source<")
+                    || match &f.sig.output {
+                        syn::ReturnType::Type(_, ret_ty) => {
+                            !self.type_mentions_named_type_param(ret_ty, alias_name)
+                        }
+                        syn::ReturnType::Default => true,
+                    }
             })
             .collect::<Vec<_>>();
         if !deduced_return_aliases.is_empty() {
@@ -423,6 +438,8 @@ impl CodeGen {
         } else {
             return_type
         };
+        let return_type =
+            Self::substitute_from_source_aliases_in_type(return_type, &deduced_return_aliases);
         let is_into_future_block_on_helper = !is_async
             && name == "block_on"
             && f.sig.inputs.len() == 1

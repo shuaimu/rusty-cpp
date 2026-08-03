@@ -3598,6 +3598,164 @@ impl CodeGen {
         }
     }
 
+    /// Crate `impl<G…> From<SRC> for S<TARG>` shapes, keyed by S's leaf.
+    /// Only single-arg generic targets qualify — that's the shape the
+    /// `<S>__from_source` resolver helper can invert (ziptuple's Zip).
+    pub(super) fn collect_generic_from_impls(&mut self, items: &[syn::Item]) {
+        for item in items {
+            match item {
+                syn::Item::Impl(i) => {
+                    let Some((_, trait_path, _)) = &i.trait_ else {
+                        continue;
+                    };
+                    let Some(last) = trait_path.segments.last() else {
+                        continue;
+                    };
+                    if last.ident != "From" {
+                        continue;
+                    }
+                    let syn::PathArguments::AngleBracketed(targs) = &last.arguments else {
+                        continue;
+                    };
+                    let src_ty = match targs.args.first() {
+                        Some(syn::GenericArgument::Type(ty)) if targs.args.len() == 1 => {
+                            ty.clone()
+                        }
+                        _ => continue,
+                    };
+                    let syn::Type::Path(self_tp) = i.self_ty.as_ref() else {
+                        continue;
+                    };
+                    let Some(self_last) = self_tp.path.segments.last() else {
+                        continue;
+                    };
+                    let syn::PathArguments::AngleBracketed(self_args) = &self_last.arguments
+                    else {
+                        continue;
+                    };
+                    let target_arg = match self_args.args.first() {
+                        Some(syn::GenericArgument::Type(ty)) if self_args.args.len() == 1 => {
+                            ty.clone()
+                        }
+                        _ => continue,
+                    };
+                    let has_type_params = i
+                        .generics
+                        .params
+                        .iter()
+                        .any(|p| matches!(p, syn::GenericParam::Type(_)));
+                    if !has_type_params {
+                        continue;
+                    }
+                    self.crate_generic_from_impls
+                        .entry(self_last.ident.to_string())
+                        .or_default()
+                        .push(CrateGenericFromImpl {
+                            generics: i.generics.clone(),
+                            src_ty,
+                            target_arg,
+                        });
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.collect_generic_from_impls(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Mark structs whose `<S>__from_source` helper some fn actually needs:
+    /// a free fn with a where-predicate `S<T>: From<U>` where T and U are
+    /// both the fn's own type params (multizip's From-bound-only T).
+    pub(super) fn collect_from_source_helper_needs(&mut self, items: &[syn::Item]) {
+        for item in items {
+            match item {
+                syn::Item::Fn(f) => {
+                    for (s_leaf, _, _) in
+                        Self::from_bound_predicates_in_generics(&f.sig.generics)
+                    {
+                        if self.crate_generic_from_impls.contains_key(&s_leaf) {
+                            self.needed_from_source_helpers.insert(s_leaf);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.collect_from_source_helper_needs(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `S<T>: From<U>` predicates in a where-clause, as (S leaf, T name,
+    /// U name) — both T and U must be bare single-segment idents.
+    pub(super) fn from_bound_predicates_in_generics(
+        generics: &syn::Generics,
+    ) -> Vec<(String, String, String)> {
+        let bare_ident = |ty: &syn::Type| -> Option<String> {
+            if let syn::Type::Path(tp) = ty
+                && tp.qself.is_none()
+                && tp.path.segments.len() == 1
+                && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+            {
+                Some(tp.path.segments[0].ident.to_string())
+            } else {
+                None
+            }
+        };
+        let mut out = Vec::new();
+        let Some(where_clause) = &generics.where_clause else {
+            return out;
+        };
+        for pred in &where_clause.predicates {
+            let syn::WherePredicate::Type(pt) = pred else {
+                continue;
+            };
+            let syn::Type::Path(btp) = &pt.bounded_ty else {
+                continue;
+            };
+            let Some(blast) = btp.path.segments.last() else {
+                continue;
+            };
+            let syn::PathArguments::AngleBracketed(bargs) = &blast.arguments else {
+                continue;
+            };
+            let Some(t_name) = (match bargs.args.first() {
+                Some(syn::GenericArgument::Type(ty)) if bargs.args.len() == 1 => bare_ident(ty),
+                _ => None,
+            }) else {
+                continue;
+            };
+            for bound in &pt.bounds {
+                let syn::TypeParamBound::Trait(tb) = bound else {
+                    continue;
+                };
+                let Some(tlast) = tb.path.segments.last() else {
+                    continue;
+                };
+                if tlast.ident != "From" {
+                    continue;
+                }
+                let syn::PathArguments::AngleBracketed(fargs) = &tlast.arguments else {
+                    continue;
+                };
+                if let Some(u_name) = (match fargs.args.first() {
+                    Some(syn::GenericArgument::Type(ty)) if fargs.args.len() == 1 => {
+                        bare_ident(ty)
+                    }
+                    _ => None,
+                }) {
+                    out.push((blast.ident.to_string(), t_name.clone(), u_name));
+                }
+            }
+        }
+        out
+    }
+
     pub(super) fn collect_trait_static_default_methods(
         &mut self,
         items: &[syn::Item],

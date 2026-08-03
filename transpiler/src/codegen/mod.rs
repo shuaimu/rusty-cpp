@@ -49,6 +49,17 @@ pub(crate) struct ExtensionImplMethod {
     self_is_template_param: bool,
 }
 
+/// One crate-local `impl<G…> From<SRC> for S<TARG>` shape, kept in Rust-type
+/// form so the `<S>__from_source` resolver helper can spell a partial
+/// specialization mapping a mapped SRC to a mapped TARG (ziptuple's
+/// `impl<B…: IntoIterator> From<(B…,)> for Zip<(B::IntoIter,…)>`).
+#[derive(Debug, Clone)]
+pub(crate) struct CrateGenericFromImpl {
+    pub(crate) generics: syn::Generics,
+    pub(crate) src_ty: syn::Type,
+    pub(crate) target_arg: syn::Type,
+}
+
 /// How a trait-assoc projection method takes its receiver — decides the
 /// spelling of the projection call (`<Trait>_::method` free fn with a
 /// by-value/by-ref `declval` self, or the receiverless `F::template
@@ -828,6 +839,19 @@ pub struct CodeGen {
     /// return of an emitted receiverless static can be a variant member
     /// struct rather than the enum the assoc actually binds.
     pub(crate) trait_assoc_method_projections: HashMap<(String, String), AssocMethodProjection>,
+    /// Generic-struct leaf → its crate `From` impl shapes (see
+    /// CrateGenericFromImpl). Feeds the `<S>__from_source` resolver helper
+    /// that recovers a From-bound-only type param (`fn multizip<T, U>(t: U)
+    /// -> Zip<T> where Zip<T>: From<U>`).
+    pub(crate) crate_generic_from_impls: HashMap<String, Vec<CrateGenericFromImpl>>,
+    /// `<S>__from_source` helpers already written this run (two forward-decl
+    /// passes visit each struct — the helper must land exactly once).
+    pub(crate) emitted_from_source_helpers: HashSet<String>,
+    /// Struct leaves whose `<S>__from_source` helper is actually needed by
+    /// some fn's From-bound alias — filled at collect time so the helper can
+    /// be emitted right after the struct's forward declaration (before any
+    /// fn decl that names it in a return spelling).
+    pub(crate) needed_from_source_helpers: HashSet<String>,
     /// (trait, method) for NO-receiver trait methods where some trait generic
     /// does not appear in the method's param types (OrderingOrBool's
     /// `fn left(left: L) -> Self::MergeResult` misses R): the emitted static
@@ -2010,6 +2034,9 @@ impl CodeGen {
             trait_bound_type_param_scopes: Vec::new(),
             trait_bound_args_scopes: Vec::new(),
             trait_assoc_method_projections: HashMap::new(),
+            crate_generic_from_impls: HashMap::new(),
+            emitted_from_source_helpers: HashSet::new(),
+            needed_from_source_helpers: HashSet::new(),
             trait_static_undeducible_methods: HashSet::new(),
             callable_type_param_return_scopes: Vec::new(),
             callable_type_param_arg_scopes: Vec::new(),
@@ -4712,6 +4739,11 @@ impl CodeGen {
         // Pass 1f2: collect trait static default methods before impl blocks.
         self.collect_trait_static_default_methods(&file.items, &[]);
         log_emit("collect_trait_static_default_methods");
+        // Pass 1f2b: crate `impl From<SRC> for S<TARG>` shapes + which
+        // structs need a `<S>__from_source` resolver helper emitted.
+        self.collect_generic_from_impls(&file.items);
+        self.collect_from_source_helper_needs(&file.items);
+        log_emit("collect_generic_from_impls");
         // Pass 1f3 (--interface-traits): pre-mark traits we will skip for
         // emission so other traits' supertrait lists drop the dropped names.
         self.collect_skipped_interface_traits(&file.items);
@@ -9760,6 +9792,7 @@ impl CodeGen {
                         export_prefix,
                         &format!("struct {};", name),
                     );
+                    self.maybe_emit_from_source_helper(&s.ident.to_string());
                     emitted_any = true;
                 }
                 syn::Item::Enum(e) => {
@@ -10071,6 +10104,7 @@ impl CodeGen {
                         export_prefix,
                         &format!("struct {};", name),
                     );
+                    self.maybe_emit_from_source_helper(&s.ident.to_string());
                     emitted_any = true;
                 }
                 syn::Item::Enum(e) => {
@@ -44707,6 +44741,54 @@ impl CodeGen {
         }
     }
 
+    /// Emit the `<S>__from_source` resolver helper (primary + one partial
+    /// specialization per crate `From` impl for S) right after S's forward
+    /// declaration. Recovers a From-bound-only fn type param at C++ deduction
+    /// time: `fn multizip<T, U>(t: U) -> Zip<T> where Zip<T>: From<U>` spells
+    /// T as `typename Zip__from_source<std::remove_cvref_t<U>>::type`.
+    fn maybe_emit_from_source_helper(&mut self, struct_ident: &str) {
+        if !self.needed_from_source_helpers.contains(struct_ident)
+            || !self.emitted_from_source_helpers.insert(struct_ident.to_string())
+        {
+            return;
+        }
+        let Some(impls) = self.crate_generic_from_impls.get(struct_ident).cloned() else {
+            return;
+        };
+        let helper = format!("{}__from_source", escape_cpp_keyword(struct_ident));
+        self.writeln(&format!("template<typename __U> struct {};", helper));
+        for shape in impls {
+            self.push_type_param_scope(&shape.generics);
+            let src_cpp = self.map_type(&shape.src_ty);
+            let target_cpp = self.map_type(&shape.target_arg);
+            self.pop_type_param_scope();
+            let type_params: Vec<String> = shape
+                .generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => {
+                        Some(format!("typename {}", tp.ident))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let unspellable = |cpp: &str| {
+                cpp.contains("auto") || cpp.contains("/* TODO") || cpp.contains("Self")
+            };
+            if unspellable(&src_cpp) || unspellable(&target_cpp) {
+                continue;
+            }
+            self.writeln(&format!(
+                "template<{}> struct {}<{}> {{ using type = {}; }};",
+                type_params.join(", "),
+                helper,
+                src_cpp,
+                target_cpp
+            ));
+        }
+    }
+
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
         let mut scope = HashSet::new();
         let mut ordered_scope = Vec::new();
@@ -45919,14 +46001,37 @@ impl CodeGen {
         }
         let callable_signatures =
             self.collect_callable_bound_return_signatures_for_function(generics);
-        if callable_signatures.is_empty() {
+        let from_bound_predicates = Self::from_bound_predicates_in_generics(generics);
+        if callable_signatures.is_empty() && from_bound_predicates.is_empty() {
             return Vec::new();
         }
 
         let mut aliases: Vec<(String, String)> = Vec::new();
         for param_name in undeduced_params {
             let mut alias_expr: Option<String> = None;
+            // From-bound resolution: `fn f<T, U>(u: U) -> S<T> where
+            // S<T>: From<U>` — T is the `<S>__from_source<U>` projection,
+            // one specialization per crate From impl for S (multizip).
+            for (s_leaf, t_name, u_name) in &from_bound_predicates {
+                if t_name != &param_name {
+                    continue;
+                }
+                if !self.function_inputs_reference_named_type_param(inputs, u_name) {
+                    continue;
+                }
+                if !self.needed_from_source_helpers.contains(s_leaf) {
+                    continue;
+                }
+                alias_expr = Some(format!(
+                    "typename {}__from_source<std::remove_cvref_t<{}>>::type",
+                    s_leaf, u_name
+                ));
+                break;
+            }
             for (callable_name, arg_tys, return_ty) in &callable_signatures {
+                if alias_expr.is_some() {
+                    break;
+                }
                 if !self.function_inputs_reference_named_type_param(inputs, callable_name) {
                     continue;
                 }
@@ -45975,6 +46080,50 @@ impl CodeGen {
             }
         }
         aliases
+    }
+
+    /// Replace `__from_source` aliases' NAMES in a mapped type spelling with
+    /// their resolver expression — the alias is dropped from the template
+    /// head, so a return type naming it (`Zip<T>`) must spell the projection
+    /// (`Zip<typename Zip__from_source<std::remove_cvref_t<U>>::type>`).
+    pub(super) fn substitute_from_source_aliases_in_type(
+        ty: String,
+        aliases: &[(String, String)],
+    ) -> String {
+        let mut out = ty;
+        for (name, expr) in aliases {
+            if !expr.contains("__from_source<") {
+                continue;
+            }
+            if !Self::cpp_type_expr_mentions_identifier(&out, name) {
+                continue;
+            }
+            // Token-boundary replacement: only whole identifiers.
+            let mut rebuilt = String::with_capacity(out.len());
+            let mut rest = out.as_str();
+            while let Some(pos) = rest.find(name.as_str()) {
+                let before_ok = pos == 0
+                    || !rest[..pos]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                let after = &rest[pos + name.len()..];
+                let after_ok = !after
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                rebuilt.push_str(&rest[..pos]);
+                if before_ok && after_ok {
+                    rebuilt.push_str(expr);
+                } else {
+                    rebuilt.push_str(name);
+                }
+                rest = after;
+            }
+            rebuilt.push_str(rest);
+            out = rebuilt;
+        }
+        out
     }
 
     fn cpp_type_expr_mentions_identifier(expr: &str, identifier: &str) -> bool {
