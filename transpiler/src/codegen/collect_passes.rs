@@ -3462,6 +3462,19 @@ impl CodeGen {
                     } else {
                         format!("{}::{}", module_path.join("::"), trait_name)
                     };
+                    let trait_generic_names: Vec<String> = t
+                        .generics
+                        .type_params()
+                        .map(|p| p.ident.to_string())
+                        .collect();
+                    let assoc_names: Vec<String> = t
+                        .items
+                        .iter()
+                        .filter_map(|it| match it {
+                            syn::TraitItem::Type(at) => Some(at.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
                     for trait_item in &t.items {
                         let syn::TraitItem::Fn(method) = trait_item else {
                             continue;
@@ -3475,6 +3488,40 @@ impl CodeGen {
                             format!("{}::{}", scoped_trait_name, method_name),
                             has_receiver,
                         );
+                        // Methods returning exactly `Self::Assoc` (iter_index's
+                        // `fn index(self, from: I) -> Self::Output`): a
+                        // use-site `R::Assoc` projection with `R: Trait<..>`
+                        // is the call result of the `<Trait>_::method` free fn
+                        // — collected HERE (not at trait emission) so the
+                        // early forward-decl passes can already spell it.
+                        if has_receiver
+                            && let syn::ReturnType::Type(_, ret_ty) = &method.sig.output
+                            && let syn::Type::Path(rp) = ret_ty.as_ref()
+                            && rp.qself.is_none()
+                            && rp.path.segments.len() == 2
+                            && rp.path.segments[0].ident == "Self"
+                        {
+                            let assoc = rp.path.segments[1].ident.to_string();
+                            if assoc_names.iter().any(|n| n == &assoc) {
+                                let non_self_params: Vec<syn::Type> = method
+                                    .sig
+                                    .inputs
+                                    .iter()
+                                    .skip(1)
+                                    .filter_map(|arg| match arg {
+                                        syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                self.trait_assoc_method_projections
+                                    .entry((trait_name.clone(), assoc))
+                                    .or_insert((
+                                        method_name.clone(),
+                                        non_self_params,
+                                        trait_generic_names.clone(),
+                                    ));
+                            }
+                        }
                     }
                 }
                 syn::Item::Mod(m) => {
@@ -12653,6 +12700,58 @@ impl CodeGen {
             }
             _ => {}
         }
+    }
+
+    /// Args-aware sibling of `collect_trait_bound_type_param_map`:
+    /// `R: IteratorIndex<I>` → R → ("IteratorIndex", [I]). Only bounds with
+    /// angle-bracketed (or no) args are recorded; parenthesized Fn-family
+    /// bounds are the callable maps' job. Last bound wins on duplicates.
+    pub(super) fn collect_trait_bound_args_map(
+        generics: &syn::Generics,
+    ) -> HashMap<String, (String, Vec<syn::Type>)> {
+        let mut map: HashMap<String, (String, Vec<syn::Type>)> = HashMap::new();
+        let mut record = |param: &str,
+                          bounds: &syn::punctuated::Punctuated<
+            syn::TypeParamBound,
+            syn::token::Plus,
+        >| {
+            for b in bounds {
+                let syn::TypeParamBound::Trait(tb) = b else {
+                    continue;
+                };
+                let Some(seg) = tb.path.segments.last() else {
+                    continue;
+                };
+                let args: Vec<syn::Type> = match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(a) => a
+                        .args
+                        .iter()
+                        .filter_map(|g| match g {
+                            syn::GenericArgument::Type(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    syn::PathArguments::None => Vec::new(),
+                    syn::PathArguments::Parenthesized(_) => continue,
+                };
+                map.insert(param.to_string(), (seg.ident.to_string(), args));
+            }
+        };
+        for tp in generics.type_params() {
+            record(&tp.ident.to_string(), &tp.bounds);
+        }
+        if let Some(wc) = &generics.where_clause {
+            for pred in &wc.predicates {
+                if let syn::WherePredicate::Type(pt) = pred
+                    && let syn::Type::Path(bt) = &pt.bounded_ty
+                    && bt.qself.is_none()
+                    && bt.path.segments.len() == 1
+                {
+                    record(&bt.path.segments[0].ident.to_string(), &pt.bounds);
+                }
+            }
+        }
+        map
     }
 
     pub(super) fn collect_trait_bound_type_param_map(generics: &syn::Generics) -> HashMap<String, String> {

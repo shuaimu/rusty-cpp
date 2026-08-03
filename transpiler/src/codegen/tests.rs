@@ -39575,6 +39575,45 @@ fn test_local_enum_left_right_variants_not_hijacked_by_either_ctor() {
     );
 }
 
+/// #33: `R::Output` where `R: IteratorIndex<I>` (itertools get). The trait
+/// declares `fn index(self, from: I) -> Self::Output` — the projection IS
+/// the call result of the emitted `IteratorIndex_::index` free fn, and the
+/// decltype spelling resolves for owners with no member typedef
+/// (rusty::range). The old `typename R::Output` was a hard substitution
+/// failure for every range index.
+#[test]
+fn test_trait_assoc_method_projection_spells_decltype_of_ufcs_call() {
+    let out = transpile_str_module(
+        r#"
+        pub trait IteratorIndex<I> {
+            type Output;
+            fn index(self, from: I) -> Self::Output;
+        }
+        impl<I> IteratorIndex<I> for std::ops::Range<usize> {
+            type Output = I;
+            fn index(self, from: I) -> Self::Output {
+                from
+            }
+        }
+        pub fn get<I, R>(iter: I, index: R) -> R::Output
+        where
+            R: IteratorIndex<I>,
+        {
+            index.index(iter)
+        }
+        "#,
+        "leafidx",
+    );
+    assert!(
+        out.contains("decltype(IteratorIndex_::index(std::declval<R>(), std::declval<I>())) get(I iter, R index)"),
+        "R::Output must spell as decltype of the UFCS index call, got:\n{out}"
+    );
+    assert!(
+        !out.contains("typename R::Output"),
+        "the member-typedef spelling must not survive, got:\n{out}"
+    );
+}
+
 /// #33: a user module named `std` (itertools' macros_hygiene declares a DECOY
 /// `mod std {}` to test macro hygiene) must not emit `namespace std` — inside
 /// the crate wrap it would shadow the global ::std for every later

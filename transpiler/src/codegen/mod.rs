@@ -772,6 +772,18 @@ pub struct CodeGen {
     /// Used to lower trait static calls like `Error::invalid_value(...)` to
     /// the constrained generic param (`E::invalid_value(...)`).
     pub(crate) trait_bound_type_param_scopes: Vec<HashMap<String, String>>,
+    /// Like `trait_bound_type_param_scopes` but keeps the bound's GENERIC
+    /// ARGS: `R: IteratorIndex<I>` → R → ("IteratorIndex", [I]). Needed to
+    /// spell assoc projections on dependent owners as decltype-of-method
+    /// calls (the args substitute into the method's param types).
+    pub(crate) trait_bound_args_scopes: Vec<HashMap<String, (String, Vec<syn::Type>)>>,
+    /// (trait, assoc) → (method, non-self param types, trait generic param
+    /// names) for trait methods whose return type is exactly `Self::Assoc`
+    /// (iter_index's `fn index(self, from: I) -> Self::Output`). The
+    /// projection `R::Output` (R bound by the trait) IS the call result of
+    /// the emitted `<Trait>_::method` free fn.
+    pub(crate) trait_assoc_method_projections:
+        HashMap<(String, String), (String, Vec<syn::Type>, Vec<String>)>,
     /// Per-scope mapping from callable type-param name (`F`) to callable-bound
     /// return type (`T` in `F: FnOnce() -> T`).
     pub(crate) callable_type_param_return_scopes: Vec<HashMap<String, syn::Type>>,
@@ -1946,6 +1958,8 @@ impl CodeGen {
             type_param_scopes: Vec::new(),
             type_param_scope_order: Vec::new(),
             trait_bound_type_param_scopes: Vec::new(),
+            trait_bound_args_scopes: Vec::new(),
+            trait_assoc_method_projections: HashMap::new(),
             callable_type_param_return_scopes: Vec::new(),
             callable_type_param_arg_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
@@ -17683,6 +17697,16 @@ impl CodeGen {
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
         self.push_type_param_scope(&free_generics);
+        // `free_generics` is bound-STRIPPED; the R::Output projection
+        // spelling needs the bound's args — restore from the original method
+        // generics (same as the body emitter's restore).
+        if let Some(top) = self.trait_bound_args_scopes.last_mut() {
+            let mut map = Self::collect_trait_bound_args_map(&method_spec.method.sig.generics);
+            if method_spec.self_is_template_param {
+                Self::rename_self_in_bound_args_map(&mut map);
+            }
+            *top = map;
+        }
         let self_cpp_ty = if method_spec.self_is_template_param {
             "Self_".to_string()
         } else {
@@ -18015,6 +18039,16 @@ impl CodeGen {
             return;
         }
         self.push_type_param_scope(&free_generics);
+        // `free_generics` is bound-STRIPPED; the R::Output projection spelling
+        // in the return type needs the bound's generic args (must match the
+        // decl pass, which does the same restore).
+        if let Some(top) = self.trait_bound_args_scopes.last_mut() {
+            let mut map = Self::collect_trait_bound_args_map(&method_spec.method.sig.generics);
+            if method_spec.self_is_template_param {
+                Self::rename_self_in_bound_args_map(&mut map);
+            }
+            *top = map;
+        }
         let associated_type_cpp_bindings =
             self.extension_assoc_cpp_bindings(&method_spec.associated_type_bindings);
         let receiver_param = format!(
@@ -18194,6 +18228,15 @@ impl CodeGen {
         // the emitted template prefix (already built from `free_generics`) is untouched.
         if let Some(top) = self.trait_bound_type_param_scopes.last_mut() {
             *top = Self::collect_trait_bound_type_param_map(&method_spec.method.sig.generics);
+        }
+        // Same restore for the args-aware sibling map (R::Output projection
+        // spelling reads the bound's generic args).
+        if let Some(top) = self.trait_bound_args_scopes.last_mut() {
+            let mut map = Self::collect_trait_bound_args_map(&method_spec.method.sig.generics);
+            if method_spec.self_is_template_param {
+                Self::rename_self_in_bound_args_map(&mut map);
+            }
+            *top = map;
         }
         self.current_struct_assoc_cpp_types
             .push(associated_type_cpp_bindings.clone());
@@ -44486,6 +44529,32 @@ impl CodeGen {
         ))
     }
 
+    /// Rename `Self` heads to `Self_` inside a collected bound-args map —
+    /// UFCS free functions spell the receiver type param `Self_`, so a
+    /// where-clause bound arg `R: IteratorIndex<Self>` must substitute as
+    /// `Self_` in the projection spelling.
+    fn rename_self_in_bound_args_map(
+        map: &mut HashMap<String, (String, Vec<syn::Type>)>,
+    ) {
+        struct SelfSegmentRenamer;
+        impl syn::visit_mut::VisitMut for SelfSegmentRenamer {
+            fn visit_type_path_mut(&mut self, tp: &mut syn::TypePath) {
+                if tp.qself.is_none()
+                    && let Some(first) = tp.path.segments.first_mut()
+                    && first.ident == "Self"
+                {
+                    first.ident = syn::Ident::new("Self_", first.ident.span());
+                }
+                syn::visit_mut::visit_type_path_mut(self, tp);
+            }
+        }
+        for (_, args) in map.values_mut() {
+            for ty in args {
+                syn::visit_mut::VisitMut::visit_type_mut(&mut SelfSegmentRenamer, ty);
+            }
+        }
+    }
+
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
         let mut scope = HashSet::new();
         let mut ordered_scope = Vec::new();
@@ -44507,6 +44576,8 @@ impl CodeGen {
         self.type_param_scopes.push(scope);
         self.type_param_scope_order.push(ordered_scope);
         self.trait_bound_type_param_scopes.push(trait_bound_map);
+        self.trait_bound_args_scopes
+            .push(Self::collect_trait_bound_args_map(generics));
         self.callable_type_param_return_scopes
             .push(callable_return_map);
         self.callable_type_param_arg_scopes
@@ -44517,6 +44588,7 @@ impl CodeGen {
         self.type_param_scopes.pop();
         self.type_param_scope_order.pop();
         self.trait_bound_type_param_scopes.pop();
+        self.trait_bound_args_scopes.pop();
         self.callable_type_param_return_scopes.pop();
         self.callable_type_param_arg_scopes.pop();
     }
@@ -44954,6 +45026,64 @@ impl CodeGen {
 
 
 
+    /// Spell `R::Assoc` (R a type param bound by a crate trait that declares
+    /// a receiver method returning exactly `Self::Assoc`) as the decltype of
+    /// the emitted `<Trait>_::method` UFCS free-fn call — itertools get's
+    /// `R: IteratorIndex<I>` → `decltype(IteratorIndex_::index(declval<R>(),
+    /// declval<I>()))`. Only consulted at the `typename R::Assoc` FALLBACK
+    /// sites: when the `<Trait>Traits<R>` helper routing resolves, it stays
+    /// authoritative.
+    fn try_spell_assoc_method_projection(
+        &self,
+        first: &str,
+        assoc_name: &str,
+    ) -> Option<String> {
+        if !self.is_type_param_in_scope(first) {
+            return None;
+        }
+        let (bound_trait, bound_args) = self
+            .trait_bound_args_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(first))?;
+        let (method, non_self_params, trait_generics) = self
+            .trait_assoc_method_projections
+            .get(&(bound_trait.clone(), assoc_name.to_string()))?;
+        if bound_args.len() != trait_generics.len() {
+            return None;
+        }
+        let subst = |ty: &syn::Type| -> String {
+            if let syn::Type::Path(ip) = ty
+                && ip.qself.is_none()
+                && ip.path.segments.len() == 1
+            {
+                let ident = ip.path.segments[0].ident.to_string();
+                if let Some(idx) = trait_generics.iter().position(|g| g == &ident) {
+                    return self.map_type(&bound_args[idx]);
+                }
+            }
+            self.map_type(ty)
+        };
+        let mut declvals = vec![format!("std::declval<{}>()", first)];
+        for pty in non_self_params {
+            let cpp = subst(pty);
+            if cpp.is_empty()
+                || cpp == "auto"
+                || cpp.contains("/* TODO")
+                || type_string_has_auto_placeholder(&cpp)
+            {
+                return None;
+            }
+            declvals.push(format!("std::declval<{}>()", cpp));
+        }
+        Some(format!(
+            "decltype({}::{}({}))",
+            self.ufcs_trait_namespace(bound_trait),
+            method,
+            declvals.join(", ")
+        ))
+    }
+
     fn maybe_prefix_typename_for_dependent_path(&self, path: String) -> String {
         let path = self.maybe_insert_template_keyword_for_dependent_member_path(path);
         if path.starts_with("typename ") {
@@ -45129,7 +45259,15 @@ impl CodeGen {
                         }
                         // Unqualified fallback. Both passes produce
                         // this same string when the table isn't
-                        // populated or the path would shadow.
+                        // populated or the path would shadow. Try the
+                        // assoc-method decltype spelling first — the
+                        // typename form is a hard substitution failure
+                        // for owners without the member typedef.
+                        if let Some(spelled) =
+                            self.try_spell_assoc_method_projection(first, assoc_name)
+                        {
+                            return spelled;
+                        }
                         return format!("typename {}::{}", first, assoc_name);
                     }
                 }
@@ -45137,6 +45275,13 @@ impl CodeGen {
         }
 
         if is_dependent_owner {
+            let segments: Vec<&str> = path.split("::").map(|s| s.trim()).collect();
+            if segments.len() == 2
+                && let Some(spelled) =
+                    self.try_spell_assoc_method_projection(segments[0], segments[1])
+            {
+                return spelled;
+            }
             return format!("typename {}", path);
         }
         path
