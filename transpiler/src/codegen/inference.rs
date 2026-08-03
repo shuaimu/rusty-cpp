@@ -6947,7 +6947,11 @@ impl CodeGen {
                 for elem in &tuple.elems {
                     elems.push(self.infer_simple_expr_type(elem)?);
                 }
-                syn::parse2::<syn::Type>(quote!((#(#elems),*))).ok()
+                // Trailing comma per element: `(i32)` parses as a PAREN type
+                // (collapsing a 1-tuple to its element — `Some((1,))` emitted
+                // `Option<int32_t>` around a make_tuple payload, #33);
+                // `(i32,)` stays a genuine 1-tuple. Valid for every arity.
+                syn::parse2::<syn::Type>(quote!((#(#elems,)*))).ok()
             }
             syn::Expr::Array(array_expr) => {
                 let first = array_expr.elems.first()?;
@@ -7650,7 +7654,9 @@ impl CodeGen {
                         .or_else(|| self.infer_simple_expr_type(elem))?;
                     elem_types.push(elem_ty);
                 }
-                return Some(parse_quote!((#(#elem_types),*)));
+                // Trailing comma per element — see the Expr::Tuple arm in
+                // infer_simple_expr_type: `(i32)` would collapse a 1-tuple.
+                return Some(parse_quote!((#(#elem_types,)*)));
             }
             syn::Expr::Match(_) => {
                 if !env.is_empty() {

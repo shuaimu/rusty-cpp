@@ -39547,3 +39547,27 @@ fn test_iterator_item_projection_defaults_on_ufcs_decl() {
         "defaults belong to the declaration only, got:\n{out}"
     );
 }
+
+/// #33: a 1-element tuple literal must infer as a 1-TUPLE — the inference
+/// quote rendered `(i32)` (a paren type, collapsing to the element), so
+/// `Some((1,))` emitted `Option<int32_t>` around a make_tuple payload
+/// (itertools tuples/test_core next_tuple asserts).
+#[test]
+fn test_one_tuple_literal_infers_as_tuple() {
+    let out = transpile_str(
+        r#"
+        fn f() {
+            let x = Some((1,));
+            let _ = x;
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Option<std::tuple<int32_t>>"),
+        "1-tuple payload must keep the tuple type, got:\n{out}"
+    );
+    assert!(
+        !out.contains("rusty::Option<int32_t>"),
+        "must not collapse the 1-tuple to its element, got:\n{out}"
+    );
+}
