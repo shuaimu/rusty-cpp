@@ -22625,6 +22625,23 @@ impl CodeGen {
                         {
                             val = format!("std::move({})", val);
                         }
+                        // A bare `return rusty::None;` in a DEDUCED (softened)
+                        // member body deduces None_t and conflicts with any
+                        // sibling `return rusty::Some(…);`
+                        // (PutBack::peeking_next's `Option<Self::Item>`).
+                        // When the dependent hint resolves to a fully-spelled
+                        // Option, type THIS statement — no signature changes,
+                        // so match-lowering stays untouched.
+                        if val == "rusty::None"
+                            && let Some(hint) = self.current_return_type_hint()
+                            && self.should_soften_dependent_assoc_mode()
+                            && self.type_references_current_struct_assoc_projection(hint)
+                            && !self.type_current_struct_assoc_aliases_emitted(hint)
+                            && let Some(resolved) = self.fully_resolved_dependent_spelling(hint)
+                            && resolved.starts_with("rusty::Option<")
+                        {
+                            val = format!("{}(rusty::None)", resolved);
+                        }
                         format!("{} {}", keyword, val)
                     }
                     None => keyword.to_string(),

@@ -27828,6 +27828,17 @@ impl CodeGen {
         // lambda params and `decltype(auto)`. Mask them before scanning for
         // unresolved-spelling markers.
         let residue = Self::mask_decltype_spans(&mapped);
+        // An unresolved assoc can map to its BARE alias name (`Item`) with no
+        // `typename`/`Self` marker — reject when any of the hint's assoc
+        // projection names survives as an identifier token.
+        let mut assoc_names = HashSet::new();
+        self.collect_current_struct_assoc_projection_names(ty, &mut assoc_names);
+        if assoc_names
+            .iter()
+            .any(|name| Self::cpp_type_expr_mentions_identifier(&residue, name))
+        {
+            return None;
+        }
         if std::env::var("RUSTY_CPP_TRAP_TVC").is_ok() {
             eprintln!("FRDS-TRAP: mapped={:?} residue={:?}", mapped, residue);
         }
