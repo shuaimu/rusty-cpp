@@ -44986,6 +44986,18 @@ impl CodeGen {
             let segments: Vec<&str> = path.split("::").map(|s| s.trim()).collect();
             if segments.len() == 2 {
                 let assoc_name = segments[1];
+                // `I::IntoIter` where I is a generic param: IntoIterator is a
+                // BUILTIN trait, so the crate-trait routing below never
+                // resolves it and the emission falls to `typename I::IntoIter`
+                // — a hard substitution failure for owners without the member
+                // typedef (rusty::Vec, ranges). Route through the header
+                // projection alias instead; it prefers the member typedef when
+                // present, so adapter owners are unchanged. Same spelling in
+                // both passes and in constraint contexts, so template
+                // redeclarations stay consistent.
+                if assoc_name == "IntoIter" && self.is_type_param_in_scope(first) {
+                    return format!("rusty::detail::into_iter_t<{}>", first);
+                }
                 // Skip if the AssocName contains template args (already
                 // a complex form we shouldn't touch).
                 if !assoc_name.contains('<') && !assoc_name.is_empty() {

@@ -10708,7 +10708,7 @@ fn test_leaf423_crate_prefixed_variant_paths_use_template_args() {
 #[test]
 fn test_leaf43_dependent_assoc_type_prefixed_with_typename() {
     let out = transpile_str("fn f<L, R>(x: Either<L::IntoIter, R::IntoIter>) {}");
-    assert!(out.contains("Either<typename L::IntoIter, typename R::IntoIter> x"));
+    assert!(out.contains("Either<typename rusty::detail::into_iter_t<L>, typename rusty::detail::into_iter_t<R>> x"));
 }
 
 #[test]
@@ -10716,8 +10716,8 @@ fn test_leaf43_qself_ref_assoc_type_normalized() {
     let out = transpile_str(
         "fn f<L>(x: <&L as IntoIterator>::IntoIter, y: <&mut L as IntoIterator>::IntoIter) {}",
     );
-    assert!(out.contains("typename L::IntoIter x"));
-    assert!(out.contains("typename L::IntoIter y"));
+    assert!(out.contains("typename rusty::detail::into_iter_t<L> x"));
+    assert!(out.contains("typename rusty::detail::into_iter_t<L> y"));
     assert!(!out.contains("const L&::IntoIter"));
     assert!(!out.contains("L&::IntoIter"));
 }
@@ -10786,7 +10786,7 @@ fn test_leaf43_assoc_alias_uses_typename() {
         }
     "#,
     );
-    assert!(out.contains("using Iter = typename L::IntoIter;"));
+    assert!(out.contains("using Iter = typename rusty::detail::into_iter_t<L>;"));
 }
 
 #[test]
@@ -20575,8 +20575,7 @@ fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
     // The nested-typename form may collapse `typename typename I::...` to
     // a single `typename I::...` (the double form is invalid C++).
     assert!(
-        out.contains("decltype(std::declval<typename I::IntoIter>().intersperse(std::declval<typename typename I::IntoIter::Item>())) imported_intersperse_into_iter_ty(I iterable)")
-            || out.contains("decltype(std::declval<typename I::IntoIter>().intersperse(std::declval<typename I::IntoIter::Item>())) imported_intersperse_into_iter_ty(I iterable)"),
+        out.contains("decltype(std::declval<typename rusty::detail::into_iter_t<I>>().intersperse(std::declval<typename rusty::detail::into_iter_t<I>::Item>())) imported_intersperse_into_iter_ty(I iterable)"),
         "expected imported Intersperse<I::IntoIter> lowering, got:\n{}",
         out
     );
@@ -20646,7 +20645,7 @@ fn test_leaf5193_imported_zip_alias_with_assoc_args_lowers_to_runtime_zip_declty
 
     assert!(
         out.contains(
-            "decltype(rusty::zip(std::declval<typename I::IntoIter>(), std::declval<typename J::IntoIter>())) f(I i, J j)"
+            "decltype(rusty::zip(std::declval<typename rusty::detail::into_iter_t<I>>(), std::declval<typename rusty::detail::into_iter_t<J>>())) f(I i, J j)"
         ),
         "expected Zip<I::IntoIter, J::IntoIter> to lower via runtime zip decltype, got:\n{}",
         out
@@ -39447,6 +39446,36 @@ fn test_fuse_type_position_uses_free_dispatcher() {
     assert!(
         !out.contains("std::declval<I>().fuse()"),
         "must not require a member fuse, got:\n{out}"
+    );
+}
+
+/// #33: `I::IntoIter` on a GENERIC owner. IntoIterator is a builtin trait, so
+/// the crate-trait assoc routing never resolves it and the old emission fell
+/// to `typename I::IntoIter` — a hard substitution failure for owners without
+/// the member typedef (rusty::Vec, ranges). Must route through the header
+/// projection alias, which prefers a member `IntoIter` typedef and falls back
+/// to `decltype(std::declval<T>().into_iter())`.
+#[test]
+fn test_generic_owner_into_iter_projects_via_dispatcher() {
+    let out = transpile_str_module(
+        r#"
+        pub struct Wrap<It> {
+            pub inner: It,
+        }
+        pub fn wrap_up<I: IntoIterator, J: IntoIterator>(a: I, b: J) -> Wrap<I::IntoIter> {
+            let _ = b;
+            Wrap { inner: a.into_iter() }
+        }
+        "#,
+        "leafintoiter",
+    );
+    assert!(
+        out.contains("rusty::detail::into_iter_t<I>"),
+        "I::IntoIter must project via rusty::detail::into_iter_t, got:\n{out}"
+    );
+    assert!(
+        !out.contains("typename I::IntoIter"),
+        "must not require a member IntoIter typedef on I, got:\n{out}"
     );
 }
 

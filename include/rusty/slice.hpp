@@ -387,6 +387,22 @@ template<typename Iter>
 using next_item_t =
     std::decay_t<decltype(option_like_take_value(std::declval<next_result_t<Iter>&>()))>;
 
+// Cross-type `IntoIterator::IntoIter` projection for a generic owner
+// (`I::IntoIter` in a transpiled signature). Prefers the member typedef when
+// the type declares one (transpiled adapters carry `using IntoIter = ...;`);
+// otherwise the type of `.into_iter()` on an rvalue receiver (rusty::Vec,
+// ranges, every port container).
+template<typename T, typename = void>
+struct into_iter_projection {
+    using type = decltype(std::declval<T>().into_iter());
+};
+template<typename T>
+struct into_iter_projection<T, std::void_t<typename T::IntoIter>> {
+    using type = typename T::IntoIter;
+};
+template<typename T>
+using into_iter_t = typename into_iter_projection<std::remove_cvref_t<T>>::type;
+
 // --- size_hint plumbing shared by the next-iter adapters -------------------
 // Inner hints come in two shapes: `std::tuple<size_t, Option<size_t>>` (the
 // canonical one the transpiler emits) and `filter_size_hint` (`_0`/`_1`
