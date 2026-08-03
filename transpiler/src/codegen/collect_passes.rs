@@ -2608,6 +2608,122 @@ impl CodeGen {
         Some(rewritten)
     }
 
+    /// Record a blanket trait impl whose self type is a BARE generic param
+    /// carrying an Fn-family bound, where the impl's assoc type equals the
+    /// bound's return-type param (merge_join's
+    /// `impl<L, R, T, F: FnMut(&L, &R) -> T> FuncLR<L, R> for F { type T = T; }`).
+    /// The type mapper lowers a use-site `<F as FuncLR<A, B>>::T` to
+    /// `std::invoke_result_t<F&, …>` from this record — no helper struct is
+    /// ever emitted for a blanket impl, so nothing else can resolve it.
+    fn collect_blanket_fn_assoc_projection(&mut self, impl_block: &syn::ItemImpl) {
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return;
+        };
+        let Some(trait_seg) = trait_path.segments.last() else {
+            return;
+        };
+        let syn::Type::Path(self_tp) = impl_block.self_ty.as_ref() else {
+            return;
+        };
+        if self_tp.qself.is_some() || self_tp.path.segments.len() != 1 {
+            return;
+        }
+        let self_ident = self_tp.path.segments[0].ident.to_string();
+        let impl_params: Vec<String> = impl_block
+            .generics
+            .type_params()
+            .map(|p| p.ident.to_string())
+            .collect();
+        if !impl_params.contains(&self_ident) {
+            return;
+        }
+        let fn_bound_from = |bounds: &syn::punctuated::Punctuated<
+            syn::TypeParamBound,
+            syn::token::Plus,
+        >|
+         -> Option<syn::ParenthesizedGenericArguments> {
+            bounds.iter().find_map(|b| match b {
+                syn::TypeParamBound::Trait(tb) => {
+                    let seg = tb.path.segments.last()?;
+                    if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
+                        return None;
+                    }
+                    match &seg.arguments {
+                        syn::PathArguments::Parenthesized(pg) => Some(pg.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        };
+        let mut fn_bound = impl_block
+            .generics
+            .type_params()
+            .find(|p| p.ident == self_ident.as_str())
+            .and_then(|p| fn_bound_from(&p.bounds));
+        if fn_bound.is_none()
+            && let Some(wc) = &impl_block.generics.where_clause
+        {
+            fn_bound = wc.predicates.iter().find_map(|pred| match pred {
+                syn::WherePredicate::Type(pt)
+                    if matches!(&pt.bounded_ty, syn::Type::Path(bt)
+                        if bt.qself.is_none() && bt.path.is_ident(&self_ident)) =>
+                {
+                    fn_bound_from(&pt.bounds)
+                }
+                _ => None,
+            });
+        }
+        let Some(pg) = fn_bound else {
+            return;
+        };
+        let syn::ReturnType::Type(_, ret_ty) = &pg.output else {
+            return;
+        };
+        let syn::Type::Path(ret_tp) = ret_ty.as_ref() else {
+            return;
+        };
+        if ret_tp.qself.is_some() || ret_tp.path.segments.len() != 1 {
+            return;
+        }
+        let ret_ident = ret_tp.path.segments[0].ident.to_string();
+        if !impl_params.contains(&ret_ident) {
+            return;
+        }
+        // Trait args must all be bare impl params — the use site substitutes
+        // its own trait args for them POSITIONALLY.
+        let trait_params: Option<Vec<String>> = match &trait_seg.arguments {
+            syn::PathArguments::AngleBracketed(a) => a
+                .args
+                .iter()
+                .map(|g| match g {
+                    syn::GenericArgument::Type(syn::Type::Path(tp2))
+                        if tp2.qself.is_none() && tp2.path.segments.len() == 1 =>
+                    {
+                        Some(tp2.path.segments[0].ident.to_string())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            syn::PathArguments::None => Some(Vec::new()),
+            _ => None,
+        };
+        let Some(trait_params) = trait_params else {
+            return;
+        };
+        for item in &impl_block.items {
+            if let syn::ImplItem::Type(at) = item
+                && matches!(&at.ty, syn::Type::Path(vt)
+                    if vt.qself.is_none() && vt.path.is_ident(&ret_ident))
+            {
+                self.blanket_fn_assoc_projections.insert(
+                    (trait_seg.ident.to_string(), at.ident.to_string()),
+                    (trait_params.clone(), pg.inputs.iter().cloned().collect()),
+                );
+            }
+        }
+    }
+
     pub(super) fn collect_impl_blocks(&mut self, items: &[syn::Item], module_path: &[String]) {
         // Structs/enums with `#[derive(Copy)]`: in single-file input the
         // derive stays an ATTRIBUTE and never becomes an `impl Copy` block
@@ -2632,6 +2748,7 @@ impl CodeGen {
                     let normalized_impl = self.normalize_impl_assoc_bound_generics(impl_block);
                     let impl_block: &syn::ItemImpl =
                         normalized_impl.as_ref().unwrap_or(impl_block);
+                    self.collect_blanket_fn_assoc_projection(impl_block);
                     if Self::impl_self_type_path(impl_block.self_ty.as_ref()).is_none() {
                         // Self type isn't a path (e.g. `impl Trait for [T; N]`).
                         // We can't key these in `impl_blocks` (which is keyed by

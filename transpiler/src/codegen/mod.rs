@@ -700,6 +700,14 @@ pub struct CodeGen {
     /// Collected impl blocks indexed by type name.
     /// Populated during the first pass of emit_file.
     pub(crate) impl_blocks: HashMap<String, Vec<syn::ImplItem>>,
+    /// Blanket-Fn assoc projections (merge_join's FuncLR shape):
+    /// `impl<L, R, T, F: FnMut(&L, &R) -> T> FuncLR<L, R> for F { type T = T; }`
+    /// defines the assoc PURELY as the Fn bound's return type, so a use-site
+    /// projection `<F as FuncLR<A, B>>::T` is the CALL RESULT of F — there is
+    /// no helper struct to resolve against. Keyed (trait, assoc) →
+    /// (trait param idents in impl order, Fn bound input types).
+    pub(crate) blanket_fn_assoc_projections:
+        HashMap<(String, String), (Vec<String>, Vec<syn::Type>)>,
     /// Impl blocks consumed during merged type emission.
     /// Retained for downstream method return-type inference after removal from
     /// `impl_blocks` to avoid duplicate standalone impl emission.
@@ -1919,6 +1927,7 @@ impl CodeGen {
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
+            blanket_fn_assoc_projections: HashMap::new(),
             consumed_impl_blocks: HashMap::new(),
             impl_source_modules: HashMap::new(),
             merged_method_using_namespaces: Vec::new(),

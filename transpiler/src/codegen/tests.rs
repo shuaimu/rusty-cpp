@@ -34171,8 +34171,8 @@ fn test_leaf5192_qself_assoc_alias_body_prevents_unbound_t_leak() {
     );
 
     assert!(
-        out.contains("using MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, typename F::T>>;"),
-        "qself associated projection in alias body should preserve owner substitution in module mode, got:\n{}",
+        out.contains("using MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, std::invoke_result_t<F&, const rusty::detail::associated_item_t<I>&, const rusty::detail::associated_item_t<J>&>>>;"),
+        "qself blanket-Fn projection in alias body should lower to invoke_result (the old `typename F::T` spelling documented the bug — no lambda has ::T), got:\n{}",
         out
     );
     assert!(
@@ -39476,6 +39476,34 @@ fn test_generic_owner_into_iter_projects_via_dispatcher() {
     assert!(
         !out.contains("typename I::IntoIter"),
         "must not require a member IntoIter typedef on I, got:\n{out}"
+    );
+}
+
+/// #33: blanket-Fn assoc projection (merge_join's FuncLR). The crate's ONLY
+/// impl of the trait is blanket over a bare param whose Fn bound's return
+/// type IS the assoc — so `<F as FuncLR<A, B>>::T` is the call result. The
+/// old emission dropped the qself to bare `typename F::T`, which no lambda
+/// has. Must lower to std::invoke_result_t with the trait args substituted
+/// into the Fn bound's inputs.
+#[test]
+fn test_blanket_fn_assoc_projection_lowers_to_invoke_result() {
+    let out = transpile_str(
+        r#"
+        pub trait FuncLR<L, R> { type T; }
+        impl<L, R, T, F: FnMut(&L, &R) -> T> FuncLR<L, R> for F { type T = T; }
+        pub struct MergeFuncLR<F, T>(F, std::marker::PhantomData<T>);
+        pub struct MergeBy<I, J, F> { a: I, b: J, f: F }
+        pub type MergeJoinBy<I, J, F> =
+            MergeBy<I, J, MergeFuncLR<F, <F as FuncLR<<I as Iterator>::Item, <J as Iterator>::Item>>::T>>;
+        "#,
+    );
+    assert!(
+        out.contains("std::invoke_result_t<F&, const rusty::detail::associated_item_t<I>&, const rusty::detail::associated_item_t<J>&>"),
+        "FuncLR::T must lower to invoke_result_t over the substituted Item args, got:\n{out}"
+    );
+    assert!(
+        !out.contains("typename F::T"),
+        "the dropped-qself member spelling must not survive, got:\n{out}"
     );
 }
 

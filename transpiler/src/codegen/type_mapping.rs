@@ -1875,6 +1875,103 @@ impl CodeGen {
                                     return self.maybe_prefix_typename_for_dependent_path(resolved);
                                 }
                             }
+                            let self_is_dependent = self.is_type_param_in_scope(&self_type)
+                                || (self_type.len() == 1
+                                    && self_type.chars().all(|c| c.is_ascii_uppercase()));
+                            // Blanket-Fn assoc projection (see
+                            // collect_blanket_fn_assoc_projection): the trait's
+                            // only impl ties the assoc to the Fn bound's return
+                            // type, so `<F as FuncLR<A, B>>::T` IS the call
+                            // result — std::invoke_result_t<F&, const A&, …>.
+                            // Alias templates never need `typename`, so return
+                            // the raw spelling.
+                            if qself.position >= 1
+                                && let Some(trait_seg) =
+                                    tp.path.segments.get(qself.position - 1)
+                                && let Some((trait_params, bound_inputs)) =
+                                    self.blanket_fn_assoc_projections.get(&(
+                                        trait_seg.ident.to_string(),
+                                        assoc_name.clone(),
+                                    ))
+                            {
+                                let trait_args: Vec<syn::Type> = match &trait_seg.arguments {
+                                    syn::PathArguments::AngleBracketed(a) => a
+                                        .args
+                                        .iter()
+                                        .filter_map(|g| match g {
+                                            syn::GenericArgument::Type(t) => Some(t.clone()),
+                                            _ => None,
+                                        })
+                                        .collect(),
+                                    _ => Vec::new(),
+                                };
+                                if trait_args.len() == trait_params.len() {
+                                    let subst = |ident: &str| -> Option<String> {
+                                        trait_params
+                                            .iter()
+                                            .position(|p| p == ident)
+                                            .map(|i| self.map_type(&trait_args[i]))
+                                    };
+                                    let bare_param = |ty: &syn::Type| -> Option<String> {
+                                        match ty {
+                                            syn::Type::Path(ip)
+                                                if ip.qself.is_none()
+                                                    && ip.path.segments.len() == 1 =>
+                                            {
+                                                Some(ip.path.segments[0].ident.to_string())
+                                            }
+                                            _ => None,
+                                        }
+                                    };
+                                    let cpp_args: Vec<String> = bound_inputs
+                                        .iter()
+                                        .map(|input| match input {
+                                            syn::Type::Reference(r) => {
+                                                let inner = bare_param(r.elem.as_ref())
+                                                    .and_then(|id| subst(&id))
+                                                    .unwrap_or_else(|| {
+                                                        self.map_type(r.elem.as_ref())
+                                                    });
+                                                format!("const {}&", inner)
+                                            }
+                                            other => bare_param(other)
+                                                .and_then(|id| subst(&id))
+                                                .unwrap_or_else(|| self.map_type(other)),
+                                        })
+                                        .collect();
+                                    return format!(
+                                        "std::invoke_result_t<{}&, {}>",
+                                        self_type,
+                                        cpp_args.join(", ")
+                                    );
+                                }
+                            }
+                            // Builtin-Iterator Item projection on a dependent
+                            // owner: `<I as Iterator>::Item` has nothing local
+                            // to resolve against; `typename I::Item` requires a
+                            // member typedef the port iterators don't all have.
+                            // The runtime next-item alias works for every
+                            // Option-like-next() iterator.
+                            if assoc_name == "Item"
+                                && self_is_dependent
+                                && qself.position >= 1
+                                && tp.path.segments.get(qself.position - 1).is_some_and(
+                                    |seg| {
+                                        matches!(
+                                            seg.ident.to_string().as_str(),
+                                            "Iterator"
+                                                | "DoubleEndedIterator"
+                                                | "ExactSizeIterator"
+                                                | "FusedIterator"
+                                        )
+                                    },
+                                )
+                            {
+                                return format!(
+                                    "rusty::detail::next_item_t<{}>",
+                                    self_type
+                                );
+                            }
                         }
                         if let Some(struct_name) = &self.current_struct {
                             if &self_type == struct_name {
