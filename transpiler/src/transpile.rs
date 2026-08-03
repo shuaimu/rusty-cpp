@@ -72,6 +72,13 @@ pub struct UfcsTraitManifest {
     /// not-in-surface heuristic in is_macro_rules_import.
     #[serde(default)]
     pub declared_macros: Vec<String>,
+    /// Crate-ROOT re-exported item names with C++ entities (named re-exports
+    /// + glob-expanded module items), EXCLUDING known macros. Lets a
+    /// consumer's self-alias import rescue (`use itertools as it; use
+    /// crate::it::interleave;`) emit `using ::itertools::interleave;` only
+    /// for names that exist in the crate namespace.
+    #[serde(default)]
+    pub root_exported_names: Vec<String>,
     /// Every MODULE this crate declares, as `::`-joined C++-escaped crate-relative paths
     /// (`de`, `de::value`, `private_`, `private_::size_hint`). Lets a consumer recognize a
     /// crate-qualified reference to a wrapped dependency's module (`serde_core::private_::size_hint`)
@@ -2855,6 +2862,7 @@ mod tests {
             declared_types: Vec::new(),
             hygiene_aliases: std::collections::BTreeMap::new(),
             declared_macros: Vec::new(),
+            root_exported_names: Vec::new(),
             declared_modules: Vec::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
@@ -2937,6 +2945,7 @@ mod tests {
             declared_types: Vec::new(),
             hygiene_aliases: std::collections::BTreeMap::new(),
             declared_macros: Vec::new(),
+            root_exported_names: Vec::new(),
             declared_modules: Vec::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),

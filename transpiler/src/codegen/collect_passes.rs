@@ -3933,6 +3933,97 @@ impl CodeGen {
         }
     }
 
+    /// Per-module PUBLIC item names (declared + NAMED pub-use re-exports) for
+    /// crate-root glob re-export expansion. See `module_pub_item_names`.
+    pub(super) fn collect_module_pub_item_names(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
+        fn is_pub(vis: &syn::Visibility) -> bool {
+            matches!(vis, syn::Visibility::Public(_) | syn::Visibility::Restricted(_))
+        }
+        // Named leaves with their ORIGIN module path (crate-rooted pub-use
+        // targets only): `pub use crate::adaptors::interleave` in module
+        // `free` records ("interleave", Some("adaptors")) — the glob
+        // expansion then uses the origin so it never depends on the middle
+        // module's namespace carrying the name.
+        fn use_tree_named_leaves(
+            tree: &syn::UseTree,
+            prefix: &mut Vec<String>,
+            out: &mut Vec<(String, Option<String>)>,
+        ) {
+            let origin = |prefix: &[String]| -> Option<String> {
+                let mut segs = prefix.to_vec();
+                if segs.first().is_some_and(|s| s == "crate") {
+                    segs.remove(0);
+                } else if segs
+                    .first()
+                    .is_some_and(|s| s == "self" || s == "super")
+                {
+                    return None;
+                }
+                (!segs.is_empty()).then(|| segs.join("::"))
+            };
+            match tree {
+                syn::UseTree::Name(n) => {
+                    let name = n.ident.to_string();
+                    if name != "self" {
+                        out.push((name, origin(prefix)));
+                    }
+                }
+                syn::UseTree::Rename(r) => out.push((r.rename.to_string(), origin(prefix))),
+                syn::UseTree::Path(p) => {
+                    prefix.push(p.ident.to_string());
+                    use_tree_named_leaves(&p.tree, prefix, out);
+                    prefix.pop();
+                }
+                syn::UseTree::Group(g) => {
+                    for t in &g.items {
+                        use_tree_named_leaves(t, prefix, out);
+                    }
+                }
+                syn::UseTree::Glob(_) => {}
+            }
+        }
+        let key = module_path.join("::");
+        for item in items {
+            let name = match item {
+                syn::Item::Fn(f) if is_pub(&f.vis) => Some(f.sig.ident.to_string()),
+                syn::Item::Struct(s) if is_pub(&s.vis) => Some(s.ident.to_string()),
+                syn::Item::Enum(e) if is_pub(&e.vis) => Some(e.ident.to_string()),
+                syn::Item::Trait(t) if is_pub(&t.vis) => Some(t.ident.to_string()),
+                syn::Item::Type(t) if is_pub(&t.vis) => Some(t.ident.to_string()),
+                syn::Item::Const(c) if is_pub(&c.vis) => Some(c.ident.to_string()),
+                syn::Item::Static(s) if is_pub(&s.vis) => Some(s.ident.to_string()),
+                syn::Item::Use(u) if is_pub(&u.vis) => {
+                    let mut leaves = Vec::new();
+                    use_tree_named_leaves(&u.tree, &mut Vec::new(), &mut leaves);
+                    self.module_pub_item_names
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(leaves);
+                    None
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_module_pub_item_names(nested, &nested_path);
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.module_pub_item_names
+                    .entry(key.clone())
+                    .or_default()
+                    .push((name, None));
+            }
+        }
+    }
+
     pub(super) fn collect_import_alias_names(&mut self, items: &[syn::Item]) {
         for item in items {
             match item {
@@ -3950,6 +4041,13 @@ impl CodeGen {
     pub(super) fn collect_import_alias_names_in_tree(&mut self, tree: &syn::UseTree) {
         match tree {
             syn::UseTree::Rename(rename) => {
+                // `use itertools as it;` where itertools IS the current crate
+                // (parity-test TUs alias their own crate): record the
+                // SELF-ALIAS so `it::X` imports rescue to the crate's
+                // namespace instead of dropping as Rust-only.
+                if self.crate_name.as_deref() == Some(rename.ident.to_string().as_str()) {
+                    self.self_crate_aliases.insert(rename.rename.to_string());
+                }
                 self.import_alias_names.insert(rename.rename.to_string());
             }
             syn::UseTree::Path(path) => self.collect_import_alias_names_in_tree(&path.tree),

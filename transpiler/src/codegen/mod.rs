@@ -1735,6 +1735,26 @@ pub struct CodeGen {
     /// Used to distinguish namespace imports from value/function imports that
     /// happen to end with a lowercase segment.
     pub(crate) declared_module_paths: HashSet<String>,
+    /// Rust module path (`free`, `adaptors::map`) → its PUBLIC item names
+    /// (declared + NAMED pub-use re-exports). Lets a crate-root glob
+    /// re-export (`pub use crate::free::*;`) emit per-name
+    /// `export using free_mod::interleave;` — a using-DIRECTIVE cannot be
+    /// exported from a C++ module, so importers' qualified lookup
+    /// (`::itertools::interleave`) never sees glob re-exports otherwise.
+    pub(crate) module_pub_item_names: HashMap<String, Vec<(String, Option<String>)>>,
+    /// Deferred crate-root glob-re-export usings, flushed just before the
+    /// crate namespace CLOSES (all declarations precede them there): the glob
+    /// site itself runs in lib.rs order, before the member modules emit.
+    /// (origin C++ namespace path, escaped name, export prefix).
+    pub(crate) pending_root_glob_exports: Vec<(String, String)>,
+    /// Aliases of the CURRENT crate from `use <crate> as <alias>;` (parity
+    /// tests alias their own crate: `use itertools as it;`). Imports rooted
+    /// at one of these rescue to `using ::<crate>::…;` instead of dropping.
+    pub(crate) self_crate_aliases: HashSet<String>,
+    /// Root-level using names already emitted this run (named re-exports +
+    /// glob expansions) — a second `export using` of the same name in the
+    /// crate namespace is a redefinition.
+    pub(crate) emitted_root_export_names: HashSet<String>,
     /// Top-level modules that are imported as bare namespaces from nested scopes.
     /// Used to emit just-enough global namespace forward declarations for alias imports.
     pub(crate) required_top_level_module_aliases: HashSet<String>,
@@ -2235,6 +2255,10 @@ impl CodeGen {
             item_const_types: HashMap::new(),
             declared_module_names: HashSet::new(),
             declared_module_paths: HashSet::new(),
+            module_pub_item_names: HashMap::new(),
+            pending_root_glob_exports: Vec::new(),
+            self_crate_aliases: HashSet::new(),
+            emitted_root_export_names: HashSet::new(),
             required_top_level_module_aliases: HashSet::new(),
             module_qualified_functions: HashMap::new(),
             module_namespace_renames: HashMap::new(),
@@ -2566,6 +2590,22 @@ impl CodeGen {
         // tidy and `} // namespace crate` aids debugging.
         if !self.output.ends_with('\n') {
             self.output.push('\n');
+        }
+        // Deferred crate-root glob re-exports (`pub use free::*;`): emitted
+        // HERE — after every member module's declarations — because a
+        // using-declaration needs its target already declared, and a
+        // using-DIRECTIVE (the glob's other half) cannot be exported from a
+        // C++ module for importers' qualified lookup.
+        if !self.pending_root_glob_exports.is_empty() {
+            let pending = std::mem::take(&mut self.pending_root_glob_exports);
+            let mut seen = HashSet::new();
+            for (origin_ns, name) in pending {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                self.output
+                    .push_str(&format!("export using {}::{};\n", origin_ns, name));
+            }
         }
         self.output
             .push_str(&format!("}} // namespace {}\n", crate_name));
@@ -3649,6 +3689,20 @@ impl CodeGen {
             method_owners,
             declared_types,
             hygiene_aliases,
+            root_exported_names: {
+                // Named root re-exports + everything the crate-root glob
+                // expansion materialized (`pub use free::*`), macros excluded.
+                let mut v: Vec<String> = self
+                    .crate_reexports
+                    .keys()
+                    .chain(self.emitted_root_export_names.iter())
+                    .filter(|name| !self.macro_rules_names.contains(*name))
+                    .cloned()
+                    .collect();
+                v.sort();
+                v.dedup();
+                v
+            },
             declared_macros,
             declared_modules,
             rusty_ext_methods_by_module,
@@ -4821,6 +4875,7 @@ impl CodeGen {
         // Pass 1i: collect `use ... as Alias` names so forward declaration emission can
         // avoid alias-order-sensitive non-void signatures.
         self.collect_import_alias_names(&file.items);
+        self.collect_module_pub_item_names(&file.items, &[]);
         log_emit("collect_import_alias_names");
         // Pass 1i.1b: collect crate-wide `extern crate <crate> as <alias>;` renames
         // BEFORE scope import bindings, so use-import targets that start with an

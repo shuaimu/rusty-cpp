@@ -5443,6 +5443,48 @@ impl CodeGen {
                 self.writeln(&format!("// Rust-only primitive re-export: using {};", resolved_path));
                 continue;
             }
+            // An import rooted at the crate's SELF-ALIAS (`use itertools as
+            // it; use crate::it::interleave;`): the flat libtest TU imports
+            // the crate module, whose namespace carries root re-exports (incl.
+            // glob-expanded ones), so a qualified using makes bare call sites
+            // resolve. Test TUs are separate CodeGen instances — the crate's
+            // OWN manifest (module == crate name) carries the name lists.
+            if let Some((root, rest)) = resolved_path.split_once("::")
+                && self.self_crate_aliases.contains(root)
+                && (self.module_name.is_some() || self.expanded_libtest_mode)
+                && let Some(crate_name) = self.crate_name.clone()
+            {
+                let crate_manifest = self
+                    .dependency_ufcs_trait_manifests
+                    .iter()
+                    .find(|m| m.module == crate_name);
+                let rescued = if !rest.contains("::") {
+                    (self.crate_reexports.contains_key(rest)
+                        || crate_manifest.is_some_and(|m| {
+                            m.root_exported_names.iter().any(|n| n == rest)
+                        }))
+                    .then(|| format!("::{}::{}", crate_name, escape_cpp_keyword(rest)))
+                } else {
+                    let first = rest.split("::").next().unwrap_or("");
+                    (self.declared_module_names.contains(first)
+                        || crate_manifest.is_some_and(|m| {
+                            m.declared_modules.iter().any(|d| {
+                                d == first || d.starts_with(&format!("{}::", first))
+                            })
+                        }))
+                    .then(|| {
+                        format!(
+                            "::{}::{}",
+                            crate_name,
+                            self.apply_module_renames_to_path(rest)
+                        )
+                    })
+                };
+                if let Some(rescued) = rescued {
+                    self.writeln(&format!("using {};", rescued));
+                    continue;
+                }
+            }
             // Own-crate imports are redundant in flat libtest targets (the
             // crate's items are visible via `import <crate>;`) and ill-formed
             // for macro-only names; skip them rather than emit a `using`
@@ -5661,6 +5703,58 @@ impl CodeGen {
                             // Apply module renames to namespace target
                             let renamed_ns = self.apply_module_renames_to_path(ns);
                             self.emit_namespace_using_import(&renamed_ns);
+                            // A crate-root GLOB re-export (`pub use free::*;`):
+                            // a using-DIRECTIVE cannot be exported from a C++
+                            // module, so importers' qualified lookup
+                            // (`::itertools::interleave`) never sees these
+                            // names. Materialize per-name export usings from
+                            // the module's public item list, skipping names
+                            // the crate root already declares or re-exports.
+                            if self.module_stack.is_empty()
+                                && (self.module_name.is_some() || self.expanded_libtest_mode)
+                                && !export_prefix.is_empty()
+                                && let Some(names) =
+                                    self.module_pub_item_names.get(ns).cloned()
+                            {
+                                let root_items: HashSet<String> = self
+                                    .module_pub_item_names
+                                    .get("")
+                                    .map(|v| v.iter().map(|(n, _)| n.clone()).collect())
+                                    .unwrap_or_default();
+                                let mut names = names;
+                                names.sort();
+                                names.dedup();
+                                for (name, origin) in names {
+                                    // NOTE: crate_reexports is NOT root-only
+                                    // (a module's own `pub use` registers
+                                    // there too) — root collisions are covered
+                                    // by root_items (module_pub_item_names[""],
+                                    // which includes lib.rs named re-exports).
+                                    if root_items.contains(&name)
+                                        || self.macro_rules_names.contains(&name)
+                                        || !self
+                                            .emitted_root_export_names
+                                            .insert(name.clone())
+                                    {
+                                        continue;
+                                    }
+                                    // DEFERRED: the usings flush right before
+                                    // the crate namespace closes — the glob
+                                    // site runs in lib.rs order, before the
+                                    // member modules' declarations exist.
+                                    let origin_ns = self.apply_module_renames_to_path(
+                                        &origin
+                                            .as_deref()
+                                            .unwrap_or(ns)
+                                            .split("::")
+                                            .map(escape_cpp_keyword)
+                                            .collect::<Vec<_>>()
+                                            .join("::"),
+                                    );
+                                    self.pending_root_glob_exports
+                                        .push((origin_ns, escape_cpp_keyword(&name)));
+                                }
+                            }
                         }
                         continue;
                     }
