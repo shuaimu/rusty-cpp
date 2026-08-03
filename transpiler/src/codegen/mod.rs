@@ -43246,9 +43246,14 @@ impl CodeGen {
                     iter_ty
                 )),
                 ("Rev", [iter_ty]) => Some(format!("decltype(std::declval<{}>().rev())", iter_ty)),
-                ("Cycle", [iter_ty]) => {
-                    Some(format!("decltype(std::declval<{}>().cycle())", iter_ty))
-                }
+                ("Cycle", [iter_ty]) => Some(format!(
+                    // Free-adapter spelling for the same reason as Fuse above:
+                    // user Iterator types (laziness's Panicking) have no
+                    // member cycle(); rusty::cycle prefers the member and
+                    // wraps member-less option-like-next iterators.
+                    "decltype(rusty::cycle(std::declval<{}>()))",
+                    iter_ty
+                )),
                 ("Cloned", [iter_ty]) => {
                     Some(format!("decltype(std::declval<{}>().cloned())", iter_ty))
                 }
@@ -43417,8 +43422,11 @@ impl CodeGen {
                 && (!self.local_declared_types.contains("Cycle")
                     || !self.local_declared_type_has_matching_arity("Cycle", 1))
             {
+                // Free-adapter spelling (see the Cycle arm in
+                // adapter_type_name_from_rust_path): member-less user
+                // iterators have no .cycle().
                 return Some(format!(
-                    "decltype(std::declval<{}>().cycle())",
+                    "decltype(rusty::cycle(std::declval<{}>()))",
                     mapped_args[0]
                 ));
             }
