@@ -24421,9 +24421,35 @@ impl CodeGen {
                         || receivers.contains(cpp_name)
                 })
         };
-        let no_capture_is_mutated = !body_reassigns_a_capture && !body_calls_method_on_a_capture;
+        // A capture CONSUMED as a value argument (`f(cap)` where the slot
+        // takes ownership — the emitter will write `std::move(cap)`) must
+        // not be const either: `std::move` on a const capture selects the
+        // deleted copy for move-only types (Box, Function). The value-slot
+        // collector is the same one the let-binding constness analysis
+        // uses, so "consumed" here matches what actually gets move-wrapped.
+        let body_consumes_a_capture = {
+            let stmts = match closure.body.as_ref() {
+                syn::Expr::Block(block) => block.block.stmts.clone(),
+                other => vec![syn::Stmt::Expr(other.clone(), None)],
+            };
+            let mut consumed = std::collections::HashSet::new();
+            for stmt in &stmts {
+                self.collect_value_call_argument_locals_in_stmt(stmt, &mut consumed);
+            }
+            outer_captures.iter().any(|cpp_name| {
+                self.lookup_rust_binding_name_for_cpp_name(cpp_name)
+                    .is_some_and(|rust_name| consumed.contains(&rust_name))
+                    || consumed.contains(cpp_name)
+            })
+        };
+        let no_capture_is_mutated = !body_reassigns_a_capture
+            && !body_calls_method_on_a_capture
+            && !body_consumes_a_capture;
         let needs_mutable = is_move_closure
-            && !(no_capture_is_mutated || (all_captures_are_raw_pointers && !body_reassigns_a_capture));
+            && !(no_capture_is_mutated
+                || (all_captures_are_raw_pointers
+                    && !body_reassigns_a_capture
+                    && !body_consumes_a_capture));
         let lambda_mutability = if needs_mutable { " mutable" } else { "" };
 
         // A callable-shaped expected type means this closure IS the callable.
