@@ -526,7 +526,59 @@ impl CodeGen {
         } else {
             rewritten
         };
+        // Unbound `Self_::Item` projections (Iterator's Item on a default
+        // method) must tolerate receivers WITHOUT a member Item typedef —
+        // runtime detail adapters like filter_next_iter. associated_item_t
+        // falls back to deducing from next(), the same spelling default-
+        // method bodies already use. Boundary-checked so `Items`-style
+        // longer names are untouched.
+        let rewritten = if self_cpp_ty == "Self_" {
+            let mut out = Self::replace_type_token_at_ident_boundary(
+                &rewritten,
+                "typename std::remove_reference_t<Self_>::Item",
+                "rusty::detail::associated_item_t<std::remove_reference_t<Self_>>",
+            );
+            out = Self::replace_type_token_at_ident_boundary(
+                &out,
+                "typename Self_::Item",
+                "rusty::detail::associated_item_t<std::remove_reference_t<Self_>>",
+            );
+            out
+        } else {
+            rewritten
+        };
         collapse_redundant_typename_tokens(&rewritten)
+    }
+
+    /// String replace that only fires when the match is NOT followed by an
+    /// identifier-continuation character (so `...::Item` never clobbers a
+    /// longer `...::Items`).
+    fn replace_type_token_at_ident_boundary(
+        haystack: &str,
+        pattern: &str,
+        replacement: &str,
+    ) -> String {
+        let mut out = String::with_capacity(haystack.len());
+        let mut rest = haystack;
+        while let Some(pos) = rest.find(pattern) {
+            let after = rest[pos + pattern.len()..].chars().next();
+            out.push_str(&rest[..pos]);
+            if after == Some(':') {
+                // Chained projection (`…::Item::IntoIter`): the alias-template
+                // replacement becomes the BASE of a dependent member access,
+                // which needs its `typename` back (alias-template ids
+                // themselves never do).
+                out.push_str("typename ");
+                out.push_str(replacement);
+            } else if after.is_none_or(|c| !(c.is_alphanumeric() || c == '_')) {
+                out.push_str(replacement);
+            } else {
+                out.push_str(pattern);
+            }
+            rest = &rest[pos + pattern.len()..];
+        }
+        out.push_str(rest);
+        out
     }
 
     pub(super) fn type_current_struct_assoc_aliases_emitted(&self, ty: &syn::Type) -> bool {
@@ -2820,7 +2872,19 @@ impl CodeGen {
                                     // §3.2.13 default-method body: qualify to the
                                     // template param `Self_` (dependent name).
                                     let tail = base.trim_start_matches("Self::").to_string();
-                                    base = format!("typename Self_::{}", tail);
+                                    if tail == "Item" {
+                                        // `Self::Item` must tolerate receivers
+                                        // WITHOUT a member Item typedef (runtime
+                                        // detail adapters like filter_next_iter):
+                                        // associated_item_t falls back to
+                                        // deducing from next() — the same
+                                        // spelling default-method BODIES already
+                                        // use.
+                                        base = "rusty::detail::associated_item_t<std::remove_reference_t<Self_>>"
+                                            .to_string();
+                                    } else {
+                                        base = format!("typename Self_::{}", tail);
+                                    }
                                 } else {
                                     base = base.trim_start_matches("Self::").to_string();
                                 }
