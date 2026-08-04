@@ -43334,6 +43334,20 @@ impl CodeGen {
         })
     }
 
+    /// Whether a mapped inner-iterator spelling resolves from ANY namespace —
+    /// a template param in scope, or a qualified path. Bare crate-type names
+    /// (`Drain<T, A2>` via `use super::Drain`) resolve in Rust's module but
+    /// not necessarily in the C++ namespace a UFCS declaration lands in, so a
+    /// named-adapter spelling built on one would be ill-formed where the old
+    /// decltype spelling was merely dropped by the spellability filter.
+    fn adapter_inner_spelling_is_namespace_safe(&self, inner: &str) -> bool {
+        let base = inner.split('<').next().unwrap_or(inner).trim();
+        if base.contains("::") {
+            return true;
+        }
+        self.is_type_param_in_scope(base)
+    }
+
     fn try_map_iterator_adapter_type(&self, tp: &syn::TypePath) -> Option<String> {
         if tp.qself.is_some() {
             return None;
@@ -43388,7 +43402,21 @@ impl CodeGen {
                     "decltype(rusty::fuse(std::declval<{}>()))",
                     iter_ty
                 )),
-                ("Rev", [iter_ty]) => Some(format!("decltype(std::declval<{}>().rev())", iter_ty)),
+                // Named spelling, not decltype-of-member: a decltype self
+                // param is a NON-DEDUCED context, which makes every UFCS
+                // overload for `impl ... for Rev<I>` unmatchable. The Rust
+                // impls require DoubleEndedIterator — exactly the
+                // rev_next_iter flavor of `.rev()` (materialized_rev is the
+                // forward-only fallback and cannot satisfy those bounds).
+                // Bare crate-type inners keep the decltype form — see
+                // adapter_inner_spelling_is_namespace_safe.
+                ("Rev", [iter_ty]) => Some(
+                    if self.adapter_inner_spelling_is_namespace_safe(iter_ty) {
+                        format!("rusty::detail::rev_next_iter<{}>", iter_ty)
+                    } else {
+                        format!("decltype(std::declval<{}>().rev())", iter_ty)
+                    },
+                ),
                 ("Cycle", [iter_ty]) => Some(format!(
                     // Free-adapter spelling for the same reason as Fuse above:
                     // user Iterator types (laziness's Panicking) have no
@@ -43555,10 +43583,16 @@ impl CodeGen {
                 && (!self.local_declared_types.contains("Rev")
                     || !self.local_declared_type_has_matching_arity("Rev", 1))
             {
-                return Some(format!(
-                    "decltype(std::declval<{}>().rev())",
-                    mapped_args[0]
-                ));
+                // Named spelling for deducibility — see the Rev arm in
+                // the (name, args) match above; bare crate-type inners keep
+                // the decltype form.
+                return Some(
+                    if self.adapter_inner_spelling_is_namespace_safe(&mapped_args[0]) {
+                        format!("rusty::detail::rev_next_iter<{}>", mapped_args[0])
+                    } else {
+                        format!("decltype(std::declval<{}>().rev())", mapped_args[0])
+                    },
+                );
             }
             if last_ident == "Cycle"
                 && mapped_args.len() == 1

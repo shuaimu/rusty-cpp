@@ -782,6 +782,10 @@ public:
 
     explicit rev_next_iter(Iter iter) : iter_(std::move(iter)) {}
 
+    // Rust `Rev<I>::Item = I::Item`; UFCS trait free functions spell their
+    // return as `typename rev_next_iter<...>::Item`.
+    using Item = next_item_t<Iter>;
+
     rev_next_iter into_iter() {
         return std::move(*this);
     }

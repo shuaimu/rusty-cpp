@@ -20526,7 +20526,7 @@ fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
         out
     );
     assert!(
-        out.contains("decltype(std::declval<I>().rev()) rev_it(I iterable)"),
+        out.contains("rusty::detail::rev_next_iter<I> rev_it(I iterable)"),
         "expected iter::Rev lowering, got:\n{}",
         out
     );
@@ -20580,7 +20580,7 @@ fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
         out
     );
     assert!(
-        out.contains("decltype(std::declval<I>().rev()) core_rev_ty(I iterable)"),
+        out.contains("rusty::detail::rev_next_iter<I> core_rev_ty(I iterable)"),
         "expected core::iter::Rev lowering, got:\n{}",
         out
     );
