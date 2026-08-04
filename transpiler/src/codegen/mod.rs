@@ -27821,6 +27821,30 @@ impl CodeGen {
     /// spelling, no `Self` residue. Used to open the soften gates for
     /// dependent-assoc types that the projection machinery can spell exactly
     /// (anything less keeps the softened/deduced behavior).
+    /// A bare `return rusty::None;` in a DEDUCED (softened) member body
+    /// deduces None_t and conflicts with any sibling `return rusty::Some(…);`
+    /// (PutBack::peeking_next's `Option<Self::Item>`). When the dependent
+    /// return hint resolves to a fully-spelled Option, type THAT statement —
+    /// no signature changes, so match-lowering stays untouched. Consulted by
+    /// BOTH the explicit `Expr::Return` lowering and the block-tail return
+    /// writers (an else-branch tail `return rusty::None;` takes the latter).
+    pub(super) fn maybe_type_bare_none_return(&self, val: &str) -> Option<String> {
+        if val != "rusty::None" {
+            return None;
+        }
+        let hint = self.current_return_type_hint()?;
+        if !self.should_soften_dependent_assoc_mode()
+            || !self.type_references_current_struct_assoc_projection(hint)
+            || self.type_current_struct_assoc_aliases_emitted(hint)
+        {
+            return None;
+        }
+        let resolved = self.fully_resolved_dependent_spelling(hint)?;
+        resolved
+            .starts_with("rusty::Option<")
+            .then(|| format!("{}(rusty::None)", resolved))
+    }
+
     fn fully_resolved_dependent_spelling(&self, ty: &syn::Type) -> Option<String> {
         let mapped = self.map_type_with_explicit_owner_generic_recovery(ty);
         // `decltype(…)` spans are opaque, fully-resolved expressions — the

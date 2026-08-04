@@ -10461,7 +10461,11 @@ fn test_leaf10532_module_mode_struct_assoc_alias_skipped_still_softens_return_si
         out.contains("return std::nullopt;")
             || out.contains("return rusty::Option<auto>{rusty::None};")
             || out.contains("return rusty::Option<auto>(rusty::None);")
-            || out.contains("return rusty::None;"),
+            || out.contains("return rusty::None;")
+            // Current: a bare None in a DEDUCED body types itself through the
+            // resolved dependent projection (part 27) — same Option type the
+            // Some arms deduce, so mixed bodies stay well-formed.
+            || out.contains("return rusty::Option<rusty::detail::associated_item_t<"),
         "{out}"
     );
 }
@@ -30415,9 +30419,13 @@ fn test_leaf434_expanded_mode_option_none_avoids_assoc_ctor_type_in_value_positi
         }
     "#,
     );
-    // None may be `std::nullopt` (legacy) or `rusty::None` (current).
+    // None may be `std::nullopt` (legacy), `rusty::None`, or the
+    // resolved-projection-typed form (part 27: a bare None in a DEDUCED
+    // body types itself so mixed None/Some bodies stay well-formed).
     assert!(
-        out.contains("return std::nullopt;") || out.contains("return rusty::None;"),
+        out.contains("return std::nullopt;")
+            || out.contains("return rusty::None;")
+            || out.contains("return rusty::Option<rusty::detail::associated_item_t<"),
         "{out}"
     );
     assert!(!out.contains("rusty::Option<Either::Item>(rusty::None)"));
@@ -30467,7 +30475,11 @@ fn test_leaf10529_module_mode_option_none_avoids_assoc_ctor_type_in_value_positi
         out.contains("return std::nullopt;")
             || out.contains("return rusty::Option<auto>{rusty::None};")
             || out.contains("return rusty::Option<auto>(rusty::None);")
-            || out.contains("return rusty::None;"),
+            || out.contains("return rusty::None;")
+            // Current: a bare None in a DEDUCED body types itself through the
+            // resolved dependent projection (part 27) — same Option type the
+            // Some arms deduce, so mixed bodies stay well-formed.
+            || out.contains("return rusty::Option<rusty::detail::associated_item_t<"),
         "{out}"
     );
     // Negative: must NOT have an unresolved assoc-type spelling in the

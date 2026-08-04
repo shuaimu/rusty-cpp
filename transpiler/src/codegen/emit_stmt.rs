@@ -381,6 +381,9 @@ impl CodeGen {
                 if should_emit_tail_return {
                     // Tail expression without semicolon → return (or co_return in async)
                     let keyword = if self.in_async { "co_return" } else { "return" };
+                    if let Some(typed) = self.maybe_type_bare_none_return(&expr_str) {
+                        expr_str = typed;
+                    }
                     self.writeln(&format!("{} {};", keyword, expr_str));
                 } else {
                     self.writeln(&format!("{};", expr_str));
@@ -6683,7 +6686,12 @@ impl CodeGen {
                     syn::Stmt::Expr(expr, None) if idx + 1 == then_len => {
                         let expr_str =
                             then_inner.emit_expr_to_string_with_expected(expr, stmt_expected);
-                        then_inner.writeln(&format!("return {};", expr_str));
+                        then_inner.writeln(&format!(
+                            "return {};",
+                            then_inner
+                                .maybe_type_bare_none_return(&expr_str)
+                                .unwrap_or_else(|| expr_str.clone())
+                        ));
                     }
                     _ => then_inner.emit_stmt(stmt, false),
                 }
@@ -6715,7 +6723,12 @@ impl CodeGen {
                                 syn::Stmt::Expr(expr, None) if idx + 1 == else_len => {
                                     let expr_str = else_inner
                                         .emit_expr_to_string_with_expected(expr, stmt_expected);
-                                    else_inner.writeln(&format!("return {};", expr_str));
+                                    else_inner.writeln(&format!(
+                                        "return {};",
+                                        else_inner
+                                            .maybe_type_bare_none_return(&expr_str)
+                                            .unwrap_or_else(|| expr_str.clone())
+                                    ));
                                 }
                                 _ => else_inner.emit_stmt(stmt, false),
                             }
@@ -6729,11 +6742,19 @@ impl CodeGen {
                 syn::Expr::If(nested_if) => {
                     // else if ... — emit as nested if
                     let nested = self.emit_if_expr_as_iife(nested_if, expected_ty);
-                    parts.push(format!("return {};", nested));
+                    parts.push(format!(
+                        "return {};",
+                        self.maybe_type_bare_none_return(&nested)
+                            .unwrap_or_else(|| nested.clone())
+                    ));
                 }
                 other => {
                     let else_str = self.emit_expr_to_string_with_expected(other, expected_ty);
-                    parts.push(format!("return {};", else_str));
+                    parts.push(format!(
+                        "return {};",
+                        self.maybe_type_bare_none_return(&else_str)
+                            .unwrap_or_else(|| else_str.clone())
+                    ));
                 }
             }
         }
@@ -6751,7 +6772,11 @@ impl CodeGen {
         match stmt {
             syn::Stmt::Expr(expr, None) => {
                 let expr_str = self.emit_expr_to_string_with_expected(expr, expected_ty);
-                format!("return {};", expr_str)
+                format!(
+                    "return {};",
+                    self.maybe_type_bare_none_return(&expr_str)
+                        .unwrap_or_else(|| expr_str.clone())
+                )
             }
             _ => self.emit_stmt_to_string(stmt),
         }
