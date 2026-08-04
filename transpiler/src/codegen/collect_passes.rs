@@ -3074,6 +3074,21 @@ impl CodeGen {
                                     ));
                                 }
                             }
+                            // Parallel per-arity impls (`impl<A> Iterator for
+                            // Zip<(A,)>` / `impl<A, B> ... for Zip<(A, B)>`):
+                            // the impl generics folded into the method above
+                            // become UNDEDUCIBLE template params — no fn arg
+                            // mentions them; the bodies only destructure
+                            // self.t. Strip them and tag the tuple arity; the
+                            // emitter renders a `requires (std::tuple_size_v<
+                            // ..> == N)` gate so per-arity overloads stay
+                            // distinct. Placed AFTER the conflict key so
+                            // sibling arities (whose pre-strip heads differ)
+                            // do not collide there.
+                            Self::strip_tuple_arity_phantom_method_generics(
+                                &mut merged,
+                                impl_block,
+                            );
                             collected_item = syn::ImplItem::Fn(merged);
                         }
                         entry.push(collected_item);
@@ -3287,6 +3302,7 @@ impl CodeGen {
                                             &mut merged,
                                             &impl_block.generics,
                                         );
+                                        Self::strip_tuple_arity_phantom_method_generics(&mut merged, impl_block);
                                         Self::normalize_impl_method_receiver_for_reference_self(
                                             &mut merged,
                                             impl_block.self_ty.as_ref(),
@@ -4387,6 +4403,7 @@ impl CodeGen {
                 if let syn::ImplItem::Fn(method) = impl_item {
                     let mut merged = method.clone();
                     merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                    Self::strip_tuple_arity_phantom_method_generics(&mut merged, impl_block);
                     Self::normalize_impl_method_receiver_for_reference_self(
                         &mut merged,
                         impl_block.self_ty.as_ref(),
@@ -4811,6 +4828,152 @@ impl CodeGen {
     /// ValMut). Host param at position 0 is `BorrowType`. Substitution:
     /// `(Immut → BorrowType)` and `(ValMut → BorrowType)`, applied to
     /// whichever impl's method got absorbed into the merged C++ struct.
+    /// See the absorption call site: when an impl's self type is
+    /// `Host<(T1..TN)>` with the tuple elems exactly bare impl generics
+    /// (the per-arity Zip family), strip those params from the merged
+    /// method's head when the signature AND body never name them, and tag
+    /// the method `#[rusty_tuple_arity(N)]` for the emitter's
+    /// `requires (std::tuple_size_v<..> == N)` gate.
+    pub(super) fn strip_tuple_arity_phantom_method_generics(
+        method: &mut syn::ImplItemFn,
+        impl_block: &syn::ItemImpl,
+    ) {
+        use quote::ToTokens;
+        if std::env::var("RUSTY_CPP_TRAP_ARITY").is_ok() {
+            eprintln!(
+                "[trap-arity] method={} self_ty={}",
+                method.sig.ident,
+                impl_block.self_ty.to_token_stream()
+            );
+        }
+        let syn::Type::Path(tp) = impl_block.self_ty.as_ref() else {
+            return;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return;
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return;
+        };
+        if args.args.len() != 1 {
+            return;
+        }
+        let Some(syn::GenericArgument::Type(syn::Type::Tuple(tup))) = args.args.first() else {
+            return;
+        };
+        if tup.elems.is_empty() {
+            return;
+        }
+        let impl_params: HashSet<String> = impl_block
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut tuple_params: Vec<String> = Vec::new();
+        for elem in &tup.elems {
+            let syn::Type::Path(ep) = elem else {
+                return;
+            };
+            if ep.qself.is_some() || ep.path.segments.len() != 1 {
+                return;
+            }
+            let name = ep.path.segments[0].ident.to_string();
+            if !impl_params.contains(&name) {
+                return;
+            }
+            tuple_params.push(name);
+        }
+        let arity = tuple_params.len();
+        // Only params the INPUTS and body never NAME are strippable —
+        // `from(std::tuple<A> t)` keeps its (deducible) head, and a body
+        // spelling `A` in a type position still needs it declared. The
+        // RETURN is deliberately not scanned: these methods return
+        // projections (`Option<(A::Item, B::Item)>`) that the emitter
+        // erases to `auto`/deduced spellings, so a return-only mention
+        // does not require the C++ head to declare the param.
+        let mut mention_text = String::new();
+        for input in &method.sig.inputs {
+            mention_text.push_str(&input.to_token_stream().to_string());
+            mention_text.push(' ');
+        }
+        let names_word = |text: &str, name: &str| {
+            text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == name)
+        };
+        // The body is scanned for TYPE-position mentions only: the zip macro
+        // reuses its type-param idents as VALUE bindings
+        // (`let ($(ref mut $B,)*) = self.t;`), which the emitter shadow-
+        // renames — those do not require the C++ head to declare the param.
+        struct TypeIdentCollector(HashSet<String>);
+        impl<'ast> syn::visit::Visit<'ast> for TypeIdentCollector {
+            fn visit_type(&mut self, ty: &'ast syn::Type) {
+                if let syn::Type::Path(tp) = ty {
+                    for seg in &tp.path.segments {
+                        self.0.insert(seg.ident.to_string());
+                    }
+                }
+                syn::visit::visit_type(self, ty);
+            }
+            fn visit_expr_path(&mut self, ep: &'ast syn::ExprPath) {
+                for seg in &ep.path.segments {
+                    if !matches!(seg.arguments, syn::PathArguments::None) {
+                        self.0.insert(seg.ident.to_string());
+                    }
+                }
+                syn::visit::visit_expr_path(self, ep);
+            }
+        }
+        let mut body_types = TypeIdentCollector(HashSet::new());
+        syn::visit::Visit::visit_block(&mut body_types, &method.block);
+        let droppable: HashSet<String> = tuple_params
+            .iter()
+            .filter(|name| !names_word(&mention_text, name) && !body_types.0.contains(*name))
+            .cloned()
+            .collect();
+        if std::env::var("RUSTY_CPP_TRAP_ARITY").is_ok() {
+            eprintln!(
+                "[trap-arity] CANDIDATE method={} arity={} tuple_params={:?} droppable={:?}",
+                method.sig.ident, arity, tuple_params, droppable
+            );
+        }
+        if droppable.is_empty() {
+            return;
+        }
+        let before = method.sig.generics.params.len();
+        method.sig.generics.params = std::mem::take(&mut method.sig.generics.params)
+            .into_iter()
+            .filter(|p| match p {
+                syn::GenericParam::Type(t) => !droppable.contains(&t.ident.to_string()),
+                _ => true,
+            })
+            .collect();
+        if method.sig.generics.params.len() == before {
+            return;
+        }
+        if let Some(wc) = method.sig.generics.where_clause.as_mut() {
+            wc.predicates = std::mem::take(&mut wc.predicates)
+                .into_iter()
+                .filter(|pred| {
+                    let syn::WherePredicate::Type(pt) = pred else {
+                        return true;
+                    };
+                    let syn::Type::Path(p) = &pt.bounded_ty else {
+                        return true;
+                    };
+                    !(p.qself.is_none()
+                        && p.path.segments.len() == 1
+                        && droppable.contains(&p.path.segments[0].ident.to_string()))
+                })
+                .collect();
+        }
+        let lit = syn::LitInt::new(&arity.to_string(), proc_macro2::Span::call_site());
+        method.attrs.push(syn::parse_quote!(#[rusty_tuple_arity(#lit)]));
+    }
+
     pub(super) fn collect_parallel_impl_groups(&mut self, items: &[syn::Item]) {
         // (host_type_name, method_ident) → Vec<class-template-args-of-this-impl>
         // host_type_name is MODULE-QUALIFIED (see walk_items_for_parallel_impls)
@@ -5916,6 +6079,7 @@ impl CodeGen {
                         };
                         let mut merged = method.clone();
                         merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                    Self::strip_tuple_arity_phantom_method_generics(&mut merged, impl_block);
                         Self::normalize_impl_method_receiver_for_reference_self(
                             &mut merged,
                             impl_block.self_ty.as_ref(),

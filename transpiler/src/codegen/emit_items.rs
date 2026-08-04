@@ -7438,14 +7438,79 @@ impl CodeGen {
         } else {
             name.clone()
         };
+        // Per-arity parallel-impl method (see
+        // strip_tuple_arity_phantom_method_generics): its undeducible
+        // impl-generics were stripped at absorption, which makes the sibling
+        // arities' signatures IDENTICAL — the tuple-size gate keeps them
+        // distinct overloads and selects the right one per instantiation.
+        // A TRAILING requires-clause: post-strip these methods have no
+        // template head of their own, and a leading clause is only valid
+        // after one. Emitted on declarations AND definitions (C++
+        // requires-clauses must match across the two).
+        let arity_gate: Option<(String, usize)> = method
+            .attrs
+            .iter()
+            .find_map(|attr| {
+                if !attr.path().is_ident("rusty_tuple_arity") {
+                    return None;
+                }
+                attr.parse_args::<syn::LitInt>()
+                    .ok()
+                    .and_then(|lit| lit.base10_parse::<usize>().ok())
+            })
+            .and_then(|arity| {
+                let host = self.current_struct.clone()?;
+                let host_params = self.declared_type_params.get(&host)?;
+                if host_params.len() != 1 {
+                    return None;
+                }
+                Some((host_params[0].clone(), arity))
+            });
+        let arity_requires: String = arity_gate
+            .as_ref()
+            .map(|(param, arity)| {
+                format!(" requires (std::tuple_size_v<{}> == {})", param, arity)
+            })
+            .unwrap_or_default();
+        // The gated next/next_back bodies mix `return rusty::None;` with
+        // `return rusty::Some(tuple);` — undeducible under `auto`. Their
+        // item type is fully spellable from the host tuple param, so give
+        // them an explicit trailing return instead.
+        if let Some((param, arity)) = arity_gate.as_ref()
+            && emitted_auto_trailing_return.is_none()
+            && emitted_return_type == "auto"
+            && matches!(method.sig.ident.to_string().as_str(), "next" | "next_back")
+        {
+            let items = (0..*arity)
+                .map(|i| {
+                    // The index is CLAMPED: a class template instantiates
+                    // every member DECLARATION regardless of the requires
+                    // gate, so an out-of-range tuple_element in an inactive
+                    // arity's trailing return would hard-error. The active
+                    // arity's indices are always in range.
+                    format!(
+                        "rusty::detail::associated_item_t<std::remove_cvref_t<std::tuple_element_t<({i} < std::tuple_size_v<{p}> ? {i} : 0), {p}>>>",
+                        i = i,
+                        p = param
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            emitted_auto_trailing_return =
+                Some(format!("rusty::Option<std::tuple<{}>>", items));
+        }
         if !self.method_emission_skip_conflict_registration {
-            let conflict_key = self.emitted_method_conflict_key(
+            let mut conflict_key = self.emitted_method_conflict_key(
                 &name,
                 &emitted_template_key,
                 &qualifier,
                 is_static,
                 &params,
             );
+            // Per-arity tuple gates make otherwise-identical signatures
+            // DISTINCT overloads — the requires clause must participate in
+            // the dedupe key or all but the first arity get dropped.
+            conflict_key.push_str(&arity_requires);
             if !self.mark_emitted_method_conflict_key(conflict_key) {
                 self.pop_type_param_scope();
                 return;
@@ -7463,22 +7528,24 @@ impl CodeGen {
                 ));
             } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
                 self.writeln(&format!(
-                    "{}{} {}({}){} -> {};",
+                    "{}{} {}({}){} -> {}{};",
                     static_prefix,
                     emitted_return_type,
                     emitted_callable_name,
                     params.join(", "),
                     qualifier,
-                    trailing_return
+                    trailing_return,
+                    arity_requires
                 ));
             } else {
                 self.writeln(&format!(
-                    "{}{} {}({}){};",
+                    "{}{} {}({}){}{};",
                     static_prefix,
                     emitted_return_type,
                     emitted_callable_name,
                     params.join(", "),
-                    qualifier
+                    qualifier,
+                    arity_requires
                 ));
             }
             self.pop_type_param_scope();
@@ -7538,22 +7605,24 @@ impl CodeGen {
             ));
         } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
             self.writeln(&format!(
-                "{}{} {}({}){} -> {} {{",
+                "{}{} {}({}){} -> {}{} {{",
                 static_prefix,
                 emitted_return_type,
                 emitted_callable_name,
                 params.join(", "),
                 qualifier,
-                trailing_return
+                trailing_return,
+                arity_requires
             ));
         } else {
             self.writeln(&format!(
-                "{}{} {}({}){} {{",
+                "{}{} {}({}){}{} {{",
                 static_prefix,
                 emitted_return_type,
                 emitted_callable_name,
                 params.join(", "),
-                qualifier
+                qualifier,
+                arity_requires
             ));
         }
         self.indent += 1;
