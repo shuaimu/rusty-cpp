@@ -4834,6 +4834,84 @@ impl CodeGen {
     /// method's head when the signature AND body never name them, and tag
     /// the method `#[rusty_tuple_arity(N)]` for the emitter's
     /// `requires (std::tuple_size_v<..> == N)` gate.
+    /// Record per-arity tuple trait impls (`impl<A> TupleCollect for (A, A)
+    /// { type Item = A; type Buffer = [Option<A>; 1]; }` — cargo-expand
+    /// gives the macro family concretely) so the Traits-primary emission can
+    /// add PARTIAL specializations for std::tuple: these impls are
+    /// parallel-impl absorbed and never reach the per-impl assoc-spec path,
+    /// and the primary's `typename B::Item` forwarding finds no nested
+    /// typedefs on std::tuple.
+    pub(super) fn collect_tuple_impl_assoc_specs(&mut self, items: &[syn::Item]) {
+        for item in items {
+            match item {
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.collect_tuple_impl_assoc_specs(nested);
+                    }
+                }
+                syn::Item::Impl(ib) => {
+                    let Some((_, tpath, _)) = &ib.trait_ else {
+                        continue;
+                    };
+                    let syn::Type::Tuple(tup) = ib.self_ty.as_ref() else {
+                        continue;
+                    };
+                    if tup.elems.is_empty() {
+                        continue;
+                    }
+                    let type_params: Vec<String> = ib
+                        .generics
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if type_params.len() != 1 {
+                        continue;
+                    }
+                    let a = &type_params[0];
+                    let all_a = tup.elems.iter().all(|e| {
+                        matches!(e, syn::Type::Path(p)
+                            if p.qself.is_none() && p.path.is_ident(a))
+                    });
+                    if !all_a {
+                        continue;
+                    }
+                    let assoc: Vec<(String, syn::Type)> = ib
+                        .items
+                        .iter()
+                        .filter_map(|it| match it {
+                            syn::ImplItem::Type(t) => {
+                                Some((t.ident.to_string(), t.ty.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if assoc.is_empty() {
+                        continue;
+                    }
+                    let Some(last) = tpath.segments.last() else {
+                        continue;
+                    };
+                    let trait_name = last.ident.to_string();
+                    let arity = tup.elems.len();
+                    if self
+                        .tuple_trait_assoc_specs
+                        .iter()
+                        .any(|(t, _, n, _)| *t == trait_name && *n == arity)
+                    {
+                        continue;
+                    }
+                    self.tuple_trait_assoc_specs
+                        .push((trait_name, a.clone(), arity, assoc));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Second phantom class (sibling of the tuple-arity strip below): an impl
     /// generic bound ONLY as another param's Fn-trait OUTPUT
     /// (`impl<B, F, I> Iterator for Batching<I, F> where F: FnMut(&mut I) ->

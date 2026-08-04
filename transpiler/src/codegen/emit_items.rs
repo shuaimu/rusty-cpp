@@ -4875,6 +4875,40 @@ impl CodeGen {
                 spec.push_str("};");
                 self.writeln(&spec);
             }
+            // Per-arity tuple impls (recorded by
+            // collect_tuple_impl_assoc_specs — parallel-impl absorbed, so
+            // they never reach the per-impl spec path): PARTIAL specs bind
+            // the assoc names for std::tuple self types, which have no
+            // nested typedefs for the primary to forward to.
+            let tuple_specs: Vec<(String, String, usize, Vec<(String, syn::Type)>)> = self
+                .tuple_trait_assoc_specs
+                .iter()
+                .filter(|(t, ..)| *t == trait_name.to_string())
+                .cloned()
+                .collect();
+            for (_, param, arity, assoc) in tuple_specs {
+                let generics: syn::Generics = match syn::parse_str(&format!("<{}>", param)) {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                self.push_type_param_scope(&generics);
+                let tuple_args = vec![param.clone(); arity].join(", ");
+                let mut spec = format!(
+                    "template <class {}> struct {}Traits<std::tuple<{}>> {{ ",
+                    param, trait_name, tuple_args
+                );
+                for (name, ty) in &assoc {
+                    let cpp = self.map_type(ty);
+                    spec.push_str(&format!(
+                        "using {} = {}; ",
+                        escape_cpp_keyword(name),
+                        cpp
+                    ));
+                }
+                spec.push_str("};");
+                self.writeln(&spec);
+                self.pop_type_param_scope();
+            }
         }
 
         self.pop_type_param_scope();

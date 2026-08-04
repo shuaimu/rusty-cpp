@@ -923,6 +923,13 @@ pub struct CodeGen {
     /// at positions consumed by host class generics — those positions get
     /// generalized back to the host class param name.
     pub(crate) parallel_impl_substitutions: HashMap<(String, String), Vec<(String, String)>>,
+    /// Per-arity tuple trait impls (`impl<A> TupleCollect for (A, A)`) are
+    /// parallel-impl absorbed and never reach the per-impl assoc-spec path;
+    /// record (trait_name, generic param, tuple arity, assoc bindings) here
+    /// so the Traits-primary emission can add PARTIAL specializations for
+    /// std::tuple (which has no nested typedefs for the primary to forward
+    /// to).
+    pub(crate) tuple_trait_assoc_specs: Vec<(String, String, usize, Vec<(String, syn::Type)>)>,
     /// Cluster C nested-marker extension: for each `(host_type, method)`
     /// pair, record text-level substitutions of concrete markers that
     /// vary across parallel impls at positions nested INSIDE the host's
@@ -2072,6 +2079,7 @@ impl CodeGen {
             declared_type_params: HashMap::new(),
             declared_type_params_from_definition: HashSet::new(),
             parallel_impl_substitutions: HashMap::new(),
+            tuple_trait_assoc_specs: Vec::new(),
             parallel_impl_nested_marker_text_subs: HashMap::new(),
             method_structural_decompositions: HashMap::new(),
             pending_template_args_specializations: HashSet::new(),
@@ -4769,6 +4777,7 @@ impl CodeGen {
         // by host class generics. Records substitutions to apply to the
         // absorbed method's signature during impl-method merging below.
         self.collect_parallel_impl_groups(&file.items);
+        self.collect_tuple_impl_assoc_specs(&file.items);
         log_emit("collect_parallel_impl_groups");
         // Pass 1c: pre-collect struct field/unit-struct metadata for expected-type
         // recovery even when struct definitions appear later in source order.
