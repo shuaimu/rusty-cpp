@@ -1149,9 +1149,9 @@ decltype(auto) as_ref_ptr(const T& value) {
 // Lazy zip view — Rust's `a.zip(b)` semantics. Eager vector
 // materialization hangs on unbounded sides (indexmap's
 // Lazy mapped view over a zip_view (or any begin/end range): exposes the
-// std::optional-shaped next() the slice.hpp adapter machinery duck-types
+// Option-shaped next() the slice.hpp adapter machinery duck-types
 // (option_like_has_value/take_value), so downstream .next()/for_in/collect
-// all work. std-only — this header is self-contained.
+// all work.
 template<typename View, typename F>
 struct zip_map_view {
     View view;
@@ -1162,14 +1162,19 @@ struct zip_map_view {
     using mapped_type = std::decay_t<decltype(std::invoke(
         std::declval<F&>(), *std::declval<base_iter&>()))>;
 
-    std::optional<mapped_type> next() {
+    using Item = mapped_type;
+
+    // rusty::Option, not std::optional: transpiled code calls
+    // .unwrap()/.is_none() DIRECTLY on this next()'s result (the duck-typed
+    // option_like machinery tolerates either, member calls do not).
+    rusty::Option<mapped_type> next() {
         if (!cur) {
             cur.emplace(std::begin(view));
         }
         if (*cur == std::end(view)) {
-            return std::nullopt;
+            return rusty::None;
         }
-        std::optional<mapped_type> value(std::invoke(func, **cur));
+        rusty::Option<mapped_type> value(std::invoke(func, **cur));
         ++*cur;
         return value;
     }

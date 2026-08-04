@@ -37904,11 +37904,20 @@ impl CodeGen {
                 let qualified = self.emit_path_to_string(path);
                 if !qualified.is_empty() && qualified != base_func {
                     base_func = qualified;
-                } else if !base_func.starts_with("::") {
+                } else if !base_func.starts_with("::")
+                    && self
+                        .self_path_overrides
+                        .last()
+                        .is_some_and(|o| o.is_some())
+                {
                     // If canonical emission still collapses to the bare tail
                     // (for example current-crate `serde_bytes::serialize`),
                     // force global qualification to avoid accidental recursion
-                    // with an in-scope method of the same name.
+                    // with an in-scope method of the same name. Only METHOD
+                    // bodies have a member scope that can capture the bare
+                    // name; in free functions (test fns) the crate's
+                    // export-using at namespace scope is what resolves it,
+                    // and `::tail` would point at nothing.
                     base_func = format!("::{}", escape_cpp_keyword(&method_tail));
                 }
             }
