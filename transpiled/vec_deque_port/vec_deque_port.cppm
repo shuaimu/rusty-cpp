@@ -3971,12 +3971,12 @@ struct VecDeque {
     ::RawVec<T, A> buf;
     mutable bool _rusty_forgotten = false;
     VecDeque(size_t head_init, size_t len_init, ::RawVec<T, A> buf_init) : head(std::move(head_init)), len_field(std::move(len_init)), buf(std::move(buf_init)) {}
-    VecDeque(const VecDeque&) = default;
+    VecDeque(const VecDeque& other) : VecDeque(other.clone()) {}
     VecDeque(VecDeque&& other) noexcept : head(std::move(other.head)), len_field(std::move(other.len_field)), buf(std::move(other.buf)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    VecDeque& operator=(const VecDeque&) = default;
+    VecDeque& operator=(const VecDeque& other) { if (this != &other) { this->~VecDeque(); new (this) VecDeque(other.clone()); } return *this; }
     VecDeque& operator=(VecDeque&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -3989,12 +3989,24 @@ struct VecDeque {
 
 
     VecDeque<T, A> clone() const {
-        // patcher: stubbed (off smoke-test path)
-        std::abort();
+        // Deep clone by re-push (was a patcher abort stub). The defaulted
+        // copy ctor this class carried shallow-copied the ring buffer —
+        // the same Drop-owner double-free class as hashbrown RawTable
+        // (mako ASan rig); raw copies now delegate here.
+        VecDeque<T, A> out =
+            VecDeque<T, A>::with_capacity_in(this->len(), rusty::clone(this->allocator()));
+        auto it = this->iter();
+        for (;;) {
+            auto e = it.next();
+            if (e.is_none()) {
+                break;
+            }
+            out.push_back(rusty::clone(e.unwrap()));
+        }
+        return out;
     }
     void clone_from(const VecDeque<T, A>& source) {
-        // patcher: stubbed (off smoke-test path)
-        std::abort();
+        *this = source.clone();
     }
     /// Runs the destructor for all items in the slice when it gets dropped (normally or
     /// during unwinding).
