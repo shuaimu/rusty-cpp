@@ -3663,6 +3663,86 @@ def patch_deep_alloc_do_alloc_result_convert(cpp_out: Path) -> int:
 
 # ── orchestration ───────────────────────────────────────────────────
 
+
+# ── Drop-owner copy semantics (mako ASan-rig double-free) ───────────
+
+def patch_drop_owner_copy_delete(cpp_out: Path) -> int:
+    """RawTable / RawIntoIter / RawDrain own their allocation via a
+    Drop-guarded dtor, but the emitter defaulted their C++ copy
+    ctor/assign. A defaulted copy shallow-duplicates the bucket
+    pointer; both owners then run the dtor and double-free (caught by
+    the mako MAKO_ASAN=1 rig via rusty::iter's iterate-a-copy arm on a
+    const HashSet). Rust-side duplication is Clone-only, which this
+    port lacks for these types — delete the copies."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    note = ("// Shallow duplication of an owning table double-frees (mako ASan rig);\n"
+            "    // Rust-side duplication is Clone-only, which this port lacks here.\n"
+            "    ")
+    for cls in ("RawTable", "RawIntoIter", "RawDrain"):
+        text = text.replace(
+            f"{cls}(const {cls}&) = default;",
+            f"{note}{cls}(const {cls}&) = delete;")
+        text = text.replace(
+            f"{cls}& operator=(const {cls}&) = default;",
+            f"{cls}& operator=(const {cls}&) = delete;")
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_map_deep_clone(cpp_out: Path) -> int:
+    """HashMap::clone went through rusty::clone(this->table), which
+    bottomed out in RawTable's shallow copy (see
+    patch_drop_owner_copy_delete). Replace with a deep clone by
+    re-insertion, and clone_from with assign-from-clone."""
+    path = cpp_out / "hashbrown_port.map.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    old = """    HashMap<K, V, S, A> clone() const {
+        return HashMap<K, V, S, A>(rusty::clone(this->hash_builder), rusty::clone(this->table));
+    }
+    void clone_from(const HashMap<K, V, S, A>& source) {
+        this->table.clone_from(source.table);
+        rusty::deref_call(this->hash_builder, rusty::detail::__mdisp_clone_from{}, source.hash_builder);
+    }"""
+    new = """    HashMap<K, V, S, A> clone() const {
+        // Deep clone by re-insertion. The port has no deep RawTable::clone
+        // (upstream hashbrown's bucket-wise Clone impl is outside the ported
+        // slice), so the previous `rusty::clone(this->table)` bottomed out in
+        // RawTable's shallow `= default` copy ctor — both owners then freed
+        // the same bucket allocation (double free caught by the mako ASan
+        // rig; RawTable's copy ctor is now deleted).
+        HashMap<K, V, S, A> out = HashMap<K, V, S, A>::with_capacity_and_hasher_in(
+            this->len(), rusty::clone(this->hash_builder), rusty::clone(this->table.alloc));
+        auto it = this->iter();
+        for (;;) {
+            auto e = it.next();
+            if (e.is_none()) {
+                break;
+            }
+            auto kv = e.unwrap();
+            out.insert(rusty::clone(std::get<0>(kv)), rusty::clone(std::get<1>(kv)));
+        }
+        return out;
+    }
+    void clone_from(const HashMap<K, V, S, A>& source) {
+        *this = source.clone();
+    }"""
+    if old in text:
+        text = text.replace(old, new)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def main(cpp_out: Path):
     patches = [
         ("Tag methods: add const qualifier", patch_tag_methods_const),
@@ -3722,6 +3802,8 @@ def main(cpp_out: Path):
         ("deep-ns: alloc.cppm — drop rusty::ptr::slice_from_raw_parts_mut (not in rusty/ptr.hpp)", patch_deep_alloc_slice_from_raw_parts_mut),
         ("deep-ns: alloc.cppm AllocatorAdapter — convert AllocError → rusty::Unit", patch_deep_alloc_adapter_rusty_unit_convert),
         ("deep-ns: alloc.cppm do_alloc — convert AllocError → rusty::Unit (deep-emit shape)", patch_deep_alloc_do_alloc_result_convert),
+        ("drop-owner: raw.cppm RawTable/RawIntoIter/RawDrain copy → delete (double-free)", patch_drop_owner_copy_delete),
+        ("drop-owner: map.cppm HashMap deep clone by re-insertion", patch_map_deep_clone),
     ]
     total = 0
     for name, fn in patches:

@@ -1959,14 +1959,30 @@ decltype(auto) iter(Range&& range) {
         return slice_iter::Iter<elem_type>(data, data + view.size());
     } else if constexpr (requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }) {
         return std::forward<Range>(range);
-    } else if constexpr (requires {
-        std::forward<Range>(range).begin();
-        std::forward<Range>(range).end();
-    }) {
+    } else if constexpr (
+        requires {
+            std::forward<Range>(range).begin();
+            std::forward<Range>(range).end();
+        }
+        && std::is_constructible_v<std::remove_cvref_t<Range>, Range&&>
+    ) {
         // Member-begin/end view whose begin() is NON-const (zip_view), passed
         // by value or mutable ref — std::begin can't see it. Adapt to the
-        // next() protocol so map/take/from_iter compose over it.
+        // next() protocol so map/take/from_iter compose over it. The
+        // constructibility guard routes move-only containers passed as
+        // lvalues to the clone arm below instead of a deleted copy.
         return detail::make_view_next_iter(std::forward<Range>(range));
+    } else if constexpr (
+        requires(const std::remove_cvref_t<Range>& v) {
+            { v.clone() } -> std::same_as<std::remove_cvref_t<Range>>;
+        }
+        && requires(std::remove_cvref_t<Range>& m) { m.begin(); m.end(); }
+    ) {
+        // Move-only container (C++ copy deleted — a Drop type) with a real
+        // Clone impl and member begin/end: iterate an owned DEEP clone.
+        // Must sit before the raw copy arm — a defaulted shallow copy of an
+        // owning table double-frees (hashbrown RawTable, caught by ASan).
+        return detail::make_view_next_iter(range.clone());
     } else if constexpr (
         std::is_copy_constructible_v<std::remove_cvref_t<Range>>
         && requires(std::remove_cvref_t<Range>& v) { v.begin(); v.end(); }
