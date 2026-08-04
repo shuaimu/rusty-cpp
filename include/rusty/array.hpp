@@ -1847,7 +1847,10 @@ public:
         : start(static_cast<T>(other.start)), end_(static_cast<T>(other.end_)) {}
 
     // Rust's by-value IntoIterator; ranges are trivially copyable, so a
-    // const receiver (emitted const locals) just copies.
+    // const receiver (emitted const locals) just copies. The IntoIter/Item
+    // typedefs back UFCS spellings of `<I as IntoIterator>::IntoIter::Item`.
+    using IntoIter = range;
+    using Item = T;
     range into_iter() const {
         return *this;
     }
@@ -2015,7 +2018,10 @@ public:
           done_(other.done_) {}
 
     // Rust's by-value IntoIterator; ranges are trivially copyable, so a
-    // const receiver (emitted const locals) just copies.
+    // const receiver (emitted const locals) just copies. IntoIter/Item
+    // back UFCS spellings — see range.
+    using IntoIter = range_inclusive;
+    using Item = T;
     range_inclusive into_iter() const {
         return *this;
     }
@@ -2138,7 +2144,10 @@ struct range_from {
     T start;
 
     // Rust's by-value IntoIterator; ranges are trivially copyable, so a
-    // const receiver (emitted const locals) just copies.
+    // const receiver (emitted const locals) just copies. IntoIter/Item
+    // back UFCS spellings — see range.
+    using IntoIter = range_from;
+    using Item = T;
     range_from into_iter() const {
         return *this;
     }

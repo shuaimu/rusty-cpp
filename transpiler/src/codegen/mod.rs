@@ -18149,6 +18149,12 @@ impl CodeGen {
         }
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
+        // The generics scope must be live BEFORE the self type is mapped, in
+        // the same order as the declaration pass — spellings that consult
+        // is_type_param_in_scope (the Rev named-vs-decltype guard) must
+        // agree between the two passes, or the declared overload has no
+        // definition (undefined reference at link).
+        self.push_type_param_scope(&free_generics);
         let self_cpp_ty = if method_spec.self_is_template_param {
             "Self_".to_string()
         } else {
@@ -18162,6 +18168,7 @@ impl CodeGen {
         };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.in_forward_decl_signature = prev_forward_decl_signature;
+            self.pop_type_param_scope();
             self.writeln(&format!(
                 "// Rust-only extension method skipped (phantom deserialize handled by runtime): {}",
                 method_name
@@ -18172,13 +18179,13 @@ impl CodeGen {
             && self.extension_self_type_mapping_is_unsupported(&self_cpp_ty)
         {
             self.in_forward_decl_signature = prev_forward_decl_signature;
+            self.pop_type_param_scope();
             self.writeln(&format!(
                 "// Rust-only extension method skipped (unsupported self type mapping): {} ({})",
                 method_name, self_cpp_ty
             ));
             return;
         }
-        self.push_type_param_scope(&free_generics);
         // `free_generics` is bound-STRIPPED; the R::Output projection spelling
         // in the return type needs the bound's generic args (must match the
         // decl pass, which does the same restore).
@@ -53756,6 +53763,8 @@ struct Chars {\n\
     using Item = char32_t;\n\
     std::u32string decoded;\n\
     std::size_t index = 0;\n\
+\n\
+    Chars into_iter() const { return *this; }\n\
 \n\
     rusty::Option<char32_t> next() {\n\
         if (index >= decoded.size()) {\n\

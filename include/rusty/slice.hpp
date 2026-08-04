@@ -1337,6 +1337,39 @@ public:
         return next_result(option_like_take_value(item));
     }
 
+    // Rust `Take::next_back` (DoubleEndedIterator when the inner is
+    // DEI + ExactSizeIterator): `iter.nth_back(len - n)` — consume the
+    // back items beyond the take window, then yield the window's last.
+    // The size_hint lower bound stands in for ExactSizeIterator::len,
+    // which is exact for the range/skip chains that reach here.
+    auto next_back()
+        requires requires(std::remove_reference_t<Iter>& it) {
+            it.next_back();
+            it.size_hint();
+        }
+    {
+        using iter_type = std::remove_reference_t<Iter>;
+        using next_result = rusty::Option<next_item_t<iter_type>>;
+        if (remaining_ == 0) {
+            return next_result(rusty::None);
+        }
+        const size_t n = remaining_;
+        --remaining_;
+        const size_t inner_len = hint_lower_bound(iter_.size_hint());
+        size_t excess = inner_len > n ? inner_len - n : 0;
+        while (excess-- > 0) {
+            auto dropped = iter_.next_back();
+            if (!option_like_has_value(dropped)) {
+                return next_result(rusty::None);
+            }
+        }
+        auto item = iter_.next_back();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         if (remaining_ == 0) {
             return std::make_tuple(0, rusty::Option<size_t>(0));
@@ -1465,6 +1498,42 @@ public:
             return next_result(rusty::None);
         }
         return next_result(option_like_take_value(item));
+    }
+
+    // Rust `Skip::next_back`: the front skip cannot affect back elements
+    // while anything remains past it (`len() > 0`, len = inner_len - n).
+    // ExactSizeIterator in Rust; the size_hint lower bound is exact for
+    // the sources that reach here.
+    auto next_back()
+        requires requires(std::remove_reference_t<Iter>& it) {
+            it.next_back();
+            it.size_hint();
+        }
+    {
+        using iter_type = std::remove_reference_t<Iter>;
+        using next_result = rusty::Option<next_item_t<iter_type>>;
+        const size_t inner_len =
+            static_cast<size_t>(std::get<0>(iter_.size_hint()));
+        if (inner_len <= remaining_) {
+            return next_result(rusty::None);
+        }
+        auto item = iter_.next_back();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
+    // Rust `Skip::size_hint` — both bounds shrink by the pending skip.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const
+        requires requires(const std::remove_reference_t<Iter>& it) {
+            it.size_hint();
+        }
+    {
+        const size_t inner =
+            static_cast<size_t>(std::get<0>(iter_.size_hint()));
+        const size_t len = inner > remaining_ ? inner - remaining_ : 0;
+        return std::make_tuple(len, rusty::Option<size_t>(len));
     }
 
 private:
