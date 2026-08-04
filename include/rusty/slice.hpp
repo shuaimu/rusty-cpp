@@ -2226,7 +2226,10 @@ struct empty_iter {
     }
 };
 
-template<typename T>
+// T defaults: `chain!()` expands to a bare `iter::empty()` whose element
+// Rust infers from context the transpiler can't always thread. An empty
+// iterator never yields, so any element type is behaviorally identical.
+template<typename T = std::tuple<>>
 empty_iter<T> empty() {
     return empty_iter<T>{};
 }

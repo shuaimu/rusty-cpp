@@ -5622,16 +5622,41 @@ impl CodeGen {
         }
         out.push('\n');
         if self.module_name.is_some() {
-            out.push_str("export namespace rusty_module_aliases {\n");
-            for (alias, target) in aliases {
-                out.push_str("namespace ");
-                out.push_str(&alias);
-                out.push_str(" = ");
-                out.push_str(&target);
-                out.push_str(";\n");
+            // Fn-collision renames (`*_tests`) must NOT be re-exported under
+            // their Rust module name: in Rust the module and the fn live in
+            // different namespaces, but a consumer that also `use`s the fn
+            // (`using ::itertools::intersperse;`) then sees BOTH through the
+            // exported using-directive — "reference to 'intersperse' is
+            // ambiguous". Keep those aliases module-local; crate-internal
+            // `intersperse::intersperse(..)` spellings bind at definition
+            // context, which sees the local block.
+            let (exported, local): (Vec<_>, Vec<_>) = aliases
+                .into_iter()
+                .partition(|(_, target)| !target.ends_with("_tests"));
+            if !exported.is_empty() {
+                out.push_str("export namespace rusty_module_aliases {\n");
+                for (alias, target) in exported {
+                    out.push_str("namespace ");
+                    out.push_str(&alias);
+                    out.push_str(" = ");
+                    out.push_str(&target);
+                    out.push_str(";\n");
+                }
+                out.push_str("} // namespace rusty_module_aliases\n");
+                out.push_str("export using namespace rusty_module_aliases;\n\n");
             }
-            out.push_str("} // namespace rusty_module_aliases\n");
-            out.push_str("export using namespace rusty_module_aliases;\n\n");
+            if !local.is_empty() {
+                out.push_str("namespace rusty_module_aliases_local {\n");
+                for (alias, target) in local {
+                    out.push_str("namespace ");
+                    out.push_str(&alias);
+                    out.push_str(" = ");
+                    out.push_str(&target);
+                    out.push_str(";\n");
+                }
+                out.push_str("} // namespace rusty_module_aliases_local\n");
+                out.push_str("using namespace rusty_module_aliases_local;\n\n");
+            }
             return out;
         }
         out.push_str("namespace rusty_module_aliases {\n");
