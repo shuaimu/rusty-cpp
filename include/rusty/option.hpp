@@ -1624,6 +1624,56 @@ bool operator!=(const Option<T>& lhs, const Option<U>& rhs) {
     return !(lhs == rhs);
 }
 
+// Rust `Option<&T>` has two C++ encodings: pointer-flavored (runtime iterator
+// Items) and reference-flavored (`Some(&x)` literals). They are not directly
+// payload-comparable, so bridge equality by comparing pointees — which is what
+// Rust's `PartialEq for Option<&T>` does. Constraints are disjoint from the
+// heterogeneous overload above (it demands direct comparability, we demand
+// its absence), so no ambiguity.
+template<typename T, typename U>
+requires std::is_pointer_v<T>
+      && (!std::is_pointer_v<std::remove_reference_t<U>>)
+      && (!requires(const T& l, const U& r) { l == r; })
+      && requires(const T& l, const U& r) { *l == r; }
+bool operator==(const Option<T>& lhs, const Option<U>& rhs) {
+    if (lhs.is_none() && rhs.is_none()) return true;
+    if (lhs.is_some() && rhs.is_some()) {
+        return *lhs.as_ref().unwrap() == rhs.as_ref().unwrap();
+    }
+    return false;
+}
+
+template<typename T, typename U>
+requires std::is_pointer_v<U>
+      && (!std::is_pointer_v<std::remove_reference_t<T>>)
+      && (!requires(const T& l, const U& r) { l == r; })
+      && requires(const T& l, const U& r) { l == *r; }
+bool operator==(const Option<T>& lhs, const Option<U>& rhs) {
+    if (lhs.is_none() && rhs.is_none()) return true;
+    if (lhs.is_some() && rhs.is_some()) {
+        return lhs.as_ref().unwrap() == *rhs.as_ref().unwrap();
+    }
+    return false;
+}
+
+template<typename T, typename U>
+requires std::is_pointer_v<T>
+      && (!std::is_pointer_v<std::remove_reference_t<U>>)
+      && (!requires(const T& l, const U& r) { l == r; })
+      && requires(const T& l, const U& r) { *l == r; }
+bool operator!=(const Option<T>& lhs, const Option<U>& rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename T, typename U>
+requires std::is_pointer_v<U>
+      && (!std::is_pointer_v<std::remove_reference_t<T>>)
+      && (!requires(const T& l, const U& r) { l == r; })
+      && requires(const T& l, const U& r) { l == *r; }
+bool operator!=(const Option<T>& lhs, const Option<U>& rhs) {
+    return !(lhs == rhs);
+}
+
 template<typename T>
 bool operator==(const Option<T>& lhs, None_t) {
     return lhs.is_none();

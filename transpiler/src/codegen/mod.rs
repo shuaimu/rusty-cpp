@@ -37856,6 +37856,25 @@ impl CodeGen {
             return base_func;
         };
         let path = &path_expr.path;
+        // A callable-bound param (`accept: F`, `F: FnMut(..)`) can be
+        // instantiated through Rust's `&mut F` blanket closure impl — which
+        // this backend encodes as a lambda POINTER (the UFCS dispatchers
+        // forward `&self.f` raw). A bare `accept(...)` cannot invoke that
+        // encoding; deref_if_pointer_like is identity for by-value closures
+        // and peels the pointer flavor. The bound scopes are only populated
+        // while a UFCS trait free-function body is being emitted.
+        if path.segments.len() == 1
+            && matches!(path.segments[0].arguments, syn::PathArguments::None)
+        {
+            let name = path.segments[0].ident.to_string();
+            if self
+                .callable_param_bound_scopes
+                .iter()
+                .any(|scope| scope.contains_key(&name))
+            {
+                return format!("rusty::detail::deref_if_pointer_like({})", base_func);
+            }
+        }
         let function_path = path
             .segments
             .iter()

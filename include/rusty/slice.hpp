@@ -61,6 +61,9 @@ public:
     using elem_type = std::remove_const_t<T>;
     using pointer =
         std::conditional_t<std::is_const_v<T>, const elem_type*, elem_type*>;
+    // Rust `slice::Iter::Item = &'a T`; next() yields the pointer flavor, and
+    // trait free functions spell their return as `typename Iter<...>::Item`.
+    using Item = pointer;
 
     Iter() : cur_(nullptr), end_(nullptr) {}
     Iter(pointer begin, pointer end) : cur_(begin), end_(end) {}

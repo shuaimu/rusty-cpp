@@ -963,8 +963,18 @@ fn test_leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg(
         }
         "#,
     );
-    assert!(out.contains("static_cast<void>(f(&self_));"));
+    // The callee may be routed through deref_if_pointer_like (callable-bound
+    // params can arrive as lambda pointers via Rust's `&mut F` blanket impl);
+    // what this pins is the preserved `&self_` borrow shape.
+    assert!(
+        out.contains("static_cast<void>(f(&self_));")
+            || out.contains(
+                "static_cast<void>(rusty::detail::deref_if_pointer_like(f)(&self_));"
+            ),
+        "{out}"
+    );
     assert!(!out.contains("static_cast<void>(f(self_));"));
+    assert!(!out.contains("static_cast<void>(rusty::detail::deref_if_pointer_like(f)(self_));"));
 }
 
 #[test]
@@ -1015,7 +1025,15 @@ fn test_leaf133_tap_call_shape_keeps_deref_closure_param() {
         }
         "#,
     );
-    assert!(out.contains("static_cast<void>(f(&self_));"));
+    // Same borrow-shape pin as leaf4154: the callee may be wrapped in
+    // deref_if_pointer_like, the `&self_` arg must survive either way.
+    assert!(
+        out.contains("static_cast<void>(f(&self_));")
+            || out.contains(
+                "static_cast<void>(rusty::detail::deref_if_pointer_like(f)(&self_));"
+            ),
+        "{out}"
+    );
     assert!(out.contains("rusty_ext::tap("));
     assert!(
         out.contains("foo += *v") || out.contains("foo += rusty::deref_mut(v)"),
