@@ -424,6 +424,87 @@ impl CodeGen {
                 })
                 .collect();
         }
+        // Pure-phantom generics: declared only to carry lifetimes/bounds
+        // (`fn partition<'a, A: 'a, I, F>(iter: I, pred: F) -> usize` — Rust
+        // infers A through I's IntoIterator bound), absent from every input,
+        // the return type, AND the body. C++ can never deduce such a param
+        // ("couldn't infer template argument 'A'"), so drop it from the head.
+        {
+            use quote::ToTokens;
+            let body_text = f.block.to_token_stream().to_string();
+            // Token scan, not syn traversal: `-> impl Fn(&T, &T) -> Ordering`
+            // mentions T only inside the Fn sugar's parenthesized args, which
+            // type_mentions_named_type_param does not reach.
+            let output_text = f.sig.output.to_token_stream().to_string();
+            let names_word = |text: &str, name: &str| {
+                text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|word| word == name)
+            };
+            let phantom: HashSet<String> = emitted_generics
+                .params
+                .iter()
+                .filter_map(|param| {
+                    let syn::GenericParam::Type(tp) = param else {
+                        return None;
+                    };
+                    let name = tp.ident.to_string();
+                    let in_inputs = f.sig.inputs.iter().any(|arg| match arg {
+                        syn::FnArg::Typed(pt) => {
+                            self.type_mentions_named_type_param(&pt.ty, &name)
+                        }
+                        syn::FnArg::Receiver(_) => false,
+                    });
+                    if in_inputs {
+                        return None;
+                    }
+                    if names_word(&output_text, &name) || names_word(&body_text, &name) {
+                        return None;
+                    }
+                    // Emitter-injected aliases (`using U = invoke_result_t<F&, T>`)
+                    // may spell the param even when the Rust body never does.
+                    if deduced_return_aliases
+                        .iter()
+                        .any(|(_, expr)| Self::cpp_type_expr_mentions_identifier(expr, &name))
+                    {
+                        return None;
+                    }
+                    Some(name)
+                })
+                .collect();
+            if !phantom.is_empty() {
+                emitted_generics.params = emitted_generics
+                    .params
+                    .into_iter()
+                    .filter(|param| match param {
+                        syn::GenericParam::Type(tp) => {
+                            !phantom.contains(&tp.ident.to_string())
+                        }
+                        _ => true,
+                    })
+                    .collect();
+                // Where-clause predicates on a dropped param (`where T:
+                // Clone` → `requires (rusty::clone_like<T>)`) would spell
+                // the now-undeclared name — strip those too.
+                if let Some(where_clause) = emitted_generics.where_clause.as_mut() {
+                    where_clause.predicates = std::mem::take(&mut where_clause.predicates)
+                        .into_iter()
+                        .filter(|pred| {
+                            let syn::WherePredicate::Type(pt) = pred else {
+                                return true;
+                            };
+                            let syn::Type::Path(tp) = &pt.bounded_ty else {
+                                return true;
+                            };
+                            !(tp.qself.is_none()
+                                && tp.path.segments.len() == 1
+                                && phantom.contains(
+                                    &tp.path.segments[0].ident.to_string(),
+                                ))
+                        })
+                        .collect();
+                }
+            }
+        }
         self.push_type_param_scope(&f.sig.generics);
         let return_type = if undeduced_return_type_param.is_some() {
             "auto".to_string()
