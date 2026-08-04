@@ -6658,17 +6658,52 @@ impl CodeGen {
                                     vec![item; tt.elems.len()].join(", ")
                                 ))
                             };
-                            let mapped: Vec<String> = turbofish
-                                .args
-                                .iter()
-                                .filter_map(|arg| match arg {
+                            // Lifetimes vanish in C++. A CONST arg
+                            // (`.next_array::<2>()`) splices as a plain
+                            // value — literal ints and bare const idents
+                            // only; anything computed bails the threading
+                            // (falls to the member path, as before).
+                            let mut mapped: Vec<String> = Vec::new();
+                            let mut has_const_arg = false;
+                            let mut thread_viable = true;
+                            for arg in &turbofish.args {
+                                match arg {
+                                    syn::GenericArgument::Lifetime(_) => {}
                                     syn::GenericArgument::Type(ty) => {
-                                        tuple_arity_item(ty).or_else(|| Some(self.map_type(ty)))
+                                        mapped.push(
+                                            tuple_arity_item(ty)
+                                                .unwrap_or_else(|| self.map_type(ty)),
+                                        );
                                     }
-                                    _ => None,
-                                })
-                                .collect();
-                            let all_viable = !mapped.is_empty()
+                                    syn::GenericArgument::Const(cexpr) => {
+                                        let spelled = match cexpr {
+                                            syn::Expr::Lit(el) => match &el.lit {
+                                                syn::Lit::Int(li) => {
+                                                    Some(li.base10_digits().to_string())
+                                                }
+                                                _ => None,
+                                            },
+                                            syn::Expr::Path(ep) => {
+                                                ep.path.get_ident().map(|i| i.to_string())
+                                            }
+                                            _ => None,
+                                        };
+                                        match spelled {
+                                            Some(s) => {
+                                                mapped.push(s);
+                                                has_const_arg = true;
+                                            }
+                                            None => thread_viable = false,
+                                        }
+                                    }
+                                    _ => thread_viable = false,
+                                }
+                                if !thread_viable {
+                                    break;
+                                }
+                            }
+                            let all_viable = thread_viable
+                                && !mapped.is_empty()
                                 && mapped.iter().all(|t| {
                                     t != "auto"
                                         && !t.contains("/* TODO")
@@ -6692,10 +6727,26 @@ impl CodeGen {
                                             })
                                 });
                             if all_viable {
+                                // Self_ is declared FIRST, so it must be
+                                // spelled too. remove_cvref works for
+                                // by-value receivers, but const-generic
+                                // methods take `&mut self` → `Self_&&`,
+                                // and a non-reference explicit Self_
+                                // can't bind an LVALUE receiver.
+                                // `decltype(__self)` inside the dispatcher
+                                // carries the receiver's own reference
+                                // category, so collapsing does the right
+                                // thing; keep the historical spelling for
+                                // the type-only case.
+                                let self_spelling = if has_const_arg {
+                                    "decltype(__self)".to_string()
+                                } else {
+                                    format!("std::remove_cvref_t<decltype({})>", receiver)
+                                };
                                 callee = format!(
-                                    "{}<std::remove_cvref_t<decltype({})>, {}>",
+                                    "{}<{}, {}>",
                                     callee,
-                                    receiver,
+                                    self_spelling,
                                     mapped.join(", ")
                                 );
                             }
@@ -16753,6 +16804,30 @@ impl CodeGen {
                 );
             }
         }
+        // itertools' `Itertools::next_array<const N>` delegates to
+        // `next_array::next_array(self)`, whose own `const N: usize` appears
+        // only in the RETURN type (`Option<[I::Item; N]>`). Rust infers the
+        // inner N by unifying return types with the ENCLOSING fn's N; C++
+        // cannot (a return-only template param is undeducible). Name-targeted:
+        // when the enclosing template declares `N`, thread `<I, N>`
+        // explicitly (I from the argument, N by name).
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && call.args.len() == 1
+            && fp.path.segments.len() >= 2
+            && fp.path.segments[fp.path.segments.len() - 1].ident == "next_array"
+            && fp.path.segments[fp.path.segments.len() - 2].ident == "next_array"
+            && fp
+                .path
+                .segments
+                .iter()
+                .all(|s| matches!(s.arguments, syn::PathArguments::None))
+            && self.type_param_scopes.iter().any(|s| s.contains("N"))
+        {
+            let arg = self.emit_expr_to_string(&call.args[0]);
+            return format!(
+                "next_array::next_array<std::remove_reference_t<decltype({arg})>, N>({arg})"
+            );
+        }
         // `guard(self, |s| ...)` / `guard(&mut place, ...)`: the ScopeGuard
         // slot must ALIAS the place — a value slot copies (a Clone-backed
         // RawTable copy re-enters clone_from_impl's own guard: infinite
@@ -25262,6 +25337,7 @@ impl CodeGen {
                         | syn::Pat::Tuple(_)
                         | syn::Pat::TupleStruct(_)
                         | syn::Pat::Struct(_)
+                        | syn::Pat::Slice(_)
                 ) =>
             {
                 pt.pat.as_ref()

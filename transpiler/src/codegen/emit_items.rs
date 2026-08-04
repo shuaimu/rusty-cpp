@@ -270,7 +270,141 @@ impl CodeGen {
         true
     }
 
+    /// itertools' `next_array`/`collect_array` are generic over `const N:
+    /// usize`, which appears only in the RETURN type (`Option<[Item; N]>`):
+    /// Rust infers N from the surrounding pattern or counterpart, C++ cannot
+    /// (a return-only template param is undeducible). Recover N from the two
+    /// shapes the tests use and inject an explicit `::<N>` turbofish for the
+    /// UFCS call-site threading to pick up:
+    ///   - `it.next_array().map(|[a, b]| ..)` — the map closure's
+    ///     slice-pattern width IS N;
+    ///   - `match (&it.next_array(), &Some([a, b])) { .. }` — the assert_eq!
+    ///     expansion; the counterpart array literal's width IS N.
+    /// Returns `Some(rewritten)` only when a rule fired.
+    fn backprop_const_array_width_turbofish(f: &syn::ItemFn) -> Option<syn::ItemFn> {
+        fn peel(mut e: &syn::Expr) -> &syn::Expr {
+            loop {
+                match e {
+                    syn::Expr::Reference(r) => e = &r.expr,
+                    syn::Expr::Paren(p) => e = &p.expr,
+                    syn::Expr::Group(g) => e = &g.expr,
+                    _ => return e,
+                }
+            }
+        }
+        fn peel_mut(mut e: &mut syn::Expr) -> &mut syn::Expr {
+            loop {
+                match e {
+                    syn::Expr::Reference(r) => e = &mut r.expr,
+                    syn::Expr::Paren(p) => e = &mut p.expr,
+                    syn::Expr::Group(g) => e = &mut g.expr,
+                    _ => return e,
+                }
+            }
+        }
+        fn closure_slice_width(arg: &syn::Expr) -> Option<usize> {
+            let syn::Expr::Closure(cl) = arg else {
+                return None;
+            };
+            if cl.inputs.len() != 1 {
+                return None;
+            }
+            let mut pat = &cl.inputs[0];
+            loop {
+                match pat {
+                    syn::Pat::Type(pt) => pat = &pt.pat,
+                    syn::Pat::Paren(pp) => pat = &pp.pat,
+                    syn::Pat::Reference(pr) => pat = &pr.pat,
+                    _ => break,
+                }
+            }
+            let syn::Pat::Slice(sp) = pat else {
+                return None;
+            };
+            if sp.elems.iter().any(|e| matches!(e, syn::Pat::Rest(_))) {
+                return None;
+            }
+            Some(sp.elems.len())
+        }
+        fn some_array_literal_width(e: &syn::Expr) -> Option<usize> {
+            let syn::Expr::Call(c) = peel(e) else {
+                return None;
+            };
+            let syn::Expr::Path(p) = c.func.as_ref() else {
+                return None;
+            };
+            if !p.path.segments.last().is_some_and(|s| s.ident == "Some")
+                || c.args.len() != 1
+            {
+                return None;
+            }
+            let syn::Expr::Array(arr) = peel(&c.args[0]) else {
+                return None;
+            };
+            Some(arr.elems.len())
+        }
+        fn apply_width(e: &mut syn::Expr, k: usize) -> bool {
+            let syn::Expr::MethodCall(mc) = peel_mut(e) else {
+                return false;
+            };
+            if mc.turbofish.is_some()
+                || !matches!(
+                    mc.method.to_string().as_str(),
+                    "next_array" | "collect_array"
+                )
+            {
+                return false;
+            }
+            let lit = syn::LitInt::new(&k.to_string(), proc_macro2::Span::call_site());
+            mc.turbofish = Some(syn::parse_quote!(::<#lit>));
+            true
+        }
+        struct W {
+            changed: bool,
+        }
+        impl syn::visit_mut::VisitMut for W {
+            fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+                syn::visit_mut::visit_expr_mut(self, e);
+                match e {
+                    syn::Expr::MethodCall(mc) if mc.method == "map" && mc.args.len() == 1 => {
+                        if let Some(k) = closure_slice_width(&mc.args[0])
+                            && apply_width(&mut mc.receiver, k)
+                        {
+                            self.changed = true;
+                        }
+                    }
+                    syn::Expr::Match(m) => {
+                        if let syn::Expr::Tuple(t) = &mut *m.expr
+                            && t.elems.len() == 2
+                        {
+                            let w0 = some_array_literal_width(&t.elems[0]);
+                            let w1 = some_array_literal_width(&t.elems[1]);
+                            if let Some(k) = w1
+                                && apply_width(&mut t.elems[0], k)
+                            {
+                                self.changed = true;
+                            }
+                            if let Some(k) = w0
+                                && apply_width(&mut t.elems[1], k)
+                            {
+                                self.changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut rewritten = f.clone();
+        let mut w = W { changed: false };
+        syn::visit_mut::VisitMut::visit_item_fn_mut(&mut w, &mut rewritten);
+        w.changed.then_some(rewritten)
+    }
+
     pub(super) fn emit_function(&mut self, f: &syn::ItemFn) {
+        // Pattern-width const-generic recovery (`.next_array()` family).
+        let backpropped = Self::backprop_const_array_width_turbofish(f);
+        let f = backpropped.as_ref().unwrap_or(f);
         // const fns already fully defined in the forward phase must not
         // define again (C++ redefinition error). The early pass inserts
         // into the set AFTER its own emit_function call, so only the

@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <tuple>        // std::tuple / std::make_tuple (zip); not pulled by <optional> under `import std`
 #include <string_view>  // std::string_view (as_deref/str views); ditto
+#include <array>        // std::array (empty-array payload == bridge); ditto
 
 // Option<T> - Represents an optional value
 // Equivalent to Rust's Option<T>
@@ -1671,6 +1672,28 @@ requires std::is_pointer_v<U>
       && (!requires(const T& l, const U& r) { l == r; })
       && requires(const T& l, const U& r) { l == *r; }
 bool operator!=(const Option<T>& lhs, const Option<U>& rhs) {
+    return !(lhs == rhs);
+}
+
+// Rust unifies an EMPTY array literal's element type with the other side
+// (`iter.next_array::<0>() == Some([])` — both `[&i32; 0]`); the transpiler
+// cannot always recover that element type, so the two sides can reach C++ as
+// `Option<std::array<T, 0>>` vs `Option<std::array<U, 0>>` with T != U.
+// Empty arrays are vacuously equal, so equality is just someness. The guard
+// keeps this disjoint from the heterogeneous overload above (std::array's
+// own == deduces a single element type, so mixed empty arrays are never
+// directly comparable).
+template<typename T, typename U>
+requires (!std::is_same_v<T, U>)
+      && (!requires(const std::array<T, 0>& l, const std::array<U, 0>& r) { l == r; })
+bool operator==(const Option<std::array<T, 0>>& lhs, const Option<std::array<U, 0>>& rhs) {
+    return lhs.is_some() == rhs.is_some();
+}
+
+template<typename T, typename U>
+requires (!std::is_same_v<T, U>)
+      && (!requires(const std::array<T, 0>& l, const std::array<U, 0>& r) { l == r; })
+bool operator!=(const Option<std::array<T, 0>>& lhs, const Option<std::array<U, 0>>& rhs) {
     return !(lhs == rhs);
 }
 

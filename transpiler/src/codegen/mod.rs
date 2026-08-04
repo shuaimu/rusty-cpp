@@ -16090,6 +16090,7 @@ impl CodeGen {
             }
             let mut merged = method.clone();
             merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+            Self::strip_tuple_arity_phantom_method_generics(&mut merged, impl_block);
             Self::normalize_impl_method_receiver_for_reference_self(
                 &mut merged,
                 impl_block.self_ty.as_ref(),
@@ -44155,9 +44156,17 @@ impl CodeGen {
     /// Check if a closure parameter pattern requires destructuring in the body.
     /// C++ doesn't support structured bindings as lambda parameters.
     fn closure_param_needs_body_destructure(pat: &syn::Pat) -> bool {
+        // Slice patterns included: `|[&x, &y]| ..` used to emit a
+        // structured-binding lambda PARAMETER (`auto [x, y]`), which is not
+        // C++ — and it dropped the per-element `&`-pattern derefs. The
+        // body-destructure path indexes each element and derefs through
+        // the reference pattern.
         matches!(
             pat,
-            syn::Pat::Tuple(_) | syn::Pat::TupleStruct(_) | syn::Pat::Struct(_)
+            syn::Pat::Tuple(_)
+                | syn::Pat::TupleStruct(_)
+                | syn::Pat::Struct(_)
+                | syn::Pat::Slice(_)
         )
     }
 
