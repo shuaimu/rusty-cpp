@@ -4688,11 +4688,27 @@ struct HashMap {
     }
 
     HashMap<K, V, S, A> clone() const {
-        return HashMap<K, V, S, A>(rusty::clone(this->hash_builder), rusty::clone(this->table));
+        // Deep clone by re-insertion. The port has no deep RawTable::clone
+        // (upstream hashbrown's bucket-wise Clone impl is outside the ported
+        // slice), so the previous `rusty::clone(this->table)` bottomed out in
+        // RawTable's shallow `= default` copy ctor — both owners then freed
+        // the same bucket allocation (double free caught by the mako ASan
+        // rig; RawTable's copy ctor is now deleted).
+        HashMap<K, V, S, A> out = HashMap<K, V, S, A>::with_capacity_and_hasher_in(
+            this->len(), rusty::clone(this->hash_builder), rusty::clone(this->table.alloc));
+        auto it = this->iter();
+        for (;;) {
+            auto e = it.next();
+            if (e.is_none()) {
+                break;
+            }
+            auto kv = e.unwrap();
+            out.insert(rusty::clone(std::get<0>(kv)), rusty::clone(std::get<1>(kv)));
+        }
+        return out;
     }
     void clone_from(const HashMap<K, V, S, A>& source) {
-        this->table.clone_from(source.table);
-        rusty::deref_call(this->hash_builder, rusty::detail::__mdisp_clone_from{}, source.hash_builder);
+        *this = source.clone();
     }
     static HashMap<K, V, S, A> new_() {
         return HashMap<K, V, S, A>::default_();

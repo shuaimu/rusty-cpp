@@ -4183,12 +4183,14 @@ struct RawIntoIter {
     rusty::PhantomData<T> marker;
     mutable bool _rusty_forgotten = false;
     RawIntoIter(RawIter<T> iter_init, rusty::Option<std::tuple<rusty::ptr::NonNull<uint8_t>, rusty::alloc::Layout, A>> allocation_init, rusty::PhantomData<T> marker_init) : iter_field(std::move(iter_init)), allocation(std::move(allocation_init)), marker(std::move(marker_init)) {}
-    RawIntoIter(const RawIntoIter&) = default;
+    // Shallow duplication of an owning table double-frees (mako ASan rig);
+    // Rust-side duplication is Clone-only, which this port lacks here.
+    RawIntoIter(const RawIntoIter&) = delete;
     RawIntoIter(RawIntoIter&& other) noexcept : iter_field(std::move(other.iter_field)), allocation(std::move(other.allocation)), marker(std::move(other.marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    RawIntoIter& operator=(const RawIntoIter&) = default;
+    RawIntoIter& operator=(const RawIntoIter&) = delete;
     RawIntoIter& operator=(RawIntoIter&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4258,16 +4260,14 @@ struct RawTable {
     rusty::PhantomData<T> marker;
     mutable bool _rusty_forgotten = false;
     RawTable(RawTableInner table_init, A alloc_init, rusty::PhantomData<T> marker_init) : table(std::move(table_init)), alloc(std::move(alloc_init)), marker(std::move(marker_init)) {}
-    // ⚠️ Bitwise copy of an OWNING table: two owners, and the second
-    // destructor double-frees. Deleting it is the right shape but
-    // rusty::Result's storage currently requires copy-constructibility,
-    // so it breaks unrelated instantiations. See STATUS note.
-    RawTable(const RawTable&) = default;
+    // Shallow duplication of an owning table double-frees (mako ASan rig);
+    // Rust-side duplication is Clone-only, which this port lacks here.
+    RawTable(const RawTable&) = delete;
     RawTable(RawTable&& other) noexcept : table(std::move(other.table)), alloc(std::move(other.alloc)), marker(std::move(other.marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    RawTable& operator=(const RawTable&) = default;
+    RawTable& operator=(const RawTable&) = delete;
     RawTable& operator=(RawTable&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4773,12 +4773,14 @@ struct RawDrain {
     rusty::PhantomData<const RawTable<T, A>&> marker;
     mutable bool _rusty_forgotten = false;
     RawDrain(RawIter<T> iter_init, RawTableInner table_init, rusty::ptr::NonNull<RawTableInner> orig_table_init, rusty::PhantomData<const RawTable<T, A>&> marker_init) : iter_field(std::move(iter_init)), table(std::move(table_init)), orig_table(std::move(orig_table_init)), marker(std::move(marker_init)) {}
-    RawDrain(const RawDrain&) = default;
+    // Shallow duplication of an owning table double-frees (mako ASan rig);
+    // Rust-side duplication is Clone-only, which this port lacks here.
+    RawDrain(const RawDrain&) = delete;
     RawDrain(RawDrain&& other) noexcept : iter_field(std::move(other.iter_field)), table(std::move(other.table)), orig_table(std::move(other.orig_table)), marker(std::move(other.marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    RawDrain& operator=(const RawDrain&) = default;
+    RawDrain& operator=(const RawDrain&) = delete;
     RawDrain& operator=(RawDrain&& other) noexcept {
         if (this == &other) {
             return *this;
