@@ -57,6 +57,21 @@ public:
         }
     }
 
+    // @safe - Rust `impl<T: PartialEq + Copy> PartialEq for Cell<T>`
+    // compares the copied-out values (derive(PartialEq) structs with Cell
+    // fields need it — itertools' PanickingCounter).
+    friend bool operator==(const Cell& lhs, const Cell& rhs)
+        requires requires(const Cell& c) { c.get() == c.get(); }
+    {
+        return lhs.get() == rhs.get();
+    }
+
+    friend bool operator!=(const Cell& lhs, const Cell& rhs)
+        requires requires(const Cell& c) { c.get() == c.get(); }
+    {
+        return !(lhs == rhs);
+    }
+
     // @safe - Swap the values of two cells
     // @lifetime: (&'a, &'a) -> void
     void swap(Cell& other) const {

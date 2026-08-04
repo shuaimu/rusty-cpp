@@ -4834,11 +4834,152 @@ impl CodeGen {
     /// method's head when the signature AND body never name them, and tag
     /// the method `#[rusty_tuple_arity(N)]` for the emitter's
     /// `requires (std::tuple_size_v<..> == N)` gate.
+    /// Second phantom class (sibling of the tuple-arity strip below): an impl
+    /// generic bound ONLY as another param's Fn-trait OUTPUT
+    /// (`impl<B, F, I> Iterator for Batching<I, F> where F: FnMut(&mut I) ->
+    /// Option<B>`). Post-merge it becomes an undeducible METHOD template
+    /// param (`template<typename B> auto next()`), which also breaks every
+    /// duck-typed probe (`requires { v.next(); }` — rusty::iter refused
+    /// Batching). B is fully determined by F: drop it and let the deduced
+    /// return carry the type. Conditions: named in no input, no body TYPE
+    /// position, not in the self type, and named inside some parenthesized
+    /// Fn bound's output.
+    fn strip_fn_output_bound_phantom_method_generics(
+        method: &mut syn::ImplItemFn,
+        impl_block: &syn::ItemImpl,
+    ) {
+        use quote::ToTokens;
+        // Only next()/next_back(): their emitted returns are erased to
+        // deduced spellings, and an undeducible head there breaks every
+        // duck-typed probe. Other emission paths RE-SPELL params the Rust
+        // AST never names (rusty_ext forward decls spell the return
+        // verbatim; owner-template recovery reconstructs `KeyValue<K, V>`
+        // in bodies), so a general drop over-fires.
+        if !matches!(
+            method.sig.ident.to_string().as_str(),
+            "next" | "next_back"
+        ) {
+            return;
+        }
+        let names_word = |text: &str, name: &str| {
+            text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == name)
+        };
+        // Collect every Fn-sugar bound OUTPUT text from the impl generics
+        // (inline bounds and where-clause predicates alike).
+        let mut fn_output_text = String::new();
+        let mut collect_bounds = |bounds: &syn::punctuated::Punctuated<
+            syn::TypeParamBound,
+            syn::Token![+],
+        >| {
+            for bound in bounds {
+                if let syn::TypeParamBound::Trait(tb) = bound {
+                    for seg in &tb.path.segments {
+                        if let syn::PathArguments::Parenthesized(pa) = &seg.arguments
+                            && let syn::ReturnType::Type(_, out) = &pa.output
+                        {
+                            fn_output_text.push_str(&out.to_token_stream().to_string());
+                            fn_output_text.push(' ');
+                        }
+                    }
+                }
+            }
+        };
+        for param in &impl_block.generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                collect_bounds(&tp.bounds);
+            }
+        }
+        if let Some(wc) = &impl_block.generics.where_clause {
+            for pred in &wc.predicates {
+                if let syn::WherePredicate::Type(pt) = pred {
+                    collect_bounds(&pt.bounds);
+                }
+            }
+        }
+        if fn_output_text.is_empty() {
+            return;
+        }
+        let self_ty_text = impl_block.self_ty.to_token_stream().to_string();
+        let mut input_text = String::new();
+        for input in &method.sig.inputs {
+            input_text.push_str(&input.to_token_stream().to_string());
+            input_text.push(' ');
+        }
+        struct TypeIdentCollector2(HashSet<String>);
+        impl<'ast> syn::visit::Visit<'ast> for TypeIdentCollector2 {
+            fn visit_type(&mut self, ty: &'ast syn::Type) {
+                if let syn::Type::Path(tp) = ty {
+                    for seg in &tp.path.segments {
+                        self.0.insert(seg.ident.to_string());
+                    }
+                }
+                syn::visit::visit_type(self, ty);
+            }
+            fn visit_expr_path(&mut self, ep: &'ast syn::ExprPath) {
+                for seg in &ep.path.segments {
+                    if !matches!(seg.arguments, syn::PathArguments::None) {
+                        self.0.insert(seg.ident.to_string());
+                    }
+                }
+                syn::visit::visit_expr_path(self, ep);
+            }
+        }
+        let mut body_types = TypeIdentCollector2(HashSet::new());
+        syn::visit::Visit::visit_block(&mut body_types, &method.block);
+        let impl_params: HashSet<String> = impl_block
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let droppable: HashSet<String> = impl_params
+            .iter()
+            .filter(|name| {
+                names_word(&fn_output_text, name)
+                    && !names_word(&self_ty_text, name)
+                    && !names_word(&input_text, name)
+                    && !body_types.0.contains(*name)
+            })
+            .cloned()
+            .collect();
+        if droppable.is_empty() {
+            return;
+        }
+        method.sig.generics.params = std::mem::take(&mut method.sig.generics.params)
+            .into_iter()
+            .filter(|p| match p {
+                syn::GenericParam::Type(t) => !droppable.contains(&t.ident.to_string()),
+                _ => true,
+            })
+            .collect();
+        if let Some(wc) = method.sig.generics.where_clause.as_mut() {
+            wc.predicates = std::mem::take(&mut wc.predicates)
+                .into_iter()
+                .filter(|pred| {
+                    let syn::WherePredicate::Type(pt) = pred else {
+                        return true;
+                    };
+                    let syn::Type::Path(p) = &pt.bounded_ty else {
+                        return true;
+                    };
+                    !(p.qself.is_none()
+                        && p.path.segments.len() == 1
+                        && droppable.contains(&p.path.segments[0].ident.to_string()))
+                })
+                .collect();
+        }
+    }
+
     pub(super) fn strip_tuple_arity_phantom_method_generics(
         method: &mut syn::ImplItemFn,
         impl_block: &syn::ItemImpl,
     ) {
         use quote::ToTokens;
+        Self::strip_fn_output_bound_phantom_method_generics(method, impl_block);
         if std::env::var("RUSTY_CPP_TRAP_ARITY").is_ok() {
             eprintln!(
                 "[trap-arity] method={} self_ty={}",
