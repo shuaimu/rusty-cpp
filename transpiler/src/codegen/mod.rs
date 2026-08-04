@@ -1815,6 +1815,7 @@ pub struct CodeGen {
     /// that set before its collect passes and only re-fills it from the
     /// file being emitted.
     pub(crate) cross_file_unit_struct_tails: HashSet<String>,
+    pub(crate) cross_file_cpp_inherit_pairs: Vec<(syn::ItemStruct, String)>,
     /// Map from a type alias's name (e.g. "Root") to the tail of its
     /// underlying struct/type (e.g. "NodeRef"). Built from
     /// `pub type Root<K, V> = NodeRef<...>;` declarations collected
@@ -2171,6 +2172,7 @@ impl CodeGen {
             cross_file_impl_blocks: Vec::new(),
             cross_file_struct_tails: HashSet::new(),
             cross_file_unit_struct_tails: HashSet::new(),
+            cross_file_cpp_inherit_pairs: Vec::new(),
             cross_file_type_alias_tails: HashMap::new(),
         }
     }
@@ -4039,6 +4041,43 @@ impl CodeGen {
         self.cross_file_enums = enums;
     }
 
+    /// Seed `#[cpp_inherit]` knowledge harvested from sibling inline-rust
+    /// blocks (see TranspileOptions::cross_file_cpp_inherit). Both halves
+    /// matter for a sibling-block struct literal: the flag routes it away
+    /// from designated init (illegal on the emitted non-aggregate), and
+    /// the field order lets the positional fieldwise-ctor form assemble
+    /// its argument list.
+    pub fn set_cross_file_cpp_inherit(&mut self, pairs: Vec<(syn::ItemStruct, String)>) {
+        // Stored, not applied: emit_file's reset pass clears
+        // cpp_inherit_trait before its collect passes, so the seed must be
+        // REPLAYED after the clears (same pattern as
+        // cross_file_unit_struct_tails).
+        self.cross_file_cpp_inherit_pairs = pairs;
+    }
+
+    fn replay_cross_file_cpp_inherit(&mut self) {
+        let pairs = std::mem::take(&mut self.cross_file_cpp_inherit_pairs);
+        for (item_struct, trait_name) in &pairs {
+            let type_name = item_struct.ident.to_string();
+            let scoped = self.scoped_type_key(&type_name);
+            self.cpp_inherit_trait
+                .insert(type_name.clone(), trait_name.clone());
+            self.cpp_inherit_trait
+                .insert(scoped.clone(), trait_name.clone());
+            if let syn::Fields::Named(fields) = &item_struct.fields {
+                let order: Vec<String> = fields
+                    .named
+                    .iter()
+                    .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+                    .collect();
+                let map = std::rc::Rc::make_mut(&mut self.struct_field_order);
+                map.entry(type_name).or_insert_with(|| order.clone());
+                map.entry(scoped).or_insert(order);
+            }
+        }
+        self.cross_file_cpp_inherit_pairs = pairs;
+    }
+
     /// Provide impl blocks harvested from sibling files in the same crate.
     /// Used for cross-module orphan-impl handling: when a struct is
     /// emitted in file A, any impl blocks from file B targeting that
@@ -4385,6 +4424,13 @@ impl CodeGen {
             self.cross_file_unit_struct_tails = foreign_units;
         }
         log_emit("seed_cross_file_unit_structs");
+        // Same replay for sibling-block #[cpp_inherit] types: the struct
+        // literal of such a type must route to the fieldwise ctor (the
+        // emitted C++ struct has a base class; designated init is
+        // illegal), and the flag + field order both live in registries the
+        // reset above cleared.
+        self.replay_cross_file_cpp_inherit();
+        log_emit("seed_cross_file_cpp_inherit");
         // Same replay for sibling-file `impl Deref`/`DerefMut` blocks: the
         // guard-flow classifier keys on `user_deref_targets`, and the per-file
         // collect pass only sees this file's own impls — without the replay,

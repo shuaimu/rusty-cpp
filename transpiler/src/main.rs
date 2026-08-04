@@ -4109,6 +4109,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     }
     let transpile_options = transpile::TranspileOptions {
+        // Crate mode's collect pass sees whole files; the sibling-block
+        // cpp_inherit harvest is an inline-rust-only need.
+        cross_file_cpp_inherit: Vec::new(),
         cpp_type_aliases: std::collections::HashMap::new(),
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         is_dependency: false,
@@ -4705,6 +4708,9 @@ fn main() {
         }
     };
     let transpile_options = transpile::TranspileOptions {
+        // Crate mode's collect pass sees whole files; the sibling-block
+        // cpp_inherit harvest is an inline-rust-only need.
+        cross_file_cpp_inherit: Vec::new(),
         cpp_type_aliases: std::collections::HashMap::new(),
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
         is_dependency: false,

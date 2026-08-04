@@ -40029,3 +40029,36 @@ fn test_drop_struct_with_clone_gets_clone_backed_copy() {
         "no defaulted shallow copy on a Drop struct: {out}"
     );
 }
+
+#[test]
+fn test_box_new_struct_literal_of_cpp_inherit_uses_fieldwise_ctor() {
+    // A #[cpp_inherit] struct is non-aggregate in C++ (it has a base
+    // class), so a struct literal must lower to the synthesized
+    // fieldwise ctor, never a designated-initializer list (mako tcp
+    // proxy factories: Box::new(TcpChannelShim { conn_: conn })).
+    let out = transpile_str(
+        r#"
+        pub trait ChannelBase {
+            fn close(&mut self);
+        }
+        struct Shim {
+            conn_: i32,
+        }
+        #[cpp_inherit]
+        impl ChannelBase for Shim {
+            fn close(&mut self) {}
+        }
+        fn make_proxy(conn: i32) -> Box<ChannelBase> {
+            Box::new(Shim { conn_: conn })
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("Shim{.conn_"),
+        "designated init on non-aggregate cpp_inherit struct: {out}"
+    );
+    assert!(
+        out.contains("Shim(") || out.contains("Shim(std::move(conn))"),
+        "expected fieldwise-ctor construction: {out}"
+    );
+}
