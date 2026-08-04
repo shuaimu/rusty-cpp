@@ -485,6 +485,59 @@ fn collect_cpp_type_aliases(content: &str) -> std::collections::HashMap<String, 
     out
 }
 
+fn collect_file_cpp_inherit(blocks: &[ParsedBlock]) -> Vec<(syn::ItemStruct, String)> {
+    // (struct def, trait) for every `#[cpp_inherit] impl Trait for Type`
+    // in any block — a sibling block constructing such a type must use
+    // its fieldwise ctor (the emitted C++ struct has a base class, so
+    // designated init is illegal), and needs the field order to build
+    // the positional argument list. Only this harvest tells it either.
+    let mut structs = std::collections::HashMap::new();
+    let mut impls = Vec::new();
+    for block in blocks {
+        let Ok(file) = syn::parse_file(&block.rust_payload_normalized) else {
+            continue;
+        };
+        for item in file.items {
+            match item {
+                syn::Item::Struct(item_struct) => {
+                    structs.insert(item_struct.ident.to_string(), item_struct);
+                }
+                syn::Item::Impl(item_impl) => {
+                    let has_attr = item_impl.attrs.iter().any(|a| {
+                        a.path()
+                            .segments
+                            .last()
+                            .is_some_and(|s| s.ident == "cpp_inherit")
+                    });
+                    if has_attr {
+                        impls.push(item_impl);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut pairs = Vec::new();
+    for item_impl in impls {
+        let Some((_, trait_path, _)) = &item_impl.trait_ else {
+            continue;
+        };
+        let Some(trait_seg) = trait_path.segments.last() else {
+            continue;
+        };
+        let syn::Type::Path(tp) = &*item_impl.self_ty else {
+            continue;
+        };
+        let Some(type_seg) = tp.path.segments.last() else {
+            continue;
+        };
+        if let Some(item_struct) = structs.get(&type_seg.ident.to_string()) {
+            pairs.push((item_struct.clone(), trait_seg.ident.to_string()));
+        }
+    }
+    pairs
+}
+
 fn collect_file_enums(blocks: &[ParsedBlock]) -> Vec<syn::ItemEnum> {
     let mut enums = Vec::new();
     for block in blocks {
@@ -504,8 +557,9 @@ fn render_generated_region(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
+    file_cpp_inherit: &[(syn::ItemStruct, String)],
 ) -> Result<String, String> {
-    let generated_cpp = transpile_payload_to_cpp(block, file_enums, cpp_aliases)?;
+    let generated_cpp = transpile_payload_to_cpp(block, file_enums, cpp_aliases, file_cpp_inherit)?;
     Ok(render_generated_region_with_cpp(block, &generated_cpp))
 }
 
@@ -513,10 +567,12 @@ fn transpile_payload_to_cpp(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
+    file_cpp_inherit: &[(syn::ItemStruct, String)],
 ) -> Result<String, String> {
     let options = transpile::TranspileOptions {
         // Sibling blocks in the same file are this block's module scope.
         cross_file_enums: file_enums.to_vec(),
+        cross_file_cpp_inherit: file_cpp_inherit.to_vec(),
         // Surrounding-TU `using` aliases, so pointer-like detection can see
         // through `WeakClientConnection` to `rusty::sync::Weak<..>`.
         cpp_type_aliases: cpp_aliases.clone(),
@@ -619,10 +675,11 @@ fn render_block_rewrite(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
+    file_cpp_inherit: &[(syn::ItemStruct, String)],
 ) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(&render_rust_block(block));
-    out.push_str(&render_generated_region(block, file_enums, cpp_aliases)?);
+    out.push_str(&render_generated_region(block, file_enums, cpp_aliases, file_cpp_inherit)?);
     Ok(out)
 }
 
@@ -787,6 +844,7 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
 
     let file_enums = collect_file_enums(blocks);
     let cpp_aliases = collect_cpp_type_aliases(content);
+    let file_cpp_inherit = collect_file_cpp_inherit(blocks);
 
     let mut out = String::with_capacity(content.len() + blocks.len() * 128);
     let mut cursor = 0usize;
@@ -794,7 +852,7 @@ fn rewrite_content(path: &Path, content: &str, blocks: &[ParsedBlock]) -> Result
         std::collections::BTreeSet::new();
     for block in blocks {
         out.push_str(&content[cursor..block.replace_start]);
-        let mut rewritten = render_block_rewrite(block, &file_enums, &cpp_aliases).map_err(|e| {
+        let mut rewritten = render_block_rewrite(block, &file_enums, &cpp_aliases, &file_cpp_inherit).map_err(|e| {
             format!(
                 "{}:{}: failed to transpile inline block id={}: {}",
                 path.display(),

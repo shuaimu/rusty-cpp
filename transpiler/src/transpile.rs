@@ -394,6 +394,13 @@ pub struct TranspileOptions {
     /// the methods (and the orphan emission should therefore be
     /// suppressed). Empty for single-file mode.
     pub cross_file_structs: Vec<syn::ItemStruct>,
+    /// (type, trait) pairs for `#[cpp_inherit] impl Trait for Type` blocks
+    /// living in SIBLING inline-rust blocks of the same file. A struct
+    /// literal of such a type must lower to the fieldwise ctor (the
+    /// emitted C++ struct has a base class, so designated init is
+    /// illegal) — but the flag is registered by the collect pass of the
+    /// block that CONTAINS the impl, which a sibling block never runs.
+    pub cross_file_cpp_inherit: Vec<(syn::ItemStruct, String)>,
     /// Cross-file type-alias declarations (`pub type Foo<K> = Bar<...>;`)
     /// collected during a crate-mode pre-pass. Used to resolve orphan
     /// impl blocks targeting a type alias back to the underlying struct
@@ -1034,6 +1041,7 @@ impl Default for TranspileOptions {
             interface_traits: false,
             inline_rust_block: false,
             cross_file_enums: Vec::new(),
+            cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
             cross_file_type_aliases: Vec::new(),
@@ -1402,6 +1410,7 @@ pub fn transpile_full_with_options(
     codegen.set_interface_traits(options.interface_traits);
     codegen.inline_rust_block = options.inline_rust_block;
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
+    codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
