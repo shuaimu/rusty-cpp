@@ -100,6 +100,20 @@ public:
         return next();
     }
 
+    // Rust `Iterator::rfind` — first match searching from the BACK; the
+    // searched suffix (found element included) is consumed (itertools'
+    // partition drives it). Yields the same pointer flavor as next_back.
+    template<typename P>
+    rusty::Option<pointer> rfind(P pred) {
+        while (end_ != cur_) {
+            --end_;
+            if (pred(end_)) {
+                return rusty::Option<pointer>(end_);
+            }
+        }
+        return rusty::None;
+    }
+
     // Rust Iterator::partition — split into (matching, rest). Returns
     // std::vector pairs (this header cannot depend on the module-only
     // rusty::Vec); consumers compare element-wise.

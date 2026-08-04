@@ -12587,11 +12587,37 @@ impl CodeGen {
                     .iter()
                     .map(|arg| self.emit_expr_maybe_move(arg))
                     .collect();
-                return Some(format!(
+                // Impls whose fn-template params mirror the trait args
+                // positionally (MergeFuncLR) need the explicit spelling;
+                // impls with FEWER params (MergeLte: `impl<T>
+                // OrderingOrBool<T, T>` — one param, two trait args)
+                // hard-error on it but deduce from the value args. Probe
+                // the bare deducible call first, fall back to the spelled
+                // form. Args pass as lambda params for single evaluation.
+                let escaped = escape_cpp_keyword(&method_name);
+                let arg_names: Vec<String> =
+                    (0..args.len()).map(|i| format!("__sarg{}", i)).collect();
+                let param_decls = arg_names
+                    .iter()
+                    .map(|n| format!("auto&& {}", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let fwd = arg_names
+                    .iter()
+                    .map(|n| format!("std::forward<decltype({0})>({0})", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let bare = format!("{}::{}({})", owner, escaped, fwd);
+                let spelled = format!(
                     "{}::template {}<{}>({})",
                     owner,
-                    escape_cpp_keyword(&method_name),
+                    escaped,
                     mapped.join(", "),
+                    fwd
+                );
+                return Some(format!(
+                    "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                    param_decls, bare, bare, spelled,
                     args.join(", ")
                 ));
             }

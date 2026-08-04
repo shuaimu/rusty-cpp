@@ -408,6 +408,77 @@ namespace rusty {
             rusty::panic::do_panic("bad variant access");
         }
 
+        // Template-template flavors: generic-enum variant tags are TEMPLATES
+        // (`rusty::Either_Left<L, R>`), and match lowering can't always spell
+        // the args, so it passes the bare template
+        // (`variant_holds<rusty::Either_Left>(v)`). Match any specialization.
+        template<template<typename...> class TT, typename U>
+        struct is_specialization_of : std::false_type {};
+        template<template<typename...> class TT, typename... Us>
+        struct is_specialization_of<TT, TT<Us...>> : std::true_type {};
+
+        template<template<typename...> class TT, typename Variant,
+                 std::size_t Index = 0>
+        constexpr bool variant_holds_tt_impl(const Variant& value) {
+            if constexpr (Index >= std::variant_size_v<Variant>) {
+                return false;
+            } else {
+                if constexpr (is_specialization_of<
+                                  TT,
+                                  std::variant_alternative_t<Index, Variant>>::value) {
+                    if (value.index() == Index) {
+                        return true;
+                    }
+                }
+                return variant_holds_tt_impl<TT, Variant, Index + 1>(value);
+            }
+        }
+
+        template<template<typename...> class TT, typename VariantLike>
+        constexpr bool variant_holds(VariantLike&& value) {
+            auto&& variant_ref = as_variant_ref(std::forward<VariantLike>(value));
+            using Variant =
+                std::remove_cv_t<std::remove_reference_t<decltype(variant_ref)>>;
+            if constexpr (!is_std_variant_v<Variant>) {
+                return false;
+            } else {
+                return variant_holds_tt_impl<TT, Variant>(variant_ref);
+            }
+        }
+
+        // First alternative that specializes TT (variant_size_v = no match).
+        template<template<typename...> class TT, typename Variant,
+                 std::size_t Index = 0>
+        constexpr std::size_t variant_tt_match_index() {
+            if constexpr (Index >= std::variant_size_v<Variant>) {
+                return std::variant_size_v<Variant>;
+            } else if constexpr (is_specialization_of<
+                                     TT,
+                                     std::variant_alternative_t<Index, Variant>>::value) {
+                return Index;
+            } else {
+                return variant_tt_match_index<TT, Variant, Index + 1>();
+            }
+        }
+
+        template<template<typename...> class TT, typename VariantLike>
+        constexpr decltype(auto) variant_get(VariantLike&& value) {
+            auto&& variant_ref = as_variant_ref(std::forward<VariantLike>(value));
+            using Variant =
+                std::remove_cv_t<std::remove_reference_t<decltype(variant_ref)>>;
+            static_assert(
+                is_std_variant_v<Variant>,
+                "variant_get requires a std::variant-like value");
+            constexpr std::size_t idx = variant_tt_match_index<TT, Variant>();
+            static_assert(
+                idx < std::variant_size_v<Variant>,
+                "variant_get: no alternative specializes the given template");
+            if (variant_ref.index() != idx) {
+                rusty::panic::do_panic("bad variant access");
+            }
+            return std::get<idx>(variant_ref);
+        }
+
         // Parse decimal literals into 128-bit integers without relying on host
         // integer literal width (which can reject valid Rust u128/i128 values).
         template<typename Int>
