@@ -2012,6 +2012,16 @@ impl CodeGen {
             // distant aggregate ctor.
             let copy_disposition = if self.struct_fields_have_known_non_copyable(&s.fields) {
                 "delete"
+            } else if !self.type_has_user_clone_impl(&name_str) {
+                // A Drop struct with NO user Clone impl has no sanctioned
+                // duplication path in Rust at all. A `= default` copy would
+                // shallow-copy owning fields (hashbrown RawTable's NonNull
+                // bucket pointer) and both copies then run Drop — the exact
+                // double-free the mako ASan rig caught in
+                // pollworker_take_removals. Delete the copies; any call site
+                // that trips this is a latent double-free surfacing at
+                // compile time.
+                "delete"
             } else {
                 "default"
             };
@@ -2021,7 +2031,7 @@ impl CodeGen {
             // tagged NonNull) — both copies then run Drop and double-free.
             // Delegate the C++ copy ctor to the emitted `clone()` member so a
             // plumbing copy is a Rust clone. Without a Clone impl there is no
-            // sanctioned duplication; keep the previous disposition unchanged.
+            // sanctioned duplication; the disposition above already deleted it.
             let clone_backed_copy =
                 copy_disposition == "default" && self.type_has_user_clone_impl(&name_str);
             let copy_ctor_line = if clone_backed_copy {

@@ -41276,3 +41276,58 @@ fn test_unmappable_cfg_leaves_emission_unchanged() {
     );
 }
 
+
+
+#[test]
+fn test_drop_struct_without_clone_gets_deleted_copy() {
+    // A Drop struct with no Clone impl has no sanctioned duplication path;
+    // a defaulted C++ copy shallow-copies owning fields and double-frees
+    // (hashbrown RawTable, caught by the mako ASan rig).
+    let out = transpile_str(
+        r#"
+        struct Owner {
+            fd: i32,
+        }
+        impl Drop for Owner {
+            fn drop(&mut self) {}
+        }
+        "#,
+    );
+    assert!(
+        out.contains("Owner(const Owner&) = delete;"),
+        "copy ctor must be deleted for Drop-without-Clone: {out}"
+    );
+    assert!(
+        out.contains("Owner& operator=(const Owner&) = delete;"),
+        "copy assign must be deleted for Drop-without-Clone: {out}"
+    );
+}
+
+#[test]
+fn test_drop_struct_with_clone_gets_clone_backed_copy() {
+    // With a user Clone impl the C++ copy delegates to clone() (deep),
+    // not `= default` (shallow).
+    let out = transpile_str(
+        r#"
+        struct Owner {
+            fd: i32,
+        }
+        impl Clone for Owner {
+            fn clone(&self) -> Owner {
+                Owner { fd: self.fd }
+            }
+        }
+        impl Drop for Owner {
+            fn drop(&mut self) {}
+        }
+        "#,
+    );
+    assert!(
+        out.contains("Owner(const Owner& other) : Owner(other.clone()) {}"),
+        "copy ctor must delegate to clone(): {out}"
+    );
+    assert!(
+        !out.contains("Owner(const Owner&) = default;"),
+        "no defaulted shallow copy on a Drop struct: {out}"
+    );
+}

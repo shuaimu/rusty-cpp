@@ -467,6 +467,7 @@ def patch_all_files(cpp_out: Path) -> int:
             # path (T = trivially-destructible) we can skip element
             # drops entirely; RawVec's destructor frees the buffer.
             text = _simplify_vecdeque_destructor(text)
+            text = _vecdeque_real_clone_and_clone_backed_copy(text)
 
             # Stub bodies of methods that are off the smoke-test path
             # (push_back/push_front/pop_back/pop_front/front/back/len/new_)
@@ -1123,6 +1124,53 @@ def _disambiguate_hoisted_helpers(text: str) -> str:
             lines[k] = pattern.sub(new_name, lines[k])
         i = method_end
     return "".join(lines)
+
+
+
+def _vecdeque_real_clone_and_clone_backed_copy(text: str) -> str:
+    """Drop-owner copy semantics (mako ASan-rig double-free class): replace
+    the stubbed clone()/clone_from() with a real deep clone by re-push, and
+    the emitter's `= default` shallow copies with clone-backed ones.
+    VecDeque owns its ring buffer via a Drop-guarded dtor; a defaulted copy
+    shallow-copies the buffer and both owners free it (same class as
+    hashbrown RawTable). Idempotent."""
+    old_clone = """    VecDeque<T, A> clone() const {
+        // patcher: stubbed (off smoke-test path)
+        std::abort();
+    }
+    void clone_from(const VecDeque<T, A>& source) {
+        // patcher: stubbed (off smoke-test path)
+        std::abort();
+    }"""
+    new_clone = """    VecDeque<T, A> clone() const {
+        // Deep clone by re-push (was a patcher abort stub). The defaulted
+        // copy ctor this class carried shallow-copied the ring buffer —
+        // the same Drop-owner double-free class as hashbrown RawTable
+        // (mako ASan rig); raw copies now delegate here.
+        VecDeque<T, A> out =
+            VecDeque<T, A>::with_capacity_in(this->len(), rusty::clone(this->allocator()));
+        auto it = this->iter();
+        for (;;) {
+            auto e = it.next();
+            if (e.is_none()) {
+                break;
+            }
+            out.push_back(rusty::clone(e.unwrap()));
+        }
+        return out;
+    }
+    void clone_from(const VecDeque<T, A>& source) {
+        *this = source.clone();
+    }"""
+    if old_clone in text:
+        text = text.replace(old_clone, new_clone)
+    text = text.replace(
+        "    VecDeque(const VecDeque&) = default;",
+        "    VecDeque(const VecDeque& other) : VecDeque(other.clone()) {}")
+    text = text.replace(
+        "    VecDeque& operator=(const VecDeque&) = default;",
+        "    VecDeque& operator=(const VecDeque& other) { if (this != &other) { this->~VecDeque(); new (this) VecDeque(other.clone()); } return *this; }")
+    return text
 
 
 def main() -> int:
