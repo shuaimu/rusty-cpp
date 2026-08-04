@@ -8253,6 +8253,37 @@ impl CodeGen {
                 self.emit_expr_to_string(&mc.receiver)
             };
             let mut unresolved_vec_placeholder_collect = false;
+            // `collect::<Result<Vec<_>, _>>()` / `collect::<Option<Vec<_>>>()`
+            // — Rust's short-circuiting FromIterator impls. Element-wise
+            // collect_range is SILENT-WRONG here (it keeps the Errs/Nones in
+            // place inside the vector), so route to the dedicated helpers,
+            // which deduce everything from the iterator's Result/Option
+            // items. Restricted to Vec payloads; other containers keep the
+            // existing paths.
+            if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc)
+                && let syn::Type::Path(tp) = self.peel_reference_paren_group_type(turbofish_ty)
+                && tp.qself.is_none()
+                && let Some(last) = tp.path.segments.last()
+                && (last.ident == "Result" || last.ident == "Option")
+                && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                && matches!(
+                    args.args.first(),
+                    Some(syn::GenericArgument::Type(syn::Type::Path(inner)))
+                        if inner.path.segments.last().is_some_and(|s| s.ident == "Vec")
+                )
+            {
+                let helper = if last.ident == "Result" {
+                    "collect_result_range"
+                } else {
+                    "collect_option_range"
+                };
+                let receiver_for_collect = if Self::is_simple_ident(&receiver) {
+                    format!("std::move({})", receiver)
+                } else {
+                    receiver.clone()
+                };
+                return format!("rusty::{}({})", helper, receiver_for_collect);
+            }
             // Try turbofish type arg first: `collect::<T>()` → `T::from_iter(receiver)`
             if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc) {
                 let mut collect_type = self.map_type(turbofish_ty);

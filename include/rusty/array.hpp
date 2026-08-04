@@ -970,6 +970,89 @@ auto collect_range(Range&& range_like) {
     }
 }
 
+/// Rust `collect::<Result<Vec<T>, E>>()` — FromIterator for Result:
+/// short-circuit on the FIRST Err (elements after it are not consumed),
+/// else Ok(all the Ok payloads). Element-wise `collect_range` is NOT
+/// equivalent (it would yield `std::vector<Result<T, E>>` with the Errs
+/// kept in place). Receiver flavors mirror collect_range.
+template<typename Range>
+auto collect_result_range(Range&& range_like) {
+    if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
+        auto owned = std::forward<Range>(range_like);
+        using Res = std::decay_t<decltype(detail::option_take_value(
+            std::declval<decltype(owned.next())&>()))>;
+        using Out = rusty::Result<std::vector<typename Res::ok_type>,
+                                  typename Res::err_type>;
+        std::vector<typename Res::ok_type> ok_values;
+        while (true) {
+            auto item = owned.next();
+            if (!detail::option_has_value(item)) {
+                break;
+            }
+            Res elem = detail::option_take_value(item);
+            if (elem.is_err()) {
+                return Out::Err(std::move(elem).unwrap_err());
+            }
+            ok_values.push_back(std::move(elem).unwrap());
+        }
+        return Out::Ok(std::move(ok_values));
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
+        return collect_result_range(std::forward<Range>(range_like).into_iter());
+    } else {
+        using Res = std::decay_t<decltype(*std::begin(range_like))>;
+        using Out = rusty::Result<std::vector<typename Res::ok_type>,
+                                  typename Res::err_type>;
+        std::vector<typename Res::ok_type> ok_values;
+        for (auto&& elem : range_like) {
+            if (elem.is_err()) {
+                return Out::Err(std::forward<decltype(elem)>(elem).unwrap_err());
+            }
+            ok_values.push_back(std::forward<decltype(elem)>(elem).unwrap());
+        }
+        return Out::Ok(std::move(ok_values));
+    }
+}
+
+/// Rust `collect::<Option<Vec<T>>>()` — the Option twin: short-circuit
+/// on the first None.
+template<typename Range>
+auto collect_option_range(Range&& range_like) {
+    if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
+        auto owned = std::forward<Range>(range_like);
+        using Opt = std::decay_t<decltype(detail::option_take_value(
+            std::declval<decltype(owned.next())&>()))>;
+        using ItemT = std::remove_cvref_t<decltype(std::declval<Opt&>().unwrap())>;
+        using Out = rusty::Option<std::vector<ItemT>>;
+        std::vector<ItemT> values;
+        while (true) {
+            auto item = owned.next();
+            if (!detail::option_has_value(item)) {
+                break;
+            }
+            Opt elem = detail::option_take_value(item);
+            if (elem.is_none()) {
+                return Out(rusty::None);
+            }
+            values.push_back(std::move(elem).unwrap());
+        }
+        return Out(std::move(values));
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
+        return collect_option_range(std::forward<Range>(range_like).into_iter());
+    } else {
+        using Opt = std::decay_t<decltype(*std::begin(range_like))>;
+        using ItemT = std::remove_cvref_t<decltype(std::declval<Opt&>().unwrap())>;
+        using Out = rusty::Option<std::vector<ItemT>>;
+        std::vector<ItemT> values;
+        for (auto&& elem : range_like) {
+            if (elem.is_none()) {
+                return Out(rusty::None);
+            }
+            values.push_back(std::forward<decltype(elem)>(elem).unwrap());
+        }
+        return Out(std::move(values));
+    }
+}
+
 template<typename T>
 decltype(auto) as_ptr(const T& value) {
     if constexpr (requires { value.as_ptr(); }) {
