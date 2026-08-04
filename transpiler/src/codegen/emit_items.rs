@@ -359,6 +359,150 @@ impl CodeGen {
             mc.turbofish = Some(syn::parse_quote!(::<#lit>));
             true
         }
+        // Tuple analog (#47 family): itertools' next_tuple/collect_tuple/
+        // tuples/tuple_windows are generic over a tuple type whose ARITY
+        // Rust infers from patterns/counterparts. Inject the established
+        // all-underscore tuple turbofish (`::<(_, _)>`) — the call-site
+        // threading spells it as `std::tuple<Item x K>`.
+        fn tuple_closure_width(arg: &syn::Expr) -> Option<usize> {
+            let syn::Expr::Closure(cl) = arg else {
+                return None;
+            };
+            if cl.inputs.len() != 1 {
+                return None;
+            }
+            let mut pat = &cl.inputs[0];
+            loop {
+                match pat {
+                    syn::Pat::Type(pt) => pat = &pt.pat,
+                    syn::Pat::Paren(pp) => pat = &pp.pat,
+                    syn::Pat::Reference(pr) => pat = &pr.pat,
+                    _ => break,
+                }
+            }
+            let syn::Pat::Tuple(tp) = pat else {
+                return None;
+            };
+            if tp.elems.iter().any(|e| matches!(e, syn::Pat::Rest(_))) {
+                return None;
+            }
+            (tp.elems.len() >= 1).then_some(tp.elems.len())
+        }
+        fn some_tuple_literal_width(e: &syn::Expr) -> Option<usize> {
+            let syn::Expr::Call(c) = peel(e) else {
+                return None;
+            };
+            let syn::Expr::Path(p) = c.func.as_ref() else {
+                return None;
+            };
+            if !p.path.segments.last().is_some_and(|s| s.ident == "Some")
+                || c.args.len() != 1
+            {
+                return None;
+            }
+            let syn::Expr::Tuple(t) = peel(&c.args[0]) else {
+                return None;
+            };
+            (!t.elems.is_empty()).then_some(t.elems.len())
+        }
+        fn underscore_tuple_turbofish(k: usize) -> syn::AngleBracketedGenericArguments {
+            let spelled = format!("::<({},)>", vec!["_"; k].join(", "));
+            syn::parse_str(&spelled).expect("underscore tuple turbofish parses")
+        }
+        fn apply_tuple_width(e: &mut syn::Expr, k: usize, methods: &[&str]) -> bool {
+            let syn::Expr::MethodCall(mc) = peel_mut(e) else {
+                return false;
+            };
+            if mc.turbofish.is_some()
+                || !methods.contains(&mc.method.to_string().as_str())
+            {
+                return false;
+            }
+            mc.turbofish = Some(underscore_tuple_turbofish(k));
+            true
+        }
+        // A `let mut iter = ...tuples();` local's arity comes from the FIRST
+        // later `iter.next()` compared against a Some(tuple literal) in the
+        // same block (assert_eq expansion).
+        fn backprop_local_tuple_adapters(block: &mut syn::Block) -> bool {
+            let mut changed = false;
+            for i in 0..block.stmts.len() {
+                let syn::Stmt::Local(local) = &block.stmts[i] else {
+                    continue;
+                };
+                let mut pat = &local.pat;
+                if let syn::Pat::Type(pt) = pat {
+                    pat = &pt.pat;
+                }
+                let syn::Pat::Ident(pi) = pat else {
+                    continue;
+                };
+                let name = pi.ident.to_string();
+                let Some(init) = &local.init else {
+                    continue;
+                };
+                {
+                    let syn::Expr::MethodCall(mc) = peel(&init.expr) else {
+                        continue;
+                    };
+                    if mc.turbofish.is_some()
+                        || !matches!(
+                            mc.method.to_string().as_str(),
+                            "tuples" | "tuple_windows" | "circular_tuple_windows"
+                        )
+                    {
+                        continue;
+                    }
+                }
+                let mut width: Option<usize> = None;
+                'scan: for later in &block.stmts[i + 1..] {
+                    let expr = match later {
+                        syn::Stmt::Expr(e, _) => e,
+                        _ => continue,
+                    };
+                    let syn::Expr::Match(m) = expr else {
+                        continue;
+                    };
+                    let syn::Expr::Tuple(t) = &*m.expr else {
+                        continue;
+                    };
+                    if t.elems.len() != 2 {
+                        continue;
+                    }
+                    let mentions_next = |e: &syn::Expr| -> bool {
+                        let syn::Expr::MethodCall(mc) = peel(e) else {
+                            return false;
+                        };
+                        if mc.method != "next" {
+                            return false;
+                        }
+                        matches!(peel(&mc.receiver), syn::Expr::Path(p)
+                            if p.path.is_ident(&name))
+                    };
+                    for (a, b) in [(0usize, 1usize), (1, 0)] {
+                        if mentions_next(&t.elems[a])
+                            && let Some(k) = some_tuple_literal_width(&t.elems[b])
+                        {
+                            width = Some(k);
+                            break 'scan;
+                        }
+                    }
+                }
+                if let Some(k) = width
+                    && let syn::Stmt::Local(local) = &mut block.stmts[i]
+                    && let Some(init) = &mut local.init
+                    && apply_tuple_width(
+                        &mut init.expr,
+                        k,
+                        &["tuples", "tuple_windows", "circular_tuple_windows"],
+                    )
+                {
+                    changed = true;
+                }
+            }
+            changed
+        }
+        const TUPLE_NEXT_METHODS: &[&str] = &["next_tuple", "collect_tuple"];
         struct W {
             changed: bool,
         }
@@ -369,6 +513,11 @@ impl CodeGen {
                     syn::Expr::MethodCall(mc) if mc.method == "map" && mc.args.len() == 1 => {
                         if let Some(k) = closure_slice_width(&mc.args[0])
                             && apply_width(&mut mc.receiver, k)
+                        {
+                            self.changed = true;
+                        }
+                        if let Some(k) = tuple_closure_width(&mc.args[0])
+                            && apply_tuple_width(&mut mc.receiver, k, TUPLE_NEXT_METHODS)
                         {
                             self.changed = true;
                         }
@@ -389,9 +538,27 @@ impl CodeGen {
                             {
                                 self.changed = true;
                             }
+                            let t0 = some_tuple_literal_width(&t.elems[0]);
+                            let t1 = some_tuple_literal_width(&t.elems[1]);
+                            if let Some(k) = t1
+                                && apply_tuple_width(&mut t.elems[0], k, TUPLE_NEXT_METHODS)
+                            {
+                                self.changed = true;
+                            }
+                            if let Some(k) = t0
+                                && apply_tuple_width(&mut t.elems[1], k, TUPLE_NEXT_METHODS)
+                            {
+                                self.changed = true;
+                            }
                         }
                     }
                     _ => {}
+                }
+            }
+            fn visit_block_mut(&mut self, block: &mut syn::Block) {
+                syn::visit_mut::visit_block_mut(self, block);
+                if backprop_local_tuple_adapters(block) {
+                    self.changed = true;
                 }
             }
         }

@@ -6729,16 +6729,22 @@ impl CodeGen {
                             if all_viable {
                                 // Self_ is declared FIRST, so it must be
                                 // spelled too. remove_cvref works for
-                                // by-value receivers, but const-generic
-                                // methods take `&mut self` → `Self_&&`,
-                                // and a non-reference explicit Self_
-                                // can't bind an LVALUE receiver.
-                                // `decltype(__self)` inside the dispatcher
-                                // carries the receiver's own reference
-                                // category, so collapsing does the right
-                                // thing; keep the historical spelling for
-                                // the type-only case.
-                                let self_spelling = if has_const_arg {
+                                // by-value receivers on rvalue chains, but
+                                // `&mut self` methods (next_tuple,
+                                // next_array) emit `Self_&&`, and a
+                                // non-reference explicit Self_ can't bind
+                                // an LVALUE receiver. `decltype(__self)`
+                                // inside the dispatcher carries the
+                                // receiver's own reference category, so
+                                // collapsing does the right thing — use it
+                                // for const args and for bare-place
+                                // (lvalue) receivers; keep the historical
+                                // spelling for rvalue-chain receivers.
+                                let receiver_is_place = matches!(
+                                    self.peel_paren_group_expr(&mc.receiver),
+                                    syn::Expr::Path(_)
+                                );
+                                let self_spelling = if has_const_arg || receiver_is_place {
                                     "decltype(__self)".to_string()
                                 } else {
                                     format!("std::remove_cvref_t<decltype({})>", receiver)
