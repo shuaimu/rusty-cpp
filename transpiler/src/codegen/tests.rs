@@ -39449,8 +39449,9 @@ fn test_fn_bound_call_result_local_types_as_output_param() {
         "#,
     );
     assert!(
-        out.contains("rusty::take(a, "),
-        "Fn-bound-result local must route take through rusty::take, got:\n{out}"
+        out.contains("rusty::take(std::move(a), "),
+        "Fn-bound-result local must route take through rusty::take, consumed \
+         (Rust take takes self by value), got:\n{out}"
     );
     assert!(!out.contains("a.take("), "must not emit a member take, got:\n{out}");
 }

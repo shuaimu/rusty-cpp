@@ -8444,7 +8444,12 @@ impl CodeGen {
             && (self.is_iterator_like_receiver_expr(&mc.receiver)
                 || self.is_probably_iterator_receiver_expr(&mc.receiver))
         {
-            let receiver = self.emit_expr_to_string(&mc.receiver);
+            // Rust `take` CONSUMES the receiver. An unmoved lvalue makes the
+            // adapter hold a REFERENCE (dangle risk, and the spelled return
+            // type — computed from the value type — no longer matches).
+            // `by_ref().take(n)` flows keep reference semantics: the syn
+            // receiver is a method call, which maybe_move leaves alone.
+            let receiver = self.emit_expr_maybe_move(&mc.receiver);
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::take({}, {})", receiver, count);
         }
@@ -8466,7 +8471,10 @@ impl CodeGen {
             && (self.is_iterator_like_receiver_expr(&mc.receiver)
                 || self.is_probably_iterator_receiver_expr(&mc.receiver))
         {
-            let receiver = self.emit_expr_to_string(&mc.receiver);
+            // Consuming receiver — see the `take` comment above (itertools'
+            // iter_index: `iter.skip(start).take(len)` returned an adapter
+            // referencing the dead param and mismatched the spelled return).
+            let receiver = self.emit_expr_maybe_move(&mc.receiver);
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::skip({}, {})", receiver, count);
         }

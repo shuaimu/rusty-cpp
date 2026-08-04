@@ -89,6 +89,17 @@ public:
     Iter& by_ref() { return *this; }
     const Iter& by_ref() const { return *this; }
 
+    // Rust `Iterator::nth` — skip n elements, yield the one after
+    // (itertools' `dropping` default method calls `self.nth(n - 1)`).
+    rusty::Option<pointer> nth(size_t n) {
+        if (static_cast<size_t>(end_ - cur_) <= n) {
+            cur_ = end_;
+            return rusty::None;
+        }
+        cur_ += n;
+        return next();
+    }
+
     // Rust Iterator::partition — split into (matching, rest). Returns
     // std::vector pairs (this header cannot depend on the module-only
     // rusty::Vec); consumers compare element-wise.
@@ -205,6 +216,11 @@ public:
     class ClonedIter {
     public:
         using value_type = std::remove_const_t<T>;
+        // Trait free functions project `typename I::Item` /
+        // `typename I::IntoIter::Item` (itertools' put_back); an iterator
+        // is its own IntoIterator.
+        using Item = value_type;
+        using IntoIter = ClonedIter;
 
         explicit ClonedIter(Iter iter) : iter_(std::move(iter)) {}
 
@@ -959,8 +975,27 @@ public:
 
     explicit fuse_next_iter(Iter iter) : iter_(std::move(iter)) {}
 
+    using Item = next_item_t<Iter>;
+    using IntoIter = fuse_next_iter;
+
     fuse_next_iter into_iter() {
         return std::move(*this);
+    }
+
+    // Rust `Iterator::by_ref` — itertools' LazyBuffer::prefill chains
+    // `self.it.by_ref().take(delta)`.
+    fuse_next_iter& by_ref() { return *this; }
+    const fuse_next_iter& by_ref() const { return *this; }
+
+    // Member take so the by_ref chain can borrow (lvalue flavor holds a
+    // reference, rvalue flavor consumes) — same pair as
+    // repeat_with_next_iter::take.
+    auto take(size_t remaining) & {
+        return make_take_next_iter(*this, remaining);
+    }
+
+    auto take(size_t remaining) && {
+        return make_take_next_iter(std::move(*this), remaining);
     }
 
     rusty::Option<next_item_t<Iter>> next() {
