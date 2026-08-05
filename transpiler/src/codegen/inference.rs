@@ -458,6 +458,7 @@ impl CodeGen {
         candidates.dedup();
         if candidates.len() == 1 {
             let escaped = self.escape_and_rename_qualified_name(&candidates[0]);
+            let escaped = self.disambiguate_mod_fn_same_name_call_path(&candidates[0], escaped);
             if path.segments.len() == 1 {
                 let qualified_parent = escaped
                     .rsplit_once("::")
@@ -516,6 +517,38 @@ impl CodeGen {
             return Some(format!("::{}", escaped));
         }
         None
+    }
+
+    /// Rust's mod/fn same-name idiom (`mod peek_nth { pub fn peek_nth }` +
+    /// `pub use peek_nth::peek_nth;`) emits BOTH `namespace peek_nth` and a
+    /// same-named using-declaration at the crate's namespace scope; C++
+    /// qualified lookup of `crate::peek_nth` finds the pair and is ambiguous.
+    /// Spelling the call through the fn's home module
+    /// (`crate::peek_nth::peek_nth(...)`) is immune: in a nested-name-specifier
+    /// lookup considers only namespaces and types, never functions. The idiom
+    /// guarantees the home module is the same-named one — the collision only
+    /// exists when the crate declares a module by the fn's name.
+    pub(super) fn disambiguate_mod_fn_same_name_call_path(
+        &self,
+        candidate: &str,
+        escaped: String,
+    ) -> String {
+        let Some((crate_seg, fn_name)) = candidate.split_once("::") else {
+            return escaped;
+        };
+        if fn_name.contains("::") {
+            return escaped;
+        }
+        let collides = self.dependency_ufcs_trait_manifests.iter().any(|m| {
+            m.module == crate_seg
+                && m.declared_modules.iter().any(|d| d == fn_name)
+                && m.root_exported_names.iter().any(|n| n == fn_name)
+        });
+        if collides {
+            format!("{}::{}", escaped, escape_cpp_keyword(fn_name))
+        } else {
+            escaped
+        }
     }
 
     /// A single-segment BARE call `name(...)` inside a method whose enclosing

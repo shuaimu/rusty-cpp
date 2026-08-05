@@ -3340,6 +3340,27 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             }
             return qualified;
         }
+        // Rust's mod/fn same-name idiom: a crate-qualified call `dep::name(...)`
+        // where the dep ALSO declares `mod name` — the dep's emission carries both
+        // `namespace name` and a same-named using-declaration at crate scope, so
+        // the 2-segment C++ spelling is ambiguous under qualified lookup. Route
+        // the call through the fn's home module (nested-name-specifier lookup
+        // considers only namespaces/types); the manifest gate keeps every other
+        // path on normal mapping.
+        if path.segments.len() == 2
+            && path
+                .segments
+                .iter()
+                .all(|s| matches!(s.arguments, syn::PathArguments::None))
+        {
+            let joined = format!("{}::{}", path.segments[0].ident, path.segments[1].ident);
+            let escaped = self.escape_and_rename_qualified_name(&joined);
+            let doubled =
+                self.disambiguate_mod_fn_same_name_call_path(&joined, escaped.clone());
+            if doubled != escaped {
+                return format!("::{}", doubled);
+            }
+        }
         // Keep this rewrite for unqualified names only. Qualified paths like
         // `std::process::Command::new` must flow through normal path mapping
         // so `std::*` namespace remaps are applied.
