@@ -6663,17 +6663,24 @@ impl CodeGen {
                             // value — literal ints and bare const idents
                             // only; anything computed bails the threading
                             // (falls to the member path, as before).
-                            let mut mapped: Vec<String> = Vec::new();
+                            // The bool marks SYNTHESIZED spellings (the
+                            // tuple-arity Item expansion, const literals) —
+                            // built by us from the receiver, so the
+                            // crate-path qualification filter below must not
+                            // reject them (`decltype(rusty::cloned(..))`
+                            // inside the spelling contains `::`).
+                            let mut mapped: Vec<(String, bool)> = Vec::new();
                             let mut has_const_arg = false;
                             let mut thread_viable = true;
                             for arg in &turbofish.args {
                                 match arg {
                                     syn::GenericArgument::Lifetime(_) => {}
                                     syn::GenericArgument::Type(ty) => {
-                                        mapped.push(
-                                            tuple_arity_item(ty)
-                                                .unwrap_or_else(|| self.map_type(ty)),
-                                        );
+                                        match tuple_arity_item(ty) {
+                                            Some(t) => mapped.push((t, true)),
+                                            None => mapped
+                                                .push((self.map_type(ty), false)),
+                                        }
                                     }
                                     syn::GenericArgument::Const(cexpr) => {
                                         let spelled = match cexpr {
@@ -6690,7 +6697,7 @@ impl CodeGen {
                                         };
                                         match spelled {
                                             Some(s) => {
-                                                mapped.push(s);
+                                                mapped.push((s, true));
                                                 has_const_arg = true;
                                             }
                                             None => thread_viable = false,
@@ -6704,7 +6711,7 @@ impl CodeGen {
                             }
                             let all_viable = thread_viable
                                 && !mapped.is_empty()
-                                && mapped.iter().all(|t| {
+                                && mapped.iter().all(|(t, synthesized)| {
                                     t != "auto"
                                         && !t.contains("/* TODO")
                                         && !type_string_has_auto_placeholder(t)
@@ -6716,15 +6723,18 @@ impl CodeGen {
                                         // primitives/std/rusty spellings and
                                         // leave the rest to the member path
                                         // as before.
-                                        && t.split('<')
-                                            .flat_map(|part| part.split(", "))
-                                            .all(|part| {
-                                                !part.contains("::")
-                                                    || part.trim_start_matches("typename ")
-                                                        .starts_with("std::")
-                                                    || part.trim_start_matches("typename ")
-                                                        .starts_with("rusty::")
-                                            })
+                                        && (*synthesized
+                                            || t.split('<')
+                                                .flat_map(|part| part.split(", "))
+                                                .all(|part| {
+                                                    !part.contains("::")
+                                                        || part
+                                                            .trim_start_matches("typename ")
+                                                            .starts_with("std::")
+                                                        || part
+                                                            .trim_start_matches("typename ")
+                                                            .starts_with("rusty::")
+                                                }))
                                 });
                             if all_viable {
                                 // Self_ is declared FIRST, so it must be
@@ -6749,11 +6759,16 @@ impl CodeGen {
                                 } else {
                                     format!("std::remove_cvref_t<decltype({})>", receiver)
                                 };
+                                let mapped_join = mapped
+                                    .iter()
+                                    .map(|(t, _)| t.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
                                 callee = format!(
                                     "{}<{}, {}>",
                                     callee,
                                     self_spelling,
-                                    mapped.join(", ")
+                                    mapped_join
                                 );
                             }
                         }
@@ -8445,6 +8460,54 @@ impl CodeGen {
         {
             return self.emit_expr_to_string(&mc.receiver);
         }
+        // Rust `as_mut`/`as_ref` on a fixed ARRAY yields the whole-array
+        // slice view — behaviorally the array itself for indexing/len
+        // (itertools' TupleBuffer binds it `auto& s = buf.as_mut()`).
+        // Probe the real member first (Option::as_mut etc. keep it), fall
+        // back to the receiver reference.
+        if matches!(mc.method.to_string().as_str(), "as_mut" | "as_ref")
+            && mc.args.is_empty()
+            && matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::Field(_) | syn::Expr::Path(_)
+            )
+            // ONLY buffer-shaped receivers (fixed arrays / `T::Buffer`
+            // projections): as_mut/as_ref carry semantic special-casing
+            // elsewhere (NonNull local typing, the #76 inner-field
+            // string-view gate) that a blanket probe-first wrapper broke.
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .map(|t| self.peel_reference_paren_group_type(t))
+                .is_some_and(|t| match t {
+                    syn::Type::Array(_) => true,
+                    syn::Type::Path(p) => p
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == "Buffer"),
+                    _ => false,
+                })
+        {
+            let method = mc.method.to_string();
+            let recv = self.emit_expr_to_string(&mc.receiver);
+            return format!(
+                "([](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__r)>(__r).{m}(); }}) {{ return std::forward<decltype(__r)>(__r).{m}(); }} else {{ return rusty::detail::deref_if_pointer(std::forward<decltype(__r)>(__r)); }} }})({recv})",
+                m = method,
+                recv = recv
+            );
+        }
+        // itertools' TupleCollect::left_shift_push as a MEMBER on a
+        // std::tuple value (tuple_windows' sliding window): probe the real
+        // member first, fall back to the rusty::detail shim.
+        if mc.method == "left_shift_push" && mc.args.len() == 1 {
+            let recv = self.emit_expr_to_string(&mc.receiver);
+            let arg = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!(
+                "([](auto&& __r, auto&& __a) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__r)>(__r).left_shift_push(std::forward<decltype(__a)>(__a)); }}) {{ return std::forward<decltype(__r)>(__r).left_shift_push(std::forward<decltype(__a)>(__a)); }} else {{ return rusty::detail::tuple_left_shift_push(rusty::detail::deref_if_pointer(std::forward<decltype(__r)>(__r)), std::forward<decltype(__a)>(__a)); }} }})({}, {})",
+                recv, arg
+            );
+        }
         if mc.method == "take"
             && mc.args.len() == 1
             && (self.is_iterator_like_receiver_expr(&mc.receiver)
@@ -9986,6 +10049,23 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::get_mut({}, {})", receiver, args[0]);
+        }
+        // UNRESOLVED receiver (e.g. the `auto& s = buf.as_mut()` binding in
+        // itertools' TupleBuffer — an array reference no local-type lookup
+        // can see): probe the real member first (maps/adapters keep it),
+        // fall back to the rusty::get_mut free fn (arrays/spans).
+        if method_name == "get_mut"
+            && args.len() == 1
+            && matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::Path(p) if p.path.segments.len() == 1
+            )
+        {
+            let recv = self.emit_expr_to_string(&mc.receiver);
+            return format!(
+                "([](auto&& __r, auto&& __i) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__r)>(__r).get_mut(std::forward<decltype(__i)>(__i)); }}) {{ return std::forward<decltype(__r)>(__r).get_mut(std::forward<decltype(__i)>(__i)); }} else {{ return rusty::get_mut(std::forward<decltype(__r)>(__r), std::forward<decltype(__i)>(__i)); }} }})({}, {})",
+                recv, args[0]
+            );
         }
         if method_name == "get"
             && args.len() == 1
@@ -16867,6 +16947,79 @@ impl CodeGen {
             return format!(
                 "next_array::next_array<std::remove_reference_t<decltype({arg})>, N>({arg})"
             );
+        }
+        // `use std::iter::once` + bare `once(x)` inside ABSORBED impl
+        // bodies (tuple_impl's window adapters) loses the use-mapping and
+        // emits an undeclared `once`. Single-seg, one arg → rusty::once.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.path.segments.len() == 1
+            && fp.path.segments[0].ident == "once"
+            && matches!(fp.path.segments[0].arguments, syn::PathArguments::None)
+            && call.args.len() == 1
+        {
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!("rusty::once({})", arg);
+        }
+        // TupleCollect statics on a HomogeneousTuple-bounded param
+        // (`T::collect_from_iter(&self.iter, &self.buf)` /
+        // `T::buffer_len(&self.buf)`): std::tuple has no statics, so probe
+        // the member spelling first (user types with real statics keep it)
+        // and fall back to the rusty::detail shims.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.path.segments.len() == 2
+            && fp
+                .path
+                .segments
+                .iter()
+                .all(|s| matches!(s.arguments, syn::PathArguments::None))
+        {
+            let owner = fp.path.segments[0].ident.to_string();
+            let method = fp.path.segments[1].ident.to_string();
+            let shim = match (method.as_str(), call.args.len()) {
+                ("collect_from_iter", 2) => Some(format!(
+                    "rusty::detail::tuple_collect_from_iter<{}>",
+                    owner
+                )),
+                ("buffer_len", 1) => {
+                    Some("rusty::detail::tuple_collect_buffer_len".to_string())
+                }
+                ("num_items", 0) => Some(format!(
+                    "rusty::detail::tuple_collect_num_items<{}>",
+                    owner
+                )),
+                ("collect_from_iter_no_buf", 1) => Some(format!(
+                    "rusty::detail::tuple_collect_from_iter_no_buf<{}>",
+                    owner
+                )),
+                _ => None,
+            };
+            if let Some(shim) = shim
+                && self.is_type_param_in_scope(&owner)
+            {
+                let args: Vec<String> = call
+                    .args
+                    .iter()
+                    .map(|a| self.emit_expr_maybe_move(a))
+                    .collect();
+                let names: Vec<String> =
+                    (0..args.len()).map(|i| format!("__tc{}", i)).collect();
+                let params = names
+                    .iter()
+                    .map(|n| format!("auto&& {}", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let fwd = names
+                    .iter()
+                    .map(|n| format!("std::forward<decltype({0})>({0})", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let bare = format!("{}::{}({})", owner, method, fwd);
+                return format!(
+                    "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}({}); }} }})({})",
+                    params, bare, bare, shim, fwd,
+                    args.join(", ")
+                );
+            }
         }
         // `guard(self, |s| ...)` / `guard(&mut place, ...)`: the ScopeGuard
         // slot must ALIAS the place — a value slot copies (a Clone-backed

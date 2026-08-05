@@ -454,40 +454,96 @@ impl CodeGen {
                         continue;
                     }
                 }
-                let mut width: Option<usize> = None;
-                'scan: for later in &block.stmts[i + 1..] {
-                    let expr = match later {
-                        syn::Stmt::Expr(e, _) => e,
-                        _ => continue,
-                    };
-                    let syn::Expr::Match(m) = expr else {
-                        continue;
-                    };
-                    let syn::Expr::Tuple(t) = &*m.expr else {
-                        continue;
-                    };
-                    if t.elems.len() != 2 {
-                        continue;
-                    }
-                    let mentions_next = |e: &syn::Expr| -> bool {
-                        let syn::Expr::MethodCall(mc) = peel(e) else {
-                            return false;
-                        };
-                        if mc.method != "next" {
-                            return false;
+                // The expanded assert_eq match can sit NESTED inside the
+                // statement (extra block wrappers), so walk each later stmt
+                // recursively rather than pattern-matching the direct shape.
+                struct FindWidth<'a> {
+                    name: &'a str,
+                    width: Option<usize>,
+                }
+                fn match_mentions_next(e: &syn::Expr, name: &str) -> bool {
+                    fn peel2(mut e: &syn::Expr) -> &syn::Expr {
+                        loop {
+                            match e {
+                                syn::Expr::Reference(r) => e = &r.expr,
+                                syn::Expr::Paren(p) => e = &p.expr,
+                                syn::Expr::Group(g) => e = &g.expr,
+                                _ => return e,
+                            }
                         }
-                        matches!(peel(&mc.receiver), syn::Expr::Path(p)
-                            if p.path.is_ident(&name))
+                    }
+                    let syn::Expr::MethodCall(mc) = peel2(e) else {
+                        return false;
                     };
-                    for (a, b) in [(0usize, 1usize), (1, 0)] {
-                        if mentions_next(&t.elems[a])
-                            && let Some(k) = some_tuple_literal_width(&t.elems[b])
+                    if mc.method != "next" {
+                        return false;
+                    }
+                    matches!(peel2(&mc.receiver), syn::Expr::Path(p)
+                        if p.path.is_ident(name))
+                }
+                impl<'ast> syn::visit::Visit<'ast> for FindWidth<'_> {
+                    fn visit_expr_match(&mut self, m: &'ast syn::ExprMatch) {
+                        if self.width.is_none()
+                            && let syn::Expr::Tuple(t) = &*m.expr
+                            && t.elems.len() == 2
                         {
-                            width = Some(k);
-                            break 'scan;
+                            for (a, b) in [(0usize, 1usize), (1, 0)] {
+                                if match_mentions_next(&t.elems[a], self.name)
+                                    && let Some(k) =
+                                        some_tuple_literal_width(&t.elems[b])
+                                {
+                                    self.width = Some(k);
+                                    break;
+                                }
+                            }
+                        }
+                        syn::visit::visit_expr_match(self, m);
+                    }
+                    // assert_eq! reaches the transpiler UNEXPANDED (the
+                    // expand manifest keeps test macros) — parse its args.
+                    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                        if self.width.is_some()
+                            || !mac
+                                .path
+                                .segments
+                                .last()
+                                .is_some_and(|s| s.ident == "assert_eq")
+                        {
+                            return;
+                        }
+                        let Ok(args) = mac.parse_body_with(
+                            syn::punctuated::Punctuated::<
+                                syn::Expr,
+                                syn::Token![,],
+                            >::parse_terminated,
+                        ) else {
+                            return;
+                        };
+                        if args.len() < 2 {
+                            return;
+                        }
+                        let a: Vec<&syn::Expr> = args.iter().collect();
+                        for (x, y) in [(0usize, 1usize), (1, 0)] {
+                            if match_mentions_next(a[x], self.name)
+                                && let Some(k) = some_tuple_literal_width(a[y])
+                            {
+                                self.width = Some(k);
+                                break;
+                            }
                         }
                     }
                 }
+                let mut finder = FindWidth {
+                    name: &name,
+                    width: None,
+                };
+                for later in &block.stmts[i + 1..] {
+                    syn::visit::Visit::visit_stmt(&mut finder, later);
+                    if finder.width.is_some() {
+                        break;
+                    }
+                }
+                let width = finder.width;
                 if let Some(k) = width
                     && let syn::Stmt::Local(local) = &mut block.stmts[i]
                     && let Some(init) = &mut local.init

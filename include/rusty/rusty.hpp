@@ -479,6 +479,86 @@ namespace rusty {
             return std::get<idx>(variant_ref);
         }
 
+        // itertools' TupleCollect::collect_from_iter for HOMOGENEOUS
+        // std::tuple targets (impl_tuple_collect!): draw N items; on an
+        // early None stash the drawn prefix into buf (an
+        // std::array<Option<Item>, N-1>) and yield None; else Some(tuple).
+        // Args arrive as POINTERS (`T::collect_from_iter(&self.iter,
+        // &self.buf)` lowering).
+        template <typename Tup, typename Iter, typename Buf>
+        rusty::Option<Tup> tuple_collect_from_iter(Iter&& it_in, Buf&& buf_in) {
+            auto&& it = deref_if_pointer(std::forward<Iter>(it_in));
+            auto&& buf = deref_if_pointer(std::forward<Buf>(buf_in));
+            constexpr std::size_t n = std::tuple_size_v<Tup>;
+            using Item = std::remove_cvref_t<std::tuple_element_t<0, Tup>>;
+            std::array<rusty::Option<Item>, n> drawn{};
+            for (std::size_t i = 0; i < n; ++i) {
+                drawn[i] = it.next();
+                if (drawn[i].is_none()) {
+                    std::size_t k = 0;
+                    for (std::size_t j = 0; j < i && k < buf.size(); ++j) {
+                        buf[k++] = std::move(drawn[j]);
+                    }
+                    return rusty::None;
+                }
+            }
+            return [&]<std::size_t... I>(std::index_sequence<I...>) {
+                return rusty::Option<Tup>(Tup{std::move(drawn[I]).unwrap()...});
+            }(std::make_index_sequence<n>{});
+        }
+
+        // TupleCollect::collect_from_iter_no_buf — draw N items, None on
+        // any shortfall (no buffering).
+        template <typename Tup, typename Iter>
+        rusty::Option<Tup> tuple_collect_from_iter_no_buf(Iter&& it_in) {
+            auto&& it = deref_if_pointer(std::forward<Iter>(it_in));
+            constexpr std::size_t n = std::tuple_size_v<Tup>;
+            using Item = std::remove_cvref_t<std::tuple_element_t<0, Tup>>;
+            std::array<rusty::Option<Item>, n> drawn{};
+            for (std::size_t i = 0; i < n; ++i) {
+                drawn[i] = it.next();
+                if (drawn[i].is_none()) {
+                    return rusty::None;
+                }
+            }
+            return [&]<std::size_t... I>(std::index_sequence<I...>) {
+                return rusty::Option<Tup>(Tup{std::move(drawn[I]).unwrap()...});
+            }(std::make_index_sequence<n>{});
+        }
+
+        // TupleCollect::num_items — the tuple arity.
+        template <typename Tup>
+        constexpr std::size_t tuple_collect_num_items() {
+            return std::tuple_size_v<Tup>;
+        }
+
+        // TupleCollect::left_shift_push — slide the window left and push
+        // the new item at the back (tuple_windows).
+        template <typename Tup, typename Item>
+        void tuple_left_shift_push(Tup& t, Item item) {
+            constexpr std::size_t n = std::tuple_size_v<Tup>;
+            if constexpr (n > 1) {
+                [&]<std::size_t... I>(std::index_sequence<I...>) {
+                    ((std::get<I>(t) = std::move(std::get<I + 1>(t))), ...);
+                }(std::make_index_sequence<n - 1>{});
+            }
+            std::get<n - 1>(t) = std::move(item);
+        }
+
+        // TupleCollect::buffer_len — count of buffered (Some) slots.
+        template <typename Buf>
+        std::size_t tuple_collect_buffer_len(Buf&& buf_in) {
+            auto&& buf = deref_if_pointer(std::forward<Buf>(buf_in));
+            std::size_t n = 0;
+            for (const auto& slot : buf) {
+                if (slot.is_none()) {
+                    break;
+                }
+                ++n;
+            }
+            return n;
+        }
+
         // Parse decimal literals into 128-bit integers without relying on host
         // integer literal width (which can reject valid Rust u128/i128 values).
         template<typename Int>
