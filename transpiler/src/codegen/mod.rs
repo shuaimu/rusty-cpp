@@ -18802,17 +18802,28 @@ impl CodeGen {
                 value_param_text.push(' ');
             }
         }
-        // ALL own type params must be return-position-only; a partially
-        // deducible signature keeps its plain call (deduction handles it).
-        if own_params
+        // The return-position-only (undeducible) subset in declaration order.
+        // A same-named forwarding target requires ALL own params undeducible
+        // (the impl-fn mirrors the full [Self, own…] head); a different-named
+        // one threads just this subset (chunk_by<K, F> forwards to
+        // new_<K, J, F> — F deduces from the value arg, only K needs help).
+        let undeducible: Vec<String> = own_params
             .iter()
-            .any(|p| emit_items::contains_whole_word(&value_param_text, p))
-        {
+            .filter(|p| !emit_items::contains_whole_word(&value_param_text, p))
+            .cloned()
+            .collect();
+        if undeducible.is_empty() {
             return None;
         }
         if block.stmts.len() != 1 {
             return None;
         }
+        // Same-named forwarding (`tuple_impl::tuple_windows(self)`) threads
+        // `<Self, own…>` — the transpiled impl-fn puts the receiver's type
+        // first. A DIFFERENT-named forwarding target (`groupbylazy::new_(
+        // self, key)` inside chunk_by) threads `<own…>` only: the callee
+        // (`new_<K, J, F>`) spells the phantom param first and deduces the
+        // rest from its value args. Misalignment fails loudly at compile.
         let is_forwarding_call = |expr: &syn::Expr| -> bool {
             let call = match expr {
                 syn::Expr::Call(c) => c,
@@ -18827,8 +18838,18 @@ impl CodeGen {
             let Some(last) = pe.path.segments.last() else {
                 return false;
             };
-            if last.ident != method_name || !last.arguments.is_empty() {
+            if !last.arguments.is_empty() {
                 return false;
+            }
+            // A callee rooted at a TYPE PARAM (`T::collect_from_iter_no_buf`)
+            // is a dependent name — injecting `<T>` there needs the `template`
+            // keyword and the trait-static routing handles it anyway. Only
+            // module-rooted paths take the injection.
+            if let Some(first) = pe.path.segments.first() {
+                let first_name = first.ident.to_string();
+                if first_name == "Self" || own_params.contains(&first_name) {
+                    return false;
+                }
             }
             matches!(
                 call.args.first(),
@@ -18845,13 +18866,6 @@ impl CodeGen {
         if !matches_shape {
             return None;
         }
-        let mut ga: syn::punctuated::Punctuated<syn::GenericArgument, syn::Token![,]> =
-            syn::punctuated::Punctuated::new();
-        ga.push(syn::GenericArgument::Type(parse_quote!(Self)));
-        for p in &own_params {
-            let ident = syn::Ident::new(p, proc_macro2::Span::call_site());
-            ga.push(syn::GenericArgument::Type(parse_quote!(#ident)));
-        }
         let mut new_block = block.clone();
         let inner_call = match &mut new_block.stmts[0] {
             syn::Stmt::Expr(syn::Expr::Return(r), _) => match r.expr.as_deref_mut() {
@@ -18864,6 +18878,28 @@ impl CodeGen {
         let syn::Expr::Path(pe) = inner_call.func.as_mut() else {
             return None;
         };
+        let callee_is_same_name = pe
+            .path
+            .segments
+            .last()
+            .is_some_and(|last| last.ident == method_name);
+        if callee_is_same_name && undeducible.len() != own_params.len() {
+            // Mixed deducibility with a mirrored head: partial explicit
+            // args would bind the wrong positions. Keep the plain call.
+            return None;
+        }
+        let mut ga: syn::punctuated::Punctuated<syn::GenericArgument, syn::Token![,]> =
+            syn::punctuated::Punctuated::new();
+        let threaded: &[String] = if callee_is_same_name {
+            ga.push(syn::GenericArgument::Type(parse_quote!(Self)));
+            &own_params
+        } else {
+            &undeducible
+        };
+        for p in threaded {
+            let ident = syn::Ident::new(p, proc_macro2::Span::call_site());
+            ga.push(syn::GenericArgument::Type(parse_quote!(#ident)));
+        }
         let last = pe.path.segments.last_mut()?;
         last.arguments =
             syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
@@ -18988,6 +19024,104 @@ impl CodeGen {
             }
         }
         generics.where_clause = None;
+
+        // `fn duplicates_by<V, F>(self, f: F) -> DuplicatesBy<Self, V, F>
+        //  where F: FnMut(&Self::Item) -> V`: V is spelled ONLY in the
+        // return type, so every call site fails with "couldn't infer
+        // template argument 'V'". When a sibling Fn-bound's OUTPUT names
+        // such a param and the bound's single input is `&Self::Item`, move
+        // it to the template tail with an invoke_result default — deduction
+        // covers the rest and the default computes V exactly as Rust does.
+        // Bounds are read from the ORIGINAL sig (they were cleared above).
+        {
+            use quote::ToTokens;
+            let mut value_param_text = String::new();
+            for input in method.sig.inputs.iter() {
+                if let syn::FnArg::Typed(pt) = input {
+                    value_param_text.push_str(&pt.ty.to_token_stream().to_string());
+                    value_param_text.push(' ');
+                }
+            }
+            let mut fn_bounds: Vec<(String, syn::Type, Vec<syn::Type>)> = Vec::new();
+            let mut collect_bound = |bearer: &str, bound: &syn::TypeParamBound| {
+                if let syn::TypeParamBound::Trait(tb) = bound
+                    && let Some(last) = tb.path.segments.last()
+                    && matches!(last.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+                    && let syn::PathArguments::Parenthesized(pa) = &last.arguments
+                    && let syn::ReturnType::Type(_, ret) = &pa.output
+                {
+                    fn_bounds.push((
+                        bearer.to_string(),
+                        (**ret).clone(),
+                        pa.inputs.iter().cloned().collect(),
+                    ));
+                }
+            };
+            for tp in method.sig.generics.type_params() {
+                for b in &tp.bounds {
+                    collect_bound(&tp.ident.to_string(), b);
+                }
+            }
+            if let Some(wc) = &method.sig.generics.where_clause {
+                for pred in &wc.predicates {
+                    if let syn::WherePredicate::Type(pt) = pred
+                        && let syn::Type::Path(btp) = &pt.bounded_ty
+                        && btp.qself.is_none()
+                        && btp.path.segments.len() == 1
+                    {
+                        let bearer = btp.path.segments[0].ident.to_string();
+                        for b in &pt.bounds {
+                            collect_bound(&bearer, b);
+                        }
+                    }
+                }
+            }
+            let mut defaulted_tail: Vec<String> = Vec::new();
+            for param in generics.params.iter_mut() {
+                let syn::GenericParam::Type(tp) = param else {
+                    continue;
+                };
+                let name = tp.ident.to_string();
+                if emit_items::contains_whole_word(&value_param_text, &name) {
+                    continue;
+                }
+                let Some((bearer, _out, inputs)) = fn_bounds.iter().find(|(_, out, _)| {
+                    matches!(out, syn::Type::Path(p)
+                        if p.qself.is_none() && p.path.is_ident(&name))
+                }) else {
+                    continue;
+                };
+                if inputs.len() != 1 {
+                    continue;
+                }
+                let input_is_self_item_ref = matches!(&inputs[0],
+                    syn::Type::Reference(r) if matches!(r.elem.as_ref(),
+                        syn::Type::Path(p) if p.qself.is_none()
+                            && p.path.segments.len() == 2
+                            && p.path.segments[0].ident == "Self"
+                            && p.path.segments[1].ident == "Item"));
+                if !input_is_self_item_ref {
+                    continue;
+                }
+                let default_text = format!(
+                    "std::remove_cvref_t<std::invoke_result_t<{}&, \
+                     rusty::detail::associated_item_t<std::remove_reference_t<Self_>>&>>",
+                    bearer
+                );
+                if let Ok(tokens) = default_text.parse::<proc_macro2::TokenStream>() {
+                    tp.default = Some(syn::Type::Verbatim(tokens));
+                    defaulted_tail.push(name);
+                }
+            }
+            if !defaulted_tail.is_empty() {
+                let (tail, head): (Vec<_>, Vec<_>) =
+                    generics.params.into_iter().partition(|p| {
+                        matches!(p, syn::GenericParam::Type(tp)
+                            if defaulted_tail.contains(&tp.ident.to_string()))
+                    });
+                generics.params = head.into_iter().chain(tail).collect();
+            }
+        }
 
         let mut existing_param_names: HashSet<String> = generics
             .params
