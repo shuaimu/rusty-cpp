@@ -262,6 +262,20 @@ public:
         );
     }
 
+    // @safe - Microsecond-count variant of wait_timeout_while, for DSL
+    // callers: std::chrono never appears in the caller's code (the
+    // duration is built here, inside the runtime's std-wrapping
+    // boundary — same rationale as sys::time::sleep_us).
+    template<typename T, typename Condition>
+    [[nodiscard]] Result<std::pair<MutexGuard<T>, bool>, PoisonError<T>> wait_timeout_us_while(
+        MutexGuard<T>&& guard,
+        uint64_t micros,
+        Condition condition
+    ) const {
+        return wait_timeout_while(
+            std::move(guard), std::chrono::microseconds(micros), std::move(condition));
+    }
+
     // =========================================================================
     // C++ compatibility API with platform::threading::unique_lock
     // These keep the traditional C++ semantics for backward compatibility.
