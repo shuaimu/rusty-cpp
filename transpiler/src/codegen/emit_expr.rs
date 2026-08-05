@@ -8255,6 +8255,21 @@ impl CodeGen {
                 };
                 return format!("rusty::iter({})", receiver);
             }
+            // KNOWN receiver type with no crate-declared into_iter method:
+            // Rust's blanket `IntoIterator for I: Iterator` is identity, and
+            // the bare member spelling hard-fails for such user Iterator
+            // structs (`Panicking{}.into_iter()`). Route through the
+            // probe-first runtime helper (member when one exists, identity
+            // otherwise). Types WITH a recorded into_iter (ArrayVec,
+            // SmallVec, …) and unresolved receivers keep the member surface —
+            // five unit tests codify that emission for typed-binding and
+            // dispatch reasons.
+            if self.infer_simple_expr_type(&mc.receiver).is_some()
+                && !self.receiver_type_has_user_iter_method(&mc.receiver, "into_iter")
+            {
+                let receiver = self.emit_expr_maybe_move(&mc.receiver);
+                return format!("rusty::detail::into_iter_value({})", receiver);
+            }
         }
         if mc.method == "find"
             && mc.args.len() == 1

@@ -25522,9 +25522,14 @@ fn test_leaf4154333333391_arrayvec_from_omitted_owner_recovers_type_and_capacity
         }
     "#,
     );
+    // The receiver type is KNOWN but records no into_iter method (this
+    // reduced ArrayVec has no impls), so the emission routes through the
+    // probe-first into_iter_value helper — member when one exists at
+    // instantiation, Rust's blanket identity otherwise. The owner recovery
+    // (type + capacity) is what this test guards.
     assert!(
         out.contains(
-            "auto iter = ArrayVec<int32_t, 3>::from(std::array{1, 2, 3}).into_iter();"
+            "auto iter = rusty::detail::into_iter_value(ArrayVec<int32_t, 3>::from(std::array{1, 2, 3}));"
         )
     );
     assert!(!out.contains("ArrayVec::from(std::array"));
@@ -38020,7 +38025,7 @@ fn test_std_iter_alias_and_ufcs_lowering() {
     assert!(out.contains("rusty::map("), "Iterator::map UFCS not lowered:\n{out}");
     assert!(out.contains("rusty::zip("), "Iterator::zip UFCS not lowered:\n{out}");
     assert!(
-        out.contains(".into_iter()"),
+        out.contains(".into_iter()") || out.contains("rusty::detail::into_iter_value("),
         "IntoIterator::into_iter UFCS not lowered:\n{out}"
     );
 }

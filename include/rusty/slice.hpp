@@ -461,6 +461,21 @@ struct into_iter_projection<std::span<T, E>, 0> {
 template<typename T>
 using into_iter_t = typename into_iter_projection<std::remove_cvref_t<T>>::type;
 
+// Runtime counterpart of the projection above: Rust's blanket
+// `impl<I: Iterator> IntoIterator for I` is identity, so an emitted
+// `x.into_iter()` must fall back to passing `x` through BY VALUE when the
+// type has no member (user Iterator structs, UFCS-next crate adapters).
+// Types with a member keep it — rusty::Vec's owning IntoIter, ranges, every
+// port container.
+template<typename T>
+constexpr auto into_iter_value(T&& v) {
+    if constexpr (requires { std::forward<T>(v).into_iter(); }) {
+        return std::forward<T>(v).into_iter();
+    } else {
+        return static_cast<std::remove_cvref_t<T>>(std::forward<T>(v));
+    }
+}
+
 // --- size_hint plumbing shared by the next-iter adapters -------------------
 // Inner hints come in two shapes: `std::tuple<size_t, Option<size_t>>` (the
 // canonical one the transpiler emits) and `filter_size_hint` (`_0`/`_1`
@@ -3705,7 +3720,12 @@ decltype(auto) zip_normalize_side(T&& side) {
 template<typename A, typename B>
 requires (detail::zip_needs_next_adapter_v<A> || detail::zip_needs_next_adapter_v<B>)
 auto zip(A&& a, B&& b) {
-    return zip(
+    // Qualified: the unqualified recursion let ADL pull a transpiled crate's
+    // own exported `zip` in as a candidate whenever the adapter's template
+    // args carry crate types (next_iter_range<itertools::Panicking>) —
+    // "call to 'zip' is ambiguous". rusty.hpp includes array.hpp (the target
+    // overload) before this header, so qualified lookup binds it.
+    return rusty::zip(
         detail::zip_normalize_side(std::forward<A>(a)),
         detail::zip_normalize_side(std::forward<B>(b)));
 }
