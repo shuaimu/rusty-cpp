@@ -43,6 +43,84 @@ def patch_set_len_on_drop_copy_assign(cpp_out: Path) -> int:
     return 0
 
 
+def patch_is_zst_everywhere(cpp_out: Path) -> int:
+    """`T::IS_ZST` comes from Rust's `SizedTypeProperties`, which the
+    transpiler passes through verbatim (nothing in transpiler/ or
+    include/rusty/ knows the name). Every emitted file needs it removed,
+    not just the four IntoIter methods and drain.cppm that were hand-ported
+    by literal string match — flatten_ok was the first consumer ever to
+    instantiate `IntoIter::next_back`, and found six untouched sites.
+
+    Two forms:
+      `if (T::IS_ZST) {`  -> `if constexpr (requires { T::IS_ZST; } && false) {`
+          The requires-expression keeps the condition value-dependent, so the
+          ZST arm is never INSTANTIATED. A plain `if constexpr (false)` or a
+          runtime `false` still instantiates it, and those arms call
+          `wrapping_byte_sub`, which exists nowhere in the runtime.
+      `(T::IS_ZST ? A : B)` -> `(B)`
+          Scanned with balanced parens rather than a regex: the old
+          `T::IS_ZST ? [^:]*?: ` could not match a branch containing a
+          qualified name, because `[^:]*?` will not cross a `::`. It skipped
+          those silently instead of failing.
+    """
+    n = 0
+    for path in sorted(cpp_out.glob("*.cppm")):
+        text = path.read_text()
+        original = text
+        text = re.sub(
+            r"\bif \(T::IS_ZST\) \{",
+            "if constexpr (requires { T::IS_ZST; } && false) {",
+            text,
+        )
+        text = _strip_is_zst_ternaries(text)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def _strip_is_zst_ternaries(text: str) -> str:
+    """Replace every `(T::IS_ZST ? A : B)` with `(B)`, honouring nesting."""
+    key = "(T::IS_ZST ? "
+    while True:
+        start = text.find(key)
+        if start < 0:
+            return text
+        # Find the `:` that belongs to THIS ternary (depth 0, not part of `::`).
+        i = start + len(key)
+        depth = 0
+        colon = -1
+        while i < len(text):
+            c = text[i]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == ":" and depth == 0 and text[i : i + 2] != "::" and text[i - 1] != ":":
+                colon = i
+                break
+            i += 1
+        if colon < 0:
+            return text  # malformed; leave it for the compiler to flag
+        # Find the close paren matching the `(` this ternary opened.
+        j = colon + 1
+        depth = 0
+        while j < len(text):
+            c = text[j]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            j += 1
+        else:
+            return text
+        text = text[:start] + "(" + text[colon + 1 : j].strip() + text[j:]
+
+
 def patch_is_zero_free_fn_const(cpp_out: Path) -> int:
     """Cluster V-F (related to V-D): is_zero.cppm emits free functions
     with `const` qualifier (`bool is_zero() const` outside a class).
@@ -2564,6 +2642,7 @@ def main(cpp_out: Path):
     patches = [
         ("set_len_on_drop copy-assign", patch_set_len_on_drop_copy_assign),
         ("is_zero free-fn const qualifier", patch_is_zero_free_fn_const),
+        ("T::IS_ZST removal (all files)", patch_is_zst_everywhere),
         ("std::collections → rusty::collections", patch_std_collections_to_rusty),
         ("std::ptr → rusty::ptr", patch_std_ptr_to_rusty),
         ("Cap.as_inner() → ''", patch_cap_as_inner),
