@@ -44962,6 +44962,54 @@ impl CodeGen {
         self.return_type_hints.pop();
     }
 
+    /// A struct literal returned from a function whose declared return type is
+    /// a type ALIAS wrapping that struct: the alias spelling is the correct
+    /// target, and the ONLY place the wrapper arguments appear.
+    ///
+    /// `fn merge_join_by<I,J,F>(..) -> MergeJoinBy<I,J,F>` where
+    /// `type MergeJoinBy<I,J,F> = MergeBy<I, J, MergeFuncLR<F, ..>>` returns a
+    /// `MergeBy { .. }` literal. Recovering that literal's arguments
+    /// positionally from the FUNCTION's generics yields `MergeBy<I, J, F>` —
+    /// the third slot loses its `MergeFuncLR` wrapper and the first two lose
+    /// their `into_iter_t` projections, so the initializer no longer converts
+    /// to the field. Emitting the alias keeps every argument the author wrote.
+    ///
+    /// Gated on the alias resolving to THIS struct, so an unrelated return
+    /// type can never capture the literal.
+    pub(super) fn return_type_alias_spelling_for_struct_literal(
+        &self,
+        path: &syn::Path,
+    ) -> Option<String> {
+        let return_ty = self.current_return_type_hint()?;
+        let syn::Type::Path(ret_path) = return_ty else { return None };
+        if ret_path.qself.is_some() {
+            return None;
+        }
+        let ret_seg = ret_path.path.segments.last()?;
+        if !matches!(ret_seg.arguments, syn::PathArguments::AngleBracketed(_)) {
+            return None;
+        }
+        let alias_name = ret_seg.ident.to_string();
+        let literal_name = path.segments.last()?.ident.to_string();
+        if alias_name == literal_name {
+            return None;
+        }
+        let target = self.type_alias_targets.get(&alias_name).or_else(|| {
+            self.type_alias_targets
+                .get(&format!("{}::{}", self.module_stack.join("::"), alias_name))
+        })?;
+        let syn::Type::Path(target_path) = target else { return None };
+        if target_path.path.segments.last()?.ident != literal_name.as_str() {
+            return None;
+        }
+        let spelled = self.map_type(return_ty);
+        (!spelled.is_empty()
+            && spelled.contains('<')
+            && !spelled.contains("/* TODO")
+            && !type_string_has_auto_placeholder(&spelled))
+        .then_some(spelled)
+    }
+
     fn current_return_type_hint(&self) -> Option<&syn::Type> {
         self.return_type_hints.last().and_then(|hint| hint.as_ref())
     }

@@ -8343,6 +8343,20 @@ impl CodeGen {
             .clone()
             .or(expected_target_name)
             .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
+        // The enclosing fn returns a type ALIAS wrapping this struct: only the
+        // alias spelling carries the wrapper arguments. Gated on the AUTHOR not
+        // having written a turbofish — an explicit one always wins.
+        if variant_struct_target.is_none()
+            && struct_expr
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::None))
+            && let Some(alias_spelling) =
+                self.return_type_alias_spelling_for_struct_literal(&struct_expr.path)
+        {
+            target_name = alias_spelling;
+        }
         if !target_name.contains("::")
             && struct_expr.path.segments.len() >= 2
             && let Some(expected_ty) = expected_ty
