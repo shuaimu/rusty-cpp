@@ -3159,6 +3159,32 @@ impl CodeGen {
         parts.join("\n")
     }
 
+    /// Whether a switch-match's emitted arm text ends in a statement that always
+    /// runs and always leaves the block. Rust matches are exhaustive, but that
+    /// exhaustiveness lives in the PATTERNS — once lowered to a chain of `if
+    /// (cond) return …;` C++ sees a path that falls off the end. In a
+    /// value-position IIFE that path is UB, and diagnosing it crashed clang
+    /// 22.1.8 outright (SIGSEGV inside -Wreturn-type's instantiation-stack
+    /// printer), which is why such a target fails with no error text at all.
+    /// Callers that wrap this text in a non-void lambda append an unreachable
+    /// terminator when this returns false.
+    pub(super) fn switch_match_arms_end_unconditionally(arms_text: &str) -> bool {
+        let Some(last) = arms_text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .next_back()
+        else {
+            return false;
+        };
+        if last.starts_with("if (") || last.starts_with("if(") {
+            return false;
+        }
+        // A diverging tail (panic/throw/unreachable) already leaves the block,
+        // but appending after it is dead code clang warns on — treat as ending.
+        true
+    }
+
     pub(super) fn emit_match_expr_switch_statement_expr(
         &self,
         match_expr: &syn::ExprMatch,
@@ -24372,9 +24398,17 @@ impl CodeGen {
                     return_clause = ann;
                 }
             }
+            // Exhaustive-in-Rust arms can still lower to an all-conditional
+            // chain; without a terminator the lambda falls off the end (UB,
+            // and a clang crash while diagnosing it — see the helper).
+            let terminator = if Self::switch_match_arms_end_unconditionally(&arms_text) {
+                ""
+            } else {
+                " rusty::intrinsics::unreachable();"
+            };
             return format!(
-                "[&](){} {{ auto&& _m = {}; {} }}()",
-                return_clause, scrutinee, arms_text
+                "[&](){} {{ auto&& _m = {}; {}{} }}()",
+                return_clause, scrutinee, arms_text, terminator
             );
         }
         // Item 11: when type inference can't see the scrutinee's tuple shape
