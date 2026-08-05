@@ -3242,6 +3242,11 @@ impl CodeGen {
                         | "skip_while"
                         | "peekable"
                         | "fuse"
+                        // Iterator-only adapters (NO Option/Result member of
+                        // the same name — zip/cloned/copied/flatten are
+                        // Option-shared and must stay OFF this list).
+                        | "chain"
+                        | "cycle"
                         | "windows"
                         | "chunks"
                         | "chunks_exact"

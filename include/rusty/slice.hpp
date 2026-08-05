@@ -1265,6 +1265,36 @@ auto make_view_next_iter(View&& view) {
         std::forward<View>(view));
 }
 
+// Adapts a UFCS-only iterator (a transpiled crate type whose `next()` is a
+// FREE function in the crate's namespace — invisible to these headers) to
+// the member-next() protocol. The next_fn lambda is built AT THE EMISSION
+// SITE, where the crate's dispatcher can be named; every rusty:: terminal
+// then composes over the wrapper.
+template<typename It, typename NextFn>
+class fn_next_iter {
+public:
+    fn_next_iter(It it, NextFn next_fn)
+        : it_(std::move(it)), next_fn_(std::move(next_fn)) {}
+
+    fn_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        return next_fn_(it_);
+    }
+
+private:
+    It it_;
+    NextFn next_fn_;
+};
+
+template<typename It, typename NextFn>
+auto make_fn_next_iter(It&& it, NextFn&& next_fn) {
+    return fn_next_iter<std::remove_cvref_t<It>, std::decay_t<NextFn>>(
+        std::forward<It>(it), std::forward<NextFn>(next_fn));
+}
+
 // Reverses a FORWARD-ONLY next() iterator by materializing it. Rust's
 // `.rev()` needs DoubleEndedIterator, and sources like zip-over-views are
 // double-ended in Rust while the C++ adapters are forward-only — replaying
