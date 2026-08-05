@@ -781,6 +781,14 @@ impl CodeGen {
                 })
                 .collect();
         }
+        // Return-position-only params recoverable from a closure bound's
+        // output (`duplicates_by`'s Key): move to the template tail with an
+        // invoke_result default rather than leaving them undeducible.
+        self.apply_fn_bound_defaulted_tail_for_free_function(
+            &f.sig.generics,
+            &f.sig.inputs,
+            &mut emitted_generics,
+        );
         // Pure-phantom generics: declared only to carry lifetimes/bounds
         // (`fn partition<'a, A: 'a, I, F>(iter: I, pred: F) -> usize` — Rust
         // infers A through I's IntoIterator bound), absent from every input,

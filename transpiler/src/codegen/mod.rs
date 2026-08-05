@@ -46638,6 +46638,145 @@ impl CodeGen {
     }
 
 
+    /// The free-function twin of the extension-method defaulted tail: `fn
+    /// duplicates_by<I, Key, F>(iter: I, f: F) -> DuplicatesBy<I, Key, F>
+    /// where F: FnMut(&I::Item) -> Key`. Key is spelled only in the RETURN
+    /// type, so it cannot be dropped from the head (the return spelling needs
+    /// it) and cannot be deduced from the arguments either — every call site
+    /// fails with "couldn't infer template argument 'Key'". Rust recovers it
+    /// by unifying the closure bound's output; C++ can compute exactly the
+    /// same thing as a template default, provided the param moves to the tail.
+    ///
+    /// Gated on the shape that makes the default well-formed: a sibling Fn
+    /// bound whose OUTPUT is precisely this param, whose single INPUT is
+    /// `&X::Item` for another type param X, and whose bearer is deducible
+    /// from the value parameters. `emitted` is mutated in place; bounds are
+    /// read from `generics` (the emitted head has them cleared).
+    fn apply_fn_bound_defaulted_tail_for_free_function(
+        &self,
+        generics: &syn::Generics,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+        emitted: &mut syn::Generics,
+    ) {
+        use quote::ToTokens;
+        let param_names: HashSet<String> = generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut value_param_text = String::new();
+        for input in inputs.iter() {
+            if let syn::FnArg::Typed(pt) = input {
+                value_param_text.push_str(&pt.ty.to_token_stream().to_string());
+                value_param_text.push(' ');
+            }
+        }
+        // (bearer, output, inputs) for every Fn/FnMut/FnOnce bound, from both
+        // inline bounds and the where clause.
+        let mut fn_bounds: Vec<(String, syn::Type, Vec<syn::Type>)> = Vec::new();
+        let mut collect_bound = |bearer: &str, bound: &syn::TypeParamBound| {
+            if let syn::TypeParamBound::Trait(tb) = bound
+                && let Some(last) = tb.path.segments.last()
+                && matches!(last.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+                && let syn::PathArguments::Parenthesized(pa) = &last.arguments
+                && let syn::ReturnType::Type(_, ret) = &pa.output
+            {
+                fn_bounds.push((
+                    bearer.to_string(),
+                    (**ret).clone(),
+                    pa.inputs.iter().cloned().collect(),
+                ));
+            }
+        };
+        for tp in generics.type_params() {
+            for b in &tp.bounds {
+                collect_bound(&tp.ident.to_string(), b);
+            }
+        }
+        if let Some(wc) = &generics.where_clause {
+            for pred in &wc.predicates {
+                if let syn::WherePredicate::Type(pt) = pred
+                    && let syn::Type::Path(btp) = &pt.bounded_ty
+                    && btp.qself.is_none()
+                    && btp.path.segments.len() == 1
+                {
+                    let bearer = btp.path.segments[0].ident.to_string();
+                    for b in &pt.bounds {
+                        collect_bound(&bearer, b);
+                    }
+                }
+            }
+        }
+        if fn_bounds.is_empty() {
+            return;
+        }
+        let mut defaulted_tail: Vec<String> = Vec::new();
+        for param in emitted.params.iter_mut() {
+            let syn::GenericParam::Type(tp) = param else {
+                continue;
+            };
+            if tp.default.is_some() {
+                continue;
+            }
+            let name = tp.ident.to_string();
+            // Deducible from an argument: leave deduction alone.
+            if emit_items::contains_whole_word(&value_param_text, &name) {
+                continue;
+            }
+            let Some((bearer, _out, bound_inputs)) = fn_bounds.iter().find(|(_, out, _)| {
+                matches!(out, syn::Type::Path(p)
+                    if p.qself.is_none() && p.path.is_ident(&name))
+            }) else {
+                continue;
+            };
+            // The bearer itself must be deducible, or the default is unusable.
+            if !emit_items::contains_whole_word(&value_param_text, bearer) {
+                continue;
+            }
+            if bound_inputs.len() != 1 {
+                continue;
+            }
+            // `&X::Item` where X is one of this function's own type params.
+            let syn::Type::Reference(r) = &bound_inputs[0] else {
+                continue;
+            };
+            let syn::Type::Path(p) = r.elem.as_ref() else {
+                continue;
+            };
+            if p.qself.is_some()
+                || p.path.segments.len() != 2
+                || p.path.segments[1].ident != "Item"
+            {
+                continue;
+            }
+            let owner = p.path.segments[0].ident.to_string();
+            if !param_names.contains(&owner) {
+                continue;
+            }
+            let default_text = format!(
+                "std::remove_cvref_t<std::invoke_result_t<{}&, \
+                 rusty::detail::associated_item_t<std::remove_reference_t<{}>>&>>",
+                bearer, owner
+            );
+            if let Ok(tokens) = default_text.parse::<proc_macro2::TokenStream>() {
+                tp.default = Some(syn::Type::Verbatim(tokens));
+                defaulted_tail.push(name);
+            }
+        }
+        if defaulted_tail.is_empty() {
+            return;
+        }
+        let params = std::mem::take(&mut emitted.params);
+        let (tail, head): (Vec<_>, Vec<_>) = params.into_iter().partition(|p| {
+            matches!(p, syn::GenericParam::Type(tp)
+                if defaulted_tail.contains(&tp.ident.to_string()))
+        });
+        emitted.params = head.into_iter().chain(tail).collect();
+    }
+
     fn undeduced_return_type_param_for_function(
         &self,
         generics: &syn::Generics,
