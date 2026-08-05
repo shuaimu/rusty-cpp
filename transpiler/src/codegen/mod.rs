@@ -889,6 +889,10 @@ pub struct CodeGen {
     /// Trait method receiver shape keyed by `Trait::method` (scoped + unscoped).
     /// Used to safely rewrite UFCS-style trait calls with by-value receivers.
     pub(crate) trait_method_has_receiver: std::rc::Rc<HashMap<String, bool>>,
+    /// `<Trait>::<method>` → receiver kind (0=&self 1=&mut self 2=self
+    /// 3=mut self). Cross-crate twin of `impl_method_receiver_kinds`, which
+    /// only ever sees the CURRENT crate's impls.
+    pub(crate) trait_method_receiver_kind: std::rc::Rc<HashMap<String, u8>>,
     /// Local trait names (scoped + unscoped) for which module-mode runtime
     /// helper structs were emitted. UFCS calls to these helpers must stay as
     /// associated calls (`Trait::method(self, ...)`) to avoid self-recursive
@@ -2072,6 +2076,7 @@ impl CodeGen {
             ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
+            trait_method_receiver_kind: std::rc::Rc::new(HashMap::new()),
             module_runtime_helper_traits: HashSet::new(),
             module_runtime_helper_trait_type_names: HashMap::new(),
             module_runtime_helper_trait_methods: HashMap::new(),
@@ -3699,6 +3704,11 @@ impl CodeGen {
                 .trait_method_has_receiver
                 .iter()
                 .map(|(key, has)| (key.clone(), *has))
+                .collect(),
+            trait_method_receiver_kind: self
+                .trait_method_receiver_kind
+                .iter()
+                .map(|(key, kind)| (key.clone(), *kind))
                 .collect(),
             method_owners,
             declared_types,

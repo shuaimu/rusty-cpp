@@ -3425,6 +3425,24 @@ impl CodeGen {
     /// the method takes `self`. No known entry, or any receiver-less one,
     /// returns false (the trait-static call form then stays on the existing
     /// routing paths rather than treating arg0 as a receiver).
+    /// `<Trait>::<method>` receiver kind (0=&self 1=&mut self 2=self
+    /// 3=mut self), from this crate's own traits or from a dependency's
+    /// MANIFEST. A consumer never parses the dependency's trait declaration,
+    /// so the manifest is the only source there.
+    pub(super) fn lookup_trait_method_receiver_kind(
+        &self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<u8> {
+        let key = format!("{}::{}", trait_name, method_name);
+        if let Some(kind) = self.trait_method_receiver_kind.get(&key) {
+            return Some(*kind);
+        }
+        self.dependency_ufcs_trait_manifests
+            .iter()
+            .find_map(|m| m.trait_method_receiver_kind.get(&key).copied())
+    }
+
     pub(super) fn trait_method_name_always_has_receiver(&self, method: &str) -> bool {
         let suffix = format!("::{}", method);
         let mut any_known = false;

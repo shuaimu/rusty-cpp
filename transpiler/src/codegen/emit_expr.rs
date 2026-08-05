@@ -6772,10 +6772,34 @@ impl CodeGen {
                                     self.peel_paren_group_expr(&mc.receiver),
                                     syn::Expr::Path(_)
                                 );
-                                let self_spelling = if has_const_arg || receiver_is_place {
-                                    "decltype(__self)".to_string()
-                                } else {
-                                    format!("std::remove_cvref_t<decltype({})>", receiver)
+                                // The CALLEE's own `self` decides this, not
+                                // the receiver expression's shape: `&self` /
+                                // `&mut self` must keep the receiver's
+                                // reference category, while a by-value `self`
+                                // consumes and wants a bare value type. The
+                                // kind crosses crates via the UFCS manifest —
+                                // a consumer never sees the trait declaration.
+                                let callee_receiver_kind = self
+                                    .ufcs_method_trait_owners
+                                    .get(&method_name)
+                                    .and_then(|owners| owners.iter().next())
+                                    .and_then(|owner| {
+                                        self.lookup_trait_method_receiver_kind(
+                                            owner,
+                                            &method_name,
+                                        )
+                                    });
+                                let self_spelling = match callee_receiver_kind {
+                                    Some(0) | Some(1) => "decltype(__self)".to_string(),
+                                    Some(_) => {
+                                        format!("std::remove_cvref_t<decltype({})>", receiver)
+                                    }
+                                    None if has_const_arg || receiver_is_place => {
+                                        "decltype(__self)".to_string()
+                                    }
+                                    None => {
+                                        format!("std::remove_cvref_t<decltype({})>", receiver)
+                                    }
                                 };
                                 let mapped_join = mapped
                                     .iter()

@@ -3519,6 +3519,22 @@ impl CodeGen {
                                     .insert((trait_name.clone(), method_name.clone()));
                             }
                         }
+                        if let Some(syn::FnArg::Receiver(recv)) = method.sig.inputs.first() {
+                            let kind: u8 =
+                                match (recv.reference.is_some(), recv.mutability.is_some()) {
+                                    (true, false) => 0,
+                                    (true, true) => 1,
+                                    (false, false) => 2,
+                                    (false, true) => 3,
+                                };
+                            for key in [
+                                format!("{}::{}", trait_name, method_name),
+                                format!("{}::{}", scoped_trait_name, method_name),
+                            ] {
+                                std::rc::Rc::make_mut(&mut self.trait_method_receiver_kind)
+                                    .insert(key, kind);
+                            }
+                        }
                         std::rc::Rc::make_mut(&mut self.trait_method_has_receiver)
                             .insert(format!("{}::{}", trait_name, method_name), has_receiver);
                         std::rc::Rc::make_mut(&mut self.trait_method_has_receiver).insert(

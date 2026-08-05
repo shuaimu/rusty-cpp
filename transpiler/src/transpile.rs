@@ -43,6 +43,15 @@ pub struct UfcsTraitManifest {
     /// trait-static routing paths.
     #[serde(default)]
     pub trait_method_has_receiver: BTreeMap<String, bool>,
+    /// `<Trait>::<method>` → the receiver's KIND: 0=`&self`, 1=`&mut self`,
+    /// 2=`self`, 3=`mut self`. `trait_method_has_receiver` records only
+    /// WHETHER there is one; a consumer spelling an explicit `Self_` template
+    /// argument needs to know which, because `&self`/`&mut self` must keep the
+    /// receiver's reference category while a by-value `self` consumes it. A
+    /// consumer parses only the dependency's MANIFEST — it never sees the
+    /// trait declaration — so this cannot be recovered locally.
+    #[serde(default)]
+    pub trait_method_receiver_kind: BTreeMap<String, u8>,
     /// Method name → owning trait names, restricted to actually-emitted
     /// `<Tr>_::m` free functions.
     #[serde(default)]
@@ -2855,6 +2864,7 @@ mod tests {
                 "Greet::hello".to_string(),
                 true,
             )]),
+            trait_method_receiver_kind: std::collections::BTreeMap::new(),
             method_owners: std::collections::BTreeMap::from([(
                 "hello".to_string(),
                 vec!["Greet".to_string()],
@@ -2938,6 +2948,7 @@ mod tests {
                 "Greet::consume".to_string(),
                 true,
             )]),
+            trait_method_receiver_kind: std::collections::BTreeMap::new(),
             method_owners: std::collections::BTreeMap::from([(
                 "consume".to_string(),
                 vec!["Greet".to_string()],
