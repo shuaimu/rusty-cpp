@@ -5956,11 +5956,7 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(receiver_expr)
             };
-            let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(receiver_expr, raw_receiver);
             let mut static_args = Vec::with_capacity(args.len() + 1);
             static_args.push(receiver);
             static_args.extend(args.iter().cloned());
@@ -6023,11 +6019,7 @@ impl CodeGen {
         } else {
             self.emit_expr_to_string(receiver_expr)
         };
-        let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
-            format!("({})", raw_receiver)
-        } else {
-            raw_receiver
-        };
+        let receiver = self.wrap_method_receiver(receiver_expr, raw_receiver);
         let mut static_args = Vec::with_capacity(args.len() + 1);
         static_args.push(receiver);
         static_args.extend(args.iter().cloned());
@@ -6825,11 +6817,7 @@ impl CodeGen {
             && self.expr_is_named_field(&mc.receiver, "iter")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                 "->"
             } else {
@@ -6961,11 +6949,7 @@ impl CodeGen {
                 );
             }
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                 "->"
             } else {
@@ -7081,11 +7065,7 @@ impl CodeGen {
                 let maybe_uninit_expected: syn::Type = parse_quote!(MaybeUninit<#expected>);
                 let raw_receiver = self
                     .emit_expr_to_string_with_expected(&mc.receiver, Some(&maybe_uninit_expected));
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                     "->"
                 } else {
@@ -7150,11 +7130,7 @@ impl CodeGen {
                     );
                 if receiver_is_ordering {
                     let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                    let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                        format!("({})", raw_receiver)
-                    } else {
-                        raw_receiver
-                    };
+                    let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                     if want_args == 0 {
                         return format!("rusty::cmp::{}({})", mc.method, receiver);
                     }
@@ -7288,11 +7264,7 @@ impl CodeGen {
         }
         if matches!(mc.method.to_string().as_str(), "min" | "max") && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let helper = if mc.method == "min" {
                 "rusty::min"
             } else {
@@ -7313,11 +7285,7 @@ impl CodeGen {
         {
             let field_name = if mc.method == "size" { "size" } else { "align" };
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                 "->"
             } else {
@@ -7348,11 +7316,7 @@ impl CodeGen {
         // for non-string-like surfaces.
         if mc.method == "bytes" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let receiver_is_string_like = self.expr_is_string_view_like(&mc.receiver)
                 || self
                     .infer_simple_expr_type(&mc.receiver)
@@ -7408,11 +7372,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.type_is_range_with_private_end_field(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return if mc.method == "start" {
                 format!("rusty::field_start({})", receiver)
             } else {
@@ -7453,11 +7413,7 @@ impl CodeGen {
         }
         if mc.method == "unsigned_abs" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "([&]() {{ auto&& _v = {recv}; using _V = std::remove_cv_t<std::remove_reference_t<decltype(_v)>>; using _U = std::make_unsigned_t<_V>; if constexpr (std::is_signed_v<_V>) {{ auto _u = static_cast<_U>(_v); return (_v < 0) ? static_cast<_U>(static_cast<_U>(0) - _u) : _u; }} else {{ return static_cast<_U>(_v); }} }})()",
                 recv = receiver
@@ -7541,11 +7497,7 @@ impl CodeGen {
             };
             if nullary_std.is_some() || binary_std.is_some() {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 if let Some(f) = nullary_std {
                     return format!("std::{}({})", f, receiver);
                 }
@@ -7563,11 +7515,7 @@ impl CodeGen {
             }
             // Float methods with no direct <cmath> counterpart.
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             if mc.args.is_empty() {
                 match method.as_str() {
                     "recip" => return format!("(1.0 / {})", receiver),
@@ -7689,11 +7637,7 @@ impl CodeGen {
             })
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let lo = self.emit_expr_to_string(&mc.args[0]);
             let hi = self.emit_expr_to_string(&mc.args[1]);
             return format!(
@@ -7711,11 +7655,7 @@ impl CodeGen {
             if is_float || is_int {
                 let method = mc.method.to_string();
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 if method == "signum" && mc.args.is_empty() {
                     if is_float {
                         // NaN → NaN; else ±1.0 (copysign matches Rust's ±0 rule).
@@ -7912,11 +7852,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.map_type(ty) == "bool")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let cond = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let cond = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             if mc.method == "then_some" {
                 let arg = self.emit_expr_to_string(&mc.args[0]);
                 return format!(
@@ -7940,11 +7876,7 @@ impl CodeGen {
             })
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let recv = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let recv = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let u8_method = mc.method.to_string();
             {
                 match u8_method.as_str() {
@@ -7990,11 +7922,7 @@ impl CodeGen {
             && self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let lhs_idx = self.emit_expr_to_string(&mc.args[0]);
             let rhs_idx = self.emit_expr_to_string(&mc.args[1]);
             let swap_view_expr =
@@ -8256,11 +8184,7 @@ impl CodeGen {
                         &mc.receiver,
                         Some(&receiver_expected),
                     );
-                    let recv = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                        format!("({})", raw)
-                    } else {
-                        raw
-                    };
+                    let recv = self.wrap_method_receiver(&mc.receiver, raw);
                     return format!("{}.into_iter()", recv);
                 }
                 // No ctor-shaped receiver to specialize: fall through to the
@@ -8650,11 +8574,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                 "->"
             } else {
@@ -8669,11 +8589,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                 "->"
             } else {
@@ -8688,11 +8604,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                 "->"
             } else {
@@ -8716,11 +8628,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
             {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
                     "->"
                 } else {
@@ -8816,11 +8724,7 @@ impl CodeGen {
                 || self.expr_is_self_inner_field(&mc.receiver)
             {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::to_string_view({})", receiver);
             }
         }
@@ -9342,11 +9246,7 @@ impl CodeGen {
                 .unwrap_or(false);
             if should_lower_ptr_helper {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 if method_name == "as_ref" {
                     return format!("rusty::ptr::as_ref({})", receiver);
                 }
@@ -9373,11 +9273,7 @@ impl CodeGen {
             && !receiver_keeps_inherent_slice_method("as_slice")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::as_slice({})", receiver);
         }
         if method_name == "as_mut_slice"
@@ -9386,11 +9282,7 @@ impl CodeGen {
             && !receiver_keeps_inherent_slice_method("as_mut_slice")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::as_mut_slice({})", receiver);
         }
         if matches!(method_name.as_str(), "clone_from_slice" | "copy_from_slice")
@@ -9407,11 +9299,7 @@ impl CodeGen {
                 || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let dst = if self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
                 receiver
             } else {
@@ -9423,11 +9311,7 @@ impl CodeGen {
         }
         if method_name == "write_fmt" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let receiver_ty = self.infer_simple_expr_type(&mc.receiver);
             let has_receiver_write_fmt = self
                 .lookup_method_arg_type_from_receiver_type(&mc.receiver, "write_fmt", 0)
@@ -9571,11 +9455,7 @@ impl CodeGen {
         }
         if method_name == "then_some" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::then_some({}, {})", receiver, args[0]);
         }
         if method_name == "into_deserializer" && args.is_empty() {
@@ -9671,11 +9551,7 @@ impl CodeGen {
                 );
             }
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let receiver_looks_like_as_ref = matches!(
                 self.peel_paren_group_expr(&mc.receiver),
                 syn::Expr::MethodCall(inner_mc)
@@ -9721,11 +9597,7 @@ impl CodeGen {
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let receiver_is_known_cow = self.expr_is_known_cow_like(&mc.receiver);
             let expected_is_string_view = self.expected_type_is_string_view(expected_ty);
             if receiver_is_known_cow || expected_is_string_view {
@@ -9777,11 +9649,7 @@ impl CodeGen {
             // FIELDS (alloc.hpp), so Rust's accessor calls lower to field
             // access. Gated on the module not binding its own `Layout`.
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("{}.{}", receiver, method_name);
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
@@ -9792,11 +9660,7 @@ impl CodeGen {
                 self.expected_pointer_element_type(expected_ty);
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             *self.as_ptr_expected_element.borrow_mut() = prev_as_ptr_elem;
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             // Rust method resolution can auto-deref `ManuallyDrop<T>` to call
             // `T::as_ptr/as_mut_ptr`; preserve that by dispatching through `*`.
             if self.method_receiver_is_manually_drop_expr(&mc.receiver) {
@@ -9826,38 +9690,22 @@ impl CodeGen {
         }
         if method_name == "chars" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::str_runtime::chars({})", receiver);
         }
         if method_name == "char_indices" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::str_runtime::char_indices({})", receiver);
         }
         if method_name == "len_utf8" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::char_runtime::len_utf8({})", receiver);
         }
         if method_name == "encode_utf8" && args.len() == 1 && self.expr_is_char_like(&mc.receiver) {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::char_runtime::encode_utf8({}, {})",
                 receiver, args[0]
@@ -9868,11 +9716,7 @@ impl CodeGen {
             && self.should_lower_char_is_whitespace_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::char_runtime::is_whitespace({})", receiver);
         }
         // `u8` ASCII classifiers/transforms (`b'a'.is_ascii_alphabetic()`,
@@ -9923,11 +9767,7 @@ impl CodeGen {
                 && self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver);
             if receiver_is_u8 || unresolved_bool_classifier {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 let ns = if receiver_is_u8 { "rusty" } else { "rusty::char_runtime" };
                 return format!("{}::{}({})", ns, method_name, receiver);
             }
@@ -9961,21 +9801,13 @@ impl CodeGen {
             }
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::char_runtime::{}({})", char_fn, receiver);
         }
         // char methods with args / non-classifier char methods.
         if self.should_lower_char_is_whitespace_method_call(&mc.receiver) {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             if (method_name == "to_digit" || method_name == "is_digit") && args.len() == 1 {
                 let arg = self.emit_expr_to_string(&mc.args[0]);
                 return format!("rusty::char_runtime::{}({}, {})", method_name, receiver, arg);
@@ -9997,11 +9829,7 @@ impl CodeGen {
         }
         if method_name == "is_char_boundary" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::str_runtime::is_char_boundary({}, {})",
                 receiver, args[0]
@@ -10021,11 +9849,7 @@ impl CodeGen {
                 });
             if receiver_is_numeric_scalar {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::pow({}, {})", receiver, args[0]);
             }
         }
@@ -10034,33 +9858,21 @@ impl CodeGen {
             && self.should_lower_char_is_whitespace_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("(static_cast<uint32_t>({}) <= 0x7F)", receiver);
         }
         // Rust `u8::is_ascii_digit()` → `rusty::is_ascii_digit(b)`.
         // C++ integer scalars do not have `.is_ascii_digit()` members.
         if method_name == "is_ascii_digit" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::is_ascii_digit({})", receiver);
         }
         // Rust `char/u8::is_ascii_hexdigit()` → `rusty::is_ascii_hexdigit(x)`.
         // C++ scalars do not expose `.is_ascii_hexdigit()` members.
         if method_name == "is_ascii_hexdigit" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::is_ascii_hexdigit({})", receiver);
         }
         if method_name == "fill" && args.len() == 1 {
@@ -10071,11 +9883,7 @@ impl CodeGen {
                 .is_some();
             if receiver_is_span || self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::fill({}, {})", receiver, args[0]);
             }
         }
@@ -10084,11 +9892,7 @@ impl CodeGen {
             && self.should_lower_slice_deref_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::get_mut({}, {})", receiver, args[0]);
         }
         // UNRESOLVED receiver (e.g. the `auto& s = buf.as_mut()` binding in
@@ -10127,11 +9931,7 @@ impl CodeGen {
                 ) && self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::get({}, {})", receiver, args[0]);
         }
         if matches!(
@@ -10145,11 +9945,7 @@ impl CodeGen {
                 || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         if matches!(method_name.as_str(), "split_first" | "split_last")
@@ -10157,11 +9953,7 @@ impl CodeGen {
             && self.should_lower_slice_deref_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         if matches!(method_name.as_str(), "split_first" | "split_last")
@@ -10169,11 +9961,7 @@ impl CodeGen {
             && !self.receiver_has_inherent_method_named(&mc.receiver, &method_name)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         if method_name == "chunks_exact"
@@ -10181,11 +9969,7 @@ impl CodeGen {
             && !self.receiver_has_inherent_method_named(&mc.receiver, "chunks_exact")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::chunks_exact({}, {})", receiver, args[0]);
         }
         // Rust slice `.windows(n)` / `.chunks(n)` — std::span has no such
@@ -10196,11 +9980,7 @@ impl CodeGen {
             && !self.receiver_has_inherent_method_named(&mc.receiver, &method_name)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
         }
         // Rust slice methods `.first()` and `.get(n)` on std::span.
@@ -10210,11 +9990,7 @@ impl CodeGen {
         if let syn::Expr::MethodCall(as_bytes_mc) = mc.receiver.as_ref() {
             if as_bytes_mc.method == "as_bytes" && as_bytes_mc.args.is_empty() {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 let opt_type = "rusty::Option<const uint8_t&>";
                 if method_name == "first" && args.is_empty() {
                     return format!(
@@ -10271,11 +10047,7 @@ impl CodeGen {
             .and_then(|ty| self.span_element_type(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             // Construct the Option type: Option<T&> or Option<const T&>
             let opt_type = if is_const {
                 format!("rusty::Option<const {}&>", elem_cpp)
@@ -10312,11 +10084,7 @@ impl CodeGen {
                 || self.should_lower_unknown_local_index_method_call(&mc.receiver, &mc.args[0]))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::get({}, {})", receiver, args[0]);
         }
         if method_name == "get_mut"
@@ -10326,11 +10094,7 @@ impl CodeGen {
                 || self.should_lower_unknown_local_index_method_call(&mc.receiver, &mc.args[0]))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::get_mut({}, {})", receiver, args[0]);
         }
         if method_name == "get"
@@ -10340,11 +10104,7 @@ impl CodeGen {
             && self.index_trait_arg_supports_bracket_access(&mc.args[0])
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::get({}, {})", receiver, args[0]);
         }
         if matches!(method_name.as_str(), "get_unchecked" | "get_unchecked_mut")
@@ -10360,11 +10120,7 @@ impl CodeGen {
                 || self.should_lower_unknown_local_index_method_call(&mc.receiver, &mc.args[0]))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("{}[{}]", receiver, args[0]);
         }
         if matches!(method_name.as_str(), "get_unchecked" | "get_unchecked_mut")
@@ -10373,11 +10129,7 @@ impl CodeGen {
             && self.expr_is_tuple_field_access(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("{}[{}]", receiver, args[0]);
         }
         // Last-resort fallback for `recv.get_unchecked[_mut](idx)` where the
@@ -10393,11 +10145,7 @@ impl CodeGen {
             && !self.is_slice_range_index_expr(&mc.args[0])
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "([&](auto&& __recv, auto&& __idx) -> decltype(auto) {{ \
                 if constexpr (requires {{ __recv[__idx]; }}) {{ \
@@ -10417,11 +10165,7 @@ impl CodeGen {
             })
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::get({}, {})", receiver, args[0]);
         }
         // Note: `.as_bytes()` on slices is NOT rewritten generically —
@@ -10429,20 +10173,12 @@ impl CodeGen {
         // Rust `is_empty()` → dispatch to `.is_empty()` or `.empty()` depending on type
         if method_name == "is_empty" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::is_empty({})", receiver);
         }
         if method_name == "escape_debug" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             if self.expr_is_char_like(&mc.receiver) {
                 return format!(
                     "rusty::detail::escape_debug_string(rusty::detail::utf8_from_char32(static_cast<char32_t>({})))",
@@ -10456,11 +10192,7 @@ impl CodeGen {
         }
         if method_name == "escape_default" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             if self.expr_is_char_like(&mc.receiver) {
                 return format!(
                     "rusty::detail::escape_default_char(static_cast<char32_t>({}))",
@@ -10475,11 +10207,7 @@ impl CodeGen {
         // Rust string methods that don't exist on std::string_view
         if method_name == "trim" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::str_runtime::trim({})", receiver);
         }
         // `&str::{to_uppercase,to_lowercase}()` and `&str::repeat(n)` don't exist
@@ -10494,11 +10222,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.type_is_string_view_like(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::String::from({}).{}()", receiver, method_name);
         }
         // `as_str()` on an UNRESOLVED local: format!-bound locals are
@@ -10542,11 +10266,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.type_is_string_view_like(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let count = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::String::from({}).repeat({})", receiver, count);
         }
@@ -10557,11 +10277,7 @@ impl CodeGen {
             self.type_is_string_view_like(ty) || self.is_known_string_like_type(ty)
         }) {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let nullary: Option<&str> = if args.is_empty() {
                 match method_name.as_str() {
                     "trim_start" => Some("trim_start"),
@@ -10626,11 +10342,7 @@ impl CodeGen {
         ) && args.len() == 1
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::str_runtime::{}({}, {})",
                 method_name, receiver, args[0]
@@ -10638,11 +10350,7 @@ impl CodeGen {
         }
         if method_name == "strip_prefix" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::str_runtime::strip_prefix({}, {})",
                 receiver, args[0]
@@ -10650,11 +10358,7 @@ impl CodeGen {
         }
         if method_name == "replace" && args.len() == 2 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::str_runtime::replace({}, {}, {})",
                 receiver, args[0], args[1]
@@ -10675,11 +10379,7 @@ impl CodeGen {
             })
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let pred = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::str_runtime::find({}, {})", receiver, pred);
         }
@@ -10693,11 +10393,7 @@ impl CodeGen {
             && !self.is_probably_iterator_receiver_expr(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::str_runtime::find({}, {})", receiver, args[0]);
         }
         if method_name == "rfind"
@@ -10710,11 +10406,7 @@ impl CodeGen {
             && !self.is_probably_iterator_receiver_expr(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::str_runtime::rfind({}, {})", receiver, args[0]);
         }
         // Rust `[T]::swap(i, j)` — std::array/span have no such member.
@@ -10730,11 +10422,7 @@ impl CodeGen {
                 || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::slice_swap({}, {}, {})", receiver, args[0], args[1]);
         }
         if matches!(method_name.as_str(), "split_at" | "split_at_mut") && args.len() == 1 {
@@ -10745,11 +10433,7 @@ impl CodeGen {
                     .is_some_and(|ty| self.is_known_string_like_type(ty))
             {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::split_at({}, {})", receiver, args[0]);
             }
             let slice_shaped = self.should_lower_slice_deref_method_call(&mc.receiver);
@@ -10757,11 +10441,7 @@ impl CodeGen {
                 || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)
             {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 // Known slice-shaped owners view through as_slice; an
                 // unknown receiver passes through raw so the member-prefer
                 // container overload can dispatch an inherent split_at.
@@ -10815,11 +10495,7 @@ impl CodeGen {
             );
             if receiver_is_stringish || receiver_chain_ends_in_as_str {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::str_runtime::split({}, {})", receiver, args[0]);
             }
         }
@@ -10846,11 +10522,7 @@ impl CodeGen {
             );
             if receiver_is_stringish || receiver_chain_ends_in_as_str {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::str_runtime::rsplit({}, {})", receiver, args[0]);
             }
         }
@@ -10863,11 +10535,7 @@ impl CodeGen {
             && !self.receiver_has_inherent_method_named(&mc.receiver, "hash")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             // Strip `&` from the state argument — Rust passes `&mut state`
             // but rusty::hash::hash takes `State&` by reference, not pointer.
             let state_arg = match mc.args.first() {
@@ -10890,20 +10558,12 @@ impl CodeGen {
             && !self.receiver_types_as_refcell_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::borrow({})", receiver);
         }
         if method_name == "to_bits" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::float_to_bits({})", receiver);
         }
         // Rust `.clone()` → `rusty::clone(receiver)`.
@@ -10913,11 +10573,7 @@ impl CodeGen {
         // `.clone()` if available, falls back to copy construction otherwise.
         if method_name == "clone" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::clone({})", receiver);
         }
         if method_name == "to_mut"
@@ -10930,22 +10586,14 @@ impl CodeGen {
                 })
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::to_mut({})", receiver);
         }
         // Rust `.cmp(&other)` on primitives → `rusty::cmp::cmp(a, b)`.
         // Expanded `#[derive(Ord)]` calls `.cmp()` on every field.
         if method_name == "cmp" && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let rhs = match self.peel_paren_group_expr(&mc.args[0]) {
                 syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr) => {
                     self.emit_expr_to_string(&r.expr)
@@ -10958,11 +10606,7 @@ impl CodeGen {
         // Expanded `#[derive(PartialOrd)]` calls `.partial_cmp()` on every field.
         if method_name == "partial_cmp" && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let rhs = match self.peel_paren_group_expr(&mc.args[0]) {
                 syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr) => {
                     self.emit_expr_to_string(&r.expr)
@@ -10981,20 +10625,12 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_option_like_syn_type(ty))
             {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 let arg = self.emit_expr_maybe_move(&mc.args[0]);
                 return format!("{}.zip({})", receiver, arg);
             }
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let rhs = match self.peel_paren_group_expr(&mc.args[0]) {
                 syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr) => {
                     self.emit_expr_to_string(&r.expr)
@@ -11008,11 +10644,7 @@ impl CodeGen {
             let receiver_is_raw_pointer = self.is_expr_raw_pointer_like(&mc.receiver)
                 || Self::emitted_pointer_add_or_offset_call(&raw_receiver);
             if receiver_is_raw_pointer {
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 let mut value_arg = args[0].clone();
                 if !value_arg.starts_with("std::move(") {
                     value_arg = format!("std::move({})", value_arg);
@@ -11023,11 +10655,7 @@ impl CodeGen {
             // so member calls must follow — probe the escaped spelling first
             // and keep the raw name for foreign receivers
             // (hashbrown's Bucket::write, emitted `void write_(T)`).
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "([&](auto&& __w, auto&& __v) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }}) {{ return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }} else {{ return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); }} }})({}, {})",
                 receiver, args[0]
@@ -11038,11 +10666,7 @@ impl CodeGen {
             let receiver_is_raw_pointer = self.is_expr_raw_pointer_like(&mc.receiver)
                 || Self::emitted_pointer_add_or_offset_call(&raw_receiver);
             if receiver_is_raw_pointer {
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::ptr::read({})", receiver);
             }
         }
@@ -11051,11 +10675,7 @@ impl CodeGen {
             let receiver_is_raw_pointer = self.is_expr_raw_pointer_like(&mc.receiver)
                 || Self::emitted_pointer_add_or_offset_call(&raw_receiver);
             if receiver_is_raw_pointer {
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::ptr::write_unaligned({}, {})", receiver, args[0]);
             }
         }
@@ -11064,22 +10684,14 @@ impl CodeGen {
             let receiver_is_raw_pointer = self.is_expr_raw_pointer_like(&mc.receiver)
                 || Self::emitted_pointer_add_or_offset_call(&raw_receiver);
             if receiver_is_raw_pointer {
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::ptr::read_unaligned({})", receiver);
             }
         }
         // Rust `ptr.is_null()` → C++ `ptr == nullptr`
         if method_name == "is_null" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("({} == nullptr)", receiver);
         }
         // `<*const T>::cast_mut()` / `<*mut T>::cast_const()` as method calls on a
@@ -11091,11 +10703,7 @@ impl CodeGen {
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::ptr::{}({})", method_name, receiver);
         }
         if method_name == "cast" && args.is_empty() {
@@ -11177,11 +10785,7 @@ impl CodeGen {
                 let cast_cpp = self
                     .rewrite_extension_integer_assoc_projection_fallbacks(&self.map_type(&cast_ty));
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("reinterpret_cast<{}>({})", cast_cpp, receiver);
             }
             // Target pointee undeterminable (no turbofish, and the result flows
@@ -11190,11 +10794,7 @@ impl CodeGen {
             // the surrounding context requires, rather than the bare
             // `ptr->cast()` member call (raw pointers have no `cast` member).
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::ptr::cast({})", receiver);
         }
         // `<*const T>::align_offset(align)` — raw-pointer alignment helper.
@@ -11203,11 +10803,7 @@ impl CodeGen {
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let align_arg = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::ptr::align_offset({}, {})", receiver, align_arg);
         }
@@ -11225,11 +10821,7 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(&mc.receiver)
             };
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let op = match method_name.as_str() {
                 "wrapping_sub" => "sub",
                 "wrapping_add" => "add",
@@ -11292,11 +10884,7 @@ impl CodeGen {
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let helper = if method_name == "copy_to_nonoverlapping" {
                 "rusty::ptr::copy_nonoverlapping"
             } else {
@@ -11311,11 +10899,7 @@ impl CodeGen {
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let helper = if method_name == "copy_from_nonoverlapping" {
                 "rusty::ptr::copy_nonoverlapping"
             } else {
@@ -11334,11 +10918,7 @@ impl CodeGen {
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::ptr::write_bytes({}, {}, {})",
                 receiver, args[0], args[1]
@@ -11354,11 +10934,7 @@ impl CodeGen {
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::ptr::drop_in_place({})", receiver);
         }
         if matches!(method_name.as_str(), "add" | "offset" | "sub")
@@ -11373,11 +10949,7 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(&mc.receiver)
             };
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let mut offset_arg = args[0].clone();
             let arg0_binding = mc.args.first().and_then(|arg0| {
                 let arg0 = self.peel_paren_group_expr(arg0);
@@ -11434,11 +11006,7 @@ impl CodeGen {
             && self.should_lower_saturating_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let rhs = format!("rusty::detail::deref_if_pointer({})", args[0]);
             return format!("rusty::{}({}, {})", method_name, receiver, rhs);
         }
@@ -11458,11 +11026,7 @@ impl CodeGen {
                 || rotate_unresolved_receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let helper = if method_name == "rotate_right" {
                 "rusty::rotate_right"
             } else {
@@ -11479,11 +11043,7 @@ impl CodeGen {
                 || rotate_unresolved_receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!(
                 "rusty::select_nth_unstable({}, static_cast<size_t>({}))",
                 receiver, args[0]
@@ -11496,11 +11056,7 @@ impl CodeGen {
             && self.should_lower_integer_rotate_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             // Width-correct helpers: routing through size_t rotated at 64
             // bits — silently wrong for every sub-64 width (u16 0x8001
             // rotate_left(4) printed 524304 where Rust prints 24).
@@ -11525,11 +11081,7 @@ impl CodeGen {
             && self.should_lower_integer_intrinsic_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         // `.abs()` — primitive in Rust std; the rusty::abs helper
@@ -11542,11 +11094,7 @@ impl CodeGen {
                 || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::abs({})", receiver);
         }
         // One-arg integer intrinsics (`usize::div_ceil`): same routing shape.
@@ -11556,11 +11104,7 @@ impl CodeGen {
             && self.should_lower_integer_intrinsic_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::div_ceil({}, {})", receiver, args[0]);
         }
         if matches!(
@@ -11571,11 +11115,7 @@ impl CodeGen {
             && self.should_lower_integer_intrinsic_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         if matches!(method_name.as_str(), "wrapping_neg" | "wrapping_abs")
@@ -11583,11 +11123,7 @@ impl CodeGen {
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         if matches!(
@@ -11597,11 +11133,7 @@ impl CodeGen {
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             // Route to the num.hpp helpers, which compute in the RECEIVER'S
             // OWN unsigned width (incl. __int128) and cast back. The old
             // size_t detour was wrong at both ends: u128 receivers TRUNCATED
@@ -11617,11 +11149,7 @@ impl CodeGen {
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let op = if method_name == "wrapping_shr" {
                 ">>"
             } else {
@@ -11646,11 +11174,7 @@ impl CodeGen {
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             // Explicit return type `Option<T>` — without it, when the call
             // site wraps the checked-arithmetic in another `RUSTY_TRY_OPT(
             // [&]() { … }())` chain, the inner macro's early `return
@@ -11683,11 +11207,7 @@ impl CodeGen {
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::checked_next_power_of_two({})", receiver);
         }
         // checked_* with a FIXED-type second arg (shift amount u32, exponent u32,
@@ -11703,11 +11223,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_known_integer_like_type(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let arg = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::{}({}, {})", method_name, receiver, arg);
         }
@@ -11722,11 +11238,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_known_integer_like_type(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         // Nullary saturating/wrapping helpers.
@@ -11740,11 +11252,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_known_integer_like_type(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("rusty::{}({})", method_name, receiver);
         }
         // saturating/wrapping with a fixed-type or independently-deduced arg.
@@ -11761,11 +11269,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_known_integer_like_type(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let arg = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::{}({}, {})", method_name, receiver, arg);
         }
@@ -11778,11 +11282,7 @@ impl CodeGen {
                 .is_some_and(|ty| self.is_known_integer_like_type(ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             let arg = self.emit_expr_to_string(&mc.args[0]);
             return format!(
                 "rusty::saturating_div({}, static_cast<std::remove_cvref_t<decltype({})>>({}))",
@@ -11827,11 +11327,7 @@ impl CodeGen {
             })
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
             return format!("{}.truncate({})", receiver, args[0]);
         }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
@@ -12619,11 +12115,7 @@ impl CodeGen {
         }
 
         let raw_receiver = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
-        let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-            format!("({})", raw_receiver)
-        } else {
-            raw_receiver
-        };
+        let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
 
         if method_name == "key" && args.len() == 1 {
             let key_arg = format!("rusty::to_string_view({})", args[0]);

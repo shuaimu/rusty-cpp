@@ -33777,6 +33777,25 @@ impl CodeGen {
         }
     }
 
+    /// Parenthesize an emitted receiver before a member access when C++
+    /// precedence would otherwise bind `.` tighter than a leading unary
+    /// operator.
+    ///
+    /// `method_receiver_needs_parentheses` inspects the RUST AST, so it cannot
+    /// see a deref the EMITTER itself introduced while lowering the receiver —
+    /// `self.end.offset_from_unsigned(..)` has no deref in the Rust source, yet
+    /// lowers to `*(reinterpret_cast<..>(&this->end))`, and `*X.m()` parses as
+    /// `*(X.m())`. Check the emitted TEXT as well as the AST.
+    pub(super) fn wrap_method_receiver(&self, receiver: &syn::Expr, emitted: String) -> String {
+        let emitted_needs_parens =
+            emitted.starts_with('*') || emitted.starts_with('&');
+        if emitted_needs_parens || self.method_receiver_needs_parentheses(receiver) {
+            format!("({})", emitted)
+        } else {
+            emitted
+        }
+    }
+
     fn method_receiver_needs_parentheses(&self, receiver: &syn::Expr) -> bool {
         match self.peel_paren_group_expr(receiver) {
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
@@ -34583,11 +34602,7 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(receiver_expr)
             };
-            let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
+            let receiver = self.wrap_method_receiver(receiver_expr, raw_receiver);
             let mut static_args = Vec::with_capacity(args.len() + 1);
             static_args.push(receiver);
             static_args.extend(args.iter().cloned());
@@ -34604,11 +34619,7 @@ impl CodeGen {
         } else {
             self.emit_expr_to_string(receiver_expr)
         };
-        let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
-            format!("({})", raw_receiver)
-        } else {
-            raw_receiver
-        };
+        let receiver = self.wrap_method_receiver(receiver_expr, raw_receiver);
         if let Some(alias_helper_fn) = self.resolve_alias_impl_free_function_for_receiver_expr(
             receiver_expr,
             method_name,
