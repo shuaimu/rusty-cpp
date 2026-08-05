@@ -3377,6 +3377,12 @@ impl CodeGen {
         // otherwise unnameable. Keyed on the transpiled sub-modules that exist
         // (see `transpiled/vec_port/`).
         self.output = inject_vec_port_member_imports(&self.output);
+        // `vec![…]` lowers to `rusty::boxed::into_vec(box_new(std::array{…}))`,
+        // and the overload converting the array to a `rusty::Vec` is
+        // module-only (vec_port.vec) — the GMF header copy is an identity
+        // fallback, so without the import the result silently stays a
+        // `std::array` and member calls on it (`.into_iter()`) fail.
+        self.output = inject_into_vec_module_import(&self.output);
         // Emit a namespace-scope `__mdisp_<name>` functor for every method
         // dispatched via `rusty::deref_call` (issue #31, site 2). Runs after the
         // import injections so it lands after the module's leading import block.
@@ -47002,6 +47008,31 @@ fn inject_vec_port_member_imports(output: &str) -> String {
         }
     }
     out
+}
+
+/// The `into_vec(std::array<T, N>)` overload that makes `vec![…]` produce a
+/// `rusty::Vec` is declared in module vec_port.vec (the GMF header copy in
+/// rusty.hpp is an identity fallback — it cannot name the module-only Vec).
+/// A crate whose purview calls `rusty::boxed::into_vec(` therefore needs the
+/// import even when no `rusty::Vec<` spelling triggered it — e.g. `vec![…]
+/// .into_iter()` where the only other vec reference is `IntoIter` (which
+/// imports the sibling vec_port.vec.into_iter, NOT the parent). Without it
+/// the identity fallback wins silently and member calls on the result fail
+/// with "no member named 'into_iter' in 'std::array<…>'".
+fn inject_into_vec_module_import(output: &str) -> String {
+    const NEEDLE: &str = "rusty::boxed::into_vec(";
+    if !output.contains(NEEDLE) {
+        return output.to_string();
+    }
+    // The vec port family declares the overload — a self/parent import
+    // would be a module cycle.
+    if let Some(pos) = output.find("\nexport module ") {
+        let rest = &output[pos + "\nexport module ".len()..];
+        if rest.trim_start().starts_with("vec_port") {
+            return output.to_string();
+        }
+    }
+    inject_module_import_if_referenced(output, NEEDLE, "import vec_port.vec;")
 }
 
 fn inject_module_import_if_referenced(output: &str, needle: &str, import_line: &str) -> String {

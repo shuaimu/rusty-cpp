@@ -16020,6 +16020,107 @@ impl CodeGen {
         Some(format!("{}({})", ctor, payload))
     }
 
+    /// `vec![Ok(0), Err(false), …]` with no expected type: mixed bare Ok/Err
+    /// elements CTAD-fail under `std::array{…}` (the free `rusty::Ok`/`rusty::Err`
+    /// factories produce DIFFERENT Result instantiations). When every element is
+    /// a bare 1-arg Ok/Err call and both variants appear, the array itself pins
+    /// `Result<T, E>` — T from an Ok payload, E from an Err payload.
+    fn infer_mixed_result_array_elem_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let peeled = self.peel_paren_group_expr(expr);
+        let syn::Expr::Array(arr) = peeled else {
+            return None;
+        };
+        if arr.elems.is_empty() {
+            return None;
+        }
+        let mut ok_ty: Option<syn::Type> = None;
+        let mut err_ty: Option<syn::Type> = None;
+        for elem in &arr.elems {
+            let syn::Expr::Call(call) = self.peel_paren_group_expr(elem) else {
+                return None;
+            };
+            if call.args.len() != 1 {
+                return None;
+            }
+            let syn::Expr::Path(p) = self.peel_paren_group_expr(call.func.as_ref()) else {
+                return None;
+            };
+            if p.qself.is_some()
+                || p.path.segments.len() != 1
+                || !p.path.segments[0].arguments.is_empty()
+            {
+                return None;
+            }
+            match p.path.segments[0].ident.to_string().as_str() {
+                "Ok" => {
+                    if ok_ty.is_none() {
+                        ok_ty = self.infer_simple_expr_type(&call.args[0]);
+                    }
+                }
+                "Err" => {
+                    if err_ty.is_none() {
+                        err_ty = self.infer_simple_expr_type(&call.args[0]);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        // Both variants present is exactly the CTAD-breaking shape; a
+        // single-variant array deduces uniformly today and keeps its behavior.
+        let ok_ty = ok_ty?;
+        let err_ty = err_ty?;
+        Some(parse_quote!(Result<#ok_ty, #err_ty>))
+    }
+
+    pub(super) fn try_emit_into_vec_box_new_with_inferred_result_payload(
+        &self,
+        arg: &syn::Expr,
+    ) -> Option<String> {
+        let syn::Expr::Call(box_call) = self.peel_paren_group_expr(arg) else {
+            return None;
+        };
+        if box_call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(box_call.func.as_ref()) else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let use_boxed_helper = matches!(
+            joined.as_str(),
+            "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
+        );
+        let use_box_ctor = matches!(
+            joined.as_str(),
+            "Box::new"
+                | "Box::new_"
+                | "rusty::Box::new"
+                | "rusty::Box::new_"
+                | "alloc::boxed::Box::new"
+                | "std::boxed::Box::new"
+        );
+        if !use_boxed_helper && !use_box_ctor {
+            return None;
+        }
+        let expected_elem_ty = self.infer_mixed_result_array_elem_type(&box_call.args[0])?;
+        let payload = self.try_emit_boxed_array_expr_with_expected_elem_type(
+            &box_call.args[0],
+            &expected_elem_ty,
+        )?;
+        let ctor = if use_box_ctor {
+            "rusty::Box::new_"
+        } else {
+            "rusty::boxed::box_new"
+        };
+        Some(format!("{}({})", ctor, payload))
+    }
+
     pub(super) fn try_emit_default_value_expr_for_type(&self, ty: &syn::Type) -> Option<String> {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
@@ -19729,6 +19830,21 @@ impl CodeGen {
                                 payload
                             );
                         }
+                        if let Some(elem_ty) =
+                            self.infer_mixed_result_array_elem_type(payload_expr)
+                        {
+                            if let Some(payload) = self
+                                .try_emit_boxed_array_expr_with_expected_elem_type(
+                                    payload_expr,
+                                    &elem_ty,
+                                )
+                            {
+                                return format!(
+                                    "rusty::boxed::into_vec(rusty::boxed::box_new({}))",
+                                    payload
+                                );
+                            }
+                        }
                         let payload = self.emit_expr_maybe_move(payload_expr);
                         return format!(
                             "rusty::boxed::into_vec(rusty::boxed::box_new({}))",
@@ -19799,6 +19915,11 @@ impl CodeGen {
                 {
                     return format!("{}({})", func, specialized_arg);
                 }
+            }
+            if let Some(specialized_arg) =
+                self.try_emit_into_vec_box_new_with_inferred_result_payload(&call.args[0])
+            {
+                return format!("{}({})", func, specialized_arg);
             }
         }
 
