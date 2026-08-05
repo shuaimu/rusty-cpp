@@ -17138,6 +17138,30 @@ impl CodeGen {
             let arg = self.emit_expr_maybe_move(&call.args[0]);
             return format!("rusty::once({})", arg);
         }
+        // Crate-internal tuple-family delegation with the arity generic in
+        // CALLER scope: `tuple_windows(iter.cycle())` inside
+        // circular_tuple_windows<I, T> — the callee spells T only in its
+        // return type, so the plain call can't deduce it. Same shape as the
+        // next_array delegation above: spell the full explicit list
+        // [arg-decltype, T]. Gated on a literal `T` in the enclosing
+        // template scope (the Rust generic names match across the
+        // delegation) and no existing turbofish.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.path.segments.len() == 1
+            && matches!(
+                fp.path.segments[0].ident.to_string().as_str(),
+                "tuple_windows" | "tuples"
+            )
+            && matches!(fp.path.segments[0].arguments, syn::PathArguments::None)
+            && call.args.len() == 1
+            && self.type_param_scopes.iter().any(|s| s.contains("T"))
+        {
+            let name = fp.path.segments[0].ident.to_string();
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!(
+                "{name}<std::remove_cvref_t<decltype({arg})>, T>({arg})"
+            );
+        }
         // TupleCollect statics on a HomogeneousTuple-bounded param
         // (`T::collect_from_iter(&self.iter, &self.buf)` /
         // `T::buffer_len(&self.buf)`): std::tuple has no statics, so probe
