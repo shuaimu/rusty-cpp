@@ -7061,9 +7061,14 @@ impl CodeGen {
         }
 
         if let Some(where_clause) = &generics.where_clause {
+            let param_names: std::collections::HashSet<String> = generics
+                .type_params()
+                .map(|tp| tp.ident.to_string())
+                .collect();
             for pred in &where_clause.predicates {
                 if let syn::WherePredicate::Type(pt) = pred {
-                    let ty_name = self.map_type(&pt.bounded_ty);
+                    let ty_name = Self::assoc_item_projection_spelling(&pt.bounded_ty, &param_names)
+                        .unwrap_or_else(|| self.map_type(&pt.bounded_ty));
                     for bound in &pt.bounds {
                         if let syn::TypeParamBound::Trait(tb) = bound {
                             if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
@@ -7078,6 +7083,48 @@ impl CodeGen {
         }
 
         constraints
+    }
+
+    /// `I::Item: Clone` / `<I as Iterator>::Item: Clone` bounds on a TEMPLATE
+    /// PARAM cannot spell `typename I::Item` in the emitted requires clause —
+    /// transpiled UFCS adapters (itertools Product, ChunkBy, …) declare no
+    /// member `Item` typedef, so the substituted constraint is ill-formed and
+    /// the candidate silently drops ("no matching function"). Route through
+    /// the runtime projection, which resolves member Item, value_type,
+    /// option-like next() payloads, and wrapper recursion.
+    fn assoc_item_projection_spelling(
+        ty: &syn::Type,
+        param_names: &std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Item" || !last.arguments.is_empty() {
+            return None;
+        }
+        let base_ident = if let Some(qself) = &tp.qself {
+            let syn::Type::Path(base) = qself.ty.as_ref() else {
+                return None;
+            };
+            if base.qself.is_some() || base.path.segments.len() != 1 {
+                return None;
+            }
+            base.path.segments[0].ident.to_string()
+        } else {
+            if tp.path.segments.len() != 2 {
+                return None;
+            }
+            let first = &tp.path.segments[0];
+            if !first.arguments.is_empty() {
+                return None;
+            }
+            first.ident.to_string()
+        };
+        if !param_names.contains(&base_ident) {
+            return None;
+        }
+        Some(format!("rusty::detail::associated_item_t<{}>", base_ident))
     }
 
     pub(super) fn collect_current_struct_assoc_projection_names(

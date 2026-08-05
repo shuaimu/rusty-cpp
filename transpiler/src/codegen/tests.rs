@@ -34164,13 +34164,20 @@ fn test_leaf5117_dependent_helper_qualified_assoc_type_is_prefixed_with_typename
         "leaf5117_nested_assoc",
     );
 
+    // Dependent-projection `::IntoIter` owners route through the runtime
+    // into_iter_t projection (typedef > member into_iter() > span > identity)
+    // — the raw member spelling hard-failed for UFCS-only adapters and user
+    // Iterator structs (kmerge_by over an iterator of Panicking). Both layers
+    // are alias templates, so no `typename` is needed anywhere.
     assert!(
-        out.contains("typename rusty::detail::associated_item_t<H>::IntoIter pass_nested("),
-        "dependent helper-qualified assoc type should carry typename prefix, got:\n{}",
+        out.contains(
+            "rusty::detail::into_iter_t<rusty::detail::associated_item_t<H>> pass_nested("
+        ),
+        "dependent helper-qualified assoc type should project via into_iter_t, got:\n{}",
         out
     );
     assert!(
-        !out.contains("typename typename rusty::detail::associated_item_t<H>::IntoIter"),
+        !out.contains("typename typename"),
         "helper-qualified assoc type should not be double-prefixed with typename, got:\n{}",
         out
     );

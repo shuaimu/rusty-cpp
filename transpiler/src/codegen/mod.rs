@@ -43786,6 +43786,22 @@ impl CodeGen {
         {
             return self.map_assoc_into_iter_cpp_type(owner_check);
         }
+        // Dependent PROJECTION owners (`<Self::Item as IntoIterator>::IntoIter`
+        // → owner `typename rusty::detail::associated_item_t<…>`): the raw
+        // member spelling hard-fails for UFCS-only adapters and user Iterator
+        // structs that declare no `IntoIter` typedef (kmerge_by over an
+        // iterator of Panicking). into_iter_t resolves typedef > member
+        // into_iter() > span > identity, covering every such owner. Bare
+        // template-param owners (`I::IntoIter`) intentionally keep the member
+        // spelling — the indexmap name-collision glue depends on it.
+        if owner.starts_with("typename ")
+            || owner_check.starts_with("rusty::detail::associated_item_t<")
+            || owner_check.starts_with("rusty::detail::next_item_t<")
+        {
+            // The alias itself needs no `typename`, but a dependent qualified
+            // ARGUMENT keeps its own (`into_iter_t<typename Self_::Item>`).
+            return Some(format!("rusty::detail::into_iter_t<{}>", owner.trim()));
+        }
         None
     }
 
