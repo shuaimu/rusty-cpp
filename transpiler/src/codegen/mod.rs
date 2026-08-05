@@ -44037,6 +44037,18 @@ impl CodeGen {
 
 
     fn rewrite_mapped_assoc_into_iter_cpp_type(&self, mapped: &str) -> Option<String> {
+        // Chained `J::IntoIter::Item` (the ITEM of a generic receiver's
+        // IntoIterator image — GroupInner's element fields): route BOTH hops
+        // through the total projections. Safe for bare template-param owners
+        // too — the indexmap `::template IntoIter<K, V>` glue hazard is the
+        // BARE `::IntoIter` tail, which the chain form never is. The owner
+        // keeps its own `typename` inside the angle brackets when it has one.
+        if let Some(owner) = mapped.strip_suffix("::IntoIter::Item") {
+            return Some(format!(
+                "rusty::detail::associated_item_t<rusty::detail::into_iter_t<{}>>",
+                owner.trim()
+            ));
+        }
         let owner = mapped.strip_suffix("::IntoIter")?;
         let owner_check = owner
             .trim_start_matches("typename ")
