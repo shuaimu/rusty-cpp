@@ -18717,14 +18717,34 @@ impl CodeGen {
             }
         }
         if !emitted_default_body_override {
+            // `fn tuple_windows<T>(self) -> TupleWindows<Self, T>` forwarding
+            // to `tuple_impl::tuple_windows(self)`: the callee spells T only
+            // in its RETURN type, so the emitted C++ call can't deduce it
+            // ("couldn't infer template argument 'T'"). Inject a Rust-level
+            // turbofish `::<Self, own_params…>` before emission — the body's
+            // local `using Self` alias makes the spelling resolve, and the
+            // transpiled impl-fn's [receiver, own-generics…] param order
+            // matches. Gated to template-Self default methods whose OWN type
+            // params are ALL return-position-only.
+            let forwarded_block = if method_spec.self_is_template_param {
+                Self::inject_forwarding_turbofish_for_undeducible_generics(
+                    &method_name,
+                    &method.sig,
+                    &method.block,
+                    &free_generics,
+                )
+            } else {
+                None
+            };
+            let body_block: &syn::Block = forwarded_block.as_ref().unwrap_or(&method.block);
             if hoisted_body_alias_names.is_empty() {
-                self.emit_block(&method.block);
+                self.emit_block(body_block);
             } else {
                 // The hoisted local generic aliases were emitted at namespace
                 // scope above; drop their block-scope definitions so the body
                 // references the hoisted ones instead of redeclaring them.
                 let stripped = self.strip_hoisted_local_generic_struct_items_from_block(
-                    &method.block,
+                    body_block,
                     &hoisted_body_alias_names,
                 );
                 self.emit_block(&stripped);
@@ -18744,6 +18764,115 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
+    }
+
+    /// See the call site in the default-method body emitter: returns a
+    /// rewritten body with `::<Self, own_params…>` injected into a bare
+    /// same-named forwarding call when the method's own type params are all
+    /// undeducible from value params (return-position-only).
+    fn inject_forwarding_turbofish_for_undeducible_generics(
+        method_name: &str,
+        sig: &syn::Signature,
+        block: &syn::Block,
+        free_generics: &syn::Generics,
+    ) -> Option<syn::Block> {
+        use quote::ToTokens;
+        let own_params: Vec<String> = sig
+            .generics
+            .type_params()
+            .map(|tp| tp.ident.to_string())
+            .collect();
+        if own_params.is_empty() {
+            return None;
+        }
+        // Every own param must SURVIVE in the emitted template — the
+        // undeducible-param filter drops some entirely (while_some's A),
+        // and spelling a dropped name is "use of undeclared identifier".
+        let emitted_params: std::collections::HashSet<String> = free_generics
+            .type_params()
+            .map(|tp| tp.ident.to_string())
+            .collect();
+        if own_params.iter().any(|p| !emitted_params.contains(p)) {
+            return None;
+        }
+        let mut value_param_text = String::new();
+        for input in &sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                value_param_text.push_str(&pt.ty.to_token_stream().to_string());
+                value_param_text.push(' ');
+            }
+        }
+        // ALL own type params must be return-position-only; a partially
+        // deducible signature keeps its plain call (deduction handles it).
+        if own_params
+            .iter()
+            .any(|p| emit_items::contains_whole_word(&value_param_text, p))
+        {
+            return None;
+        }
+        if block.stmts.len() != 1 {
+            return None;
+        }
+        let is_forwarding_call = |expr: &syn::Expr| -> bool {
+            let call = match expr {
+                syn::Expr::Call(c) => c,
+                _ => return false,
+            };
+            let syn::Expr::Path(pe) = call.func.as_ref() else {
+                return false;
+            };
+            if pe.qself.is_some() || pe.path.segments.len() < 2 {
+                return false;
+            }
+            let Some(last) = pe.path.segments.last() else {
+                return false;
+            };
+            if last.ident != method_name || !last.arguments.is_empty() {
+                return false;
+            }
+            matches!(
+                call.args.first(),
+                Some(syn::Expr::Path(p)) if p.path.is_ident("self")
+            )
+        };
+        let matches_shape = match &block.stmts[0] {
+            syn::Stmt::Expr(syn::Expr::Return(r), _) => {
+                r.expr.as_deref().is_some_and(is_forwarding_call)
+            }
+            syn::Stmt::Expr(e, _) => is_forwarding_call(e),
+            _ => return None,
+        };
+        if !matches_shape {
+            return None;
+        }
+        let mut ga: syn::punctuated::Punctuated<syn::GenericArgument, syn::Token![,]> =
+            syn::punctuated::Punctuated::new();
+        ga.push(syn::GenericArgument::Type(parse_quote!(Self)));
+        for p in &own_params {
+            let ident = syn::Ident::new(p, proc_macro2::Span::call_site());
+            ga.push(syn::GenericArgument::Type(parse_quote!(#ident)));
+        }
+        let mut new_block = block.clone();
+        let inner_call = match &mut new_block.stmts[0] {
+            syn::Stmt::Expr(syn::Expr::Return(r), _) => match r.expr.as_deref_mut() {
+                Some(syn::Expr::Call(c)) => c,
+                _ => return None,
+            },
+            syn::Stmt::Expr(syn::Expr::Call(c), _) => c,
+            _ => return None,
+        };
+        let syn::Expr::Path(pe) = inner_call.func.as_mut() else {
+            return None;
+        };
+        let last = pe.path.segments.last_mut()?;
+        last.arguments =
+            syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                colon2_token: Some(Default::default()),
+                lt_token: Default::default(),
+                args: ga,
+                gt_token: Default::default(),
+            });
+        Some(new_block)
     }
 
     fn extension_self_type_mapping_is_unsupported(&self, mapped: &str) -> bool {

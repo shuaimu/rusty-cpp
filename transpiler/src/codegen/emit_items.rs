@@ -9095,7 +9095,7 @@ fn prune_unused_template_params(header: &str, body: &str) -> Option<String> {
 }
 
 /// Whole-word containment test (identifier boundaries).
-fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+pub(super) fn contains_whole_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
