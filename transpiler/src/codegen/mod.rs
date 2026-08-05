@@ -18727,7 +18727,7 @@ impl CodeGen {
             // matches. Gated to template-Self default methods whose OWN type
             // params are ALL return-position-only.
             let forwarded_block = if method_spec.self_is_template_param {
-                Self::inject_forwarding_turbofish_for_undeducible_generics(
+                self.inject_forwarding_turbofish_for_undeducible_generics(
                     &method_name,
                     &method.sig,
                     &method.block,
@@ -18771,6 +18771,7 @@ impl CodeGen {
     /// same-named forwarding call when the method's own type params are all
     /// undeducible from value params (return-position-only).
     fn inject_forwarding_turbofish_for_undeducible_generics(
+        &self,
         method_name: &str,
         sig: &syn::Signature,
         block: &syn::Block,
@@ -18866,6 +18867,19 @@ impl CodeGen {
         if !matches_shape {
             return None;
         }
+        let callee_order: Option<Vec<String>> = {
+            let callee_expr = match &block.stmts[0] {
+                syn::Stmt::Expr(syn::Expr::Return(r), _) => r.expr.as_deref(),
+                syn::Stmt::Expr(e, _) => Some(e),
+                _ => None,
+            };
+            match callee_expr {
+                Some(syn::Expr::Call(c)) => self
+                    .lookup_function_type_param_names(c.func.as_ref())
+                    .cloned(),
+                _ => None,
+            }
+        };
         let mut new_block = block.clone();
         let inner_call = match &mut new_block.stmts[0] {
             syn::Stmt::Expr(syn::Expr::Return(r), _) => match r.expr.as_deref_mut() {
@@ -18890,15 +18904,36 @@ impl CodeGen {
         }
         let mut ga: syn::punctuated::Punctuated<syn::GenericArgument, syn::Token![,]> =
             syn::punctuated::Punctuated::new();
-        let threaded: &[String] = if callee_is_same_name {
-            ga.push(syn::GenericArgument::Type(parse_quote!(Self)));
-            &own_params
+        // The callee's OWN declared order is authoritative when we know it.
+        // `Itertools::tuple_combinations<T>` forwards to `adaptors::
+        // tuple_combinations<T, I>` — T first, the iterator SECOND — so the
+        // positional `<Self, own…>` guess bound I to the tuple type and the
+        // argument stopped converting. Map each callee param by NAME: a name
+        // the caller also declares threads that param, anything else is the
+        // receiver slot (exactly one, or the alignment is ambiguous).
+        if let Some(order) = callee_order.filter(|order| {
+            order.iter().filter(|p| !own_params.contains(p)).count() == 1
+                && own_params.iter().all(|p| order.contains(p))
+        }) {
+            for p in &order {
+                if own_params.contains(p) {
+                    let ident = syn::Ident::new(p, proc_macro2::Span::call_site());
+                    ga.push(syn::GenericArgument::Type(parse_quote!(#ident)));
+                } else {
+                    ga.push(syn::GenericArgument::Type(parse_quote!(Self)));
+                }
+            }
         } else {
-            &undeducible
-        };
-        for p in threaded {
-            let ident = syn::Ident::new(p, proc_macro2::Span::call_site());
-            ga.push(syn::GenericArgument::Type(parse_quote!(#ident)));
+            let threaded: &[String] = if callee_is_same_name {
+                ga.push(syn::GenericArgument::Type(parse_quote!(Self)));
+                &own_params
+            } else {
+                &undeducible
+            };
+            for p in threaded {
+                let ident = syn::Ident::new(p, proc_macro2::Span::call_site());
+                ga.push(syn::GenericArgument::Type(parse_quote!(#ident)));
+            }
         }
         let last = pe.path.segments.last_mut()?;
         last.arguments =
