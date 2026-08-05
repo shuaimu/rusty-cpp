@@ -2231,6 +2231,16 @@ template<typename T>
 struct range_from {
     T start;
 
+    constexpr range_from() = default;
+    constexpr range_from(T s) : start(std::move(s)) {}
+    // Element-type conversion, mirroring `range`: the transpiled
+    // iter_index overloads take range_from<size_t>, call sites build
+    // range_from<int>.
+    template<typename U>
+    constexpr range_from(const range_from<U>& other)
+    requires std::is_convertible_v<U, T>
+        : start(static_cast<T>(other.start)) {}
+
     // Rust's by-value IntoIterator; ranges are trivially copyable, so a
     // const receiver (emitted const locals) just copies. IntoIter/Item
     // back UFCS spellings — see range.
@@ -2290,6 +2300,13 @@ template<typename T>
 struct range_to {
     T end;
 
+    constexpr range_to() = default;
+    constexpr range_to(T e) : end(std::move(e)) {}
+    template<typename U>
+    constexpr range_to(const range_to<U>& other)
+    requires std::is_convertible_v<U, T>
+        : end(static_cast<T>(other.end)) {}
+
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end}); }
 
@@ -2318,6 +2335,13 @@ struct range_to_inclusive {
     static constexpr bool rusty_inclusive_range = true;
 
     T end;
+
+    constexpr range_to_inclusive() = default;
+    constexpr range_to_inclusive(T e) : end(std::move(e)) {}
+    template<typename U>
+    constexpr range_to_inclusive(const range_to_inclusive<U>& other)
+    requires std::is_convertible_v<U, T>
+        : end(static_cast<T>(other.end)) {}
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end}); }

@@ -12231,6 +12231,25 @@ impl CodeGen {
                 "[](auto&& _v) { return rusty::Some(std::forward<decltype(_v)>(_v)); }".to_string(),
             );
         }
+        // Ok/Err ctors as HOF args, same shape as Some — must run BEFORE
+        // the data-enum variant helper, which hands back the raw factory
+        // spelling (`rusty::Ok`, an uninstantiated template, not callable).
+        if matches!(
+            joined.as_str(),
+            "Ok" | "Result::Ok" | "core::result::Result::Ok" | "std::result::Result::Ok"
+        ) {
+            return Some(
+                "[](auto&& _v) { return rusty::Ok(std::forward<decltype(_v)>(_v)); }".to_string(),
+            );
+        }
+        if matches!(
+            joined.as_str(),
+            "Err" | "Result::Err" | "core::result::Result::Err" | "std::result::Result::Err"
+        ) {
+            return Some(
+                "[](auto&& _v) { return rusty::Err(std::forward<decltype(_v)>(_v)); }".to_string(),
+            );
+        }
         if let Some(variant_ctor) =
             self.try_emit_data_enum_variant_map_callable_with_target(&path_expr.path, target_ty)
         {
@@ -12284,6 +12303,22 @@ impl CodeGen {
             syn::Expr::Path(path) => path,
             _ => return None,
         };
+        // A bare VARIANT CONSTRUCTOR as a HOF arg (`.map(Ok)` — Rust passes
+        // the ctor as a fn value): the raw factory spelling (`rusty::Ok`) is
+        // an uninstantiated template, not a callable — wrap in a forwarding
+        // lambda.
+        if path_expr.qself.is_none()
+            && path_expr.path.segments.len() == 1
+            && path_expr.path.segments[0].arguments.is_empty()
+        {
+            let ident = path_expr.path.segments[0].ident.to_string();
+            if matches!(ident.as_str(), "Ok" | "Err" | "Some") {
+                return Some(format!(
+                    "[](auto&& __v) {{ return rusty::{}(std::forward<decltype(__v)>(__v)); }}",
+                    ident
+                ));
+            }
+        }
         if path_expr.qself.is_some() || path_expr.path.segments.len() != 2 {
             return None;
         }
