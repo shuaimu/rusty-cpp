@@ -3813,7 +3813,7 @@ struct IntoIter {
         std::abort();
     }    template<typename B, typename F>
     B fold(B accum, F f) {
-        if (T::IS_ZST) {
+        if constexpr (requires { T::IS_ZST; } && false) {
             while (rusty::as_ptr(this->ptr) != this->end->cast_mut()) {
                 const auto tmp = this->ptr.read();
                 this->end = this->end->wrapping_byte_sub(1);
@@ -3831,7 +3831,7 @@ struct IntoIter {
     template<typename B, typename F>
     auto try_fold(B accum, F f) {
         using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
-        if (T::IS_ZST) {
+        if constexpr (requires { T::IS_ZST; } && false) {
             while (rusty::as_ptr(this->ptr) != this->end->cast_mut()) {
                 const auto tmp = this->ptr.read();
                 this->end = this->end->wrapping_byte_sub(1);
@@ -3853,14 +3853,14 @@ struct IntoIter {
         }
     }
     rusty::Option<T> next_back() {
-        if (T::IS_ZST) {
+        if constexpr (requires { T::IS_ZST; } && false) {
             if (rusty::as_ptr(this->ptr) == (this->end)) {
                 return rusty::Option<T>{rusty::None};
             }
             this->end = this->end->wrapping_byte_sub(1);
             return rusty::Option<T>(rusty::ptr::read(rusty::as_ptr(this->ptr)));
         } else {
-            if (rusty::detail::deref_if_pointer_like(this->ptr) == rusty::detail::deref_if_pointer_like(this->end)) {
+            if (rusty::as_ptr(this->ptr) == (this->end)) {
                 return rusty::Option<T>{rusty::None};
             }
             // @unsafe
@@ -3872,12 +3872,12 @@ struct IntoIter {
     }
     auto advance_back_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
         const auto step_size = rusty::min(rusty::len((*this)), std::move(n));
-        if (T::IS_ZST) {
+        if constexpr (requires { T::IS_ZST; } && false) {
             this->end = this->end->wrapping_byte_sub(std::move(step_size));
         } else {
             this->end = rusty::ptr::sub(this->end, std::move(step_size));
         }
-        const auto to_drop = (T::IS_ZST ? rusty::from_raw_parts_mut(rusty::as_ptr(ptr::NonNull<T>::dangling()), std::move(step_size)) : rusty::from_raw_parts_mut(const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(this->end)), std::move(step_size)));
+        const auto to_drop = (rusty::from_raw_parts_mut(const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(this->end)), std::move(step_size)));
         // @unsafe
         {
             rusty::ptr::drop_in_place(std::move(to_drop));
@@ -3885,10 +3885,10 @@ struct IntoIter {
         return rusty::num::NonZero<size_t>::new_(rusty::detail::deref_if_pointer_like(n) - rusty::detail::deref_if_pointer_like(step_size)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
     }
     bool is_empty() const {
-        if (T::IS_ZST) {
+        if constexpr (requires { T::IS_ZST; } && false) {
             return rusty::as_ptr(this->ptr) == (this->end);
         } else {
-            return rusty::detail::deref_if_pointer_like(this->ptr) == rusty::detail::deref_if_pointer_like(this->end);
+            return rusty::as_ptr(this->ptr) == (this->end);
         }
     }
     static IntoIter<T, A> default_() {
