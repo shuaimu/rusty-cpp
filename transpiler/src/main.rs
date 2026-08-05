@@ -3367,6 +3367,32 @@ fn run_stage_d_module_build(
         }
     }
 
+    // Skipping a test target keeps the REMAINING targets testable, which is the
+    // right default while a crate is being brought up — but it also means a
+    // crate can report PASS while whole test files never compiled. A crate wired
+    // into the parity matrix as a regression gate must not pass that way: set
+    // RUSTY_CPP_STRICT_TEST_TARGETS=1 to make any skip fatal, so the matrix
+    // measures targets COMPILED rather than targets attempted.
+    if !skipped_test_modules.is_empty()
+        && std::env::var("RUSTY_CPP_STRICT_TEST_TARGETS")
+            .is_ok_and(|v| v != "0" && !v.is_empty())
+    {
+        let mut names: Vec<&str> = skipped_test_modules.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        fs::write(&build_log_path, &build_log)
+            .map_err(|e| format!("Failed to write build log: {}", e))?;
+        println!(
+            "  Build FAILED (strict test targets) — {} skipped: {}",
+            names.len(),
+            names.join(", ")
+        );
+        println!("  see {}", build_log_path.display());
+        return Err(format!(
+            "test targets skipped under RUSTY_CPP_STRICT_TEST_TARGETS: {}",
+            names.join(", ")
+        ));
+    }
+
     // Drop test wrappers from skipped modules so the runner doesn't
     // try to call functions whose translation unit was never
     // compiled.
