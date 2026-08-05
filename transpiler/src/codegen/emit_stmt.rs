@@ -267,6 +267,77 @@ impl CodeGen {
                 }
             }
         }
+
+        // A fn-level `return` in a NON-TAIL position inside a value-position
+        // match arm is trapped by the IIFE lowering: it returns from the
+        // LAMBDA, not the function. Tail-return shapes are already routed by
+        // the try-style lowerings, whose gate is tail-only — this handles the
+        // shapes that gate cannot see. Requiring that gate FALSE keeps this
+        // route disjoint from every existing one.
+        if std::env::var_os("RUSTY_CPP_DISABLE_NONLOCAL_RETURN_LET_MATCH").is_none()
+            && let syn::Stmt::Local(local) = stmt
+            && let syn::Pat::Ident(pat_ident) = &local.pat
+            && pat_ident.subpat.is_none()
+            && let Some(init) = &local.init
+            && init.diverge.is_none()
+            && let syn::Expr::Match(match_expr) = self.peel_paren_group_expr(&init.expr)
+            && !match_expr.arms.is_empty()
+            && !self.match_expr_has_explicit_return_arm(match_expr)
+            && self.expr_has_non_local_return(&init.expr)
+            && self.match_assign_to_optional_result_is_supported(match_expr)
+        {
+            let arm_ty = self
+                .infer_match_arms_common_type(&match_expr.arms)
+                .or_else(|| self.infer_match_arms_common_type_with_scrutinee(match_expr));
+            let arm_cpp = match &arm_ty {
+                Some(ty) => self.map_type(ty),
+                // Arm-type inference cannot see through a generic iterator's
+                // associated Item (`J::Item` for `J: Iterator`). When the
+                // scrutinee is a `.next()` call the slot type IS that Item,
+                // and the runtime already projects it from the iterator.
+                None => match self.peel_paren_group_expr(&match_expr.expr) {
+                    syn::Expr::MethodCall(mc) if mc.method == "next" && mc.args.is_empty() => {
+                        let recv = self.emit_expr_to_string(&mc.receiver);
+                        format!(
+                            "rusty::detail::next_item_t<std::remove_cvref_t<decltype({})>>",
+                            recv
+                        )
+                    }
+                    _ => String::new(),
+                },
+            };
+            if !arm_cpp.is_empty()
+                && arm_cpp != "auto"
+                && !type_string_has_auto_placeholder(&arm_cpp)
+                && !arm_cpp.contains("/* TODO")
+                // std::optional<T&> is ill-formed.
+                && !arm_cpp.contains('&')
+            {
+                let slot = self.reserve_synthetic_cpp_name("_let_match_value");
+                self.writeln(&format!("std::optional<{}> {};", arm_cpp, slot));
+                if self.try_emit_match_assign_to_optional_result(
+                    &slot,
+                    match_expr,
+                    arm_ty.as_ref(),
+                ) {
+                    // The sink emitted the scrutinee against OUTER names; only
+                    // now may the binding claim its (possibly shadowing) name.
+                    let rust_name = pat_ident.ident.to_string();
+                    let cpp_name = self.allocate_local_cpp_name(&rust_name);
+                    if let Some(ty) = arm_ty.clone() {
+                        self.register_local_binding(rust_name, Some(ty));
+                    }
+                    self.writeln(&format!(
+                        "{} {} = std::move({}).value();",
+                        arm_cpp, cpp_name, slot
+                    ));
+                    return;
+                }
+                // Declined after the decl line: harmless dead declaration,
+                // fall through to the unchanged emission below.
+            }
+        }
+
         // Deferred-init `let x;` whose declaration was suppressed by
         // `emit_local` (because no type could be inferred — `auto X;`
         // is invalid C++). Materialize the declaration at the first

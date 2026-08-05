@@ -4239,4 +4239,104 @@ impl CodeGen {
             _ => false,
         }
     }
+
+    /// A function-level `return` reachable from this expression WITHOUT crossing
+    /// into a new function scope. Closure and async bodies are deliberately NOT
+    /// descended: a `return` there belongs to that body, not to ours.
+    ///
+    /// Distinct from `expr_tree_has_return_or_try` (which conflates `?` with
+    /// `return` and is used as a BAIL gate in ~30 places) and from
+    /// `expr_is_try_style_return_flow` (tail position only). `?` is not a hit
+    /// here — it lowers to its own carrier, not to a trapped `return`.
+    pub(super) fn block_has_non_local_return(&self, block: &syn::Block) -> bool {
+        block.stmts.iter().any(|s| match s {
+            syn::Stmt::Expr(e, _) => self.expr_has_non_local_return(e),
+            syn::Stmt::Local(l) => l.init.as_ref().is_some_and(|i| {
+                self.expr_has_non_local_return(&i.expr)
+                    || i.diverge
+                        .as_ref()
+                        .is_some_and(|(_, d)| self.expr_has_non_local_return(d))
+            }),
+            // Stmt::Item opens its own fn scope; Stmt::Macro is opaque.
+            _ => false,
+        })
+    }
+
+    pub(super) fn expr_has_non_local_return(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Return(_) => true,
+            syn::Expr::Block(b) => self.block_has_non_local_return(&b.block),
+            syn::Expr::Unsafe(u) => self.block_has_non_local_return(&u.block),
+            syn::Expr::If(i) => {
+                self.expr_has_non_local_return(&i.cond)
+                    || self.block_has_non_local_return(&i.then_branch)
+                    || i.else_branch
+                        .as_ref()
+                        .is_some_and(|(_, e)| self.expr_has_non_local_return(e))
+            }
+            syn::Expr::Match(m) => {
+                self.expr_has_non_local_return(&m.expr)
+                    || m.arms.iter().any(|a| {
+                        a.guard
+                            .as_ref()
+                            .is_some_and(|(_, g)| self.expr_has_non_local_return(g))
+                            || self.expr_has_non_local_return(&a.body)
+                    })
+            }
+            syn::Expr::While(w) => {
+                self.expr_has_non_local_return(&w.cond) || self.block_has_non_local_return(&w.body)
+            }
+            syn::Expr::ForLoop(f) => {
+                self.expr_has_non_local_return(&f.expr) || self.block_has_non_local_return(&f.body)
+            }
+            syn::Expr::Loop(l) => self.block_has_non_local_return(&l.body),
+            syn::Expr::Let(l) => self.expr_has_non_local_return(&l.expr),
+            syn::Expr::MethodCall(mc) => {
+                self.expr_has_non_local_return(&mc.receiver)
+                    || mc.args.iter().any(|a| self.expr_has_non_local_return(a))
+            }
+            syn::Expr::Call(c) => {
+                self.expr_has_non_local_return(&c.func)
+                    || c.args.iter().any(|a| self.expr_has_non_local_return(a))
+            }
+            syn::Expr::Binary(b) => {
+                self.expr_has_non_local_return(&b.left) || self.expr_has_non_local_return(&b.right)
+            }
+            syn::Expr::Assign(a) => {
+                self.expr_has_non_local_return(&a.left) || self.expr_has_non_local_return(&a.right)
+            }
+            syn::Expr::Unary(u) => self.expr_has_non_local_return(&u.expr),
+            syn::Expr::Reference(r) => self.expr_has_non_local_return(&r.expr),
+            syn::Expr::Field(f) => self.expr_has_non_local_return(&f.base),
+            syn::Expr::Cast(c) => self.expr_has_non_local_return(&c.expr),
+            syn::Expr::Await(a) => self.expr_has_non_local_return(&a.base),
+            syn::Expr::Try(t) => self.expr_has_non_local_return(&t.expr),
+            syn::Expr::Index(i) => {
+                self.expr_has_non_local_return(&i.expr) || self.expr_has_non_local_return(&i.index)
+            }
+            syn::Expr::Repeat(r) => {
+                self.expr_has_non_local_return(&r.expr) || self.expr_has_non_local_return(&r.len)
+            }
+            syn::Expr::Range(r) => {
+                r.start
+                    .as_ref()
+                    .is_some_and(|e| self.expr_has_non_local_return(e))
+                    || r.end
+                        .as_ref()
+                        .is_some_and(|e| self.expr_has_non_local_return(e))
+            }
+            syn::Expr::Tuple(t) => t.elems.iter().any(|e| self.expr_has_non_local_return(e)),
+            syn::Expr::Array(a) => a.elems.iter().any(|e| self.expr_has_non_local_return(e)),
+            syn::Expr::Struct(s) => {
+                s.fields
+                    .iter()
+                    .any(|f| self.expr_has_non_local_return(&f.expr))
+                    || s.rest
+                        .as_ref()
+                        .is_some_and(|e| self.expr_has_non_local_return(e))
+            }
+            // Closure / Async / TryBlock / Const / Macro / Lit / Path / Yield.
+            _ => false,
+        }
+    }
 }
