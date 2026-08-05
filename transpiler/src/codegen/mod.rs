@@ -43940,10 +43940,15 @@ impl CodeGen {
                     mapped_args[0]
                 ));
             }
+            // NOTE: forward-decl signatures used to force the decltype dodge
+            // here (`in_forward_decl_signature ||`) — but the dodge's member
+            // probe SFINAE-kills UFCS receivers in every dispatcher DECL it
+            // reaches ("no member named 'intersperse' in 'Panicking'"), while
+            // the crate's adapter structs are forward-declared ahead of the
+            // fn decls, so the REAL spelling resolves there too.
             if last_ident == "Intersperse"
                 && mapped_args.len() == 1
-                && (self.in_forward_decl_signature
-                    || !self.local_declared_types.contains("Intersperse")
+                && (!self.local_declared_types.contains("Intersperse")
                     || !self
                         .local_declared_type_has_matching_arity("Intersperse", mapped_args.len()))
             {
@@ -43957,8 +43962,7 @@ impl CodeGen {
             }
             if last_ident == "IntersperseWith"
                 && mapped_args.len() == 2
-                && (self.in_forward_decl_signature
-                    || !self.local_declared_types.contains("IntersperseWith")
+                && (!self.local_declared_types.contains("IntersperseWith")
                     || !self.local_declared_type_has_matching_arity(
                         "IntersperseWith",
                         mapped_args.len(),
