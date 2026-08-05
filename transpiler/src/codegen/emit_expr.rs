@@ -13326,6 +13326,33 @@ impl CodeGen {
                 {
                     return view_ctor;
                 }
+                // `!0` against a typed slot (struct-literal field, typed
+                // let): the plain emitter types the bare literal i32 and
+                // `~static_cast<int32_t>(0)` then NARROWS (-1 → size_t is a
+                // braced-init hard error). Rust types the literal from the
+                // slot; mirror that for unsuffixed int literals only —
+                // suffixed ones keep their own width.
+                if matches!(un.op, syn::UnOp::Not(_))
+                    && let Some(expected) = expected_ty
+                    && self.is_known_integer_like_type(expected)
+                    && matches!(
+                        self.peel_paren_group_expr(&un.expr),
+                        syn::Expr::Lit(l)
+                            if matches!(&l.lit, syn::Lit::Int(i) if i.suffix().is_empty()))
+                {
+                    let mapped = self.map_type(expected);
+                    let operand =
+                        self.emit_expr_to_string_with_expected(&un.expr, Some(expected));
+                    // Sub-int widths promote under `~`; truncate back
+                    // (mirror of the untyped arm's rule).
+                    if matches!(
+                        mapped.as_str(),
+                        "uint8_t" | "uint16_t" | "int8_t" | "int16_t"
+                    ) {
+                        return format!("static_cast<{}>(~{})", mapped, operand);
+                    }
+                    return format!("~{}", operand);
+                }
                 if matches!(un.op, syn::UnOp::Deref(_)) && !self.is_expr_raw_pointer_like(&un.expr)
                 {
                     let operand = self.peel_paren_group_expr(&un.expr);
