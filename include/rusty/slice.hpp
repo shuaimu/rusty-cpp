@@ -421,17 +421,42 @@ using next_item_t =
     std::decay_t<decltype(option_like_take_value(std::declval<next_result_t<Iter>&>()))>;
 
 // Cross-type `IntoIterator::IntoIter` projection for a generic owner
-// (`I::IntoIter` in a transpiled signature). Prefers the member typedef when
-// the type declares one (transpiled adapters carry `using IntoIter = ...;`);
-// otherwise the type of `.into_iter()` on an rvalue receiver (rusty::Vec,
-// ranges, every port container).
-template<typename T, typename = void>
+// (`I::IntoIter` in a transpiled signature). Precedence:
+//   2: member typedef (transpiled adapters carry `using IntoIter = ...;`)
+//   1: the type of `.into_iter()` on an rvalue receiver (rusty::Vec,
+//      ranges, every port container)
+//   0: identity — Rust's blanket `impl<I: Iterator> IntoIterator for I`
+//      has `IntoIter = Self`; crate adapters whose `next()` lives in UFCS
+//      free functions (itertools Product, ChunkBy, …) declare neither of
+//      the above and must project to themselves, not hard-error.
+// std::span (the image of Rust `&[T]`, itself an IntoIterator) also has
+// neither shape, but must project to the slice iterator `rusty::iter(span)`
+// produces at runtime — a rank-0 specialization below.
+template<typename T>
+constexpr int into_iter_projection_rank() {
+    if constexpr (requires { typename T::IntoIter; }) {
+        return 2;
+    } else if constexpr (requires { std::declval<T>().into_iter(); }) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+template<typename T, int = into_iter_projection_rank<T>()>
 struct into_iter_projection {
+    using type = T;
+};
+template<typename T>
+struct into_iter_projection<T, 1> {
     using type = decltype(std::declval<T>().into_iter());
 };
 template<typename T>
-struct into_iter_projection<T, std::void_t<typename T::IntoIter>> {
+struct into_iter_projection<T, 2> {
     using type = typename T::IntoIter;
+};
+template<typename T, std::size_t E>
+struct into_iter_projection<std::span<T, E>, 0> {
+    using type = slice_iter::Iter<T>;
 };
 template<typename T>
 using into_iter_t = typename into_iter_projection<std::remove_cvref_t<T>>::type;
@@ -2196,10 +2221,15 @@ decltype(auto) iter(Range&& range) {
     } else if constexpr (requires { *std::forward<Range>(range); }) {
         return iter(*std::forward<Range>(range));
     } else {
-        static_assert(
-            detail::dependent_false_v<Range>,
-            "rusty::iter requires iter(), option-like next(), data()/size(), or dereferenceable receiver"
-        );
+        // Transpiled crate adapters (itertools Product, ChunkBy, …) carry
+        // their `next()` as UFCS FREE functions in the crate's namespace —
+        // invisible from this header. Pass the value through so the emitted
+        // probe-first dispatchers downstream can resolve it; a genuinely
+        // non-iterable receiver still fails at its use site. BY VALUE, not
+        // forwarded: decltype(auto) on a forwarded rvalue deduces T&& (a
+        // dangling ref to the caller's temporary) and conflicts with the
+        // decay_t deduction of sibling returns in the adapter helpers.
+        return static_cast<std::remove_cvref_t<Range>>(std::forward<Range>(range));
     }
 }
 

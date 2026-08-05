@@ -1384,7 +1384,10 @@ fn test_leaf41543333333327451_local_drop_impl_merges_into_local_struct() {
 }
 
 #[test]
-fn test_leaf41543333333327451_local_non_drop_trait_impl_is_skipped() {
+fn test_leaf41543333333327451_local_clone_trait_impl_merges_into_local_struct() {
+    // A manual fn-local `impl Clone` absorbs as a `clone()` member:
+    // `rusty::clone_like<T>` and the rusty::clone runtime helper duck-probe
+    // exactly that member (itertools count_clones' side-effectful Clone).
     let out = transpile_str(
         r#"
         fn f() {
@@ -1400,7 +1403,7 @@ fn test_leaf41543333333327451_local_non_drop_trait_impl_is_skipped() {
         "#,
     );
     assert!(out.contains("// Rust-only nested impl block skipped in local scope"));
-    assert!(!out.contains("Local clone() const"));
+    assert!(out.contains("Local clone() const"));
 }
 
 #[test]

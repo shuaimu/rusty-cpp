@@ -4375,11 +4375,17 @@ impl CodeGen {
             // callable after T hoists to namespace scope.
             let is_local_fmt_trait_impl =
                 matches!(trait_name.as_deref(), Some("Write" | "Display" | "Debug"));
+            // A manual fn-local `impl Clone` must absorb as a `clone()` member:
+            // `rusty::clone_like<T>` (and the rusty::clone runtime helper)
+            // duck-probe exactly that member, and dropping the impl leaves the
+            // hoisted struct failing every `T: Clone`-bounded signature.
+            let is_local_clone_trait_impl = trait_name.as_deref() == Some("Clone");
             let allow_non_inherent_trait_impl = is_drop_trait
                 || is_default_trait
                 || impl_is_automatically_derived
                 || is_local_serde_trait_impl
-                || is_local_fmt_trait_impl;
+                || is_local_fmt_trait_impl
+                || is_local_clone_trait_impl;
             if !is_inherent_impl && !allow_non_inherent_trait_impl {
                 continue;
             }
