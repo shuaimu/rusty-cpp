@@ -287,6 +287,12 @@ private:
 
 } // namespace slice_iter
 
+// Forward declaration: `detail::into_iter_value` below must bridge a POINTER
+// receiver to the borrowing iterator, but `iter`'s definition sits after the
+// detail block closes, and the call there is QUALIFIED (so ADL cannot find it).
+template<typename Range>
+decltype(auto) iter(Range&& range);
+
 namespace detail {
 
 // Rebind a template's arguments onto another template: for a Rust
@@ -469,10 +475,17 @@ using into_iter_t = typename into_iter_projection<std::remove_cvref_t<T>>::type;
 // port container.
 template<typename T>
 constexpr auto into_iter_value(T&& v) {
+    using U = std::remove_cvref_t<T>;
     if constexpr (requires { std::forward<T>(v).into_iter(); }) {
         return std::forward<T>(v).into_iter();
+    } else if constexpr (std::is_pointer_v<U> && requires { rusty::iter(*v); }) {
+        // A POINTER receiver is Rust's `&`/`&mut`, and
+        // `impl IntoIterator for &mut [T; N]` BORROWS (Item is a reference).
+        // Identity would hand the raw pointer to `.next()`. No dangle risk:
+        // the pointee outlives the call, unlike a by-value rvalue.
+        return rusty::iter(*v);
     } else {
-        return static_cast<std::remove_cvref_t<T>>(std::forward<T>(v));
+        return static_cast<U>(std::forward<T>(v));
     }
 }
 
