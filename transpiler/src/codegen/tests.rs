@@ -12261,6 +12261,41 @@ fn test_return_if_with_try_in_branch_lowers_to_statement_flow() {
 }
 
 #[test]
+fn test_match_arm_tail_if_with_try_lowers_to_statement_flow() {
+    // A match arm whose TAIL is an if-expression with `?` in a branch. The arm
+    // emitter wraps arm bodies in `return ...;` itself, so this never reaches
+    // the statement-level `return if` interception — it used to drop the whole
+    // body to `/* TODO: if-expression */`, which also made the enclosing
+    // `next()` ill-formed and cascaded into adapter self-recursion.
+    let out = transpile_str(
+        r#"
+        pub enum St { A, B { k: usize } }
+        pub fn f(s: &St, v: Option<i32>) -> Option<i32> {
+            match s {
+                St::A => None,
+                St::B { k } => {
+                    if *k > 0 {
+                        let x = v?;
+                        Some(x + 1)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("/* TODO: if-expression */"),
+        "match-arm tail if-expression dropped to a placeholder: {out}"
+    );
+    assert!(
+        out.contains("RUSTY_TRY_OPT(v)"),
+        "the `?` should survive in the arm body: {out}"
+    );
+}
+
+#[test]
 fn test_return_if_without_escaping_control_flow_keeps_ternary() {
     // The value-only case must be untouched by the statement-level path.
     let out = transpile_str("pub fn g(c: bool) -> i32 { return if c { 1 } else { 2 }; }");

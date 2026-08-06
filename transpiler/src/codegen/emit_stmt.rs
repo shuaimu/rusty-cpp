@@ -1329,16 +1329,8 @@ impl CodeGen {
                         // Diverging arms should still return when the emitted body is already
                         // typed (e.g. `[&]() -> T { panic(...); }()`), otherwise C++
                         // may deduce inconsistent lambda return types (`T` vs `void`).
-                        let diverging = self.is_expr_diverging(&arm.body);
-                        let body_trimmed = body.trim_start();
-                        let body_is_return_expr = body_trimmed.starts_with("return ");
-                        let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                        let ret_prefix =
-                            if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                                ""
-                            } else {
-                                "return "
-                            };
+                        let (body, ret_prefix) =
+                            self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
 
                         if let Some((_, guard)) = &arm.guard {
                             let guard_str = self
@@ -1430,16 +1422,8 @@ impl CodeGen {
                         } else {
                             body
                         };
-                        let diverging = self.is_expr_diverging(&arm.body);
-                        let body_trimmed = body.trim_start();
-                        let body_is_return_expr = body_trimmed.starts_with("return ");
-                        let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                        let ret_prefix =
-                            if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                                ""
-                            } else {
-                                "return "
-                            };
+                        let (body, ret_prefix) =
+                            self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
                         out.push_str(&format!("if ({}) {{ ", cond_expr));
                         for stmt in binding_stmts {
                             out.push_str(&stmt);
@@ -1532,15 +1516,8 @@ impl CodeGen {
                     } else {
                         body
                     };
-                    let diverging = self.is_expr_diverging(&arm.body);
-                    let body_trimmed = body.trim_start();
-                    let body_is_return_expr = body_trimmed.starts_with("return ");
-                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                        ""
-                    } else {
-                        "return "
-                    };
+                    let (body, ret_prefix) =
+                        self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
                     out.push_str(&format!("if ({}) {{ ", cond_expr));
                     for stmt in binding_stmts {
                         out.push_str(&stmt);
@@ -1607,15 +1584,8 @@ impl CodeGen {
                     } else {
                         body
                     };
-                    let diverging = self.is_expr_diverging(&arm.body);
-                    let body_trimmed = body.trim_start();
-                    let body_is_return_expr = body_trimmed.starts_with("return ");
-                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                        ""
-                    } else {
-                        "return "
-                    };
+                    let (body, ret_prefix) =
+                        self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
                     out.push_str("if (true) { ");
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str =
@@ -1788,15 +1758,8 @@ impl CodeGen {
                     } else {
                         body
                     };
-                    let diverging = self.is_expr_diverging(&arm.body);
-                    let body_trimmed = body.trim_start();
-                    let body_is_return_expr = body_trimmed.starts_with("return ");
-                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                        ""
-                    } else {
-                        "return "
-                    };
+                    let (body, ret_prefix) =
+                        self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str =
                             self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
@@ -1884,15 +1847,8 @@ impl CodeGen {
                     } else {
                         body
                     };
-                    let diverging = self.is_expr_diverging(&arm.body);
-                    let body_trimmed = body.trim_start();
-                    let body_is_return_expr = body_trimmed.starts_with("return ");
-                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                        ""
-                    } else {
-                        "return "
-                    };
+                    let (body, ret_prefix) =
+                        self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
                     out.push_str(&format!("if ({}) {{ ", cond_expr));
                     for stmt in binding_stmts {
                         out.push_str(&stmt);
@@ -1987,15 +1943,8 @@ impl CodeGen {
                     } else {
                         body
                     };
-                    let diverging = self.is_expr_diverging(&arm.body);
-                    let body_trimmed = body.trim_start();
-                    let body_is_return_expr = body_trimmed.starts_with("return ");
-                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
-                        ""
-                    } else {
-                        "return "
-                    };
+                    let (body, ret_prefix) =
+                        self.arm_body_with_return_prefix(&arm.body, body, arm_expected_ty);
                     out.push_str(&format!("if ({}) {{ ", cond_expr));
                     for stmt in binding_stmts {
                         out.push_str(&stmt);
@@ -6232,6 +6181,122 @@ impl CodeGen {
     /// Lower `result_var = if cond { ...?... } else { val };` as a statement block
     /// that assigns to `result_var` in each branch. Handles nested if-expressions
     /// with `?` recursively.
+    /// The if-expression a match arm's body ends in, when it has no expression
+    /// form. Only a bare `if` body, or a block whose SOLE statement is one, is
+    /// accepted: with leading statements present, lowering just the tail would
+    /// silently drop them, which is worse than the placeholder it replaces.
+    fn arm_tail_if_expr_needing_statement_lowering<'a>(
+        &self,
+        arm_body: &'a syn::Expr,
+    ) -> Option<&'a syn::ExprIf> {
+        let candidate = match self.peel_paren_group_expr(arm_body) {
+            syn::Expr::If(if_expr) => if_expr,
+            syn::Expr::Block(block) if block.block.stmts.len() == 1 => {
+                match &block.block.stmts[0] {
+                    syn::Stmt::Expr(syn::Expr::If(if_expr), None) => if_expr,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let (_, else_branch) = candidate.else_branch.as_ref()?;
+        if !self.block_contains_early_return_or_try(&candidate.then_branch)
+            && !self.expr_contains_early_return_or_try(else_branch)
+        {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    /// Render a block as `stmt; stmt; return <tail>;`, or None when it has no
+    /// value tail (nothing to return) — pure string building, so this works in
+    /// the `&self` expression-emission path.
+    fn block_stmts_with_return_tail(
+        &self,
+        block: &syn::Block,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let mut out = String::new();
+        let last = block.stmts.len().checked_sub(1)?;
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            if i == last {
+                let syn::Stmt::Expr(expr, None) = stmt else {
+                    return None;
+                };
+                out.push_str(&format!(
+                    "return {};",
+                    self.emit_expr_to_string_with_expected(expr, expected_ty)
+                ));
+                return Some(out);
+            }
+            out.push_str(self.emit_stmt_to_string(stmt).trim_end());
+            out.push(' ');
+        }
+        None
+    }
+
+    /// `if cond { ...; a } else { ...; b }` as a branch-wise if STATEMENT, each
+    /// branch returning. Returns None for shapes not handled here (if-let
+    /// conditions, else-if chains), so the caller keeps its existing behaviour.
+    fn if_expr_as_return_statement_string(
+        &self,
+        if_expr: &syn::ExprIf,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if matches!(&*if_expr.cond, syn::Expr::Let(_)) {
+            return None;
+        }
+        let (_, else_expr) = if_expr.else_branch.as_ref()?;
+        let then_s = self.block_stmts_with_return_tail(&if_expr.then_branch, expected_ty)?;
+        let else_s = match else_expr.as_ref() {
+            syn::Expr::Block(b) => self.block_stmts_with_return_tail(&b.block, expected_ty)?,
+            syn::Expr::If(_) => return None,
+            other => format!(
+                "return {};",
+                self.emit_expr_to_string_with_expected(other, expected_ty)
+            ),
+        };
+        let cond = self.emit_expr_to_string(&if_expr.cond);
+        Some(format!("if ({}) {{ {} }} else {{ {} }}", cond, then_s, else_s))
+    }
+
+    /// A match arm's body is emitted as an expression STRING and then prefixed
+    /// with `return ` unless it already is one (or the arm diverges). An
+    /// if-expression tail whose branches carry `?`/`return` has no expression
+    /// form at all, so the emitter degraded it to a
+    /// `/* TODO: if-expression */` placeholder that dropped the body outright.
+    ///
+    /// Re-emit exactly those as a branch-wise if STATEMENT, each branch
+    /// returning; the arm's own IIFE returns that value, and a branch's `?`
+    /// lands at the same level it would have in Rust. Reports that no
+    /// `return ` prefix is wanted — a C++ expression can never begin with
+    /// `if (`, so the statement form is unambiguous to callers inspecting it.
+    ///
+    /// Shared by all seven arm-emission sites so the class is fixed once.
+    fn arm_body_with_return_prefix(
+        &self,
+        arm_body: &syn::Expr,
+        body: String,
+        expected_ty: Option<&syn::Type>,
+    ) -> (String, &'static str) {
+        if body.contains("/* TODO: if-expression */")
+            && let Some(if_expr) = self.arm_tail_if_expr_needing_statement_lowering(arm_body)
+            && let Some(stmts) = self.if_expr_as_return_statement_string(if_expr, expected_ty)
+        {
+            return (stmts, "");
+        }
+        let body_trimmed = body.trim_start();
+        let diverging = self.is_expr_diverging(arm_body);
+        let body_is_return_expr = body_trimmed.starts_with("return ");
+        let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
+        let prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
+            ""
+        } else {
+            "return "
+        };
+        (body, prefix)
+    }
+
     // (IfTailSink is declared at module scope below.)
     /// Where the value of a statement-lowered `if` expression goes.
     ///
