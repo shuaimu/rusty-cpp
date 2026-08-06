@@ -41424,3 +41424,50 @@ fn test_namespace_scope_thread_local_static_fwd_decl_keeps_specifier() {
     );
 }
 
+#[test]
+fn test_return_of_fn_local_static_does_not_move_out_of_it() {
+    // A fn-body `static` outlives the call. Emitting `return std::move(NAME)`
+    // moves out of the shared object and guts it for every later call --
+    // runtime-proven data loss. The tail-expression form of the same Rust
+    // never moved, so the two spellings diverged.
+    let out = transpile_str(
+        r#"
+        fn return_static_by_value() -> std::string {
+            static NAME: std::string = std::string("world");
+            return NAME;
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("std::move(NAME)"),
+        "moved out of a function-local static: {out}"
+    );
+    assert!(out.contains("return NAME;"), "{out}");
+}
+
+#[test]
+fn test_fn_local_static_with_dynamic_init_stays_after_guard() {
+    // A C++ magic static initializes on first flow THROUGH its declaration.
+    // Hoisting one with a DYNAMIC initializer above an early-return guard
+    // makes the initializer run unconditionally -- a silent semantic change.
+    // (Constant-initialized statics may still hoist; position is unobservable
+    // there and hoisted local structs/fns may reference them.)
+    let out = transpile_str(
+        r#"
+        fn guarded(ok: bool) -> std::string {
+            if !ok {
+                return std::string("");
+            }
+            static HEAVY: std::string = expensive_init();
+            HEAVY
+        }
+        "#,
+    );
+    let guard = out.find("if (!ok)").expect("guard missing");
+    let heavy = out.find("static std::string HEAVY").expect("static missing");
+    assert!(
+        guard < heavy,
+        "dynamic-init static hoisted above its guard: {out}"
+    );
+}
+

@@ -1486,6 +1486,11 @@ pub struct CodeGen {
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     pub(crate) local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
+    /// Names of function-local `static` items, scoped per block. A static has
+    /// PROCESS lifetime, so `return NAME;` must never emit `std::move(NAME)`
+    /// the way an ordinary local does -- that moves out of the shared object
+    /// and guts it for every later call.
+    pub(crate) local_static_names: Vec<HashSet<String>>,
     /// Previous same-scope binding types overwritten by shadow registrations.
     /// Used so in-progress initializers can still recover the immediately
     /// shadowed binding type for `let x = x.method(...)` patterns.
@@ -2303,6 +2308,7 @@ impl CodeGen {
             assert_equal_sibling_item: std::cell::RefCell::new(None),
             as_ptr_expected_element: std::cell::RefCell::new(None),
             local_bindings: Vec::new(),
+            local_static_names: Vec::new(),
             local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),
             impl_method_self_tys: HashMap::new(),
@@ -30408,8 +30414,21 @@ impl CodeGen {
         if name == "self" {
             return false;
         }
+        // A function-local `static` outlives the call. Moving out of it in a
+        // return statement silently guts it for every subsequent call, and the
+        // tail-expression form of the same Rust code does NOT move -- so the
+        // two spellings of identical semantics would diverge.
+        if self.is_local_static_name(&name) {
+            return false;
+        }
         self.lookup_local_binding_cpp_name(&name).is_some()
             || self.lookup_local_binding_type(&name).is_some()
+    }
+
+    fn is_local_static_name(&self, name: &str) -> bool {
+        self.local_static_names
+            .iter()
+            .any(|scope| scope.contains(name))
     }
 
     fn if_let_unwrap_binding_should_preserve_reference(

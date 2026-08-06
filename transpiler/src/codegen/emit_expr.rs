@@ -571,7 +571,34 @@ impl CodeGen {
         Some(format!("return {{{}}};", field_inits.join(", ")))
     }
 
+    /// Whether a fn-body `static`'s initializer is a compile-time constant.
+    /// Constant ones may be hoisted to the top of the block (position is
+    /// unobservable, and hoisted structs/fns may reference them); dynamic ones
+    /// must stay in source position so a C++ magic static still initializes on
+    /// first flow through its declaration rather than unconditionally.
+    fn static_initializer_is_constant(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Lit(_) => true,
+            syn::Expr::Unary(u) => Self::static_initializer_is_constant(&u.expr),
+            syn::Expr::Cast(c) => Self::static_initializer_is_constant(&c.expr),
+            syn::Expr::Paren(p) => Self::static_initializer_is_constant(&p.expr),
+            syn::Expr::Group(g) => Self::static_initializer_is_constant(&g.expr),
+            _ => false,
+        }
+    }
+
     pub(super) fn emit_block(&mut self, block: &syn::Block) {
+        // Record this block's `static` items so a `return NAME;` over one does
+        // not emit std::move (see return_expr_should_move_local).
+        let block_static_names: std::collections::HashSet<String> = block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Static(s)) => Some(s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        self.local_static_names.push(block_static_names);
         let profile_blocks = std::env::var_os("RUSTY_CPP_PROFILE_BLOCKS").is_some();
         let profile_this_block = profile_blocks && block.stmts.len() >= 8;
         let block_profile_start = std::time::Instant::now();
@@ -848,18 +875,29 @@ impl CodeGen {
         // Rust block-scoped items are usable across the whole block regardless of
         // lexical order. Emit local type/const/static items first (in source order)
         // so nested/local functions and local type methods can reference them.
+        // A fn-body `static` is hoisted ONLY when its initializer is a
+        // constant. Rust requires static initializers to be const, so there
+        // position is unobservable and hoisting lets a hoisted local struct's
+        // Drop impl (or a local fn) reference it. The DSL additionally accepts
+        // DYNAMIC initializers -- Meyers singletons, lazy env probes -- and a
+        // C++ magic static initializes on first flow THROUGH its declaration,
+        // so hoisting one of those above an early-return guard would make the
+        // initializer run unconditionally. Those stay in source position.
         for stmt in stmts {
-            if matches!(
-                stmt,
+            let hoist = match stmt {
                 syn::Stmt::Item(
                     syn::Item::Struct(_)
                         | syn::Item::Enum(_)
                         | syn::Item::Type(_)
                         | syn::Item::Use(_)
-                        | syn::Item::Const(_)
-                        | syn::Item::Static(_)
-                )
-            ) {
+                        | syn::Item::Const(_),
+                ) => true,
+                syn::Stmt::Item(syn::Item::Static(s)) => {
+                    Self::static_initializer_is_constant(&s.expr)
+                }
+                _ => false,
+            };
+            if hoist {
                 self.emit_stmt(stmt, false);
             }
         }
@@ -885,8 +923,9 @@ impl CodeGen {
                             | syn::Item::Type(_)
                             | syn::Item::Use(_)
                             | syn::Item::Const(_)
-                            | syn::Item::Static(_)
-                    )
+                    ) | syn::Stmt::Item(syn::Item::Static(_))
+                        if !matches!(stmt, syn::Stmt::Item(syn::Item::Static(st))
+                            if !Self::static_initializer_is_constant(&st.expr))
                 )
             })
             .collect();
@@ -984,6 +1023,7 @@ impl CodeGen {
         }
 
         self.block_depth -= 1;
+        self.local_static_names.pop();
         self.local_bindings.pop();
         self.local_shadowed_binding_types.pop();
         self.local_cpp_bindings.pop();
