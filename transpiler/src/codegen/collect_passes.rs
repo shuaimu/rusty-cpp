@@ -2724,7 +2724,43 @@ impl CodeGen {
         }
     }
 
+    /// Type names (unqualified) that have an OWNED `impl IntoIterator for T`.
+    /// The borrowed-impl skip below exists only to avoid colliding with such an
+    /// impl, so it must not fire when there is nothing to collide with.
+    fn collect_owned_into_iterator_type_names(items: &[syn::Item], out: &mut HashSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        Self::collect_owned_into_iterator_type_names(nested, out);
+                    }
+                }
+                syn::Item::Impl(ib) => {
+                    let Some((_, path, _)) = &ib.trait_ else { continue };
+                    if path.segments.last().map(|s| s.ident.to_string()).as_deref()
+                        != Some("IntoIterator")
+                    {
+                        continue;
+                    }
+                    // Borrowed impls are the ones being guarded; only an OWNED
+                    // self type counts as the collision partner.
+                    if Self::impl_self_reference_mutability(ib.self_ty.as_ref()).is_some() {
+                        continue;
+                    }
+                    if let Some(tp) = Self::impl_self_type_path(ib.self_ty.as_ref())
+                        && let Some(seg) = tp.path.segments.last()
+                    {
+                        out.insert(seg.ident.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(super) fn collect_impl_blocks(&mut self, items: &[syn::Item], module_path: &[String]) {
+        let mut owned_into_iterator_types: HashSet<String> = HashSet::new();
+        Self::collect_owned_into_iterator_type_names(items, &mut owned_into_iterator_types);
         // Structs/enums with `#[derive(Copy)]`: in single-file input the
         // derive stays an ATTRIBUTE and never becomes an `impl Copy` block
         // (only cargo-expand produces those). Scan the attrs directly so
@@ -2906,10 +2942,18 @@ impl CodeGen {
                     // C++ cannot distinguish both non-const receiver shapes.
                     // Keep the owned impl and rely on `rusty::iter(...)` lowering for borrowed
                     // iterator entry points.
+                    // ...but ONLY when an owned impl actually exists to keep.
+                    // itertools' ChunkBy / IntoChunks have only the borrowed
+                    // impl, so skipping left no `into_iter` at all, and the
+                    // `rusty::iter(..)` fallback cannot help either (it looks
+                    // for `.iter()`, which they do not have).
                     let skip_borrowed_into_iterator_impl = trait_name.as_deref()
                         == Some("IntoIterator")
                         && Self::impl_self_reference_mutability(impl_block.self_ty.as_ref())
-                            .is_some();
+                            .is_some()
+                        && Self::impl_self_type_path(impl_block.self_ty.as_ref())
+                            .and_then(|tp| tp.path.segments.last().map(|s| s.ident.to_string()))
+                            .is_some_and(|n| owned_into_iterator_types.contains(&n));
                     if skip_borrowed_into_iterator_impl {
                         continue;
                     }
@@ -3207,12 +3251,19 @@ impl CodeGen {
                                     .and_then(|path| path.segments.last())
                                     .map(|seg| seg.ident.to_string());
                                 let is_inherent_impl = trait_name.is_none();
+                                // Same refinement as the sibling site above:
+                                // only skip when an owned impl exists to keep.
                                 let skip_borrowed_into_iterator_impl = trait_name.as_deref()
                                     == Some("IntoIterator")
                                     && Self::impl_self_reference_mutability(
                                         impl_block.self_ty.as_ref(),
                                     )
-                                    .is_some();
+                                    .is_some()
+                                    && Self::impl_self_type_path(impl_block.self_ty.as_ref())
+                                        .and_then(|tp| {
+                                            tp.path.segments.last().map(|s| s.ident.to_string())
+                                        })
+                                        .is_some_and(|n| owned_into_iterator_types.contains(&n));
                                 if skip_borrowed_into_iterator_impl {
                                     continue;
                                 }
