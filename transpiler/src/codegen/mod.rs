@@ -47433,7 +47433,22 @@ fn inject_deref_dispatch_functors(output: &str) -> String {
     }
     let mut block = String::from("namespace rusty { namespace detail {\n");
     for m in &methods {
-        block.push_str("RUSTY_METHOD_DISPATCH(");
+        // See the twin in inline_rust.rs: Iterator DEFAULT methods have no
+        // member on a user impl that defines only the required ones, so the
+        // member-only dispatcher cannot reach them. For names whose runtime
+        // counterpart is spelled IDENTICALLY, emit the variant that falls back
+        // to `rusty::<name>`. Deliberately a small allowlist — the macro spells
+        // that as a QUALIFIED id resolved at definition time, so a name with no
+        // counterpart is ill-formed and breaks the whole module build.
+        let has_same_named_free_fn = matches!(
+            m.as_str(),
+            "fuse" | "peekable" | "inspect" | "skip_while" | "take_while"
+        );
+        block.push_str(if has_same_named_free_fn {
+            "RUSTY_METHOD_DISPATCH_FREE("
+        } else {
+            "RUSTY_METHOD_DISPATCH("
+        });
         block.push_str(m);
         block.push_str(")\n");
     }

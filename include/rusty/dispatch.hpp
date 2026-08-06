@@ -266,6 +266,36 @@ constexpr decltype(auto) deref_call(R&& r, F&& f, A&&... a) {
         }                                                                      \
     };
 
+/// Variant of RUSTY_METHOD_DISPATCH for a method that ALSO has a same-named
+/// free function `rusty::<name>`. Rust trait DEFAULT methods have no member on
+/// a user impl that defines only the required ones — `impl Iterator for X { fn
+/// next }` has no `.fuse()` — but the runtime supplies `rusty::fuse(x)`.
+///
+/// The free overload is gated on the member being ABSENT, so a member always
+/// wins and this only converts what was previously a hard error.
+///
+/// IMPORTANT: only emit this for names where `rusty::<name>` really exists.
+/// `rusty::name` is a QUALIFIED id, resolved at template-DEFINITION time, so
+/// expanding it for a name without a counterpart (e.g. `into_iter`) is
+/// ill-formed and breaks the whole module build.
+#define RUSTY_METHOD_DISPATCH_FREE(name)                                       \
+    struct __mdisp_##name {                                                    \
+        template<typename R, typename... A>                                    \
+        constexpr auto operator()(R&& r, A&&... a) const                       \
+            -> decltype(static_cast<R&&>(r).name(static_cast<A&&>(a)...)) {     \
+            return static_cast<R&&>(r).name(static_cast<A&&>(a)...);            \
+        }                                                                      \
+        template<typename R, typename... A>                                    \
+            requires (!requires(R&& rr, A&&... aa) {                            \
+                static_cast<R&&>(rr).name(static_cast<A&&>(aa)...);             \
+            })                                                                 \
+        constexpr auto operator()(R&& r, A&&... a) const                       \
+            -> decltype(rusty::name(static_cast<R&&>(r),                        \
+                                    static_cast<A&&>(a)...)) {                  \
+            return rusty::name(static_cast<R&&>(r), static_cast<A&&>(a)...);    \
+        }                                                                      \
+    };
+
 /// Rust `V::default()` for a TYPE-PARAM owner V. Struct emissions carry a
 /// `default_()` static member; a C-like enum-class cannot hold members, so
 /// its Default impl emits an ADL marker next to the enum

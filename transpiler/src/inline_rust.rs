@@ -603,7 +603,25 @@ fn insert_hoisted_dispatch_region(content: &str, methods: &[String]) -> String {
     block.push('\n');
     block.push_str("namespace rusty { namespace detail {\n");
     for m in methods {
-        block.push_str("RUSTY_METHOD_DISPATCH(");
+        // Iterator DEFAULT methods have no member on a user impl that defines
+        // only the required ones (`impl Iterator for X { fn next }` has no
+        // `.fuse()`), so the member-only dispatcher cannot reach them. For the
+        // names whose runtime counterpart is spelled IDENTICALLY
+        // (`rusty::fuse`, ...), emit the variant that falls back to it.
+        // Deliberately a small allowlist: the macro spells `rusty::<name>` as a
+        // QUALIFIED id resolved at definition time, so a name without a
+        // counterpart is ill-formed and breaks the whole module build. The
+        // rest of the iterator family maps to DIFFERENTLY-named helpers
+        // (`max` -> `rusty::iter_max`) and cannot use this form.
+        let has_same_named_free_fn = matches!(
+            m.as_str(),
+            "fuse" | "peekable" | "inspect" | "skip_while" | "take_while"
+        );
+        block.push_str(if has_same_named_free_fn {
+            "RUSTY_METHOD_DISPATCH_FREE("
+        } else {
+            "RUSTY_METHOD_DISPATCH("
+        });
         block.push_str(m);
         block.push_str(")\n");
     }
