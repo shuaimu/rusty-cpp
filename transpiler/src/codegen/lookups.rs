@@ -385,10 +385,45 @@ impl CodeGen {
             return None;
         }
         let suffix = format!("::{}", func_name);
+        // An EXPLICIT associated call (`rusty::Mutex::<T>::new(x)`) names its
+        // owner. A registered key that merely ENDS in `::new` under an
+        // unrelated owner -- typically the enclosing impl's own `fn new` --
+        // must not supply argument hints for it, or that constructor's
+        // parameter types get cross-wired POSITIONALLY onto every
+        // `Owner::new(..)` in the block. That is what made a bare
+        // `Default::default()` field initializer inside a PARAMETERIZED
+        // #[cpp_ctor] infer the enclosing ctor's parameter type instead of
+        // the field's.
+        //
+        // Only reject when BOTH sides name an owner and the two disagree;
+        // every other combination behaves exactly as before.
+        let call_owner: Option<String> = if path_expr.path.segments.len() >= 2 {
+            path_expr
+                .path
+                .segments
+                .iter()
+                .rev()
+                .nth(1)
+                .map(|seg| seg.ident.to_string())
+                .filter(|owner| owner != "Self")
+        } else {
+            None
+        };
         let mut fallback_keys: Vec<&String> = self
             .function_arg_expected_types
             .keys()
             .filter(|key| key.as_str() == func_name || key.ends_with(&suffix))
+            .filter(|key| {
+                let (Some(call_owner), Some(key_owner)) = (
+                    call_owner.as_deref(),
+                    key.strip_suffix(&suffix)
+                        .and_then(|owner_path| owner_path.rsplit("::").next())
+                        .filter(|owner| !owner.is_empty()),
+                ) else {
+                    return true;
+                };
+                call_owner == key_owner
+            })
             .collect();
         fallback_keys.sort();
         fallback_keys.dedup();

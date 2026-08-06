@@ -41502,3 +41502,32 @@ fn test_match_struct_variant_binding_allows_moving_move_only_payload() {
     );
 }
 
+#[test]
+fn test_explicit_associated_call_does_not_borrow_unrelated_owner_arg_types() {
+    // An explicit `Owner::method(..)` call names its owner. The bare-suffix
+    // fallback used to accept ANY registered key ending in `::method` -- in
+    // practice the ENCLOSING impl's own `fn new` -- and then applied that
+    // constructor's parameter types POSITIONALLY to the call. Inside a
+    // parameterized #[cpp_ctor] that made a bare `Default::default()` field
+    // initializer infer the ctor's parameter type instead of the field's.
+    let out = transpile_str(
+        r#"
+        struct Holder {
+            fd_: i32,
+            flag_: rusty::Cell<bool>,
+        }
+        impl Holder {
+            fn new(fd: i32, label: std::string) -> Holder {
+                Holder { fd_: fd, flag_: rusty::Cell::new(Default::default()) }
+            }
+        }
+        "#,
+    );
+    // The field initializer must default a bool (the field's type), never
+    // std::string (the ctor's second parameter).
+    assert!(
+        !out.contains("default_like<std::string>"),
+        "unrelated owner's parameter type leaked into the field init: {out}"
+    );
+}
+
