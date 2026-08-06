@@ -473,11 +473,26 @@ using into_iter_t = typename into_iter_projection<std::remove_cvref_t<T>>::type;
 // type has no member (user Iterator structs, UFCS-next crate adapters).
 // Types with a member keep it — rusty::Vec's owning IntoIter, ranges, every
 // port container.
+// Local (header stays self-contained — see the `rusty/vec.hpp` comment).
+template<typename T>
+inline constexpr bool into_iter_is_std_span_v = false;
+template<typename T, std::size_t E>
+inline constexpr bool into_iter_is_std_span_v<std::span<T, E>> = true;
+
 template<typename T>
 constexpr auto into_iter_value(T&& v) {
     using U = std::remove_cvref_t<T>;
     if constexpr (requires { std::forward<T>(v).into_iter(); }) {
         return std::forward<T>(v).into_iter();
+    } else if constexpr (into_iter_is_std_span_v<U>) {
+        // `into_iter_projection<std::span<T, E>>` (above) maps a span to
+        // `slice_iter::Iter<T>`, so identity here would make the VALUE and the
+        // TYPE disagree: a function declared to return
+        // `Adapter<into_iter_t<I>>` could not return the adapter its own body
+        // builds from `into_iter_value(iterable)` — the two spell different
+        // types. No dangle: a span is a non-owning view, so the Iter refers to
+        // the original data, not to `v`.
+        return rusty::iter(v);
     } else if constexpr (std::is_pointer_v<U> && requires { rusty::iter(*v); }) {
         // A POINTER receiver is Rust's `&`/`&mut`, and
         // `impl IntoIterator for &mut [T; N]` BORROWS (Item is a reference).
