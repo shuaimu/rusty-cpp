@@ -48221,9 +48221,18 @@ pub(crate) fn resolve_impl_method_conflict(
 /// Most signature collisions are benign — a derive-generated body against an
 /// explicit one, or a forwarder — and discarding one is correct. Two DIFFERENT
 /// bodies collapsing to one signature is not: one impl's behaviour is silently
-/// gone, and the port compiles and does the wrong thing. C++ cannot overload on
-/// a Rust trait's type argument alone, so the standard `Extend<T>` +
-/// `Extend<&'a T>` pair lands here for every std container. Say so out loud.
+/// gone, and the port compiles and does the wrong thing. Say so out loud.
+///
+/// TWO DISTINCT CAUSES land here, and the distinction matters:
+///   - TRAIT-ARG: the impls differ only in the Rust trait's type argument
+///     (`Extend<T>` vs `Extend<&'a T>`, which every std container has). C++
+///     genuinely cannot overload on that, so this is a hard limit.
+///   - SELF-TYPE: the impls differ in the SELF type's template argument
+///     (itertools `MergeFuncLR<F, Ordering>` vs `<F, bool>`, `$C<I>` vs
+///     `$C<Fuse<I>>`) or its wrapper (`&T` / `&mut T` / `Box<T>`). C++ CAN
+///     express these — as constrained overloads or partial specializations —
+///     so these are an emitter gap, not a language limit. Roughly half the
+///     sites across the parity matrix are this kind. See task #193.
 fn warn_on_lossy_impl_method_conflict(
     type_name: &str,
     kept: &syn::ImplItemFn,
@@ -48248,8 +48257,11 @@ fn warn_on_lossy_impl_method_conflict(
     }
     eprintln!(
         "warning: {}::{}: two impls collapse to a single C++ signature, so one \
-         body is kept and the other discarded. C++ cannot overload on the Rust \
-         trait type argument alone (as in `Extend<T>` vs `Extend<&T>`).",
+         body is kept and the other discarded. Either the impls differ only in \
+         the Rust trait's type argument (`Extend<T>` vs `Extend<&T>`), which \
+         C++ cannot overload on, or they differ in the SELF type's template \
+         argument or wrapper, which C++ could express but the emitter does not \
+         yet (see task #193).",
         type_name, kept.sig.ident
     );
 }
