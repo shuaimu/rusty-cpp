@@ -28592,7 +28592,7 @@ fn test_leaf5124_smallvec_into_iter_collect_preserves_value_iterator_receiver() 
 }
 
 #[test]
-fn test_leaf5124_generic_into_iter_collect_uses_iter_bridge() {
+fn test_leaf5124_generic_into_iter_collect_consumes_receiver() {
     let out = transpile_str(
         r#"
         fn f<T>(value: T) -> Vec<i32> {
@@ -28600,14 +28600,18 @@ fn test_leaf5124_generic_into_iter_collect_uses_iter_bridge() {
         }
         "#,
     );
+    // `value.into_iter()` on a by-value receiver CONSUMES in Rust, so it
+    // lowers to the consuming helper rather than the borrowing rusty::iter
+    // bridge. Changed deliberately: the bridge produced an iterator type that
+    // could not match a signature's `into_iter_t<T>` projection.
     assert!(
-        out.contains("::from_iter(rusty::iter(std::move(value)))"),
+        out.contains("::from_iter(rusty::detail::into_iter_value(std::move(value)))"),
         "{out}"
     );
 }
 
 #[test]
-fn test_leaf5157_generic_into_iter_binding_uses_iter_bridge() {
+fn test_leaf5157_generic_into_iter_binding_consumes_receiver() {
     let out = transpile_str(
         r#"
         fn f<I>(iterable: I)
@@ -28619,7 +28623,12 @@ fn test_leaf5157_generic_into_iter_binding_uses_iter_bridge() {
         }
         "#,
     );
-    assert!(out.contains("rusty::iter(std::move(iterable))"), "{out}");
+    // Consuming lowering (see the sibling collect test) — an IntoIterator
+    // bound does not make the receiver borrowed.
+    assert!(
+        out.contains("rusty::detail::into_iter_value(std::move(iterable))"),
+        "{out}"
+    );
     assert!(!out.contains("iterable.into_iter()"), "{out}");
 }
 

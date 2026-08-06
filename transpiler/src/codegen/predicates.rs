@@ -3659,7 +3659,16 @@ impl CodeGen {
         if tp.qself.is_some() || tp.path.segments.len() != 1 {
             return false;
         }
-        self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+        // A bare generic receiver USED to bridge here. But Rust's
+        // `t.into_iter()` on a by-value binding CONSUMES, and a signature over
+        // `T: IntoIterator` projects `into_iter_t<T>`; the borrowing bridge
+        // yields a different type, so a chained `.into_iter().fuse()` feeding a
+        // `PutBack<Fuse<I::IntoIter>>` field could never convert (itertools
+        // merge_join_by). Fall through to the consuming `into_iter_value`,
+        // which is what an UNCHAINED `.into_iter()` with a known expected type
+        // already emitted — chained and unchained now agree.
+        let _ = &tp;
+        false
     }
 
     pub(super) fn is_ordering_like_type(&self, ty: &syn::Type) -> bool {
