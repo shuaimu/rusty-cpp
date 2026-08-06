@@ -7077,8 +7077,12 @@ fn test_match_struct_variant() {
             || out.contains("std::variant_alternative_t<0, "),
         "{out}"
     );
-    assert!(out.contains("const auto& x = _v.x;"), "{out}");
-    assert!(out.contains("const auto& y = _v.y;"), "{out}");
+    // `auto&&`, not `const auto&`: with a const visit parameter it deduces
+    // `const f64&` exactly as before, but it also lets an arm that took the
+    // MUTABLE visit parameter move a move-only payload out (see
+    // test_match_struct_variant_binding_allows_moving_move_only_payload).
+    assert!(out.contains("auto&& x = _v.x;"), "{out}");
+    assert!(out.contains("auto&& y = _v.y;"), "{out}");
 }
 
 #[test]
@@ -41468,6 +41472,33 @@ fn test_fn_local_static_with_dynamic_init_stays_after_guard() {
     assert!(
         guard < heavy,
         "dynamic-init static hoisted above its guard: {out}"
+    );
+}
+
+#[test]
+fn test_match_struct_variant_binding_allows_moving_move_only_payload() {
+    // A struct-variant field binding used to be emitted `const auto&`, so an
+    // arm handing a move-only payload (rusty::Box) to a handler hit the
+    // deleted copy ctor and could not compile. `auto&&` binds mutably when
+    // the arm took the mutable visit parameter, which is Rust's semantics for
+    // `match &mut`.
+    let out = transpile_str(
+        r#"
+        enum Cmd { Add { pollable: rusty::Box<PollableBase> } }
+        fn f(c: &mut Cmd) {
+            match c {
+                Cmd::Add { pollable } => { take_owned(pollable); }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto&& pollable = _v.pollable;"),
+        "field binding must be movable, not const-bound: {out}"
+    );
+    assert!(
+        !out.contains("const auto& pollable"),
+        "field binding still const-bound: {out}"
     );
 }
 

@@ -25532,8 +25532,18 @@ impl CodeGen {
                         syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => field_name_str.clone(),
                     };
+                    // `auto&&`, not `const auto&`: it collapses to `const F&`
+                    // when the visit parameter is const (byte-identical to the
+                    // previous emit for every arm that compiles today), and to
+                    // `F&` when the arm took the MUTABLE visit parameter via
+                    // `match &mut x`. That second case is what lets a move-only
+                    // payload -- e.g. a `rusty::Box<PollableBase>` handed to a
+                    // handler -- be moved out of the arm; with `const auto&` it
+                    // hit the deleted copy constructor and could not compile.
+                    // Same policy collect_pattern_binding_stmts already applies
+                    // to tuple-struct payload bindings (collect_passes.rs).
                     self.writeln(&format!(
-                        "const auto& {} = _v.{};",
+                        "auto&& {} = _v.{};",
                         binding_name, emitted_field_name
                     ));
                 }
