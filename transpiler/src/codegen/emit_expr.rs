@@ -6779,16 +6779,17 @@ impl CodeGen {
                                 // consumes and wants a bare value type. The
                                 // kind crosses crates via the UFCS manifest —
                                 // a consumer never sees the trait declaration.
-                                let callee_receiver_kind = self
+                                let owner_trait = self
                                     .ufcs_method_trait_owners
                                     .get(&method_name)
                                     .and_then(|owners| owners.iter().next())
-                                    .and_then(|owner| {
-                                        self.lookup_trait_method_receiver_kind(
-                                            owner,
-                                            &method_name,
-                                        )
-                                    });
+                                    .map(|o| o.as_str())
+                                    .unwrap_or("");
+                                let callee_receiver_kind = self
+                                    .lookup_trait_method_receiver_kind(
+                                        owner_trait,
+                                        &method_name,
+                                    );
                                 let self_spelling = match callee_receiver_kind {
                                     Some(0) | Some(1) => "decltype(__self)".to_string(),
                                     Some(_) => {
@@ -6801,18 +6802,35 @@ impl CodeGen {
                                         format!("std::remove_cvref_t<decltype({})>", receiver)
                                     }
                                 };
-                                let mapped_join = mapped
-                                    .iter()
-                                    .map(|(t, _)| t.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                // The head now declares return-position-only
-                                // params BEFORE `Self_`, so supplying just
-                                // them lets `Self_` DEDUCE from the receiver
-                                // argument — which preserves its reference
-                                // category without us having to spell it.
+                                // The head declares BARE undeducible params
+                                // before `Self_` and item-projection-defaulted
+                                // ones after it. Spell only the bare prefix:
+                                // `Self_` then DEDUCES from the receiver
+                                // argument (preserving its reference category
+                                // without us naming it) and the defaults
+                                // behind it fill themselves in. Spelling more
+                                // would push an argument into `Self_`'s slot.
+                                // `None` ⇒ callee has no `Self_` (concrete
+                                // impl) ⇒ spell everything, as before.
+                                let bare = self
+                                    .lookup_ufcs_bare_template_prefix_len(
+                                        owner_trait,
+                                        &method_name,
+                                    )
+                                    .map(|n| (n as usize).min(mapped.len()))
+                                    .unwrap_or(mapped.len());
                                 let _ = &self_spelling;
-                                callee = format!("{}<{}>", callee, mapped_join);
+                                // `callee<>` binds nothing and would re-break
+                                // deduction, so an empty prefix emits no
+                                // template argument list at all.
+                                if bare > 0 {
+                                    let mapped_join = mapped[..bare]
+                                        .iter()
+                                        .map(|(t, _)| t.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    callee = format!("{}<{}>", callee, mapped_join);
+                                }
                             }
                         }
                         return self.emit_extension_call_with_receiver_autoderef_fallback(

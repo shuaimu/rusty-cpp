@@ -52,6 +52,13 @@ pub struct UfcsTraitManifest {
     /// trait declaration — so this cannot be recovered locally.
     #[serde(default)]
     pub trait_method_receiver_kind: BTreeMap<String, u8>,
+    /// `<Trait>::<method>` → how many leading template params of the emitted
+    /// head precede `Self_`. A consumer may spell ONLY that many explicit
+    /// template arguments; `Self_` then deduces from the receiver and the
+    /// item-projection defaults behind it fill in. Cannot be recovered
+    /// locally — a consumer never sees the dependency's trait declaration.
+    #[serde(default)]
+    pub trait_method_bare_template_prefix_len: BTreeMap<String, u8>,
     /// Method name → owning trait names, restricted to actually-emitted
     /// `<Tr>_::m` free functions.
     #[serde(default)]
@@ -2865,6 +2872,7 @@ mod tests {
                 true,
             )]),
             trait_method_receiver_kind: std::collections::BTreeMap::new(),
+            trait_method_bare_template_prefix_len: std::collections::BTreeMap::new(),
             method_owners: std::collections::BTreeMap::from([(
                 "hello".to_string(),
                 vec!["Greet".to_string()],
@@ -2949,6 +2957,7 @@ mod tests {
                 true,
             )]),
             trait_method_receiver_kind: std::collections::BTreeMap::new(),
+            trait_method_bare_template_prefix_len: std::collections::BTreeMap::new(),
             method_owners: std::collections::BTreeMap::from([(
                 "consume".to_string(),
                 vec!["Greet".to_string()],

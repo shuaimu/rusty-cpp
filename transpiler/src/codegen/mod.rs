@@ -697,6 +697,14 @@ pub struct CodeGen {
     /// (matching the owner-map keys / call-site lookup).
     pub(crate) ufcs_emitted_trait_methods:
         std::collections::HashSet<(String, String)>,
+    /// `<Trait>::<method>` → how many leading template params of the emitted
+    /// `<Tr>_::m` head precede `Self_`. Those are the BARE undeducible params
+    /// (return-position-only, no default); a call site may spell ONLY these,
+    /// after which `Self_` deduces from the receiver and the item-projection
+    /// defaults behind it fill themselves in. `0` means spell no template
+    /// arguments at all — `Some(0)` and `None` are NOT the same thing.
+    pub(crate) ufcs_default_method_bare_prefix_len:
+        std::collections::HashMap<String, u8>,
     /// UFCS concrete-impl free-function signature dedupe (per emission phase).
     /// Distinct Rust types that map to the SAME C++ type (`isize`≡`i64`,
     /// `usize`≡`u64`, `NonZero*`/`Atomic*` width variants, `CStr`/`CString`/
@@ -2036,6 +2044,7 @@ impl CodeGen {
             ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
+            ufcs_default_method_bare_prefix_len: std::collections::HashMap::new(),
             ufcs_def_dedupe_seen: std::collections::HashSet::new(),
             ufcs_template_self_body: false,
             ufcs_free_fn_body: false,
@@ -3709,6 +3718,11 @@ impl CodeGen {
                 .trait_method_receiver_kind
                 .iter()
                 .map(|(key, kind)| (key.clone(), *kind))
+                .collect(),
+            trait_method_bare_template_prefix_len: self
+                .ufcs_default_method_bare_prefix_len
+                .iter()
+                .map(|(key, n)| (key.clone(), *n))
                 .collect(),
             method_owners,
             declared_types,
@@ -16679,8 +16693,17 @@ impl CodeGen {
                     }
                     for spec in &specs {
                         if self.emit_extension_trait_free_function_declaration(spec) {
+                            let m = spec.method.sig.ident.to_string();
                             self.ufcs_emitted_trait_methods
-                                .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
+                                .insert((trait_name.clone(), m.clone()));
+                            // Only trait DEFAULT methods carry `Self_`, and this
+                            // decl pass runs before any body — so the map is
+                            // complete by the time a call site is emitted.
+                            if spec.self_is_template_param {
+                                let n = self.extension_bare_prefix_len_for_spec(spec);
+                                self.ufcs_default_method_bare_prefix_len
+                                    .insert(format!("{}::{}", trait_name, m), n as u8);
+                            }
                         }
                     }
                     self.indent -= 1;
@@ -17886,7 +17909,13 @@ impl CodeGen {
             // supply it alone and let `Self_` deduce. Leading it with `Self_`
             // forced call sites to spell the receiver type too, which cannot
             // bind an lvalue receiver through a by-value `Self_`.
-            let insert_at = Self::extension_undeducible_prefix_len(&free_generics, &method.sig);
+            let projection_defaulted =
+                self.ufcs_projection_defaulted_params(&free_generics, &method.sig);
+            let insert_at = Self::extension_bare_undeducible_prefix_len(
+                &free_generics,
+                &method.sig,
+                &projection_defaulted,
+            );
             free_generics
                 .params
                 .insert(insert_at, syn::parse_quote!(Self_));
@@ -18206,7 +18235,13 @@ impl CodeGen {
         if method_spec.self_is_template_param {
             // See the declaration pass: `Self_` follows return-position-only
             // params so they can be supplied alone at call sites.
-            let insert_at = Self::extension_undeducible_prefix_len(&free_generics, &method.sig);
+            let projection_defaulted =
+                self.ufcs_projection_defaulted_params(&free_generics, &method.sig);
+            let insert_at = Self::extension_bare_undeducible_prefix_len(
+                &free_generics,
+                &method.sig,
+                &projection_defaulted,
+            );
             free_generics
                 .params
                 .insert(insert_at, syn::parse_quote!(Self_));
@@ -19084,9 +19119,55 @@ impl CodeGen {
         }
     }
 
-    fn extension_undeducible_prefix_len(
+    /// Which params `apply_iterator_item_projection_defaults` would attach a
+    /// default to. Probed by running that pass on a CLONE rather than
+    /// duplicating its predicate, so the two cannot drift apart.
+    fn ufcs_projection_defaulted_params(
+        &self,
+        free_generics: &syn::Generics,
+        sig: &syn::Signature,
+    ) -> std::collections::HashSet<String> {
+        fn defaulted(g: &syn::Generics) -> std::collections::HashSet<String> {
+            g.params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) if tp.default.is_some() => {
+                        Some(tp.ident.to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        let before = defaulted(free_generics);
+        let mut probe = free_generics.clone();
+        self.apply_iterator_item_projection_defaults(&mut probe, sig);
+        defaulted(&probe)
+            .into_iter()
+            .filter(|n| !before.contains(n))
+            .collect()
+    }
+
+    /// The bare-undeducible prefix length for a spec, recomputed from the same
+    /// inputs the emitters use. Emits nothing.
+    fn extension_bare_prefix_len_for_spec(&self, spec: &ExtensionImplMethod) -> usize {
+        let free_generics = self.extension_free_function_generics(
+            &spec.method,
+            &spec.self_ty,
+            Some(&spec.associated_type_bindings),
+        );
+        let projection_defaulted =
+            self.ufcs_projection_defaulted_params(&free_generics, &spec.method.sig);
+        Self::extension_bare_undeducible_prefix_len(
+            &free_generics,
+            &spec.method.sig,
+            &projection_defaulted,
+        )
+    }
+
+    fn extension_bare_undeducible_prefix_len(
         generics: &syn::Generics,
         sig: &syn::Signature,
+        projection_defaulted: &std::collections::HashSet<String>,
     ) -> usize {
         use quote::ToTokens;
         let mut value_param_text = String::new();
@@ -19104,13 +19185,21 @@ impl CodeGen {
                     // A param whose DEFAULT names `Self_` must follow it — a
                     // C++ default template argument may only use parameters
                     // already declared. Item-projection defaults
-                    // (`= next_item_t<Self_>::ok_type`) are exactly this case.
-                    !emit_items::contains_whole_word(
-                            &value_param_text,
-                            &tp.ident.to_string(),
-                        )
+                    // (`= next_item_t<Self_>::ok_type`) are exactly this case,
+                    // so they stay BEHIND `Self_`; only the BARE undeducible
+                    // params form the prefix, which is also exactly what a
+                    // call site is allowed to spell.
+                    let name = tp.ident.to_string();
+                    !emit_items::contains_whole_word(&value_param_text, &name)
+                        && !projection_defaulted.contains(&name)
                 }
-                _ => false,
+                // A const param (an array length such as `collect_array<N>`)
+                // is NEVER deducible from the receiver and never carries a
+                // projection default, so it belongs in the bare prefix — the
+                // call site must keep spelling it. Lifetimes are already
+                // dropped by `extension_free_function_generics`.
+                syn::GenericParam::Const(_) => true,
+                syn::GenericParam::Lifetime(_) => false,
             })
             .count()
     }

@@ -3443,6 +3443,23 @@ impl CodeGen {
             .find_map(|m| m.trait_method_receiver_kind.get(&key).copied())
     }
 
+    /// How many explicit template arguments a UFCS call site may spell for a
+    /// trait DEFAULT method before `Self_`. `None` means the callee has no
+    /// `Self_` at all (concrete impls) — spell everything, as before.
+    pub(super) fn lookup_ufcs_bare_template_prefix_len(
+        &self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<u8> {
+        let key = format!("{}::{}", trait_name, method_name);
+        if let Some(n) = self.ufcs_default_method_bare_prefix_len.get(&key) {
+            return Some(*n);
+        }
+        self.dependency_ufcs_trait_manifests
+            .iter()
+            .find_map(|m| m.trait_method_bare_template_prefix_len.get(&key).copied())
+    }
+
     pub(super) fn trait_method_name_always_has_receiver(&self, method: &str) -> bool {
         let suffix = format!("::{}", method);
         let mut any_known = false;
