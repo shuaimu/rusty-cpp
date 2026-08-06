@@ -17879,8 +17879,17 @@ impl CodeGen {
             Some(&method_spec.associated_type_bindings),
         );
         if method_spec.self_is_template_param {
-            // Default method (§ 3.2.13): `Self` is the leading template param.
-            free_generics.params.insert(0, syn::parse_quote!(Self_));
+            // Default method (§ 3.2.13): `Self` is a template param, placed
+            // AFTER any return-position-only params. `Self_` is deducible (it
+            // types the `self_` value parameter); a param that appears only in
+            // the return type is not, so it must come FIRST for a call site to
+            // supply it alone and let `Self_` deduce. Leading it with `Self_`
+            // forced call sites to spell the receiver type too, which cannot
+            // bind an lvalue receiver through a by-value `Self_`.
+            let insert_at = Self::extension_undeducible_prefix_len(&free_generics, &method.sig);
+            free_generics
+                .params
+                .insert(insert_at, syn::parse_quote!(Self_));
             // Item-projection defaults for params only the where-clause binds
             // (declaration pass only; the definition renders without defaults).
             self.apply_iterator_item_projection_defaults(&mut free_generics, &method.sig);
@@ -18195,8 +18204,12 @@ impl CodeGen {
             Some(&method_spec.associated_type_bindings),
         );
         if method_spec.self_is_template_param {
-            // Default method (§ 3.2.13): `Self` is the leading template param.
-            free_generics.params.insert(0, syn::parse_quote!(Self_));
+            // See the declaration pass: `Self_` follows return-position-only
+            // params so they can be supplied alone at call sites.
+            let insert_at = Self::extension_undeducible_prefix_len(&free_generics, &method.sig);
+            free_generics
+                .params
+                .insert(insert_at, syn::parse_quote!(Self_));
         }
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
@@ -19025,6 +19038,81 @@ impl CodeGen {
             )
         };
         self.record_function_return_type(&scoped_name, None);
+    }
+
+    /// How many leading type params of an extension free fn are
+    /// return-position-only (absent from every value parameter, so
+    /// undeducible). `Self_` is inserted after them: a call site can then
+    /// supply just the undeducible prefix and let `Self_` deduce from the
+    /// receiver argument.
+    /// Strip defaults that name `Self_` from params declared BEFORE it. A C++
+    /// default template argument may only use already-declared params, and
+    /// these params are supplied explicitly at every call site anyway.
+    fn hoist_self_before_dependent_defaults(generics: &mut syn::Generics) {
+        use quote::ToTokens;
+        let self_pos = generics.params.iter().position(|p| {
+            matches!(p, syn::GenericParam::Type(tp) if tp.ident == "Self_")
+        });
+        let Some(self_pos) = self_pos else { return };
+        let needs_hoist = generics.params.iter().take(self_pos).any(|p| {
+            matches!(p, syn::GenericParam::Type(tp)
+                if tp.default.as_ref().is_some_and(|d| {
+                    emit_items::contains_whole_word(
+                        &d.to_token_stream().to_string(),
+                        "Self_",
+                    )
+                }))
+        });
+        if needs_hoist {
+            // Drop the offending defaults instead of reordering: the call site
+            // now supplies these params explicitly (that is the whole point of
+            // putting them first), so a default is redundant — and keeping one
+            // that names a later-declared `Self_` is ill-formed.
+            for p in generics.params.iter_mut().take(self_pos) {
+                if let syn::GenericParam::Type(tp) = p
+                    && tp.default.as_ref().is_some_and(|d| {
+                        emit_items::contains_whole_word(
+                            &d.to_token_stream().to_string(),
+                            "Self_",
+                        )
+                    })
+                {
+                    tp.default = None;
+                    tp.eq_token = None;
+                }
+            }
+        }
+    }
+
+    fn extension_undeducible_prefix_len(
+        generics: &syn::Generics,
+        sig: &syn::Signature,
+    ) -> usize {
+        use quote::ToTokens;
+        let mut value_param_text = String::new();
+        for input in &sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                value_param_text.push_str(&pt.ty.to_token_stream().to_string());
+                value_param_text.push(' ');
+            }
+        }
+        generics
+            .params
+            .iter()
+            .take_while(|p| match p {
+                syn::GenericParam::Type(tp) => {
+                    // A param whose DEFAULT names `Self_` must follow it — a
+                    // C++ default template argument may only use parameters
+                    // already declared. Item-projection defaults
+                    // (`= next_item_t<Self_>::ok_type`) are exactly this case.
+                    !emit_items::contains_whole_word(
+                            &value_param_text,
+                            &tp.ident.to_string(),
+                        )
+                }
+                _ => false,
+            })
+            .count()
     }
 
     fn extension_free_function_generics(

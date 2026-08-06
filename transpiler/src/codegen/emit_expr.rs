@@ -6806,12 +6806,13 @@ impl CodeGen {
                                     .map(|(t, _)| t.as_str())
                                     .collect::<Vec<_>>()
                                     .join(", ");
-                                callee = format!(
-                                    "{}<{}, {}>",
-                                    callee,
-                                    self_spelling,
-                                    mapped_join
-                                );
+                                // The head now declares return-position-only
+                                // params BEFORE `Self_`, so supplying just
+                                // them lets `Self_` DEDUCE from the receiver
+                                // argument — which preserves its reference
+                                // category without us having to spell it.
+                                let _ = &self_spelling;
+                                callee = format!("{}<{}>", callee, mapped_join);
                             }
                         }
                         return self.emit_extension_call_with_receiver_autoderef_fallback(
