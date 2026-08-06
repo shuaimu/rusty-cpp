@@ -40062,3 +40062,63 @@ fn test_box_new_struct_literal_of_cpp_inherit_uses_fieldwise_ctor() {
         "expected fieldwise-ctor construction: {out}"
     );
 }
+
+#[test]
+#[ignore = "LIVE DEFECT: a fn returning a class type re-qualifies unqualified \
+free-fn calls against the return type (mako utils.cpp emitted \
+std::string::Log_error). This is a REPRO, kept ignored so it is not lost; \
+remove the ignore when the resolver is fixed."]
+fn test_fn_returning_std_string_keeps_free_fn_calls_unqualified() {
+    // A fn whose return type is std::string must not re-qualify UNRELATED
+    // unqualified free-fn calls in its body against the return type
+    // (mako utils.cpp get_host_name emitted std::string::Log_error).
+    let out = transpile_str(
+        r#"
+        fn log_it(msg: &str) {}
+        fn get_host_name() -> std::string {
+            let name: std::string = hostname_of();
+            let missing: bool = name.is_empty();
+            if missing {
+                log_it("no hostname");
+            }
+            name
+        }
+        fn hostname_of() -> std::string {
+            format!("h")
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("std::string::log_it"),
+        "free-fn call re-qualified against the return type: {out}"
+    );
+    assert!(out.contains("log_it(\"no hostname\")"), "{out}");
+}
+
+#[test]
+fn test_namespace_scope_thread_local_static_fwd_decl_keeps_specifier() {
+    // C++ requires the forward declaration and the definition to agree on
+    // thread storage: `extern T x;` followed by `inline thread_local T x = ..;`
+    // is rejected ("thread-local declaration follows non-thread-local
+    // declaration"), which made every namespace-scope thread_local slot
+    // unreachable from the DSL even though reads/assignments already lowered.
+    let out = transpile_str(
+        r#"
+        #[thread_local]
+        static mut g_slot: u64 = 0;
+        fn bump() -> u64 {
+            g_slot = g_slot + 1u64;
+            g_slot
+        }
+        "#,
+    );
+    assert!(
+        out.contains("extern thread_local uint64_t g_slot;"),
+        "forward decl dropped the thread_local specifier: {out}"
+    );
+    assert!(
+        out.contains("inline thread_local uint64_t g_slot"),
+        "definition lost thread_local: {out}"
+    );
+}
+

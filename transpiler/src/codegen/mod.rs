@@ -10147,7 +10147,25 @@ impl CodeGen {
             if type_string_has_auto_placeholder(&ty) {
                 continue;
             }
-            self.writeln(&format!("{}extern {} {};", export_prefix, ty, name));
+            // Carry `#[thread_local]` onto the FORWARD DECLARATION too, not
+            // just the definition. C++ requires the two to agree: a plain
+            // `extern T x;` followed by `inline thread_local T x = ...;` is
+            // rejected with "thread-local declaration follows non-thread-local
+            // declaration", which made every namespace-scope thread_local
+            // slot unreachable from the DSL even though reads and assignments
+            // already lowered correctly.
+            let is_thread_local = s.attrs.iter().any(|a| {
+                a.path()
+                    .segments
+                    .last()
+                    .is_some_and(|seg| seg.ident == "thread_local")
+            });
+            let storage = if is_thread_local {
+                "extern thread_local"
+            } else {
+                "extern"
+            };
+            self.writeln(&format!("{}{} {} {};", export_prefix, storage, ty, name));
             emitted_any = true;
         }
 
