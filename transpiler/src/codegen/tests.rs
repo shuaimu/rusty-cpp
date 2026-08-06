@@ -12233,6 +12233,34 @@ fn test_vec_macro() {
 }
 
 #[test]
+fn test_vec_macro_repeat_form_lowers_to_array_repeat() {
+    // `vec![elem; len]` used to splice the raw `elem ; len` tokens into a
+    // braced initializer and emit `rusty::Vec{0 ; k}` — not valid C++, so the
+    // repeat form was a hard compile error wherever it appeared.
+    let out = transpile_str("fn f(k: usize) { let v = vec![0; k]; }");
+    assert!(
+        out.contains("rusty::array_repeat(0, k)"),
+        "vec! repeat form not lowered: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Vec{0 ;"),
+        "raw repeat tokens still spliced into a braced init: {out}"
+    );
+}
+
+#[test]
+fn test_vec_macro_repeat_form_lowers_element_expression() {
+    // The element is a real expression, not pass-through tokens: a Rust
+    // literal suffix would otherwise leak into the C++ (`104u8`).
+    let out = transpile_str("fn f(n: usize) { let v = vec![7u8; n]; }");
+    assert!(
+        out.contains("rusty::array_repeat("),
+        "vec! repeat form not lowered: {out}"
+    );
+    assert!(!out.contains("7u8"), "Rust literal suffix leaked: {out}");
+}
+
+#[test]
 fn test_todo_macro() {
     let out = transpile_str("fn f() { todo!(); }");
     assert!(out.contains("throw std::logic_error"));
