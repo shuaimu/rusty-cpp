@@ -371,12 +371,27 @@ impl CodeGen {
             if self.try_emit_assign_if_return_statement_level(&assign.left, &assign.right) {
                 return;
             }
+            // (return-position sibling is handled just below, outside the
+            // Assign arm, since its statement is an Expr::Return.)
             // Destructuring assignment `(x, y) = (y, x)`: the LHS tuple must
             // be a REFERENCE tuple — emitting it as std::make_tuple assigned
             // into a temporary, making the whole statement a silent no-op.
             if self.try_emit_tuple_destructuring_assign(assign) {
                 return;
             }
+        }
+        // `return if cond { ...?...; a } else { b };` — same problem as the
+        // assignment case above: the value-position lowerings would either
+        // need single-expression branches (ternary) or trap the branch's
+        // `?`/`return` inside a lambda (IIFE), and with neither available the
+        // emitter fell back to a `/* TODO: if-expression */` placeholder that
+        // dropped the expression entirely.
+        if let syn::Stmt::Expr(syn::Expr::Return(ret), _) = stmt
+            && let Some(value) = ret.expr.as_deref()
+            && !self.in_async
+            && self.try_emit_return_if_statement_level(value)
+        {
+            return;
         }
         match stmt {
             syn::Stmt::Local(local) => self.emit_local(local),
@@ -6138,7 +6153,7 @@ impl CodeGen {
                                 .as_ref()
                                 .is_some_and(|(_, e)| self.expr_contains_early_return_or_try(e))
                         {
-                            self.emit_if_assign_as_statement_block(cpp_name, inner_if, None);
+                            self.emit_if_assign_as_statement_block(&IfTailSink::Assign(cpp_name), inner_if, None);
                             continue;
                         }
                     }
@@ -6179,7 +6194,7 @@ impl CodeGen {
                                     })
                                 {
                                     self.emit_if_assign_as_statement_block(
-                                        cpp_name, inner_if, None,
+                                        &IfTailSink::Assign(cpp_name), inner_if, None,
                                     );
                                     continue;
                                 }
@@ -6191,7 +6206,7 @@ impl CodeGen {
                         self.emit_stmt(stmt, false);
                     }
                 } else if let syn::Expr::If(inner_if) = else_expr.as_ref() {
-                    self.emit_if_assign_as_statement_block(cpp_name, inner_if, None);
+                    self.emit_if_assign_as_statement_block(&IfTailSink::Assign(cpp_name), inner_if, None);
                 } else {
                     let else_val = self.emit_expr_to_string(else_expr);
                     self.writeln(&format!("{} = {};", cpp_name, else_val));
@@ -6217,9 +6232,24 @@ impl CodeGen {
     /// Lower `result_var = if cond { ...?... } else { val };` as a statement block
     /// that assigns to `result_var` in each branch. Handles nested if-expressions
     /// with `?` recursively.
+    // (IfTailSink is declared at module scope below.)
+    /// Where the value of a statement-lowered `if` expression goes.
+    ///
+    /// `place = if c { ...?...; a } else { b }` assigns into `place`;
+    /// `return if c { ...?...; a } else { b }` returns it. Both need the same
+    /// statement-level lowering — an IIFE would capture the branch's `?`/
+    /// `return` as lambda-local instead of function-local — so the emitter is
+    /// shared and only the tail differs.
+    fn if_tail_text(&self, sink: &IfTailSink<'_>, val: &str) -> String {
+        match sink {
+            IfTailSink::Assign(name) => format!("{} = {};", name, val),
+            IfTailSink::Return => format!("return {};", val),
+        }
+    }
+
     pub(super) fn emit_if_assign_as_statement_block(
         &mut self,
-        result_var: &str,
+        sink: &IfTailSink<'_>,
         if_expr: &syn::ExprIf,
         expected_ty: Option<&syn::Type>,
     ) {
@@ -6231,7 +6261,9 @@ impl CodeGen {
             self.indent += 1;
             self.push_transient_statement_scope();
             if let Some(used) = self.local_cpp_names_used.last_mut() {
-                used.insert(result_var.to_string());
+                if let IfTailSink::Assign(name) = sink {
+                    used.insert((*name).to_string());
+                }
             }
             self.emit_if_let_statement_scope_bindings(
                 &let_expr.pat,
@@ -6246,7 +6278,7 @@ impl CodeGen {
             self.push_transient_statement_scope();
         }
 
-        // Emit then-branch; tail assigns to result_var
+        // Emit then-branch; tail feeds the sink (assignment or return)
         let stmts = &if_expr.then_branch.stmts;
         for (i, stmt) in stmts.iter().enumerate() {
             let is_last = i == stmts.len() - 1;
@@ -6260,7 +6292,7 @@ impl CodeGen {
                                 .is_some_and(|(_, e)| self.expr_contains_early_return_or_try(e))
                         {
                             self.emit_if_assign_as_statement_block(
-                                result_var,
+                                sink,
                                 inner_if,
                                 expected_ty,
                             );
@@ -6271,7 +6303,8 @@ impl CodeGen {
                         }
                     }
                     let val = self.emit_expr_to_string_with_expected(expr, expected_ty);
-                    self.writeln(&format!("{} = {};", result_var, val));
+                    let tail = self.if_tail_text(sink, &val);
+                    self.writeln(&tail);
                     continue;
                 }
             }
@@ -6285,7 +6318,8 @@ impl CodeGen {
                 syn::Expr::Block(b) => {
                     if let Some(single) = self.extract_single_expr_from_block(&b.block) {
                         let val = self.emit_expr_to_string_with_expected(single, expected_ty);
-                        self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
+                        let tail = self.if_tail_text(sink, &val);
+                        self.writeln(&format!("}} else {{ {} }}}}", tail));
                     } else {
                         self.writeln("} else {");
                         self.indent += 1;
@@ -6302,7 +6336,7 @@ impl CodeGen {
                                             |(_, e)| self.expr_contains_early_return_or_try(e),
                                         ) {
                                             self.emit_if_assign_as_statement_block(
-                                                result_var,
+                                                sink,
                                                 inner_if,
                                                 expected_ty,
                                             );
@@ -6311,7 +6345,8 @@ impl CodeGen {
                                     }
                                     let val =
                                         self.emit_expr_to_string_with_expected(expr, expected_ty);
-                                    self.writeln(&format!("{} = {};", result_var, val));
+                                    let tail = self.if_tail_text(sink, &val);
+                    self.writeln(&tail);
                                     continue;
                                 }
                             }
@@ -6331,17 +6366,19 @@ impl CodeGen {
                     {
                         self.writeln("} else {");
                         self.indent += 1;
-                        self.emit_if_assign_as_statement_block(result_var, else_if, expected_ty);
+                        self.emit_if_assign_as_statement_block(sink, else_if, expected_ty);
                         self.indent -= 1;
                         self.writeln("}}");
                     } else {
                         let val = self.emit_expr_to_string_with_expected(else_expr, expected_ty);
-                        self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
+                        let tail = self.if_tail_text(sink, &val);
+                        self.writeln(&format!("}} else {{ {} }}}}", tail));
                     }
                 }
                 other => {
                     let val = self.emit_expr_to_string_with_expected(other, expected_ty);
-                    self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
+                    let tail = self.if_tail_text(sink, &val);
+                        self.writeln(&format!("}} else {{ {} }}}}", tail));
                 }
             }
         } else {
@@ -6557,7 +6594,7 @@ impl CodeGen {
                                 .is_some_and(|(_, e)| self.expr_contains_early_return_or_try(e))
                         {
                             self.emit_if_assign_as_statement_block(
-                                &result_var,
+                                &IfTailSink::Assign(&result_var),
                                 inner_if,
                                 inferred_result_ty.as_ref(),
                             );
@@ -7179,4 +7216,11 @@ impl syn::visit_mut::VisitMut for LoopBreakChainRewrite<'_> {
     }
 
     fn visit_item_mut(&mut self, _node: &mut syn::Item) {}
+}
+
+/// Destination for the value of a statement-lowered `if` expression.
+/// See `CodeGen::if_tail_text`.
+pub(super) enum IfTailSink<'a> {
+    Assign(&'a str),
+    Return,
 }

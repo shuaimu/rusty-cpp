@@ -12233,6 +12233,44 @@ fn test_vec_macro() {
 }
 
 #[test]
+fn test_return_if_with_try_in_branch_lowers_to_statement_flow() {
+    // `return if c { ...?...; a } else { b };` has no value-position lowering:
+    // a ternary needs single-expression branches and an IIFE would capture the
+    // `?` as lambda-local. The emitter used to drop the whole expression to a
+    // `/* TODO: if-expression */` placeholder.
+    let out = transpile_str(
+        r#"
+        pub fn f(v: Option<i32>, c: bool) -> Option<i32> {
+            return if c {
+                let x = v?;
+                Some(x + 1)
+            } else {
+                None
+            };
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("/* TODO: if-expression */"),
+        "return-position if-expression dropped to a placeholder: {out}"
+    );
+    assert!(
+        out.contains("RUSTY_TRY_OPT(v)"),
+        "the `?` should lower at function level, not inside a lambda: {out}"
+    );
+}
+
+#[test]
+fn test_return_if_without_escaping_control_flow_keeps_ternary() {
+    // The value-only case must be untouched by the statement-level path.
+    let out = transpile_str("pub fn g(c: bool) -> i32 { return if c { 1 } else { 2 }; }");
+    assert!(
+        out.contains("return (c ?"),
+        "plain return-if should stay a ternary: {out}"
+    );
+}
+
+#[test]
 fn test_vec_macro_repeat_form_lowers_to_array_repeat() {
     // `vec![elem; len]` used to splice the raw `elem ; len` tokens into a
     // braced initializer and emit `rusty::Vec{0 ; k}` — not valid C++, so the

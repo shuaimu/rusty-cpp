@@ -5814,7 +5814,49 @@ impl CodeGen {
         let synth_name = self.reserve_synthetic_cpp_name("_assign_if_lhs");
         self.writeln(&format!("auto& {} = {};", synth_name, lhs_cpp));
         let expected_ty = self.infer_simple_expr_type(lhs_expr);
-        self.emit_if_assign_as_statement_block(&synth_name, if_expr, expected_ty.as_ref());
+        self.emit_if_assign_as_statement_block(
+            &super::emit_stmt::IfTailSink::Assign(&synth_name),
+            if_expr,
+            expected_ty.as_ref(),
+        );
+        true
+    }
+
+    /// `return if cond { ...?...; a } else { b };` — the return-position
+    /// sibling of `try_emit_assign_if_return_statement_level`.
+    ///
+    /// The value-position lowerings cannot express this: a ternary needs both
+    /// branches to be single expressions, and an IIFE would capture a branch's
+    /// `?`/`return` as lambda-local rather than function-local. With no path
+    /// left the emitter degraded to a literal `/* TODO: if-expression */`
+    /// placeholder, silently dropping the whole expression (itertools'
+    /// `Permutations::next`, which then failed to compile as "non-void block
+    /// should return a value" — the lucky case; in a void context it would
+    /// simply have vanished).
+    ///
+    /// Lowering to a real `if` STATEMENT with a `return` in each branch tail
+    /// keeps the branch's own `?`/`return` at function level, where it belongs.
+    pub(super) fn try_emit_return_if_statement_level(&mut self, value: &syn::Expr) -> bool {
+        let syn::Expr::If(if_expr) = self.peel_paren_group_expr(value) else {
+            return false;
+        };
+        // Every path has to produce the returned value, so an else is required.
+        let Some((_, else_branch)) = &if_expr.else_branch else {
+            return false;
+        };
+        // Only intercept the case the value-position paths get wrong; the
+        // plain ternary/IIFE lowering handles value-only branches correctly.
+        if !self.block_contains_early_return_or_try(&if_expr.then_branch)
+            && !self.expr_contains_early_return_or_try(else_branch)
+        {
+            return false;
+        }
+        let expected_ty = self.current_return_type_hint().cloned();
+        self.emit_if_assign_as_statement_block(
+            &super::emit_stmt::IfTailSink::Return,
+            if_expr,
+            expected_ty.as_ref(),
+        );
         true
     }
 
