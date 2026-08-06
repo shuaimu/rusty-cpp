@@ -11887,9 +11887,18 @@ impl CodeGen {
         // the ctor as a fn value): the raw factory spelling (`rusty::Ok`) is
         // an uninstantiated template, not a callable — wrap in a forwarding
         // lambda.
+        // A TURBOFISH is allowed here (`.map(Ok::<u8, ()>)`): in Rust it only
+        // pins the variant's type args, which C++ recovers from the expected
+        // Result/Option type at the use site. Requiring no arguments made the
+        // turbofished form fall through to the raw `rusty::Ok` spelling — an
+        // uninstantiated template, so `Func` was undeducible (itertools
+        // laziness `Panicking.map(Ok::<u8, ()>)`).
         if path_expr.qself.is_none()
             && path_expr.path.segments.len() == 1
-            && path_expr.path.segments[0].arguments.is_empty()
+            && matches!(
+                path_expr.path.segments[0].arguments,
+                syn::PathArguments::None | syn::PathArguments::AngleBracketed(_)
+            )
         {
             let ident = path_expr.path.segments[0].ident.to_string();
             if matches!(ident.as_str(), "Ok" | "Err" | "Some") {
