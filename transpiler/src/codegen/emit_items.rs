@@ -8339,6 +8339,9 @@ impl CodeGen {
                 )
             });
         let mut is_variant_struct_literal_target = variant_struct_target.is_some();
+        // Set when the alias spelling below wins: it already carries EVERY
+        // template argument, so positional recovery must not re-derive them.
+        let mut adopted_return_alias_spelling = false;
         let mut target_name = variant_struct_target
             .clone()
             .or(expected_target_name)
@@ -8356,6 +8359,7 @@ impl CodeGen {
                 self.return_type_alias_spelling_for_struct_literal(&struct_expr.path)
         {
             target_name = alias_spelling;
+            adopted_return_alias_spelling = true;
         }
         if !target_name.contains("::")
             && struct_expr.path.segments.len() >= 2
@@ -8385,6 +8389,12 @@ impl CodeGen {
             .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::None))
             && allow_omitted_generic_recovery
             && !is_variant_struct_literal_target
+            // Field-based recovery reads the literal's OWN fields, so for an
+            // alias it re-derives the alias's parameters instead of the
+            // arguments the signature applies to them (`MergeJoinBy<I, ..>`
+            // for a fn returning `MergeJoinBy<into_iter_t<I>, ..>`) — which
+            // instantiates a different type than the function returns.
+            && !adopted_return_alias_spelling
         {
             let is_local_type_path = if struct_expr.path.segments.len() == 1 {
                 let local_name = struct_expr.path.segments[0].ident.to_string();
