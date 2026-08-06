@@ -1354,6 +1354,11 @@ pub struct CodeGen {
     /// slice of that: back-propagate the concrete `Coll<..>` from those uses in
     /// the same block. Maps the local name → the inferred collection type.
     pub(crate) collection_ctor_usage_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// `let indices = vec![0; k];` used as a struct-literal field whose
+    /// declared type names the element (`Box<[usize]>`). Rust types the local
+    /// FROM the field; mirror that so the elements are not guessed from the
+    /// literals. Maps the local name → the declared field type.
+    pub(crate) struct_field_usage_type_hints: Vec<HashMap<String, syn::Type>>,
     /// The input type of the closure currently being emitted as a `.map()` /
     /// `.and_then()` argument (the receiver's `Result`/`Option` Ok/Some type).
     /// Lets a destructured closure param (`|(event, mark)|` on
@@ -2185,6 +2190,7 @@ impl CodeGen {
             return_type_hint_push_depths: Vec::new(),
             int_literal_usage_type_hints: Vec::new(),
             collection_ctor_usage_type_hints: Vec::new(),
+            struct_field_usage_type_hints: Vec::new(),
             pending_map_closure_input_type: std::cell::RefCell::new(None),
             pending_closure_param_types: std::cell::RefCell::new(None),
             pending_map_closure_return_type: std::cell::RefCell::new(None),
@@ -30604,6 +30610,124 @@ impl CodeGen {
         };
         self.function_return_types.contains_key(&scoped)
             || self.emitted_top_level_functions.contains(&scoped)
+    }
+
+    /// Collect declared FIELD types for untyped locals that flow, by name,
+    /// into a struct literal field. See `struct_field_usage_type_hints`.
+    ///
+    /// Rust types such a local FROM the field:
+    ///
+    ///     let indices = vec![0; k].into_boxed_slice();
+    ///     CombinationsWithReplacement { indices, pool, first: true }
+    ///
+    /// makes the literal `usize` because the field is `Box<[usize]>`. The
+    /// emitter has no expected type at the `let`, so the repeat's element
+    /// would deduce to `int` and produce a `Box<span<int>>` that does not
+    /// convert to the field's `Box<span<size_t>>`.
+    ///
+    /// Deliberately narrow: only untyped locals whose initializer is a `vec!`
+    /// (directly, or through `.into_boxed_slice()`) — exactly the shapes whose
+    /// element type is otherwise guessed from the literals alone. Widening
+    /// this to every local would re-type bindings whose initializers already
+    /// pinned a perfectly good type.
+    fn collect_struct_field_usage_type_hints(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> HashMap<String, syn::Type> {
+        fn init_is_vec_macro(cg: &CodeGen, expr: &syn::Expr) -> bool {
+            match cg.peel_paren_group_expr(expr) {
+                // `cargo expand` turns `vec![elem; len]` into
+                // `::alloc::vec::from_elem(elem, len)` before we ever see it,
+                // so the call form is the one that actually shows up.
+                syn::Expr::Call(call) => {
+                    call.args.len() == 2
+                        && matches!(
+                            cg.peel_paren_group_expr(&call.func),
+                            syn::Expr::Path(p)
+                                if p.path.segments.last().is_some_and(|s| s.ident == "from_elem")
+                                    && p.path.segments.iter().any(|s| s.ident == "vec")
+                        )
+                }
+                syn::Expr::Macro(m) => m
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "vec"),
+                syn::Expr::MethodCall(mc) => {
+                    mc.args.is_empty()
+                        && mc.method == "into_boxed_slice"
+                        && init_is_vec_macro(cg, &mc.receiver)
+                }
+                _ => false,
+            }
+        }
+
+        let mut candidates: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else { continue };
+            // `let x: T = ..` is a `Pat::Type`, so annotated bindings are
+            // naturally skipped — their type is already pinned.
+            let syn::Pat::Ident(pi) = &local.pat else {
+                continue;
+            };
+            if pi.subpat.is_some() {
+                continue;
+            }
+            let Some(init) = &local.init else { continue };
+            if init.diverge.is_some() {
+                continue;
+            }
+            if init_is_vec_macro(self, &init.expr) {
+                candidates.insert(pi.ident.to_string());
+            }
+        }
+        if candidates.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut out: HashMap<String, syn::Type> = HashMap::new();
+        for stmt in stmts {
+            let expr = match stmt {
+                syn::Stmt::Expr(e, _) => e,
+                _ => continue,
+            };
+            let syn::Expr::Struct(s) = self.peel_paren_group_expr(expr) else {
+                continue;
+            };
+            let Some(owner) = s.path.segments.last().map(|seg| seg.ident.to_string()) else {
+                continue;
+            };
+            let Some(fields) = self.struct_field_types.get(&owner).or_else(|| {
+                // Module-scoped keys (`combinations_with_replacement::CwR`).
+                let suffix = format!("::{}", owner);
+                self.struct_field_types
+                    .iter()
+                    .find(|(key, _)| key.ends_with(&suffix))
+                    .map(|(_, fields)| fields)
+            }) else {
+                continue;
+            };
+            for f in &s.fields {
+                let syn::Member::Named(field_name) = &f.member else {
+                    continue;
+                };
+                let syn::Expr::Path(p) = self.peel_paren_group_expr(&f.expr) else {
+                    continue;
+                };
+                if p.path.segments.len() != 1 {
+                    continue;
+                }
+                let bound = p.path.segments[0].ident.to_string();
+                if !candidates.contains(&bound) {
+                    continue;
+                }
+                if let Some(ty) = fields.get(&field_name.to_string()) {
+                    out.insert(bound, ty.clone());
+                }
+            }
+        }
+        out
     }
 
     /// Collect integer element types for untyped integer-literal locals whose

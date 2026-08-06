@@ -733,6 +733,8 @@ impl CodeGen {
             .push(self.collect_int_literal_usage_type_hints(&block.stmts));
         self.collection_ctor_usage_type_hints
             .push(self.collect_collection_ctor_usage_type_hints(&block.stmts));
+        self.struct_field_usage_type_hints
+            .push(self.collect_struct_field_usage_type_hints(&block.stmts));
         self.collection_decltype_element_overrides
             .push(decltype_element_overrides);
         self.local_bindings.push(HashMap::new());
@@ -1002,6 +1004,7 @@ impl CodeGen {
         self.tail_returned_local_type_hints.pop();
         self.int_literal_usage_type_hints.pop();
         self.collection_ctor_usage_type_hints.pop();
+        self.struct_field_usage_type_hints.pop();
         self.collection_decltype_element_overrides.pop();
         self.reassigned_vars = prev;
         self.deref_assigned_vars = prev_deref_assigned;
@@ -2744,6 +2747,60 @@ impl CodeGen {
     }
 
     /// Emit a macro invocation as an expression (returns a string).
+    /// `vec![elem; len]` / `vec![a, b, c]` emitted with a known ELEMENT type.
+    ///
+    /// `emit_macro_expr` takes no expected type — and neither
+    /// `emit_expr_to_string_with_expected` nor `emit_expr_to_string` has a
+    /// `syn::Expr::Macro` arm that carries one — so a `vec!` in a typed
+    /// position otherwise deduces its elements from the literals alone. Rust
+    /// types them from context instead: `vec![0; k]` flowing into a
+    /// `Box<[usize]>` builds `usize` zeros, not `int` ones.
+    ///
+    /// Returns None when `expr` is not a `vec!` invocation, so callers can
+    /// fall back to the untyped emission unchanged.
+    pub(super) fn try_emit_vec_macro_with_element_hint(
+        &self,
+        expr: &syn::Expr,
+        elem_ty: &syn::Type,
+    ) -> Option<String> {
+        // `cargo expand` runs before transpilation, and it rewrites
+        // `vec![elem; len]` into `::alloc::vec::from_elem(elem, len)`. That
+        // call form — not the macro — is what every expanded crate actually
+        // contains, so it has to be recognised here too.
+        if let syn::Expr::Call(call) = self.peel_paren_group_expr(expr)
+            && call.args.len() == 2
+            && let syn::Expr::Path(p) = self.peel_paren_group_expr(&call.func)
+            && p.path.segments.last().is_some_and(|s| s.ident == "from_elem")
+            && p.path.segments.iter().any(|s| s.ident == "vec")
+        {
+            let val = &call.args[0];
+            let len = &call.args[1];
+            let rep: syn::ExprRepeat = syn::parse_quote!([#val; #len]);
+            return Some(self.emit_repeat_expr_with_element_hint(&rep, elem_ty));
+        }
+        let syn::Expr::Macro(m) = self.peel_paren_group_expr(expr) else {
+            return None;
+        };
+        if m.mac.path.segments.last()?.ident != "vec" {
+            return None;
+        }
+        let tokens = m.mac.tokens.to_string();
+        if let Ok(rep) = syn::parse_str::<syn::ExprRepeat>(&format!("[{}]", tokens)) {
+            return Some(self.emit_repeat_expr_with_element_hint(&rep, elem_ty));
+        }
+        let arr = syn::parse_str::<syn::ExprArray>(&format!("[{}]", tokens)).ok()?;
+        let items: Vec<String> = arr
+            .elems
+            .iter()
+            .map(|e| self.emit_expr_to_string_with_expected_and_move_if_needed(e, Some(elem_ty)))
+            .collect();
+        Some(format!(
+            "rusty::Vec<{}>{{{}}}",
+            self.map_type(elem_ty),
+            items.join(", ")
+        ))
+    }
+
     pub(super) fn emit_macro_expr(&self, mac: &syn::Macro) -> String {
         let macro_name = mac
             .path
@@ -8041,6 +8098,36 @@ impl CodeGen {
             // Box<Slice<K, V>>); the runtime helper only knows Vec shapes.
             && !self.receiver_declares_inherent_method(&mc.receiver, "into_boxed_slice")
         {
+            // `Box<[T]>` names the element type the RECEIVER has to build.
+            // Rust infers the literal in `vec![0; k].into_boxed_slice()` as
+            // `usize` from the `Box<[usize]>` it flows into; with no expected
+            // type reaching the receiver the repeat's element deduces to `int`
+            // and the result is a `Box<span<int>>` that will not convert.
+            // The Box is peeled here rather than by widening
+            // `expected_array_element_type`, which `span_element_type` and
+            // others also consult.
+            let boxed_elem = expected_ty
+                .and_then(|ty| match ty {
+                    syn::Type::Path(tp) => tp.path.segments.last().and_then(|seg| {
+                        if seg.ident != "Box" {
+                            return None;
+                        }
+                        let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+                            return None;
+                        };
+                        ab.args.iter().find_map(|a| match a {
+                            syn::GenericArgument::Type(inner) => Some(inner),
+                            _ => None,
+                        })
+                    }),
+                    _ => None,
+                })
+                .and_then(|inner| self.expected_array_element_type(Some(inner)));
+            if let Some(elem) = boxed_elem
+                && let Some(seeded) = self.try_emit_vec_macro_with_element_hint(&mc.receiver, elem)
+            {
+                return format!("rusty::into_boxed_slice({})", seeded);
+            }
             let receiver = self.emit_expr_maybe_move(&mc.receiver);
             return format!("rusty::into_boxed_slice({})", receiver);
         }

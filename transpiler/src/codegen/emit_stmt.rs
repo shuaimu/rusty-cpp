@@ -3206,6 +3206,26 @@ impl CodeGen {
                         inferred_binding_ty = Some(usage_ty);
                     }
                 }
+                // `let indices = vec![0; k]; Struct { indices, .. }`: the
+                // struct's declared field type names the element type Rust
+                // would have inferred here. Only fills a binding the
+                // initializer left unpinned or pinned only to an incomplete
+                // (`auto`-leaking) type — the collector is already restricted
+                // to `vec!` initializers.
+                if let Some(field_ty) = self
+                    .struct_field_usage_type_hints
+                    .iter()
+                    .rev()
+                    .find_map(|hints| hints.get(&name_str))
+                    .cloned()
+                {
+                    let unpinned = inferred_binding_ty
+                        .as_ref()
+                        .is_none_or(|ty| type_string_has_auto_placeholder(&self.map_type(ty)));
+                    if unpinned {
+                        inferred_binding_ty = Some(field_ty);
+                    }
+                }
                 // `let mut m = HashMap::new()`: back-propagate m's concrete
                 // Coll<K,V,..> from its later insert/push uses in this block so
                 // the initializer emits `HashMap<K,V>::new()` instead of leaking

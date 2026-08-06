@@ -12249,6 +12249,57 @@ fn test_vec_macro_repeat_form_lowers_to_array_repeat() {
 }
 
 #[test]
+fn test_vec_repeat_local_takes_element_type_from_struct_field() {
+    // Rust infers the `0` as usize from the `Box<[usize]>` field the local
+    // flows into. Without that the repeat's element deduces to int and the
+    // result is a Box<span<int>> that will not convert.
+    let out = transpile_str(
+        r#"
+        pub struct CwR { pub indices: Box<[usize]>, pub first: bool }
+        pub fn make(k: usize) -> CwR {
+            let indices = vec![0; k].into_boxed_slice();
+            CwR { indices, first: true }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::array_repeat(static_cast<size_t>(0), k)"),
+        "struct field type did not reach the repeat element: {out}"
+    );
+}
+
+#[test]
+fn test_vec_from_elem_call_form_takes_element_type_from_struct_field() {
+    // `cargo expand` runs before transpilation and rewrites `vec![0; k]` into
+    // `::alloc::vec::from_elem(0, k)`, so the CALL form is what every expanded
+    // crate actually contains — the macro form alone is not enough.
+    let out = transpile_str(
+        r#"
+        pub struct CwR { pub indices: Box<[usize]>, pub first: bool }
+        pub fn make(k: usize) -> CwR {
+            let indices = ::alloc::vec::from_elem(0, k).into_boxed_slice();
+            CwR { indices, first: true }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::array_repeat(static_cast<size_t>(0), k)"),
+        "from_elem call form did not take the field's element type: {out}"
+    );
+}
+
+#[test]
+fn test_vec_repeat_takes_element_type_from_declared_return_type() {
+    let out = transpile_str(
+        "pub fn d(k: usize) -> Box<[usize]> { vec![0; k].into_boxed_slice() }",
+    );
+    assert!(
+        out.contains("static_cast<size_t>(0)"),
+        "Box<[T]> return type did not reach the repeat element: {out}"
+    );
+}
+
+#[test]
 fn test_vec_macro_repeat_form_lowers_element_expression() {
     // The element is a real expression, not pass-through tokens: a Rust
     // literal suffix would otherwise leak into the C++ (`104u8`).
