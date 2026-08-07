@@ -788,6 +788,56 @@ private:
     Func func_;
 };
 
+template<typename Iter, typename Func>
+class filter_map_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::filter_map requires next() to return an Option/optional-like value"
+    );
+
+    filter_map_next_iter(Iter iter, Func func)
+        : iter_(std::move(iter)), func_(std::move(func)) {}
+
+    filter_map_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    // Rust's `FilterMap::next` pulls until the closure yields Some, so the
+    // loop lives here rather than in the caller.
+    auto next() {
+        using item_type = next_item_t<Iter>;
+        using mapped_option = std::decay_t<decltype(
+            std::invoke(std::declval<Func&>(), deref_if_pointer(std::declval<item_type>())))>;
+        using mapped_type = std::decay_t<decltype(
+            option_like_take_value(std::declval<mapped_option&>()))>;
+        using next_result = rusty::Option<mapped_type>;
+
+        for (;;) {
+            auto item = iter_.next();
+            if (!option_like_has_value(item)) {
+                return next_result(rusty::None);
+            }
+            auto mapped = std::invoke(
+                func_,
+                deref_if_pointer(option_like_take_value(item)));
+            if (option_like_has_value(mapped)) {
+                return next_result(option_like_take_value(mapped));
+            }
+        }
+    }
+
+    // Rust's `FilterMap::size_hint` keeps the inner UPPER bound and drops the
+    // lower one to 0 — any element may be filtered out.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return {static_cast<size_t>(0), std::get<1>(forwarded_size_hint(iter_))};
+    }
+
+private:
+    Iter iter_;
+    Func func_;
+};
+
 template<typename Iter>
 class enumerate_next_iter {
 public:
@@ -1997,6 +2047,15 @@ auto make_map_next_iter(Iter&& iter, Func&& func) {
         std::forward<Func>(func));
 }
 
+template<typename Iter, typename Func>
+auto make_filter_map_next_iter(Iter&& iter, Func&& func) {
+    using stored_iter = std::decay_t<Iter>;
+    using stored_func = std::decay_t<Func>;
+    return filter_map_next_iter<stored_iter, stored_func>(
+        std::forward<Iter>(iter),
+        std::forward<Func>(func));
+}
+
 template<typename Iter>
 auto make_enumerate_next_iter(Iter&& iter) {
     using stored_iter = std::decay_t<Iter>;
@@ -2487,6 +2546,32 @@ decltype(auto) for_in(Range&& range) {
     } else {
         return detail::preserve_for_in_range(std::forward<Range>(range));
     }
+}
+
+// `rusty::filter_map` for a next()-ONLY iterator.
+//
+// The general `filter_map` lives in array.hpp with its `filter_map_view`, but
+// that view needs `std::begin`/`std::end`, and its into_iter() fallback
+// recursed forever on a next-only iterator: Rust's blanket
+// `impl IntoIterator for I: Iterator` is identity, so `x.into_iter()` returns
+// the same type. The lazy adapters that handle this case all live HERE, and
+// array.hpp cannot name them (neither header includes the other — both are
+// deliberately self-contained), so the next-only case is a constrained
+// overload beside `rusty::map`, which resolves the same situation the same way.
+//
+// Constrained to types WITHOUT begin/end so anything the array.hpp view
+// already handles keeps taking that path unchanged; only the shape that used
+// to recurse is claimed here.
+template<typename Range, typename Func>
+    requires (detail::has_option_like_next_v<std::remove_reference_t<Range>>
+              && !requires(std::remove_reference_t<Range>& r) {
+                     std::begin(r);
+                     std::end(r);
+                 })
+auto filter_map(Range&& range, Func&& func) {
+    return detail::make_filter_map_next_iter(
+        std::forward<Range>(range),
+        std::forward<Func>(func));
 }
 
 template<typename Range, typename Func>

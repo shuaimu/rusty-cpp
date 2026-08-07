@@ -1652,7 +1652,17 @@ auto filter_map(Range&& range, Func&& func) {
             std::forward<Range>(range),
             std::forward<Func>(func)
         );
-    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }
+                         && !std::is_same_v<
+                                std::remove_cvref_t<
+                                    decltype(std::declval<Range&&>().into_iter())>,
+                                std::remove_cvref_t<Range>>) {
+        // Guarded against IDENTITY into_iter(): Rust's blanket
+        // `impl IntoIterator for I: Iterator` returns Self, and the runtime
+        // mirrors that, so an unguarded recursion here re-entered this same
+        // specialization forever ("function with deduced return type cannot be
+        // used before it is defined"). A next-only iterator is claimed instead
+        // by the constrained overload in slice.hpp, beside the lazy adapters.
         return filter_map(std::forward<Range>(range).into_iter(), std::forward<Func>(func));
     } else {
         static_assert(
