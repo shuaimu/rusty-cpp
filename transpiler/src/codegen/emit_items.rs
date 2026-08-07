@@ -4895,6 +4895,40 @@ impl CodeGen {
         // Trait can then route through `typename <Trait>Traits<B>::AssocName`,
         // which works even when B is foreign (no nested typedef).
         // Phase 3b.2 wires the rewrite at type-emit sites.
+        self.emit_trait_assoc_traits_maps(trait_name, &trait_assoc_type_names);
+
+        self.pop_type_param_scope();
+        self.current_struct_assoc_cpp_types.pop();
+        self.current_struct = prev_struct;
+
+        // Register the trait class so generic-arg recovery (e.g., the
+        // Box<dyn Trait> coercion in emit_call_func_with_owner_template_recovery)
+        // recognizes `TraitName` as a real C++ type rather than treating
+        // it as a value-identifier placeholder. The bare name (without
+        // generic-arg suffix) is what downstream lookups consult.
+        self.local_declared_types.insert(trait_name_str);
+        // Remember the trait's generic arity so dyn type mapping and
+        // adapter-spec emission can recover the right template form.
+        // (For now this is implicit via t.generics; we don't store it
+        // in a separate map yet — see follow-up phases.)
+        let _ = trait_generic_arglist;
+    }
+
+    /// Emit a trait's associated-type helper maps: the `<Tr>Traits` primary,
+    /// its pointer/reference forwarding specialisations, and the per-arity
+    /// tuple specialisations.
+    ///
+    /// Extracted so the MARKER-trait path can call it too. A method-less trait
+    /// that declares associated types (itertools'
+    /// `trait HasCombination<I> { type Combination; }`) is not a marker: it
+    /// warrants no vtable, but downstream code still lowers `T::Combination`
+    /// through these maps. Previously that path returned before reaching this
+    /// block, so the maps were never emitted (book §13.15.3, obstacle 0).
+    pub(super) fn emit_trait_assoc_traits_maps(
+        &mut self,
+        trait_name: &syn::Ident,
+        trait_assoc_type_names: &[String],
+    ) {
         if !trait_assoc_type_names.is_empty() {
             // Primary template: default each associated type to the nested
             // typedef on the impl type B (`typename B::Assoc`). A concrete impl
@@ -4912,7 +4946,7 @@ impl CodeGen {
             // a hard error — currently-passing code therefore never reached it,
             // making this strictly additive.)
             let mut primary = format!("template <class B> struct {}Traits {{ ", trait_name);
-            for name in &trait_assoc_type_names {
+            for name in trait_assoc_type_names {
                 primary.push_str(&format!("using {0} = typename B::{0}; ", name));
             }
             primary.push_str("};");
@@ -4930,7 +4964,7 @@ impl CodeGen {
                     "template <class S> struct {}Traits<{}> {{ ",
                     trait_name, ptr_or_ref
                 );
-                for name in &trait_assoc_type_names {
+                for name in trait_assoc_type_names {
                     spec.push_str(&format!(
                         "using {0} = typename {1}Traits<S>::{0}; ",
                         name, trait_name
@@ -4974,22 +5008,6 @@ impl CodeGen {
                 self.pop_type_param_scope();
             }
         }
-
-        self.pop_type_param_scope();
-        self.current_struct_assoc_cpp_types.pop();
-        self.current_struct = prev_struct;
-
-        // Register the trait class so generic-arg recovery (e.g., the
-        // Box<dyn Trait> coercion in emit_call_func_with_owner_template_recovery)
-        // recognizes `TraitName` as a real C++ type rather than treating
-        // it as a value-identifier placeholder. The bare name (without
-        // generic-arg suffix) is what downstream lookups consult.
-        self.local_declared_types.insert(trait_name_str);
-        // Remember the trait's generic arity so dyn type mapping and
-        // adapter-spec emission can recover the right template form.
-        // (For now this is implicit via t.generics; we don't store it
-        // in a separate map yet — see follow-up phases.)
-        let _ = trait_generic_arglist;
     }
 
     pub(super) fn emit_module_mode_trait_runtime_helper(&mut self, t: &syn::ItemTrait) -> bool {
