@@ -35779,6 +35779,36 @@ impl CodeGen {
                 arg_call_list
             );
         }
+        // `Index::index` is spelled `operator[]` in C++, so an explicit call —
+        // `self.buffer.index(i)`, which is how a Rust `impl Index` normally
+        // delegates to an inner container — matches no member and no free
+        // function. Worse, the name collides with any crate that happens to
+        // define its own `index` (itertools has an `iter_index` module), so the
+        // dispatcher silently aimed at THAT and failed with "no matching
+        // function for call to 'index'".
+        //
+        // Subscript goes in the TAIL, like the eq/ne operators above: a crate
+        // that genuinely provides its own `index` still wins through the direct
+        // or free-function arm for its own types. Deliberately not a name
+        // mapping — a bare `index` spelling is what caused this in the first
+        // place.
+        if callee_leaf == "index" && extra_args.len() == 1 {
+            let idx = format!(
+                "rusty::detail::deref_if_pointer_like(std::forward<decltype({0})>({0}))",
+                arg_names[0]
+            );
+            let subscript_call = format!("({})[{}]", deref_receiver, idx);
+            return format!(
+                "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                direct_call,
+                direct_call,
+                deref_call,
+                deref_call,
+                subscript_call,
+                arg_call_list
+            );
+        }
         // UFCS Phase 6 (book § 3.2.10): a `dyn Tr` receiver derefs to the
         // abstract interface `Tr&`, for which there is NO `m(const Tr&)`
         // free function — only `m(const ConcreteU&)` per impl. So make the
