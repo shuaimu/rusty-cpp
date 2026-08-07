@@ -2562,6 +2562,38 @@ decltype(auto) for_in(Range&& range) {
 // Constrained to types WITHOUT begin/end so anything the array.hpp view
 // already handles keeps taking that path unchanged; only the shape that used
 // to recurse is claimed here.
+// `rusty::last` for a next()-ONLY iterator.
+//
+// Rust's `Iterator::last(self)` CONSUMES the iterator and returns the final
+// item by value. The general `last` in array.hpp handles containers: it tries
+// a `.last()` member, then falls back to treating the receiver as a slice and
+// returning `Option<Elem&>`. For a next-only iterator neither fits — the slice
+// fallback derives `Elem` from the receiver itself, so `it.last()` came out as
+// `Option<ITERATOR&>` rather than `Option<Item>`, and comparing it with `None`
+// failed to compile.
+//
+// Constrained to types WITHOUT begin/end, so every container keeps the
+// array.hpp path byte-for-byte; only the drain-me shape is claimed here.
+template<typename Iter>
+    requires (detail::has_option_like_next_v<std::remove_reference_t<Iter>>
+              && !requires(std::remove_reference_t<Iter>& r) {
+                     std::begin(r);
+                     std::end(r);
+                 })
+auto last(Iter&& iter) {
+    using iter_type = std::remove_reference_t<Iter>;
+    using item_type = detail::next_item_t<iter_type>;
+    rusty::Option<item_type> found(rusty::None);
+    iter_type& it = iter;
+    for (;;) {
+        auto step = it.next();
+        if (!detail::option_like_has_value(step)) {
+            return found;
+        }
+        found = rusty::Some(detail::option_like_take_value(step));
+    }
+}
+
 template<typename Range, typename Func>
     requires (detail::has_option_like_next_v<std::remove_reference_t<Range>>
               && !requires(std::remove_reference_t<Range>& r) {
