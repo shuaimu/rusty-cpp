@@ -6900,6 +6900,287 @@ The heuristics are equally best-effort — they were written shape-by-shape agai
 
 > **Investigated, NOT landed (the ByteArray `next_element` turbofish — C5+C4, on branch `wip/serde-bytes-bytearray-36`).** The serde_bytes ByteArray `visit_seq` (`for (idx, byte) in bytes.iter_mut().enumerate() { *byte = seq.next_element()?.ok_or_else(…)? }`) emitted a bare, unresolvable `SeqAccess_::next_element` ("no member named next_element"). Two findings overturned the §13.14 framing for this case: (1) **it is forward-flow, not the backward engine.** The element type flows *forward* `typeof(*byte)=u8` → `next_element`, recoverable by the **existing** expected-type-threading machinery once two gaps closed — the type-solver engine was never involved. **C5** types the `enumerate` tuple for-binding (`emit_for_loop` only typed `Pat::Ident`; tuple bindings stayed untyped `auto&&`, so `*byte`'s type was unknown). **C4** extends the existing `ok_or` receiver-threading handler to `ok_or_else` (same `Option<T>→Result<T,E>` shape) so the assignment-target `u8` survives the `.ok_or_else(…)?` hop and reaches the call, where the **already-present** Path-1 cross-crate (`SeqAccess_::`) turbofish injection (emit_expr.rs:5056) fires. Verified on the real crate: 8/8 `SeqAccess_::next_element` get `<uint8_t>`; 1651 unit tests pass; **C5 alone is matrix-green (14/1)**. (2) **Why it cannot land on main yet — the precompile-skip-gate.** parity-test *skips* a test target whose precompile fails (compile-validation only → crate PASS); that is how serde_bytes "passes" today with `test_derive`/`test_serde` not genuinely compiling (#35). C4 fixes *enough* of `test_derive` that it **escapes the skip-gate**, and the full build then fails on the **remaining** de-hollow errors C5/C4 do not touch: serde_core `IgnoredAny::visit_seq` while-let `next_element` (no turbofish), map `next_entry` (`DeserializerMapVisitor`/`EnumMapVisitor`), and `__DeserializeWith` deduced-return-before-defined. So C5+C4 regress serde_bytes PASS→FAIL. **Lesson:** progress that lifts a target past the skip-gate but not all the way to compiling is a *net matrix regression* — the de-hollow targets must be fixed *as a set*, not incrementally. The remaining three error classes are the gating work for #35; C5+C4 are preserved on the branch to land together with them.
 
+### 13.15 Return-position-only type and const parameters (the fifth family)
+
+§13.2 named four families of deduction failure. There is a fifth, and it is
+structurally different from the others: **a type parameter that appears only in
+the function's return type, never in any value parameter.**
+
+```rust
+pub trait IntersperseElement<Item> {
+    fn generate(&mut self) -> Item;     // Item: in the return type only
+}
+```
+
+lowers to
+
+```cpp
+template<typename Item, typename F>
+Item generate(F& self_);                // Item deducible from nothing
+```
+
+C++ deduction reads only the argument list, so `Item` is unrecoverable at every
+call site and the compiler reports `couldn't infer template argument 'Item'`.
+This is not a variant of §13.2's cases 1–4: there is no arm to unify, no
+container to read the element off, no closure return to merge, and no target
+field to flow backward from. The information Rust used is simply not present in
+the C++ signature.
+
+The shape is common in iterator-adjacent APIs. In itertools it accounts for the
+bulk of the residual error tail: `generate`, `extract_item`, `next_array` (`N`),
+`next_tuple` (`T`), `flatten_ok`, `map_ok`, `intersperse`.
+
+#### 13.15.1 Why the existing turbofish path does not cover it
+
+For this family, explicit template arguments are supplied at exactly one
+condition (`emit_expr.rs:6761`, the single-owner extension-call path):
+
+```rust
+if let Some(turbofish) = &mc.turbofish && !callee.contains('<') { … }
+```
+
+That is: **only when the Rust source itself wrote a turbofish.** On this path
+the emitter threads what the programmer spelled; it computes nothing. So
+`.next_array::<2>()` gets `<2>` and `.next_array()` gets nothing.
+
+The restriction to *this family* is deliberate — it is not the only injector in
+the emitter, just the only one that can fire here. Three serde-specific paths
+also append template arguments to an extension callee, all keyed to the accessor
+names `next_element` / `next_key` / `next_value` / `next_entry` and all gated on
+`mc.turbofish.is_none()`, the exact complement of the gate above:
+
+* `emit_expr.rs:6729-6750`, eleven lines *above* this gate in the same function,
+  infers the element type from the expected `Result<Option<T>, E>` via
+  `infer_serde_access_method_template_type_from_expected` (`inference.rs:11865`).
+  The `!callee.contains('<')` clause above exists to avoid double-appending
+  after that block has run.
+* `emit_expr.rs:12634-12735` applies the same inference as
+  `default_de_template_args` on the `rusty_ext` resolution path.
+* `emit_expr.rs:21980-21998` splices *hardcoded* defaults (`<::de::IgnoredAny>`,
+  `<std::tuple<>>`) with no inference and no turbofish; `21955` synthesizes
+  `next_key<__Field…>` from a seed type.
+
+So the emitter demonstrably *can* compute an argument the source never wrote.
+What it cannot do is compute one for the §13.15 family, because none of those
+computations generalize past the serde accessor name list. **That existing
+expected-type injector is the working precedent this family's fix should
+generalize** — the mechanism is present and proven; only its keying is wrong.
+
+The distribution matters when scoping work here. Counting *code* call sites in
+itertools (excluding `///` doc examples, which inflate a naive grep): `next_array`
+4 bare : 1 turbofished, `next_tuple` 3 : 1, and `generate` (2), `intersperse`
+(10), `map_ok` (3), `flatten_ok` (9), `extract_item` (2) are bare at *every*
+site. Any fix keyed on the presence of a turbofish therefore addresses a small
+minority of the occurrences.
+
+A related consequence: the auto-deref dispatcher emits
+`rusty_ext::generate(__self)` with no template arguments inside its
+`if constexpr (requires { … })` probe. That is not a defect in the dispatcher —
+it faithfully passes along the callee string it was given, and for a bare call
+site there is nothing to pass. Fixing the dispatcher in isolation would change
+nothing.
+
+#### 13.15.2 The split: three sub-families with different costs
+
+The family does not have one fix. Rust recovers the missing parameter by three
+different mechanisms, and each demands different machinery from us.
+
+**(a) Impl-determined — the type argument is fixed by the impl.**
+
+```rust
+impl<Item: Clone> IntersperseElement<Item> for IntersperseElementSimple<Item> {
+    fn generate(&mut self) -> Item { self.0.clone() }
+}
+```
+
+Given `Self = IntersperseElementSimple<u8>`, `Item = u8` follows structurally
+from the impl header. No flow analysis is involved: this is a *lookup*, and the
+answer is available statically at the point of emit. `generate` and
+`extract_item` are here, and — per the `Combination`-on-tuple errors — so is the
+`PoolIndex` family.
+
+**(b) Flow-determined — the argument comes from how the result is used.**
+
+Note first that `N` below is a *const generic*, not a type parameter —
+`fn next_array<const N: usize>(&mut self) -> Option<[Self::Item; N]>`; rustc's
+diagnostic is "cannot infer the **value** of the const parameter `N`". Its
+sibling `next_tuple<T>` *is* a type parameter, so this family spans both kinds.
+The distinction has teeth for §13.15.3: a per-trait *type* map cannot carry a
+const, and needs a `static constexpr std::size_t` member rather than a nested
+typedef. The C++ analogue of a return-position-only const is a non-type template
+parameter — undeducible for the same reason.
+
+```rust
+assert_eq!(iter.next_array(), Some([]));                    // N = 0
+assert_eq!(iter.next_array().map(|[&x, &y]| [x, y]), …);    // N = 2
+```
+
+Neither call site carries a clue. In the first, `N = 0` comes from the **arity
+of the empty array literal** in the sibling operand: `Some([])` has type
+`Option<[_; 0]>`, and `Option`'s `PartialEq` is homogeneous, so the comparison
+forces the lengths equal. The macro is incidental to Rust — a bare
+`iter.next_array() == Some([])` infers identically; `assert_eq!` matters only to
+*us*, because our collector must see through the expansion to reach the operand.
+In the second, `N = 2` is fixed by the **closure parameter's array pattern**, one
+combinator (`Option::map`) removed from the call — rustc infers an array length
+from a fixed-arity pattern with no rest binding. The `Some([1, 2])` on the right
+contributes nothing to `N`; it pins the closure's *output*. Replacing
+`|[&x, &y]|` with a plain binding makes the line fail with `E0284` even with that
+operand intact. This is §13.2's case 2 (backward flow), but from constraint
+sources §13.6 does not collect: sibling operands of a comparison, and pattern
+arity inside a closure parameter.
+
+**(c) Turbofish — the programmer already wrote it.** The mechanism exists; see
+§13.15.1 and the `Self_`-ordering interaction in §13.15.4.
+
+Collapsing (a) and (b) into a single "undeducible type argument" project is a
+scoping error worth avoiding: (a) is a bounded lookup that fits the existing
+architecture, while (b) requires new constraint sources and genuinely harder
+inversion. They should be planned and estimated separately.
+
+#### 13.15.3 Sub-family (a) versus the `<Trait>Traits` map — and the §13.8 boundary
+
+Chapter 14 already defines the mechanism that would answer (a): the per-trait
+type map, `PoolIndexTraits<Self>::Item`, specialized per impl. But it models
+**associated types**, and (a) is about **trait type parameters**. The difference
+is not cosmetic:
+
+```rust
+trait PoolIndex           { type Item; }        // associated  → keyed on Self alone
+trait IntersperseElement<Item> { … }            // parameter   → Self is not a key
+```
+
+An associated type of a *non-generic* trait is a function of `Self`: one impl,
+one `Item`, so `Traits<Self>::Item` is well-defined. Neither real case is that
+simple.
+
+`PoolIndex` is generic **and** has an associated type — `trait PoolIndex<T>:
+BorrowMut<[usize]> { type Item; }` — and its array impl defines
+`Item = [T; K]`, naming a `T` that appears nowhere in `Self`. So
+`PoolIndexTraits<Vec<usize>>::Item` is not merely ambiguous, it is ill-defined,
+and Chapter 14's single-parameter sketch cannot be emitted for the real trait.
+The trait-*parameter* case is the same defect from the other side: one type may
+implement a trait at several arguments, as itertools does with a blanket
+`impl<Item, F: FnMut() -> Item> IntersperseElement<Item> for F` alongside the
+concrete `impl<Item: Clone> IntersperseElement<Item> for
+IntersperseElementSimple<Item>`.
+
+Both are one recorded limitation — the `…Traits` primary is single-parameter and
+cannot carry the trait's own type arguments — and the fix is uniform: key the map
+on `(Self, trait args)`, i.e. emit `PoolIndexTraits<Self, T>`. That is precisely
+why (a) cannot be answered without consulting the impl set.
+
+This sits close to a stated non-goal without crossing it. §13.8 says the engine
+"is not a replacement for Rust's borrow checker or trait resolution. Those are
+upstream — by the time we run, the input has already type-checked under `rustc`."
+Read to the end of the sentence, that disclaims *redoing* trait resolution, and
+its justification is the very premise family (a) relies on: rustc has already
+chosen the impl. Nor is the operation foreign to §13.5's solver — recovering
+`Item` from `impl … IntersperseElement<Item> for IntersperseElementSimple<Item>`
+given `Self = IntersperseElementSimple<u8>` is exactly the
+`(Ctor c args, Ctor c' args')` rule, and §13.6 already reads declared types out
+of signatures and struct fields. What (a) adds is a new *source* for that
+lookup — the impl set — and per §13.15.5 Option 1 even that lives in Chapter 14's
+type map, which §13.8's non-goals do not scope.
+
+What the boundary does need is an explicit statement, since the impl set has not
+been named as a lookup source before:
+
+> The engine does not perform trait *selection* — it never chooses among
+> candidate impls by checking bounds, coherence, or specialization. It does
+> perform trait-argument *recovery*: given a `Self` type that already
+> type-checked under rustc, look up the impl and read off the trait's type
+> arguments.
+
+Recovery is decidable and cheap; selection is neither. Where recovery is
+ambiguous — several impls of the same trait for one `Self` — the engine must
+report failure and fall back, exactly as §13.5 prescribes for unification
+failure. It must not guess.
+
+#### 13.15.4 Interaction with `Self_` parameter ordering
+
+Where explicit arguments *are* supplied, C++ fills them positionally from the
+left. So if a call site is to spell only the parameters C++ cannot deduce, those
+must form a prefix — they must precede `Self_`, which is deducible (it types the
+`self_` function parameter). This is a consequence of wanting to spell only a
+prefix, not a language rule: spelling every argument explicitly works at any
+ordering.
+
+Spelling `Self_` explicitly is possible but fragile, because the correct spelling
+depends on the callee's receiver kind. A `&mut self` method emits its receiver as
+a *forwarding reference* `Self_&&`; substituting a non-reference explicit
+argument turns that into an rvalue reference, which cannot bind an lvalue
+receiver. (A by-value `self` method, emitting `Self_ self_`, has no such problem —
+a by-value parameter copy-initializes from an lvalue happily. The failure is
+specific to the forwarding-reference receiver, not to by-value spelling.) A
+spelling that carries the receiver's category — `decltype(__self)` — works, and
+the emitter uses exactly that where it must spell `Self_`. The simpler discipline,
+and the one adopted, is to supply only the undeducible prefix and let `Self_`
+deduce, preserving the category without naming it.
+
+One C++ constraint falls out of this ordering and is easy to miss: a default
+template argument may only name parameters already declared, so item-projection
+defaults of the form `= next_item_t<Self_>::…` are ill-formed on a parameter
+placed *before* `Self_`. The resolution is to keep such parameters *behind*
+`Self_` with their defaults intact: only the **bare** undeducible parameters —
+return-position-only and undefaulted — form the explicitly spelled prefix, after
+which `Self_` deduces and the defaults behind it fill themselves in. This is what
+`extension_bare_undeducible_prefix_len` (`mod.rs:19191`) implements, and it is
+already on main. Dropping the defaults instead was tried and abandoned.
+
+#### 13.15.5 Options
+
+**Blanket impls make (a) harder than a lookup.** itertools declares *two* impls
+of `IntersperseElement`, and both are emitted as overloads:
+
+```cpp
+Item generate(IntersperseElementSimple<Item>& self_);   // concrete impl: Item IS deducible
+template<typename Item, typename F> Item generate(F& self_);  // blanket impl: F matches anything
+```
+
+The concrete overload is fine — `Item` deduces from `IntersperseElementSimple<u8>`.
+The blanket one, from `impl<Item, F: FnMut() -> Item> IntersperseElement<Item> for F`,
+has a universally-matching parameter and an undeducible `Item`. Spelling `Item`
+at the call site therefore does *not* settle it: both overloads remain viable,
+so the fix must also constrain the blanket overload — its Rust bound
+`F: FnMut() -> Item` has to survive as a C++ `requires` clause, which both
+restores deducibility (via the callable's return type) and removes it from the
+overload set for non-callable receivers. Any plan for (a) that stops at
+"recover the type argument and spell it" is incomplete.
+
+Note also where the emission lives: these are *per-impl* free functions, not the
+`Self`-templated default-method path, so a fix hooked only into the latter never
+fires for them.
+
+**Option 1 — trait-argument recovery via an extended type map (addresses (a)).**
+Extend the per-trait map so the trait's own type arguments are recoverable, and
+have emit consult it to spell the undeducible prefix. Bounded, fits the existing
+architecture, and reuses Chapter 14's machinery. Requires resolving the
+single-key ambiguity above — either by keying on more than `Self`, or by
+detecting multiplicity and failing cleanly.
+
+**Option 2 — engine-driven backward flow (addresses (b)).** Add the missing
+constraint sources to §13.6's collector: equality/comparison operands (including
+through macro expansion) and closure-parameter pattern arity. This is the same
+mechanism §13.13 specifies for `next_element`, applied to new syntax. Note the
+harder half: recovering `N` from `|[&x, &y]|` requires inverting through the
+`.map()` combinator, not merely reading a sibling's type.
+
+**Option 3 — require a turbofish in the source.** Rejected. It would mean
+editing the crates under translation, which the parity program exists to avoid.
+
+Options 1 and 2 are independent and can land in either order. Neither subsumes
+the other.
+
+#### 13.15.6 Consequence for parity scope
+
+Because (a) and (b) are independent, no single change clears a crate whose tail
+contains both. itertools is exactly such a crate: landing Option 1 removes the
+impl-determined errors but leaves the flow-determined ones, so the crate cannot
+reach a green gate on that work alone. Scheduling should treat "add the crate as
+a tracked known-FAIL row" and "make the crate green" as separate milestones, and
+should not assume the second follows shortly from the first.
+
 ## 14. Name Resolution: Trait Helper Qualification and the Two-Pass Inconsistency Problem
 
 ### 14.1 Why this chapter exists
