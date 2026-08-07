@@ -15129,11 +15129,6 @@ impl CodeGen {
         // (for example `A::Item` outside generic scope), avoid emitting an
         // explicit span return type that will not compile in concrete call sites.
         if self.mapped_type_has_out_of_scope_type_params(&elem_cpp) {
-            let storage_decl = if is_mut {
-                "auto _slice_ref_tmp".to_string()
-            } else {
-                "const auto _slice_ref_tmp".to_string()
-            };
             let inner = self.emit_expr_to_string_with_expected(
                 &reference.expr,
                 Some(expected_ref.elem.as_ref()),
@@ -15147,6 +15142,25 @@ impl CodeGen {
             } else {
                 ""
             };
+            // Same literal-vs-view split decides how the slot BINDS, not just
+            // whether it is static. Rust's `&mut xs` aliases; copying into the
+            // slot made the span point at the copy, so every mutation through
+            // it was discarded — silently, for a copyable target like Vec
+            // (itertools' `advance(&mut indices, ..)` updated nothing), and as
+            // a deleted-copy error once the target became a move-only Box.
+            // A literal-backed target has no object to alias, so it keeps its
+            // own storage.
+            let storage_decl = if static_kw.is_empty() {
+                if is_mut {
+                    "auto&& _slice_ref_tmp".to_string()
+                } else {
+                    "const auto& _slice_ref_tmp".to_string()
+                }
+            } else if is_mut {
+                "auto _slice_ref_tmp".to_string()
+            } else {
+                "const auto _slice_ref_tmp".to_string()
+            };
             return Some(format!(
                 "{}() {{ {}{} = {}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
                 capture, static_kw, storage_decl, inner, span_decl
@@ -15158,11 +15172,6 @@ impl CodeGen {
         } else {
             format!("std::span<const {}>", elem_cpp)
         };
-        let storage_decl = if is_mut {
-            "auto _slice_ref_tmp".to_string()
-        } else {
-            "const auto _slice_ref_tmp".to_string()
-        };
         let inner = self
             .emit_expr_to_string_with_expected(&reference.expr, Some(expected_ref.elem.as_ref()));
         let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
@@ -15172,6 +15181,21 @@ impl CodeGen {
             "static "
         } else {
             ""
+        };
+        // The same literal-vs-view split decides how the slot BINDS. Rust's
+        // `&mut xs` aliases; copying into the slot pointed the span at the copy
+        // and discarded every mutation through it — silently for a copyable
+        // target, and as a deleted-copy error for a move-only one.
+        let storage_decl = if static_kw.is_empty() {
+            if is_mut {
+                "auto&& _slice_ref_tmp".to_string()
+            } else {
+                "const auto& _slice_ref_tmp".to_string()
+            }
+        } else if is_mut {
+            "auto _slice_ref_tmp".to_string()
+        } else {
+            "const auto _slice_ref_tmp".to_string()
         };
         Some(format!(
             "{}() -> {} {{ {}{} = {}; return {}(_slice_ref_tmp); }}()",
