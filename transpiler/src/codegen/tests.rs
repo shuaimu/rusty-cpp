@@ -12261,6 +12261,31 @@ fn test_return_if_with_try_in_branch_lowers_to_statement_flow() {
 }
 
 #[test]
+fn test_collect_into_boxed_slice_with_inferred_element() {
+    // `Box<[_]>` asks for the element to come from the iterator. There is no
+    // spellable `Box<span<auto>>::from_iter`, so this used to fall through to
+    // `collect_range` and yield a Vec that would not convert.
+    let out = transpile_str(
+        "pub fn f(n: usize) -> Box<[usize]> { let xs: Box<[_]> = (0..n).collect(); xs }",
+    );
+    assert!(
+        out.contains("rusty::into_boxed_slice(rusty::collect_range("),
+        "Box<[_]> collect should box the collected range: {out}"
+    );
+}
+
+#[test]
+fn test_collect_into_boxed_slice_with_explicit_element_unchanged() {
+    let out = transpile_str(
+        "pub fn g(n: usize) -> Box<[usize]> { let xs: Box<[usize]> = (0..n).collect(); xs }",
+    );
+    assert!(
+        out.contains("rusty::Box<std::span<size_t>>::from_iter("),
+        "explicit-element Box collect should keep from_iter: {out}"
+    );
+}
+
+#[test]
 fn test_match_arm_tail_if_with_try_lowers_to_statement_flow() {
     // A match arm whose TAIL is an if-expression with `?` in a branch. The arm
     // emitter wraps arm bodies in `return ...;` itself, so this never reaches

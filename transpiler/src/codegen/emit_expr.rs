@@ -8474,6 +8474,12 @@ impl CodeGen {
                 self.emit_expr_to_string(&mc.receiver)
             };
             let mut unresolved_vec_placeholder_collect = false;
+            // `let xs: Box<[_]> = it.collect();` — Rust infers the element from
+            // the iterator. `Box<span<auto>>::from_iter` is not spellable, so
+            // the placeholder check below used to reject the target entirely
+            // and fall through to `collect_range`, which yields a Vec that then
+            // fails to convert wherever the boxed slice was wanted.
+            let mut unresolved_boxed_slice_collect = false;
             // `collect::<Result<Vec<_>, _>>()` / `collect::<Option<Vec<_>>>()`
             // — Rust's short-circuiting FromIterator impls. Element-wise
             // collect_range is SILENT-WRONG here (it keeps the Errs/Nones in
@@ -8555,6 +8561,11 @@ impl CodeGen {
                 {
                     unresolved_vec_placeholder_collect = true;
                 }
+                if expected_cpp.starts_with("rusty::Box<std::span<")
+                    && type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    unresolved_boxed_slice_collect = true;
+                }
                 if expected_cpp != "auto"
                     && !expected_cpp.contains("/* TODO")
                     && !type_string_has_auto_placeholder(&expected_cpp)
@@ -8587,6 +8598,14 @@ impl CodeGen {
             } else {
                 receiver.clone()
             };
+            if unresolved_boxed_slice_collect {
+                // Collect into a Vec and box it: the element type deduces from
+                // the iterator, which is exactly what `Box<[_]>` asks for.
+                return format!(
+                    "rusty::into_boxed_slice(rusty::collect_range({}))",
+                    receiver_for_collect_range
+                );
+            }
             if unresolved_vec_placeholder_collect {
                 return format!("rusty::collect_range({})", receiver_for_collect_range);
             }
