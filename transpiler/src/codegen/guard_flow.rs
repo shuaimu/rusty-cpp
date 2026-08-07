@@ -324,6 +324,82 @@ impl CodeGen {
         finder.hit
     }
 
+    /// Sibling of `expr_consumes_any_named_binding`: does the arm body
+    /// MUTATE one of its payload bindings in place?
+    ///
+    /// Rust's match ergonomics bind the payload of a `&mut` scrutinee
+    /// mutably, so `Some(item @ Some(_)) => item.take()` writes `None`
+    /// back through `item` into the scrutinee. Our syntactic
+    /// `scrutinee_is_mut_borrow` only sees a literal `&mut expr`, so a
+    /// scrutinee that is ALREADY a `&mut` binding (itertools'
+    /// `IntersperseWith::next` destructures `&mut self` into `peek`, then
+    /// matches on it) falls through to the const `as_const(...)`
+    /// materialization and the `&mut self` call fails to compile.
+    ///
+    /// Neither existing option is right for this shape: `as_const` bars
+    /// the mutation, and moving the payload out (the
+    /// `allow_runtime_match_binding_payload_moves` rewrite) silently
+    /// DROPS the write-back — intersperse would lose its separator. The
+    /// mutable peek (`unwrap_mut` off the non-const source) is the only
+    /// lowering that both mutates and leaves the scrutinee intact.
+    ///
+    /// Detection is use-driven and deliberately narrow: only a `&mut
+    /// self` method called directly on the binding counts. That keeps the
+    /// change confined to code that does not compile today — a const
+    /// payload receiving a `&mut self` call is a hard error — so no
+    /// working emission can shift under it.
+    pub(super) fn expr_mutably_uses_any_named_binding(
+        &self,
+        body: &syn::Expr,
+        names: &std::collections::HashSet<String>,
+    ) -> bool {
+        struct Finder<'a> {
+            cg: &'a CodeGen,
+            names: &'a std::collections::HashSet<String>,
+            hit: bool,
+        }
+        impl<'a, 'ast> syn::visit::Visit<'ast> for Finder<'a> {
+            fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                if !self.hit
+                    && let syn::Expr::Path(p) = self.cg.peel_paren_group_expr(&mc.receiver)
+                    && let Some(ident) = p.path.get_ident()
+                    && self.names.contains(&ident.to_string())
+                    && CodeGen::method_needs_mutable_receiver(&mc.method.to_string())
+                {
+                    self.hit = true;
+                }
+                syn::visit::visit_expr_method_call(self, mc);
+            }
+        }
+        let mut finder = Finder {
+            cg: self,
+            names,
+            hit: false,
+        };
+        syn::visit::Visit::visit_expr(&mut finder, body);
+        finder.hit
+    }
+
+    /// In-place mutators whose receiver must be non-const. Restricted to
+    /// the `Option`/`Result` surface the runtime-match payload path can
+    /// actually produce; a crate method that happens to share one of
+    /// these names is still a `&mut self` method by Rust convention, so a
+    /// false positive only costs a mutable peek where a const one would
+    /// have done.
+    pub(super) fn method_needs_mutable_receiver(method: &str) -> bool {
+        matches!(
+            method,
+            "take"
+                | "replace"
+                | "insert"
+                | "get_or_insert"
+                | "get_or_insert_with"
+                | "get_or_insert_default"
+                | "as_mut"
+                | "iter_mut"
+        )
+    }
+
     /// The single value/argument-position adapter (doctrine rule 3): when
     /// `expr` may be a guard, wrap its emitted form in the tolerant deref so
     /// the VALUE — not the guard — reaches the consumer. `emitted` is

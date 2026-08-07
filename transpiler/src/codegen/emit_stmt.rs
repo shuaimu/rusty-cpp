@@ -1254,9 +1254,27 @@ impl CodeGen {
                                 &arm.body,
                                 &binding_map.keys().cloned().collect(),
                             );
+                        // An arm body that MUTATES its payload binding needs
+                        // the same mutable peek a consuming one does. Rust's
+                        // match ergonomics bind the payload of a `&mut`
+                        // scrutinee mutably, so `Some(item @ Some(_)) =>
+                        // item.take()` writes back through the binding —
+                        // `as_const` bars the call outright, and moving the
+                        // payload out would drop the write-back.
+                        //
+                        // Unlike the consuming case this is NOT gated on
+                        // `!scrutinee_borrows_payload`: peeking mutably is
+                        // exactly what a borrowed scrutinee wants, since
+                        // `unwrap_mut` leaves `_m` intact for later arms.
+                        let arm_mutates_payload = needs_payload_materialization
+                            && self.expr_mutably_uses_any_named_binding(
+                                &arm.body,
+                                &binding_map.keys().cloned().collect(),
+                            );
                         let mut payload_bindings_are_refs = true;
                         if needs_payload_materialization {
                             let payload_value_source = if arm_consumes_payload
+                                || arm_mutates_payload
                                 || scrutinee_is_mut_borrow
                             {
                                 "rusty::detail::deref_if_pointer(_m)"
@@ -1269,10 +1287,12 @@ impl CodeGen {
                             // into `_m`; the owned-consuming case is only the
                             // plain non-const unwrap.
                             payload_bindings_are_refs = arm_consumes_payload
+                                || arm_mutates_payload
                                 || scrutinee_is_mut_borrow
                                 || payload_value_source
                                     != "rusty::detail::deref_if_pointer(_m)";
                             let effective_unwrap = if arm_consumes_payload
+                                || arm_mutates_payload
                                 || scrutinee_is_mut_borrow
                             {
                                 match unwrap_method {

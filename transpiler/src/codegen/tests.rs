@@ -2587,6 +2587,75 @@ fn test_runtime_match_self_field_scrutinee_uses_const_unwrap() {
     );
 }
 
+/// itertools `IntersperseWith::next`: `Some(item @ Some(_)) => item.take()`.
+/// Match ergonomics bind `item` mutably because the scrutinee is already a
+/// `&mut` (destructured out of `&mut self`), so the payload must materialize
+/// as a MUTABLE peek.
+///
+/// Both other lowerings are wrong here. `std::as_const(...).unwrap()` yields
+/// a const ref and `take()` (a `&mut self` method) will not compile against
+/// it. Moving the payload out compiles but is SILENTLY WRONG: `take()` must
+/// write `None` back through the binding into the scrutinee, and a moved-out
+/// temporary discards that write — intersperse would drop its separator.
+#[test]
+fn test_runtime_match_mutating_payload_binding_materializes_mutable_peek() {
+    let out = transpile_str(
+        r#"
+        struct Holder { peek: Option<Option<u8>> }
+        impl Holder {
+            fn step(&mut self) -> Option<u8> {
+                let Self { peek } = self;
+                match peek {
+                    Some(item @ Some(_)) => item.take(),
+                    Some(None) => None,
+                    None => None,
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap_mut();"),
+        "expected a mutable peek for the mutated payload binding; got:\n{out}"
+    );
+    assert!(
+        !out.contains("auto&& _mv0 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()"),
+        "const payload materialization would reject the `&mut self` take():\n{out}"
+    );
+    // The write-back must survive: a moved-out payload would compile but
+    // silently lose the `None` that take() stores into the scrutinee.
+    assert!(
+        !out.contains("auto&& _mv0 = rusty::detail::deref_if_pointer(_m).unwrap();"),
+        "payload moved out of the scrutinee — take()'s write-back is lost:\n{out}"
+    );
+}
+
+/// Guard for the narrowing: a payload binding that is only READ keeps the
+/// const materialization, so the mutable peek cannot creep into arms that
+/// do not need it.
+#[test]
+fn test_runtime_match_readonly_payload_binding_keeps_const_materialization() {
+    let out = transpile_str(
+        r#"
+        struct Holder { peek: Option<Option<u8>> }
+        impl Holder {
+            fn step(&mut self) -> bool {
+                let Self { peek } = self;
+                match peek {
+                    Some(item @ Some(_)) => item.is_some(),
+                    Some(None) => false,
+                    None => false,
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("unwrap_mut()"),
+        "read-only payload binding should not force a mutable peek:\n{out}"
+    );
+}
+
 #[test]
 fn test_runtime_result_match_block_tail_moves_owned_payload_binding_without_hint() {
     let out = transpile_str(
