@@ -1053,6 +1053,23 @@ auto collect_option_range(Range&& range_like) {
     }
 }
 
+namespace detail {
+// A `rusty::Box<[T]>` is Rust's boxed slice, and `&mut boxed` deref-coerces to
+// `&mut [T]`. The Box exposes neither data() nor begin(), so as_ptr/as_mut_ptr
+// used to fall through to their `&value` fallback and callers derived the
+// element type as the BOX rather than T — `owned_container_slice`'s
+// `operator std::span<elem_type>()` then produced a span of the wrong type and
+// no conversion to `std::span<T>` existed.
+//
+// Narrowed to a Box whose PAYLOAD is itself contiguous, so `Box<int>` and every
+// other wrapper keep the existing fallback untouched.
+template<typename T>
+inline constexpr bool is_boxed_contiguous_v = false;
+template<typename T, typename A>
+inline constexpr bool is_boxed_contiguous_v<rusty::Box<T, A>> =
+    requires(T& payload) { payload.data(); };
+}  // namespace detail
+
 template<typename T>
 decltype(auto) as_ptr(const T& value) {
     if constexpr (requires { value.as_ptr(); }) {
@@ -1077,6 +1094,9 @@ decltype(auto) as_ptr(const T& value) {
         } else {
             return &value;
         }
+    } else if constexpr (detail::is_boxed_contiguous_v<std::remove_cvref_t<T>>) {
+        // Boxed slice: peel to the payload (see is_boxed_contiguous_v).
+        return rusty::as_ptr(*value);
     } else {
         return &value;
     }
@@ -1094,6 +1114,9 @@ decltype(auto) as_mut_ptr(T& value) {
         } else {
             return &value;
         }
+    } else if constexpr (detail::is_boxed_contiguous_v<std::remove_cvref_t<T>>) {
+        // Boxed slice: peel to the payload (see is_boxed_contiguous_v).
+        return rusty::as_mut_ptr(*value);
     } else {
         return &value;
     }
