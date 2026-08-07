@@ -110,6 +110,18 @@ pub struct UfcsTraitManifest {
     /// (e.g. Serializer::serialize_bytes), or be emitted in a different module than the consumer
     /// references it through; either would make a guessed bridge name a non-existent member.
     /// Populated from `emitted_rusty_ext_methods_by_module`.
+    /// Free-function name (and `::`-qualified spellings) -> per-argument pass
+    /// style, encoded 0=Reference 1=Pointer 2=Value 3=Mixed.
+    ///
+    /// A consumer needs this to know that a dependency's function takes an
+    /// argument BY VALUE, i.e. consumes it. Without it a local passed to such a
+    /// call is not marked consumed, is emitted `const`, and `std::move` on a
+    /// const lvalue silently selects the COPY constructor — a hard error for a
+    /// move-only type and a silent copy (where Rust moved) for everything else.
+    /// Cannot be recovered locally: the consumer never sees the dependency's
+    /// function signatures.
+    #[serde(default)]
+    pub function_arg_pass_styles: std::collections::BTreeMap<String, Vec<u8>>,
     #[serde(default)]
     pub rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>>,
     /// C-like enum VARIANT name → the enum's crate-relative C++ path
@@ -2882,6 +2894,7 @@ mod tests {
             declared_macros: Vec::new(),
             root_exported_names: Vec::new(),
             declared_modules: Vec::new(),
+            function_arg_pass_styles: std::collections::BTreeMap::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
@@ -2967,6 +2980,7 @@ mod tests {
             declared_macros: Vec::new(),
             root_exported_names: Vec::new(),
             declared_modules: Vec::new(),
+            function_arg_pass_styles: std::collections::BTreeMap::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),

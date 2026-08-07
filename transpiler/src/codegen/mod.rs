@@ -3730,6 +3730,24 @@ impl CodeGen {
                 .iter()
                 .map(|(key, n)| (key.clone(), *n))
                 .collect(),
+            function_arg_pass_styles: self
+                .function_arg_pass_styles
+                .iter()
+                .map(|(key, styles)| {
+                    (
+                        key.clone(),
+                        styles
+                            .iter()
+                            .map(|s| match s {
+                                ArgPassStyle::Reference => 0u8,
+                                ArgPassStyle::Pointer => 1u8,
+                                ArgPassStyle::Value => 2u8,
+                                ArgPassStyle::Mixed => 3u8,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
             method_owners,
             declared_types,
             hygiene_aliases,

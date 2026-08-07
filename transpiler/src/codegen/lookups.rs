@@ -276,6 +276,25 @@ impl CodeGen {
                     return Some(style);
                 }
             }
+            // Cross-TU: the callee may be declared in a DEPENDENCY, whose
+            // signatures are not in the local map. Without this a by-value
+            // parameter over there is invisible here, the argument local is
+            // never marked consumed, and `std::move` on the resulting `const`
+            // local silently binds the copy constructor. Mirrors
+            // lookup_trait_method_receiver_kind's dependency fallback.
+            if let Some(style) = self
+                .dependency_ufcs_trait_manifests
+                .iter()
+                .find_map(|m| m.function_arg_pass_styles.get(&key))
+                .and_then(|styles| styles.get(arg_idx).copied())
+            {
+                return Some(match style {
+                    0 => ArgPassStyle::Reference,
+                    1 => ArgPassStyle::Pointer,
+                    2 => ArgPassStyle::Value,
+                    _ => ArgPassStyle::Mixed,
+                });
+            }
         }
         let func_name = path_expr
             .path
@@ -299,6 +318,31 @@ impl CodeGen {
             && let Some(style) = styles.get(arg_idx).copied()
         {
             return Some(style);
+        }
+        // Same unique-suffix fallback over DEPENDENCY manifests: a consumer
+        // spells `it::repeat_n` while the dependency recorded it under its
+        // declaring module (`repeatn::repeat_n`), so the exact-key pass above
+        // cannot match. Uniqueness is the safety property — an ambiguous name
+        // across deps is left unresolved rather than guessed.
+        let mut dep_hits: Vec<(&String, &Vec<u8>)> = Vec::new();
+        for manifest in self.dependency_ufcs_trait_manifests.iter() {
+            for (key, styles) in manifest.function_arg_pass_styles.iter() {
+                if (key.as_str() == func_name || key.ends_with(&suffix))
+                    && !dep_hits.iter().any(|(seen, _)| *seen == key)
+                {
+                    dep_hits.push((key, styles));
+                }
+            }
+        }
+        if dep_hits.len() == 1
+            && let Some(style) = dep_hits[0].1.get(arg_idx).copied()
+        {
+            return Some(match style {
+                0 => ArgPassStyle::Reference,
+                1 => ArgPassStyle::Pointer,
+                2 => ArgPassStyle::Value,
+                _ => ArgPassStyle::Mixed,
+            });
         }
         None
     }
