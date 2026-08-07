@@ -19337,23 +19337,42 @@ impl CodeGen {
                 }) else {
                     continue;
                 };
-                if inputs.len() != 1 {
-                    continue;
-                }
-                let input_is_self_item_ref = matches!(&inputs[0],
-                    syn::Type::Reference(r) if matches!(r.elem.as_ref(),
-                        syn::Type::Path(p) if p.qself.is_none()
-                            && p.path.segments.len() == 2
-                            && p.path.segments[0].ident == "Self"
-                            && p.path.segments[1].ident == "Item"));
-                if !input_is_self_item_ref {
-                    continue;
-                }
-                let default_text = format!(
-                    "std::remove_cvref_t<std::invoke_result_t<{}&, \
-                     rusty::detail::associated_item_t<std::remove_reference_t<Self_>>&>>",
-                    bearer
-                );
+                let default_text = match inputs.len() {
+                    // A NILADIC callable bound — `impl<Item, F: FnMut() -> Item>
+                    // IntersperseElement<Item> for F` (itertools' blanket
+                    // intersperse impl). `Item` is a trait type parameter
+                    // appearing only in the return type, so C++ deduces nothing
+                    // and every call site fails (book §13.15). The bound pins it
+                    // exactly as Rust does: `Item` IS the callable's result.
+                    //
+                    // Impl-level generics are merged into the method sig by
+                    // `merge_impl_type_generics_into_method` before the spec is
+                    // built, so an impl-level bound reaches this collector just
+                    // like a method-level one.
+                    0 => format!(
+                        "std::remove_cvref_t<std::invoke_result_t<{}&>>",
+                        bearer
+                    ),
+                    // `fn duplicates_by<V, F>(..) where F: FnMut(&Self::Item) -> V`
+                    // — the original case; the sole input must be `&Self::Item`.
+                    1 => {
+                        let input_is_self_item_ref = matches!(&inputs[0],
+                            syn::Type::Reference(r) if matches!(r.elem.as_ref(),
+                                syn::Type::Path(p) if p.qself.is_none()
+                                    && p.path.segments.len() == 2
+                                    && p.path.segments[0].ident == "Self"
+                                    && p.path.segments[1].ident == "Item"));
+                        if !input_is_self_item_ref {
+                            continue;
+                        }
+                        format!(
+                            "std::remove_cvref_t<std::invoke_result_t<{}&, \
+                             rusty::detail::associated_item_t<std::remove_reference_t<Self_>>&>>",
+                            bearer
+                        )
+                    }
+                    _ => continue,
+                };
                 if let Ok(tokens) = default_text.parse::<proc_macro2::TokenStream>() {
                     tp.default = Some(syn::Type::Verbatim(tokens));
                     defaulted_tail.push(name);
