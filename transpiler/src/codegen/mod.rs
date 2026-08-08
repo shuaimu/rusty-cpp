@@ -23141,6 +23141,7 @@ impl CodeGen {
         params: &[String],
         struct_lit: &syn::ExprStruct,
         declaration_only: bool,
+        is_explicit: bool,
     ) {
         let qualified_name = if out_of_line {
             format!("{}::{}", owner, owner)
@@ -23148,9 +23149,17 @@ impl CodeGen {
             owner.to_string()
         };
         let params_str = params.join(", ");
+        let explicit_prefix = if is_explicit && !out_of_line {
+            "explicit "
+        } else {
+            ""
+        };
 
         if declaration_only {
-            self.writeln(&format!("{}({});", qualified_name, params_str));
+            self.writeln(&format!(
+                "{}{}({});",
+                explicit_prefix, qualified_name, params_str
+            ));
             return;
         }
 
@@ -23215,9 +23224,15 @@ impl CodeGen {
         }
 
         if inits.is_empty() {
-            self.writeln(&format!("{}({}) {{}}", qualified_name, params_str));
+            self.writeln(&format!(
+                "{}{}({}) {{}}",
+                explicit_prefix, qualified_name, params_str
+            ));
         } else {
-            self.writeln(&format!("{}({})", qualified_name, params_str));
+            self.writeln(&format!(
+                "{}{}({})",
+                explicit_prefix, qualified_name, params_str
+            ));
             self.indent += 1;
             for (i, init) in inits.iter().enumerate() {
                 let prefix = if i == 0 { ": " } else { ", " };

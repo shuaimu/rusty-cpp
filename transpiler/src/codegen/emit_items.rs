@@ -1646,18 +1646,26 @@ impl CodeGen {
         // default TraitAdapter wrapper. The base spelling is reused for the
         // base clause and the synthesized/cpp_ctor base-init.
         let cpp_inherit_base: Option<String> = self.cpp_inherit_base_name(&name_str);
-        // When a `#[cpp_inherit]` type ALSO has a `#[cpp_ctor]` factory, the
-        // custom ctor takes over construction: suppress the synthesized
-        // fieldwise + move ctor (a single fieldwise ctor can't supply the
-        // default/parametrized ctors that `make_shared<X>(args)` call sites
-        // need, and would collide with the custom one). The implicit move
-        // ctor then handles moves — and correctly moves a stateful base,
-        // unlike the synthesized reconstruct-the-base move ctor.
-        let has_cpp_ctor_method = merged_impl_items.as_ref().is_some_and(|items| {
-            items.iter().any(|it| {
-                matches!(it, syn::ImplItem::Fn(m) if Self::has_cpp_ctor_attr(&m.attrs))
+        // Preserve the established cpp_inherit behavior: any `#[cpp_ctor]`
+        // takes over construction for that path.
+        let cpp_ctor_methods: Vec<&syn::ImplItemFn> = merged_impl_items
+            .iter()
+            .flat_map(|items| items.iter())
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(method) if Self::has_cpp_ctor_attr(&method.attrs) => Some(method),
+                _ => None,
             })
-        });
+            .collect();
+        let has_cpp_ctor_method = !cpp_ctor_methods.is_empty();
+        // Drop structs normally need the synthesized all-fields ctor because
+        // their destructor prevents aggregate initialization. A pinned holder
+        // can explicitly suppress that bypass only when every annotated ctor
+        // is a pure struct literal that will really lower to a constructor.
+        let suppress_drop_fieldwise_ctor = Self::has_cpp_no_fieldwise_ctor_attr(&s.attrs)
+            && !cpp_ctor_methods.is_empty()
+            && cpp_ctor_methods.iter().all(|method| {
+                Self::extract_cpp_ctor_struct_literal(&method.block, &name_str).is_some()
+            });
         let reserved_member_names: HashSet<String> = merged_impl_items
             .as_ref()
             .map(|items| {
@@ -2058,47 +2066,50 @@ impl CodeGen {
                         .next()
                         .map(|field| self.field_type_has_drop_impl(&field.ty))
                         .unwrap_or(false);
-                    let ctor_params: Vec<String> = fields
-                        .named
-                        .iter()
-                        .filter_map(|field| {
-                            let field_name = field.ident.as_ref()?.to_string();
-                            let param_name = format!("{}_init", field_name);
-                            Some(format!("{} {}", self.map_type(&field.ty), param_name))
-                        })
-                        .collect();
-                    let ctor_inits: Vec<String> = fields
-                        .named
-                        .iter()
-                        .filter_map(|field| {
-                            let rust_field_name = field.ident.as_ref()?.to_string();
-                            let member_name = named_field_cpp_names
-                                .get(&rust_field_name)
-                                .cloned()
-                                .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
-                            let param_name = format!("{}_init", rust_field_name);
-                            let rewrite_field_key =
-                                Self::format_by_value_field_name(None, &rust_field_name);
-                            let init = if matches!(&field.ty, syn::Type::Reference(_)) {
-                                format!("{}({})", member_name, param_name)
-                            } else {
-                                let moved = format!("std::move({})", param_name);
-                                let wrapped = self.wrap_by_value_cycle_rewrite_field_initializer(
-                                    &name_str,
-                                    &rewrite_field_key,
-                                    moved,
-                                );
-                                format!("{}({})", member_name, wrapped)
-                            };
-                            Some(init)
-                        })
-                        .collect();
-                    self.writeln(&format!(
-                        "{}({}) : {} {{}}",
-                        name,
-                        ctor_params.join(", "),
-                        ctor_inits.join(", ")
-                    ));
+                    if !suppress_drop_fieldwise_ctor {
+                        let ctor_params: Vec<String> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| {
+                                let field_name = field.ident.as_ref()?.to_string();
+                                let param_name = format!("{}_init", field_name);
+                                Some(format!("{} {}", self.map_type(&field.ty), param_name))
+                            })
+                            .collect();
+                        let ctor_inits: Vec<String> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| {
+                                let rust_field_name = field.ident.as_ref()?.to_string();
+                                let member_name = named_field_cpp_names
+                                    .get(&rust_field_name)
+                                    .cloned()
+                                    .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
+                                let param_name = format!("{}_init", rust_field_name);
+                                let rewrite_field_key =
+                                    Self::format_by_value_field_name(None, &rust_field_name);
+                                let init = if matches!(&field.ty, syn::Type::Reference(_)) {
+                                    format!("{}({})", member_name, param_name)
+                                } else {
+                                    let moved = format!("std::move({})", param_name);
+                                    let wrapped =
+                                        self.wrap_by_value_cycle_rewrite_field_initializer(
+                                            &name_str,
+                                            &rewrite_field_key,
+                                            moved,
+                                        );
+                                    format!("{}({})", member_name, wrapped)
+                                };
+                                Some(init)
+                            })
+                            .collect();
+                        self.writeln(&format!(
+                            "{}({}) : {} {{}}",
+                            name,
+                            ctor_params.join(", "),
+                            ctor_inits.join(", ")
+                        ));
+                    }
                     self.writeln(&copy_ctor_line);
 
                     // `PhantomPinned` (!Unpin) forbids moving: emit deleted
@@ -2177,39 +2188,42 @@ impl CodeGen {
                         .next()
                         .map(|field| self.field_type_has_drop_impl(&field.ty))
                         .unwrap_or(false);
-                    let ctor_params: Vec<String> = fields
-                        .unnamed
-                        .iter()
-                        .enumerate()
-                        .map(|(i, field)| format!("{} _{}_init", self.map_type(&field.ty), i))
-                        .collect();
-                    let ctor_inits: Vec<String> = fields
-                        .unnamed
-                        .iter()
-                        .enumerate()
-                        .map(|(i, field)| {
-                            let param_name = format!("_{}_init", i);
-                            let rewrite_field_key =
-                                Self::format_by_value_field_name(None, &format!("#{}", i));
-                            if matches!(&field.ty, syn::Type::Reference(_)) {
-                                format!("_{}({})", i, param_name)
-                            } else {
-                                let moved = format!("std::move({})", param_name);
-                                let wrapped = self.wrap_by_value_cycle_rewrite_field_initializer(
-                                    &name_str,
-                                    &rewrite_field_key,
-                                    moved,
-                                );
-                                format!("_{}({})", i, wrapped)
-                            }
-                        })
-                        .collect();
-                    self.writeln(&format!(
-                        "{}({}) : {} {{}}",
-                        name,
-                        ctor_params.join(", "),
-                        ctor_inits.join(", ")
-                    ));
+                    if !suppress_drop_fieldwise_ctor {
+                        let ctor_params: Vec<String> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, field)| format!("{} _{}_init", self.map_type(&field.ty), i))
+                            .collect();
+                        let ctor_inits: Vec<String> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, field)| {
+                                let param_name = format!("_{}_init", i);
+                                let rewrite_field_key =
+                                    Self::format_by_value_field_name(None, &format!("#{}", i));
+                                if matches!(&field.ty, syn::Type::Reference(_)) {
+                                    format!("_{}({})", i, param_name)
+                                } else {
+                                    let moved = format!("std::move({})", param_name);
+                                    let wrapped =
+                                        self.wrap_by_value_cycle_rewrite_field_initializer(
+                                            &name_str,
+                                            &rewrite_field_key,
+                                            moved,
+                                        );
+                                    format!("_{}({})", i, wrapped)
+                                }
+                            })
+                            .collect();
+                        self.writeln(&format!(
+                            "{}({}) : {} {{}}",
+                            name,
+                            ctor_params.join(", "),
+                            ctor_inits.join(", ")
+                        ));
+                    }
                     self.writeln(&copy_ctor_line);
 
                     let move_inits: Vec<String> = fields
@@ -2259,7 +2273,9 @@ impl CodeGen {
                     self.writeln("}");
                 }
                 syn::Fields::Unit => {
-                    self.writeln(&format!("{}() = default;", name));
+                    if !suppress_drop_fieldwise_ctor {
+                        self.writeln(&format!("{}() = default;", name));
+                    }
                     self.writeln(&copy_ctor_line);
                     self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
                     self.indent += 1;
@@ -8348,6 +8364,15 @@ impl CodeGen {
         } else {
             escape_cpp_keyword_in_member_position(&method_ident)
         };
+        // Rust Drop remains unwindable by default. This marker is an explicit
+        // source contract for Drop bodies known not to unwind.
+        let drop_noexcept = if is_drop_destructor
+            && Self::has_cpp_noexcept_attr(&method.attrs)
+        {
+            "true"
+        } else {
+            "false"
+        };
         let is_deref_method = method_ident == "deref" && name == "operator*";
         let is_deref_mut_method = method_ident == "deref_mut";
 
@@ -8656,6 +8681,7 @@ impl CodeGen {
                         &params,
                         struct_lit,
                         declaration_only,
+                        Self::has_cpp_explicit_attr(&method.attrs),
                     );
                     self.pop_type_param_scope();
                     return;
@@ -8830,9 +8856,10 @@ impl CodeGen {
         if self.method_emission_declaration_only {
             if is_drop_destructor {
                 self.writeln(&format!(
-                    "{}({}) noexcept(false);",
+                    "{}({}) noexcept({});",
                     emitted_callable_name,
-                    params.join(", ")
+                    params.join(", "),
+                    drop_noexcept
                 ));
             } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
                 self.writeln(&format!(
@@ -8907,9 +8934,10 @@ impl CodeGen {
         }
         if is_drop_destructor {
             self.writeln(&format!(
-                "{}({}) noexcept(false) {{",
+                "{}({}) noexcept({}) {{",
                 emitted_callable_name,
-                params.join(", ")
+                params.join(", "),
+                drop_noexcept
             ));
         } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
             self.writeln(&format!(

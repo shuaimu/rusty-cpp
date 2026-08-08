@@ -840,6 +840,72 @@ impl Calc {
 }
 
 #[test]
+fn test_inline_rust_drop_cpp_ctor_is_nothrow_and_has_no_fieldwise_bypass() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pinned_drop_ctor.hpp");
+    let source = r#"#if RUSTYCPP_RUST
+#[cfg_attr(any(), cpp_no_fieldwise_ctor)]
+struct PinnedTask {
+    value: i32,
+    _pin: rusty::marker::PhantomPinned,
+}
+
+impl PinnedTask {
+    #[cpp_ctor]
+    #[cfg_attr(any(), cpp_explicit)]
+    fn new(value: i32) -> PinnedTask {
+        PinnedTask {
+            value: value,
+            _pin: rusty::marker::PhantomPinned {},
+        }
+    }
+}
+
+impl Drop for PinnedTask {
+    #[cfg_attr(any(), cpp_noexcept)]
+    fn drop(&mut self) {}
+}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.pinned_drop_ctor version=1 rust_sha256=deadbeef*/
+/*RUSTYCPP:GEN-END id=demo.pinned_drop_ctor*/
+"#;
+    std::fs::write(&file, source).unwrap();
+
+    let rewrite = transpiler_bin()
+        .arg("inline-rust")
+        .arg("--rewrite")
+        .arg("--files")
+        .arg(file.to_str().unwrap())
+        .output()
+        .expect("failed to run rewrite");
+    assert!(
+        rewrite.status.success(),
+        "rewrite stderr: {}",
+        String::from_utf8_lossy(&rewrite.stderr)
+    );
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("explicit PinnedTask(int32_t value);"),
+        "{content}"
+    );
+    assert!(
+        content.contains("PinnedTask::PinnedTask(int32_t value)"),
+        "{content}"
+    );
+    assert!(!content.contains("value_init"), "{content}");
+    assert!(!content.contains("_pin_init"), "{content}");
+    assert!(
+        content.contains("PinnedTask(PinnedTask&&) = delete;"),
+        "{content}"
+    );
+    assert!(
+        content.contains("~PinnedTask() noexcept(true)"),
+        "{content}"
+    );
+}
+
+#[test]
 fn test_result_ok_qualifier_preserves_signature_t() {
     // Regression: when an impl block has more type params than the host
     // struct (impl<BorrowType,K,V,NodeType> on a Handle<Node,Type>) and
