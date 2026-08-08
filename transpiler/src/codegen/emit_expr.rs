@@ -14455,7 +14455,13 @@ impl CodeGen {
                 return None;
             }
         }
-        let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
+        let mut method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
+        if owner_seg.ident == "Arc"
+            && matches!(rust_method_name.as_str(), "new" | "new_")
+            && !self.bare_std_named_type_suppression_applies("Arc")
+        {
+            method = "make".to_string();
+        }
         if self.owner_cpp_has_unusable_template_args(&owner_cpp)
             && matches!(owner_seg.arguments, syn::PathArguments::None)
         {
@@ -18452,9 +18458,49 @@ impl CodeGen {
             return emitted;
         }
 
+        // An expected alias such as `type P = Box<dyn LocalTrait>` used to
+        // lose its trait owner before omitted-owner recovery, producing
+        // `Box<Concrete>` even for an ordinary (non-inheriting) impl.  Recover
+        // only the exact source-level Box/dyn shape through bounded aliases;
+        // the final interface pass then selects `LocalTraitAdapter<Concrete>`.
+        // A cpp_inherit payload already converts directly to the interface and
+        // must keep the concrete Box (there is intentionally no Adapter).
+        let source_is_box_new = matches!(call.func.as_ref(), syn::Expr::Path(path)
+            if path.path.segments.len() >= 2
+                && path.path.segments.iter().nth_back(1).is_some_and(|seg| seg.ident == "Box")
+                && path.path.segments.last().is_some_and(|seg|
+                    matches!(seg.ident.to_string().as_str(), "new" | "new_")));
+        if source_is_box_new
+            && call.args.len() == 1
+            && !self.bare_std_named_type_suppression_applies("Box")
+            && !self.expr_constructs_cpp_inherit_type(&call.args[0])
+            && let Some(trait_cpp) = expected_ty
+                .or_else(|| self.current_return_type_hint())
+                .and_then(|ty| self.known_local_dyn_trait_smart_ptr_cpp_name(ty, "Box"))
+        {
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!("rusty::Box<{}>::new_({})", trait_cpp, arg);
+        }
+
         let mut func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         func = self.rewrite_seed_ctor_path_string(&func);
         func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
+        // Arc::new takes its Rust payload by value, but rusty::Arc::new_ also
+        // takes by value before moving into the control block.  Routing a
+        // recovered typed owner through `make` forwards the already-evaluated
+        // argument directly into T and removes that extra observable move.
+        let source_is_arc_new = matches!(call.func.as_ref(), syn::Expr::Path(path)
+            if path.path.segments.len() >= 2
+                && path.path.segments.iter().nth_back(1).is_some_and(|seg| seg.ident == "Arc")
+                && path.path.segments.last().is_some_and(|seg|
+                    matches!(seg.ident.to_string().as_str(), "new" | "new_")));
+        if source_is_arc_new
+            && !self.bare_std_named_type_suppression_applies("Arc")
+            && func.contains("Arc<")
+            && let Some(owner) = func.strip_suffix("::new_")
+        {
+            func = format!("{}::make", owner);
+        }
         // Boxing INTO `void*` can never own or dispatch the value — the
         // dyn-erased hint (`Box<dyn io::Write>` → element void*) leaked into
         // the owner recovery. Fall back to the argument's own type; the
@@ -19260,7 +19306,7 @@ impl CodeGen {
         {
             let arg = self.emit_expr_maybe_move(&call.args[0]);
             return format!(
-                "rusty::Arc<std::remove_cvref_t<decltype(({}))>>::new_({})",
+                "rusty::Arc<std::remove_cvref_t<decltype(({}))>>::make({})",
                 arg, arg
             );
         }
