@@ -13785,6 +13785,9 @@ impl CodeGen {
                 self.emit_index_expr_to_string(idx, expected_ty)
             }
             syn::Expr::Path(path) => {
+                if let Some(marker_assoc) = self.try_emit_cpp_marker_assoc_expr(path) {
+                    return marker_assoc;
+                }
                 if let Some(clone_expr) =
                     self.try_emit_self_path_clone_for_expected_value(&path.path, expected_ty)
                 {
@@ -22719,10 +22722,43 @@ impl CodeGen {
         Some(format!("{}::new_({})", expected_cpp_ty, args.join(", ")))
     }
 
+    fn try_emit_cpp_marker_assoc_expr(&self, path: &syn::ExprPath) -> Option<String> {
+        let qself = path.qself.as_ref()?;
+        if qself.position == 0 || qself.position >= path.path.segments.len() {
+            return None;
+        }
+        let mut trait_path = syn::Path {
+            leading_colon: path.path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for segment in path.path.segments.iter().take(qself.position) {
+            trait_path.segments.push(segment.clone());
+        }
+        if !self.trait_path_is_cpp_marker(&trait_path) {
+            return None;
+        }
+        let marker = self.cpp_marker_instantiation_cpp(&trait_path, &qself.ty)?;
+        let mut assoc_path = syn::Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for segment in path.path.segments.iter().skip(qself.position) {
+            assoc_path.segments.push(segment.clone());
+        }
+        Some(format!(
+            "{}::{}",
+            marker,
+            self.emit_path_to_string(&assoc_path)
+        ))
+    }
+
     pub(super) fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
             syn::Expr::Path(path) => {
+                if let Some(marker_assoc) = self.try_emit_cpp_marker_assoc_expr(path) {
+                    return marker_assoc;
+                }
                 if let Some(_qself) = &path.qself {
                     if path.path.segments.len() == 1 {
                         match path.path.segments[0].ident.to_string().as_str() {

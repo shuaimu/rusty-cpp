@@ -524,7 +524,7 @@ impl CodeGen {
     /// Without the attribute, factory-style `fn new(...) -> Self`
     /// continues to lower to `static Owner Owner::new_(args)`.
     pub(super) fn has_cpp_ctor_attr(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| a.path().is_ident("cpp_ctor"))
+        Self::has_cpp_only_marker_attr(attrs, "cpp_ctor")
     }
 
     /// Recognize a C++-only marker either directly, or hidden from rustc in
@@ -573,6 +573,27 @@ impl CodeGen {
     /// lowering.
     pub(super) fn has_cpp_no_fieldwise_ctor_attr(attrs: &[syn::Attribute]) -> bool {
         Self::has_cpp_only_marker_attr(attrs, "cpp_no_fieldwise_ctor")
+    }
+
+    /// Lower an otherwise ordinary Rust trait as a non-inheriting C++
+    /// compile-time registry.  This is deliberately opt-in: normal traits
+    /// retain the interface/adapter lowering below, while registry traits do
+    /// not acquire a vptr, base class, or any Send/Sync implications.
+    pub(super) fn has_cpp_marker_trait_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_marker_trait")
+    }
+
+    /// Lower a concrete trait impl as an explicit specialization of the
+    /// corresponding `cpp_marker_trait` registry.
+    pub(super) fn has_cpp_marker_impl_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_marker_impl")
+    }
+
+    /// Suppress structural Send/Sync marker synthesis for a C++ bridge type.
+    /// Some zero-field CRTP/tag types are intentionally neither Send nor Sync;
+    /// vacuous structural derivation would otherwise silently widen them.
+    pub(super) fn has_cpp_no_auto_traits_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_no_auto_traits")
     }
 
     /// `#[cpp_inherit]` on an `impl Trait for Type` opts that impl into

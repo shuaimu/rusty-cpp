@@ -3223,7 +3223,9 @@ impl CodeGen {
             self.writeln(&format!("{n}({n}&&) = delete;", n = name_str));
             self.writeln(&format!("{n}& operator=({n}&&) = delete;", n = name_str));
         }
-        self.emit_auto_trait_markers(&name_str, &s.fields, &s.generics);
+        if !Self::has_cpp_no_auto_traits_attr(&s.attrs) {
+            self.emit_auto_trait_markers(&name_str, &s.fields, &s.generics);
+        }
         self.indent -= 1;
         self.writeln("};");
 
@@ -4719,9 +4721,59 @@ impl CodeGen {
     }
 
     pub(super) fn emit_trait(&mut self, t: &syn::ItemTrait) {
+        if Self::has_cpp_marker_trait_attr(&t.attrs) {
+            self.emit_cpp_marker_trait(t);
+            return;
+        }
         // Interface + Adapter design (replaces Pro facade). See § 3.2.9 of
         // docs/rusty-cpp-transpiler.md.
         self.emit_trait_interface_pattern(t);
+    }
+
+    /// Template header shared by marker-registry forward declarations and
+    /// definitions.  The Rust trait's generic parameters come first; the
+    /// implementing type is the final C++ parameter because Rust spells it as
+    /// `impl Trait<Args...> for Implementor` rather than as a trait generic.
+    pub(super) fn cpp_marker_trait_template_lines(
+        &self,
+        t: &syn::ItemTrait,
+        include_type_defaults: bool,
+    ) -> Vec<String> {
+        let previous = self.in_constraint_emit.get();
+        self.in_constraint_emit.set(true);
+        let (mut params, constraints) =
+            self.collect_emitted_template_parts(&t.generics, include_type_defaults);
+        self.in_constraint_emit.set(previous);
+        params.push("typename Implementor".to_string());
+        let mut lines = vec![format!("template<{}>", params.join(", "))];
+        if !constraints.is_empty() {
+            lines.push(format!("    requires ({})", constraints.join(" && ")));
+        }
+        lines
+    }
+
+    /// A marker registry is a pure compile-time predicate, not an interface.
+    /// Its primary rejects every implementor.  Opted-in impl blocks emit the
+    /// only `value = true` specializations and may attach associated constants
+    /// (for example a frozen wire discriminant).
+    fn emit_cpp_marker_trait(&mut self, t: &syn::ItemTrait) {
+        let unsupported = t.items.iter().any(|item| {
+            !matches!(item, syn::TraitItem::Const(c) if c.default.is_none())
+        }) || !t.supertraits.is_empty()
+            || t.unsafety.is_some();
+        if unsupported {
+            panic!(
+                "cpp_marker_trait `{}` may contain only required associated constants; methods, defaults, supertraits, and unsafe traits are unsupported",
+                t.ident
+            );
+        }
+        for line in self.cpp_marker_trait_template_lines(t, true) {
+            self.writeln(&line);
+        }
+        self.writeln(&format!(
+            "struct {} {{ static constexpr bool value = false; }};",
+            escape_cpp_keyword(&t.ident.to_string())
+        ));
     }
 
     /// Emit a Rust trait as a plain C++ abstract base class plus undefined
@@ -7647,7 +7699,73 @@ impl CodeGen {
         true
     }
 
+    fn cpp_marker_impl_specialization_type(&self, i: &syn::ItemImpl) -> Option<String> {
+        let (polarity, trait_path, _) = i.trait_.as_ref()?;
+        if polarity.is_some()
+            || !i.generics.params.is_empty()
+            || i.generics.where_clause.is_some()
+        {
+            return None;
+        }
+        let mut instantiated_path = trait_path.clone();
+        let last = instantiated_path.segments.last_mut()?;
+        match &mut last.arguments {
+            syn::PathArguments::None => {
+                let implementor = i.self_ty.as_ref().clone();
+                last.arguments = syn::PathArguments::AngleBracketed(
+                    syn::parse_quote!(<#implementor>),
+                );
+            }
+            syn::PathArguments::AngleBracketed(args) => {
+                args.args
+                    .push(syn::GenericArgument::Type(i.self_ty.as_ref().clone()));
+            }
+            syn::PathArguments::Parenthesized(_) => return None,
+        }
+        let marker_ty = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: instantiated_path,
+        });
+        Some(
+            self.map_type(&marker_ty)
+                .trim_start_matches("typename ")
+                .trim_start_matches("::")
+                .to_string(),
+        )
+    }
+
+    fn emit_cpp_marker_impl(&mut self, i: &syn::ItemImpl) {
+        let Some(specialization) = self.cpp_marker_impl_specialization_type(i) else {
+            panic!("cpp_marker_impl supports only concrete positive trait impls");
+        };
+        if i.items
+            .iter()
+            .any(|item| !matches!(item, syn::ImplItem::Const(_)))
+        {
+            panic!("cpp_marker_impl may contain only associated constants");
+        }
+        self.writeln("template<>");
+        self.writeln(&format!("struct {} {{", specialization));
+        self.indent += 1;
+        self.writeln("static constexpr bool value = true;");
+        for item in &i.items {
+            let syn::ImplItem::Const(c) = item else {
+                unreachable!();
+            };
+            let ty = self.map_type(&c.ty);
+            let name = escape_cpp_keyword(&c.ident.to_string());
+            let expr = self.emit_impl_const_expr(c);
+            self.writeln(&format!("static constexpr {} {} = {};", ty, name, expr));
+        }
+        self.indent -= 1;
+        self.writeln("};");
+    }
+
     pub(super) fn emit_impl_block(&mut self, i: &syn::ItemImpl) {
+        if Self::has_cpp_marker_impl_attr(&i.attrs) {
+            self.emit_cpp_marker_impl(i);
+            return;
+        }
         // `Send` and `Sync` are auto traits, but an explicit positive impl is
         // the Rust spelling for overriding the structural result (most often
         // after auditing a type that contains a raw pointer).  These impls
@@ -7696,7 +7814,8 @@ impl CodeGen {
         // (with a proper `self_` parameter) — the member-style orphan
         // stub below would be a dead `#if 0` duplicate whose
         // `(*this)` bodies read as live bugs to anyone grepping. Skip it.
-        if let Some((trait_name, _)) = Self::ufcs_trait_impl_specs(i)
+        if let Some((trait_name, _)) =
+            Self::ufcs_trait_impl_specs(i, &self.ufcs_trait_default_methods)
             && self.ufcs_declared_trait_names.contains(&trait_name)
         {
             self.writeln(&format!(
@@ -8373,6 +8492,13 @@ impl CodeGen {
         } else {
             "false"
         };
+        let ordinary_noexcept = if !is_drop_destructor
+            && Self::has_cpp_noexcept_attr(&method.attrs)
+        {
+            " noexcept(true)"
+        } else {
+            ""
+        };
         let is_deref_method = method_ident == "deref" && name == "operator*";
         let is_deref_mut_method = method_ident == "deref_mut";
 
@@ -8863,23 +8989,25 @@ impl CodeGen {
                 ));
             } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
                 self.writeln(&format!(
-                    "{}{} {}({}){} -> {}{};",
+                    "{}{} {}({}){}{} -> {}{};",
                     static_prefix,
                     emitted_return_type,
                     emitted_callable_name,
                     params.join(", "),
                     qualifier,
+                    ordinary_noexcept,
                     trailing_return,
                     arity_requires
                 ));
             } else {
                 self.writeln(&format!(
-                    "{}{} {}({}){}{};",
+                    "{}{} {}({}){}{}{};",
                     static_prefix,
                     emitted_return_type,
                     emitted_callable_name,
                     params.join(", "),
                     qualifier,
+                    ordinary_noexcept,
                     arity_requires
                 ));
             }
@@ -8941,23 +9069,25 @@ impl CodeGen {
             ));
         } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
             self.writeln(&format!(
-                "{}{} {}({}){} -> {}{} {{",
+                "{}{} {}({}){}{} -> {}{} {{",
                 static_prefix,
                 emitted_return_type,
                 emitted_callable_name,
                 params.join(", "),
                 qualifier,
+                ordinary_noexcept,
                 trailing_return,
                 arity_requires
             ));
         } else {
             self.writeln(&format!(
-                "{}{} {}({}){}{} {{",
+                "{}{} {}({}){}{}{} {{",
                 static_prefix,
                 emitted_return_type,
                 emitted_callable_name,
                 params.join(", "),
                 qualifier,
+                ordinary_noexcept,
                 arity_requires
             ));
         }
