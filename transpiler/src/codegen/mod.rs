@@ -36016,7 +36016,7 @@ impl CodeGen {
     /// multi-owner defaults whose BODIES call trait methods, these templates
     /// additionally need per-trait `requires` constraints — the marker/constraint
     /// completion; serde's `size_hint` body is `{ None }` so it needs only this.)
-    fn emit_multi_owner_ufcs_call(
+    pub(crate) fn emit_multi_owner_ufcs_call(
         &self,
         callees: &[String],
         receiver_expr: &str,

@@ -22091,10 +22091,25 @@ impl CodeGen {
                 self.ufcs_trait_namespace(&owner_leaf),
                 escape_cpp_keyword(&method_name),
             );
-            return Some(self.emit_extension_call_with_receiver_autoderef_fallback(
-                &callee,
+            // TRAIT-QUALIFIED, so the named trait must WIN over a same-named
+            // member. emit_extension_call_with_receiver_autoderef_fallback puts
+            // the member tier FIRST — correct for unqualified `recv.m()` (rustc
+            // resolves inherent before trait, and that ordering is what keeps
+            // indexmap's inherent `sorted_by` from being hijacked by
+            // Itertools_::sorted_by) but WRONG here: the source named the trait.
+            // Measured: with two traits declaring `end` for one type, BOTH
+            // `Alpha::end(&x)` and `Beta::end(&x)` took the member branch and
+            // ran the same collapsed body (rustc 101/201, port 101/101).
+            //
+            // emit_multi_owner_ufcs_call has the order this needs — qualified
+            // callee (direct, then deref'd), member only as the final else — so
+            // the foreign-trait case the comment above describes still resolves
+            // through the member branch, just no longer ahead of the real one.
+            return Some(self.emit_multi_owner_ufcs_call(
+                std::slice::from_ref(&callee),
                 &recv,
                 &extra_args,
+                &escape_cpp_keyword(&method_name),
             ));
         }
 
