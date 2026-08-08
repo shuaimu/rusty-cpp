@@ -5361,6 +5361,8 @@ impl CodeGen {
         // names introduced later via `use` regardless source order.
         self.collect_scope_import_bindings(&file.items, &[]);
         log_emit("collect_scope_import_bindings");
+        self.collect_consumer_module_import_paths(file);
+        log_emit("collect_consumer_module_import_paths");
         // Pass 1i.5: collect top-level module names that must be forward-declared so
         // nested bare-module imports can emit valid namespace aliases.
         self.collect_required_top_level_module_aliases(&file.items, &[]);
@@ -28984,13 +28986,21 @@ impl CodeGen {
         // lowering so import/alias rewrites do not turn
         // `SerializationStrategy::Value` into unrelated paths like `value::Value`.
         if path.segments.len() >= 2 {
+            let mut owner_path = path.clone();
+            owner_path.segments = path
+                .segments
+                .iter()
+                .take(path.segments.len() - 1)
+                .cloned()
+                .collect();
             let mut owner_segments: Vec<String> = path
                 .segments
                 .iter()
                 .take(path.segments.len() - 1)
                 .map(|seg| seg.ident.to_string())
                 .collect();
-            if owner_segments.len() == 1 && owner_segments[0] == "Self" {
+            let owner_was_self = owner_segments.len() == 1 && owner_segments[0] == "Self";
+            if owner_was_self {
                 if let Some(ctx) = variant_ctx {
                     owner_segments = ctx
                         .enum_name
@@ -29016,15 +29026,18 @@ impl CodeGen {
                     || self.enum_has_variant_name(&owner_full, &variant_name)
                     || self.enum_has_variant_name(&owner_full, &canonical_variant);
                 if owner_matches {
-                    let owner_cpp = owner_segments
-                        .iter()
-                        .map(|seg| escape_cpp_keyword(seg))
-                        .collect::<Vec<String>>()
-                        .join("::");
-                    let member = escape_cpp_keyword(&canonical_variant);
-                    if path.leading_colon.is_some() {
-                        return format!("::{}::{}", owner_cpp, member);
+                    if owner_was_self
+                        && let Ok(resolved_owner_path) = syn::parse_str::<syn::Path>(&owner_full)
+                    {
+                        owner_path = resolved_owner_path;
                     }
+                    let mut owner_cpp = self.emit_path_to_string(&owner_path);
+                    if let Some(template_args) = self.emit_path_explicit_template_args(&owner_path)
+                    {
+                        owner_cpp.push_str(&template_args);
+                    }
+                    owner_cpp = owner_cpp.trim_end_matches("::").to_string();
+                    let member = escape_cpp_keyword(&canonical_variant);
                     return format!("{}::{}", owner_cpp, member);
                 }
             }

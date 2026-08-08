@@ -27,6 +27,88 @@ impl syn::visit_mut::VisitMut for TypeIdentReplacer {
 }
 
 impl CodeGen {
+    fn preserve_item_use_leading_colon(item: &syn::ItemUse, path: &str) -> String {
+        if item.leading_colon.is_none() {
+            return path.to_string();
+        }
+        if let Some((alias, target)) = split_use_import_alias(path) {
+            return format!("{} = ::{}", alias, target.trim_start_matches("::"));
+        }
+        format!("::{}", path.trim_start_matches("::"))
+    }
+
+    /// Collect consumer-mapped named-module dependencies before emission. Path
+    /// rendering is intentionally side-effect free and is also used by many
+    /// speculative inference paths, so recording imports there would either
+    /// miss clone-rendered fragments or add dependencies for discarded output.
+    /// This AST pass sees the emitted type/expression paths in their lexical
+    /// module scopes and feeds the existing deterministic import prologue.
+    pub(super) fn collect_consumer_module_import_paths(&mut self, file: &syn::File) {
+        if self.consumer_module_map.is_empty() || self.module_name.is_none() {
+            return;
+        }
+
+        struct ConsumerImportVisitor<'a> {
+            codegen: &'a CodeGen,
+            relative_scope: Vec<String>,
+            imports: std::collections::BTreeSet<String>,
+        }
+
+        impl<'ast> Visit<'ast> for ConsumerImportVisitor<'_> {
+            fn visit_path(&mut self, path: &'ast syn::Path) {
+                if path.leading_colon.is_none() {
+                    let rust_path = path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    if let Some((entry, _)) = self.codegen.resolve_consumer_mapped_path_in_scope(
+                        &rust_path,
+                        true,
+                        &self.relative_scope,
+                    ) && self.codegen.consumer_module_import_is_allowed(entry)
+                    {
+                        self.imports.insert(entry.cpp_module.clone());
+                    }
+                }
+                visit::visit_path(self, path);
+            }
+
+            fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+                let Some((_, items)) = &module.content else {
+                    return;
+                };
+                self.relative_scope.push(module.ident.to_string());
+                for item in items {
+                    self.visit_item(item);
+                }
+                self.relative_scope.pop();
+            }
+
+            // These paths are compile-time syntax rather than emitted C++
+            // type/expression references. `use` and `mod child;` dependencies
+            // are handled by their dedicated emitters, which also preserve
+            // glob/alias/public semantics.
+            fn visit_item_use(&mut self, _item: &'ast syn::ItemUse) {}
+            fn visit_attribute(&mut self, _attribute: &'ast syn::Attribute) {}
+            fn visit_macro(&mut self, _macro: &'ast syn::Macro) {}
+        }
+
+        let imports = {
+            let mut visitor = ConsumerImportVisitor {
+                codegen: self,
+                relative_scope: Vec::new(),
+                imports: std::collections::BTreeSet::new(),
+            };
+            visitor.visit_file(file);
+            visitor.imports
+        };
+        for import in imports {
+            self.record_cpp_module_import_path(&import);
+        }
+    }
+
     /// Pre-collect opt-in compile-time registry traits before any template
     /// declaration/definition is emitted.  The constraint emitter needs this
     /// information even when a bound appears textually before the trait item.
@@ -4670,6 +4752,7 @@ impl CodeGen {
                 }
                 syn::Item::Use(u) => {
                     for raw_path in self.flatten_use_tree_preserve_crate(&u.tree, "") {
+                        let raw_path = Self::preserve_item_use_leading_colon(u, &raw_path);
                         self.record_scope_import_binding(module_path, &raw_path);
                     }
                 }
@@ -4684,6 +4767,8 @@ impl CodeGen {
                                     for raw_path in
                                         self.flatten_use_tree_preserve_crate(&u.tree, "")
                                     {
+                                        let raw_path =
+                                            Self::preserve_item_use_leading_colon(u, &raw_path);
                                         self.record_scope_import_binding(module_path, &raw_path);
                                     }
                                 }

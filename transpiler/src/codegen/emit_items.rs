@@ -6325,7 +6325,26 @@ impl CodeGen {
             // - `mod foo;`   → import parent.foo;
             // - `mod foo {}` → inline namespace emission only (no import line)
             if !has_inline_content {
-                let full_name = format!("{}.{}", parent_module, mod_name);
+                let mapped_child_module = if self.consumer_module_map.is_empty() {
+                    None
+                } else {
+                    let mut rust_child = self.consumer_rust_module.clone().unwrap_or_default();
+                    for segment in &self.module_stack {
+                        if !rust_child.is_empty() {
+                            rust_child.push_str("::");
+                        }
+                        rust_child.push_str(segment);
+                    }
+                    if !rust_child.is_empty() {
+                        rust_child.push_str("::");
+                    }
+                    rust_child.push_str(&mod_name_str);
+                    self.consumer_module_map
+                        .entry_for_rust_module(&rust_child)
+                        .map(|entry| entry.cpp_module.clone())
+                };
+                let full_name = mapped_child_module
+                    .unwrap_or_else(|| format!("{}.{}", parent_module, mod_name));
                 if is_pub {
                     self.writeln(&format!("export import {};", full_name));
                 } else {
@@ -6600,6 +6619,109 @@ impl CodeGen {
         })
     }
 
+    /// Emit a `use` whose target belongs to a consumer-mapped Rust module.
+    /// This runs before external-crate rejection and before the generic C++
+    /// namespace heuristics, both of which have already lost the owning Rust
+    /// module for non-isomorphic maps.
+    fn emit_consumer_mapped_use_path(
+        &mut self,
+        raw_path: &str,
+        export_prefix: &str,
+    ) -> bool {
+        let Some((entry, suffix)) = self.resolve_consumer_mapped_path(raw_path, false) else {
+            return false;
+        };
+        let cpp_module = entry.cpp_module.clone();
+        let cpp_namespace = entry.cpp_namespace.clone();
+        let should_import = self.consumer_module_import_is_allowed(entry);
+        if should_import {
+            self.record_cpp_module_import_path(&cpp_module);
+        }
+
+        let namespace_import = raw_path.trim_start().starts_with("namespace ");
+        let normalized = normalize_use_import_path(raw_path).trim();
+        let alias_and_target = split_use_import_alias(normalized);
+        let alias = alias_and_target.map(|(alias, _)| alias.trim());
+        let escaped_suffix = suffix
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let target = if escaped_suffix.is_empty() {
+            format!("::{}", cpp_namespace)
+        } else {
+            format!("::{}::{}", cpp_namespace, escaped_suffix)
+        };
+
+        if namespace_import {
+            self.writeln(&format!("using namespace {};", target));
+            return true;
+        }
+
+        if let Some(alias) = alias {
+            if alias == "_" {
+                self.writeln(&format!(
+                    "// Rust-only trait import marker: using {};",
+                    raw_path
+                ));
+                return true;
+            }
+            let escaped_alias = escape_cpp_keyword(alias);
+            if suffix.is_empty() {
+                self.writeln(&format!(
+                    "{}namespace {} = {};",
+                    export_prefix, escaped_alias, target
+                ));
+                return true;
+            }
+            let leaf = suffix.last().map(String::as_str).unwrap_or_default();
+            let const_like = leaf.len() > 1
+                && leaf.chars().any(|ch| ch.is_ascii_uppercase())
+                && leaf
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+            let fn_like = leaf
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+            if const_like {
+                self.writeln(&format!(
+                    "{}constexpr const auto& {} = {};",
+                    export_prefix, escaped_alias, target
+                ));
+            } else if fn_like {
+                // C++ has no signature-free function alias declaration. The
+                // pre-collected Rust binding still rewrites every call/value
+                // use to the mapped target.
+                self.writeln(&format!(
+                    "// Rust-only fn rename (call sites resolve the alias): using {};",
+                    raw_path
+                ));
+            } else {
+                self.writeln(&format!(
+                    "{}using {} = {};",
+                    export_prefix, escaped_alias, target
+                ));
+            }
+            return true;
+        }
+
+        if suffix.is_empty() {
+            let alias = normalized.rsplit("::").next().unwrap_or_default();
+            if !alias.is_empty() {
+                self.writeln(&format!(
+                    "{}namespace {} = {};",
+                    export_prefix,
+                    escape_cpp_keyword(alias),
+                    target
+                ));
+            }
+        } else {
+            self.writeln(&format!("{}using {};", export_prefix, target));
+        }
+        true
+    }
+
     pub(super) fn emit_use(&mut self, u: &syn::ItemUse) {
         if std::env::var_os("RUSTY_DBG_USE").is_some() {
             let toks = quote::ToTokens::to_token_stream(&u.tree).to_string();
@@ -6612,6 +6734,16 @@ impl CodeGen {
             }
         }
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
+
+        // Flatten once up front so mapped crate roots can be recognized before
+        // the generic external-crate classifier rejects them.
+        let paths = self.flatten_use_tree(&u.tree, "");
+        let consumer_paths = self.flatten_use_tree_preserve_crate(&u.tree, "");
+        let has_consumer_mapped_target = u.leading_colon.is_none()
+            && consumer_paths.iter().any(|path| {
+                self.resolve_consumer_mapped_path(path, false)
+                    .is_some()
+            });
 
         // Detect external crate imports
         let root_ident = self.get_use_root(&u.tree);
@@ -6635,7 +6767,8 @@ impl CodeGen {
             && !self.declared_module_names.contains(&root_ident)
             && !self.import_alias_names.contains(&root_ident)
             && !root_is_scope_import
-            && mapped_external_root.is_none();
+            && mapped_external_root.is_none()
+            && !has_consumer_mapped_target;
 
         if is_external {
             self.writeln(&format!(
@@ -6644,15 +6777,12 @@ impl CodeGen {
             ));
         }
 
-        // Flatten group imports into separate using declarations
-        let paths = self.flatten_use_tree(&u.tree, "");
-
         let export_prefix = if self.is_exported(&u.vis) {
             "export "
         } else {
             ""
         };
-        for raw_path in &paths {
+        for (path_index, raw_path) in paths.iter().enumerate() {
             let path = self.rewrite_external_crate_import_path(raw_path);
             if let Some(cpp_import) = classify_cpp_module_use_import(&path) {
                 self.record_cpp_module_use_import(&cpp_import);
@@ -6667,6 +6797,15 @@ impl CodeGen {
                         cpp_import.module_path
                     ));
                 }
+                continue;
+            }
+            let consumer_path = consumer_paths
+                .get(path_index)
+                .map(String::as_str)
+                .unwrap_or(path.as_str());
+            if u.leading_colon.is_none()
+                && self.emit_consumer_mapped_use_path(consumer_path, export_prefix)
+            {
                 continue;
             }
             let resolved_path = self.resolve_unqualified_local_import_path(&path);
