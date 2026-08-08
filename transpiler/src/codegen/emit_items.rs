@@ -2109,6 +2109,32 @@ impl CodeGen {
             }
         }
 
+        // §206: this type has BOTH a hand-written Display and a hand-written
+        // Debug. The Debug `fmt` was renamed to `rusty_debug_fmt` at collect
+        // time so it survives the collision; give it the entry point the
+        // runtime looks for. to_debug_string prefers `rusty_debug_string()`
+        // over any `.fmt()`, so {:?} lands on the Debug body and {} on Display.
+        // Condition on DIRECT EVIDENCE that the renamed method is present, not
+        // on a name-keyed set. The clash set is keyed on the leaf ident while
+        // the rename site keys on the module-qualified `type_name`; keying the
+        // wrapper on a third spelling emitted `rusty_debug_string()` calling a
+        // `rusty_debug_fmt` that did not exist, breaking 5 crates.
+        let has_renamed_debug_fmt = merged_impl_items.as_ref().is_some_and(|items| {
+            items.iter().any(|it| {
+                matches!(it, syn::ImplItem::Fn(f) if f.sig.ident == "rusty_debug_fmt")
+            })
+        });
+        if has_renamed_debug_fmt {
+            self.writeln("std::string rusty_debug_string() const {");
+            self.indent += 1;
+            self.writeln("rusty::fmt::Formatter formatter{};");
+            self.writeln("auto result = this->rusty_debug_fmt(formatter);");
+            self.writeln("if (result.is_ok()) { return formatter.str(); }");
+            self.writeln("return \"<fmt-error>\";");
+            self.indent -= 1;
+            self.writeln("}");
+        }
+
         // Emit methods from impl blocks (merged)
         let mut emitted_methods_in_struct = std::collections::HashSet::<String>::new();
         if let Some(methods) = merged_impl_items {

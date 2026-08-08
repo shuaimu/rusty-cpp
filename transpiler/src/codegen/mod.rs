@@ -1210,6 +1210,15 @@ pub struct CodeGen {
     /// the dumb pass-through would hand them to std::format, which has no
     /// formatter specialization for them.
     pub(crate) display_impl_types: HashSet<String>,
+    /// Types with BOTH a hand-written `impl Display` and a hand-written
+    /// `impl Debug`. Both lower to a member named `fmt`, so one is discarded
+    /// and `{:?}` silently prints the Display body (confirmed by runtime probe,
+    /// see task #206). For these types the Debug `fmt` is renamed to
+    /// `rusty_debug_fmt` and a `rusty_debug_string()` wrapper is emitted, which
+    /// the runtime's to_debug_string already prefers over any `.fmt()`.
+    /// A DERIVED Debug never lands here -- derive already emits
+    /// `rusty_debug_string()` directly.
+    pub(crate) manual_debug_display_clash_types: HashSet<String>,
     /// Output position of the first top-level function DEFINITION. Local
     /// trait-adapter explicit specializations are relocated here: C++
     /// requires an explicit specialization to be defined before its first
@@ -2174,6 +2183,7 @@ impl CodeGen {
             crate_iterator_impl_types: HashSet::new(),
             crate_intoiter_impl_types: HashSet::new(),
             display_impl_types: HashSet::new(),
+            manual_debug_display_clash_types: HashSet::new(),
             local_adapter_insert_pos: None,
             type_arg_nesting: std::cell::Cell::new(0),
             unwrap_tmp_counter: std::cell::Cell::new(0),

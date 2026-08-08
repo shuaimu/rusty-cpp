@@ -2758,9 +2758,70 @@ impl CodeGen {
         }
     }
 
+    /// Types with BOTH a hand-written `impl Display` and a hand-written
+    /// `impl Debug`. Both lower to a member `fmt`, collide, and one body is
+    /// discarded — making `{:?}` print the Display body (task #206). Derived
+    /// impls are excluded: derive(Debug) emits `rusty_debug_string()` directly
+    /// and never collides.
+    fn collect_manual_debug_display_clashes(items: &[syn::Item], out: &mut HashSet<String>) {
+        fn walk(items: &[syn::Item], display: &mut HashSet<String>, debug: &mut HashSet<String>) {
+            for item in items {
+                match item {
+                    syn::Item::Mod(m) => {
+                        if let Some((_, nested)) = &m.content {
+                            walk(nested, display, debug);
+                        }
+                    }
+                    syn::Item::Impl(i) => {
+                        if impl_block_is_automatically_derived(i) {
+                            continue;
+                        }
+                        let Some((_, tp, _)) = &i.trait_ else { continue };
+                        let Some(tn) = tp.segments.last().map(|s| s.ident.to_string()) else {
+                            continue;
+                        };
+                        let Some(sp) = CodeGen::impl_self_type_path(i.self_ty.as_ref())
+                        else {
+                            continue;
+                        };
+                        let Some(sn) = sp.path.segments.last().map(|s| s.ident.to_string()) else {
+                            continue;
+                        };
+                        // Only a `fmt` method can collide.
+                        if !i.items.iter().any(|it| {
+                            matches!(it, syn::ImplItem::Fn(f) if f.sig.ident == "fmt")
+                        }) {
+                            continue;
+                        }
+                        match tn.as_str() {
+                            "Display" => {
+                                display.insert(sn);
+                            }
+                            "Debug" => {
+                                debug.insert(sn);
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let (mut display, mut debug) = (HashSet::new(), HashSet::new());
+        walk(items, &mut display, &mut debug);
+        out.extend(display.intersection(&debug).cloned());
+    }
+
     pub(super) fn collect_impl_blocks(&mut self, items: &[syn::Item], module_path: &[String]) {
         let mut owned_into_iterator_types: HashSet<String> = HashSet::new();
         Self::collect_owned_into_iterator_type_names(items, &mut owned_into_iterator_types);
+        // §206: seed the Display/Debug clash set before any impl is absorbed,
+        // so the rename below sees it regardless of source order.
+        {
+            let mut clashes = HashSet::new();
+            Self::collect_manual_debug_display_clashes(items, &mut clashes);
+            self.manual_debug_display_clash_types.extend(clashes);
+        }
         // Structs/enums with `#[derive(Copy)]`: in single-file input the
         // derive stays an ATTRIBUTE and never becomes an `impl Copy` block
         // (only cargo-expand produces those). Scan the attrs directly so
@@ -3000,6 +3061,45 @@ impl CodeGen {
                             .or_default()
                             .insert(module_path.join("::"));
                     }
+
+                    // §206: a hand-written Debug `fmt` on a type that ALSO has a
+                    // hand-written Display `fmt` lowers to the same C++ member,
+                    // collides, and one body is discarded — making {:?} print the
+                    // Display body. Rename Debug's to `rusty_debug_fmt` so both
+                    // survive; the `rusty_debug_string()` wrapper emitted with the
+                    // struct routes {:?} back to it (to_debug_string prefers that
+                    // member over any `.fmt()`).
+                    //
+                    // This MUST happen before the item loop: the conflict key below
+                    // is derived from the method ident, so renaming the per-item
+                    // clone inside the loop leaves the collision intact.
+                    let debug_renamed_impl: Option<syn::ItemImpl> =
+                        if trait_name.as_deref() == Some("Debug")
+                            && (self.manual_debug_display_clash_types.contains(&type_name)
+                                || type_name
+                                    .rsplit("::")
+                                    .next()
+                                    .is_some_and(|leaf| {
+                                        self.manual_debug_display_clash_types.contains(leaf)
+                                    }))
+                        {
+                            let mut cloned = impl_block.clone();
+                            for it in &mut cloned.items {
+                                if let syn::ImplItem::Fn(f) = it
+                                    && f.sig.ident == "fmt"
+                                {
+                                    f.sig.ident = syn::Ident::new(
+                                        "rusty_debug_fmt",
+                                        f.sig.ident.span(),
+                                    );
+                                }
+                            }
+                            Some(cloned)
+                        } else {
+                            None
+                        };
+                    let impl_block: &syn::ItemImpl =
+                        debug_renamed_impl.as_ref().unwrap_or(impl_block);
 
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     let seen_method_keys = self
