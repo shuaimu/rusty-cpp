@@ -1066,6 +1066,72 @@ pub fn make_widget(x: i32) -> Widget { Widget { x } }
 }
 
 #[test]
+fn test_consumer_module_map_projects_two_rust_modules_into_flat_namespace() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("client.rs");
+    let map_path = dir.path().join("consumer-modules.toml");
+    let output_path = dir.path().join("client.cppm");
+
+    std::fs::write(
+        &input,
+        r#"
+use crate::base::sync::Counter;
+
+pub fn round_trip(value: crate::base::sync::Counter) -> crate::base::sync::Counter {
+    let _fresh = crate::base::sync::make_counter();
+    value
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &map_path,
+        r#"
+version = 1
+
+[[module]]
+rust_module = "crate::base::sync"
+cpp_module = "rrr.basetypes"
+cpp_namespace = "rrr"
+
+[[module]]
+rust_module = "crate::rpc::client"
+cpp_module = "rrr.client"
+cpp_namespace = "rrr"
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("--module-name")
+        .arg("rrr.client")
+        .arg("--consumer-module-map")
+        .arg(map_path.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    assert!(cpp.contains("export module rrr.client;"), "{cpp}");
+    assert!(cpp.contains("import rrr.basetypes;"), "{cpp}");
+    assert!(cpp.contains("namespace rrr {"), "{cpp}");
+    assert!(cpp.contains("using ::rrr::Counter;"), "{cpp}");
+    assert!(
+        cpp.contains("::rrr::Counter round_trip(::rrr::Counter value)"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("::rrr::make_counter()"), "{cpp}");
+    assert!(!cpp.contains("::base::sync"), "{cpp}");
+}
+
+#[test]
 fn test_inline_rust_cpp_ctor_no_fields() {
     // An empty struct ctor should emit `Owner() {}`.
     let dir = tempfile::tempdir().unwrap();

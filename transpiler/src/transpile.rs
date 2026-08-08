@@ -268,6 +268,189 @@ fn default_cpp_module_symbol_index_version() -> u32 {
     1
 }
 
+/// One consumer-specific projection of a Rust crate module into the C++
+/// module graph.  The Rust path is canonicalized without its leading
+/// `crate::` (the crate root itself is the empty string).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsumerModuleEntry {
+    pub rust_module: String,
+    pub cpp_module: String,
+    pub cpp_namespace: String,
+}
+
+/// Consumer-owned module/namespace projection used when the C++ surface must
+/// not mirror the Rust crate hierarchy.  Mako, for example, maps many
+/// `crate::base::*` / `crate::rpc::*` modules to legacy `rrr.*` named modules
+/// whose exported entities all live in the single `rrr` namespace.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConsumerModuleMap {
+    pub modules: BTreeMap<String, ConsumerModuleEntry>,
+}
+
+impl ConsumerModuleMap {
+    pub fn entry_for_cpp_module(&self, cpp_module: &str) -> Option<&ConsumerModuleEntry> {
+        self.modules
+            .values()
+            .find(|entry| entry.cpp_module == cpp_module)
+    }
+
+    pub fn entry_for_rust_module(&self, rust_module: &str) -> Option<&ConsumerModuleEntry> {
+        self.modules.get(rust_module)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsumerModuleMapFile {
+    version: u32,
+    #[serde(default)]
+    module: Vec<ConsumerModuleMapFileEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsumerModuleMapFileEntry {
+    rust_module: String,
+    cpp_module: String,
+    cpp_namespace: String,
+}
+
+fn canonical_consumer_rust_module_path(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let path = syn::parse_str::<syn::Path>(trimmed)
+        .map_err(|e| format!("invalid Rust module path '{}': {}", raw, e))?;
+    if path.leading_colon.is_some()
+        || path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+    {
+        return Err(format!(
+            "Rust module path '{}' must be an unparameterized crate path",
+            raw
+        ));
+    }
+    let mut segments = path.segments.iter();
+    let Some(root) = segments.next() else {
+        return Err("Rust module path must not be empty".to_string());
+    };
+    if root.ident != "crate" {
+        return Err(format!(
+            "Rust module path '{}' must begin with 'crate'",
+            raw
+        ));
+    }
+    Ok(segments
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::"))
+}
+
+fn valid_cpp_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn validate_cpp_qualified_name(raw: &str, separator: &str, label: &str) -> Result<(), String> {
+    let segments: Vec<&str> = raw.split(separator).collect();
+    if segments.is_empty()
+        || segments
+            .iter()
+            .any(|segment| !valid_cpp_identifier(segment))
+    {
+        return Err(format!("invalid {} '{}'", label, raw));
+    }
+    Ok(())
+}
+
+/// Load the consumer module projection accepted by
+/// `--consumer-module-map`. JSON and TOML are supported; an unknown extension
+/// is tried as JSON first and TOML second, matching the C++ symbol-index
+/// sidecar behavior.
+pub fn load_consumer_module_map(path: &Path) -> Result<ConsumerModuleMap, String> {
+    let content = fs::read_to_string(path).map_err(|e| {
+        format!(
+            "Failed to read consumer module map {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let parsed: ConsumerModuleMapFile = match extension.as_deref() {
+        Some("json") => serde_json::from_str(&content).map_err(|e| {
+            format!("Invalid JSON consumer module map {}: {}", path.display(), e)
+        })?,
+        Some("toml") => toml::from_str(&content).map_err(|e| {
+            format!("Invalid TOML consumer module map {}: {}", path.display(), e)
+        })?,
+        _ => match serde_json::from_str(&content) {
+            Ok(value) => value,
+            Err(json_error) => toml::from_str(&content).map_err(|toml_error| {
+                format!(
+                    "Failed to parse consumer module map {} as JSON ({}) or TOML ({})",
+                    path.display(),
+                    json_error,
+                    toml_error
+                )
+            })?,
+        },
+    };
+    if parsed.version != 1 {
+        return Err(format!(
+            "Unsupported consumer module map version {} in {} (expected version 1)",
+            parsed.version,
+            path.display()
+        ));
+    }
+    if parsed.module.is_empty() {
+        return Err(format!(
+            "Consumer module map {} contains no module entries",
+            path.display()
+        ));
+    }
+
+    let mut modules = BTreeMap::new();
+    let mut cpp_modules = HashSet::new();
+    for entry in parsed.module {
+        let rust_module = canonical_consumer_rust_module_path(&entry.rust_module)?;
+        validate_cpp_qualified_name(&entry.cpp_module, ".", "C++ module name")?;
+        validate_cpp_qualified_name(&entry.cpp_namespace, "::", "C++ namespace")?;
+        if modules.contains_key(&rust_module) {
+            return Err(format!(
+                "Consumer module map {} repeats Rust module '{}'",
+                path.display(),
+                entry.rust_module
+            ));
+        }
+        if !cpp_modules.insert(entry.cpp_module.clone()) {
+            return Err(format!(
+                "Consumer module map {} repeats C++ module '{}'",
+                path.display(),
+                entry.cpp_module
+            ));
+        }
+        modules.insert(
+            rust_module.clone(),
+            ConsumerModuleEntry {
+                rust_module,
+                cpp_module: entry.cpp_module,
+                cpp_namespace: entry.cpp_namespace,
+            },
+        );
+    }
+    Ok(ConsumerModuleMap { modules })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranspileOptions {
     /// Enable `CodeGen::set_crate_name` on the `--crate` path (using the module
@@ -331,6 +514,11 @@ pub struct TranspileOptions {
     /// Source paths used to load the configured C++ module symbol index.
     /// Used in diagnostics so unresolved-symbol errors point to the configured index input.
     pub cpp_module_symbol_index_sources: Vec<PathBuf>,
+    /// Optional consumer-specific projection from Rust crate-module paths to
+    /// named C++ modules and their actual namespaces. Unlike
+    /// `crate_module_names`, this supports non-isomorphic graphs such as a
+    /// legacy flat `rrr` namespace spread across `rrr.*` module units.
+    pub consumer_module_map: ConsumerModuleMap,
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
@@ -1023,6 +1211,7 @@ impl Default for TranspileOptions {
             is_dependency: false,
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
+            consumer_module_map: ConsumerModuleMap::default(),
             external_crate_module_aliases: HashMap::new(),
             cpp_type_aliases: HashMap::new(),
             emit_ufcs_trait_manifest_path: None,
@@ -1323,6 +1512,38 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
+    let effective_cxx_namespace = if options.consumer_module_map.is_empty() {
+        options.cxx_namespace.clone()
+    } else {
+        let current_cpp_module = module_name.ok_or_else(|| {
+            "--consumer-module-map requires module emission; pass --module-name <name>"
+                .to_string()
+        })?;
+        let entry = options
+            .consumer_module_map
+            .entry_for_cpp_module(current_cpp_module)
+            .ok_or_else(|| {
+                format!(
+                    "C++ module '{}' has no entry in --consumer-module-map",
+                    current_cpp_module
+                )
+            })?;
+        if options.auto_namespace {
+            return Err(
+                "--consumer-module-map cannot be combined with --auto-namespace; the map supplies the C++ namespace"
+                    .to_string(),
+            );
+        }
+        if let Some(explicit) = options.cxx_namespace.as_deref()
+            && explicit != entry.cpp_namespace
+        {
+            return Err(format!(
+                "--cxx-namespace '{}' conflicts with namespace '{}' mapped for C++ module '{}'",
+                explicit, entry.cpp_namespace, current_cpp_module
+            ));
+        }
+        Some(entry.cpp_namespace.clone())
+    };
     let profile_transpile = std::env::var_os("RUSTY_CPP_PROFILE_TRANSPILE").is_some();
     let profile_this_call = profile_transpile && rust_source.lines().take(2001).count() >= 2000;
     let profile_start = std::time::Instant::now();
@@ -1403,7 +1624,7 @@ pub fn transpile_full_with_options(
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_in_umbrella_closure(options.in_umbrella_closure);
     codegen.lenient_auto_template_args = options.lenient_auto_template_args;
-    codegen.set_cxx_namespace(options.cxx_namespace.clone());
+    codegen.set_cxx_namespace(effective_cxx_namespace);
     codegen.set_auto_namespace(options.auto_namespace);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
     codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
@@ -1415,6 +1636,7 @@ pub fn transpile_full_with_options(
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_crate_module_names(options.crate_module_names.clone());
+    codegen.set_consumer_module_map(options.consumer_module_map.clone(), module_name);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -3583,6 +3805,60 @@ callable_signatures = ["int(int,int)"]
         let max = std_module.symbols.get("max").expect("max symbol");
         assert_eq!(max.kind.as_deref(), Some("function"));
         assert_eq!(max.callable_signatures, vec!["int(int,int)".to_string()]);
+    }
+
+    #[test]
+    fn test_load_consumer_module_map_toml() {
+        let dir = tempdir().expect("tempdir");
+        let map_path = dir.path().join("consumer-modules.toml");
+        std::fs::write(
+            &map_path,
+            r#"
+version = 1
+
+[[module]]
+rust_module = "crate::base::sync"
+cpp_module = "rrr.basetypes"
+cpp_namespace = "rrr"
+
+[[module]]
+rust_module = "crate::rpc::client"
+cpp_module = "rrr.client"
+cpp_namespace = "rrr"
+"#,
+        )
+        .expect("write consumer map");
+
+        let map = load_consumer_module_map(&map_path).expect("load consumer map");
+        assert_eq!(map.modules.len(), 2);
+        let sync = map.entry_for_rust_module("base::sync").unwrap();
+        assert_eq!(sync.cpp_module, "rrr.basetypes");
+        assert_eq!(sync.cpp_namespace, "rrr");
+        assert_eq!(
+            map.entry_for_cpp_module("rrr.client")
+                .map(|entry| entry.rust_module.as_str()),
+            Some("rpc::client")
+        );
+    }
+
+    #[test]
+    fn test_consumer_module_map_rejects_duplicate_cpp_module() {
+        let dir = tempdir().expect("tempdir");
+        let map_path = dir.path().join("consumer-modules.json");
+        std::fs::write(
+            &map_path,
+            r#"{
+  "version": 1,
+  "module": [
+    {"rust_module":"crate::base::sync","cpp_module":"rrr.shared","cpp_namespace":"rrr"},
+    {"rust_module":"crate::rpc::client","cpp_module":"rrr.shared","cpp_namespace":"rrr"}
+  ]
+}"#,
+        )
+        .expect("write consumer map");
+
+        let error = load_consumer_module_map(&map_path).unwrap_err();
+        assert!(error.contains("repeats C++ module 'rrr.shared'"), "{error}");
     }
 
     #[test]

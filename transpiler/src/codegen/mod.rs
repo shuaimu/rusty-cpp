@@ -1653,6 +1653,11 @@ pub struct CodeGen {
     pub(crate) self_path_overrides: Vec<Option<String>>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     pub(crate) module_name: Option<String>,
+    /// Optional consumer-specific Rust-module -> C++ module/namespace map.
+    /// `consumer_rust_module` identifies this unit's Rust module, selected by
+    /// matching `module_name` against the map's C++ module names.
+    pub(crate) consumer_module_map: crate::transpile::ConsumerModuleMap,
+    pub(crate) consumer_rust_module: Option<String>,
     /// When set (and module mode active), wrap all exported items between
     /// `export namespace NS { … }`. Lets two sibling modules export
     /// same-named types without colliding at importer scope (rusty-std-book
@@ -2357,6 +2362,8 @@ impl CodeGen {
             char_predicate_closure_param_scopes: Vec::new(),
             self_path_overrides: Vec::new(),
             module_name: None,
+            consumer_module_map: crate::transpile::ConsumerModuleMap::default(),
+            consumer_rust_module: None,
             cxx_namespace: None,
             auto_namespace: false,
             use_import_std_in_modules: false,
@@ -4811,6 +4818,26 @@ impl CodeGen {
     /// for why we need this.
     pub fn set_crate_module_names(&mut self, names: Vec<String>) {
         self.crate_module_names = names.into_iter().collect();
+    }
+
+    /// Configure a consumer-specific module projection for this emit. The
+    /// current Rust module is selected by the C++ module name passed to
+    /// `emit_file`; validation in `transpile_full_with_options` guarantees a
+    /// unique entry when the map is non-empty.
+    pub fn set_consumer_module_map(
+        &mut self,
+        map: crate::transpile::ConsumerModuleMap,
+        current_cpp_module: Option<&str>,
+    ) {
+        self.consumer_rust_module = current_cpp_module
+            .and_then(|name| map.entry_for_cpp_module(name))
+            .map(|entry| entry.rust_module.clone());
+        self.crate_module_names.extend(
+            map.modules
+                .values()
+                .map(|entry| entry.cpp_module.clone()),
+        );
+        self.consumer_module_map = map;
     }
 
 
@@ -46210,10 +46237,11 @@ impl CodeGen {
     fn try_map_fn_trait_boxed(&self, tb: &syn::TraitBound) -> Option<String> {
         let last_seg = tb.path.segments.last()?;
         let trait_name = last_seg.ident.to_string();
-
-        if !matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce") {
-            return None;
-        }
+        let const_suffix = match trait_name.as_str() {
+            "Fn" => " const",
+            "FnMut" | "FnOnce" => "",
+            _ => return None,
+        };
 
         if let syn::PathArguments::Parenthesized(args) = &last_seg.arguments {
             let param_types: Vec<String> = args
@@ -46226,9 +46254,10 @@ impl CodeGen {
                 syn::ReturnType::Type(_, ty) => self.map_callable_surface_type(ty),
             };
             Some(format!(
-                "rusty::Function<{}({})>",
+                "rusty::Function<{}({}){}>",
                 return_type,
-                param_types.join(", ")
+                param_types.join(", "),
+                const_suffix
             ))
         } else {
             None
@@ -48544,7 +48573,11 @@ impl CodeGen {
             return None;
         }
         let scoped_ident = self.scoped_type_key(&ident);
-        if self.data_enum_types.contains(&ident) || self.data_enum_types.contains(&scoped_ident) {
+        if self.c_like_enum_types.contains(&ident)
+            || self.c_like_enum_types.contains(&scoped_ident)
+            || self.data_enum_types.contains(&ident)
+            || self.data_enum_types.contains(&scoped_ident)
+        {
             return None;
         }
         let scope_key = self.module_stack.join("::");

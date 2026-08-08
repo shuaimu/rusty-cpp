@@ -67,6 +67,11 @@ struct Cli {
     #[arg(long = "cpp-module-index")]
     cpp_module_index: Vec<PathBuf>,
 
+    /// Consumer projection from Rust crate-module paths to named C++ modules
+    /// and namespaces (JSON or TOML)
+    #[arg(long = "consumer-module-map")]
+    consumer_module_map: Option<PathBuf>,
+
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
     by_value_cycle_breaking_prototype: bool,
@@ -4246,6 +4251,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         is_dependency: false,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
+        consumer_module_map: transpile::ConsumerModuleMap::default(),
         external_crate_module_aliases: HashMap::new(),
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
@@ -4846,6 +4852,17 @@ fn main() {
             }
         }
     };
+    let consumer_module_map = if let Some(ref map_path) = cli.consumer_module_map {
+        match transpile::load_consumer_module_map(map_path) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        transpile::ConsumerModuleMap::default()
+    };
     let transpile_options = transpile::TranspileOptions {
         // Crate mode's collect pass sees whole files; the sibling-block
         // cpp_inherit harvest is an inline-rust-only need.
@@ -4856,6 +4873,7 @@ fn main() {
         is_dependency: false,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
+        consumer_module_map,
         external_crate_module_aliases: HashMap::new(),
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),

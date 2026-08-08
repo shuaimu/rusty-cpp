@@ -42096,3 +42096,86 @@ fn test_explicit_associated_call_does_not_borrow_unrelated_owner_arg_types() {
         "unrelated owner's parameter type leaked into the field init: {out}"
     );
 }
+
+fn transpile_str_module_with_consumer_map(rust_code: &str, module_name: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let modules = [
+        ("base::sync", "rrr.basetypes"),
+        ("rpc::client", "rrr.client"),
+    ]
+    .into_iter()
+    .map(|(rust_module, cpp_module)| {
+        (
+            rust_module.to_string(),
+            crate::transpile::ConsumerModuleEntry {
+                rust_module: rust_module.to_string(),
+                cpp_module: cpp_module.to_string(),
+                cpp_namespace: "rrr".to_string(),
+            },
+        )
+    })
+    .collect();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.set_consumer_module_map(crate::transpile::ConsumerModuleMap { modules }, Some(module_name));
+    cg.emit_file(&file, Some(module_name));
+    cg.into_output()
+}
+
+#[test]
+fn test_box_dyn_fn_uses_const_rusty_function_signature() {
+    let out = transpile_str("fn apply(f: Box<dyn Fn(i32) -> i32>) {}");
+    assert!(
+        out.contains("rusty::Function<int32_t(int32_t) const> f"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_consumer_module_map_projects_sibling_imports_and_qualified_paths() {
+    let out = transpile_str_module_with_consumer_map(
+        r#"
+use crate::base::sync::Counter;
+use crate::base::sync;
+use crate::base::sync as clocks;
+
+pub fn round_trip(value: crate::base::sync::Counter) -> crate::base::sync::Counter {
+    let _fresh = crate::base::sync::make_counter();
+    let _other = sync::make_counter();
+    let _aliased = clocks::make_counter();
+    value
+}
+"#,
+        "rrr.client",
+    );
+    assert!(out.contains("export module rrr.client;"), "{out}");
+    assert!(out.contains("namespace rrr {"), "{out}");
+    assert_eq!(out.matches("import rrr.basetypes;").count(), 1, "{out}");
+    assert!(out.contains("using ::rrr::Counter;"), "{out}");
+    assert!(out.contains("::rrr::Counter round_trip(::rrr::Counter value)"), "{out}");
+    assert_eq!(out.matches("::rrr::make_counter()").count(), 3, "{out}");
+    assert!(!out.contains("::base::sync"), "{out}");
+    assert!(!out.contains("::rrr::base"), "{out}");
+}
+
+#[test]
+fn test_module_c_like_enum_value_param_not_softened_to_auto() {
+    let out = transpile_str_module(
+        r#"
+        enum ErrorCode {
+            Ok,
+            Invalid,
+        }
+        fn from_code(code: ErrorCode) -> i32 {
+            match code {
+                ErrorCode::Ok => 0,
+                ErrorCode::Invalid => 1,
+            }
+        }
+        "#,
+        "sample",
+    );
+    assert!(out.contains("int32_t from_code(ErrorCode code)"), "{out}");
+    assert!(!out.contains("from_code(auto code"), "{out}");
+}
+
