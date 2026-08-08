@@ -48530,8 +48530,18 @@ pub(crate) fn resolve_impl_method_conflict(
 ///     (itertools `MergeFuncLR<F, Ordering>` vs `<F, bool>`, `$C<I>` vs
 ///     `$C<Fuse<I>>`) or its wrapper (`&T` / `&mut T` / `Box<T>`). C++ CAN
 ///     express these — as constrained overloads or partial specializations —
-///     so these are an emitter gap, not a language limit. Roughly half the
-///     sites across the parity matrix are this kind. See task #193.
+///     so these are an emitter gap, not a language limit.
+///   - DIFFERENT-TRAIT, SAME METHOD NAME: a manual `impl Display` and a manual
+///     `impl Debug` both lower to a member named `fmt`. CONFIRMED silent-wrong
+///     by runtime probe: with both impls present, `{:?}` prints the DISPLAY
+///     body (Rust `display=3 debug=V(3)` vs port `display=3 debug=3`). A
+///     *derived* Debug is safe — it emits `rusty_debug_string()`, which the
+///     runtime prefers — so only hand-written `impl Debug` is affected. Fix is
+///     to route a manual Debug impl to the debug member too, not to `fmt`.
+///
+/// Measured at 42 distinct sites across the 22-crate parity matrix; all 22
+/// still PASS, which shows only that their suites do not exercise the dropped
+/// behaviour. See task #206 for the inventory and per-cluster classification.
 fn warn_on_lossy_impl_method_conflict(
     type_name: &str,
     kept: &syn::ImplItemFn,
@@ -48556,11 +48566,14 @@ fn warn_on_lossy_impl_method_conflict(
     }
     eprintln!(
         "warning: {}::{}: two impls collapse to a single C++ signature, so one \
-         body is kept and the other discarded. Either the impls differ only in \
-         the Rust trait's type argument (`Extend<T>` vs `Extend<&T>`), which \
-         C++ cannot overload on, or they differ in the SELF type's template \
-         argument or wrapper, which C++ could express but the emitter does not \
-         yet (see task #193).",
+         body is kept and the other discarded — the port compiles and may do \
+         the wrong thing. Causes: (a) the impls differ only in the Rust trait's \
+         type argument (`Extend<T>` vs `Extend<&T>`), which C++ cannot overload \
+         on; (b) they differ in the SELF type's template argument or wrapper, \
+         which C++ could express but the emitter does not yet; (c) they are \
+         DIFFERENT traits sharing a method name (manual `impl Display` + manual \
+         `impl Debug` both lower to `fmt`), which makes `{{:?}}` print the \
+         Display body. See task #206.",
         type_name, kept.sig.ident
     );
 }
