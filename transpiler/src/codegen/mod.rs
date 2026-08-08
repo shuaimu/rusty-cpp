@@ -10449,10 +10449,13 @@ impl CodeGen {
                         ""
                     };
                     if enum_is_c_like(e) {
+                        let underlying = Self::c_like_enum_integer_repr(e)
+                            .map(|ty| format!(" : {}", ty))
+                            .unwrap_or_default();
                         self.emit_template_declaration_without_type_defaults(
                             &e.generics,
                             export_prefix,
-                            &format!("enum class {};", name),
+                            &format!("enum class {}{};", name, underlying),
                         );
                         self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
                     } else if self.enum_uses_struct_wrapper(e) {
@@ -10800,10 +10803,13 @@ impl CodeGen {
                         ""
                     };
                     if enum_is_c_like(e) {
+                        let underlying = Self::c_like_enum_integer_repr(e)
+                            .map(|ty| format!(" : {}", ty))
+                            .unwrap_or_default();
                         self.emit_template_declaration_without_type_defaults(
                             &e.generics,
                             export_prefix,
-                            &format!("enum class {};", name),
+                            &format!("enum class {}{};", name, underlying),
                         );
                         self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
                         self.emit_c_like_enum_inherent_method_forward_decls(
@@ -17056,6 +17062,13 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
+        // A cpp_inherit impl is already represented by real virtual member
+        // overrides.  Emitting the ordinary UFCS companion functions as well
+        // duplicates the public API and can instantiate a second, incompatible
+        // dispatch path that the legacy inheritance lowering never exposed.
+        if Self::has_cpp_inherit_attr(&impl_block.attrs) {
+            return;
+        }
         let Some((trait_name, specs)) =
             Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
         else {
@@ -17167,6 +17180,11 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
+        // Keep the declaration pass exactly aligned with the definition pass:
+        // cpp_inherit impls dispatch through virtual members, not UFCS helpers.
+        if Self::has_cpp_inherit_attr(&impl_block.attrs) {
+            return;
+        }
         let Some((trait_name, specs)) =
             Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
         else {

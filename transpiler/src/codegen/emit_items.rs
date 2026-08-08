@@ -4234,7 +4234,13 @@ impl CodeGen {
                     .forward_emitted_c_like_enums
                     .contains(&scoped_enum_name);
             if !already_defined {
-                self.writeln(&format!("{}enum class {} {{", export_prefix, name));
+                let underlying = Self::c_like_enum_integer_repr(e)
+                    .map(|ty| format!(" : {}", ty))
+                    .unwrap_or_default();
+                self.writeln(&format!(
+                    "{}enum class {}{} {{",
+                    export_prefix, name, underlying
+                ));
                 self.indent += 1;
                 let variants = self.render_c_like_enum_variants(e);
                 self.writeln(&variants.join(",\n    "));
@@ -9099,6 +9105,28 @@ impl CodeGen {
             emitted_auto_trailing_return =
                 Some(format!("rusty::Option<std::tuple<{}>>", items));
         }
+        let cpp_inherit_override = !is_static
+            && !is_drop_destructor
+            && self.current_struct.as_ref().is_some_and(|owner| {
+                let scoped_owner = self.scoped_type_key(owner);
+                let trait_name = self
+                    .cpp_inherit_trait
+                    .get(owner)
+                    .or_else(|| self.cpp_inherit_trait.get(&scoped_owner));
+                trait_name.is_some_and(|trait_name| {
+                    self.ufcs_declared_trait_methods
+                        .get(trait_name)
+                        .is_some_and(|methods| methods.contains(&method_ident))
+                        && !self
+                            .trait_class_skipped_method_keys
+                            .contains(&(trait_name.clone(), method_ident.clone()))
+                })
+            });
+        let override_suffix = if cpp_inherit_override {
+            " override"
+        } else {
+            ""
+        };
         if !self.method_emission_skip_conflict_registration {
             let mut conflict_key = self.emitted_method_conflict_key(
                 &name,
@@ -9129,7 +9157,7 @@ impl CodeGen {
                 ));
             } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
                 self.writeln(&format!(
-                    "{}{} {}({}){}{} -> {}{};",
+                    "{}{} {}({}){}{} -> {}{}{};",
                     static_prefix,
                     emitted_return_type,
                     emitted_callable_name,
@@ -9137,17 +9165,19 @@ impl CodeGen {
                     qualifier,
                     ordinary_noexcept,
                     trailing_return,
+                    override_suffix,
                     arity_requires
                 ));
             } else {
                 self.writeln(&format!(
-                    "{}{} {}({}){}{}{};",
+                    "{}{} {}({}){}{}{}{};",
                     static_prefix,
                     emitted_return_type,
                     emitted_callable_name,
                     params.join(", "),
                     qualifier,
                     ordinary_noexcept,
+                    override_suffix,
                     arity_requires
                 ));
             }
@@ -9208,8 +9238,13 @@ impl CodeGen {
                 drop_noexcept
             ));
         } else if let Some(trailing_return) = emitted_auto_trailing_return.as_ref() {
+            let definition_override = if out_of_line_owner.is_none() {
+                override_suffix
+            } else {
+                ""
+            };
             self.writeln(&format!(
-                "{}{} {}({}){}{} -> {}{} {{",
+                "{}{} {}({}){}{} -> {}{}{} {{",
                 static_prefix,
                 emitted_return_type,
                 emitted_callable_name,
@@ -9217,17 +9252,24 @@ impl CodeGen {
                 qualifier,
                 ordinary_noexcept,
                 trailing_return,
+                definition_override,
                 arity_requires
             ));
         } else {
+            let definition_override = if out_of_line_owner.is_none() {
+                override_suffix
+            } else {
+                ""
+            };
             self.writeln(&format!(
-                "{}{} {}({}){}{}{} {{",
+                "{}{} {}({}){}{}{}{} {{",
                 static_prefix,
                 emitted_return_type,
                 emitted_callable_name,
                 params.join(", "),
                 qualifier,
                 ordinary_noexcept,
+                definition_override,
                 arity_requires
             ));
         }

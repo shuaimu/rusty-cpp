@@ -7796,6 +7796,21 @@ fn test_interface_traits_arc_dyn_maps_to_rusty_arc_of_interface() {
 }
 
 #[test]
+fn test_ordinary_arc_new_constructs_payload_in_place() {
+    let out = transpile_str(
+        "struct Payload { value: i32 } fn wrap(value: Payload) -> Arc<Payload> { Arc::new(value) }",
+    );
+    assert!(
+        out.contains("rusty::Arc<Payload>::make(std::move(value))"),
+        "ordinary Arc::new must use the in-place factory and avoid a second payload move:\n{out}"
+    );
+    assert!(
+        !out.contains("Arc<Payload>::new_("),
+        "the by-value Arc factory adds an observable move:\n{out}"
+    );
+}
+
+#[test]
 fn test_interface_traits_unknown_trait_falls_back_to_void_ptr() {
     // Unknown trait (no facade resolvable) should still fall back to void*
     // / const void*, just as the Pro path does. The interface_traits flag
@@ -8013,7 +8028,7 @@ fn test_interface_traits_arc_new_coerces_via_adapter() {
     );
     assert!(out.contains("rusty::Arc<Animal> make()"), "{out}");
     assert!(
-        out.contains("rusty::Arc<AnimalAdapter<Dog>>::new_(Dog{"),
+        out.contains("rusty::Arc<AnimalAdapter<Dog>>::make(Dog{"),
         "{out}"
     );
 }
@@ -11600,6 +11615,63 @@ fn test_pub_enum_forward_decl_and_definition_are_exported_in_module_mode() {
     assert!(out.contains("export enum class Code {"), "{out}");
     assert!(out.contains("A = 10"), "{out}");
     assert!(out.contains("B = 20"), "{out}");
+}
+
+#[test]
+fn test_c_like_integer_repr_matches_forward_decls_and_definitions() {
+    let out = transpile_str_module(
+        r#"
+        #[repr(u8)] pub enum U8 { A }
+        #[repr(u16)] pub enum U16 { A }
+        #[repr(u32)] pub enum U32 { A }
+        #[repr(u64)] pub enum U64 { A }
+        #[repr(u128)] pub enum U128 { A }
+        #[repr(usize)] pub enum Usize { A }
+        #[repr(i8)] pub enum I8 { A }
+        #[repr(i16)] pub enum I16 { A }
+        #[repr(i32)] pub enum I32 { A }
+        #[repr(i64)] pub enum I64 { A }
+        #[repr(i128)] pub enum I128 { A }
+        #[repr(isize)] pub enum Isize { A }
+        #[repr(C)] pub enum COnly { A }
+        "#,
+        "reprs",
+    );
+    for (rust_name, cpp_type) in [
+        ("U8", "uint8_t"),
+        ("U16", "uint16_t"),
+        ("U32", "uint32_t"),
+        ("U64", "uint64_t"),
+        ("U128", "unsigned __int128"),
+        ("Usize", "size_t"),
+        ("I8", "int8_t"),
+        ("I16", "int16_t"),
+        ("I32", "int32_t"),
+        ("I64", "int64_t"),
+        ("I128", "__int128"),
+        ("Isize", "ptrdiff_t"),
+    ] {
+        assert!(
+            out.contains(&format!("export enum class {rust_name} : {cpp_type};")),
+            "missing matching fixed-underlying forward declaration for {rust_name}:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("export enum class {rust_name} : {cpp_type} {{")),
+            "missing fixed-underlying definition for {rust_name}:\n{out}"
+        );
+    }
+    assert!(out.contains("export enum class COnly;"), "{out}");
+    assert!(out.contains("export enum class COnly {"), "{out}");
+    assert!(!out.contains("enum class COnly :"), "{out}");
+}
+
+#[test]
+#[should_panic(expected = "multiple integer #[repr(...)]")]
+fn test_c_like_multiple_integer_reprs_fail_closed() {
+    let _ = transpile_str_module(
+        "#[repr(u8, i8)] pub enum Ambiguous { A }",
+        "bad_reprs",
+    );
 }
 
 #[test]
@@ -42095,6 +42167,114 @@ fn test_box_new_struct_literal_of_cpp_inherit_uses_fieldwise_ctor() {
     assert!(
         out.contains("Shim(") || out.contains("Shim(std::move(conn))"),
         "expected fieldwise-ctor construction: {out}"
+    );
+}
+
+#[test]
+fn test_module_mode_local_dyn_trait_box_and_hidden_cpp_inherit_are_nominal() {
+    let out = transpile_str_module(
+        r#"
+        pub trait PollableBase {
+            fn fd(&self) -> i32;
+            fn close(&mut self);
+        }
+        pub type PollableProxy = Box<dyn PollableBase>;
+
+        pub struct PollableShim {
+            fd_: i32,
+        }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl PollableBase for PollableShim {
+            fn fd(&self) -> i32 { self.fd_ }
+            fn close(&mut self) {}
+        }
+
+        pub fn make_pollable(fd: i32) -> PollableProxy {
+            Box::new(PollableShim { fd_: fd })
+        }
+        "#,
+        "pollable",
+    );
+    assert!(
+        out.contains("using PollableProxy = rusty::Box<PollableBase>;"),
+        "a known local trait object must keep its owning nominal interface:\n{out}"
+    );
+    assert!(
+        out.contains("struct PollableShim : public PollableBase"),
+        "cfg_attr(any(), cpp_inherit) must enable direct inheritance:\n{out}"
+    );
+    assert!(out.contains("close() override"), "{out}");
+    assert!(
+        !out.contains("PollableBaseAdapter<PollableShim"),
+        "a directly inherited object must not be wrapped in an absent adapter:\n{out}"
+    );
+    assert!(
+        !out.contains("namespace PollableBase_")
+            && !out.contains("using namespace PollableBase_"),
+        "cpp_inherit virtual overrides must not also export UFCS companions:\n{out}"
+    );
+}
+
+#[test]
+fn test_module_mode_local_dyn_trait_box_keeps_ordinary_adapter_path() {
+    let out = transpile_str_module(
+        r#"
+        pub trait Animal {
+            fn value(&self) -> i32;
+        }
+        pub type AnimalBox = Box<dyn Animal>;
+        pub struct Dog { value_: i32 }
+        impl Animal for Dog {
+            fn value(&self) -> i32 { self.value_ }
+        }
+        pub fn make_animal(value: i32) -> AnimalBox {
+            Box::new(Dog { value_: value })
+        }
+        "#,
+        "ordinary_adapter",
+    );
+    assert!(out.contains("using AnimalBox = rusty::Box<Animal>;"), "{out}");
+    assert!(
+        out.contains("class AnimalAdapter<Dog> final : public Animal"),
+        "ordinary local impls still require their owning adapter:\n{out}"
+    );
+    assert!(
+        out.contains("rusty::Box<AnimalAdapter<Dog>>::new_("),
+        "Box::new must construct the ordinary adapter specialization:\n{out}"
+    );
+    assert!(
+        out.contains("namespace Animal_") && out.contains("using namespace Animal_"),
+        "UFCS suppression must be limited to cpp_inherit impls:\n{out}"
+    );
+}
+
+#[test]
+fn test_local_dyn_trait_box_and_cpp_inherit_recognition_fail_closed() {
+    let out = transpile_str_module(
+        r#"
+        pub trait LocalTrait {
+            fn value(&self) -> i32;
+        }
+        pub type Unknown = Box<dyn external::Trait>;
+        pub type ExtraBound = Box<dyn LocalTrait + Send>;
+
+        pub struct Conditional {}
+        #[cfg_attr(unix, cpp_inherit)]
+        impl LocalTrait for Conditional {
+            fn value(&self) -> i32 { 1 }
+        }
+        "#,
+        "pollable_negative",
+    );
+    assert!(out.contains("using Unknown = void*;"), "{out}");
+    assert!(out.contains("using ExtraBound = void*;"), "{out}");
+    let conditional = out
+        .lines()
+        .find(|line| line.contains("struct Conditional"))
+        .unwrap_or_else(|| panic!("missing Conditional declaration:\n{out}"));
+    assert!(
+        !conditional.contains(": public LocalTrait"),
+        "only the permanently-disabled any() marker is accepted: {conditional}"
     );
 }
 

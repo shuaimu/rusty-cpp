@@ -91,6 +91,42 @@ fn test_ptr_read_const_pointer_supports_move_only_payloads() {
 }
 
 #[test]
+fn test_arc_make_constructs_function_payload_with_one_observable_move() {
+    let source = r#"
+        #include <rusty/arc.hpp>
+        #include <utility>
+
+        struct Payload {
+            static inline int moves = 0;
+            int value;
+
+            explicit Payload(int v) : value(v) {}
+            Payload(const Payload&) = delete;
+            Payload& operator=(const Payload&) = delete;
+            Payload(Payload&& other) noexcept : value(other.value) {
+                ++moves;
+                other.value = -1;
+            }
+            Payload& operator=(Payload&&) = delete;
+        };
+
+        rusty::Arc<Payload> wrap(Payload value) {
+            return rusty::Arc<Payload>::make(std::move(value));
+        }
+
+        int main() {
+            auto payload = wrap(Payload(73));
+            if (Payload::moves != 1) {
+                return 1;
+            }
+            return payload->value == 73 ? 0 : 2;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "arc_make_one_observable_move");
+}
+
+#[test]
 fn test_for_in_next_iter_range_moves_move_only_items() {
     let source = r#"
         #include <rusty/slice.hpp>

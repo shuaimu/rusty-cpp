@@ -1802,6 +1802,118 @@ impl CodeGen {
         })
     }
 
+    /// Resolve a trait object only when its single semantic trait is a
+    /// declaration collected from this Rust input. This is intentionally
+    /// stricter than the legacy facade-name heuristic: unknown/external
+    /// traits and additional bounds must keep the fail-closed fallback.
+    fn known_local_dyn_trait_cpp_name(
+        &self,
+        object: &syn::TypeTraitObject,
+    ) -> Option<String> {
+        let mut trait_bound = None;
+        for bound in &object.bounds {
+            match bound {
+                syn::TypeParamBound::Lifetime(_) => {}
+                syn::TypeParamBound::Trait(candidate)
+                    if trait_bound.is_none()
+                        && matches!(candidate.modifier, syn::TraitBoundModifier::None)
+                        && candidate.lifetimes.is_none() =>
+                {
+                    trait_bound = Some(candidate);
+                }
+                _ => return None,
+            }
+        }
+        let trait_bound = trait_bound?;
+        let scoped = self.resolve_trait_scoped_key_for_impl(
+            &trait_bound.path,
+            &self.module_stack,
+        );
+        if !self.trait_declared_paths.contains(&scoped) {
+            return None;
+        }
+        let short = scoped.rsplit("::").next()?;
+        if self.skipped_interface_traits.contains(short) {
+            return None;
+        }
+
+        let leaf = self.interface_trait_cpp_name(&trait_bound.path);
+        let Some((prefix, _)) = scoped.rsplit_once("::") else {
+            return Some(leaf);
+        };
+        let prefix = prefix
+            .split("::")
+            .map(escape_cpp_keyword)
+            .collect::<Vec<_>>()
+            .join("::");
+        Some(format!("{}::{}", prefix, leaf))
+    }
+
+    /// Resolve a source-level smart-pointer-to-local-trait shape through a
+    /// bounded chain of Rust type aliases.  This deliberately works from the
+    /// Rust AST rather than a rendered `using` spelling, so an unrelated C++
+    /// alias cannot opt a value into interface ownership lowering.
+    pub(super) fn known_local_dyn_trait_smart_ptr_cpp_name(
+        &self,
+        ty: &syn::Type,
+        owner: &str,
+    ) -> Option<String> {
+        let mut current = ty.clone();
+        let mut seen = HashSet::new();
+        for _ in 0..32 {
+            let peeled = self.peel_paren_group_type(&current);
+            if !seen.insert(peeled.to_token_stream().to_string()) {
+                return None;
+            }
+            let syn::Type::Path(path) = peeled else {
+                return None;
+            };
+            let last = path.path.segments.last()?;
+            if last.ident == owner {
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                let mut type_args = args.args.iter().filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(ty) => Some(ty),
+                    _ => None,
+                });
+                let object = match self.peel_paren_group_type(type_args.next()?) {
+                    syn::Type::TraitObject(object) if type_args.next().is_none() => object,
+                    _ => return None,
+                };
+                return self.known_local_dyn_trait_cpp_name(object);
+            }
+            let next = self.resolve_type_alias_once(peeled)?;
+            if next == *peeled {
+                return None;
+            }
+            current = next;
+        }
+        None
+    }
+
+    pub(super) fn expr_constructs_cpp_inherit_type(&self, expr: &syn::Expr) -> bool {
+        let direct_name = match self.peel_paren_group_expr(expr) {
+            syn::Expr::Struct(value) => value
+                .path
+                .segments
+                .last()
+                .map(|seg| seg.ident.to_string()),
+            _ => None,
+        };
+        direct_name
+            .as_deref()
+            .is_some_and(|name| self.is_cpp_inherit_type(name))
+            || self.infer_simple_expr_type(expr).is_some_and(|ty| {
+                matches!(
+                    self.peel_reference_paren_group_type(&ty),
+                    syn::Type::Path(path)
+                        if path.path.segments.last().is_some_and(|seg|
+                            self.is_cpp_inherit_type(&seg.ident.to_string()))
+                )
+            })
+    }
+
     /// Resolve only declared Rust type aliases, with a hard depth bound and
     /// cycle detection.  Nullable-callback transparency must never be inferred
     /// from a C++ spelling or a same-named user type: it is a source-type ABI
@@ -2982,6 +3094,11 @@ impl CodeGen {
                                     if is_io_write {
                                         return "rusty::io::DynWrite".to_string();
                                     }
+                                }
+                                if let Some(local_trait) =
+                                    self.known_local_dyn_trait_cpp_name(to)
+                                {
+                                    return format!("rusty::Box<{}>", local_trait);
                                 }
                                 if self.module_name.is_some() {
                                     return "void*".to_string();

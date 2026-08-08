@@ -603,7 +603,54 @@ impl CodeGen {
     /// wrapper, so existing call sites that upcast `Arc<Type>` /
     /// `shared_ptr<Type>` to the trait base keep compiling. Opt-in only.
     pub(super) fn has_cpp_inherit_attr(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| a.path().is_ident("cpp_inherit"))
+        Self::has_cpp_only_marker_attr(attrs, "cpp_inherit")
+    }
+
+    /// Return the C++ fixed underlying type requested by a Rust integer
+    /// `#[repr(...)]` on a C-like enum.  Forward declarations and definitions
+    /// must use the same spelling: omitting it on the declaration fixes the
+    /// type to `int` in C++, and a later `: uint8_t` definition is ill-formed.
+    ///
+    /// Multiple integer representations are invalid Rust.  Reject them here as
+    /// well instead of choosing one based on attribute order and silently
+    /// changing the ABI of source that has not been validated by rustc.
+    pub(super) fn c_like_enum_integer_repr(e: &syn::ItemEnum) -> Option<&'static str> {
+        let mut result = None;
+        for attr in &e.attrs {
+            if !attr.path().is_ident("repr") {
+                continue;
+            }
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                panic!("unsupported malformed #[repr(...)] on C-like enum `{}`", e.ident);
+            };
+            for meta in args {
+                let syn::Meta::Path(path) = meta else {
+                    continue;
+                };
+                let Some(ident) = path.get_ident().map(ToString::to_string) else {
+                    continue;
+                };
+                let cpp = match ident.as_str() {
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8"
+                    | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                        types::map_primitive_type(&ident)
+                    }
+                    _ => None,
+                };
+                let Some(cpp) = cpp else {
+                    continue;
+                };
+                if result.replace(cpp).is_some() {
+                    panic!(
+                        "multiple integer #[repr(...)] arguments on C-like enum `{}`",
+                        e.ident
+                    );
+                }
+            }
+        }
+        result
     }
 
     /// True when `type_name`'s simple name was recorded (via a
