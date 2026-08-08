@@ -1778,7 +1778,231 @@ impl CodeGen {
         None
     }
 
+    fn transparent_nullable_callback_path_is_canonical(
+        &self,
+        path: &syn::Path,
+        bare: &str,
+        qualified: &[&[&str]],
+    ) -> bool {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if segments.len() == 1 && segments[0] == bare {
+            return path.leading_colon.is_none()
+                && !self.bare_std_named_type_suppression_applies(bare);
+        }
+        qualified.iter().any(|candidate| {
+            candidate.len() == segments.len()
+                && candidate
+                    .iter()
+                    .zip(&segments)
+                    .all(|(expected, actual)| *expected == actual)
+        })
+    }
+
+    /// Resolve only declared Rust type aliases, with a hard depth bound and
+    /// cycle detection.  Nullable-callback transparency must never be inferred
+    /// from a C++ spelling or a same-named user type: it is a source-type ABI
+    /// rule for one exact Rust shape.
+    fn resolve_transparent_nullable_callback_aliases(&self, ty: &syn::Type) -> syn::Type {
+        fn peel_paren_group(mut ty: &syn::Type) -> &syn::Type {
+            loop {
+                ty = match ty {
+                    syn::Type::Paren(paren) => &paren.elem,
+                    syn::Type::Group(group) => &group.elem,
+                    _ => return ty,
+                };
+            }
+        }
+
+        // References are deliberately not peeled here. `map_type` must see
+        // them so `&Option<Callback>` retains its C++ const/reference shape.
+        let mut current = peel_paren_group(ty).clone();
+        let mut seen = HashSet::new();
+        for _ in 0..8 {
+            let shape = current.to_token_stream().to_string();
+            if !seen.insert(shape) {
+                break;
+            }
+            // `resolve_type_alias_once` is a general helper which itself
+            // peels references. Guard it so this source-shape classifier does
+            // not accidentally turn a reference into the transparent value.
+            if !matches!(current, syn::Type::Path(_)) {
+                break;
+            }
+            let Some(next) = self.resolve_type_alias_once(&current) else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = peel_paren_group(&next).clone();
+        }
+        current
+    }
+
+    pub(super) fn transparent_nullable_callback_box_type(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        let option_ty = self.resolve_transparent_nullable_callback_aliases(ty);
+        let syn::Type::Path(option_path) = &option_ty else {
+            return None;
+        };
+        if option_path.qself.is_some()
+            || !self.transparent_nullable_callback_path_is_canonical(
+                &option_path.path,
+                "Option",
+                &[&["core", "option", "Option"], &["std", "option", "Option"]],
+            )
+        {
+            return None;
+        }
+        let option_args = match &option_path.path.segments.last()?.arguments {
+            syn::PathArguments::AngleBracketed(args) if args.args.len() == 1 => args,
+            _ => return None,
+        };
+        let syn::GenericArgument::Type(box_source_ty) = option_args.args.first()? else {
+            return None;
+        };
+
+        let box_ty = self.resolve_transparent_nullable_callback_aliases(box_source_ty);
+        let syn::Type::Path(box_path) = &box_ty else {
+            return None;
+        };
+        if box_path.qself.is_some()
+            || !self.transparent_nullable_callback_path_is_canonical(
+                &box_path.path,
+                "Box",
+                &[&["alloc", "boxed", "Box"], &["std", "boxed", "Box"]],
+            )
+        {
+            return None;
+        }
+        Some(box_ty)
+    }
+
+    fn transparent_nullable_callback_in_cell_wrapper(
+        &self,
+        ty: &syn::Type,
+        wrapper: &str,
+    ) -> Option<syn::Type> {
+        let guard_ty = self.resolve_transparent_nullable_callback_aliases(ty);
+        let syn::Type::Path(guard_path) = &guard_ty else {
+            return None;
+        };
+        if guard_path.qself.is_some()
+            || !self.transparent_nullable_callback_path_is_canonical(
+                &guard_path.path,
+                wrapper,
+                &[
+                    &["core", "cell", wrapper],
+                    &["std", "cell", wrapper],
+                ],
+            )
+        {
+            return None;
+        }
+        let args = match &guard_path.path.segments.last()?.arguments {
+            syn::PathArguments::AngleBracketed(args) => args,
+            _ => return None,
+        };
+        let inner = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(inner) => Some(inner),
+            _ => None,
+        })?;
+        self.try_map_transparent_nullable_callback_type(inner)?;
+        Some(inner.clone())
+    }
+
+    /// Return the transparent callback Option carried by a `RefMut` guard.
+    /// This is intentionally not a general recursive "contains" query: only
+    /// the canonical cell guard is allowed to expose a nullable callback for
+    /// the dedicated `guard.as_mut()` lowering.
+    pub(super) fn transparent_nullable_callback_in_refmut(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        self.transparent_nullable_callback_in_cell_wrapper(ty, "RefMut")
+    }
+
+    pub(super) fn transparent_nullable_callback_in_refcell(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        self.transparent_nullable_callback_in_cell_wrapper(ty, "RefCell")
+    }
+
+    /// Recognize exactly `Option<Box<dyn Fn/FnMut/FnOnce(...)>>` and lower its
+    /// redundant outer discriminator to `rusty::Function`'s existing nullable
+    /// state. Lifetimes are harmless, but a second trait bound (notably
+    /// `Send`/`Sync`) rejects the optimization rather than erasing semantics.
+    pub(super) fn try_map_transparent_nullable_callback_type(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<String> {
+        let box_ty = self.transparent_nullable_callback_box_type(ty)?;
+        let syn::Type::Path(box_path) = &box_ty else {
+            return None;
+        };
+        let box_args = match &box_path.path.segments.last()?.arguments {
+            syn::PathArguments::AngleBracketed(args) if args.args.len() == 1 => args,
+            _ => return None,
+        };
+        let syn::GenericArgument::Type(callable_source_ty) = box_args.args.first()? else {
+            return None;
+        };
+
+        let callable_ty = self.resolve_transparent_nullable_callback_aliases(callable_source_ty);
+        let syn::Type::TraitObject(callable) = &callable_ty else {
+            return None;
+        };
+        let mut fn_bound = None;
+        for bound in &callable.bounds {
+            match bound {
+                syn::TypeParamBound::Lifetime(_) => {}
+                syn::TypeParamBound::Trait(trait_bound)
+                    if fn_bound.is_none()
+                        && matches!(trait_bound.modifier, syn::TraitBoundModifier::None)
+                        && trait_bound.lifetimes.is_none() =>
+                {
+                    fn_bound = Some(trait_bound);
+                }
+                // Additional traits, `?Trait`, HRTBs, and future bound kinds
+                // are semantic constraints and therefore reject transparency.
+                _ => return None,
+            }
+        }
+        let fn_bound = fn_bound?;
+        if !self.transparent_nullable_callback_path_is_canonical(
+                &fn_bound.path,
+                fn_bound.path.segments.last()?.ident.to_string().as_str(),
+                &[
+                    &["core", "ops", "Fn"],
+                    &["core", "ops", "FnMut"],
+                    &["core", "ops", "FnOnce"],
+                    &["std", "ops", "Fn"],
+                    &["std", "ops", "FnMut"],
+                    &["std", "ops", "FnOnce"],
+                ],
+            )
+        {
+            return None;
+        }
+        let trait_name = fn_bound.path.segments.last()?.ident.to_string();
+        if !matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce") {
+            return None;
+        }
+        self.try_map_fn_trait_bare_signature(fn_bound)
+            .map(|signature| format!("rusty::Function<{}>", signature))
+    }
+
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
+        if let Some(callback) = self.try_map_transparent_nullable_callback_type(ty) {
+            return callback;
+        }
         // A bare C++ BUILTIN spelling can only appear when an already-mapped
         // type string was parsed back into a syn::Type (template-arg
         // substitution): pass it through verbatim. Without this, `double` /
@@ -2695,10 +2919,47 @@ impl CodeGen {
                                 args.args.first()
                             {
                                 // Check for Fn → rusty::Function
-                                if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
+                                let mut fn_trait_bound = None;
+                                let exact_single_trait = to.bounds.iter().all(|bound| match bound {
+                                    syn::TypeParamBound::Lifetime(_) => true,
+                                    syn::TypeParamBound::Trait(tb)
+                                        if fn_trait_bound.is_none()
+                                            && matches!(
+                                                tb.modifier,
+                                                syn::TraitBoundModifier::None
+                                            )
+                                            && tb.lifetimes.is_none() =>
+                                    {
+                                        fn_trait_bound = Some(tb);
+                                        true
+                                    }
+                                    _ => false,
+                                });
+                                if exact_single_trait
+                                    && let Some(tb) = fn_trait_bound
+                                    && self.transparent_nullable_callback_path_is_canonical(
+                                        &tb.path,
+                                        tb.path
+                                            .segments
+                                            .last()
+                                            .map(|segment| segment.ident.to_string())
+                                            .unwrap_or_default()
+                                            .as_str(),
+                                        &[
+                                            &["core", "ops", "Fn"],
+                                            &["core", "ops", "FnMut"],
+                                            &["core", "ops", "FnOnce"],
+                                            &["std", "ops", "Fn"],
+                                            &["std", "ops", "FnMut"],
+                                            &["std", "ops", "FnOnce"],
+                                        ],
+                                    )
+                                {
                                     if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
                                         return fn_type;
                                     }
+                                }
+                                if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
                                     // `Box<dyn io::Write + 'a>` gets the type-erased
                                     // owning writer instead of the module-mode
                                     // `void*` fallback (which cannot dispatch —

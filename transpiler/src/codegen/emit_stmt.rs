@@ -2262,6 +2262,158 @@ impl CodeGen {
         true
     }
 
+    fn try_emit_transparent_nullable_callback_if_let(
+        &mut self,
+        let_expr: &syn::ExprLet,
+        then_branch: &syn::Block,
+        else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
+        first: bool,
+    ) -> bool {
+        let (expect_some, binding_pat) = match &*let_expr.pat {
+            syn::Pat::TupleStruct(tuple) if self.is_option_some_path(&tuple.path) => {
+                if tuple.elems.len() != 1 {
+                    return false;
+                }
+                (true, tuple.elems.first())
+            }
+            syn::Pat::Path(path) if self.is_option_none_path(&path.path) => (false, None),
+            syn::Pat::Ident(ident) if ident.ident == "None" => (false, None),
+            _ => return false,
+        };
+
+        let (callback_option_ty, init_decl, init_name, init_expr, slot_expr, mutable_slot) =
+            match self.peel_paren_group_expr(&let_expr.expr) {
+                syn::Expr::Reference(reference) => {
+                    let inferred = self
+                        .infer_simple_expr_type(&reference.expr)
+                        .or_else(|| {
+                            self.infer_local_binding_type_from_initializer(&reference.expr)
+                        });
+                    let Some(inferred) = inferred.filter(|ty| {
+                        self.try_map_transparent_nullable_callback_type(ty).is_some()
+                    }) else {
+                        return false;
+                    };
+                    let mutable = reference.mutability.is_some();
+                    (
+                        inferred,
+                        if mutable { "auto&" } else { "const auto&" },
+                        "_iflet_callback_slot",
+                        self.emit_expr_to_string(&reference.expr),
+                        "_iflet_callback_slot".to_string(),
+                        mutable,
+                    )
+                }
+                syn::Expr::MethodCall(method)
+                    if method.method == "as_mut" && method.args.is_empty() =>
+                {
+                    let receiver_ty = self
+                        .infer_simple_expr_type(&method.receiver)
+                        .or_else(|| {
+                            self.infer_local_binding_type_from_initializer(&method.receiver)
+                        });
+                    let Some(option_ty) = receiver_ty.as_ref().and_then(|ty| {
+                        self.transparent_nullable_callback_in_refmut(ty)
+                    }) else {
+                        return false;
+                    };
+                    (
+                        option_ty,
+                        "auto&&",
+                        "_iflet_callback_guard",
+                        self.emit_expr_to_string(&method.receiver),
+                        "rusty::detail::deref_if_pointer_like(_iflet_callback_guard)".to_string(),
+                        true,
+                    )
+                }
+                other => {
+                    let inferred = self
+                        .infer_simple_expr_type(other)
+                        .or_else(|| self.infer_local_binding_type_from_initializer(other));
+                    if inferred.as_ref().is_some_and(|ty| {
+                        self.try_map_transparent_nullable_callback_type(ty).is_some()
+                    }) {
+                        panic!(
+                            "unsupported by-value if-let on transparent Option<Box<dyn Fn*>>; borrow the slot explicitly"
+                        );
+                    }
+                    return false;
+                }
+            };
+
+        let condition = if expect_some {
+            format!("static_cast<bool>({})", slot_expr)
+        } else {
+            format!("!static_cast<bool>({})", slot_expr)
+        };
+        let header = format!(
+            "if ({} {} = {}; {}) {{",
+            init_decl, init_name, init_expr, condition
+        );
+        if first {
+            self.writeln(&header);
+        } else {
+            self.output.push_str(&format!("{}\n", header));
+        }
+        self.indent += 1;
+
+        let mut binding_map = HashMap::new();
+        let mut binding_type = None;
+        if expect_some {
+            let Some(binding_pat) = binding_pat else {
+                unreachable!("Some pattern has one element");
+            };
+            match binding_pat {
+                syn::Pat::Wild(_) => {}
+                syn::Pat::Ident(ident) if ident.subpat.is_none() => {
+                    let rust_name = ident.ident.to_string();
+                    let cpp_name = self
+                        .lookup_local_binding_cpp_name(&rust_name)
+                        .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                    let binding_decl = if mutable_slot { "auto&" } else { "const auto&" };
+                    self.writeln(&format!(
+                        "{} {} = {};",
+                        binding_decl, cpp_name, slot_expr
+                    ));
+                    binding_type = self.transparent_nullable_callback_box_type(&callback_option_ty);
+                    binding_map.insert(rust_name, cpp_name);
+                }
+                _ => {
+                    panic!(
+                        "unsupported payload pattern on transparent Option<Box<dyn Fn*>>"
+                    );
+                }
+            }
+        }
+
+        if binding_map.is_empty() {
+            self.emit_block(then_branch);
+        } else {
+            let mut local_types = HashMap::new();
+            let mut local_consts = HashMap::new();
+            for rust_name in binding_map.keys() {
+                local_types.insert(rust_name.clone(), binding_type.clone());
+                local_consts.insert(rust_name.clone(), false);
+            }
+            self.local_cpp_bindings.push(binding_map);
+            self.local_bindings.push(local_types);
+            self.local_shadowed_binding_types.push(HashMap::new());
+            self.local_const_bindings.push(local_consts);
+            self.local_reference_bindings.push(HashSet::new());
+            self.rebind_reference_pointer_bindings.push(HashSet::new());
+            self.emit_block(then_branch);
+            self.rebind_reference_pointer_bindings.pop();
+            self.local_reference_bindings.pop();
+            self.local_const_bindings.pop();
+            self.local_shadowed_binding_types.pop();
+            self.local_bindings.pop();
+            self.local_cpp_bindings.pop();
+        }
+        self.indent -= 1;
+        self.emit_if_let_else(else_branch);
+        true
+    }
+
     /// Emit `if let Pattern = expr { ... } else { ... }` as C++ code.
     pub(super) fn emit_if_let(
         &mut self,
@@ -2270,6 +2422,14 @@ impl CodeGen {
         else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
         first: bool,
     ) {
+        if self.try_emit_transparent_nullable_callback_if_let(
+            let_expr,
+            then_branch,
+            else_branch,
+            first,
+        ) {
+            return;
+        }
         // Strip reference from scrutinee: `if let Some(x) = &self.field` → use `self.field`
         // The `&` is a Rust borrow for pattern matching that has no C++ equivalent.
         // Cluster E: remember whether the original scrutinee was a `&` /
