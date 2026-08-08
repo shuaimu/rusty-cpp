@@ -2514,6 +2514,45 @@ fn test_cpp_explicit_marker_applies_to_inline_ctor_but_not_out_of_line_definitio
 }
 
 #[test]
+fn hidden_cpp_ctor_on_generic_default_impl_emits_ctor_and_default_like_call() {
+    let out = transpile_str(
+        r#"
+        struct Envelope<T> {
+            kind: i32,
+            marker: [core::marker::PhantomData<T>; 0],
+        }
+
+        impl<T> Default for Envelope<T> {
+            #[cfg_attr(any(), cpp_ctor)]
+            fn default() -> Envelope<T> {
+                Envelope { kind: 0i32, marker: [] }
+            }
+        }
+
+        impl<T> Envelope<T> {
+            fn pack() -> Envelope<T> {
+                Default::default()
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("Envelope()")
+            && out.contains(": kind(static_cast<int32_t>(0))"),
+        "missing real zero-argument ctor definition:\n{out}"
+    );
+    assert!(
+        !out.contains("static Envelope<T> default_()")
+            && !out.contains("static Envelope default_()"),
+        "the marked Default method must not survive as a static factory:\n{out}"
+    );
+    assert!(
+        out.contains("rusty::default_like<Envelope<T>>()"),
+        "Default::default() must route through direct default construction:\n{out}"
+    );
+}
+
+#[test]
 fn test_drop_nonlowerable_cpp_ctor_retains_fieldwise_ctor_for_factory_fallback() {
     let out = transpile_str(
         r#"
@@ -40222,6 +40261,215 @@ fn a_macro_internal_wildcard_const_block_is_still_skipped() {
     assert!(
         !out.contains("static_assert("),
         "a scope block is not an assertion:\n{out}"
+    );
+}
+
+#[test]
+fn cpp_marker_trait_is_a_non_inheriting_registry_with_a_frozen_const() {
+    let out = transpile_str(
+        r#"
+        mod wire {
+            #[cfg_attr(any(), cpp_marker_trait)]
+            pub trait PayloadMember<Set, const VERSION: u32> {
+                const KIND: i32;
+            }
+
+            pub fn kind<Set, const VERSION: u32, T: PayloadMember<Set, VERSION>>() -> i32 {
+                <T as PayloadMember<Set, VERSION>>::KIND
+            }
+        }
+
+        pub struct Set;
+        pub struct Payload;
+
+        #[cfg_attr(any(), cpp_marker_impl)]
+        impl wire::PayloadMember<Set, 7> for Payload {
+            const KIND: i32 = 19;
+        }
+        "#,
+    );
+    assert!(
+        out.contains(
+            "template<typename Set, uint32_t VERSION, typename Implementor>"
+        ) && out.contains(
+            "struct PayloadMember { static constexpr bool value = false; };"
+        ),
+        "marker primary must append the implementor after type/const generics:\n{out}"
+    );
+    assert!(
+        out.contains("requires (PayloadMember<Set, VERSION, T>::value)"),
+        "marked bounds must become the registry predicate:\n{out}"
+    );
+    assert!(
+        out.contains("return PayloadMember<Set, VERSION, T>::KIND;"),
+        "a marked associated const must route through the specialization:\n{out}"
+    );
+    assert!(
+        out.contains("struct wire::PayloadMember<Set, 7, Payload> {")
+            && out.contains("static constexpr bool value = true;")
+            && (out.contains("static constexpr int32_t KIND = 19;")
+                || out.contains("static constexpr int32_t KIND = static_cast<int32_t>(19);")),
+        "a marked impl must be a non-inheriting explicit specialization:\n{out}"
+    );
+    assert!(
+        !out.contains("PayloadMemberAdapter")
+            && !out.contains("class PayloadMember")
+            && !out.contains("TODO(interface_traits): trait `PayloadMember`"),
+        "the marker registry must never use interface/adapter lowering:\n{out}"
+    );
+}
+
+#[test]
+fn cpp_marker_trait_is_exported_and_constrained_in_module_mode() {
+    let out = transpile_str_module(
+        r#"
+        #[cfg_attr(any(), cpp_marker_trait)]
+        pub trait PayloadMember<Set> { const KIND: i32; }
+
+        pub fn kind<Set, T: PayloadMember<Set>>() -> i32 {
+            <T as PayloadMember<Set>>::KIND
+        }
+        "#,
+        "wire_registry",
+    );
+    assert!(
+        out.contains("export template<typename Set, typename Implementor>")
+            && out.contains("struct PayloadMember;"),
+        "the public marker registry must be exported from a named module:\n{out}"
+    );
+    assert!(
+        out.matches("requires (PayloadMember<Set, T>::value)").count() >= 2,
+        "both the exported declaration and definition must retain the marker bound:\n{out}"
+    );
+}
+
+#[test]
+fn ordinary_user_trait_bounds_keep_their_previous_unconstrained_lowering() {
+    let out = transpile_str(
+        r#"
+        pub trait Ordinary { fn read(&self) -> i32; }
+        pub fn read_it<T: Ordinary>(value: &T) -> i32 { value.read() }
+        "#,
+    );
+    assert!(
+        !out.contains("Ordinary<T>::value") && !out.contains("requires (Ordinary"),
+        "only an explicitly marked trait may add a registry constraint:\n{out}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cpp_marker_trait")]
+fn malformed_cpp_marker_trait_fails_loudly() {
+    let _ = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_marker_trait)]
+        pub trait NotARegistry { fn runtime_method(&self); }
+        "#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "cpp_marker_impl")]
+fn malformed_cpp_marker_impl_fails_loudly() {
+    let _ = transpile_str(
+        r#"
+        pub struct Set;
+        pub struct Payload;
+        #[cfg_attr(any(), cpp_marker_impl)]
+        impl Clone for Payload { fn clone(&self) -> Payload { Payload } }
+        "#,
+    );
+}
+
+#[test]
+fn cpp_no_auto_traits_suppresses_only_the_opted_in_struct() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_no_auto_traits)]
+        pub struct Serializable<const KIND: i32> {}
+        pub struct Plain {}
+        "#,
+    );
+    let serializable_body = out
+        .split("struct Serializable {")
+        .nth(1)
+        .and_then(|rest| rest.split("};").next())
+        .expect("Serializable body");
+    let plain_body = out
+        .split("struct Plain {")
+        .nth(1)
+        .and_then(|rest| rest.split("};").next())
+        .expect("Plain body");
+    assert!(
+        !serializable_body.contains("is_send") && !serializable_body.contains("is_sync"),
+        "opted-in bridge type must remain !Send/!Sync:\n{out}"
+    );
+    assert!(
+        plain_body.contains("is_send = true") && plain_body.contains("is_sync = true"),
+        "unmarked zero-field structs must retain established auto traits:\n{out}"
+    );
+}
+
+#[test]
+fn zero_length_generic_marker_field_uses_layout_neutral_storage() {
+    let out = transpile_str(
+        r#"
+        pub struct SerializableEnvelope<PayloadSet> {
+            pub kind_: i32,
+            pub inner_: usize,
+            pub _payload_set: [core::marker::PhantomData<PayloadSet>; 0],
+        }
+        "#,
+    );
+    assert!(
+        out.contains(
+            "[[no_unique_address]] rusty::detail::zero_length_array<rusty::PhantomData<PayloadSet>> _payload_set;"
+        ),
+        "a Rust zero-length generic marker must not grow the C++ layout:\n{out}"
+    );
+}
+
+#[test]
+fn ordinary_assert_and_cpp_noexcept_preserve_kind_contracts() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_no_auto_traits)]
+        pub struct Serializable<const KIND: i32> {}
+
+        impl<const KIND: i32> Serializable<KIND> {
+            #[cfg_attr(any(), cpp_noexcept)]
+            pub const fn static_kind() -> i32 {
+                assert!(KIND != 0, "wire kind 0 is reserved");
+                KIND
+            }
+
+            #[cfg_attr(any(), cpp_noexcept)]
+            pub const fn kind(&self) -> i32 { Self::static_kind() }
+
+            pub fn may_panic(&self) {}
+        }
+        "#,
+    );
+    assert!(
+        out.contains("KIND")
+            && out.contains("!= 0")
+            && (out.contains("rusty::panic") || out.contains("std::logic_error")),
+        "the Rust-side nonzero assertion must remain in static_kind:\n{out}"
+    );
+    assert!(
+        out.contains("kind() const noexcept(true)"),
+        "cpp_noexcept must apply to an ordinary const method:\n{out}"
+    );
+    assert!(
+        out.contains("static_kind() noexcept(true)")
+            && (out.contains("return Serializable<KIND>::static_kind();")
+                || out.contains("return Serializable::static_kind();")
+                || out.contains("return Self::static_kind();")),
+        "static methods and Self-path calls must retain the noexcept contract:\n{out}"
+    );
+    assert!(
+        out.contains("may_panic() const {") && !out.contains("may_panic() const noexcept"),
+        "unmarked ordinary methods must retain their previous exception surface:\n{out}"
     );
 }
 

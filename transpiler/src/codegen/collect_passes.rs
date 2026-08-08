@@ -27,6 +27,105 @@ impl syn::visit_mut::VisitMut for TypeIdentReplacer {
 }
 
 impl CodeGen {
+    /// Pre-collect opt-in compile-time registry traits before any template
+    /// declaration/definition is emitted.  The constraint emitter needs this
+    /// information even when a bound appears textually before the trait item.
+    pub(super) fn collect_cpp_marker_traits(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) if Self::has_cpp_marker_trait_attr(&t.attrs) => {
+                    let mut path = module_path.to_vec();
+                    path.push(t.ident.to_string());
+                    self.cpp_marker_trait_paths.insert(path.join("::"));
+                }
+                syn::Item::Mod(m) if !Self::should_skip_cfg_attrs(&m.attrs) => {
+                    if let Some((_, nested)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_cpp_marker_traits(nested, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(super) fn trait_path_is_cpp_marker(&self, path: &syn::Path) -> bool {
+        let mut segments: Vec<String> = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        if matches!(segments.first().map(String::as_str), Some("crate" | "self")) {
+            segments.remove(0);
+        }
+        if segments.is_empty() {
+            return false;
+        }
+        let written = segments.join("::");
+        if self.cpp_marker_trait_paths.contains(&written) {
+            return true;
+        }
+        // A bare trait name resolves within the namespace currently being
+        // emitted.  Do not match by leaf globally: two modules may legally
+        // declare same-named traits, and an unmarked one must stay unchanged.
+        if segments.len() == 1 && !self.module_stack.is_empty() {
+            let mut scoped = self.module_stack.clone();
+            scoped.push(written);
+            return self.cpp_marker_trait_paths.contains(&scoped.join("::"));
+        }
+        false
+    }
+
+    pub(super) fn cpp_marker_instantiation_cpp(
+        &self,
+        trait_path: &syn::Path,
+        implementor: &syn::Type,
+    ) -> Option<String> {
+        let mut instantiated_path = trait_path.clone();
+        let last = instantiated_path.segments.last_mut()?;
+        match &mut last.arguments {
+            syn::PathArguments::None => {
+                let implementor = implementor.clone();
+                last.arguments = syn::PathArguments::AngleBracketed(
+                    syn::parse_quote!(<#implementor>),
+                );
+            }
+            syn::PathArguments::AngleBracketed(args) => {
+                args.args
+                    .push(syn::GenericArgument::Type(implementor.clone()));
+            }
+            syn::PathArguments::Parenthesized(_) => return None,
+        }
+        let marker_ty = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: instantiated_path,
+        });
+        Some(
+            self.map_type(&marker_ty)
+                .trim_start_matches("typename ")
+                .to_string(),
+        )
+    }
+
+    fn cpp_marker_bound_constraint(
+        &self,
+        trait_path: &syn::Path,
+        implementor: &syn::Type,
+    ) -> Option<String> {
+        if !self.trait_path_is_cpp_marker(trait_path) {
+            return None;
+        }
+        Some(format!(
+            "{}::value",
+            self.cpp_marker_instantiation_cpp(trait_path, implementor)?
+        ))
+    }
+
     pub(super) fn collect_struct_enum_items_recursive<'a>(
         items: &'a [syn::Item],
         out: &mut Vec<&'a syn::Item>,
@@ -2659,6 +2758,12 @@ impl CodeGen {
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
+                    // Marker-registry impls are emitted as namespace-scope
+                    // explicit specializations.  Never merge their associated
+                    // constants into the implementing payload class.
+                    if Self::has_cpp_marker_impl_attr(&impl_block.attrs) {
+                        continue;
+                    }
                     let normalized_impl = self.normalize_impl_assoc_bound_generics(impl_block);
                     let impl_block: &syn::ItemImpl =
                         normalized_impl.as_ref().unwrap_or(impl_block);
@@ -6255,17 +6360,21 @@ impl CodeGen {
         emitted_type_params: &[&syn::TypeParam],
     ) -> Vec<String> {
         let mut constraints: Vec<String> = Vec::new();
-        // User-trait bounds intentionally emit NO constraint: nothing ever
-        // generates a `<Trait>Facade` type, so the old
-        // `<Trait>Facade::is_satisfied_by<T>()` clause was an unbound
-        // identifier in every non-module output (modules already skipped it,
-        // and impl-level bounds are dropped the same way). Only the
-        // well-known std/runtime concepts survive as real constraints.
+        // Ordinary user-trait bounds intentionally emit NO constraint: nothing
+        // generates a `<Trait>Facade` type.  The sole opt-in exception is a
+        // `cpp_marker_trait`, whose non-inheriting registry primary has a
+        // concrete `value` predicate.
 
         for tp in emitted_type_params {
             for bound in &tp.bounds {
                 if let syn::TypeParamBound::Trait(tb) = bound {
-                    if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
+                    let bounded_ident = &tp.ident;
+                    let bounded_ty: syn::Type = syn::parse_quote!(#bounded_ident);
+                    if let Some(marker) =
+                        self.cpp_marker_bound_constraint(&tb.path, &bounded_ty)
+                    {
+                        constraints.push(marker);
+                    } else if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
                         if !self.trait_path_is_crate_declared_local(&tb.path) {
                             constraints.push(format!("{}<{}>", concept, tp.ident));
                         }
@@ -6280,7 +6389,11 @@ impl CodeGen {
                     let ty_name = self.map_type(&pt.bounded_ty);
                     for bound in &pt.bounds {
                         if let syn::TypeParamBound::Trait(tb) = bound {
-                            if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
+                            if let Some(marker) =
+                                self.cpp_marker_bound_constraint(&tb.path, &pt.bounded_ty)
+                            {
+                                constraints.push(marker);
+                            } else if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
                                 if !self.trait_path_is_crate_declared_local(&tb.path) {
                                     constraints.push(format!("{}<{}>", concept, ty_name));
                                 }

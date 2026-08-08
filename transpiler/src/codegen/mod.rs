@@ -792,6 +792,11 @@ pub struct CodeGen {
     /// Scoped trait paths declared in this crate/module (including traits with
     /// no default static methods). Used to avoid cross-trait fallback injection.
     pub(crate) trait_declared_paths: HashSet<String>,
+    /// Fully scoped Rust paths of traits explicitly lowered as non-inheriting
+    /// C++ marker registries.  Bounds on only these traits become C++
+    /// `requires Registry<..., T>::value` predicates; ordinary user-trait
+    /// bounds retain their established (unconstrained) lowering.
+    pub(crate) cpp_marker_trait_paths: HashSet<String>,
     /// Trait method receiver shape keyed by `Trait::method` (scoped + unscoped).
     /// Used to safely rewrite UFCS-style trait calls with by-value receivers.
     pub(crate) trait_method_has_receiver: std::rc::Rc<HashMap<String, bool>>,
@@ -1935,6 +1940,7 @@ impl CodeGen {
             trait_default_const_exprs: HashMap::new(),
             ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
+            cpp_marker_trait_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             module_runtime_helper_traits: HashSet::new(),
             module_runtime_helper_trait_type_names: HashMap::new(),
@@ -4287,6 +4293,7 @@ impl CodeGen {
         self.method_emission_skip_conflict_registration = false;
         self.trait_static_default_methods.clear();
         self.trait_declared_paths.clear();
+        self.cpp_marker_trait_paths.clear();
         std::rc::Rc::make_mut(&mut self.trait_method_has_receiver).clear();
         self.module_runtime_helper_traits.clear();
         self.module_runtime_helper_trait_type_names.clear();
@@ -4486,6 +4493,10 @@ impl CodeGen {
         log_emit("seed_cross_file_deref_targets");
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
+        // Opt-in non-inheriting marker registries affect generic-bound
+        // lowering, including early declarations, so collect them before any
+        // emission pass begins.
+        self.collect_cpp_marker_traits(&file.items, &[]);
         // UFCS Phase 3: classify method names for call-site lowering.
         self.ufcs_method_classes = crate::transpile::classify_method_names(&file.items);
         // UFCS Phase 7: scope emission to crate-declared traits.
@@ -4884,6 +4895,14 @@ impl CodeGen {
         let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
         for item in deferred_items {
             if let syn::Item::Impl(i) = item {
+                // Marker-registry impls are namespace-scope explicit
+                // specializations, never members to be drained into a local
+                // host struct.  Emit them even when the implementor is local.
+                if Self::has_cpp_marker_impl_attr(&i.attrs) {
+                    self.emit_item(item);
+                    self.newline();
+                    continue;
+                }
                 // A concrete positive Send/Sync impl has no methods for the
                 // host struct to drain. Let its dedicated lowering record the
                 // required global-scope trait specialization.
@@ -9668,11 +9687,23 @@ impl CodeGen {
                     } else {
                         ""
                     };
-                    self.emit_template_declaration_without_type_defaults(
-                        &t.generics,
-                        export_prefix,
-                        &format!("class {};", name),
-                    );
+                    if Self::has_cpp_marker_trait_attr(&t.attrs) {
+                        let mut lines =
+                            self.cpp_marker_trait_template_lines(t, false).into_iter();
+                        if let Some(first) = lines.next() {
+                            self.writeln(&format!("{}{}", export_prefix, first));
+                        }
+                        for line in lines {
+                            self.writeln(&line);
+                        }
+                        self.writeln(&format!("struct {};", name));
+                    } else {
+                        self.emit_template_declaration_without_type_defaults(
+                            &t.generics,
+                            export_prefix,
+                            &format!("class {};", name),
+                        );
+                    }
                     emitted_any = true;
                 }
                 syn::Item::Union(u) => {
@@ -10011,11 +10042,23 @@ impl CodeGen {
                     } else {
                         ""
                     };
-                    self.emit_template_declaration_without_type_defaults(
-                        &t.generics,
-                        export_prefix,
-                        &format!("class {};", name),
-                    );
+                    if Self::has_cpp_marker_trait_attr(&t.attrs) {
+                        let mut lines =
+                            self.cpp_marker_trait_template_lines(t, false).into_iter();
+                        if let Some(first) = lines.next() {
+                            self.writeln(&format!("{}{}", export_prefix, first));
+                        }
+                        for line in lines {
+                            self.writeln(&line);
+                        }
+                        self.writeln(&format!("struct {};", name));
+                    } else {
+                        self.emit_template_declaration_without_type_defaults(
+                            &t.generics,
+                            export_prefix,
+                            &format!("class {};", name),
+                        );
+                    }
                     emitted_any = true;
                 }
                 _ => continue,
