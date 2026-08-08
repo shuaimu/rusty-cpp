@@ -5144,16 +5144,20 @@ impl CodeGen {
         }
         let mut any = false;
         for name in names {
-            // PRIMARY DECLARATION ONLY. The specializations must NOT be hoisted:
-            // their bodies name crate types by the spelling that is valid inside
-            // the owning module's namespace (`TupleNCombination`), and at file
-            // scope that spelling does not resolve (`adaptors::TupleNCombination`
+            // PRIMARY DECLARATION ONLY. The specializations must NOT be
+            // hoisted: their bodies name crate types by the spelling valid
+            // inside the owning module's namespace (`TupleNCombination`), and
+            // at file scope that does not resolve (`adaptors::TupleNCombination`
             // is required). Measured: hoisting them costs a hard
             // "no template named 'TupleNCombination'" and truncates the build.
             //
-            // The primary alone is enough to keep a field's *declaration* from
-            // hard-erroring at the name lookup, which is what lets the rest of
-            // the TU compile and the real error tail become visible.
+            // The declaration MUST land in the same namespace as the trait, or
+            // it is a different entity than the one the specializations refine.
+            // Emitting it at crate-namespace scope is actively worse than
+            // emitting nothing: the field's unqualified lookup escapes the
+            // enclosing namespaces, binds the crate-scope primary, and fails at
+            // instantiation with "implicit instantiation of undefined template"
+            // instead of falling through to the right one.
             let arity = match self
                 .tuple_trait_assoc_specs_generic
                 .iter()
@@ -5164,11 +5168,18 @@ impl CodeGen {
             };
             let key_params: Vec<String> =
                 (0..arity).map(|i| format!("class A{}", i)).collect();
-            self.writeln(&format!(
+            let decl = format!(
                 "template <class Self_, {}> struct {}TraitsG;",
                 key_params.join(", "),
                 name
-            ));
+            );
+            match self.ufcs_declared_trait_modules.get(&name) {
+                Some(m) if !m.is_empty() => {
+                    let m = m.clone();
+                    self.writeln(&format!("namespace {} {{ {} }}", m, decl));
+                }
+                _ => self.writeln(&decl),
+            }
             any = true;
         }
         any
