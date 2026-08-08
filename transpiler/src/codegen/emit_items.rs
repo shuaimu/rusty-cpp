@@ -4429,6 +4429,42 @@ impl CodeGen {
                 self.writeln("}");
             }
             self.writeln("");
+            // A method-less trait that declares ASSOCIATED TYPES is not a
+            // marker — `T::Assoc` still lowers through the traits maps, and
+            // this branch returns before the block that emits them (book
+            // §13.15.3, obstacle 0). Falling through to the full body is NOT
+            // the fix: it also emits the interface class and adapters, which a
+            // method-less trait cannot satisfy (measured 15 -> 29).
+            //
+            // Emit ONLY for traits that actually have a generic map to route
+            // to. Emitting for every method-less assoc-type trait is a larger
+            // change than this fix needs and perturbs existing expectations —
+            // it makes `trait IntoDeserializer { type Deserializer; }` emit a
+            // primary containing `using Deserializer = …`, which the
+            // identity-alias guard tests assert never appears.
+            let marker_assoc_names: Vec<String> = t
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    syn::TraitItem::Type(ty) => Some(ty.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            if !marker_assoc_names.is_empty()
+                && self
+                    .tuple_trait_assoc_specs_generic
+                    .iter()
+                    .any(|s| s.trait_name == trait_name.to_string())
+            {
+                // Register the names too: the normal path does this at the top
+                // of the body, which this branch returns before, and without it
+                // lookup_unique_trait_for_assoc_name never learns the owner, so
+                // the use-site rewrite silently never fires.
+                self.trait_associated_type_names
+                    .insert(trait_name.to_string(), marker_assoc_names.clone());
+                self.emit_trait_assoc_traits_maps(trait_name, &marker_assoc_names);
+                self.writeln("");
+            }
             // Module-mode static helper for qualified UFCS calls — see the
             // same call below for the substantive comment.
             if self.emit_module_mode_trait_runtime_helper(t) {
@@ -5006,6 +5042,72 @@ impl CodeGen {
                 spec.push_str("};");
                 self.writeln(&spec);
                 self.pop_type_param_scope();
+            }
+            // §13.15.3: generic traits get a SECOND map keyed on
+            // (Self, trait args). `I` is a non-deduced context inside the tuple
+            // argument but deduces from the args key; the tuple argument is
+            // then merely checked, which is what makes this well-formed.
+            let generic_specs: Vec<crate::codegen::TupleGenericAssocSpec> = self
+                .tuple_trait_assoc_specs_generic
+                .iter()
+                .filter(|s| s.trait_name == trait_name.to_string())
+                .cloned()
+                .collect();
+            if !generic_specs.is_empty() {
+                let arg_arity = generic_specs[0].trait_args.len();
+                let key_params: Vec<String> =
+                    (0..arg_arity).map(|i| format!("A{}", i)).collect();
+                self.writeln(&format!(
+                    "template <class Self_, {}> struct {}TraitsG;",
+                    key_params
+                        .iter()
+                        .map(|k| format!("class {}", k))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    trait_name
+                ));
+                for sp in generic_specs {
+                    if sp.trait_args.len() != arg_arity {
+                        continue;
+                    }
+                    let generics: syn::Generics =
+                        match syn::parse_str(&format!("<{}>", sp.decl_params.join(", "))) {
+                            Ok(g) => g,
+                            Err(_) => continue,
+                        };
+                    self.push_type_param_scope(&generics);
+                    let elem_cpp = self.map_type(&sp.elem);
+                    let args_cpp: Vec<String> =
+                        sp.trait_args.iter().map(|a| self.map_type(a)).collect();
+                    let bad = |s: &String| s == "auto" || s.contains("/* TODO");
+                    if bad(&elem_cpp) || args_cpp.iter().any(bad) {
+                        self.pop_type_param_scope();
+                        continue;
+                    }
+                    let tuple_args = vec![elem_cpp; sp.arity].join(", ");
+                    let mut spec = format!(
+                        "template <{}> struct {}TraitsG<std::tuple<{}>, {}> {{ ",
+                        sp.decl_params
+                            .iter()
+                            .map(|p| format!("class {}", p))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        trait_name,
+                        tuple_args,
+                        args_cpp.join(", ")
+                    );
+                    for (name, ty) in &sp.assoc {
+                        let cpp = self.map_type(ty);
+                        spec.push_str(&format!(
+                            "using {} = {}; ",
+                            escape_cpp_keyword(name),
+                            cpp
+                        ));
+                    }
+                    spec.push_str("};");
+                    self.writeln(&spec);
+                    self.pop_type_param_scope();
+                }
             }
         }
     }

@@ -14673,6 +14673,19 @@ impl CodeGen {
         // owner (e.g. indexmap's `Slice<T>`, only ever held by reference) maps to
         // `const Slice<T>&`; `const Slice<T>&::from_slice(..)` is ill-formed. Strip
         // the leading `const` and trailing `&`/`*` for the `Owner::method` spelling.
+        // An assoc type routed through the generic traits map arrives as
+        // `typename <Tr>TraitsG<T, I>::Assoc`, and `typename X::Y::from(..)` is
+        // ill-formed — `typename` introduces a TYPE, not a call owner. Same
+        // class as the `const`/`&` strip below, conditioned on the TraitsG
+        // spelling so no other assoc-type owner changes.
+        let owner_trimmed = owner_cpp.trim();
+        let owner_cpp = if owner_trimmed.starts_with("typename ")
+            && owner_trimmed.contains("TraitsG<")
+        {
+            owner_trimmed.trim_start_matches("typename ").trim()
+        } else {
+            owner_trimmed
+        };
         let bare_owner = owner_cpp
             .trim()
             .trim_start_matches("const ")

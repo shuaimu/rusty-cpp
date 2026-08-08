@@ -4941,17 +4941,82 @@ impl CodeGen {
                             _ => None,
                         })
                         .collect();
-                    if type_params.len() != 1 {
+                    // §13.15.3: a GENERIC trait's tuple impl keys on
+                    // (Self, trait args) and takes a different map, so it
+                    // tolerates shapes the single-key path cannot.
+                    let trait_args: Vec<syn::Type> = tpath
+                        .segments
+                        .last()
+                        .map(|s| match &s.arguments {
+                            syn::PathArguments::AngleBracketed(ab) => ab
+                                .args
+                                .iter()
+                                .filter_map(|g| match g {
+                                    syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        })
+                        .unwrap_or_default();
+                    let generic_elem = if trait_args.is_empty() || type_params.is_empty() {
+                        None
+                    } else {
+                        use quote::ToTokens;
+                        let mut elem: Option<(String, syn::Type)> = None;
+                        let uniform = tup.elems.iter().all(|e| {
+                            let syn::Type::Path(pp) = e else { return false };
+                            if pp.qself.is_some() {
+                                return false;
+                            }
+                            let head_ok = match pp.path.segments.len() {
+                                1 => type_params.iter().any(|tp| pp.path.is_ident(tp)),
+                                2 => type_params
+                                    .iter()
+                                    .any(|tp| pp.path.segments[0].ident == tp.as_str()),
+                                _ => false,
+                            };
+                            if !head_ok {
+                                return false;
+                            }
+                            let text = e.to_token_stream().to_string();
+                            match &elem {
+                                Some((prev, _)) => *prev == text,
+                                None => {
+                                    elem = Some((text, e.clone()));
+                                    true
+                                }
+                            }
+                        });
+                        if !uniform {
+                            None
+                        } else {
+                            elem.map(|(_, ty)| ty).filter(|ty| {
+                                // Every declared param must appear in the
+                                // specialisation's arguments or it is
+                                // non-deducible and the spec is ill-formed.
+                                let elem_text = ty.to_token_stream().to_string();
+                                let args_text: String = trait_args
+                                    .iter()
+                                    .map(|a| a.to_token_stream().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                type_params.iter().all(|tp| {
+                                    emit_items::contains_whole_word(&elem_text, tp)
+                                        || emit_items::contains_whole_word(&args_text, tp)
+                                })
+                            })
+                        }
+                    };
+                    let single_key_ok = type_params.len() == 1
+                        && tup.elems.iter().all(|e| {
+                            matches!(e, syn::Type::Path(p)
+                                if p.qself.is_none() && p.path.is_ident(&type_params[0]))
+                        });
+                    if generic_elem.is_none() && !single_key_ok {
                         continue;
                     }
                     let a = &type_params[0];
-                    let all_a = tup.elems.iter().all(|e| {
-                        matches!(e, syn::Type::Path(p)
-                            if p.qself.is_none() && p.path.is_ident(a))
-                    });
-                    if !all_a {
-                        continue;
-                    }
                     let assoc: Vec<(String, syn::Type)> = ib
                         .items
                         .iter()
@@ -4970,6 +5035,26 @@ impl CodeGen {
                     };
                     let trait_name = last.ident.to_string();
                     let arity = tup.elems.len();
+                    if let Some(elem) = generic_elem {
+                        if self
+                            .tuple_trait_assoc_specs_generic
+                            .iter()
+                            .any(|s| s.trait_name == trait_name && s.arity == arity)
+                        {
+                            continue;
+                        }
+                        self.tuple_trait_assoc_specs_generic.push(
+                            crate::codegen::TupleGenericAssocSpec {
+                                trait_name,
+                                decl_params: type_params.clone(),
+                                arity,
+                                elem,
+                                trait_args,
+                                assoc,
+                            },
+                        );
+                        continue;
+                    }
                     if self
                         .tuple_trait_assoc_specs
                         .iter()

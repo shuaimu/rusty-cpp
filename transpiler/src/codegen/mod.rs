@@ -124,6 +124,20 @@ enum RuntimeMatchEnumKind {
     Entry,
 }
 
+/// One `<Tr>TraitsG<std::tuple<Elem…>, Args…>` specialisation (§13.15.3).
+/// Both itertools impl shapes are covered:
+///   `impl<I: Iterator> Tr<I> for (I::Item,)`  → decl [I],    elem I::Item, args [I]
+///   `impl<I, A> Tr<I> for (A, A)` (macro)     → decl [I, A], elem A,       args [I]
+#[derive(Debug, Clone)]
+pub(crate) struct TupleGenericAssocSpec {
+    pub(crate) trait_name: String,
+    pub(crate) decl_params: Vec<String>,
+    pub(crate) arity: usize,
+    pub(crate) elem: syn::Type,
+    pub(crate) trait_args: Vec<syn::Type>,
+    pub(crate) assoc: Vec<(String, syn::Type)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArgPassStyle {
     Reference,
@@ -942,6 +956,14 @@ pub struct CodeGen {
     /// std::tuple (which has no nested typedefs for the primary to forward
     /// to).
     pub(crate) tuple_trait_assoc_specs: Vec<(String, String, usize, Vec<(String, syn::Type)>)>,
+    /// §13.15.3: a GENERIC trait's tuple impl, keyed on (Self, trait args).
+    /// Keyed on Self alone the trait's arg is unrecoverable — in
+    /// `impl<I: Iterator> Tr<I> for (I::Item,)` the element is an alias, a
+    /// NON-DEDUCED context. The existing map cannot take a second key (slot #2
+    /// is the `void_t` detection slot, baked into vendored ports), hence a
+    /// separate `<Tr>TraitsG<Self, Args…>`. Each spec carries its own header
+    /// params so both impl shapes work (see TupleGenericAssocSpec).
+    pub(crate) tuple_trait_assoc_specs_generic: Vec<TupleGenericAssocSpec>,
     /// Cluster C nested-marker extension: for each `(host_type, method)`
     /// pair, record text-level substitutions of concrete markers that
     /// vary across parallel impls at positions nested INSIDE the host's
@@ -2099,6 +2121,7 @@ impl CodeGen {
             declared_type_params_from_definition: HashSet::new(),
             parallel_impl_substitutions: HashMap::new(),
             tuple_trait_assoc_specs: Vec::new(),
+            tuple_trait_assoc_specs_generic: Vec::new(),
             parallel_impl_nested_marker_text_subs: HashMap::new(),
             method_structural_decompositions: HashMap::new(),
             pending_template_args_specializations: HashSet::new(),
@@ -46419,6 +46442,44 @@ impl CodeGen {
                             self.lookup_trait_for_assoc_via_param_bound(first, assoc_name)
                         })
                     {
+                        // §13.15.3: a generic trait's assoc type is a function
+                        // of (Self, trait args), so route it through
+                        // `<Tr>TraitsG`. trait_bound_args_scopes already holds
+                        // the args (`T: HasCombination<I>` -> ("HasCombination",
+                        // [I])), where-clauses included.
+                        let short = trait_name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(trait_name.as_str())
+                            .to_string();
+                        if self
+                            .tuple_trait_assoc_specs_generic
+                            .iter()
+                            .any(|s| s.trait_name == short)
+                            && let Some((bound_trait, bound_args)) = self
+                                .trait_bound_args_scopes
+                                .iter()
+                                .rev()
+                                .find_map(|scope| scope.get(first))
+                            && bound_trait
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(bound_trait.as_str())
+                                == short
+                            && !bound_args.is_empty()
+                        {
+                            let args: Vec<String> =
+                                bound_args.iter().map(|a| self.map_type(a)).collect();
+                            if args.iter().all(|a| a != "auto" && !a.contains("/* TODO")) {
+                                return format!(
+                                    "typename {}TraitsG<{}, {}>::{}",
+                                    short,
+                                    first,
+                                    args.join(", "),
+                                    assoc_name
+                                );
+                            }
+                        }
                         // Qualify with the trait's home namespace path
                         // when one is known AND the qualified spelling
                         // actually resolves unambiguously at the use
