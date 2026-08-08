@@ -407,6 +407,6 @@ No Pin support. Self-referential structs are not specially handled.
 
 ## Related Documentation
 
-- [RAII_TRACKING.md](RAII_TRACKING.md) - RAII tracking implementation details
+- [raii_tracking.md](raii_tracking.md) - RAII tracking implementation details
 - [../CLAUDE.md](../CLAUDE.md) - Full project documentation
 - [annotation_reference.md](annotation_reference.md) - Safety annotation syntax

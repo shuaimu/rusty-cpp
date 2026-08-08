@@ -54,13 +54,13 @@ Complete implementation summaries for major features:
   - Workarounds for missing features
   - Implementation priorities
 
-- **[RAII_TRACKING.md](RAII_TRACKING.md)** - RAII tracking implementation
+- **[raii_tracking.md](raii_tracking.md)** - RAII tracking implementation
   - Container/iterator lifetime tracking
   - Member lifetime tracking
   - Lambda escape analysis
   - new/delete tracking
 
-- **[PARTIAL_MOVES_PLAN.md](PARTIAL_MOVES_PLAN.md)** - Partial moves improvement plan
+- **[partial_borrows.md](partial_borrows.md)** - Partial moves and borrows
   - Current status (basic support implemented)
   - Nested field tracking plan
   - Partial borrow tracking plan
