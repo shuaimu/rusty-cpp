@@ -48499,6 +48499,17 @@ fn is_assoc_self_forwarder_method(method: &syn::ImplItemFn) -> bool {
     true
 }
 
+/// Label an impl for diagnostics: "Trait < Args > for SelfTy".
+pub(crate) fn impl_origin_label(impl_block: &syn::ItemImpl) -> String {
+    let self_ty = impl_block.self_ty.to_token_stream().to_string();
+    match &impl_block.trait_ {
+        Some((_, path, _)) => {
+            format!("{} for {}", path.to_token_stream(), self_ty)
+        }
+        None => format!("inherent for {}", self_ty),
+    }
+}
+
 /// Resolve two impl methods that collapse to the same C++ signature: keep one
 /// and discard the other, warning first when that actually loses behaviour.
 pub(crate) fn resolve_impl_method_conflict(
@@ -48506,7 +48517,13 @@ pub(crate) fn resolve_impl_method_conflict(
     key: &str,
     merged: syn::ImplItemFn,
     type_name: &str,
+    origin: &str,
 ) {
+    // Remember which impl each method came from. This runs for EVERY method,
+    // not just conflicting ones (the early return below is what filters), so by
+    // the time a conflict fires we can name both sides and classify the cause
+    // instead of making the reader go grep the impls by hand.
+    let prior_origin = record_impl_method_origin(type_name, &merged.sig.ident.to_string(), origin);
     let Some(existing_index) = find_impl_method_conflict_index(entry, key) else {
         return;
     };
@@ -48521,7 +48538,13 @@ pub(crate) fn resolve_impl_method_conflict(
     } else {
         (&existing, &merged)
     };
-    warn_on_lossy_impl_method_conflict(type_name, kept, dropped);
+    warn_on_lossy_impl_method_conflict(
+        type_name,
+        kept,
+        dropped,
+        prior_origin.as_deref(),
+        origin,
+    );
     if should_replace {
         entry[existing_index] = syn::ImplItem::Fn(merged);
     }
@@ -48552,10 +48575,68 @@ pub(crate) fn resolve_impl_method_conflict(
 /// Measured at 42 distinct sites across the 22-crate parity matrix; all 22
 /// still PASS, which shows only that their suites do not exercise the dropped
 /// behaviour. See task #206 for the inventory and per-cluster classification.
+/// Record the impl an absorbed method came from; return the origin previously
+/// recorded for the same (type, method), if any. Keyed on the pair because that
+/// is exactly the granularity at which methods collide.
+pub(crate) fn record_impl_method_origin(
+    type_name: &str,
+    method: &str,
+    origin: &str,
+) -> Option<String> {
+    if origin.is_empty() {
+        return None;
+    }
+    static ORIGINS: std::sync::Mutex<Option<HashMap<String, String>>> =
+        std::sync::Mutex::new(None);
+    let slot = format!("{}::{}", type_name, method);
+    let mut guard = ORIGINS.lock().ok()?;
+    let map = guard.get_or_insert_with(HashMap::new);
+    match map.get(&slot) {
+        Some(prior) if prior != origin => Some(prior.clone()),
+        Some(_) => None,
+        None => {
+            map.insert(slot, origin.to_string());
+            None
+        }
+    }
+}
+
+/// Split an origin label "Trait < Args > for SelfTy" into its two halves.
+fn split_impl_origin(origin: &str) -> Option<(&str, &str)> {
+    let (tr, self_ty) = origin.split_once(" for ")?;
+    Some((tr.trim(), self_ty.trim()))
+}
+
+/// Name the cause of a collapse from the two impls' trait paths and self types.
+/// The distinction decides whether the site is worth work at all: TRAIT-ARG is a
+/// C++ language limit, the other two are emitter gaps.
+fn classify_impl_collapse(a: &str, b: &str) -> &'static str {
+    let (Some((ta, sa)), Some((tb, sb))) = (split_impl_origin(a), split_impl_origin(b)) else {
+        return "UNCLASSIFIED (missing origin info)";
+    };
+    let head = |t: &str| t.split('<').next().unwrap_or(t).trim().to_string();
+    let (ha, hb) = (head(ta), head(tb));
+    if ha != hb {
+        return "DIFFERENT-TRAIT sharing a method name (the Display/Debug class) \
+                — EMITTER GAP: rename one side and give it its own entry point";
+    }
+    if sa != sb {
+        return "SELF-TYPE (same trait, different Self) — EMITTER GAP: C++ can \
+                express this as a constrained overload or partial specialization";
+    }
+    if ta != tb {
+        return "TRAIT-ARG (same trait, different trait argument) — HARD C++ \
+                LIMIT: identical parameters, so not overloadable; do not chase";
+    }
+    "UNCLASSIFIED (origins differ in neither trait nor Self)"
+}
+
 fn warn_on_lossy_impl_method_conflict(
     type_name: &str,
     kept: &syn::ImplItemFn,
     dropped: &syn::ImplItemFn,
+    kept_origin: Option<&str>,
+    dropped_origin: &str,
 ) {
     if impl_method_is_automatically_derived(kept) || impl_method_is_automatically_derived(dropped) {
         return;
@@ -48574,18 +48655,27 @@ fn warn_on_lossy_impl_method_conflict(
             return;
         }
     }
-    eprintln!(
-        "warning: {}::{}: two impls collapse to a single C++ signature, so one \
-         body is kept and the other discarded — the port compiles and may do \
-         the wrong thing. Causes: (a) the impls differ only in the Rust trait's \
-         type argument (`Extend<T>` vs `Extend<&T>`), which C++ cannot overload \
-         on; (b) they differ in the SELF type's template argument or wrapper, \
-         which C++ could express but the emitter does not yet; (c) they are \
-         DIFFERENT traits sharing a method name (manual `impl Display` + manual \
-         `impl Debug` both lower to `fmt`), which makes `{{:?}}` print the \
-         Display body. See task #206.",
-        type_name, kept.sig.ident
-    );
+    match kept_origin {
+        Some(ko) => eprintln!(
+            "warning: {}::{}: two impls collapse to a single C++ signature — one \
+             body is kept and the other discarded, so the port compiles and may \
+             do the wrong thing.\n  kept:    {}\n  dropped: {}\n  cause:   {}\n\
+               (see task #206)",
+            type_name,
+            kept.sig.ident,
+            ko,
+            dropped_origin,
+            classify_impl_collapse(ko, dropped_origin),
+        ),
+        None => eprintln!(
+            "warning: {}::{}: two impls collapse to a single C++ signature, so \
+             one body is kept and the other discarded — the port compiles and \
+             may do the wrong thing. Origin info unavailable at this call site; \
+             causes are TRAIT-ARG (hard C++ limit), SELF-TYPE (emitter gap), or \
+             DIFFERENT-TRAIT sharing a method name (emitter gap). See task #206.",
+            type_name, kept.sig.ident
+        ),
+    }
 }
 
     /// Flatten a left-associative `&&` spine into its operands.

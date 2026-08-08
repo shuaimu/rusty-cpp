@@ -3191,9 +3191,24 @@ impl CodeGen {
                             }
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
-                                resolve_impl_method_conflict(entry, &key, merged, &type_name);
+                                resolve_impl_method_conflict(
+                                    entry,
+                                    &key,
+                                    merged,
+                                    &type_name,
+                                    &impl_origin_label(impl_block),
+                                );
                                 continue;
                             }
+                            // Record which impl this method came from, so a LATER collision can
+                            // name both sides and classify the cause. resolve_impl_method_conflict
+                            // only runs on the second occurrence, so the first must be recorded here
+                            // or the kept side is always unknown.
+                            record_impl_method_origin(
+                                &type_name,
+                                &merged.sig.ident.to_string(),
+                                &impl_origin_label(impl_block),
+                            );
                             seen_method_keys.insert(key);
                             if let Some(op) = &op_name {
                                 let method_name = merged.sig.ident.to_string();
@@ -3463,10 +3478,25 @@ impl CodeGen {
                                         }
                                         let key = impl_method_conflict_key(&merged);
                                         if seen_method_keys.contains(&key) {
-                                            resolve_impl_method_conflict(entry, &key, merged, &type_name);
+                                            resolve_impl_method_conflict(
+                                    entry,
+                                    &key,
+                                    merged,
+                                    &type_name,
+                                    &impl_origin_label(impl_block),
+                                );
                                             continue;
                                         }
-                                        seen_method_keys.insert(key);
+                                        // Record which impl this method came from, so a LATER collision can
+                            // name both sides and classify the cause. resolve_impl_method_conflict
+                            // only runs on the second occurrence, so the first must be recorded here
+                            // or the kept side is always unknown.
+                            record_impl_method_origin(
+                                &type_name,
+                                &merged.sig.ident.to_string(),
+                                &impl_origin_label(impl_block),
+                            );
+                            seen_method_keys.insert(key);
                                         let method_name = merged.sig.ident.to_string();
                                         if let Some(op) = &op_name {
                                             self.operator_renames.insert(
@@ -4586,10 +4616,25 @@ impl CodeGen {
                     }
                     let key = impl_method_conflict_key(&merged);
                     if seen_method_keys.contains(&key) {
-                        resolve_impl_method_conflict(entry, &key, merged, &type_name);
+                        resolve_impl_method_conflict(
+                                    entry,
+                                    &key,
+                                    merged,
+                                    &type_name,
+                                    &impl_origin_label(impl_block),
+                                );
                         continue;
                     }
-                    seen_method_keys.insert(key);
+                    // Record which impl this method came from, so a LATER collision can
+                            // name both sides and classify the cause. resolve_impl_method_conflict
+                            // only runs on the second occurrence, so the first must be recorded here
+                            // or the kept side is always unknown.
+                            record_impl_method_origin(
+                                &type_name,
+                                &merged.sig.ident.to_string(),
+                                &impl_origin_label(impl_block),
+                            );
+                            seen_method_keys.insert(key);
                     if let Some(op) = &op_name {
                         let method_name = merged.sig.ident.to_string();
                         local_operator_renames.insert((type_name.clone(), method_name), op.clone());
