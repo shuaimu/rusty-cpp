@@ -422,6 +422,33 @@ void test_panic_catch_unwind_handles_begin_panic() {
     printf("PASS\n");
 }
 
+void test_panic_payload_message_extracts_std_exception() {
+    printf("test_panic_payload_message_extracts_std_exception: ");
+    {
+        auto result = rusty::panic::catch_unwind([]() {
+            throw std::runtime_error("boom");
+        });
+        assert(result.is_err());
+        auto message = rusty::panic::payload_message(result.unwrap_err());
+        assert(message.is_some());
+        assert(message.unwrap() == "boom");
+    }
+    printf("PASS\n");
+}
+
+void test_panic_payload_message_rejects_opaque_and_null_payloads() {
+    printf("test_panic_payload_message_rejects_opaque_and_null_payloads: ");
+    {
+        auto result = rusty::panic::catch_unwind([]() {
+            throw 7;
+        });
+        assert(result.is_err());
+        assert(rusty::panic::payload_message(result.unwrap_err()).is_none());
+        assert(rusty::panic::payload_message(std::exception_ptr{}).is_none());
+    }
+    printf("PASS\n");
+}
+
 void test_panic_resume_unwind_rethrows_payload() {
     printf("test_panic_resume_unwind_rethrows_payload: ");
     {
@@ -464,6 +491,8 @@ int main() {
     test_result_const_unwrap_helpers();
     test_result_unwrap_or_else_void_callable_compiles();
     test_panic_catch_unwind_handles_begin_panic();
+    test_panic_payload_message_extracts_std_exception();
+    test_panic_payload_message_rejects_opaque_and_null_payloads();
     test_panic_resume_unwind_rethrows_payload();
     
     printf("\nAll Result tests passed!\n");

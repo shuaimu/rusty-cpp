@@ -57,6 +57,22 @@ auto catch_unwind(F&& callable) {
         std::forward<F>(callable)));
 }
 
+// Recover the diagnostic carried by a caught C++ exception. Rust panic
+// payloads are opaque, so callers must handle the None case just as they
+// would for a non-string Rust panic payload.
+inline rusty::Option<std::string> payload_message(std::exception_ptr payload) {
+    if (!payload) {
+        return rusty::None;
+    }
+    try {
+        std::rethrow_exception(payload);
+    } catch (const std::exception& e) {
+        return rusty::Some(std::string(e.what()));
+    } catch (...) {
+        return rusty::None;
+    }
+}
+
 [[noreturn]] inline void resume_unwind(std::exception_ptr payload) {
     if (payload) {
         std::rethrow_exception(payload);
