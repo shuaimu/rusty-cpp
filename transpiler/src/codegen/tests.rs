@@ -9812,6 +9812,94 @@ fn test_leaf4154333333361_std_any_typeid_import_maps_to_std_type_index() {
 }
 
 #[test]
+fn test_std_any_typeid_of_lowers_to_cpp_rtti() {
+    let out = transpile_str(
+        r#"
+        fn type_id<T: 'static>() -> std::any::TypeId {
+            std::any::TypeId::of::<T>()
+        }
+        "#,
+    );
+    assert!(out.contains("return std::type_index(typeid(T));"), "{out}");
+    assert!(!out.contains("std::type_index::of"), "{out}");
+    assert!(out.contains("#include <typeindex>"), "{out}");
+}
+
+#[test]
+fn test_core_any_typeid_of_lowers_to_cpp_rtti() {
+    let out = transpile_str(
+        r#"
+        fn type_id<T: 'static>() -> core::any::TypeId {
+            core::any::TypeId::of::<T>()
+        }
+        "#,
+    );
+    assert!(out.contains("return std::type_index(typeid(T));"), "{out}");
+    assert!(!out.contains("std::type_index::of"), "{out}");
+}
+
+#[test]
+fn test_imported_std_any_typeid_of_lowers_to_cpp_rtti() {
+    let out = transpile_str(
+        r#"
+        use std::any::TypeId as RuntimeTypeId;
+        fn type_id<T: 'static>() -> RuntimeTypeId {
+            RuntimeTypeId::of::<T>()
+        }
+        "#,
+    );
+    assert!(out.contains("return std::type_index(typeid(T));"), "{out}");
+    assert!(!out.contains("std::type_index::of"), "{out}");
+}
+
+#[test]
+fn test_local_typeid_of_is_not_rewritten_as_std_any() {
+    let out = transpile_str(
+        r#"
+        struct TypeId {}
+        impl TypeId {
+            fn of<T>() -> TypeId { TypeId {} }
+        }
+        fn local<T>() -> TypeId { TypeId::of::<T>() }
+        "#,
+    );
+    assert!(!out.contains("typeid(T)"), "{out}");
+    assert!(out.contains("TypeId::of<T>()"), "{out}");
+}
+
+#[test]
+fn test_imported_typeid_alias_shadowed_by_type_param_is_not_rewritten() {
+    let out = transpile_str(
+        r#"
+        use std::any::TypeId as RuntimeTypeId;
+        fn local<RuntimeTypeId, T>() -> RuntimeTypeId {
+            RuntimeTypeId::of::<T>()
+        }
+        "#,
+    );
+    assert!(!out.contains("typeid(T)"), "{out}");
+    assert!(out.contains("::of<T>()"), "{out}");
+}
+
+#[test]
+fn test_typeid_of_module_std_surface_is_available() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub fn type_id<T: 'static>() -> std::any::TypeId {
+            std::any::TypeId::of::<T>()
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_use_import_std_in_modules(true);
+    cg.emit_file(&file, Some("type_id_probe"));
+    let out = cg.into_output();
+    assert!(out.contains("import std;"), "{out}");
+    assert!(out.contains("std::type_index(typeid(T))"), "{out}");
+}
+
+#[test]
 fn test_leaf4154333333362_runtime_option_match_return_arm_uses_try_style_lowering() {
     let out = transpile_str(
         r#"

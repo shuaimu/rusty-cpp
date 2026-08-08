@@ -16560,6 +16560,49 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // Rust's exact runtime type identity has no associated-function surface
+        // on std::type_index. Lower the two canonical paths, plus a `use`-bound
+        // TypeId alias, directly to C++ RTTI. Keep bare local `TypeId` owners out
+        // of this seam: a crate is free to declare an unrelated same-named type.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.qself.is_none()
+            && call.args.is_empty()
+            && fp.path.segments.len() >= 2
+            && fp.path.segments.last().is_some_and(|seg| seg.ident == "of")
+            && let Some(last) = fp.path.segments.last()
+            && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
+            && arguments.args.len() == 1
+            && let Some(syn::GenericArgument::Type(target_ty)) = arguments.args.first()
+        {
+            let owner = fp
+                .path
+                .segments
+                .iter()
+                .take(fp.path.segments.len() - 1)
+                .map(|seg| seg.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            let canonical_owner = matches!(
+                owner.as_str(),
+                "std::any::TypeId" | "core::any::TypeId"
+            );
+            let imported_owner = if !owner.contains("::")
+                && !self.is_type_param_in_scope(&owner)
+            {
+                self.resolve_scope_import_binding_path(&owner)
+                    .is_some_and(|bound| {
+                        matches!(
+                            bound.trim_start_matches("::"),
+                            "std::any::TypeId" | "core::any::TypeId" | "std::type_index"
+                        )
+                    })
+            } else {
+                false
+            };
+            if canonical_owner || imported_owner {
+                return format!("std::type_index(typeid({}))", self.map_type(target_ty));
+            }
+        }
         // Rust's write-into-fresh-uninit idiom: `Box::write(Box::new_uninit(),
         // value)` (Rc/Arc/Box in-place construction; rc.rs/sync.rs in the
         // stdlib alloc port). `Box::<T>::new_uninit()` is a ZERO-arg factory,
