@@ -2391,6 +2391,155 @@ fn test_leaf4154_drop_trait_impl_emits_destructor() {
 }
 
 #[test]
+fn test_drop_cpp_noexcept_marker_emits_nothrow_destructor() {
+    let out = transpile_str(
+        r#"
+        struct Direct;
+        impl Drop for Direct {
+            #[cpp_noexcept]
+            fn drop(&mut self) {}
+        }
+
+        struct Guarded;
+        impl Drop for Guarded {
+            #[cfg_attr(any(), cpp_noexcept)]
+            fn drop(&mut self) {}
+        }
+
+        struct Conditional;
+        impl Drop for Conditional {
+            #[cfg_attr(windows, cpp_noexcept)]
+            fn drop(&mut self) {}
+        }
+        "#,
+    );
+    assert!(out.contains("~Direct() noexcept(true) {"), "{out}");
+    assert!(out.contains("~Guarded() noexcept(true) {"), "{out}");
+    assert!(!out.contains("~Direct() noexcept(false)"), "{out}");
+    assert!(!out.contains("~Guarded() noexcept(false)"), "{out}");
+    assert!(out.contains("~Conditional() noexcept(false)"), "{out}");
+}
+
+#[test]
+fn test_drop_cpp_ctor_suppresses_fieldwise_ctor_and_preserves_pin_deletes() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_no_fieldwise_ctor)]
+        struct PinnedTask {
+            fn_: i32,
+            yield_: i32,
+            _pin: rusty::marker::PhantomPinned,
+        }
+        impl PinnedTask {
+            #[cpp_ctor]
+            #[cfg_attr(any(), cpp_explicit)]
+            fn new(fn_: i32) -> PinnedTask {
+                PinnedTask {
+                    fn_: fn_,
+                    yield_: 0i32,
+                    _pin: rusty::marker::PhantomPinned {},
+                }
+            }
+        }
+        impl Drop for PinnedTask {
+            #[cfg_attr(any(), cpp_noexcept)]
+            fn drop(&mut self) {}
+        }
+        "#,
+    );
+    assert!(out.contains("explicit PinnedTask(int32_t fn_);"), "{out}");
+    assert!(out.contains("PinnedTask::PinnedTask(int32_t fn_)"), "{out}");
+    assert!(!out.contains("fn__init"), "fieldwise ctor leaked: {out}");
+    assert!(!out.contains("_pin_init"), "fieldwise ctor leaked: {out}");
+    assert!(out.contains("PinnedTask(PinnedTask&&) = delete;"), "{out}");
+    assert!(
+        out.contains("PinnedTask& operator=(PinnedTask&&) = delete;"),
+        "{out}"
+    );
+    assert!(out.contains("~PinnedTask() noexcept(true)"), "{out}");
+}
+
+#[test]
+fn test_drop_mixed_cpp_ctors_retain_fieldwise_ctor() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_no_fieldwise_ctor)]
+        struct Mixed { value: i32 }
+        impl Mixed {
+            #[cpp_ctor]
+            fn from_parts(value: i32, _tag: bool) -> Mixed { Mixed { value: value } }
+
+            #[cpp_ctor]
+            fn adjusted(value: i32, adjustment: i32) -> Mixed {
+                let result = value + adjustment;
+                Mixed { value: result }
+            }
+        }
+        impl Drop for Mixed { fn drop(&mut self) {} }
+        "#,
+    );
+    assert!(
+        out.contains("Mixed(int32_t value_init)"),
+        "mixed fallback fieldwise ctor missing: {out}"
+    );
+    assert!(out.contains("static Mixed adjusted("), "{out}");
+}
+
+#[test]
+fn test_cpp_explicit_marker_applies_to_inline_ctor_but_not_out_of_line_definition() {
+    let out = transpile_str(
+        r#"
+        fn make() {
+            struct Local { value: i32 }
+            impl Local {
+                #[cpp_ctor]
+                #[cfg_attr(any(), cpp_explicit)]
+                fn new(value: i32) -> Local { Local { value: value } }
+            }
+            let _value = Local::new(1);
+        }
+
+        struct Outer { value: i32 }
+        impl Outer {
+            #[cpp_ctor]
+            #[cfg_attr(any(), cpp_explicit)]
+            fn new(value: i32) -> Outer { Outer { value: value } }
+        }
+        "#,
+    );
+    assert!(out.contains("explicit Local(int32_t value)"), "{out}");
+    assert!(out.contains("explicit Outer(int32_t value);"), "{out}");
+    assert!(out.contains("Outer::Outer(int32_t value)"), "{out}");
+    assert!(!out.contains("explicit Outer::Outer"), "{out}");
+}
+
+#[test]
+fn test_drop_nonlowerable_cpp_ctor_retains_fieldwise_ctor_for_factory_fallback() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_no_fieldwise_ctor)]
+        struct Fallback { value: i32 }
+        impl Fallback {
+            #[cpp_ctor]
+            fn new(value: i32) -> Fallback {
+                let adjusted = value;
+                Fallback { value: adjusted }
+            }
+        }
+        impl Drop for Fallback {
+            fn drop(&mut self) {}
+        }
+        "#,
+    );
+    assert!(
+        out.contains("Fallback(int32_t value_init)"),
+        "fallback fieldwise ctor missing: {out}"
+    );
+    assert!(out.contains("static Fallback new_(int32_t value)"), "{out}");
+    assert!(out.contains("~Fallback() noexcept(false)"), "{out}");
+}
+
+#[test]
 fn test_leaf4154_drop_struct_literal_uses_constructor_call() {
     let out = transpile_str(
         r#"

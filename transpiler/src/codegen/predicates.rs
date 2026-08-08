@@ -527,6 +527,54 @@ impl CodeGen {
         attrs.iter().any(|a| a.path().is_ident("cpp_ctor"))
     }
 
+    /// Recognize a C++-only marker either directly, or hidden from rustc in
+    /// the permanently-disabled `#[cfg_attr(any(), marker)]` spelling.
+    fn has_cpp_only_marker_attr(attrs: &[syn::Attribute], marker: &str) -> bool {
+        attrs.iter().any(|attr| {
+            if attr.path().is_ident(marker) {
+                return true;
+            }
+            if !attr.path().is_ident("cfg_attr") {
+                return false;
+            }
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            let Some(syn::Meta::List(predicate)) = args.first() else {
+                return false;
+            };
+            predicate.path.is_ident("any")
+                && predicate.tokens.is_empty()
+                && args
+                    .iter()
+                    .skip(1)
+                    .any(|meta| meta.path().is_ident(marker))
+        })
+    }
+
+    /// Opt a Rust `Drop::drop` method into a non-unwinding C++ destructor.
+    /// The `cfg_attr(any(), ...)` spelling keeps the unknown marker disabled
+    /// for rustc while still exposing the contract to this transpiler.
+    pub(super) fn has_cpp_noexcept_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_noexcept")
+    }
+
+    /// Preserve an explicit one-argument C++ constructor contract for a
+    /// lowerable `#[cpp_ctor]` factory.
+    pub(super) fn has_cpp_explicit_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_explicit")
+    }
+
+    /// Suppress the synthesized all-fields constructor for a pinned Drop
+    /// holder whose explicit `#[cpp_ctor]` is the only valid construction
+    /// route. Kept opt-in so unrelated Drop structs retain their established
+    /// lowering.
+    pub(super) fn has_cpp_no_fieldwise_ctor_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_no_fieldwise_ctor")
+    }
+
     /// `#[cpp_inherit]` on an `impl Trait for Type` opts that impl into
     /// direct C++ inheritance: the concrete `Type` is emitted as
     /// `struct Type : public Trait { ... override ... }` (with a synthesized
