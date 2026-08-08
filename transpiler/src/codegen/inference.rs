@@ -99,18 +99,96 @@ impl CodeGen {
     }
 
 
+    fn consumer_effective_rust_scope(&self, relative_scope: &[String]) -> Vec<String> {
+        let mut current: Vec<String> = self
+            .consumer_rust_module
+            .as_deref()
+            .unwrap_or_default()
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect();
+        current.extend(relative_scope.iter().cloned());
+        current
+    }
+
+    fn consumer_scope_declares_root(&self, relative_scope: &[String], root: &str) -> bool {
+        if root.is_empty() {
+            return false;
+        }
+        let escaped_root = escape_cpp_keyword(root);
+        let scope = relative_scope.join("::");
+        let escaped_scope = relative_scope
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let module_candidate = |scope: &str, root: &str| {
+            if scope.is_empty() {
+                root.to_string()
+            } else {
+                format!("{}::{}", scope, root)
+            }
+        };
+        let module_is_declared = [
+            module_candidate(&scope, root),
+            module_candidate(&scope, &escaped_root),
+            module_candidate(&escaped_scope, root),
+            module_candidate(&escaped_scope, &escaped_root),
+        ]
+        .iter()
+        .any(|candidate| self.declared_module_paths.contains(candidate));
+        if module_is_declared || self.module_path_declares_type_name_exact(relative_scope, root) {
+            return true;
+        }
+        if relative_scope.is_empty() && self.declared_item_names.contains(root) {
+            return true;
+        }
+        let item_key = module_candidate(&scope, root);
+        self.item_const_types.contains_key(&item_key)
+            || self
+                .module_qualified_functions
+                .values()
+                .any(|qualified| qualified == &item_key)
+    }
+
+    fn consumer_runtime_binding_shadows_root(&self, root: &str) -> bool {
+        self.is_type_param_in_scope(root)
+            || self.is_local_type_name_in_scope(root)
+            || self.is_local_function_name_in_scope(root)
+            || self
+                .local_bindings
+                .iter()
+                .rev()
+                .any(|scope| scope.contains_key(root))
+            || self
+                .param_bindings
+                .iter()
+                .rev()
+                .any(|scope| scope.contains_key(root))
+    }
+
     /// Resolve a Rust path to candidate crate-relative paths. Each result is
     /// paired with the minimum number of candidate segments that a mapped
     /// module must consume. For an unqualified relative path we require the
     /// mapping to consume at least one of the path's own segments; otherwise
     /// every `Type::associated` path would spuriously match the current file's
     /// module entry.
-    fn consumer_rust_path_candidates(&self, path: &str) -> Vec<(Vec<String>, usize)> {
+    fn consumer_rust_path_candidates_in_scope(
+        &self,
+        path: &str,
+        relative_scope: &[String],
+    ) -> Vec<(Vec<String>, usize)> {
         let normalized = normalize_use_import_path(path).trim();
         let normalized = split_use_import_alias(normalized)
             .map(|(_, target)| target)
-            .unwrap_or(normalized)
-            .trim_start_matches("::");
+            .unwrap_or(normalized);
+        // A leading `::` is rooted in Rust's extern prelude. It is not an
+        // alternate spelling of `crate::`, even if its first segment happens
+        // to equal a consumer-mapped crate module.
+        if normalized.starts_with("::") {
+            return Vec::new();
+        }
         let segments: Vec<String> = normalized
             .split("::")
             .filter(|segment| !segment.is_empty())
@@ -120,14 +198,7 @@ impl CodeGen {
             return Vec::new();
         }
 
-        let current: Vec<String> = self
-            .consumer_rust_module
-            .as_deref()
-            .unwrap_or_default()
-            .split("::")
-            .filter(|segment| !segment.is_empty())
-            .map(str::to_string)
-            .collect();
+        let current = self.consumer_effective_rust_scope(relative_scope);
         let mut candidates = Vec::new();
         match segments[0].as_str() {
             "crate" => candidates.push((segments[1..].to_vec(), 0)),
@@ -147,6 +218,53 @@ impl CodeGen {
                 candidates.push((candidate, 0));
             }
             _ => {
+                let root = &segments[0];
+                // Function/block bindings are lexically nearer than every
+                // module-scope declaration or import.
+                if self.consumer_runtime_binding_shadows_root(root) {
+                    return Vec::new();
+                }
+
+                // Resolve the first lexical binding and stop there. In Rust a
+                // nearer declaration/import shadows every same-named module in
+                // an ancestor; continuing the outward map search would silently
+                // select a different symbol graph.
+                for depth in (0..=relative_scope.len()).rev() {
+                    let scope = &relative_scope[..depth];
+                    let scope_key = scope.join("::");
+                    if let Some(target) =
+                        self.resolve_scope_import_binding_target_for_exact_scope(&scope_key, root)
+                    {
+                        if target.trim_start().starts_with("::") {
+                            return Vec::new();
+                        }
+                        let mut expanded = target;
+                        for segment in &segments[1..] {
+                            expanded.push_str("::");
+                            expanded.push_str(segment);
+                        }
+                        // Scope bindings have already been resolved by the
+                        // collect pass. Treat the target as crate-relative and
+                        // never resume searching with the shadowed local name.
+                        let expanded = expanded.trim_start_matches("crate::");
+                        let expanded_segments = expanded
+                            .split("::")
+                            .filter(|segment| !segment.is_empty())
+                            .map(str::to_string)
+                            .collect::<Vec<_>>();
+                        return if expanded_segments.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![(expanded_segments, 0)]
+                        };
+                    }
+                    if self.consumer_scope_declares_root(scope, root) {
+                        let mut candidate = self.consumer_effective_rust_scope(scope);
+                        candidate.extend_from_slice(&segments);
+                        let minimum = candidate.len().saturating_sub(segments.len()) + 1;
+                        return vec![(candidate, minimum)];
+                    }
+                }
                 // Rust also resolves an unqualified module path from the
                 // current scope outwards. Try the current module and each
                 // ancestor, nearest first. Requiring one mapped segment past
@@ -172,16 +290,19 @@ impl CodeGen {
 
     /// Find the longest mapped module prefix for a Rust path and return its
     /// consumer entry plus the remaining item/expression path segments.
-    fn resolve_consumer_mapped_path(
+    pub(super) fn resolve_consumer_mapped_path_in_scope(
         &self,
         path: &str,
         require_item_suffix: bool,
+        relative_scope: &[String],
     ) -> Option<(&crate::transpile::ConsumerModuleEntry, Vec<String>)> {
         if self.consumer_module_map.is_empty() {
             return None;
         }
 
-        for (candidate, minimum_module_segments) in self.consumer_rust_path_candidates(path) {
+        for (candidate, minimum_module_segments) in
+            self.consumer_rust_path_candidates_in_scope(path, relative_scope)
+        {
             let mut matches: Vec<(&crate::transpile::ConsumerModuleEntry, usize)> = self
                 .consumer_module_map
                 .modules
@@ -210,6 +331,29 @@ impl CodeGen {
             }
         }
         None
+    }
+
+    pub(super) fn resolve_consumer_mapped_path(
+        &self,
+        path: &str,
+        require_item_suffix: bool,
+    ) -> Option<(&crate::transpile::ConsumerModuleEntry, Vec<String>)> {
+        self.resolve_consumer_mapped_path_in_scope(path, require_item_suffix, &self.module_stack)
+    }
+
+    pub(super) fn consumer_module_import_is_allowed(
+        &self,
+        entry: &crate::transpile::ConsumerModuleEntry,
+    ) -> bool {
+        if self.module_name.as_deref() == Some(entry.cpp_module.as_str()) {
+            return false;
+        }
+        let Some(current) = self.consumer_rust_module.as_deref() else {
+            return true;
+        };
+        !entry.rust_module.is_empty()
+            && entry.rust_module != current
+            && !current.starts_with(&format!("{}::", entry.rust_module))
     }
 
     /// Project a qualified Rust type/expression path through the consumer map.
@@ -264,11 +408,16 @@ impl CodeGen {
     ///     `crate_module_names`.
     pub(super) fn resolve_sibling_module_path(&self, segment: &str) -> Option<String> {
         if !self.consumer_module_map.is_empty() {
-            let current = self.consumer_rust_module.as_deref()?;
-            let current_segments: Vec<&str> = current
-                .split("::")
-                .filter(|part| !part.is_empty())
-                .collect();
+            if self.consumer_scope_declares_root(&self.module_stack, segment) {
+                let mut exact_child =
+                    self.consumer_effective_rust_scope(&self.module_stack);
+                exact_child.push(segment.to_string());
+                return self
+                    .consumer_module_map
+                    .entry_for_rust_module(&exact_child.join("::"))
+                    .map(|entry| entry.cpp_module.clone());
+            }
+            let current_segments = self.consumer_effective_rust_scope(&self.module_stack);
             for depth in (0..current_segments.len()).rev() {
                 let mut candidate = current_segments[..depth].join("::");
                 if !candidate.is_empty() {
@@ -306,23 +455,16 @@ impl CodeGen {
     /// current module, for the same cycle reason.
     pub(super) fn resolve_crate_module_use_path(&self, path: &str) -> Option<String> {
         let normalized = normalize_use_import_path(path);
-        if normalized.is_empty() || normalized.contains(" = ") {
+        let normalized = split_use_import_alias(normalized)
+            .map(|(_, target)| target)
+            .unwrap_or(normalized);
+        if normalized.is_empty() || normalized.starts_with("::") {
             return None;
         }
         if !self.consumer_module_map.is_empty() {
-            let current = self.consumer_rust_module.as_deref()?;
-            for (candidate, _) in self.consumer_rust_path_candidates(normalized) {
-                let candidate = candidate.join("::");
-                let Some(entry) = self.consumer_module_map.entry_for_rust_module(&candidate) else {
-                    continue;
-                };
-                if candidate != current
-                    && !current.starts_with(&format!("{}::", candidate))
-                {
-                    return Some(entry.cpp_module.clone());
-                }
-            }
-            return None;
+            let (entry, suffix) = self.resolve_consumer_mapped_path(normalized, false)?;
+            return (suffix.is_empty() && self.consumer_module_import_is_allowed(entry))
+                .then(|| entry.cpp_module.clone());
         }
         let segs: Vec<&str> = normalized
             .trim_start_matches("::")

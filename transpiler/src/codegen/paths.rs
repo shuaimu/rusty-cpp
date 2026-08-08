@@ -1099,6 +1099,88 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
+    fn apply_consumer_nonterminal_generic_args(
+        &self,
+        mapped: String,
+        path: &syn::Path,
+        resolved_segments: &[String],
+    ) -> String {
+        if path.segments.len() < 2 || resolved_segments.len() < 2 {
+            return mapped;
+        }
+
+        let had_leading_colon = mapped.starts_with("::");
+        let mut mapped_segments: Vec<String> = mapped
+            .trim_start_matches("::")
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect();
+        if mapped_segments.is_empty() {
+            return mapped;
+        }
+
+        // Consumer projection replaces a Rust module prefix with an arbitrary
+        // C++ namespace, but preserves the item suffix. Match that suffix from
+        // the end so generic arguments also survive a leading import-alias
+        // expansion (where the resolved path has more segments than `path`).
+        let common_suffix_len = resolved_segments
+            .iter()
+            .rev()
+            .map(|segment| escape_cpp_keyword(segment))
+            .zip(mapped_segments.iter().rev())
+            .take_while(|(resolved, mapped)| resolved == *mapped)
+            .count();
+        if common_suffix_len == 0 {
+            return mapped;
+        }
+
+        let resolved_suffix_start = resolved_segments.len() - common_suffix_len;
+        let mapped_suffix_start = mapped_segments.len() - common_suffix_len;
+        for (path_index, segment) in path
+            .segments
+            .iter()
+            .enumerate()
+            .take(path.segments.len() - 1)
+        {
+            let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                continue;
+            };
+            let mapped_args: Vec<String> = args
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                    syn::GenericArgument::Const(expr) => Some(self.emit_expr_to_string(expr)),
+                    _ => None,
+                })
+                .collect();
+            if mapped_args.is_empty() {
+                continue;
+            }
+
+            let distance_from_end = path.segments.len() - 1 - path_index;
+            let Some(resolved_index) = resolved_segments.len().checked_sub(distance_from_end + 1)
+            else {
+                continue;
+            };
+            if resolved_index < resolved_suffix_start {
+                continue;
+            }
+            let mapped_index = mapped_suffix_start + resolved_index - resolved_suffix_start;
+            let mapped_segment = mapped_segments[mapped_index].clone();
+            mapped_segments[mapped_index] =
+                format!("{}<{}>", mapped_segment, mapped_args.join(", "));
+        }
+
+        let mapped = mapped_segments.join("::");
+        if had_leading_colon {
+            format!("::{}", mapped)
+        } else {
+            mapped
+        }
+    }
+
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         // General Layer 1 Stage B: expand a `use <std-mod>::{self}` MODULE self-alias
@@ -1146,8 +1228,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         // before the generic Rust-path lowering below erases `crate`/`super`
         // context. This covers both type paths and expression paths; their
         // generic arguments are appended by the respective callers.
-        if let Some(mapped) = self.resolve_consumer_qualified_path(&segments) {
-            return mapped;
+        if path.leading_colon.is_none()
+            && let Some(mapped) = self.resolve_consumer_qualified_path(&segments)
+        {
+            return self.apply_consumer_nonterminal_generic_args(mapped, path, &segments);
         }
         let mut joined: String;
         let mut force_leading_colon = path.leading_colon.is_some();
@@ -1712,8 +1796,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         // The leading import-binding pass above may have expanded an explicit
         // alias (`use crate::base::sync as clocks; clocks::now()`) into its
         // full Rust target. Project that newly qualified form as well.
-        if let Some(mapped) = self.resolve_consumer_qualified_path(&segments) {
-            return mapped;
+        if path.leading_colon.is_none()
+            && let Some(mapped) = self.resolve_consumer_qualified_path(&segments)
+        {
+            return self.apply_consumer_nonterminal_generic_args(mapped, path, &segments);
         }
         if segments.len() >= 2 {
             let owner_module = segments[0].clone();
