@@ -8946,6 +8946,169 @@ fn test_box_dyn_fn_mut_uses_rusty_function() {
 }
 
 #[test]
+fn test_nullable_boxed_callbacks_use_function_null_state_and_preserve_kind() {
+    let out = transpile_str(
+        r#"
+        type ConstCallback = Box<dyn Fn(i32) -> i32>;
+        type MutCallback = Box<dyn FnMut()>;
+        type OnceCallback = Box<dyn FnOnce(String)>;
+        type MaybeMut = Option<MutCallback>;
+
+        struct Callbacks {
+            direct: Option<ConstCallback>,
+            nested: RefCell<MaybeMut>,
+            once: std::option::Option<std::boxed::Box<dyn std::ops::FnOnce(String)>>,
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Function<int32_t(int32_t) const> direct"),
+        "{out}"
+    );
+    assert!(
+        out.contains("rusty::RefCell<rusty::Function<void()>> nested"),
+        "{out}"
+    );
+    assert!(
+        out.contains("rusty::Function<void(rusty::String)> once"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("rusty::Option<rusty::Function"),
+        "the redundant Option carrier must be absent:\n{out}"
+    );
+}
+
+#[test]
+fn test_nullable_callback_references_keep_reference_and_const_shape() {
+    let out = transpile_str(
+        r#"
+        fn inspect(value: &Option<Box<dyn Fn()>>) {}
+        fn mutate(value: &mut Option<Box<dyn FnMut()>>) {}
+        "#,
+    );
+    assert!(
+        out.contains("const rusty::Function<void() const>& value"),
+        "{out}"
+    );
+    assert!(out.contains("rusty::Function<void()>& value"), "{out}");
+}
+
+#[test]
+fn test_nullable_callback_rejects_noncanonical_or_semantically_stronger_bounds() {
+    let out = transpile_str(
+        r#"
+        trait Send {}
+        trait CustomFn {}
+        struct Rejected {
+            nested_option: Option<Option<Box<dyn Fn()>>>,
+            send_bound: Option<Box<dyn Fn() + Send>>,
+            hrtb: Option<Box<dyn for<'a> Fn(&'a i32)>>,
+            custom: Option<Box<dyn CustomFn>>,
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Option<rusty::Function<void() const>> nested_option"),
+        "the outer Option in a nested Option must remain:\n{out}"
+    );
+    for field in ["send_bound", "hrtb", "custom"] {
+        let line = out
+            .lines()
+            .find(|line| line.contains(field))
+            .unwrap_or_else(|| panic!("missing field {field}:\n{out}"));
+        assert!(
+            !line.trim_start().starts_with("rusty::Function<"),
+            "unsupported source shape flattened for {field}: {line}"
+        );
+    }
+}
+
+#[test]
+fn test_nullable_callback_none_some_replace_and_if_let_lowering() {
+    let out = transpile_str(
+        r#"
+        type Callback = Box<dyn Fn(i32) -> i32>;
+        type MutCallback = Box<dyn FnMut()>;
+
+        struct Holder {
+            direct: Option<Callback>,
+            nested: RefCell<Option<MutCallback>>,
+        }
+
+        impl Holder {
+            fn new() -> Self {
+                Self {
+                    direct: None,
+                    nested: RefCell::new(Default::default()),
+                }
+            }
+
+            fn set(&mut self, callback: Callback) {
+                self.direct = Some(callback);
+            }
+
+            fn call(&self, value: i32) -> i32 {
+                if let Some(callback) = &self.direct {
+                    callback(value)
+                } else {
+                    0
+                }
+            }
+
+            fn set_mut(&self, callback: MutCallback) {
+                self.nested.replace(Some(callback));
+            }
+
+            fn call_mut(&self) {
+                let mut callback_slot = self.nested.borrow_mut();
+                if let Some(callback) = callback_slot.as_mut() {
+                    callback();
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Function<int32_t(int32_t) const>{}"),
+        "None must construct an empty callback:\n{out}"
+    );
+    assert!(
+        out.contains("direct = std::move(callback)")
+            || out.contains("this->direct = std::move(callback)"),
+        "Some(callback) must move its payload exactly once:\n{out}"
+    );
+    assert!(
+        out.contains("nested.replace(std::move(callback))")
+            || out.contains("this->nested.replace(std::move(callback))"),
+        "RefCell::replace(Some(callback)) must pass the nullable carrier:\n{out}"
+    );
+    assert!(out.contains("static_cast<bool>(_iflet_callback_slot)"), "{out}");
+    assert!(out.contains("auto&& _iflet_callback_guard = callback_slot"), "{out}");
+    assert!(
+        out.contains("rusty::detail::deref_if_pointer_like(_iflet_callback_guard)"),
+        "the RefMut guard must stay alive through the branch:\n{out}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "unsupported Option operation `is_some`")]
+fn test_nullable_callback_fails_closed_on_unsupported_option_methods() {
+    let _ = transpile_str(
+        r#"
+        struct Holder {
+            callback: Option<Box<dyn Fn()>>,
+        }
+        impl Holder {
+            fn has_callback(&self) -> bool {
+                self.callback.is_some()
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
 fn test_fn_multi_params() {
     let out = transpile_str("fn apply(f: impl Fn(i32, f64, bool) -> String) {}");
     assert!(out.contains("std::function<rusty::String(int32_t, double, bool)>"));

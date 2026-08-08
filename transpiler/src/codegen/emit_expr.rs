@@ -8589,6 +8589,35 @@ impl CodeGen {
             return format!("rusty::as_mut_slice({})", receiver);
         }
 
+        if mc.method == "replace" && mc.args.len() == 1 {
+            let receiver_ty = self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver));
+            if let Some(callback_option_ty) = receiver_ty
+                .as_ref()
+                .and_then(|ty| self.transparent_nullable_callback_in_refcell(ty))
+            {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                let replacement = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &mc.args[0],
+                    Some(&callback_option_ty),
+                );
+                return format!("{}.replace({})", receiver, replacement);
+            }
+        }
+
+        let transparent_callback_receiver_ty = self
+            .infer_simple_expr_type(&mc.receiver)
+            .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver));
+        if transparent_callback_receiver_ty.as_ref().is_some_and(|ty| {
+            self.try_map_transparent_nullable_callback_type(ty).is_some()
+        }) {
+            panic!(
+                "unsupported Option operation `{}` on transparent Option<Box<dyn Fn*>>",
+                mc.method
+            );
+        }
+
         let method_name = mc.method.to_string();
         // Record a `.map(closure)` receiver's Ok/Some type so the closure's
         // destructured param types its bindings (see
@@ -13522,6 +13551,12 @@ impl CodeGen {
                     return "this->operator*()".to_string();
                 }
                 if self.is_option_none_path(&path.path) {
+                    if let Some(expected) = expected_ty
+                        && let Some(callback_cpp) =
+                            self.try_map_transparent_nullable_callback_type(expected)
+                    {
+                        return format!("{}{{}}", callback_cpp);
+                    }
                     if let Some(expected_cpp) = self.expected_option_cpp_type_for_none(expected_ty)
                     {
                         return format!("{}{{rusty::None}}", expected_cpp);
@@ -19602,6 +19637,55 @@ impl CodeGen {
                 | "std::option::Option::Some"
         ) && call.args.len() == 1
         {
+            if let Some(expected) = expected_ty
+                && self
+                    .try_map_transparent_nullable_callback_type(expected)
+                    .is_some()
+                && let Some(box_ty) = self.transparent_nullable_callback_box_type(expected)
+            {
+                // The outer Option and owning Box are both represented by the
+                // move-only nullable Function carrier. Peel a canonical
+                // `Box::new(payload)` constructor, but otherwise retain the
+                // Box-typed expectation so an existing callback binding is
+                // moved exactly once.
+                let source = self.peel_paren_group_expr(&call.args[0]);
+                if let syn::Expr::Call(box_new) = source
+                    && box_new.args.len() == 1
+                    && let syn::Expr::Path(box_new_path) = box_new.func.as_ref()
+                    && box_new_path.qself.is_none()
+                {
+                    let segments = box_new_path
+                        .path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>();
+                    let canonical_box_new = matches!(
+                        segments.as_slice(),
+                        [owner, method] if owner == "Box" && method == "new"
+                    ) || matches!(
+                        segments.as_slice(),
+                        [root, module, owner, method]
+                            if matches!(root.as_str(), "alloc" | "std")
+                                && module == "boxed"
+                                && owner == "Box"
+                                && method == "new"
+                    );
+                    if canonical_box_new
+                        && !(segments.len() == 2
+                            && self.bare_std_named_type_suppression_applies("Box"))
+                    {
+                        return self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            &box_new.args[0],
+                            Some(&box_ty),
+                        );
+                    }
+                }
+                return self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &call.args[0],
+                    Some(&box_ty),
+                );
+            }
             let expected_inner_ty = self.expected_option_type_arg(expected_ty);
             // Some((&"key3", &mut 3)) against Option<(&K, &mut V)>: literal
             // temporaries can't bind the payload tuple's reference slots.
@@ -19844,6 +19928,11 @@ impl CodeGen {
                 .cloned()
                 .or_else(|| self.infer_default_call_expected_type_from_in_progress_local_name())
             {
+                if let Some(callback_cpp) =
+                    self.try_map_transparent_nullable_callback_type(&expected)
+                {
+                    return format!("{}{{}}", callback_cpp);
+                }
                 if let Some(default_expr) = self.try_emit_default_value_expr_for_type(&expected) {
                     return default_expr;
                 }
