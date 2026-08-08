@@ -5044,16 +5044,35 @@ impl CodeGen {
                 self.pop_type_param_scope();
             }
             // §13.15.3: generic traits get a SECOND map keyed on
-            // (Self, trait args). `I` is a non-deduced context inside the tuple
-            // argument but deduces from the args key; the tuple argument is
-            // then merely checked, which is what makes this well-formed.
-            let generic_specs: Vec<crate::codegen::TupleGenericAssocSpec> = self
-                .tuple_trait_assoc_specs_generic
-                .iter()
-                .filter(|s| s.trait_name == trait_name.to_string())
-                .cloned()
-                .collect();
-            if !generic_specs.is_empty() {
+            // (Self, trait args). Emitted by a shared helper so the hoist pass
+            // (emit_hoisted_generic_trait_assoc_maps) produces byte-identical
+            // output; the helper dedups, so whichever runs first wins.
+            self.emit_trait_assoc_traits_maps_generic(&trait_name.to_string());
+        }
+    }
+
+    /// §13.15.3: emit the generic per-trait type map `<Tr>TraitsG<Self, Args…>`
+    /// for `trait_name` — primary declaration plus one specialization per
+    /// collected spec. `I` is a non-deduced context inside the tuple argument
+    /// but deduces from the args key; the tuple argument is then merely
+    /// checked, which is what makes this well-formed.
+    ///
+    /// Idempotent: a trait is emitted at most once per run, so the hoist pass
+    /// and the in-trait call can both fire without duplicating specializations
+    /// (a duplicate partial specialization is ill-formed, unlike a duplicate
+    /// primary declaration).
+    pub(super) fn emit_trait_assoc_traits_maps_generic(&mut self, trait_name: &str) -> bool {
+        let generic_specs: Vec<crate::codegen::TupleGenericAssocSpec> = self
+            .tuple_trait_assoc_specs_generic
+            .iter()
+            .filter(|s| s.trait_name == trait_name)
+            .cloned()
+            .collect();
+        if generic_specs.is_empty() {
+            return false;
+        }
+        {
+            {
                 let arg_arity = generic_specs[0].trait_args.len();
                 let key_params: Vec<String> =
                     (0..arg_arity).map(|i| format!("A{}", i)).collect();
@@ -5110,6 +5129,49 @@ impl CodeGen {
                 }
             }
         }
+        true
+    }
+
+    /// §13.15.3: emit every generic per-trait type map ahead of the item
+    /// definitions, so a struct field that projects through one is not
+    /// instantiated before the map's specializations are visible.
+    pub(super) fn emit_hoisted_generic_trait_assoc_maps(&mut self) -> bool {
+        let mut names: Vec<String> = Vec::new();
+        for spec in &self.tuple_trait_assoc_specs_generic {
+            if !names.contains(&spec.trait_name) {
+                names.push(spec.trait_name.clone());
+            }
+        }
+        let mut any = false;
+        for name in names {
+            // PRIMARY DECLARATION ONLY. The specializations must NOT be hoisted:
+            // their bodies name crate types by the spelling that is valid inside
+            // the owning module's namespace (`TupleNCombination`), and at file
+            // scope that spelling does not resolve (`adaptors::TupleNCombination`
+            // is required). Measured: hoisting them costs a hard
+            // "no template named 'TupleNCombination'" and truncates the build.
+            //
+            // The primary alone is enough to keep a field's *declaration* from
+            // hard-erroring at the name lookup, which is what lets the rest of
+            // the TU compile and the real error tail become visible.
+            let arity = match self
+                .tuple_trait_assoc_specs_generic
+                .iter()
+                .find(|s| s.trait_name == name)
+            {
+                Some(s) => s.trait_args.len(),
+                None => continue,
+            };
+            let key_params: Vec<String> =
+                (0..arity).map(|i| format!("class A{}", i)).collect();
+            self.writeln(&format!(
+                "template <class Self_, {}> struct {}TraitsG;",
+                key_params.join(", "),
+                name
+            ));
+            any = true;
+        }
+        any
     }
 
     pub(super) fn emit_module_mode_trait_runtime_helper(&mut self, t: &syn::ItemTrait) -> bool {

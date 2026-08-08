@@ -5224,6 +5224,26 @@ impl CodeGen {
         }
         log_emit("emit_item_forward_decls");
 
+        // §13.15.3: hoist the generic per-trait type maps `<Tr>TraitsG` — both
+        // the primary declaration and its specializations — ahead of the item
+        // definitions. A struct field can project through the map
+        // (`typename <Tr>TraitsG<T, I>::Assoc`) while the trait that owns it is
+        // declared LATER in Rust source order; itertools has exactly this
+        // shape, `struct TupleCombinations` (adaptors/mod.rs:620) before
+        // `trait HasCombination` (:625). The primary alone is not enough: the
+        // field instantiates the map, so every specialization must also precede
+        // it or the instantiation selects the undefined primary.
+        //
+        // This runs AFTER emit_item_forward_decls so the specializations can
+        // name crate structs (itertools::Panicking) that are declared there.
+        // The in-trait emission stays put — redeclaring a class template is
+        // well-formed, and the specializations are dedup'd by emit_trait_assoc_
+        // traits_maps_generic itself.
+        if self.emit_hoisted_generic_trait_assoc_maps() {
+            self.newline();
+        }
+        log_emit("emit_hoisted_generic_trait_assoc_maps");
+
         if self.emit_extension_trait_forward_decls_for_all_scopes() {
             self.newline();
         }
