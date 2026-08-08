@@ -10,7 +10,7 @@ This example demonstrates how to integrate rusty-cpp into a CMake-based C++ proj
 
 ```bash
 cd your-project
-git submodule add https://github.com/Overcomplicated12/rusty-cpp.git third-party/rusty-cpp
+git submodule add https://github.com/shuaimu/rusty-cpp.git third-party/rusty-cpp
 git submodule update --init --recursive
 ```
 

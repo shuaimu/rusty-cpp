@@ -1,6 +1,6 @@
 # rusty-cpp
 
-[![CI](https://github.com/Overcomplicated12/rusty-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Overcomplicated12/rusty-cpp/actions/workflows/ci.yml)
+[![CI](https://github.com/shuaimu/rusty-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/shuaimu/rusty-cpp/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/documentation-online-blue)](http://mpaxos.com/software/rusty-cpp.html)
 
 Bringing Rust's safety to C++ — in both directions. You can have your existing C++ *checked* like Rust, or you can *write* Rust and ship C++:
@@ -106,12 +106,12 @@ See [cmake-example-project/](cmake-example-project/) for a complete working exam
 For system-wide installation, use our install script which detects your OS and installs all dependencies:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Overcomplicated12/rusty-cpp/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/shuaimu/rusty-cpp/main/install.sh | bash
 ```
 
 Or clone and run locally:
 ```bash
-git clone https://github.com/Overcomplicated12/rusty-cpp.git
+git clone https://github.com/shuaimu/rusty-cpp.git
 cd rusty-cpp
 ./install.sh
 ```
@@ -129,7 +129,7 @@ cd rusty-cpp
 
 ```bash
 brew install llvm z3
-git clone https://github.com/Overcomplicated12/rusty-cpp.git
+git clone https://github.com/shuaimu/rusty-cpp.git
 cd rusty-cpp
 cargo build --release
 ```
@@ -138,7 +138,7 @@ cargo build --release
 
 ```bash
 sudo apt-get install llvm-16-dev libclang-16-dev clang-16 libz3-dev
-git clone https://github.com/Overcomplicated12/rusty-cpp.git
+git clone https://github.com/shuaimu/rusty-cpp.git
 cd rusty-cpp
 cargo build --release
 ```
