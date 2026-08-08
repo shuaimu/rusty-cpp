@@ -99,6 +99,145 @@ impl CodeGen {
     }
 
 
+    /// Resolve a Rust path to candidate crate-relative paths. Each result is
+    /// paired with the minimum number of candidate segments that a mapped
+    /// module must consume. For an unqualified relative path we require the
+    /// mapping to consume at least one of the path's own segments; otherwise
+    /// every `Type::associated` path would spuriously match the current file's
+    /// module entry.
+    fn consumer_rust_path_candidates(&self, path: &str) -> Vec<(Vec<String>, usize)> {
+        let normalized = normalize_use_import_path(path).trim();
+        let normalized = split_use_import_alias(normalized)
+            .map(|(_, target)| target)
+            .unwrap_or(normalized)
+            .trim_start_matches("::");
+        let segments: Vec<String> = normalized
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect();
+        if segments.is_empty() {
+            return Vec::new();
+        }
+
+        let current: Vec<String> = self
+            .consumer_rust_module
+            .as_deref()
+            .unwrap_or_default()
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect();
+        let mut candidates = Vec::new();
+        match segments[0].as_str() {
+            "crate" => candidates.push((segments[1..].to_vec(), 0)),
+            "self" => {
+                let mut candidate = current;
+                candidate.extend_from_slice(&segments[1..]);
+                candidates.push((candidate, 0));
+            }
+            "super" => {
+                let mut candidate = current;
+                let mut index = 0;
+                while segments.get(index).is_some_and(|segment| segment == "super") {
+                    candidate.pop();
+                    index += 1;
+                }
+                candidate.extend_from_slice(&segments[index..]);
+                candidates.push((candidate, 0));
+            }
+            _ => {
+                // Rust also resolves an unqualified module path from the
+                // current scope outwards. Try the current module and each
+                // ancestor, nearest first. Requiring one mapped segment past
+                // the implicit prefix prevents the current module itself from
+                // capturing ordinary `Type::associated` paths.
+                for depth in (0..=current.len()).rev() {
+                    let mut candidate = current[..depth].to_vec();
+                    candidate.extend_from_slice(&segments);
+                    candidates.push((candidate, depth.saturating_add(1)));
+                }
+
+                // A crate-root-qualified path may already have had `crate::`
+                // normalized away by an earlier resolver. Try that form only
+                // after Rust's nearer relative scopes.
+                candidates.push((segments.clone(), 1));
+            }
+        }
+
+        let mut seen = HashSet::new();
+        candidates.retain(|(candidate, minimum)| seen.insert((candidate.clone(), *minimum)));
+        candidates
+    }
+
+    /// Find the longest mapped module prefix for a Rust path and return its
+    /// consumer entry plus the remaining item/expression path segments.
+    fn resolve_consumer_mapped_path(
+        &self,
+        path: &str,
+        require_item_suffix: bool,
+    ) -> Option<(&crate::transpile::ConsumerModuleEntry, Vec<String>)> {
+        if self.consumer_module_map.is_empty() {
+            return None;
+        }
+
+        for (candidate, minimum_module_segments) in self.consumer_rust_path_candidates(path) {
+            let mut matches: Vec<(&crate::transpile::ConsumerModuleEntry, usize)> = self
+                .consumer_module_map
+                .modules
+                .values()
+                .filter_map(|entry| {
+                    let module_segments: Vec<&str> = entry
+                        .rust_module
+                        .split("::")
+                        .filter(|segment| !segment.is_empty())
+                        .collect();
+                    (module_segments.len() >= minimum_module_segments
+                        && module_segments.len() <= candidate.len()
+                        && module_segments
+                            .iter()
+                            .zip(candidate.iter())
+                            .all(|(expected, actual)| *expected == actual))
+                    .then_some((entry, module_segments.len()))
+                })
+                .collect();
+            matches.sort_by_key(|(_, length)| std::cmp::Reverse(*length));
+            if let Some((entry, module_length)) = matches.into_iter().next() {
+                let suffix = candidate[module_length..].to_vec();
+                if !require_item_suffix || !suffix.is_empty() {
+                    return Some((entry, suffix));
+                }
+            }
+        }
+        None
+    }
+
+    /// Project a qualified Rust type/expression path through the consumer map.
+    /// Generic arguments are emitted separately by the callers, so this helper
+    /// intentionally handles identifiers only.
+    pub(super) fn resolve_consumer_qualified_path(&self, segments: &[String]) -> Option<String> {
+        if segments.len() < 2 {
+            return None;
+        }
+        let path = segments.join("::");
+        let (entry, suffix) = self.resolve_consumer_mapped_path(&path, true)?;
+        let suffix = suffix
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        Some(format!("::{}::{}", entry.cpp_namespace, suffix))
+    }
+
+    /// Namespace owning the exports of a generated C++ module. Consumer maps
+    /// may deliberately project several named modules into one flat namespace.
+    pub(super) fn consumer_cpp_namespace_for_module(&self, cpp_module: &str) -> String {
+        self.consumer_module_map
+            .entry_for_cpp_module(cpp_module)
+            .map(|entry| entry.cpp_namespace.clone())
+            .unwrap_or_else(|| cpp_module.replace('.', "::"))
+    }
+
     /// Given a single Rust use-path segment (e.g. `node`, taken from
     /// `using ::node::Root;`), return the fully-qualified C++ module
     /// name iff that segment corresponds to an ancestor-sibling module
@@ -124,6 +263,24 @@ impl CodeGen {
     ///   * no ancestor produces a candidate present in
     ///     `crate_module_names`.
     pub(super) fn resolve_sibling_module_path(&self, segment: &str) -> Option<String> {
+        if !self.consumer_module_map.is_empty() {
+            let current = self.consumer_rust_module.as_deref()?;
+            let current_segments: Vec<&str> = current
+                .split("::")
+                .filter(|part| !part.is_empty())
+                .collect();
+            for depth in (0..current_segments.len()).rev() {
+                let mut candidate = current_segments[..depth].join("::");
+                if !candidate.is_empty() {
+                    candidate.push_str("::");
+                }
+                candidate.push_str(segment);
+                if let Some(entry) = self.consumer_module_map.entry_for_rust_module(&candidate) {
+                    return Some(entry.cpp_module.clone());
+                }
+            }
+            return None;
+        }
         let current = self.module_name.as_deref()?;
         let mut prefix = current;
         while let Some(dot) = prefix.rfind('.') {
@@ -150,6 +307,21 @@ impl CodeGen {
     pub(super) fn resolve_crate_module_use_path(&self, path: &str) -> Option<String> {
         let normalized = normalize_use_import_path(path);
         if normalized.is_empty() || normalized.contains(" = ") {
+            return None;
+        }
+        if !self.consumer_module_map.is_empty() {
+            let current = self.consumer_rust_module.as_deref()?;
+            for (candidate, _) in self.consumer_rust_path_candidates(normalized) {
+                let candidate = candidate.join("::");
+                let Some(entry) = self.consumer_module_map.entry_for_rust_module(&candidate) else {
+                    continue;
+                };
+                if candidate != current
+                    && !current.starts_with(&format!("{}::", candidate))
+                {
+                    return Some(entry.cpp_module.clone());
+                }
+            }
             return None;
         }
         let segs: Vec<&str> = normalized

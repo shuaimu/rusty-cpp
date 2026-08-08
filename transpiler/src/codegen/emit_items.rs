@@ -5955,7 +5955,7 @@ impl CodeGen {
                         .next()
                         .unwrap_or_default()
                         .to_string();
-                    let ns_path = sibling_module.replace('.', "::");
+                    let ns_path = self.consumer_cpp_namespace_for_module(&sibling_module);
                     if !alias.is_empty() {
                         self.writeln(&format!(
                             "namespace {} = ::{};",
@@ -6251,7 +6251,8 @@ impl CodeGen {
                             if self.cxx_namespace.is_some()
                                 && sibling_module.ends_with(&format!(".{}", first_segment))
                             {
-                                let ns_path = sibling_module.replace('.', "::");
+                                let ns_path =
+                                    self.consumer_cpp_namespace_for_module(&sibling_module);
                                 self.writeln(&format!(
                                     "namespace {} = ::{};",
                                     first_segment, ns_path
@@ -6292,7 +6293,7 @@ impl CodeGen {
                             && !item.is_empty()
                             && item != first_segment
                         {
-                            let ns_path = sibling_module.replace('.', "::");
+                            let ns_path = self.consumer_cpp_namespace_for_module(&sibling_module);
                             self.writeln(&format!(
                                 "{}using ::{}::{};",
                                 export_prefix,

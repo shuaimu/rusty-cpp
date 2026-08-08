@@ -1141,6 +1141,14 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 segments = expanded;
             }
         }
+        // A consumer may expose the Rust crate through a deliberately
+        // non-isomorphic C++ module graph. Resolve mapped crate-module prefixes
+        // before the generic Rust-path lowering below erases `crate`/`super`
+        // context. This covers both type paths and expression paths; their
+        // generic arguments are appended by the respective callers.
+        if let Some(mapped) = self.resolve_consumer_qualified_path(&segments) {
+            return mapped;
+        }
         let mut joined: String;
         let mut force_leading_colon = path.leading_colon.is_some();
         let original_force_leading_colon = force_leading_colon;
@@ -1700,6 +1708,12 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 }
             }
             joined = segments.join("::");
+        }
+        // The leading import-binding pass above may have expanded an explicit
+        // alias (`use crate::base::sync as clocks; clocks::now()`) into its
+        // full Rust target. Project that newly qualified form as well.
+        if let Some(mapped) = self.resolve_consumer_qualified_path(&segments) {
+            return mapped;
         }
         if segments.len() >= 2 {
             let owner_module = segments[0].clone();
