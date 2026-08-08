@@ -61,7 +61,7 @@ ctest -R cpp_rust_member_interop --output-on-failure
 
 Notes:
 
-- The test wiring is enabled by default with `ENABLE_CPP_RUST_MEMBER_INTEROP_TEST=ON`.
+- The test wiring is enabled by default with `ENABLE_CPP_RUST_MEMBER_INTEROP_TEST=ON` when `bash` is available.
 - Rust source transpilation is configured in CMake via `RustyCppTranspiler.cmake` (`cpp_rust_member_interop_transpile` target).
 - The script probes for C++20 modules support using a local module import and skips if unavailable.
 - The script prefers `clang++` (precompiled module flow) and falls back to `g++ -fmodules-ts`.
@@ -83,8 +83,8 @@ cmake --build . --target inline_rust_example_rewrite
 
 Notes:
 
-- `inline_rust_example_check` validates marker structure and `rust_sha256`.
-- `inline_rust_example_rewrite` rewrites only `RUSTYCPP:GEN` regions.
+- When `tools/rustycpp-inline` is available, `inline_rust_example_check` validates marker structure and `rust_sha256`.
+- When `tools/rustycpp-inline` is available, `inline_rust_example_rewrite` rewrites only `RUSTYCPP:GEN` regions.
 - The `.cpp` example demonstrates TU-local placement; no automatic cross-TU declaration surfacing is performed in v1.
 
 ## CMakeLists.txt Integration

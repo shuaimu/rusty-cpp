@@ -1,7 +1,8 @@
 #pragma once
 
 // Inline Rust DSL example in a header-like file.
-// V1 rule: this is safe for shared APIs because other translation units can include it.
+// This fixture is included by one translation unit; shared APIs still need an
+// ordinary C++ declaration/definition strategy to avoid duplicate definitions.
 // In inline mode, includes are author-managed.
 // This example demonstrates:
 // - a free function (`greet`)
