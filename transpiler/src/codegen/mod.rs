@@ -4855,6 +4855,33 @@ impl CodeGen {
         // absorbed method's signature during impl-method merging below.
         self.collect_parallel_impl_groups(&file.items);
         self.collect_tuple_impl_assoc_specs(&file.items);
+        // §13.15.3: register the assoc names of traits that got a generic map
+        // HERE, in the pre-pass, not during the trait's own emission. Source
+        // order decides otherwise: itertools declares `struct TupleCombinations`
+        // (adaptors/mod.rs:620) BEFORE `trait HasCombination` (:625), so the
+        // struct's field `T::Combination` is emitted while the name→trait map is
+        // still empty, the lookup fails, and the field never routes through
+        // <Tr>TraitsG. The value position worked only because it is emitted
+        // later. Scoped to traits with a generic map: registering every
+        // method-less trait makes common assoc names multiply-owned and breaks
+        // the uniqueness lookup elsewhere.
+        {
+            let generic_trait_assoc: Vec<(String, Vec<String>)> = self
+                .tuple_trait_assoc_specs_generic
+                .iter()
+                .map(|s| {
+                    (
+                        s.trait_name.clone(),
+                        s.assoc.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            for (trait_name, names) in generic_trait_assoc {
+                self.trait_associated_type_names
+                    .entry(trait_name)
+                    .or_insert(names);
+            }
+        }
         log_emit("collect_parallel_impl_groups");
         // Pass 1c: pre-collect struct field/unit-struct metadata for expected-type
         // recovery even when struct definitions appear later in source order.
