@@ -46,6 +46,7 @@ A Rust-style borrow checker for C++ code.
 - [Part IX: Future Roadmap](#part-ix-future-roadmap)
   - [30. Planned Features](#30-planned-features)
   - [31. FAQ & Troubleshooting](#31-faq--troubleshooting)
+- [32. Macro Hygiene & the Cross-Crate Manifest](#32-macro-hygiene--the-cross-crate-manifest)
 
 ---
 
@@ -132,7 +133,7 @@ RustyCpp differs by using Rust's proven ownership model rather than heuristics, 
 ### Installation & Build Requirements
 
 **Prerequisites:**
-- Rust 1.70+ (for building the checker)
+- Rust 1.85+ (for building the checker)
 - LLVM/Clang 16+ (for LibClang)
 - Z3 Solver (for constraint solving)
 
@@ -180,13 +181,13 @@ void bad_example() {
 
 ```bash
 # Basic usage
-./rusty-cpp-checker example.cpp
+./target/release/rusty-cpp-checker example.cpp
 
 # With include paths
-./rusty-cpp-checker example.cpp -I include -I /usr/local/include
+./target/release/rusty-cpp-checker example.cpp -I include -I /usr/local/include
 
 # With compile_commands.json
-./rusty-cpp-checker example.cpp --compile-commands build/compile_commands.json
+./target/release/rusty-cpp-checker example.cpp --compile-commands build/compile_commands.json
 ```
 
 ### Understanding Output
@@ -1723,13 +1724,11 @@ add_custom_target(borrow_check
     COMMENT "Running RustyCpp borrow checker"
 )
 
-# Or integrate with compile_commands.json
-add_custom_target(borrow_check_all
-    COMMAND ${RUSTY_CPP_CHECKER}
-        --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
-    COMMENT "Running RustyCpp on all sources"
-)
+# The checker accepts one translation unit per invocation. For target-wide
+# checking, use the repository's CMake helper:
+include(path/to/rusty-cpp/cmake/RustyCppSubmodule.cmake)
+enable_borrow_checking()
+add_borrow_check_target(your_target)
 ```
 
 ### Makefile Integration
@@ -1739,7 +1738,9 @@ RUSTY_CPP_CHECKER := rusty-cpp-checker
 INCLUDE_DIRS := -I include -I third_party/include
 
 borrow_check: $(SOURCES)
-	$(RUSTY_CPP_CHECKER) $(SOURCES) $(INCLUDE_DIRS)
+	@for source in $(SOURCES); do \
+		$(RUSTY_CPP_CHECKER) $$source $(INCLUDE_DIRS) || exit $$?; \
+	done
 
 .PHONY: borrow_check
 ```
@@ -1753,7 +1754,7 @@ RustyCpp can read compiler flags from `compile_commands.json`:
 cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
 
 # Run checker with compile commands
-./rusty-cpp-checker src/main.cpp --compile-commands build/compile_commands.json
+./target/release/rusty-cpp-checker src/main.cpp --compile-commands build/compile_commands.json
 ```
 
 ---
@@ -1763,7 +1764,7 @@ cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
 ### CLI Flags
 
 ```bash
-./rusty-cpp-checker file.cpp -I include -I /usr/local/include
+./target/release/rusty-cpp-checker file.cpp -I include -I /usr/local/include
 ```
 
 ### Environment Variables
@@ -1772,7 +1773,7 @@ cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
 export CPLUS_INCLUDE_PATH=/project/include:/third_party/include
 export CPATH=/usr/include
 
-./rusty-cpp-checker file.cpp
+./target/release/rusty-cpp-checker file.cpp
 ```
 
 ### Auto-Detection
@@ -2167,7 +2168,7 @@ void safe_wrapper() {
 
 ### Current Status: Implemented
 
-RustyCpp provides **compile-time thread safety** via Rust-like `Send` and `Sync` traits, enforced through C++20 concepts.
+RustyCpp provides compile-time `Send` and `Sync` constraints for supported types, enforced through C++20 concepts. It does not analyze arbitrary C++ thread code for data races.
 
 ### Send Trait: Transfer Across Threads
 
@@ -2684,10 +2685,10 @@ The [Safe C++ Proposal](https://safecpp.org/draft.html) is a comprehensive langu
 | **Borrow types** | `T^` (mutable), `const T^` (shared) | Standard C++ references |
 | **Relocation** | `rel` keyword | `std::move` + analysis |
 | **Sum types** | `choice` + `match` | Library types + callbacks |
-| **Thread safety** | `send`/`sync` traits | Not implemented |
+| **Thread safety** | `send`/`sync` traits | `Send`/`Sync` constraints for supported types |
 | **Lifetime params** | First-class syntax | Comment annotations |
 | **Runtime checks** | Panic on bounds, etc. | Pure static analysis |
-| **Compiler support** | Requires compiler changes | Works with any C++20 compiler |
+| **Compiler support** | Requires compiler changes | Works with the repository's supported C++23 toolchain |
 | **Adoption** | Rewrite with new syntax | Gradual annotation |
 
 ### Philosophical Differences
@@ -2824,7 +2825,8 @@ A: Make sure third-party headers are detected as external. Check:
 
 A: Pass specific files to the checker:
 ```bash
-./rusty-cpp-checker src/safe_module.cpp src/core.cpp
+./target/release/rusty-cpp-checker src/safe_module.cpp
+./target/release/rusty-cpp-checker src/core.cpp
 ```
 
 ### Q: Can I use this with existing codebases?
@@ -2965,7 +2967,7 @@ Rust-like cross-crate resolution without brittle number-matching.
 ---
 
 *Document version: 1.7*
-*Last updated: June 2026*
+*Last updated: August 2026*
 *Section 32 (macro hygiene & cross-crate manifest) added June 2026*
 *Reorganized: Raw pointer discussion moved to dedicated Section 24 in Part VIII*
 *Early examples now use references instead of pointers to match Rust's safe-by-default model*
