@@ -13171,6 +13171,40 @@ impl CodeGen {
         }
     }
 
+    /// C++ represents Rust fixed arrays as `std::array`, whose references bind
+    /// directly to the array lvalue.  Do not route a borrow of a local fixed
+    /// array through the generic pointer/span lowering: that loses compatibility
+    /// with cross-module `&[T; N]` parameters, which retain their
+    /// `std::array<T, N>&` ABI.
+    ///
+    /// Restrict this to stable *local* paths. Fields, indexes, raw pointers,
+    /// literals, and other rvalues retain their existing borrow lowering.
+    fn try_emit_fixed_array_local_borrow_call_arg(&self, arg: &syn::Expr) -> Option<String> {
+        let syn::Expr::Reference(reference) = self.peel_paren_group_expr(arg) else {
+            return None;
+        };
+        if !self.is_stable_reference_lvalue_expr(&reference.expr) {
+            return None;
+        }
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(&reference.expr) else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.len() != 1 {
+            return None;
+        }
+        let local_name = path.path.segments[0].ident.to_string();
+        let local_ty = self
+            .lookup_local_binding_type(&local_name)
+            .or_else(|| self.infer_simple_expr_type(&reference.expr));
+        if !local_ty
+            .as_ref()
+            .is_some_and(|ty| self.type_is_fixed_array_like(ty))
+        {
+            return None;
+        }
+        Some(self.emit_expr_to_string_with_expected(&reference.expr, None))
+    }
+
     fn emit_deserializer_call_arg(&self, expr: &syn::Expr) -> String {
         if let syn::Expr::Reference(reference) = self.peel_paren_group_expr(expr)
             && reference.mutability.is_some()
@@ -13224,6 +13258,9 @@ impl CodeGen {
         // adapter. Runs before any other arg-shape lowering.
         if let Some(wrapped) = self.try_emit_interface_traits_dyn_ref_coercion(arg, expected_ty) {
             return wrapped;
+        }
+        if let Some(array_lvalue) = self.try_emit_fixed_array_local_borrow_call_arg(arg) {
+            return array_lvalue;
         }
 
         let arg_is_closure = matches!(self.peel_paren_group_expr(arg), syn::Expr::Closure(_));

@@ -20863,6 +20863,9 @@ impl CodeGen {
             .iter()
             .enumerate()
             .map(|(idx, arg)| {
+                if let Some(array_lvalue) = self.try_emit_fixed_array_local_borrow_call_arg(arg) {
+                    return array_lvalue;
+                }
                 let declared_arg_expected_ty =
                     self.lookup_function_arg_expected_type(call.func.as_ref(), idx);
                 if self

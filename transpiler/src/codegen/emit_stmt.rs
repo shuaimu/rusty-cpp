@@ -3020,6 +3020,12 @@ impl CodeGen {
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         self.register_local_binding_pattern(pat);
+        // Preserve repeat-expression emission as `rusty::array_repeat(...)`,
+        // but retain its unambiguous fixed-array type for later call-argument
+        // lowering. This must be recorded after emitting the initializer: using
+        // it as the initializer's expected type selects the typed std::array
+        // materialization path instead.
+        let deferred_fixed_array_repeat_ty = self.fixed_array_repeat_local_type(local);
         // `let PAT = EXPR else { DIVERGE };` — the diverge block was silently
         // DROPPED (the None path aborted through an unguarded unwrap) and the
         // matched-path bindings dangled (auto&& over an unwrap() prvalue).
@@ -5677,6 +5683,37 @@ impl CodeGen {
                     self.writeln("// TODO: complex pattern binding");
                 }
             }
+        }
+        if let Some(ty) = deferred_fixed_array_repeat_ty {
+            self.update_local_binding_type_for_pattern(pat, ty);
+        }
+    }
+
+    /// Infer the source-level fixed array type of a simple local initialized by
+    /// `[seed; len]`. This is deliberately narrower than general initializer
+    /// inference: it exists so a later `&local` / `&mut local` can preserve the
+    /// C++ `std::array` lvalue ABI without changing repeat-expression emission.
+    fn fixed_array_repeat_local_type(&self, local: &syn::Local) -> Option<syn::Type> {
+        let syn::Pat::Ident(pat_ident) = &local.pat else {
+            return None;
+        };
+        if pat_ident.subpat.is_some() {
+            return None;
+        }
+        let init = local.init.as_ref()?;
+        let syn::Expr::Repeat(repeat) = self.peel_paren_group_expr(&init.expr) else {
+            return None;
+        };
+        let elem_ty = self
+            .infer_simple_expr_type(&repeat.expr)
+            .or_else(|| self.infer_local_binding_type_from_initializer(&repeat.expr))?;
+        let len = &repeat.len;
+        syn::parse2::<syn::Type>(quote::quote!([#elem_ty; #len])).ok()
+    }
+
+    fn update_local_binding_type_for_pattern(&mut self, pat: &syn::Pat, ty: syn::Type) {
+        if let syn::Pat::Ident(pat_ident) = pat {
+            self.update_local_binding_type(pat_ident.ident.to_string(), ty);
         }
     }
 
