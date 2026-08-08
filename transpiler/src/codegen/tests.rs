@@ -13998,6 +13998,87 @@ fn test_marker_trait_copy() {
     assert!(out.contains("concept Copy = true;"));
 }
 
+#[test]
+fn test_explicit_send_impl_emits_full_specialization() {
+    let out = transpile_str(
+        "struct Worker { raw: *mut u8 }\nunsafe impl Send for Worker {}",
+    );
+    assert!(
+        out.contains("template<> struct rusty::is_send<Worker> : std::true_type {};"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_explicit_sync_impl_emits_qualified_full_specialization() {
+    let out = transpile_str("unsafe impl Sync for rrr::PollThread {}");
+    assert!(
+        out.contains(
+            "template<> struct rusty::is_sync<rrr::PollThread> : std::true_type {};"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_nested_explicit_send_impl_is_emitted_at_global_scope() {
+    let out = transpile_str(
+        "mod worker { struct Handle { raw: *mut u8 } unsafe impl Send for Handle {} }",
+    );
+    assert!(
+        out.contains(
+            "template<> struct rusty::is_send<worker::Handle> : std::true_type {};"
+        ),
+        "{out}"
+    );
+    let specialization = out
+        .find("template<> struct rusty::is_send<worker::Handle>")
+        .expect("specialization emitted");
+    assert_eq!(
+        out[..specialization].trim_end().chars().last(),
+        Some('}'),
+        "the worker namespace must close before the specialization:\n{out}"
+    );
+}
+
+#[test]
+fn test_namespaced_module_marker_specialization_qualifies_the_host() {
+    let out = transpile_str_module_with_cxx_namespace(
+        "struct Worker { raw: *mut u8 } unsafe impl Send for Worker {}",
+        "worker",
+        "worker",
+    );
+    let specialization = out
+        .find("template<> struct rusty::is_send<worker::Worker>")
+        .expect("specialization emitted with the namespace-qualified host");
+    assert!(
+        out[..specialization]
+            .trim_end()
+            .ends_with("} // namespace worker"),
+        "the C++ namespace wrapper must close before the specialization:\n{out}"
+    );
+}
+
+#[test]
+fn test_generic_send_impl_is_not_unconditionally_opted_in() {
+    let out = transpile_str("unsafe impl<T: Send> Send for Wrapper<T> {}");
+    assert!(
+        !out.contains("struct rusty::is_send<"),
+        "a bounded generic impl cannot become an unconditional opt-in:\n{out}"
+    );
+}
+
+#[test]
+fn test_safe_same_named_trait_impl_is_not_an_auto_trait_opt_in() {
+    let out = transpile_str(
+        "trait Send { fn ping(&self); } struct Worker; impl Send for Worker { fn ping(&self) {} }",
+    );
+    assert!(
+        !out.contains("struct rusty::is_send<"),
+        "only an unsafe empty impl can opt into the auto trait:\n{out}"
+    );
+}
+
 // ── Multi-bound `dyn A + B` shape is now covered by
 //    test_interface_traits_box_multi_bound_synthesizes_combined_interface
 //    (interface+adapter path). The legacy Pro-facade tests for the same
@@ -41530,4 +41611,3 @@ fn test_explicit_associated_call_does_not_borrow_unrelated_owner_arg_types() {
         "unrelated owner's parameter type leaked into the field init: {out}"
     );
 }
-
