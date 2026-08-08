@@ -5517,6 +5517,11 @@ impl CodeGen {
                 let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
                 for item in ordered_items {
                     if let syn::Item::Impl(i) = item {
+                        if Self::concrete_positive_auto_trait_impl(i).is_some() {
+                            self.emit_item(item);
+                            self.newline();
+                            continue;
+                        }
                         if let Some(owner_key) = self.alias_impl_owner_key_from_impl(i)
                             && !pending_alias_impl_owner_defs
                                 .iter()
@@ -6618,6 +6623,46 @@ impl CodeGen {
     }
 
     pub(super) fn emit_impl_block(&mut self, i: &syn::ItemImpl) {
+        // `Send` and `Sync` are auto traits, but an explicit positive impl is
+        // the Rust spelling for overriding the structural result (most often
+        // after auditing a type that contains a raw pointer).  These impls
+        // have no methods, so the ordinary trait-impl paths below used to
+        // erase them completely.  Restate a concrete impl as the full
+        // specialization consumed by rusty::Send / rusty::Sync.
+        //
+        // Generic impls need a conditional partial specialization that
+        // faithfully lowers their bounds.  Do not turn those into an
+        // unconditional opt-in here: that would make a !Send instantiation
+        // cross a thread boundary.  The concrete form is sufficient for the
+        // inline-Rust use case and is always an exact translation.
+        if let Some(marker) = Self::concrete_positive_auto_trait_impl(i) {
+            let mut self_cpp = self.map_type(i.self_ty.as_ref());
+            let self_is_unqualified = matches!(
+                i.self_ty.as_ref(),
+                syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1
+            );
+            if self_is_unqualified {
+                let mut scopes = Vec::new();
+                if let Some(ns) = self.cxx_namespace.as_ref()
+                    && !ns.is_empty()
+                {
+                    scopes.push(ns.clone());
+                }
+                if !self.module_stack.is_empty() {
+                    scopes.push(
+                        self.escape_and_rename_qualified_name(&self.module_stack.join("::")),
+                    );
+                }
+                if !scopes.is_empty() {
+                    self_cpp = format!("{}::{}", scopes.join("::"), self_cpp);
+                }
+            }
+            self.pending_explicit_auto_trait_specializations.insert(format!(
+                "template<> struct rusty::{}<{}> : std::true_type {{}};",
+                marker, self_cpp
+            ));
+            return;
+        }
         if self.emit_type_alias_impl_block(i) {
             return;
         }
@@ -6724,6 +6769,25 @@ impl CodeGen {
         }
         if !host_is_local {
             self.writeln("#endif  // patcher: end orphan-impl stub");
+        }
+    }
+
+    pub(super) fn concrete_positive_auto_trait_impl(
+        i: &syn::ItemImpl,
+    ) -> Option<&'static str> {
+        let (polarity, trait_path, _) = i.trait_.as_ref()?;
+        if i.unsafety.is_none()
+            || !i.items.is_empty()
+            || polarity.is_some()
+            || !i.generics.params.is_empty()
+            || i.generics.where_clause.is_some()
+        {
+            return None;
+        }
+        match trait_path.segments.last()?.ident.to_string().as_str() {
+            "Send" => Some("is_send"),
+            "Sync" => Some("is_sync"),
+            _ => None,
         }
     }
 

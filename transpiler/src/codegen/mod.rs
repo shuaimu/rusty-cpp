@@ -852,6 +852,11 @@ pub struct CodeGen {
     /// `__TemplateArgs<...>` partial specialization needs to be emitted at
     /// struct-emit time. Populated alongside `method_structural_decompositions`.
     pub(crate) pending_template_args_specializations: HashSet<String>,
+    /// Concrete positive `Send` / `Sync` impls lower to specializations of
+    /// `rusty::is_send` / `rusty::is_sync`. They must be emitted at global
+    /// scope, after any C++ namespace wrapper has closed.
+    pub(crate) pending_explicit_auto_trait_specializations:
+        std::collections::BTreeSet<String>,
     /// Declared generic parameter kinds keyed by local type name (scoped and unscoped).
     /// Mirrors `declared_type_params` indexing (Type vs Const) so omitted-arg
     /// recovery does not substitute mismatched kind positions.
@@ -1941,6 +1946,7 @@ impl CodeGen {
             parallel_impl_nested_marker_text_subs: HashMap::new(),
             method_structural_decompositions: HashMap::new(),
             pending_template_args_specializations: HashSet::new(),
+            pending_explicit_auto_trait_specializations: std::collections::BTreeSet::new(),
             declared_type_param_kinds: HashMap::new(),
             declared_type_param_defaults: HashMap::new(),
             numeric_type_aliases: HashMap::new(),
@@ -4237,6 +4243,7 @@ impl CodeGen {
         self.operator_renames.clear();
         self.drop_trait_methods.clear();
         self.types_with_user_clone.clear();
+        self.pending_explicit_auto_trait_specializations.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
         self.expanded_test_marker_should_panic.clear();
@@ -4877,6 +4884,14 @@ impl CodeGen {
         let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
         for item in deferred_items {
             if let syn::Item::Impl(i) = item {
+                // A concrete positive Send/Sync impl has no methods for the
+                // host struct to drain. Let its dedicated lowering record the
+                // required global-scope trait specialization.
+                if Self::concrete_positive_auto_trait_impl(i).is_some() {
+                    self.emit_item(item);
+                    self.newline();
+                    continue;
+                }
                 // Type-alias impl: defer to the post-pass that emits via
                 // emit_type_alias_impl_defs_for_owner.
                 if let Some(owner_key) = self.alias_impl_owner_key_from_impl(i) {
@@ -5130,6 +5145,15 @@ impl CodeGen {
                         Self::requalify_crate_root_symbol(&self.output, &ns, item);
                 }
                 self.writeln(&format!("}} // namespace {}", ns));
+            }
+        }
+        if !self.pending_explicit_auto_trait_specializations.is_empty() {
+            self.newline();
+            let specializations = std::mem::take(
+                &mut self.pending_explicit_auto_trait_specializations,
+            );
+            for specialization in specializations {
+                self.writeln(&specialization);
             }
         }
     }
