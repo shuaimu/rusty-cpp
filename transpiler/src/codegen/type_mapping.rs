@@ -37,12 +37,16 @@ impl CodeGen {
             .any(|token| !token.is_empty() && self.import_alias_names.contains(token))
     }
 
-    pub(super) fn map_scope_import_binding_target_path(&self, target_path: &str) -> String {
+    pub(super) fn map_scope_import_binding_target_path(
+        &self,
+        target_path: &str,
+        source_is_external: bool,
+    ) -> String {
         let normalized = normalize_use_import_path(target_path);
         // This hook is only for consumer-owned Rust paths in the configured
         // projection. Preserve every unrelated external or local import's
         // existing spelling.
-        if !self.consumer_module_map.is_empty() && !normalized.starts_with("::") {
+        if self.consumer_rust_module_is_override && !source_is_external {
             let segments = normalized
                 .split("::")
                 .filter(|segment| !segment.is_empty())

@@ -1534,6 +1534,12 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             }
         }
 
+        // Rooted scope bindings include absolute Rust 2018 imports and
+        // imports whose external origin was preserved during collection.
+        // Alias expansion preserves that marker, but `segments` itself
+        // cannot retain the leading `::`. Carry it separately so the
+        // consumer map below does not project the external path as local.
+        let mut import_binding_was_rooted = false;
         if !segments.is_empty() {
             let mut import_binding_rewrite_applied = false;
             for _ in 0..6 {
@@ -1631,6 +1637,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 }
                 if bound_target.starts_with("::") {
                     force_leading_colon = true;
+                    import_binding_was_rooted = true;
                 }
                 let normalized_bound_target = bound_target.trim_start_matches("::");
                 let direct_import_alias = normalized_bound_target
@@ -1797,6 +1804,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         // alias (`use crate::base::sync as clocks; clocks::now()`) into its
         // full Rust target. Project that newly qualified form as well.
         if path.leading_colon.is_none()
+            && !import_binding_was_rooted
             && let Some(mapped) = self.resolve_consumer_qualified_path(&segments)
         {
             return self.apply_consumer_nonterminal_generic_args(mapped, path, &segments);

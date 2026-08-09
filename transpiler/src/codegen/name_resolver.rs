@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Unified name/path alias resolution — the systematic core that is replacing
 /// the scattered per-flavor alias maps + per-site `normalize_*`/`rewrite_*`
@@ -23,6 +23,11 @@ use std::collections::HashMap;
 #[derive(Default, Clone)]
 pub(crate) struct NameResolver {
     alias_edges: HashMap<String, String>,
+    /// Alias edges introduced specifically by `extern crate X as Y`. These
+    /// remain separate from `external_crate_aliases`, which is the configured
+    /// Rust-crate-to-C++-namespace map. The origin bit lets callers preserve
+    /// extern-prelude provenance after canonical alias expansion.
+    extern_crate_alias_edges: HashSet<String>,
     /// Rust-visible bindings introduced by `use cpp::...` interop imports:
     /// binding name (alias or tail segment) -> imported C++ module path (no
     /// `cpp::`). Kept in a SEPARATE map from `alias_edges` on purpose: these
@@ -50,6 +55,7 @@ impl NameResolver {
     /// and is intentionally preserved across files.
     pub(crate) fn clear(&mut self) {
         self.alias_edges.clear();
+        self.extern_crate_alias_edges.clear();
         self.cpp_module_bindings.clear();
     }
 
@@ -106,16 +112,34 @@ impl NameResolver {
         self.alias_edges.entry(alias).or_insert(target);
     }
 
+    /// Record an alias edge introduced by `extern crate X as Y`. First writer
+    /// wins just like `add_alias`, and the edge retains its external origin
+    /// through transitive resolution.
+    pub(crate) fn add_extern_crate_alias(&mut self, alias: String, target: String) {
+        if alias.is_empty() || alias == target || self.alias_edges.contains_key(&alias) {
+            return;
+        }
+        self.extern_crate_alias_edges.insert(alias.clone());
+        self.alias_edges.insert(alias, target);
+    }
+
     /// Rewrite the leading alias-prefix of `path` to its target, transitively.
     /// Matching is on SEGMENT boundaries (so `stdalloc` matches `stdalloc::x`
     /// but not `stdallocx`), and the LONGEST matching alias prefix wins.
     /// Preserves a leading `::`. No-op when no edge prefixes `path`.
     pub(crate) fn resolve_prefix(&self, path: &str) -> String {
+        self.resolve_prefix_with_external_origin(path).0
+    }
+
+    /// Resolve a path like `resolve_prefix` while reporting whether any
+    /// applied alias edge originated from an `extern crate ... as ...` item.
+    pub(crate) fn resolve_prefix_with_external_origin(&self, path: &str) -> (String, bool) {
         if self.alias_edges.is_empty() {
-            return path.to_string();
+            return (path.to_string(), false);
         }
         let leading = path.starts_with("::");
         let mut cur = path.trim_start_matches("::").to_string();
+        let mut external_origin = false;
         // Fixpoint with a hard iteration cap as a cycle guard. Each alias
         // edge applies AT MOST ONCE per resolution: a SELF-REFERENTIAL
         // rename (`use crate::libyaml::error as libyaml;` inside a module —
@@ -128,16 +152,18 @@ impl NameResolver {
             match self.rewrite_once(&cur, &used) {
                 Some((next, alias)) => {
                     used.insert(alias);
+                    external_origin |= self.extern_crate_alias_edges.contains(alias);
                     cur = next;
                 }
                 None => break,
             }
         }
-        if leading {
+        let resolved = if leading {
             format!("::{}", cur)
         } else {
             cur
-        }
+        };
+        (resolved, external_origin)
     }
 
     fn rewrite_once<'a>(
@@ -221,5 +247,35 @@ mod resolver_tests {
         let r = resolver(&[("a::b::imp", "a::b::sse2"), ("q", "r")]);
         assert_eq!(r.resolve_prefix("a::b::imp::T"), "a::b::sse2::T");
         assert_eq!(r.resolve_prefix("q::x"), "r::x");
+    }
+
+    #[test]
+    fn extern_crate_origin_is_transitive_and_distinct_from_local_aliases() {
+        let mut r = NameResolver::default();
+        for root in ["runtime", "std", "core", "alloc"] {
+            r.add_extern_crate_alias(format!("ext_{root}"), root.to_string());
+        }
+        r.add_alias("dep".to_string(), "ext_runtime".to_string());
+        r.add_alias("local".to_string(), "crate::runtime".to_string());
+        r.add_alias("self_alias".to_string(), "self".to_string());
+
+        assert_eq!(
+            r.resolve_prefix_with_external_origin("dep::epoll::PollMode"),
+            ("runtime::epoll::PollMode".to_string(), true)
+        );
+        for root in ["std", "core", "alloc"] {
+            assert_eq!(
+                r.resolve_prefix_with_external_origin(&format!("ext_{root}::marker::Type")),
+                (format!("{root}::marker::Type"), true)
+            );
+        }
+        assert_eq!(
+            r.resolve_prefix_with_external_origin("local::epoll::PollMode"),
+            ("crate::runtime::epoll::PollMode".to_string(), false)
+        );
+        assert_eq!(
+            r.resolve_prefix_with_external_origin("self_alias::runtime::epoll::PollMode"),
+            ("self::runtime::epoll::PollMode".to_string(), false)
+        );
     }
 }

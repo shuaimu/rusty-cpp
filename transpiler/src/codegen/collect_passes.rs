@@ -3829,9 +3829,17 @@ impl CodeGen {
                 syn::Item::ExternCrate(ec) => {
                     if let Some((_, rename)) = &ec.rename {
                         let alias = rename.to_string();
-                        let target = ec.ident.to_string();
+                        let target = if ec.ident == "self" && self.consumer_rust_module_is_override {
+                            "crate".to_string()
+                        } else {
+                            ec.ident.to_string()
+                        };
                         if alias != "_" {
-                            self.name_resolver.add_alias(alias, target);
+                            if ec.ident == "self" {
+                                self.name_resolver.add_alias(alias, target);
+                            } else {
+                                self.name_resolver.add_extern_crate_alias(alias, target);
+                            }
                         }
                     }
                 }
@@ -4010,7 +4018,13 @@ impl CodeGen {
                         .as_ref()
                         .map(|(_, rename)| rename.to_string())
                         .unwrap_or_else(|| ec.ident.to_string());
-                    let target = ec.ident.to_string();
+                    let target = if ec.ident == "self" && self.consumer_rust_module_is_override {
+                        "crate".to_string()
+                    } else if ec.ident == "self" || !self.consumer_rust_module_is_override {
+                        ec.ident.to_string()
+                    } else {
+                        format!("::{}", ec.ident)
+                    };
                     self.record_scope_import_binding(
                         module_path,
                         &format!("{} = {}", local_name, target),
@@ -4044,7 +4058,17 @@ impl CodeGen {
                                         .as_ref()
                                         .map(|(_, rename)| rename.to_string())
                                         .unwrap_or_else(|| ec.ident.to_string());
-                                    let target = ec.ident.to_string();
+                                    let target = if ec.ident == "self"
+                                        && self.consumer_rust_module_is_override
+                                    {
+                                        "crate".to_string()
+                                    } else if ec.ident == "self"
+                                        || !self.consumer_rust_module_is_override
+                                    {
+                                        ec.ident.to_string()
+                                    } else {
+                                        format!("::{}", ec.ident)
+                                    };
                                     self.record_scope_import_binding(
                                         module_path,
                                         &format!("{} = {}", local_name, target),
