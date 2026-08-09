@@ -10,6 +10,15 @@ fn transpile_with_consumer_map(
     current_cpp_module: &str,
     modules: &[(&str, &str, &str)],
 ) -> String {
+    transpile_with_consumer_map_and_scope(rust_source, current_cpp_module, None, modules)
+}
+
+fn transpile_with_consumer_map_and_scope(
+    rust_source: &str,
+    current_cpp_module: &str,
+    consumer_rust_module: Option<&str>,
+    modules: &[(&str, &str, &str)],
+) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     let input = dir.path().join("input.rs");
     let map_path = dir.path().join("consumer-modules.toml");
@@ -31,12 +40,19 @@ cpp_namespace = "{cpp_namespace}""#
     }
     std::fs::write(&map_path, map).expect("write module map");
 
-    let output = transpiler_bin()
+    let mut command = transpiler_bin();
+    command
         .arg(&input)
         .arg("--module-name")
         .arg(current_cpp_module)
         .arg("--consumer-module-map")
-        .arg(&map_path)
+        .arg(&map_path);
+    if let Some(rust_module) = consumer_rust_module {
+        command
+            .arg("--consumer-rust-module")
+            .arg(rust_module);
+    }
+    let output = command
         .arg("-o")
         .arg(&output_path)
         .output()
@@ -54,6 +70,56 @@ const CLIENT_AND_BASE: &[(&str, &str, &str)] = &[
     ("crate::rpc::client", "rrr.client", "client_ns"),
     ("crate::base::sync", "rrr.basetypes", "base_ns"),
 ];
+
+#[test]
+fn grouped_epoll_implementation_uses_interface_projection_without_self_import() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+use crate::runtime::epoll::PollMode;
+
+pub fn platform_mask(mode: PollMode) -> i32 {
+    mode.0 | PollMode::WRITE.0
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("export module rrr.epoll_wrapper;"), "{cpp}");
+    assert!(cpp.contains("namespace rrr {"), "{cpp}");
+    assert!(cpp.contains("::rrr::PollMode"), "{cpp}");
+    assert!(!cpp.contains("import rrr.epoll_wrapper;"), "{cpp}");
+    assert!(!cpp.contains("runtime::epoll::PollMode"), "{cpp}");
+}
+
+#[test]
+fn unrelated_imported_and_local_types_are_not_consumer_projected() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+pub mod local {
+    pub struct PollMode;
+}
+
+use crate::runtime::timer::Timer;
+use self::local::PollMode as LocalMode;
+
+pub fn retain(timer: Timer, mode: LocalMode) {
+    let _ = timer;
+    let _ = mode;
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("runtime::timer::Timer"), "{cpp}");
+    assert!(cpp.contains("local::PollMode"), "{cpp}");
+    assert!(!cpp.contains("::rrr::Timer"), "{cpp}");
+    assert!(!cpp.contains("::rrr::LocalMode"), "{cpp}");
+    assert!(!cpp.contains("::rrr::PollMode"), "{cpp}");
+}
 
 #[test]
 fn fully_qualified_cross_module_path_records_import_without_use_item() {

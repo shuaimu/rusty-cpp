@@ -527,6 +527,13 @@ pub struct TranspileOptions {
     /// `crate_module_names`, this supports non-isomorphic graphs such as a
     /// legacy flat `rrr` namespace spread across `rrr.*` module units.
     pub consumer_module_map: ConsumerModuleMap,
+    /// Optional Rust lexical module for the unit currently being emitted.
+    /// The value must be a canonical `crate::...` path and is normalized here
+    /// without its leading `crate::`. This is deliberately
+    /// separate from `consumer_module_map`: grouped implementation units can
+    /// share an interface's C++ module without becoming a second canonical
+    /// owner in that map.
+    pub consumer_rust_module: Option<String>,
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
@@ -1220,6 +1227,7 @@ impl Default for TranspileOptions {
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             consumer_module_map: ConsumerModuleMap::default(),
+            consumer_rust_module: None,
             external_crate_module_aliases: HashMap::new(),
             cpp_type_aliases: HashMap::new(),
             emit_ufcs_trait_manifest_path: None,
@@ -1614,6 +1622,32 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
+    let consumer_rust_module = match options.consumer_rust_module.as_deref() {
+        None => None,
+        Some(raw) => {
+            if options.consumer_module_map.is_empty() {
+                return Err(
+                    "--consumer-rust-module requires --consumer-module-map".to_string(),
+                );
+            }
+            let current_cpp_module = module_name.ok_or_else(|| {
+                "--consumer-rust-module requires module emission; pass --module-name <name>"
+                    .to_string()
+            })?;
+            let canonical = canonical_consumer_rust_module_path(raw)?;
+            if let Some(entry) = options
+                .consumer_module_map
+                .entry_for_rust_module(&canonical)
+                && entry.cpp_module != current_cpp_module
+            {
+                return Err(format!(
+                    "--consumer-rust-module '{}' maps to C++ module '{}', not current module '{}'",
+                    raw, entry.cpp_module, current_cpp_module
+                ));
+            }
+            Some(canonical)
+        }
+    };
     let effective_cxx_namespace = if options.consumer_module_map.is_empty() {
         options.cxx_namespace.clone()
     } else {
@@ -1754,7 +1788,11 @@ pub fn transpile_full_with_options(
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_crate_module_names(options.crate_module_names.clone());
-    codegen.set_consumer_module_map(options.consumer_module_map.clone(), module_name);
+    codegen.set_consumer_module_map(
+        options.consumer_module_map.clone(),
+        module_name,
+        consumer_rust_module.as_deref(),
+    );
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -4078,6 +4116,124 @@ cpp_namespace = "rrr"
 
         let error = load_consumer_module_map(&map_path).unwrap_err();
         assert!(error.contains("repeats C++ module 'rrr.shared'"), "{error}");
+    }
+
+    fn grouped_epoll_consumer_map() -> ConsumerModuleMap {
+        ConsumerModuleMap {
+            modules: BTreeMap::from([(
+                "runtime::epoll".to_string(),
+                ConsumerModuleEntry {
+                    rust_module: "runtime::epoll".to_string(),
+                    cpp_module: "rrr.epoll_wrapper".to_string(),
+                    cpp_namespace: "rrr".to_string(),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn test_consumer_rust_module_requires_consumer_map() {
+        let options = TranspileOptions {
+            consumer_rust_module: Some("crate::runtime::epoll_linux".to_string()),
+            ..TranspileOptions::default()
+        };
+        let error = transpile_full_with_options(
+            "pub fn platform_mask() -> i32 { 0 }",
+            Some("rrr.epoll_wrapper"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("consumer Rust module without map must fail");
+        assert_eq!(
+            error,
+            "--consumer-rust-module requires --consumer-module-map"
+        );
+    }
+
+    #[test]
+    fn test_consumer_rust_module_requires_module_emission() {
+        let options = TranspileOptions {
+            consumer_module_map: grouped_epoll_consumer_map(),
+            consumer_rust_module: Some("crate::runtime::epoll_linux".to_string()),
+            ..TranspileOptions::default()
+        };
+        let error = transpile_full_with_options(
+            "pub fn platform_mask() -> i32 { 0 }",
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("consumer Rust module without module emission must fail");
+        assert_eq!(
+            error,
+            "--consumer-rust-module requires module emission; pass --module-name <name>"
+        );
+    }
+
+    #[test]
+    fn test_consumer_rust_module_requires_canonical_crate_path() {
+        for (path, expected) in [
+            ("runtime::epoll_linux", "must begin with 'crate'"),
+            (
+                "::crate::runtime::epoll_linux",
+                "must be an unparameterized crate path",
+            ),
+            (
+                "crate::runtime::epoll_linux::<i32>",
+                "must be an unparameterized crate path",
+            ),
+        ] {
+            let options = TranspileOptions {
+                consumer_module_map: grouped_epoll_consumer_map(),
+                consumer_rust_module: Some(path.to_string()),
+                ..TranspileOptions::default()
+            };
+            let error = transpile_full_with_options(
+                "pub fn platform_mask() -> i32 { 0 }",
+                Some("rrr.epoll_wrapper"),
+                &UserTypeMap::default(),
+                &HashSet::new(),
+                None,
+                &options,
+            )
+            .expect_err("non-canonical consumer Rust path must fail");
+            assert!(error.contains(expected), "{path}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_consumer_rust_module_rejects_mapped_cpp_module_mismatch() {
+        let mut map = grouped_epoll_consumer_map();
+        map.modules.insert(
+            "rpc::client".to_string(),
+            ConsumerModuleEntry {
+                rust_module: "rpc::client".to_string(),
+                cpp_module: "rrr.client".to_string(),
+                cpp_namespace: "rrr".to_string(),
+            },
+        );
+        let options = TranspileOptions {
+            consumer_module_map: map,
+            consumer_rust_module: Some("crate::rpc::client".to_string()),
+            ..TranspileOptions::default()
+        };
+        let error = transpile_full_with_options(
+            "pub fn platform_mask() -> i32 { 0 }",
+            Some("rrr.epoll_wrapper"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("mapped consumer Rust path owned by another C++ module must fail");
+        assert_eq!(
+            error,
+            "--consumer-rust-module 'crate::rpc::client' maps to C++ module 'rrr.client', not current module 'rrr.epoll_wrapper'"
+        );
     }
 
     fn serializable_cpp_module_index() -> CppModuleSymbolIndex {

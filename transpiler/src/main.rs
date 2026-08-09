@@ -72,6 +72,14 @@ struct Cli {
     #[arg(long = "consumer-module-map")]
     consumer_module_map: Option<PathBuf>,
 
+    /// Rust lexical module of the current consumer unit. This may name an
+    /// implementation unit omitted from the canonical consumer module map.
+    #[arg(
+        long = "consumer-rust-module",
+        requires_all = ["consumer_module_map", "module_name"]
+    )]
+    consumer_rust_module: Option<String>,
+
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
     by_value_cycle_breaking_prototype: bool,
@@ -793,6 +801,65 @@ fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_consumer_rust_module_cli_requires_map_and_module_name() {
+        let missing_map = match Cli::try_parse_from([
+            "rusty-cpp-transpiler",
+            "input.rs",
+            "--module-name",
+            "rrr.epoll_wrapper",
+            "--consumer-rust-module",
+            "crate::runtime::epoll_linux",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("consumer Rust module without map must fail"),
+        };
+        assert_eq!(
+            missing_map.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(
+            missing_map.to_string().contains("--consumer-module-map"),
+            "{missing_map}"
+        );
+
+        let missing_module = match Cli::try_parse_from([
+            "rusty-cpp-transpiler",
+            "input.rs",
+            "--consumer-module-map",
+            "consumer-modules.toml",
+            "--consumer-rust-module",
+            "crate::runtime::epoll_linux",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("consumer Rust module without module name must fail"),
+        };
+        assert_eq!(
+            missing_module.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(
+            missing_module.to_string().contains("--module-name"),
+            "{missing_module}"
+        );
+
+        let cli = Cli::try_parse_from([
+            "rusty-cpp-transpiler",
+            "input.rs",
+            "--module-name",
+            "rrr.epoll_wrapper",
+            "--consumer-module-map",
+            "consumer-modules.toml",
+            "--consumer-rust-module",
+            "crate::runtime::epoll_linux",
+        ])
+        .expect("complete consumer scope argv should parse");
+        assert_eq!(
+            cli.consumer_rust_module.as_deref(),
+            Some("crate::runtime::epoll_linux")
+        );
+    }
 
     #[test]
     fn test_collect_rusty_test_entries_from_cppm_uses_wrapper_exports_only() {
@@ -4252,6 +4319,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         consumer_module_map: transpile::ConsumerModuleMap::default(),
+        consumer_rust_module: None,
         external_crate_module_aliases: HashMap::new(),
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
@@ -4874,6 +4942,7 @@ fn main() {
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         consumer_module_map,
+        consumer_rust_module: cli.consumer_rust_module.clone(),
         external_crate_module_aliases: HashMap::new(),
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
