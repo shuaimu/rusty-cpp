@@ -17859,7 +17859,14 @@ impl CodeGen {
                 if (owner == "Serialize_" && method == "serialize")
                     || (owner == "Deserialize_" && method == "deserialize")
                 {
-                    let path = self.emit_path_to_string(&path_expr.path);
+                    // Keep cpp-import-bound free-function families on the
+                    // expression-path route: it resolves the Rust binding
+                    // through the module index to the module's declared C++
+                    // namespace.  The plain path speller deliberately retains
+                    // the Rust module hierarchy and would produce, for example,
+                    // `cpp::rrr::serializable::Serialize_` instead of the
+                    // indexed `::rrr::Serialize_` owner.
+                    let path = self.emit_expr_path_to_string(&path_expr.path);
                     let args: Vec<String> = call
                         .args
                         .iter()

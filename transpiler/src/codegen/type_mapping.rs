@@ -2444,6 +2444,7 @@ impl CodeGen {
                     }
                 }
                 path_str = Self::strip_crate_root_cpp_path(&path_str);
+                path_str = self.rewrite_cpp_import_bound_type_spelling(&path_str);
                 if path_str == "private" {
                     path_str = "private_".to_string();
                 } else if path_str == "::private" {

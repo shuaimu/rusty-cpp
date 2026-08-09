@@ -1,6 +1,7 @@
 version = 1
 
 [modules.std]
+cpp_module = "std"
 namespace = "std"
 
 [modules.std.symbols.max]
@@ -8,6 +9,7 @@ kind = "function"
 callable_signatures = ["int(int,int)"]
 
 [modules."custom::math"]
+cpp_module = "custom.math"
 namespace = "custom::math"
 
 [modules."custom::math".symbols.add_one]
