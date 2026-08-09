@@ -1396,6 +1396,13 @@ pub struct CodeGen {
     pub(crate) local_manually_drop_bindings: Vec<HashSet<String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     pub(crate) param_bindings: Vec<HashMap<String, syn::Type>>,
+    /// Rust parameter names in declaration order for each `param_bindings` scope.
+    ///
+    /// The binding map deliberately remains a `HashMap` for hot type lookups, but
+    /// code generation must never inherit its randomized iteration order.  Keep
+    /// the source order alongside it for emission sites that materialize more
+    /// than one parameter-derived declaration.
+    pub(crate) param_binding_order: Vec<Vec<String>>,
     /// Scoped callable-bound metadata for function parameters (for example
     /// extension-trait callable params like `f: F` where `F: FnOnce(&mut Self)`).
     /// Used to preserve borrow-shaped callback argument emission at call sites.
@@ -2089,6 +2096,7 @@ impl CodeGen {
             hoisted_local_type_name_scopes: Vec::new(),
             local_manually_drop_bindings: Vec::new(),
             param_bindings: Vec::new(),
+            param_binding_order: Vec::new(),
             callable_param_bound_scopes: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
@@ -4419,6 +4427,7 @@ impl CodeGen {
         self.repeat_elem_type_hints.clear();
         self.local_placeholder_type_hints.clear();
         self.param_bindings.clear();
+        self.param_binding_order.clear();
         self.callable_param_bound_scopes.clear();
         self.local_bindings.clear();
         self.local_shadowed_binding_types.clear();
@@ -14397,19 +14406,24 @@ impl CodeGen {
 
     fn push_const_generic_param_bindings(&mut self, generics: &syn::Generics) {
         let mut scope = HashMap::new();
+        let mut order = Vec::new();
         for param in &generics.params {
             if let syn::GenericParam::Const(cp) = param {
                 if self.is_type_param_in_scope(&cp.ident.to_string()) {
                     continue;
                 }
-                scope.insert(cp.ident.to_string(), cp.ty.clone());
+                let name = cp.ident.to_string();
+                order.push(name.clone());
+                scope.insert(name, cp.ty.clone());
             }
         }
         self.param_bindings.push(scope);
+        self.param_binding_order.push(order);
     }
 
     fn pop_const_generic_param_bindings(&mut self) {
         self.param_bindings.pop();
+        self.param_binding_order.pop();
     }
 
     fn local_function_const_generic_call_args(&self, call: &syn::ExprCall) -> Vec<String> {
@@ -22942,6 +22956,12 @@ impl CodeGen {
                 params_to_alias.push((name.clone(), ty.clone()));
             }
         }
+        let source_order = self
+            .param_binding_order
+            .last()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        Self::sort_param_bindings_in_source_order(&mut params_to_alias, source_order);
         for (name, ty) in params_to_alias {
             let has_outer_cpp_alias = self
                 .local_cpp_bindings
@@ -22975,6 +22995,29 @@ impl CodeGen {
             }
             self.record_rebind_reference_pointer_binding(&name);
         }
+    }
+
+    fn sort_param_bindings_in_source_order(
+        bindings: &mut [(String, syn::Type)],
+        source_order: &[String],
+    ) {
+        let rank: HashMap<&str, usize> = source_order
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect();
+        bindings.sort_by(|(left, _), (right, _)| {
+            rank.get(left.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(
+                    &rank
+                        .get(right.as_str())
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                )
+                .then_with(|| left.cmp(right))
+        });
     }
 
 
@@ -31856,11 +31899,14 @@ impl CodeGen {
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
     ) {
         let mut scope = HashMap::new();
+        let mut order = Vec::new();
         for input in inputs {
             match input {
                 syn::FnArg::Typed(pat_type) => {
                     if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
-                        scope.insert(pi.ident.to_string(), (*pat_type.ty).clone());
+                        let name = pi.ident.to_string();
+                        order.push(name.clone());
+                        scope.insert(name, (*pat_type.ty).clone());
                     }
                 }
                 syn::FnArg::Receiver(recv) => {
@@ -31873,11 +31919,13 @@ impl CodeGen {
                     } else {
                         parse_quote!(Self)
                     };
+                    order.push("self".to_string());
                     scope.insert("self".to_string(), self_ty);
                 }
             }
         }
         self.param_bindings.push(scope);
+        self.param_binding_order.push(order);
     }
 
     fn override_current_param_self_binding_with_type(
@@ -31902,6 +31950,7 @@ impl CodeGen {
 
     fn pop_param_bindings(&mut self) {
         self.param_bindings.pop();
+        self.param_binding_order.pop();
     }
 
     fn push_callable_param_bound_scope(
