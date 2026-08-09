@@ -16437,6 +16437,146 @@ impl CodeGen {
         ))
     }
 
+    /// Whether `path` names the hand-written runtime projection of Rust's
+    /// canonical `std::sync::Arc` type.
+    ///
+    /// This intentionally does not accept an unbound bare `Arc`: although the
+    /// generic std-type mapper historically treats that spelling as the
+    /// runtime Arc, Rust requires it to arrive through an import and a crate is
+    /// free to declare its own `Arc`.  Import bindings are resolved first and
+    /// may project `std::sync::Arc` to `rusty::Arc`.  A literal `rusty::Arc`
+    /// source path is not itself treated as proof of std identity.
+    fn path_resolves_to_std_sync_arc(&self, path: &syn::Path) -> bool {
+        if path.segments.is_empty() {
+            return false;
+        }
+        let segments: Vec<String> = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        let root = &segments[0];
+
+        // An explicit root binding wins over the source spelling.  This is
+        // important for `extern crate other as std` and for aliases such as
+        // `use std::sync::Arc as Shared` / `use std::sync as shared`.
+        if let Some(bound_root) = self.resolve_scope_import_binding_path(root) {
+            let bound_root = bound_root.trim().trim_start_matches("::");
+            let rest = segments.iter().skip(1).cloned().collect::<Vec<_>>();
+            let rebound = if rest.is_empty() {
+                bound_root.to_string()
+            } else {
+                format!("{}::{}", bound_root, rest.join("::"))
+            };
+            let rebound = rebound.trim_start_matches("::");
+            return matches!(rebound, "std::sync::Arc" | "rusty::Arc");
+        }
+
+        let joined = segments.join("::");
+        if joined != "std::sync::Arc" {
+            return false;
+        }
+
+        // In a no_std-style source a crate can own a module literally named
+        // `std`.  If that path contains a locally declared Arc, it is not the
+        // external standard type despite having the same token spelling.
+        !self.local_declared_types.contains("std::sync::Arc")
+            && !self
+                .local_declared_types
+                .contains(&Self::escape_qualified_path_preserve_global(
+                    "std::sync::Arc",
+                ))
+    }
+
+    /// Resolve references and local type aliases until the underlying type
+    /// identity is visible.  The bounded walk is fail-closed for malformed
+    /// alias cycles.
+    fn type_resolves_to_std_sync_arc(&self, ty: &syn::Type) -> bool {
+        let mut current = ty.clone();
+        for _ in 0..8 {
+            let peeled = self.peel_reference_paren_group_type(&current);
+            let syn::Type::Path(type_path) = peeled else {
+                return false;
+            };
+            if type_path.qself.is_some() {
+                return false;
+            }
+            if self.path_resolves_to_std_sync_arc(&type_path.path) {
+                return true;
+            }
+            let Some(resolved) = self.resolve_type_alias_once(peeled) else {
+                return false;
+            };
+            if Self::types_equivalent_by_tokens(peeled, &resolved) {
+                return false;
+            }
+            current = resolved;
+        }
+        false
+    }
+
+    /// Lower the standard Arc downgrade associated call to the runtime's free
+    /// function, preserving Rust's borrow/reborrow surface as a C++ const&.
+    fn try_emit_std_arc_downgrade_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(function_path) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        if function_path.qself.is_some()
+            || function_path.path.segments.len() < 2
+            || call.args.len() != 1
+            || !function_path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| {
+                    segment.ident == "downgrade"
+                        && matches!(segment.arguments, syn::PathArguments::None)
+                })
+        {
+            return None;
+        }
+
+        let mut owner_path = function_path.path.clone();
+        owner_path.segments = function_path
+            .path
+            .segments
+            .iter()
+            .take(function_path.path.segments.len() - 1)
+            .cloned()
+            .collect();
+        let owner_ty = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: owner_path,
+        });
+        if !self.type_resolves_to_std_sync_arc(&owner_ty) {
+            return None;
+        }
+
+        let argument = call.args.first()?;
+        let argument_ty = self.infer_simple_expr_type(argument).or_else(|| {
+            let syn::Expr::Reference(reference) = self.peel_paren_group_expr(argument) else {
+                return None;
+            };
+            self.infer_simple_expr_type(&reference.expr)
+        })?;
+        if !self.type_resolves_to_std_sync_arc(&argument_ty) {
+            return None;
+        }
+
+        // Rust spells the required borrow explicitly for an owned Arc, while
+        // an `&Arc<T>` parameter is passed directly.  In both cases the C++
+        // helper takes `const rusty::Arc<T>&`, so peel only the syntactic outer
+        // borrow and never move the strong handle.
+        let strong = match self.peel_paren_group_expr(argument) {
+            syn::Expr::Reference(reference) => reference.expr.as_ref(),
+            other => other,
+        };
+        Some(format!(
+            "rusty::sync::downgrade({})",
+            self.emit_expr_to_string(strong)
+        ))
+    }
+
     pub(super) fn try_emit_runtime_cow_variant_ctor_call(&self, call: &syn::ExprCall) -> Option<String> {
         let syn::Expr::Path(func_path) = call.func.as_ref() else {
             return None;
@@ -17106,6 +17246,17 @@ impl CodeGen {
             if canonical_owner || imported_owner {
                 return format!("std::type_index(typeid({}))", self.map_type(target_ty));
             }
+        }
+        // `std::sync::Arc::downgrade(&arc)` is an associated function in
+        // Rust, but the hand-written runtime deliberately exposes it as the
+        // free function `rusty::sync::downgrade(arc)`: Weak needs privileged
+        // access to Arc's control block and Arc itself has no static
+        // `downgrade` member.  Lower only when BOTH sides resolve to the
+        // canonical std Arc identity.  The path check rejects an unrelated
+        // user `Arc`, while the argument-type check prevents a same-spelled
+        // associated call from being captured through an ambiguous alias.
+        if let Some(emitted) = self.try_emit_std_arc_downgrade_call(call) {
+            return emitted;
         }
         // Rust's write-into-fresh-uninit idiom: `Box::write(Box::new_uninit(),
         // value)` (Rc/Arc/Box in-place construction; rc.rs/sync.rs in the
