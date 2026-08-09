@@ -371,6 +371,82 @@ fn test_crate_mode_basic() {
     assert!(stdout.contains("2 files transpiled"));
 }
 
+// Regression fixture for srpc.wire's cross-module fixed-array borrow ABI.
+//
+// A cross-module callee exposes `&[u8; N]` as `const std::array<...>&`; both
+// shared and mutable borrows of an array local must therefore lower to the bare
+// lvalue. The same-module case does not cover this because its callers are tests.
+#[test]
+fn test_crate_mode_cross_module_fixed_array_borrow_abi() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"srpc_wire_array_borrow\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"srpc_wire_array_borrow\"\n",
+    )
+    .unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "pub mod varint;\npub mod serde;\n").unwrap();
+    std::fs::write(
+        src_dir.join("varint.rs"),
+        "pub fn load32(buf: &[u8; 9]) -> i32 { buf[0] as i32 }\n\
+         pub fn dump32(val: i32, buf: &mut [u8; 9]) -> usize { buf[0] = val as u8; 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("serde.rs"),
+        "use super::varint;\n\
+         pub fn ser(v: i32) -> usize {\n\
+             let mut b = [0u8; 9];\n\
+             let n = varint::dump32(v, &mut b);\n\
+             let _ = varint::load32(&b);\n\
+             n\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to transpile crate fixture");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let varint_cpp = std::fs::read_to_string(out_dir.join("srpc_wire_array_borrow.varint.cppm"))
+        .unwrap();
+    let serde_cpp = std::fs::read_to_string(out_dir.join("srpc_wire_array_borrow.serde.cppm"))
+        .unwrap();
+
+    assert!(
+        varint_cpp.contains("const std::array<uint8_t, 9>& buf"),
+        "unexpected varint ABI:\n{varint_cpp}"
+    );
+    assert!(
+        varint_cpp.contains("std::array<uint8_t, 9>& buf"),
+        "unexpected varint ABI:\n{varint_cpp}"
+    );
+    assert!(
+        serde_cpp.contains("varint::dump32(") && serde_cpp.contains(", b)"),
+        "mutable array borrow must pass its bare lvalue:\n{serde_cpp}"
+    );
+    assert!(
+        serde_cpp.contains("varint::load32(b)"),
+        "shared array borrow must pass its bare lvalue:\n{serde_cpp}"
+    );
+    assert!(
+        !serde_cpp.contains("rusty::as_slice(b)"),
+        "array borrow must not become a span when the callee ABI is std::array&:\n{serde_cpp}"
+    );
+}
+
 #[test]
 fn test_crate_mode_missing_cargo_toml() {
     let dir = tempfile::tempdir().unwrap();
