@@ -94,6 +94,186 @@ pub fn platform_mask(mode: PollMode) -> i32 {
 }
 
 #[test]
+fn canonical_interface_fallback_retains_pre_override_binding_spelling() {
+    let cpp = transpile_with_consumer_map(
+        r#"
+use crate::runtime::epoll::PollMode;
+
+pub fn platform_mask(mode: PollMode) -> i32 {
+    mode.0 | PollMode::WRITE.0
+}
+"#,
+        "rrr.epoll_wrapper",
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(
+        cpp.contains("platform_mask(runtime::epoll::PollMode mode)"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("using ::rrr::PollMode;"), "{cpp}");
+    assert!(
+        !cpp.contains("platform_mask(::rrr::PollMode mode)"),
+        "{cpp}"
+    );
+}
+
+#[test]
+fn explicit_override_absolute_alias_is_not_consumer_projected() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+use ::runtime::epoll::PollMode as Ext;
+
+pub fn external(value: Ext) -> Ext {
+    value
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("runtime::epoll::PollMode"), "{cpp}");
+    assert!(!cpp.contains("::rrr::PollMode"), "{cpp}");
+    assert!(!cpp.contains("import rrr.epoll_wrapper;"), "{cpp}");
+}
+
+#[test]
+fn explicit_override_extern_crate_alias_is_not_consumer_projected() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+extern crate runtime as ext_runtime;
+use ext_runtime::epoll::PollMode as Ext;
+
+pub fn external(value: Ext) -> Ext {
+    value
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("runtime::epoll::PollMode"), "{cpp}");
+    assert!(!cpp.contains("::rrr::PollMode"), "{cpp}");
+    assert!(!cpp.contains("import rrr.epoll_wrapper;"), "{cpp}");
+}
+
+#[test]
+fn explicit_override_unrenamed_extern_crate_is_not_consumer_projected() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+extern crate runtime;
+use runtime::epoll::PollMode as Ext;
+
+pub fn external(value: Ext) -> Ext {
+    value
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("runtime::epoll::PollMode"), "{cpp}");
+    assert!(!cpp.contains("::rrr::PollMode"), "{cpp}");
+    assert!(!cpp.contains("import rrr.epoll_wrapper;"), "{cpp}");
+}
+
+#[test]
+fn explicit_override_transitive_extern_alias_is_not_consumer_projected() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+extern crate runtime as ext_runtime;
+use ext_runtime as dependency;
+use dependency::epoll::PollMode as Ext;
+
+pub fn external(value: Ext) -> Ext {
+    value
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("runtime::epoll::PollMode"), "{cpp}");
+    assert!(!cpp.contains("::rrr::PollMode"), "{cpp}");
+    assert!(!cpp.contains("import rrr.epoll_wrapper;"), "{cpp}");
+}
+
+#[test]
+fn explicit_override_extern_crate_self_alias_remains_consumer_owned() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+extern crate self as current_crate;
+use current_crate::runtime::epoll::PollMode as Local;
+
+pub fn local(value: Local) -> Local {
+    value
+}
+"#,
+        "rrr.epoll_wrapper",
+        Some("crate::runtime::epoll_linux"),
+        &[("crate::runtime::epoll", "rrr.epoll_wrapper", "rrr")],
+    );
+
+    assert!(cpp.contains("::rrr::PollMode"), "{cpp}");
+    assert!(!cpp.contains("runtime::epoll::PollMode"), "{cpp}");
+    assert!(!cpp.contains("import rrr.epoll_wrapper;"), "{cpp}");
+}
+
+#[test]
+fn explicit_override_std_core_alloc_roots_are_not_consumer_projected() {
+    let cpp = transpile_with_consumer_map_and_scope(
+        r#"
+use std::runtime::epoll::StdMode as StdExt;
+use core::runtime::epoll::CoreMode as CoreExt;
+use alloc::runtime::epoll::AllocMode as AllocExt;
+
+pub fn external(
+    std_value: StdExt,
+    core_value: CoreExt,
+    alloc_value: AllocExt,
+) {
+    let _ = std_value;
+    let _ = core_value;
+    let _ = alloc_value;
+}
+"#,
+        "rrr.consumer",
+        Some("crate::runtime::epoll_linux"),
+        &[
+            ("crate::consumer", "rrr.consumer", "consumer"),
+            ("crate::std::runtime::epoll", "rrr.std_shadow", "std_mapped"),
+            (
+                "crate::core::runtime::epoll",
+                "rrr.core_shadow",
+                "core_mapped",
+            ),
+            (
+                "crate::alloc::runtime::epoll",
+                "rrr.alloc_shadow",
+                "alloc_mapped",
+            ),
+        ],
+    );
+
+    assert!(!cpp.contains("std_mapped::StdMode"), "{cpp}");
+    assert!(!cpp.contains("core_mapped::CoreMode"), "{cpp}");
+    assert!(!cpp.contains("alloc_mapped::AllocMode"), "{cpp}");
+    // The ordinary C++ std/core/alloc lowering may canonicalize the namespace
+    // spelling, but each scope alias must survive without entering any of the
+    // deliberately colliding consumer projections above.
+    assert!(cpp.contains("using StdExt = "), "{cpp}");
+    assert!(cpp.contains("using CoreExt = "), "{cpp}");
+    assert!(cpp.contains("using AllocExt = "), "{cpp}");
+    assert!(!cpp.contains("import rrr.std_shadow;"), "{cpp}");
+    assert!(!cpp.contains("import rrr.core_shadow;"), "{cpp}");
+    assert!(!cpp.contains("import rrr.alloc_shadow;"), "{cpp}");
+}
+
+#[test]
 fn unrelated_imported_and_local_types_are_not_consumer_projected() {
     let cpp = transpile_with_consumer_map_and_scope(
         r#"

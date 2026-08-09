@@ -1665,6 +1665,9 @@ pub struct CodeGen {
     /// matching `module_name` against the map's C++ module names.
     pub(crate) consumer_module_map: crate::transpile::ConsumerModuleMap,
     pub(crate) consumer_rust_module: Option<String>,
+    /// Whether `consumer_rust_module` came from an explicit invocation-local
+    /// override rather than the canonical C++-module map fallback.
+    pub(crate) consumer_rust_module_is_override: bool,
     /// When set (and module mode active), wrap all exported items between
     /// `export namespace NS { … }`. Lets two sibling modules export
     /// same-named types without colliding at importer scope (rusty-std-book
@@ -2388,6 +2391,7 @@ impl CodeGen {
             module_name: None,
             consumer_module_map: crate::transpile::ConsumerModuleMap::default(),
             consumer_rust_module: None,
+            consumer_rust_module_is_override: false,
             cxx_namespace: None,
             auto_namespace: false,
             use_import_std_in_modules: false,
@@ -4872,6 +4876,7 @@ impl CodeGen {
         current_cpp_module: Option<&str>,
         current_rust_module: Option<&str>,
     ) {
+        self.consumer_rust_module_is_override = current_rust_module.is_some();
         self.consumer_rust_module = current_rust_module.map(str::to_owned).or_else(|| {
             current_cpp_module
                 .and_then(|name| map.entry_for_cpp_module(name))
@@ -11849,6 +11854,19 @@ impl CodeGen {
 
 
     fn record_scope_import_binding(&mut self, module_path: &[String], raw_path: &str) {
+        // Normalization and alias/local-resolution below may erase external
+        // provenance (an explicit leading `::`, extern-crate alias, configured
+        // dependency root, or unshadowed std/core/alloc). Classify the source
+        // first so it can never be projected through the consumer's local map.
+        let source_target_path = split_use_import_alias(raw_path)
+            .map(|(_, target)| target)
+            .unwrap_or(raw_path)
+            .trim();
+        let source_is_external = self.consumer_rust_module_is_override
+            && self.consumer_path_has_external_provenance_in_scope(
+                source_target_path,
+                module_path,
+            );
         // Resolve any leading alias segment first (`extern crate … as <alias>`
         // / `use <mod> as <alias>`, transitively via the name resolver) so the
         // alias never leaks into the recorded binding or downstream mangling.
@@ -11873,7 +11891,15 @@ impl CodeGen {
             target_path.trim_start_matches("::") == "std::collections::HashMap"
                 && (target_path.starts_with("::")
                     || !self.current_scope_has_visible_module_root("std"));
-        let normalized_scope_target = self.map_scope_import_binding_target_path(target_path);
+        let normalized_scope_target =
+            self.map_scope_import_binding_target_path(target_path, source_is_external);
+        let normalized_scope_target = if source_is_external
+            && !normalized_scope_target.trim_start().starts_with("::")
+        {
+            format!("::{}", normalized_scope_target.trim())
+        } else {
+            normalized_scope_target
+        };
         let target_path = normalized_scope_target.trim();
         if local_name.is_empty()
             || target_path.is_empty()

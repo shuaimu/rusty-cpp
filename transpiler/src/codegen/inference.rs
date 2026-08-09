@@ -168,6 +168,92 @@ impl CodeGen {
                 .any(|scope| scope.contains_key(root))
     }
 
+    /// Whether a Rust path is definitively rooted outside the current crate.
+    /// Resolve nearer scope bindings/declarations first so local modules named
+    /// like configured dependencies or std/core/alloc retain Rust shadowing.
+    pub(super) fn consumer_path_has_external_provenance_in_scope(
+        &self,
+        path: &str,
+        relative_scope: &[String],
+    ) -> bool {
+        let normalized = normalize_use_import_path(path).trim();
+        let normalized = split_use_import_alias(normalized)
+            .map(|(_, target)| target)
+            .unwrap_or(normalized)
+            .trim();
+        if normalized.starts_with("::") {
+            return true;
+        }
+        let mut segments = normalized
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+
+        for _ in 0..16 {
+            let Some(root) = segments.first().cloned() else {
+                return false;
+            };
+            if !seen.insert(segments.join("::")) {
+                return false;
+            }
+            if matches!(root.as_str(), "crate" | "self" | "super") {
+                return false;
+            }
+
+            let mut rebound = None;
+            for depth in (0..=relative_scope.len()).rev() {
+                let scope = &relative_scope[..depth];
+                let scope_key = scope.join("::");
+                if let Some(target) =
+                    self.resolve_scope_import_binding_target_for_exact_scope(&scope_key, &root)
+                {
+                    if target.trim_start().starts_with("::") {
+                        return true;
+                    }
+                    let mut expanded = target;
+                    for segment in &segments[1..] {
+                        expanded.push_str("::");
+                        expanded.push_str(segment);
+                    }
+                    rebound = Some(expanded);
+                    break;
+                }
+                if self.consumer_scope_declares_root(scope, &root) {
+                    return false;
+                }
+            }
+            if let Some(expanded) = rebound {
+                segments = expanded
+                    .split("::")
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                continue;
+            }
+
+            let joined = segments.join("::");
+            let (resolved, via_extern_crate_alias) = self
+                .name_resolver
+                .resolve_prefix_with_external_origin(&joined);
+            if via_extern_crate_alias {
+                return true;
+            }
+            if resolved != joined {
+                segments = resolved
+                    .split("::")
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                continue;
+            }
+            return self.name_resolver.external_crate_target(&root).is_some()
+                || matches!(root.as_str(), "std" | "core" | "alloc");
+        }
+        false
+    }
+
     /// Resolve a Rust path to candidate crate-relative paths. Each result is
     /// paired with the minimum number of candidate segments that a mapped
     /// module must consume. For an unqualified relative path we require the
@@ -222,6 +308,9 @@ impl CodeGen {
                 // Function/block bindings are lexically nearer than every
                 // module-scope declaration or import.
                 if self.consumer_runtime_binding_shadows_root(root) {
+                    return Vec::new();
+                }
+                if self.consumer_path_has_external_provenance_in_scope(path, relative_scope) {
                     return Vec::new();
                 }
 
