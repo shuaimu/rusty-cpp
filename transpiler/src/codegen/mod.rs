@@ -1818,6 +1818,12 @@ pub struct CodeGen {
     /// Enables order-independent path lowering for names introduced by `use` items
     /// that may appear later in source order than their first use.
     pub(crate) scope_import_bindings: HashMap<(String, String), HashSet<String>>,
+    /// Source-provenance marker for `use std::collections::HashMap [as X]`.
+    /// The ordinary scope binding is intentionally mapped to its C++ spelling
+    /// (`rusty::HashMap`), which is insufficient for semantic method rewrites:
+    /// a user module can expose the same C++-looking path. Keep this narrow
+    /// source fact so HashMap's get_mut/get overload bridge fails closed.
+    pub(crate) canonical_std_hash_map_import_bindings: HashSet<(String, String)>,
     /// Unified alias/path resolution engine. Absorbs `extern crate X as Y`
     /// (`stdalloc -> alloc`) and `use <mod> as <alias>` (`control::group::imp ->
     /// control::group::sse2`) as alias EDGES, resolved transitively to a
@@ -2419,6 +2425,7 @@ impl CodeGen {
             import_alias_names: HashSet::new(),
             module_scope_namespace_aliases: HashSet::new(),
             scope_import_bindings: HashMap::new(),
+            canonical_std_hash_map_import_bindings: HashSet::new(),
             name_resolver: name_resolver::NameResolver::default(),
             nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
             expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
@@ -4976,6 +4983,7 @@ impl CodeGen {
         self.import_alias_names.clear();
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
+        self.canonical_std_hash_map_import_bindings.clear();
         self.name_resolver.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -11857,6 +11865,10 @@ impl CodeGen {
                 };
                 (local_tail.trim(), normalized)
             };
+        let source_is_canonical_std_hash_map =
+            target_path.trim_start_matches("::") == "std::collections::HashMap"
+                && (target_path.starts_with("::")
+                    || !self.current_scope_has_visible_module_root("std"));
         let normalized_scope_target = self.map_scope_import_binding_target_path(target_path);
         let target_path = normalized_scope_target.trim();
         if local_name.is_empty()
@@ -11890,6 +11902,10 @@ impl CodeGen {
         local_keys.dedup();
         for scope_key in scope_keys {
             for local_key in &local_keys {
+                if source_is_canonical_std_hash_map {
+                    self.canonical_std_hash_map_import_bindings
+                        .insert((scope_key.clone(), local_key.clone()));
+                }
                 self.scope_import_bindings
                     .entry((scope_key.clone(), local_key.clone()))
                     .or_default()
@@ -61940,6 +61956,29 @@ fn collect_assignments_in_stmt(stmt: &syn::Stmt, result: &mut std::collections::
     }
 }
 
+fn collect_assignment_target(
+    expr: &syn::Expr,
+    result: &mut std::collections::HashSet<String>,
+) {
+    let mut lhs = expr;
+    loop {
+        match lhs {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                result.insert(path.path.segments[0].ident.to_string());
+                break;
+            }
+            syn::Expr::Field(field) => lhs = field.base.as_ref(),
+            syn::Expr::Index(index) => lhs = index.expr.as_ref(),
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                lhs = unary.expr.as_ref();
+            }
+            syn::Expr::Paren(paren) => lhs = paren.expr.as_ref(),
+            syn::Expr::Group(group) => lhs = group.expr.as_ref(),
+            _ => break,
+        }
+    }
+}
+
 /// Recursively collect assignment targets from an expression.
 fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::HashSet<String>) {
     match expr {
@@ -61951,33 +61990,7 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
             // fixes btree_port B2 where `let map = self.dormant_map.awaken();
             // map.length -= 1;` was emitted as `const auto map = ...;`
             // and the compound-assign on `map.length` failed.
-            let mut lhs = assign.left.as_ref();
-            loop {
-                match lhs {
-                    syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                        result.insert(path.path.segments[0].ident.to_string());
-                        break;
-                    }
-                    syn::Expr::Field(field) => {
-                        lhs = field.base.as_ref();
-                    }
-                    syn::Expr::Index(index) => {
-                        lhs = index.expr.as_ref();
-                    }
-                    syn::Expr::Unary(unary)
-                        if matches!(unary.op, syn::UnOp::Deref(_)) =>
-                    {
-                        lhs = unary.expr.as_ref();
-                    }
-                    syn::Expr::Paren(p) => {
-                        lhs = p.expr.as_ref();
-                    }
-                    syn::Expr::Group(g) => {
-                        lhs = g.expr.as_ref();
-                    }
-                    _ => break,
-                }
-            }
+            collect_assignment_target(&assign.left, result);
             collect_assignments_in_expr(&assign.left, result);
             collect_assignments_in_expr(&assign.right, result);
         }
@@ -62039,6 +62052,21 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
             }
         }
         syn::Expr::Binary(binary) => {
+            if matches!(
+                binary.op,
+                syn::BinOp::AddAssign(_)
+                    | syn::BinOp::SubAssign(_)
+                    | syn::BinOp::MulAssign(_)
+                    | syn::BinOp::DivAssign(_)
+                    | syn::BinOp::RemAssign(_)
+                    | syn::BinOp::BitXorAssign(_)
+                    | syn::BinOp::BitAndAssign(_)
+                    | syn::BinOp::BitOrAssign(_)
+                    | syn::BinOp::ShlAssign(_)
+                    | syn::BinOp::ShrAssign(_)
+            ) {
+                collect_assignment_target(&binary.left, result);
+            }
             collect_assignments_in_expr(&binary.left, result);
             collect_assignments_in_expr(&binary.right, result);
         }

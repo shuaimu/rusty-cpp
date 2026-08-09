@@ -1871,6 +1871,150 @@ impl CodeGen {
         fn_bound
     }
 
+    /// Resolve an owned callback only from the canonical Rust source shape
+    /// `Box<dyn Fn/FnMut/FnOnce + ...>`.  This is deliberately source-aware:
+    /// a crate-local `Box` or `FnMut`, an extra semantic trait, duplicate auto
+    /// traits, and malformed alias cycles all fail closed instead of being
+    /// mistaken for the runtime's move-only callable.
+    pub(super) fn owned_boxed_callback_trait_object_type(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        let box_ty = self.resolve_transparent_nullable_callback_aliases(ty);
+        let syn::Type::Path(box_path) = &box_ty else {
+            return None;
+        };
+        if box_path.qself.is_some()
+            || !self.transparent_nullable_callback_path_is_canonical(
+                &box_path.path,
+                "Box",
+                &[&["alloc", "boxed", "Box"], &["std", "boxed", "Box"]],
+            )
+        {
+            return None;
+        }
+        let box_args = match &box_path.path.segments.last()?.arguments {
+            syn::PathArguments::AngleBracketed(args) if args.args.len() == 1 => args,
+            _ => return None,
+        };
+        let syn::GenericArgument::Type(callable_source_ty) = box_args.args.first()? else {
+            return None;
+        };
+        let callable_ty =
+            self.resolve_transparent_nullable_callback_aliases(callable_source_ty);
+        let syn::Type::TraitObject(callable) = &callable_ty else {
+            return None;
+        };
+        self.boxed_callback_fn_bound(callable)?;
+        Some(callable_ty)
+    }
+
+    /// Return the exact runtime callable spelling and Rust call trait kind for
+    /// a canonical owned boxed callback.  Keeping the kind lets construction
+    /// lowering opt in to the narrower `FnMut` seam without guessing from a
+    /// rendered C++ alias.
+    pub(super) fn try_map_owned_boxed_callback_type(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<(String, CallableTraitKind)> {
+        let callable_ty = self.owned_boxed_callback_trait_object_type(ty)?;
+        let syn::Type::TraitObject(callable) = &callable_ty else {
+            return None;
+        };
+        let fn_bound = self.boxed_callback_fn_bound(callable)?;
+        let kind = match fn_bound.path.segments.last()?.ident.to_string().as_str() {
+            "Fn" => CallableTraitKind::Fn,
+            "FnMut" => CallableTraitKind::FnMut,
+            "FnOnce" => CallableTraitKind::FnOnce,
+            _ => return None,
+        };
+        self.try_map_fn_trait_boxed(fn_bound)
+            .map(|mapped| (mapped, kind))
+    }
+
+    /// Prove that a source type is the standard library's HashMap, following
+    /// only Rust type aliases and `use` bindings.  Method-name-only rewriting
+    /// is unsafe here: user containers routinely expose a semantically
+    /// distinct `get_mut`, while the rusty HashMap port deliberately represents
+    /// Rust's const/mutable pair as overloaded C++ `get` members.
+    pub(super) fn type_is_canonical_std_hash_map(&self, ty: &syn::Type) -> bool {
+        let mut current = ty.clone();
+        let mut seen = HashSet::new();
+        for _ in 0..32 {
+            let peeled = self.peel_reference_paren_group_type(&current);
+            if !seen.insert(peeled.to_token_stream().to_string()) {
+                return false;
+            }
+            let syn::Type::Path(type_path) = peeled else {
+                return false;
+            };
+            if type_path.qself.is_some() {
+                return false;
+            }
+
+            let segments = type_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let Some(root) = segments.first() else {
+                return false;
+            };
+            if segments == ["std", "collections", "HashMap"] {
+                // Relative `std::...` can name a crate-local module. An
+                // absolute path names the extern-prelude crate in the Rust
+                // editions accepted by this transpiler.
+                if type_path.path.leading_colon.is_some()
+                    || root != "std"
+                    || !self.current_scope_has_visible_module_root("std")
+                {
+                    return true;
+                }
+                return false;
+            }
+            if segments.len() == 1 {
+                // A declared `type ByName = HashMap<...>` is transparent for
+                // this source classification. Follow it before checking
+                // nominal shadowing; imported aliases have no type-alias
+                // target and are decided by their provenance marker below.
+                if let Some(next) = self.resolve_type_alias_once(peeled) {
+                    if next == *peeled {
+                        return false;
+                    }
+                    current = next;
+                    continue;
+                }
+                for depth in (0..=self.module_stack.len()).rev() {
+                    let scope_path = &self.module_stack[..depth];
+                    let scope = scope_path.join("::");
+                    if self
+                        .canonical_std_hash_map_import_bindings
+                        .contains(&(scope, root.clone()))
+                    {
+                        return true;
+                    }
+                    // A nearer nominal declaration shadows an outer import.
+                    // Check it after the same-scope provenance marker because
+                    // template `use` aliases are also registered as emitted
+                    // local type names.
+                    if self.module_path_declares_type_name_exact(scope_path, root) {
+                        return false;
+                    }
+                }
+            }
+
+            let Some(next) = self.resolve_type_alias_once(peeled) else {
+                return false;
+            };
+            if next == *peeled {
+                return false;
+            }
+            current = next;
+        }
+        false
+    }
+
     /// Resolve a trait object only when its single semantic trait is a
     /// declaration collected from this Rust input. This is intentionally
     /// stricter than the legacy facade-name heuristic: unknown/external
@@ -3100,11 +3244,17 @@ impl CodeGen {
                             if let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
                                 args.args.first()
                             {
-                                // Check for Fn → rusty::Function
-                                if let Some(tb) = self.boxed_callback_fn_bound(to) {
-                                    if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
-                                        return fn_type;
-                                    }
+                                // Canonical Box<dyn Fn*> owns a move-only
+                                // rusty::Function. Reject a crate-local Box
+                                // even when its leaf spelling is identical.
+                                if self.transparent_nullable_callback_path_is_canonical(
+                                    &tp.path,
+                                    "Box",
+                                    &[&["alloc", "boxed", "Box"], &["std", "boxed", "Box"]],
+                                ) && let Some(tb) = self.boxed_callback_fn_bound(to)
+                                    && let Some(fn_type) = self.try_map_fn_trait_boxed(tb)
+                                {
+                                    return fn_type;
                                 }
                                 if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
                                     // `Box<dyn io::Write + 'a>` gets the type-erased

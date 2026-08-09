@@ -9543,6 +9543,28 @@ impl CodeGen {
             }
             args.push(emitted_arg);
         }
+        // std::collections::HashMap has distinct Rust `get` / `get_mut`
+        // methods, while the rusty HashMap port exposes const and mutable
+        // overloads of the single C++ name `get`. Rewrite only when receiver
+        // inference proves the canonical std source type; a same-spelled local
+        // container must retain its own `get_mut` member.
+        if method_name == "get_mut"
+            && args.len() == 1
+            && mc.turbofish.is_none()
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                .as_ref()
+                .is_some_and(|ty| self.type_is_canonical_std_hash_map(ty))
+        {
+            return self.emit_receiver_member_call(
+                &mc.receiver,
+                "get",
+                None,
+                &args,
+                None,
+            );
+        }
         if let Some(toml_write_call) =
             self.try_emit_toml_write_method_call(mc, &method_name, &args, expected_ty)
         {
@@ -17199,11 +17221,193 @@ impl CodeGen {
         }
     }
 
+    /// Match the constructor half of the exact Rust owned-callback shape.
+    /// The expected type performs the trait-object validation separately;
+    /// this predicate only proves that the call is canonical std/alloc Box
+    /// construction rather than a same-spelled crate-local API.
+    fn call_is_canonical_box_new(&self, call: &syn::ExprCall) -> bool {
+        if call.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return false;
+        };
+        if path_expr.qself.is_some() || path_expr.path.segments.len() < 2 {
+            return false;
+        }
+        let segments = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if segments.last().is_none_or(|leaf| leaf != "new") {
+            return false;
+        }
+        let owner = &segments[..segments.len() - 1];
+        if owner.len() == 1 && owner[0] == "Box" {
+            return path_expr.path.leading_colon.is_none()
+                && !self.bare_std_named_type_suppression_applies("Box");
+        }
+
+        // An explicit binding on the root wins over its textual spelling.
+        // This rejects `extern crate other as std` and accepts an ordinary
+        // `use std::boxed::Box as Owned` alias.
+        let rebound_owner = if let Some(bound_root) =
+            self.resolve_scope_import_binding_path(&owner[0])
+        {
+            let bound_root = bound_root.trim().trim_start_matches("::");
+            if owner.len() == 1 {
+                bound_root.to_string()
+            } else {
+                format!("{}::{}", bound_root, owner[1..].join("::"))
+            }
+        } else {
+            owner.join("::")
+        };
+        if !matches!(
+            rebound_owner.trim_start_matches("::"),
+            "std::boxed::Box" | "alloc::boxed::Box"
+        ) {
+            return false;
+        }
+        !self.local_declared_types.contains(&rebound_owner)
+            && !self
+                .local_declared_types
+                .contains(&rebound_owner.trim_start_matches("::").to_string())
+    }
+
+    /// Whether an expression-path root is proven to be an alias imported from
+    /// the reserved `cpp::rusty` interop module. Textual `rusty` spellings are
+    /// deliberately insufficient: user modules can use the same name.
+    fn path_root_is_reserved_cpp_rusty_alias(&self, root: &str) -> bool {
+        if self.is_type_param_in_scope(root) || self.is_local_type_name_in_scope(root) {
+            return false;
+        }
+        self.resolve_scope_import_binding_path(root)
+            .is_some_and(|bound| {
+                matches!(
+                    bound.trim().trim_start_matches("::"),
+                    "cpp::rusty"
+                )
+            })
+            || self.name_resolver.cpp_binding(root) == Some("rusty")
+    }
+
+    /// A valid-Rust escape hatch for the one C++ ABI detail `TypeId` does not
+    /// expose: the implementation-defined `std::type_index::hash_code()` key.
+    /// Only an alias imported from the reserved `cpp::rusty` module is
+    /// recognized, so a same-named user helper retains ordinary call lowering.
+    fn try_emit_cpp_rusty_type_id_hash_code_call(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        if call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.qself.is_some()
+            || path_expr.path.leading_colon.is_some()
+            || path_expr.path.segments.len() != 2
+            || path_expr
+                .path
+                .segments
+                .last()
+                .is_none_or(|leaf| leaf.ident != "type_id_hash_code")
+        {
+            return None;
+        }
+        let root = path_expr.path.segments.first()?.ident.to_string();
+        if !self.path_root_is_reserved_cpp_rusty_alias(&root) {
+            return None;
+        }
+        let type_id = self.emit_expr_to_string(&call.args[0]);
+        Some(format!("({}).hash_code()", type_id))
+    }
+
+    /// Preserve the zero-argument in-place construction semantics used by the
+    /// legacy C++ any-message factory. `Arc<T>::make(default_like<T>())` is not
+    /// equivalent: it prefers `T::default_()` over `T{}` and requires moving
+    /// the resulting value. This reserved intrinsic emits no helper symbol.
+    fn try_emit_cpp_rusty_arc_make_default_call(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        if !call.args.is_empty() {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.qself.is_some()
+            || path_expr.path.leading_colon.is_some()
+            || path_expr.path.segments.len() != 2
+        {
+            return None;
+        }
+        let root = path_expr.path.segments.first()?.ident.to_string();
+        if !self.path_root_is_reserved_cpp_rusty_alias(&root) {
+            return None;
+        }
+        let function = path_expr.path.segments.last()?;
+        if function.ident != "arc_make_default" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(arguments) = &function.arguments else {
+            return None;
+        };
+        if arguments.args.len() != 1 {
+            return None;
+        }
+        let syn::GenericArgument::Type(payload_type) = arguments.args.first()? else {
+            return None;
+        };
+        let payload_cpp = self.map_type(payload_type);
+        if payload_cpp == "auto"
+            || payload_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&payload_cpp)
+        {
+            return None;
+        }
+        Some(format!("rusty::Arc<{}>::make()", payload_cpp))
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `Box<dyn FnMut(..)>` already maps to rusty::Function. Construct that
+        // erased owner directly from its closure instead of first allocating a
+        // Box<std::function<..>> and then wrapping the Box as another callable.
+        // Restrict construction to FnMut, the exact move/call-mutable seam in
+        // use; Fn/FnOnce and every non-canonical trait-object shape retain their
+        // existing lowering until their distinct semantics are modeled.
+        if self.call_is_canonical_box_new(call)
+            && matches!(
+                self.peel_paren_group_expr(&call.args[0]),
+                syn::Expr::Closure(_)
+            )
+            && let Some(expected) = expected_ty
+            && let Some((callback_cpp, CallableTraitKind::FnMut)) =
+                self.try_map_owned_boxed_callback_type(expected)
+            && let Some(callable_source_ty) =
+                self.owned_boxed_callback_trait_object_type(expected)
+        {
+            let closure = self.emit_expr_to_string_with_expected(
+                &call.args[0],
+                Some(&callable_source_ty),
+            );
+            return format!("{}({})", callback_cpp, closure);
+        }
+        if let Some(hash_code) = self.try_emit_cpp_rusty_type_id_hash_code_call(call) {
+            return hash_code;
+        }
+        if let Some(arc) = self.try_emit_cpp_rusty_arc_make_default_call(call) {
+            return arc;
+        }
         // Rust's exact runtime type identity has no associated-function surface
         // on std::type_index. Lower the two canonical paths, plus a `use`-bound
         // TypeId alias, directly to C++ RTTI. Keep bare local `TypeId` owners out

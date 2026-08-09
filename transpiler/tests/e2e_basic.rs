@@ -451,6 +451,71 @@ namespace = "std"
 }
 
 #[test]
+fn test_cli_indexed_zero_arg_arc_make_default_intrinsic() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("test.rs");
+    let output_path = dir.path().join("test.cppm");
+    let index_path = dir.path().join("cpp_index.toml");
+
+    std::fs::write(
+        &input,
+        r#"
+use cpp::rusty as cpp_rusty;
+use std::sync::Arc;
+
+fn make_default<T: Default>() -> Arc<T> {
+    unsafe { cpp_rusty::arc_make_default::<T>() }
+}
+
+mod cpp {
+    pub mod rusty {
+        use std::sync::Arc;
+
+        pub unsafe fn arc_make_default<T: Default>() -> Arc<T> {
+            Arc::new(T::default())
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &index_path,
+        r#"
+version = 1
+
+[modules.rusty]
+cpp_module = "rusty"
+namespace = "rusty"
+
+[modules.rusty.symbols.arc_make_default]
+kind = "function_template"
+callable_signatures = ["rusty::Arc<T>()"]
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .arg("--cpp-module-index")
+        .arg(index_path.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    assert!(cpp.contains("return rusty::Arc<T>::make();"), "{cpp}");
+    assert!(!cpp.contains("arc_make_default"), "{cpp}");
+    assert!(!cpp.contains("default_like<T>()"), "{cpp}");
+}
+
+#[test]
 fn test_crate_mode_cpp_import_requires_symbol_index() {
     let dir = tempfile::tempdir().unwrap();
     let src_dir = dir.path().join("src");
