@@ -1886,7 +1886,7 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         let member_style_arity = (path_expr.path.segments.len() > 2
             && call_arity > 0
             && Self::symbol_is_member_method(&symbol))
-        .then_some(call_arity - 1);
+        .then(|| call_arity - 1);
         if Self::symbol_is_template(&symbol) && symbol.callable_signatures.is_empty() {
             self.record_diagnostic(
                 &call_site,

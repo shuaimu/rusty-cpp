@@ -10302,6 +10302,231 @@ fn test_imported_std_any_typeid_of_lowers_to_cpp_rtti() {
 }
 
 #[test]
+fn test_cpp_rusty_type_id_hash_code_intrinsic_lowers_inline_to_type_index() {
+    let out = transpile_str(
+        r#"
+        use std::any::TypeId;
+        use cpp::rusty as cpp_rusty;
+
+        fn registry_key(type_id: TypeId) -> usize {
+            unsafe { cpp_rusty::type_id_hash_code(type_id) }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("return (type_id).hash_code();"),
+        "the reserved intrinsic must expose std::type_index's exact size_t key:\n{out}"
+    );
+    assert!(
+        !out.contains("cpp_rusty::type_id_hash_code(")
+            && !out.contains("rusty::type_id_hash_code("),
+        "the intrinsic must lower inline with no helper symbol:\n{out}"
+    );
+}
+
+#[test]
+fn test_type_id_hash_code_same_spelled_non_cpp_binding_fails_closed() {
+    let out = transpile_str(
+        r#"
+        use std::any::TypeId;
+        mod rusty {
+            pub unsafe fn type_id_hash_code(_type_id: TypeId) -> usize { 7 }
+        }
+        use rusty as cpp_rusty;
+
+        fn registry_key(type_id: TypeId) -> usize {
+            unsafe { cpp_rusty::type_id_hash_code(type_id) }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("(type_id).hash_code()"),
+        "a same-spelled ordinary Rust module must not acquire intrinsic semantics:\n{out}"
+    );
+}
+
+#[test]
+fn test_cpp_rusty_arc_make_default_intrinsic_lowers_to_zero_arg_in_place_make() {
+    let out = transpile_str(
+        r#"
+        use std::sync::Arc;
+        use cpp::rusty as cpp_rusty;
+
+        fn make_default<T: Default>() -> Arc<T> {
+            unsafe { cpp_rusty::arc_make_default::<T>() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("return rusty::Arc<T>::make();"),
+        "the reserved intrinsic must preserve zero-argument in-place construction:\n{out}"
+    );
+    assert!(
+        !out.contains("arc_make_default") && !out.contains("default_like<T>()"),
+        "the intrinsic must emit neither a helper symbol nor default_like payload:\n{out}"
+    );
+}
+
+#[test]
+fn test_arc_make_default_same_spelled_non_cpp_binding_fails_closed() {
+    let out = transpile_str(
+        r#"
+        use std::sync::Arc;
+        mod rusty {
+            pub unsafe fn arc_make_default<T: Default>() -> Arc<T> {
+                Arc::new(T::default())
+            }
+        }
+        use rusty as cpp_rusty;
+
+        fn make_default<T: Default>() -> Arc<T> {
+            unsafe { cpp_rusty::arc_make_default::<T>() }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("rusty::Arc<T>::make()"),
+        "a same-spelled ordinary Rust module must not acquire intrinsic semantics:\n{out}"
+    );
+}
+
+#[test]
+fn test_std_hash_map_get_mut_uses_mutable_get_overload_through_field_and_aliases() {
+    let out = transpile_str_module(
+        r#"
+        use std::collections::HashMap as StdHashMap;
+        type ByName = StdHashMap<usize, i32>;
+
+        struct Registry {
+            by_name: ByName,
+        }
+
+        fn map_mut<'a>(registry: &'a mut Registry) -> &'a mut Registry {
+            registry
+        }
+
+        fn bump(registry: &mut Registry, key: &usize) -> bool {
+            let map = map_mut(registry);
+            if let Some(value) = map.by_name.get_mut(key) {
+                *value += 1;
+                true
+            } else {
+                false
+            }
+        }
+        "#,
+        "hash_map_get_mut",
+    );
+    assert!(
+        out.contains("map.by_name.get(key)"),
+        "canonical std HashMap get_mut must select rusty HashMap's mutable get overload:\n{out}"
+    );
+    assert!(
+        !out.contains("map.by_name.get_mut(key)"),
+        "the port has no HashMap::get_mut member:\n{out}"
+    );
+}
+
+#[test]
+fn test_same_spelled_local_hash_map_get_mut_is_not_rewritten() {
+    let out = transpile_str_module(
+        r#"
+        struct HashMap<K, V> {
+            key: K,
+            value: V,
+        }
+
+        impl<K, V> HashMap<K, V> {
+            fn get_mut(&mut self, _key: &K) -> Option<&mut V> {
+                Some(&mut self.value)
+            }
+        }
+
+        struct Registry {
+            by_name: HashMap<usize, i32>,
+        }
+
+        fn lookup(registry: &mut Registry, key: &usize) -> Option<&mut i32> {
+            registry.by_name.get_mut(key)
+        }
+        "#,
+        "local_hash_map_get_mut",
+    );
+    assert!(
+        out.contains("registry.by_name.get_mut(key)"),
+        "a crate-local HashMap must retain its own get_mut semantics:\n{out}"
+    );
+}
+
+#[test]
+fn test_rusty_named_user_hash_map_import_does_not_spoof_std_provenance() {
+    let out = transpile_str_module(
+        r#"
+        mod rusty {
+            pub struct HashMap<K, V> {
+                pub key: K,
+                pub value: V,
+            }
+
+            impl<K, V> HashMap<K, V> {
+                pub fn get_mut(&mut self, _key: &K) -> Option<&mut V> {
+                    Some(&mut self.value)
+                }
+            }
+        }
+
+        use rusty::HashMap as LooksRuntimeMapped;
+
+        fn lookup(
+            map: &mut LooksRuntimeMapped<usize, i32>,
+            key: &usize,
+        ) -> Option<&mut i32> {
+            map.get_mut(key)
+        }
+        "#,
+        "spoofed_hash_map_get_mut",
+    );
+    assert!(
+        out.contains("map.get_mut(key)"),
+        "a user import that renders like rusty::HashMap must retain get_mut:\n{out}"
+    );
+}
+
+#[test]
+fn test_nested_local_hash_map_shadows_outer_std_import_for_get_mut() {
+    let out = transpile_str_module(
+        r#"
+        use std::collections::HashMap;
+
+        mod nested {
+            pub struct HashMap<K, V> {
+                pub key: K,
+                pub value: V,
+            }
+
+            impl<K, V> HashMap<K, V> {
+                pub fn get_mut(&mut self, _key: &K) -> Option<&mut V> {
+                    Some(&mut self.value)
+                }
+            }
+
+            pub fn lookup(
+                map: &mut HashMap<usize, i32>,
+                key: &usize,
+            ) -> Option<&mut i32> {
+                map.get_mut(key)
+            }
+        }
+        "#,
+        "shadowed_hash_map_get_mut",
+    );
+    assert!(
+        out.contains("map.get_mut(key)"),
+        "a nearer local HashMap declaration must shadow an outer std import:\n{out}"
+    );
+}
+
+#[test]
 fn test_local_typeid_of_is_not_rewritten_as_std_any() {
     let out = transpile_str(
         r#"
@@ -41218,6 +41443,53 @@ fn test_nested_arc_boxed_callbacks_preserve_fn_kind_and_canonical_auto_traits() 
     assert!(
         out.contains("using OnceCallback = rusty::Arc<rusty::Function<void()>>;"),
         "FnOnce keeps the existing mutable Function lowering:\n{out}"
+    );
+}
+
+#[test]
+fn test_boxed_fnmut_closure_constructs_rusty_function_directly() {
+    let out = transpile_str_module(
+        r#"
+        type Factory = Box<dyn FnMut() -> i32 + Send + Sync>;
+
+        fn make_factory(start: i32) -> Factory {
+            let mut state = start;
+            Box::new(move || -> i32 {
+                state += 1;
+                state
+            })
+        }
+        "#,
+        "owned_fnmut",
+    );
+    assert!(
+        out.contains("return rusty::Function<int32_t()>([=, state = std::move(state)]() mutable"),
+        "canonical Box<dyn FnMut> closure construction must erase directly and retain mutable call state:\n{out}"
+    );
+    assert!(
+        !out.contains("rusty::Box<std::function")
+            && !out.contains("rusty::make_box([")
+            && !out.contains("std::make_shared"),
+        "direct callable erasure must not allocate an intermediate boxed wrapper:\n{out}"
+    );
+}
+
+#[test]
+fn test_boxed_fnmut_direct_construction_rejects_extra_semantic_trait() {
+    let out = transpile_str_module(
+        r#"
+        trait Extra {}
+        type Rejected = Box<dyn FnMut() -> i32 + Send + Extra>;
+
+        fn make_rejected() -> Rejected {
+            Box::new(|| -> i32 { 7 })
+        }
+        "#,
+        "owned_fnmut_negative",
+    );
+    assert!(
+        !out.contains("rusty::Function<int32_t()>(["),
+        "an extra semantic trait must fail closed at the construction site:\n{out}"
     );
 }
 
