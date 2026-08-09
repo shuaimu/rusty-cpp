@@ -39,6 +39,19 @@ impl CodeGen {
 
     pub(super) fn map_scope_import_binding_target_path(&self, target_path: &str) -> String {
         let normalized = normalize_use_import_path(target_path);
+        // This hook is only for consumer-owned Rust paths in the configured
+        // projection. Preserve every unrelated external or local import's
+        // existing spelling.
+        if !self.consumer_module_map.is_empty() && !normalized.starts_with("::") {
+            let segments = normalized
+                .split("::")
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if let Some(mapped) = self.resolve_consumer_qualified_path(&segments) {
+                return mapped;
+            }
+        }
         if let Some(mapped_crate_single) = self.resolve_crate_single_segment_type_import(normalized)
         {
             return mapped_crate_single;

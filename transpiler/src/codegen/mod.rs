@@ -4207,18 +4207,22 @@ impl CodeGen {
         self.crate_module_names = names.into_iter().collect();
     }
 
-    /// Configure a consumer-specific module projection for this emit. The
-    /// current Rust module is selected by the C++ module name passed to
-    /// `emit_file`; validation in `transpile_full_with_options` guarantees a
-    /// unique entry when the map is non-empty.
+    /// Configure a consumer-specific module projection for this emit.
+    /// `current_rust_module` is an optional invocation-local lexical scope,
+    /// already canonicalized without `crate::`. If absent, the current Rust
+    /// module is selected by the C++ module name as before. The projection map
+    /// itself remains unique and canonical in either case.
     pub fn set_consumer_module_map(
         &mut self,
         map: crate::transpile::ConsumerModuleMap,
         current_cpp_module: Option<&str>,
+        current_rust_module: Option<&str>,
     ) {
-        self.consumer_rust_module = current_cpp_module
-            .and_then(|name| map.entry_for_cpp_module(name))
-            .map(|entry| entry.rust_module.clone());
+        self.consumer_rust_module = current_rust_module.map(str::to_owned).or_else(|| {
+            current_cpp_module
+                .and_then(|name| map.entry_for_cpp_module(name))
+                .map(|entry| entry.rust_module.clone())
+        });
         self.crate_module_names.extend(
             map.modules
                 .values()

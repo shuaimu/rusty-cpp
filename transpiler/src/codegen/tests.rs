@@ -73,7 +73,11 @@ fn transpile_str_module_with_consumer_map(rust_code: &str, module_name: &str) ->
     .collect();
     let mut cg = CodeGen::new();
     cg.set_cxx_namespace(Some("rrr".to_string()));
-    cg.set_consumer_module_map(crate::transpile::ConsumerModuleMap { modules }, Some(module_name));
+    cg.set_consumer_module_map(
+        crate::transpile::ConsumerModuleMap { modules },
+        Some(module_name),
+        None,
+    );
     cg.emit_file(&file, Some(module_name));
     cg.into_output()
 }
@@ -14361,6 +14365,44 @@ pub fn round_trip(value: crate::base::sync::Counter) -> crate::base::sync::Count
     assert_eq!(out.matches("::rrr::make_counter()").count(), 3, "{out}");
     assert!(!out.contains("::base::sync"), "{out}");
     assert!(!out.contains("::rrr::base"), "{out}");
+}
+
+#[test]
+fn test_consumer_module_map_current_rust_scope_override_keeps_canonical_owner_unique() {
+    let interface = crate::transpile::ConsumerModuleEntry {
+        rust_module: "runtime::epoll".to_string(),
+        cpp_module: "rrr.epoll_wrapper".to_string(),
+        cpp_namespace: "rrr".to_string(),
+    };
+    let map = crate::transpile::ConsumerModuleMap {
+        modules: std::collections::BTreeMap::from([(
+            "runtime::epoll".to_string(),
+            interface,
+        )]),
+    };
+    let mut cg = CodeGen::new();
+    cg.set_consumer_module_map(
+        map,
+        Some("rrr.epoll_wrapper"),
+        Some("runtime::epoll_linux"),
+    );
+
+    assert_eq!(
+        cg.consumer_rust_module.as_deref(),
+        Some("runtime::epoll_linux")
+    );
+    assert_eq!(cg.consumer_module_map.modules.len(), 1);
+    assert!(
+        cg.consumer_module_map
+            .entry_for_rust_module("runtime::epoll_linux")
+            .is_none()
+    );
+    assert_eq!(
+        cg.consumer_module_map
+            .entry_for_cpp_module("rrr.epoll_wrapper")
+            .map(|entry| entry.rust_module.as_str()),
+        Some("runtime::epoll")
+    );
 }
 
 #[test]
