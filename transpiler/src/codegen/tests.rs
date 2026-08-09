@@ -22934,6 +22934,120 @@ fn test_leaf512_sync_weak_alias_import_emits_template_alias() {
 }
 
 #[test]
+fn test_std_arc_downgrade_lowers_to_sync_free_function_for_borrow_shapes() {
+    let out = transpile_str(
+        r#"
+        use std::sync::{Arc, Weak as ArcWeak};
+
+        struct Holder { value: Arc<i32> }
+
+        fn from_reference(value: &Arc<i32>) -> ArcWeak<i32> {
+            Arc::downgrade(value)
+        }
+
+        fn from_owned(value: Arc<i32>) -> ArcWeak<i32> {
+            Arc::downgrade(&value)
+        }
+
+        fn from_field(holder: &Holder) -> ArcWeak<i32> {
+            Arc::downgrade(&holder.value)
+        }
+    "#,
+    );
+    assert_eq!(
+        out.matches("rusty::sync::downgrade(").count(),
+        3,
+        "every valid borrow shape must use the runtime free function:\n{out}"
+    );
+    assert!(out.contains("rusty::sync::downgrade(value)"), "{out}");
+    assert!(
+        out.contains("rusty::sync::downgrade(holder.value)"),
+        "{out}"
+    );
+    assert!(!out.contains("::downgrade(&"), "{out}");
+    assert!(!out.contains(">::downgrade("), "{out}");
+}
+
+#[test]
+fn test_std_arc_downgrade_resolves_qualified_module_and_type_alias_owners() {
+    let out = transpile_str(
+        r#"
+        use std::sync::{Arc, Weak as ArcWeak};
+        use std::sync as shared_sync;
+
+        type SharedI32 = Arc<i32>;
+
+        fn from_qualified(value: &std::sync::Arc<i32>) -> ArcWeak<i32> {
+            std::sync::Arc::downgrade(value)
+        }
+
+        fn from_module_alias(value: &Arc<i32>) -> ArcWeak<i32> {
+            shared_sync::Arc::downgrade(value)
+        }
+
+        fn from_type_alias(value: &SharedI32) -> ArcWeak<i32> {
+            SharedI32::downgrade(value)
+        }
+    "#,
+    );
+    assert_eq!(
+        out.matches("rusty::sync::downgrade(value)").count(),
+        3,
+        "canonical and alias owners must converge on one runtime seam:\n{out}"
+    );
+    assert!(!out.contains("shared_sync::"), "{out}");
+    assert!(!out.contains("SharedI32::downgrade"), "{out}");
+}
+
+#[test]
+fn test_user_arc_downgrade_is_not_rewritten_to_std_runtime() {
+    let out = transpile_str(
+        r#"
+        use std::sync::{Arc as StdArc, Weak as StdWeak};
+
+        struct Weak;
+        struct Arc;
+
+        impl Arc {
+            fn downgrade(_: &Arc) -> Weak { Weak }
+        }
+
+        fn make(value: &Arc) -> Weak {
+            Arc::downgrade(value)
+        }
+
+        fn make_std(value: &StdArc<i32>) -> StdWeak<i32> {
+            StdArc::downgrade(value)
+        }
+
+        mod nested {
+            struct Weak;
+            struct Arc;
+
+            impl Arc {
+                fn downgrade(_: &Arc) -> Weak { Weak }
+            }
+
+            fn make(value: &Arc) -> Weak {
+                Arc::downgrade(value)
+            }
+        }
+    "#,
+    );
+    assert_eq!(
+        out.matches("rusty::sync::downgrade(").count(),
+        1,
+        "only the imported std Arc may use the runtime free function:\n{out}"
+    );
+    assert_eq!(
+        out.matches("std::remove_cvref_t<decltype((value))>::downgrade(value)")
+            .count(),
+        2,
+        "root and nested user Arc types must retain their associated function:\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf512_forward_decl_emits_template_alias_before_alias_typed_fn_signature() {
     let out = transpile_str(
         r#"
