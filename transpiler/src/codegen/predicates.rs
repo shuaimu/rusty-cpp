@@ -554,6 +554,60 @@ impl CodeGen {
         })
     }
 
+    /// Recognize the exact Rust-valid spelling for a C++ declaration-only
+    /// free function.  The false `any()` predicate keeps the marker invisible
+    /// to rustc while the native body remains available to Cargo tests.
+    pub(crate) fn is_cpp_declaration_attr(attr: &syn::Attribute) -> bool {
+        if !attr.path().is_ident("cfg_attr") {
+            return false;
+        }
+        let Ok(args) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            return false;
+        };
+        args.len() == 2
+            && matches!(args.first(), Some(syn::Meta::List(predicate))
+                if predicate.path.is_ident("any") && predicate.tokens.is_empty())
+            && matches!(args.iter().nth(1), Some(syn::Meta::Path(path))
+                if path.is_ident("cpp_declaration"))
+    }
+
+    /// Detect attempted spellings too, so malformed or rustc-visible marker
+    /// uses fail validation rather than silently emitting a body.
+    pub(crate) fn mentions_cpp_declaration_attr(attr: &syn::Attribute) -> bool {
+        fn path_mentions_marker(path: &syn::Path) -> bool {
+            path.segments
+                .last()
+                .is_some_and(|segment| segment.ident == "cpp_declaration")
+        }
+
+        fn meta_mentions_marker(meta: &syn::Meta) -> bool {
+            if path_mentions_marker(meta.path()) {
+                return true;
+            }
+            let syn::Meta::List(list) = meta else {
+                return false;
+            };
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .is_ok_and(|nested| nested.iter().any(meta_mentions_marker))
+        }
+
+        path_mentions_marker(attr.path())
+            || (attr.path().is_ident("cfg_attr")
+                && attr
+                    .parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                    )
+                    .is_ok_and(|args| args.iter().any(meta_mentions_marker)))
+    }
+
+    pub(crate) fn has_cpp_declaration_attr(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(Self::is_cpp_declaration_attr)
+    }
+
     /// Opt a Rust `Drop::drop` method into a non-unwinding C++ destructor.
     /// The `cfg_attr(any(), ...)` spelling keeps the unknown marker disabled
     /// for rustc while still exposing the contract to this transpiler.

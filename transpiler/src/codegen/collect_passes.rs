@@ -86,6 +86,16 @@ impl CodeGen {
                 self.relative_scope.pop();
             }
 
+            fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+                // Preserve declaration signature dependencies, but never leak
+                // imports used only by a native Rust forwarding body.
+                if CodeGen::has_cpp_declaration_attr(&function.attrs) {
+                    visit::visit_signature(self, &function.sig);
+                } else {
+                    visit::visit_item_fn(self, function);
+                }
+            }
+
             // These paths are compile-time syntax rather than emitted C++
             // type/expression references. `use` and `mod child;` dependencies
             // are handled by their dedicated emitters, which also preserve

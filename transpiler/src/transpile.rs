@@ -1700,6 +1700,8 @@ pub fn transpile_full_with_options(
     let mut file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
         .map_err(|e| format!("Parse error: {}", e))?;
     log_profile("parse_with_expand_hygiene_fallback");
+    validate_cpp_declaration_markers(&file)?;
+    log_profile("validate_cpp_declaration_markers");
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
     log_profile("file_contains_cpp_module_imports");
     if has_cpp_module_imports {
@@ -1848,6 +1850,177 @@ pub fn transpile_full_with_options(
         out
     };
     Ok(output_str)
+}
+
+/// Validate the deliberately narrow declaration-only ownership marker before
+/// codegen. A marked body remains native Rust; C++ receives only the ordinary
+/// declaration emitted by the existing forward-declaration pass.
+fn validate_cpp_declaration_markers(file: &syn::File) -> Result<(), String> {
+    use syn::visit::Visit;
+
+    #[derive(Default)]
+    struct MarkerFinder(bool);
+
+    impl<'ast> Visit<'ast> for MarkerFinder {
+        fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+            self.0 |= crate::codegen::CodeGen::mentions_cpp_declaration_attr(attr);
+        }
+    }
+
+    #[derive(Default)]
+    struct UnsupportedSignatureFinder(bool);
+
+    impl<'ast> Visit<'ast> for UnsupportedSignatureFinder {
+        fn visit_type_impl_trait(&mut self, _ty: &'ast syn::TypeImplTrait) {
+            self.0 = true;
+        }
+
+        fn visit_type_infer(&mut self, _ty: &'ast syn::TypeInfer) {
+            self.0 = true;
+        }
+
+        fn visit_expr_infer(&mut self, _expr: &'ast syn::ExprInfer) {
+            // Covers inferred const positions such as `[u8; _]`, which are
+            // expressions rather than `Type::Infer` nodes in syn's AST.
+            self.0 = true;
+        }
+
+        fn visit_type_macro(&mut self, _ty: &'ast syn::TypeMacro) {
+            self.0 = true;
+        }
+
+        fn visit_macro(&mut self, _mac: &'ast syn::Macro) {
+            // Includes macros embedded in const expressions such as
+            // `[u8; count!()]`, not just `Type::Macro` nodes.
+            self.0 = true;
+        }
+    }
+
+    fn contains_marker<T>(node: &T, visit: impl FnOnce(&mut MarkerFinder, &T)) -> bool {
+        let mut finder = MarkerFinder::default();
+        visit(&mut finder, node);
+        finder.0
+    }
+
+    fn validate_items(items: &[syn::Item], scope: &mut Vec<String>) -> Result<(), String> {
+        for item in items {
+            match item {
+                syn::Item::Fn(function) => {
+                    let name = function.sig.ident.to_string();
+                    let qualified = if scope.is_empty() {
+                        name
+                    } else {
+                        format!("{}::{name}", scope.join("::"))
+                    };
+                    let attempts = function
+                        .attrs
+                        .iter()
+                        .filter(|attr| {
+                            crate::codegen::CodeGen::mentions_cpp_declaration_attr(attr)
+                        })
+                        .count();
+                    let markers = function
+                        .attrs
+                        .iter()
+                        .filter(|attr| crate::codegen::CodeGen::is_cpp_declaration_attr(attr))
+                        .count();
+                    if attempts != markers || markers > 1 {
+                        return Err(format!(
+                            "cpp_declaration on '{qualified}' must use exactly one #[cfg_attr(any(), cpp_declaration)] attribute"
+                        ));
+                    }
+                    if markers == 1 {
+                        let mut unsupported_signature = UnsupportedSignatureFinder::default();
+                        unsupported_signature.visit_signature(&function.sig);
+                        let unsupported = if !matches!(
+                            function.vis,
+                            syn::Visibility::Public(_)
+                        ) {
+                            Some("non-public functions")
+                        } else if !function.sig.generics.params.is_empty()
+                            || function.sig.generics.where_clause.is_some()
+                        {
+                            Some("generic functions")
+                        } else if function.sig.constness.is_some() {
+                            Some("const functions")
+                        } else if function.sig.asyncness.is_some() {
+                            Some("async functions")
+                        } else if function.sig.abi.is_some() {
+                            Some("functions with an explicit ABI")
+                        } else if function.sig.variadic.is_some() {
+                            Some("variadic functions")
+                        } else if unsupported_signature.0 {
+                            Some("opaque, inferred, or macro-generated signature types or expressions")
+                        } else if function.attrs.iter().any(|attr| {
+                            (attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+                                && !crate::codegen::CodeGen::is_cpp_declaration_attr(attr)
+                        }) {
+                            Some("conditionally compiled functions")
+                        } else if function
+                            .attrs
+                            .iter()
+                            .any(|attr| attr.path().is_ident("test"))
+                        {
+                            Some("test functions")
+                        } else {
+                            None
+                        };
+                        if let Some(kind) = unsupported {
+                            return Err(format!(
+                                "#[cfg_attr(any(), cpp_declaration)] on '{qualified}' is unsupported: {kind} cannot use a separate C++ definition"
+                            ));
+                        }
+                    }
+
+                    let marker_in_signature = contains_marker(&function.sig, |finder, sig| {
+                        finder.visit_signature(sig)
+                    });
+                    let marker_in_body = contains_marker(&function.block, |finder, block| {
+                        finder.visit_block(block)
+                    });
+                    if marker_in_signature || marker_in_body {
+                        return Err(format!(
+                            "cpp_declaration is only supported on module-scope free functions (found inside '{qualified}')"
+                        ));
+                    }
+                }
+                syn::Item::Mod(module) => {
+                    if module.attrs.iter().any(|attr| {
+                        crate::codegen::CodeGen::mentions_cpp_declaration_attr(attr)
+                    }) {
+                        return Err(format!(
+                            "cpp_declaration is only supported on module-scope free functions (found on module '{}')",
+                            module.ident
+                        ));
+                    }
+                    if let Some((_, nested)) = &module.content {
+                        scope.push(module.ident.to_string());
+                        validate_items(nested, scope)?;
+                        scope.pop();
+                    }
+                }
+                other => {
+                    if contains_marker(other, |finder, item| finder.visit_item(item)) {
+                        return Err(
+                            "cpp_declaration is only supported on module-scope free functions"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    if file.attrs.iter().any(|attr| {
+        crate::codegen::CodeGen::mentions_cpp_declaration_attr(attr)
+    }) {
+        return Err(
+            "cpp_declaration is only supported on module-scope free functions (found at crate scope)"
+                .to_string(),
+        );
+    }
+    validate_items(&file.items, &mut Vec::new())
 }
 
 fn parse_with_expand_hygiene_fallback(rust_source: &str) -> Result<syn::File, syn::Error> {
@@ -2997,6 +3170,142 @@ mod tests {
         let output = result.unwrap();
         assert!(output.contains("export module my_crate;"));
         assert!(output.contains("export void hello()"));
+    }
+
+    #[test]
+    fn test_cpp_declaration_emits_only_declaration_and_preserves_alias_lookup() {
+        let options = TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..TranspileOptions::default()
+        };
+        let output = transpile_full_with_options(
+            r#"
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn platform_open() -> i32 {
+                    crate::native_only::sentinel_987654321()
+                }
+                use crate::platform_open as open_alias;
+                pub fn through_alias() -> i32 { open_alias() }
+            "#,
+            Some("rrr.epoll_wrapper"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("valid declaration-only owner");
+
+        assert!(output.contains("export int32_t platform_open();"), "{output}");
+        assert!(!output.contains("platform_open() {"), "{output}");
+        assert!(!output.contains("sentinel_987654321"), "{output}");
+        assert!(output.contains("return ::rrr::platform_open();"), "{output}");
+    }
+
+    #[test]
+    fn test_cpp_declaration_keeps_signature_imports_and_drops_only_its_body_imports() {
+        let entry = |rust_module: &str, cpp_module: &str, cpp_namespace: &str| {
+            ConsumerModuleEntry {
+                rust_module: rust_module.to_string(),
+                cpp_module: cpp_module.to_string(),
+                cpp_namespace: cpp_namespace.to_string(),
+            }
+        };
+        let options = TranspileOptions {
+            consumer_module_map: ConsumerModuleMap {
+                modules: BTreeMap::from([
+                    ("runtime::iface".into(), entry("runtime::iface", "rrr.iface", "rrr")),
+                    ("signature".into(), entry("signature", "rrr.signature", "rusty")),
+                    ("native_body".into(), entry("native_body", "rrr.native_body", "native")),
+                    ("ordinary_body".into(), entry("ordinary_body", "rrr.ordinary_body", "ordinary")),
+                ]),
+            },
+            consumer_rust_module: Some("crate::runtime::iface".to_string()),
+            ..TranspileOptions::default()
+        };
+        let output = transpile_full_with_options(
+            r#"
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn convert(value: crate::signature::Unit) -> crate::signature::Unit {
+                    crate::native_body::convert(value)
+                }
+                pub fn ordinary() -> i32 { crate::ordinary_body::run() }
+            "#,
+            Some("rrr.iface"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            Some("srpc"),
+            &options,
+        )
+        .expect("signature dependency should remain lowerable");
+
+        assert!(output.contains("import rrr.signature;"), "{output}");
+        assert!(!output.contains("import rrr.native_body;"), "{output}");
+        assert!(!output.contains("native::convert"), "{output}");
+        assert!(output.contains("import rrr.ordinary_body;"), "{output}");
+        assert!(output.contains("ordinary::run"), "{output}");
+    }
+
+    #[test]
+    fn test_cpp_declaration_accepts_concrete_array_const_expressions() {
+        let output = transpile(
+            r#"
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn literal(value: [u8; 4]) -> [u8; 4] { value }
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn expression(value: [u8; 2 + 2]) -> [u8; 2 + 2] { value }
+            "#,
+            Some("marker.arrays"),
+        )
+        .expect("ordinary array lengths are concrete declarations");
+
+        assert!(output.contains("std::array<uint8_t, 4> literal"), "{output}");
+        assert!(output.contains("std::array<uint8_t, 2 + 2> expression"), "{output}");
+        assert!(!output.contains("literal(std::array<uint8_t, 4> value) {"), "{output}");
+        assert!(!output.contains("expression(std::array<uint8_t, 2 + 2> value) {"), "{output}");
+    }
+
+    #[test]
+    fn test_cpp_declaration_rejects_signature_const_expression_macros() {
+        let error = transpile(
+            r#"
+                macro_rules! count { () => { 4 } }
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn marked(value: [u8; count!()]) -> [u8; count!()] { value }
+            "#,
+            Some("marker.invalid"),
+        )
+        .expect_err("signature macro must fail before forward declaration emission");
+        assert!(
+            error.contains("macro-generated signature types or expressions"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_declaration_rejects_other_unsupported_forms() {
+        let cases = [
+            ("#[cfg_attr(any(), cpp_declaration)] pub fn f<T>(x: T) {}", "generic functions"),
+            ("#[cfg_attr(any(), cpp_declaration)] pub const fn f() {}", "const functions"),
+            ("#[cfg_attr(any(), cpp_declaration)] pub async fn f() {}", "async functions"),
+            ("#[cfg_attr(any(), cpp_declaration)] pub extern \"C\" fn f() {}", "explicit ABI"),
+            ("#[cfg_attr(any(), cpp_declaration)] fn f() {}", "non-public functions"),
+            ("#[cfg_attr(any(), cpp_declaration)] pub fn f() -> impl Iterator<Item=i32> { [1].into_iter() }", "opaque, inferred, or macro-generated"),
+            ("#[cfg_attr(any(), cpp_declaration)] pub fn f(x: [u8; _]) {}", "opaque, inferred, or macro-generated"),
+            ("#[test] #[cfg_attr(any(), cpp_declaration)] pub fn f() {}", "test functions"),
+            ("#[cfg(unix)] #[cfg_attr(any(), cpp_declaration)] pub fn f() {}", "conditionally compiled"),
+            ("struct S; impl S { #[cfg_attr(any(), cpp_declaration)] pub fn f() {} }", "module-scope free functions"),
+            ("pub fn outer() { #[cfg_attr(any(), cpp_declaration)] pub fn f() {} }", "module-scope free functions"),
+            ("#[cpp_declaration] pub fn f() {}", "must use exactly one"),
+            ("#[cfg_attr(all(), cpp_declaration)] pub fn f() {}", "must use exactly one"),
+            ("#[cfg_attr(any(), cfg_attr(any(), cpp_declaration))] pub fn f() {}", "must use exactly one"),
+            ("#[cpp_declaration] mod nested {}", "module-scope free functions"),
+            ("#![cfg_attr(any(), cpp_declaration)] pub fn f() {}", "crate scope"),
+        ];
+        for (source, expected) in cases {
+            let error = transpile(source, Some("marker.invalid"))
+                .expect_err("unsupported marker form must fail closed");
+            assert!(error.contains(expected), "{source}: {error}");
+        }
     }
 
     #[test]
