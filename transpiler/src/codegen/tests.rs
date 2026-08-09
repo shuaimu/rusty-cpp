@@ -41029,6 +41029,52 @@ fn test_module_mode_local_dyn_trait_box_keeps_ordinary_adapter_path() {
 }
 
 #[test]
+fn test_nested_arc_boxed_callbacks_preserve_fn_kind_and_canonical_auto_traits() {
+    let out = transpile_str_module(
+        r#"
+        use std::sync::Arc;
+
+        pub type Callback = Arc<Box<dyn Fn(i32) -> bool + Send + Sync>>;
+        pub type MutCallback = Arc<Box<dyn FnMut(i32) + Sync + Send + 'static>>;
+        pub type OnceCallback = Arc<Box<dyn FnOnce() + Send + Sync>>;
+        "#,
+        "callback_aliases",
+    );
+    assert!(
+        out.contains(
+            "using Callback = rusty::Arc<rusty::Function<bool(int32_t) const>>;"
+        ),
+        "Fn + Send + Sync must preserve its const Function surface:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "using MutCallback = rusty::Arc<rusty::Function<void(int32_t)>>;"
+        ),
+        "FnMut + canonical auto traits must remain non-const:\n{out}"
+    );
+    assert!(
+        out.contains("using OnceCallback = rusty::Arc<rusty::Function<void()>>;"),
+        "FnOnce keeps the existing mutable Function lowering:\n{out}"
+    );
+}
+
+#[test]
+fn test_nested_arc_boxed_callback_rejects_non_auto_additional_trait() {
+    let out = transpile_str_module(
+        r#"
+        use std::sync::Arc;
+        pub trait Extra {}
+        pub type Rejected = Arc<Box<dyn Fn() + Send + Extra>>;
+        "#,
+        "callback_alias_negative",
+    );
+    assert!(
+        out.contains("using Rejected = rusty::Arc<void*>;"),
+        "an additional semantic trait must keep the fail-closed fallback:\n{out}"
+    );
+}
+
+#[test]
 fn test_local_dyn_trait_box_and_cpp_inherit_recognition_fail_closed() {
     let out = transpile_str_module(
         r#"
