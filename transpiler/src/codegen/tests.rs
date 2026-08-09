@@ -6486,6 +6486,55 @@ fn test_no_rebind_mut_binding_stays_reference() {
 // ── Implicit move insertion tests ───────────────────────────
 
 #[test]
+fn test_reassigned_mut_ref_param_aliases_follow_source_order_deterministically() {
+    const SOURCE: &str = r#"
+        fn line_range(out_start: &mut usize, out_end: &mut usize) {
+            *out_start = 1usize;
+            *out_end = 2usize;
+        }
+    "#;
+    const START_DECL: &str = "size_t* out_start_shadow1 = &out_start;";
+    const END_DECL: &str = "size_t* out_end_shadow1 = &out_end;";
+
+    // Exercise whole-function lowering repeatedly. `HashMap` seeds and bucket
+    // layouts are deliberately outside the output contract; source parameter
+    // order is the contract.
+    for _ in 0..32 {
+        let out = transpile_str(SOURCE);
+        let start = out
+            .find(START_DECL)
+            .unwrap_or_else(|| panic!("missing start alias:\n{out}"));
+        let end = out
+            .find(END_DECL)
+            .unwrap_or_else(|| panic!("missing end alias:\n{out}"));
+        assert!(start < end, "parameter aliases left source order:\n{out}");
+    }
+
+    // Pin the narrow ordering boundary independently of `HashMap` insertion
+    // order. This models both candidate orders the old randomized iteration
+    // produced while retaining the same Rust declaration order.
+    let ty: syn::Type = syn::parse_str("&mut usize").unwrap();
+    let source_order = vec!["out_start".to_string(), "out_end".to_string()];
+    for inserted_names in [
+        ["out_start", "out_end"],
+        ["out_end", "out_start"],
+    ] {
+        let mut bindings: Vec<(String, syn::Type)> = inserted_names
+            .into_iter()
+            .map(|name| (name.to_string(), ty.clone()))
+            .collect();
+        CodeGen::sort_param_bindings_in_source_order(&mut bindings, &source_order);
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["out_start", "out_end"]
+        );
+    }
+}
+
+#[test]
 fn test_move_on_variable_binding() {
     // let b = a → auto b = std::move(a)
     let out = transpile_str("fn f() { let a = 1; let b = a; }");
