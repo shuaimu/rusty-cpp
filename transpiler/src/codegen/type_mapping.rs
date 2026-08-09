@@ -1802,6 +1802,75 @@ impl CodeGen {
         })
     }
 
+    /// Ordinary boxed callbacks may carry Rust's canonical thread-safety
+    /// auto traits without changing the callable C++ surface.  Keep this
+    /// separate from transparent nullable callbacks: `Option<Box<dyn Fn +
+    /// Send>>` must still fail closed rather than erase an outer semantic
+    /// constraint.  Every non-lifetime bound here must be exactly one
+    /// Fn-family trait or one of the canonical Send/Sync markers.
+    fn boxed_callback_fn_bound<'a>(
+        &self,
+        object: &'a syn::TypeTraitObject,
+    ) -> Option<&'a syn::TraitBound> {
+        let mut fn_bound = None;
+        let mut saw_send = false;
+        let mut saw_sync = false;
+        for bound in &object.bounds {
+            match bound {
+                syn::TypeParamBound::Lifetime(_) => {}
+                syn::TypeParamBound::Trait(trait_bound)
+                    if matches!(trait_bound.modifier, syn::TraitBoundModifier::None)
+                        && trait_bound.lifetimes.is_none() =>
+                {
+                    let leaf = trait_bound.path.segments.last()?.ident.to_string();
+                    if matches!(leaf.as_str(), "Fn" | "FnMut" | "FnOnce")
+                        && self.transparent_nullable_callback_path_is_canonical(
+                            &trait_bound.path,
+                            &leaf,
+                            &[
+                                &["core", "ops", "Fn"],
+                                &["core", "ops", "FnMut"],
+                                &["core", "ops", "FnOnce"],
+                                &["std", "ops", "Fn"],
+                                &["std", "ops", "FnMut"],
+                                &["std", "ops", "FnOnce"],
+                            ],
+                        )
+                    {
+                        if fn_bound.replace(trait_bound).is_some() {
+                            return None;
+                        }
+                    } else if matches!(leaf.as_str(), "Send" | "Sync")
+                        && self.transparent_nullable_callback_path_is_canonical(
+                            &trait_bound.path,
+                            &leaf,
+                            &[
+                                &["core", "marker", "Send"],
+                                &["core", "marker", "Sync"],
+                                &["std", "marker", "Send"],
+                                &["std", "marker", "Sync"],
+                            ],
+                        )
+                    {
+                        let seen = if leaf == "Send" {
+                            &mut saw_send
+                        } else {
+                            &mut saw_sync
+                        };
+                        if *seen {
+                            return None;
+                        }
+                        *seen = true;
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        fn_bound
+    }
+
     /// Resolve a trait object only when its single semantic trait is a
     /// declaration collected from this Rust input. This is intentionally
     /// stricter than the legacy facade-name heuristic: unknown/external
@@ -3031,42 +3100,7 @@ impl CodeGen {
                                 args.args.first()
                             {
                                 // Check for Fn → rusty::Function
-                                let mut fn_trait_bound = None;
-                                let exact_single_trait = to.bounds.iter().all(|bound| match bound {
-                                    syn::TypeParamBound::Lifetime(_) => true,
-                                    syn::TypeParamBound::Trait(tb)
-                                        if fn_trait_bound.is_none()
-                                            && matches!(
-                                                tb.modifier,
-                                                syn::TraitBoundModifier::None
-                                            )
-                                            && tb.lifetimes.is_none() =>
-                                    {
-                                        fn_trait_bound = Some(tb);
-                                        true
-                                    }
-                                    _ => false,
-                                });
-                                if exact_single_trait
-                                    && let Some(tb) = fn_trait_bound
-                                    && self.transparent_nullable_callback_path_is_canonical(
-                                        &tb.path,
-                                        tb.path
-                                            .segments
-                                            .last()
-                                            .map(|segment| segment.ident.to_string())
-                                            .unwrap_or_default()
-                                            .as_str(),
-                                        &[
-                                            &["core", "ops", "Fn"],
-                                            &["core", "ops", "FnMut"],
-                                            &["core", "ops", "FnOnce"],
-                                            &["std", "ops", "Fn"],
-                                            &["std", "ops", "FnMut"],
-                                            &["std", "ops", "FnOnce"],
-                                        ],
-                                    )
-                                {
+                                if let Some(tb) = self.boxed_callback_fn_bound(to) {
                                     if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
                                         return fn_type;
                                     }
