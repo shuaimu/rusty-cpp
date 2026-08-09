@@ -1833,6 +1833,16 @@ pub struct CodeGen {
     /// Keys are canonical module paths without `cpp::` (e.g., `std`), values contain
     /// symbol names as recorded in the index (e.g., `vector::push_back`).
     pub(crate) cpp_module_member_symbols: HashMap<String, HashSet<String>>,
+    /// Declared C++ namespace for each indexed C++ module.  Module identity and
+    /// symbol namespace are deliberately separate: `import rrr.serializable;`
+    /// can expose its entities from `::rrr`, so a Rust binding to the former
+    /// must never manufacture `rrr::serializable::...` symbol paths.
+    pub(crate) cpp_module_namespaces: HashMap<String, String>,
+    /// Named C++ import for each indexed Rust interop binding path.  This is
+    /// kept separate from `cpp_module_namespaces`: a binding such as
+    /// `legacy::serde` may import `rrr.serializable` while its symbols live in
+    /// `::rrr`.
+    pub(crate) cpp_module_import_names: HashMap<String, String>,
     /// True while emitting function forward declaration signatures.
     /// Used to qualify single-segment type paths that depend on `use` aliases
     /// emitted later in the namespace body.
@@ -2407,6 +2417,8 @@ impl CodeGen {
             cpp_module_import_paths: Vec::new(),
             cpp_module_import_path_keys: HashSet::new(),
             cpp_module_member_symbols: HashMap::new(),
+            cpp_module_namespaces: HashMap::new(),
+            cpp_module_import_names: HashMap::new(),
             in_forward_decl_signature: false,
             in_constraint_emit: std::cell::Cell::new(false),
             suppress_dependent_assoc_traits_routing: std::cell::Cell::new(false),
@@ -4652,6 +4664,20 @@ impl CodeGen {
         cpp_module_member_symbols: HashMap<String, HashSet<String>>,
     ) {
         self.cpp_module_member_symbols = cpp_module_member_symbols;
+    }
+
+    pub fn set_cpp_module_namespaces(
+        &mut self,
+        cpp_module_namespaces: HashMap<String, String>,
+    ) {
+        self.cpp_module_namespaces = cpp_module_namespaces;
+    }
+
+    pub fn set_cpp_module_import_names(
+        &mut self,
+        cpp_module_import_names: HashMap<String, String>,
+    ) {
+        self.cpp_module_import_names = cpp_module_import_names;
     }
 
     pub fn set_external_crate_module_aliases(
@@ -21362,7 +21388,16 @@ impl CodeGen {
     fn record_cpp_module_use_import(&mut self, import: &CppModuleUseImport) {
         self.name_resolver
             .record_cpp_binding(import.binding_name.clone(), import.module_path.clone());
-        self.record_cpp_module_import_path(&import.module_path);
+        let cpp_module = self
+            .cpp_module_import_names
+            .get(&import.module_path)
+            .cloned()
+            // Direct CodeGen unit tests without a configured symbol index retain
+            // their historical binding-derived import.  Full transpilation
+            // validates every reserved binding against a required indexed
+            // `cpp_module` before emission reaches this fallback.
+            .unwrap_or_else(|| cpp_module_path_to_import_name(&import.module_path));
+        self.record_cpp_module_import_path(&cpp_module);
     }
 
     fn record_cpp_module_import_path(&mut self, module_path: &str) {
@@ -44430,6 +44465,33 @@ impl CodeGen {
 
 
 
+    fn cpp_import_symbol_namespace_path(&self, module_path: &str) -> String {
+        if let Some(namespace) = self.cpp_module_namespaces.get(module_path) {
+            let escaped = namespace
+                .trim()
+                .trim_start_matches("::")
+                .split("::")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(escape_cpp_keyword)
+                .collect::<Vec<_>>()
+                .join("::");
+            if escaped.is_empty() {
+                "::".to_string()
+            } else {
+                format!("::{}", escaped)
+            }
+        } else {
+            module_path
+                .split("::")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(escape_cpp_keyword)
+                .collect::<Vec<_>>()
+                .join("::")
+        }
+    }
+
     fn rewrite_cpp_import_bound_expr_path(&self, path: &syn::Path) -> Option<String> {
         if path.segments.len() < 2 {
             return None;
@@ -44437,21 +44499,21 @@ impl CodeGen {
         let first_segment = path.segments.first()?.ident.to_string();
         let module_path = self.name_resolver.cpp_binding(&first_segment)?;
 
-        let mut resolved_segments: Vec<String> = module_path
+        let symbol_namespace = self.cpp_import_symbol_namespace_path(module_path);
+        let mut resolved_segments: Vec<String> = symbol_namespace
+            .trim_start_matches("::")
             .split("::")
             .map(str::trim)
             .filter(|segment| !segment.is_empty())
-            .map(escape_cpp_keyword)
+            .map(str::to_string)
             .collect();
-        if resolved_segments.is_empty() {
-            return None;
-        }
 
         for segment in path.segments.iter().skip(1) {
             resolved_segments.push(escape_cpp_keyword(&segment.ident.to_string()));
         }
 
-        let mut force_leading_colon = path.leading_colon.is_some();
+        let mut force_leading_colon =
+            path.leading_colon.is_some() || symbol_namespace.starts_with("::");
         if resolved_segments.len() == 2 {
             let parent = resolved_segments[0].clone();
             let leaf = resolved_segments[1].clone();
@@ -44488,17 +44550,36 @@ impl CodeGen {
     }
 
     fn rewrite_cpp_import_bound_type_spelling(&self, cpp_ty: &str) -> String {
-        if self.name_resolver.cpp_bindings_is_empty() || cpp_ty.is_empty() {
+        if cpp_ty.is_empty() {
             let rewritten = Self::rewrite_builtin_namespace_aliases_in_type(cpp_ty);
             return Self::rewrite_private_keyword_namespace_in_type_path(&rewritten);
         }
         let mut rewritten = cpp_ty.to_string();
         let mut bindings: Vec<(&String, &String)> = self.name_resolver.cpp_bindings().collect();
         bindings.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
-        for (alias, target) in bindings {
+        for (alias, module_path) in bindings {
             let escaped_alias = escape_cpp_keyword(alias);
             let needle = format!("{}::", escaped_alias);
-            let replacement = format!("{}::", target);
+            let replacement = format!(
+                "{}::",
+                self.cpp_import_symbol_namespace_path(module_path)
+                    .trim_end_matches("::")
+            );
+            rewritten = Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
+        }
+        // Forward declarations are emitted before `use` items have populated
+        // the name resolver.  Their scope-binding expansion retains the
+        // reserved `cpp::` root, so resolve that indexed spelling directly.
+        // Longest module key wins (`a::b` before `a`).
+        let mut indexed_modules: Vec<&String> = self.cpp_module_namespaces.keys().collect();
+        indexed_modules.sort_by_key(|module| std::cmp::Reverse(module.len()));
+        for module_path in indexed_modules {
+            let needle = format!("cpp::{}::", module_path);
+            let replacement = format!(
+                "{}::",
+                self.cpp_import_symbol_namespace_path(module_path)
+                    .trim_end_matches("::")
+            );
             rewritten = Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
         }
         let rewritten = Self::rewrite_builtin_namespace_aliases_in_type(&rewritten);

@@ -230,6 +230,10 @@ pub struct CppModuleSymbolIndex {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CppModuleIndexModule {
+    /// Named C++ module imported for this Rust interop binding.  This is
+    /// intentionally independent from both the binding-path key in `modules`
+    /// and the namespace that owns the indexed symbols.
+    pub cpp_module: String,
     pub namespace: Option<String>,
     pub symbols: BTreeMap<String, CppModuleIndexSymbol>,
 }
@@ -241,6 +245,7 @@ pub struct CppModuleIndexSymbol {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CppModuleSymbolIndexFile {
     #[serde(default = "default_cpp_module_symbol_index_version")]
     version: u32,
@@ -249,7 +254,9 @@ struct CppModuleSymbolIndexFile {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CppModuleIndexModuleFile {
+    cpp_module: String,
     #[serde(default)]
     namespace: Option<String>,
     #[serde(default)]
@@ -257,6 +264,7 @@ struct CppModuleIndexModuleFile {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CppModuleIndexSymbolFile {
     #[serde(default)]
     kind: Option<String>,
@@ -1256,6 +1264,7 @@ pub fn load_cpp_module_symbol_index_files(
         let file = parse_cpp_module_symbol_index_file(path, &content)?;
         merge_cpp_module_symbol_index_file(&mut merged, path, file)?;
     }
+    validate_cpp_module_symbol_index_contract(&merged, index_paths)?;
     Ok(merged)
 }
 
@@ -1318,8 +1327,37 @@ fn merge_cpp_module_symbol_index_file(
                 source_path.display()
             ));
         }
+        validate_cpp_qualified_name(&module_path, "::", "C++ interop binding path")
+            .map_err(|error| {
+                format!(
+                    "C++ module symbol index {} contains {}",
+                    source_path.display(),
+                    error
+                )
+            })?;
+        validate_cpp_qualified_name(&module.cpp_module, ".", "C++ module name").map_err(
+            |error| {
+                format!(
+                    "C++ module symbol index {} entry '{}' contains {}",
+                    source_path.display(),
+                    module_path,
+                    error
+                )
+            },
+        )?;
+        if let Some(namespace) = module.namespace.as_deref() {
+            validate_cpp_qualified_name(namespace, "::", "C++ namespace").map_err(|error| {
+                format!(
+                    "C++ module symbol index {} entry '{}' contains {}",
+                    source_path.display(),
+                    module_path,
+                    error
+                )
+            })?;
+        }
 
         let incoming = CppModuleIndexModule {
+            cpp_module: module.cpp_module,
             namespace: module.namespace,
             symbols: module
                 .symbols
@@ -1351,6 +1389,15 @@ fn merge_cpp_module_entry(
     source_path: &Path,
     module_path: &str,
 ) -> Result<(), String> {
+    if existing.cpp_module != incoming.cpp_module {
+        return Err(format!(
+            "C++ module symbol index {} has conflicting C++ module name for binding '{}': '{}' vs '{}'",
+            source_path.display(),
+            module_path,
+            existing.cpp_module,
+            incoming.cpp_module
+        ));
+    }
     match (&existing.namespace, &incoming.namespace) {
         (Some(a), Some(b)) if a != b => {
             return Err(format!(
@@ -1422,6 +1469,61 @@ fn collect_cpp_module_member_symbol_map(
         }
     }
     by_module
+}
+
+fn collect_cpp_module_namespace_map(index: &CppModuleSymbolIndex) -> HashMap<String, String> {
+    index
+        .modules
+        .iter()
+        .filter_map(|(module_path, module)| {
+            module
+                .namespace
+                .as_ref()
+                .map(|namespace| (module_path.clone(), namespace.clone()))
+        })
+        .collect()
+}
+
+fn collect_cpp_module_import_name_map(index: &CppModuleSymbolIndex) -> HashMap<String, String> {
+    index
+        .modules
+        .iter()
+        .map(|(binding_path, module)| (binding_path.clone(), module.cpp_module.clone()))
+        .collect()
+}
+
+fn validate_cpp_module_symbol_index_contract(
+    index: &CppModuleSymbolIndex,
+    index_sources: &[PathBuf],
+) -> Result<(), String> {
+    let source_label = format_cpp_module_index_sources(index_sources);
+    let mut cpp_modules = HashSet::new();
+    for (binding_path, module) in &index.modules {
+        validate_cpp_qualified_name(binding_path, "::", "C++ interop binding path").map_err(
+            |error| format!("C++ module symbol index {source_label} contains {error}"),
+        )?;
+        validate_cpp_qualified_name(&module.cpp_module, ".", "C++ module name").map_err(
+            |error| {
+                format!(
+                    "C++ module symbol index {source_label} entry '{binding_path}' contains {error}"
+                )
+            },
+        )?;
+        if let Some(namespace) = module.namespace.as_deref() {
+            validate_cpp_qualified_name(namespace, "::", "C++ namespace").map_err(|error| {
+                format!(
+                    "C++ module symbol index {source_label} entry '{binding_path}' contains {error}"
+                )
+            })?;
+        }
+        if !cpp_modules.insert(module.cpp_module.as_str()) {
+            return Err(format!(
+                "C++ module symbol index {source_label} repeats C++ module '{}' across binding entries",
+                module.cpp_module
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Transpile Rust source code to C++ code.
@@ -1561,14 +1663,30 @@ pub fn transpile_full_with_options(
         }
     };
     log_profile("start");
-    let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
+    let mut file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
         .map_err(|e| format!("Parse error: {}", e))?;
     log_profile("parse_with_expand_hygiene_fallback");
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
     log_profile("file_contains_cpp_module_imports");
     if has_cpp_module_imports {
+        // `cpp` is a reserved interop root once this file contains a
+        // `use cpp::...` binding.  Native Rust fixtures commonly carry a
+        // top-level inline `mod cpp { ... }` solely to make cargo type-check;
+        // it is not part of the C++ surface.  Require both conditions so an
+        // ordinary Rust module named `cpp` remains an ordinary emitted module.
+        file.items.retain(|item| {
+            !matches!(item, syn::Item::Mod(module)
+                if module.ident == "cpp" && module.content.is_some())
+        });
+    }
+    if has_cpp_module_imports {
         match options.cpp_module_symbol_index.as_ref() {
-            Some(index) if !index.modules.is_empty() => {}
+            Some(index) if !index.modules.is_empty() => {
+                validate_cpp_module_symbol_index_contract(
+                    index,
+                    &options.cpp_module_symbol_index_sources,
+                )?;
+            }
             Some(_) => {
                 return Err(
                     "Found `use cpp::...` import, but configured C++ module symbol index is empty"
@@ -1640,6 +1758,8 @@ pub fn transpile_full_with_options(
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
+        codegen.set_cpp_module_namespaces(collect_cpp_module_namespace_map(index));
+        codegen.set_cpp_module_import_names(collect_cpp_module_import_name_map(index));
     }
     // UFCS cross-crate (book § 3.2.7): load dependency trait manifests so the
     // classifier + call-site qualification know the dependency's trait methods
@@ -2183,6 +2303,23 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         }
     }
 
+    fn validate_cpp_type_symbol(&mut self, type_path: &syn::TypePath) {
+        if type_path.qself.is_some() {
+            return;
+        }
+        let Some((module_path, symbol_name)) =
+            self.resolve_cpp_symbol_for_path(&type_path.path)
+        else {
+            return;
+        };
+        let type_site = type_path.to_token_stream().to_string();
+        let _ = self.validate_cpp_module_symbol_access(
+            &type_site,
+            &module_path,
+            &symbol_name,
+        );
+    }
+
     fn validate_cpp_macro_symbol_with_site(&mut self, path: &syn::Path, site: &str) {
         let Some((module_path, symbol_name)) = self.resolve_cpp_symbol_for_path(path) else {
             return;
@@ -2226,12 +2363,14 @@ impl<'ast> Visit<'ast> for CppForeignCallResolutionVisitor<'_> {
 
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
         self.context_stack.push(function.sig.ident.to_string());
+        visit::visit_signature(self, &function.sig);
         visit::visit_block(self, &function.block);
         self.context_stack.pop();
     }
 
     fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
         self.context_stack.push(method.sig.ident.to_string());
+        visit::visit_signature(self, &method.sig);
         visit::visit_block(self, &method.block);
         self.context_stack.pop();
     }
@@ -2263,6 +2402,11 @@ impl<'ast> Visit<'ast> for CppForeignCallResolutionVisitor<'_> {
     fn visit_expr_path(&mut self, path_expr: &'ast syn::ExprPath) {
         self.validate_cpp_value_symbol(path_expr);
         visit::visit_expr_path(self, path_expr);
+    }
+
+    fn visit_type_path(&mut self, type_path: &'ast syn::TypePath) {
+        self.validate_cpp_type_symbol(type_path);
+        visit::visit_type_path(self, type_path);
     }
 
     fn visit_expr_macro(&mut self, expr_macro: &'ast syn::ExprMacro) {
@@ -3758,6 +3902,7 @@ mod tests {
   "version": 1,
   "modules": {
     "std": {
+      "cpp_module": "std",
       "namespace": "std",
       "symbols": {
         "max": {
@@ -3774,6 +3919,7 @@ mod tests {
 
         let index = load_cpp_module_symbol_index_files(&[index_path]).expect("load json index");
         let std_module = index.modules.get("std").expect("std module");
+        assert_eq!(std_module.cpp_module, "std");
         assert_eq!(std_module.namespace.as_deref(), Some("std"));
         let max = std_module.symbols.get("max").expect("max symbol");
         assert_eq!(max.kind.as_deref(), Some("function"));
@@ -3790,6 +3936,7 @@ mod tests {
 version = 1
 
 [modules.std]
+cpp_module = "std"
 namespace = "std"
 
 [modules.std.symbols.max]
@@ -3801,10 +3948,82 @@ callable_signatures = ["int(int,int)"]
 
         let index = load_cpp_module_symbol_index_files(&[index_path]).expect("load toml index");
         let std_module = index.modules.get("std").expect("std module");
+        assert_eq!(std_module.cpp_module, "std");
         assert_eq!(std_module.namespace.as_deref(), Some("std"));
         let max = std_module.symbols.get("max").expect("max symbol");
         assert_eq!(max.kind.as_deref(), Some("function"));
         assert_eq!(max.callable_signatures, vec!["int(int,int)".to_string()]);
+    }
+
+    #[test]
+    fn test_cpp_module_symbol_index_requires_explicit_cpp_module() {
+        let dir = tempdir().expect("tempdir");
+        let index_path = dir.path().join("missing_cpp_module.toml");
+        std::fs::write(
+            &index_path,
+            r#"
+version = 1
+[modules."legacy::serde"]
+namespace = "rrr"
+"#,
+        )
+        .expect("write incomplete index");
+
+        let error = load_cpp_module_symbol_index_files(&[index_path])
+            .expect_err("missing cpp_module must fail closed");
+        assert!(error.contains("cpp_module"), "{error}");
+    }
+
+    #[test]
+    fn test_cpp_module_symbol_index_rejects_malformed_cpp_module() {
+        let dir = tempdir().expect("tempdir");
+        let index_path = dir.path().join("malformed_cpp_module.toml");
+        std::fs::write(
+            &index_path,
+            r#"
+version = 1
+[modules."legacy::serde"]
+cpp_module = "rrr.serializable;import evil"
+namespace = "rrr"
+"#,
+        )
+        .expect("write malformed index");
+
+        let error = load_cpp_module_symbol_index_files(&[index_path])
+            .expect_err("malformed cpp_module must fail closed");
+        assert!(error.contains("invalid C++ module name"), "{error}");
+        assert!(error.contains("rrr.serializable;import evil"), "{error}");
+    }
+
+    #[test]
+    fn test_cpp_module_symbol_index_rejects_unknown_fields_at_every_level() {
+        let dir = tempdir().expect("tempdir");
+        let cases = [
+            (
+                "top",
+                r#"{"version":1,"future":true,"modules":{}}"#,
+                "future",
+            ),
+            (
+                "module",
+                r#"{"version":1,"modules":{"legacy::serde":{"cpp_module":"rrr.serializable","namespace":"rrr","future":true,"symbols":{}}}}"#,
+                "future",
+            ),
+            (
+                "symbol",
+                r#"{"version":1,"modules":{"legacy::serde":{"cpp_module":"rrr.serializable","namespace":"rrr","symbols":{"Archive":{"kind":"type","future":true}}}}}"#,
+                "future",
+            ),
+        ];
+
+        for (name, contents, unknown_field) in cases {
+            let index_path = dir.path().join(format!("unknown_{name}.json"));
+            std::fs::write(&index_path, contents).expect("write unknown-field index");
+            let error = load_cpp_module_symbol_index_files(&[index_path])
+                .expect_err("unknown index field must fail closed");
+            assert!(error.contains("unknown field"), "{name}: {error}");
+            assert!(error.contains(unknown_field), "{name}: {error}");
+        }
     }
 
     #[test]
@@ -3861,6 +4080,156 @@ cpp_namespace = "rrr"
         assert!(error.contains("repeats C++ module 'rrr.shared'"), "{error}");
     }
 
+    fn serializable_cpp_module_index() -> CppModuleSymbolIndex {
+        let mut symbols = BTreeMap::new();
+        for archive in ["BinaryWriteArchive", "BinaryReadArchive"] {
+            symbols.insert(
+                archive.to_string(),
+                CppModuleIndexSymbol {
+                    kind: Some("type".to_string()),
+                    callable_signatures: Vec::new(),
+                },
+            );
+        }
+        for operation in ["Serialize_::serialize", "Deserialize_::deserialize"] {
+            symbols.insert(
+                operation.to_string(),
+                CppModuleIndexSymbol {
+                    kind: Some("function_template".to_string()),
+                    callable_signatures: vec!["void(T,Archive)".to_string()],
+                },
+            );
+        }
+        CppModuleSymbolIndex {
+            modules: BTreeMap::from([(
+                "legacy::serde".to_string(),
+                CppModuleIndexModule {
+                    cpp_module: "rrr.serializable".to_string(),
+                    namespace: Some("rrr".to_string()),
+                    symbols,
+                },
+            )]),
+        }
+    }
+
+    fn transpile_with_serializable_cpp_index(source: &str) -> Result<String, String> {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(serializable_cpp_module_index()),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/rrr-cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+        transpile_full_with_options(
+            source,
+            Some("srpc.consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+    }
+
+    #[test]
+    fn test_cpp_module_declared_namespace_projects_types_and_expressions_absolutely() {
+        let output = transpile_with_serializable_cpp_index(
+            r#"
+use cpp::legacy::serde;
+
+pub unsafe fn roundtrip(
+    value: i32,
+    write: &mut serde::BinaryWriteArchive,
+    read: &mut serde::BinaryReadArchive,
+) {
+    serde::Serialize_::serialize(value, write);
+    serde::Deserialize_::deserialize(value, read);
+}
+
+mod cpp {
+    pub mod legacy {
+        pub mod serde {
+            pub struct BinaryWriteArchive;
+            pub struct BinaryReadArchive;
+            pub mod Serialize_ {}
+            pub mod Deserialize_ {}
+        }
+    }
+}
+"#,
+        )
+        .expect("indexed serializable surface should transpile");
+
+        assert_eq!(output.matches("import rrr.serializable;").count(), 1, "{output}");
+        assert!(!output.contains("import legacy.serde;"), "{output}");
+        assert!(output.contains("::rrr::BinaryWriteArchive& write"), "{output}");
+        assert!(output.contains("::rrr::BinaryReadArchive& read"), "{output}");
+        assert!(output.contains("::rrr::Serialize_::serialize("), "{output}");
+        assert!(output.contains("::rrr::Deserialize_::deserialize("), "{output}");
+        assert!(!output.contains("rrr::serializable::Serialize_"), "{output}");
+        assert!(!output.contains("namespace cpp"), "{output}");
+    }
+
+    #[test]
+    fn test_cpp_module_declared_namespace_projects_alias_binding() {
+        let output = transpile_with_serializable_cpp_index(
+            r#"
+use cpp::legacy::serde as legacy;
+pub unsafe fn encode(value: i32, ar: &mut legacy::BinaryWriteArchive) {
+    legacy::Serialize_::serialize(value, ar);
+}
+"#,
+        )
+        .expect("indexed aliased serializable surface should transpile");
+
+        assert!(output.contains("import rrr.serializable;"), "{output}");
+        assert!(!output.contains("import legacy.serde;"), "{output}");
+        assert!(output.contains("::rrr::BinaryWriteArchive& ar"), "{output}");
+        assert!(output.contains("::rrr::Serialize_::serialize("), "{output}");
+        assert!(!output.contains("legacy::BinaryWriteArchive"), "{output}");
+        assert!(!output.contains("legacy::Serialize_"), "{output}");
+    }
+
+    #[test]
+    fn test_ordinary_inline_cpp_module_is_not_suppressed_without_reserved_import() {
+        let output = transpile(
+            "mod cpp { pub struct Native { pub value: i32 } }",
+            None,
+        )
+        .expect("ordinary cpp module should transpile");
+        assert!(output.contains("namespace cpp"), "{output}");
+        assert!(output.contains("struct Native"), "{output}");
+    }
+
+    #[test]
+    fn test_cpp_module_type_errors_when_module_path_is_unindexed() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(serializable_cpp_module_index()),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/rrr-cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+        let error = transpile_full_with_options(
+            "use cpp::rrr::missing; fn f(_: missing::Archive) {}",
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("unindexed type module must fail closed");
+        assert!(error.contains("module path is not present"), "{error}");
+        assert!(error.contains("module `rrr::missing`"), "{error}");
+        assert!(error.contains("symbol `Archive`"), "{error}");
+    }
+
+    #[test]
+    fn test_cpp_module_type_errors_when_symbol_is_unindexed() {
+        let error = transpile_with_serializable_cpp_index(
+            "use cpp::legacy::serde; fn f(_: serde::UnknownArchive) {}",
+        )
+        .expect_err("unindexed type symbol must fail closed");
+        assert!(error.contains("symbol is not present"), "{error}");
+        assert!(error.contains("module `legacy::serde`"), "{error}");
+        assert!(error.contains("symbol `UnknownArchive`"), "{error}");
+    }
+
     #[test]
     fn test_cpp_module_import_requires_symbol_index() {
         let err = transpile("use cpp::std as cpp_std;\nfn f() {}", None)
@@ -3875,6 +4244,7 @@ cpp_namespace = "rrr"
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols: BTreeMap::new(),
             },
@@ -3910,6 +4280,7 @@ cpp_namespace = "rrr"
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -3953,6 +4324,7 @@ fn max2(lo: i32, hi: i32) -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -3987,6 +4359,7 @@ fn max2(lo: i32, hi: i32) -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols: BTreeMap::new(),
             },
@@ -4032,6 +4405,7 @@ fn f(v: i32) -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -4077,6 +4451,7 @@ fn f() -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -4122,6 +4497,7 @@ fn f() -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -4164,6 +4540,7 @@ fn f() -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -4208,6 +4585,7 @@ fn f() -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -4252,6 +4630,7 @@ fn f(v: i32) -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols,
             },
@@ -4291,6 +4670,7 @@ fn f(v: i32) -> i32 {
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
+                cpp_module: "std".to_string(),
                 namespace: Some("std".to_string()),
                 symbols: BTreeMap::new(),
             },

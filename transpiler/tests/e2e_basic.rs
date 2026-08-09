@@ -426,6 +426,7 @@ fn test_cli_cpp_module_index_flag_single_file() {
         r#"
 version = 1
 [modules.std]
+cpp_module = "std"
 namespace = "std"
 "#,
     )
@@ -496,6 +497,7 @@ fn test_crate_mode_cpp_import_with_symbol_index_succeeds() {
         r#"
 version = 1
 [modules.std]
+cpp_module = "std"
 namespace = "std"
 "#,
     )

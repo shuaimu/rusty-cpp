@@ -1,6 +1,7 @@
 version = 1
 
 [modules.std]
+cpp_module = "std"
 namespace = "std"
 
 [modules.std.symbols.max]
