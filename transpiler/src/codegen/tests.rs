@@ -372,6 +372,17 @@ fn test_c_like_enum_preserves_discriminants() {
 }
 
 #[test]
+fn test_module_c_like_enum_function_parameter_stays_nominal() {
+    let out = transpile_str_module(
+        "#[repr(i32)] pub enum Code { A = 10, B = 20 } pub fn code(v: Code) -> i32 { v as i32 }",
+        "probe.errors",
+    );
+    assert!(out.contains("export int32_t code(Code v);"), "{out}");
+    assert!(out.contains("export int32_t code(Code v) {"), "{out}");
+    assert!(!out.contains("code(auto v)"), "{out}");
+}
+
+#[test]
 fn test_enum_with_data() {
     let out = transpile_str("enum Shape { Circle(f64), Rect { w: f64, h: f64 }, None }");
     assert!(out.contains("struct Shape_Circle {"));

@@ -45487,7 +45487,11 @@ impl CodeGen {
             return None;
         }
         let scoped_ident = self.scoped_type_key(&ident);
-        if self.data_enum_types.contains(&ident) || self.data_enum_types.contains(&scoped_ident) {
+        if self.c_like_enum_types.contains(&ident)
+            || self.c_like_enum_types.contains(&scoped_ident)
+            || self.data_enum_types.contains(&ident)
+            || self.data_enum_types.contains(&scoped_ident)
+        {
             return None;
         }
         let scope_key = self.module_stack.join("::");
