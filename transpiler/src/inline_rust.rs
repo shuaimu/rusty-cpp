@@ -14,10 +14,14 @@ const LEGACY_AT_RUST_PREFIX: &str = "@rust";
 const GEN_BEGIN_PREFIX: &str = "/*RUSTYCPP:GEN-BEGIN ";
 const GEN_END_PREFIX: &str = "/*RUSTYCPP:GEN-END id=";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InlineRustMode {
     Check,
     Rewrite,
+    EmitRust {
+        output: PathBuf,
+        block_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -31,17 +35,32 @@ pub fn run_inline_rust(options: &InlineRustOptions) -> Result<(), String> {
         return Err("inline-rust: at least one path is required".to_string());
     }
 
+    if let InlineRustMode::EmitRust { .. } = &options.mode {
+        if options.files.len() != 1 {
+            return Err(format!(
+                "inline-rust --emit-rust requires exactly one --files input; got {}",
+                options.files.len()
+            ));
+        }
+    }
+
     for path in &options.files {
-        process_file(path, options.mode)?;
+        process_file(path, &options.mode)?;
     }
     Ok(())
 }
 
-fn process_file(path: &Path, mode: InlineRustMode) -> Result<(), String> {
+fn process_file(path: &Path, mode: &InlineRustMode) -> Result<(), String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("{}: failed to read file: {}", path.display(), e))?;
     let blocks = parse_blocks(path, &content)?;
     if blocks.is_empty() {
+        if matches!(mode, InlineRustMode::EmitRust { .. }) {
+            return Err(format!(
+                "{}: no inline Rust blocks found to emit",
+                path.display()
+            ));
+        }
         println!("inline-rust skip: {} (no block markers)", path.display());
         return Ok(());
     }
@@ -49,32 +68,7 @@ fn process_file(path: &Path, mode: InlineRustMode) -> Result<(), String> {
     match mode {
         InlineRustMode::Check => {
             for block in &blocks {
-                let generated = block.generated_region.as_ref().ok_or_else(|| {
-                    format!(
-                        "{}:{}: missing generated region for block id={} (run --rewrite)",
-                        path.display(),
-                        block.if_line,
-                        block.id
-                    )
-                })?;
-                if generated.version != "1" {
-                    return Err(format!(
-                        "{}:{}: unsupported GEN marker version {}; expected 1",
-                        path.display(),
-                        block.if_line,
-                        generated.version
-                    ));
-                }
-                if generated.rust_sha256 != block.rust_hash {
-                    return Err(format!(
-                        "{}:{}: hash mismatch for id={} (marker={}, expected={})",
-                        path.display(),
-                        block.if_line,
-                        block.id,
-                        generated.rust_sha256,
-                        block.rust_hash
-                    ));
-                }
+                validate_generated_block(path, block)?;
             }
             println!(
                 "inline-rust check: {} ({} block(s))",
@@ -96,7 +90,137 @@ fn process_file(path: &Path, mode: InlineRustMode) -> Result<(), String> {
             );
             Ok(())
         }
+        InlineRustMode::EmitRust { output, block_ids } => {
+            emit_rust_file(path, output, &blocks, block_ids)
+        }
     }
+}
+
+fn validate_generated_block(path: &Path, block: &ParsedBlock) -> Result<(), String> {
+    let generated = block.generated_region.as_ref().ok_or_else(|| {
+        format!(
+            "{}:{}: missing generated region for block id={} (run --rewrite)",
+            path.display(),
+            block.if_line,
+            block.id
+        )
+    })?;
+    if generated.version != "1" {
+        return Err(format!(
+            "{}:{}: unsupported GEN marker version {}; expected 1",
+            path.display(),
+            block.if_line,
+            generated.version
+        ));
+    }
+    if generated.rust_sha256 != block.rust_hash {
+        return Err(format!(
+            "{}:{}: hash mismatch for id={} (marker={}, expected={})",
+            path.display(),
+            block.if_line,
+            block.id,
+            generated.rust_sha256,
+            block.rust_hash
+        ));
+    }
+    Ok(())
+}
+
+fn emit_rust_file(
+    source: &Path,
+    output: &Path,
+    blocks: &[ParsedBlock],
+    requested_ids: &[String],
+) -> Result<(), String> {
+    reject_source_output_alias(source, output)?;
+
+    let selected: Vec<&ParsedBlock> = if requested_ids.is_empty() {
+        blocks.iter().collect()
+    } else {
+        let mut seen = HashSet::new();
+        let mut selected = Vec::with_capacity(requested_ids.len());
+        for id in requested_ids {
+            if !seen.insert(id.as_str()) {
+                return Err(format!("duplicate requested block id={id}"));
+            }
+            let block = blocks
+                .iter()
+                .find(|block| block.id == *id)
+                .ok_or_else(|| format!("{}: missing inline block id={id}", source.display()))?;
+            selected.push(block);
+        }
+        selected
+    };
+
+    for block in &selected {
+        validate_generated_block(source, block)?;
+    }
+
+    let mut emitted = selected
+        .iter()
+        .map(|block| block.rust_payload_normalized.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    emitted.push('\n');
+
+    fs::write(output, emitted.as_bytes())
+        .map_err(|e| format!("{}: failed to write emitted Rust: {}", output.display(), e))?;
+    println!(
+        "inline-rust emit-rust: {} -> {} ({} block(s))",
+        source.display(),
+        output.display(),
+        selected.len()
+    );
+    Ok(())
+}
+
+fn reject_source_output_alias(source: &Path, output: &Path) -> Result<(), String> {
+    let canonical_source = fs::canonicalize(source)
+        .map_err(|e| format!("{}: failed to resolve source path: {}", source.display(), e))?;
+
+    let canonical_output =
+        if output.exists() {
+            Some(fs::canonicalize(output).map_err(|e| {
+                format!("{}: failed to resolve output path: {}", output.display(), e)
+            })?)
+        } else {
+            let parent = output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let file_name = output
+                .file_name()
+                .ok_or_else(|| format!("{}: output path has no file name", output.display()))?;
+            fs::canonicalize(parent)
+                .ok()
+                .map(|canonical_parent| canonical_parent.join(file_name))
+        };
+
+    if canonical_output.as_ref() == Some(&canonical_source) {
+        return Err(format!(
+            "refusing to emit Rust over source file {}",
+            source.display()
+        ));
+    }
+
+    #[cfg(unix)]
+    if output.exists() {
+        use std::os::unix::fs::MetadataExt;
+        let source_metadata = fs::metadata(source)
+            .map_err(|e| format!("{}: failed to stat source: {}", source.display(), e))?;
+        let output_metadata = fs::metadata(output)
+            .map_err(|e| format!("{}: failed to stat output: {}", output.display(), e))?;
+        if source_metadata.dev() == output_metadata.dev()
+            && source_metadata.ino() == output_metadata.ino()
+        {
+            return Err(format!(
+                "refusing to emit Rust over source file {}",
+                source.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
