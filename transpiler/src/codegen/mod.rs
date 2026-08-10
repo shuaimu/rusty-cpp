@@ -1450,6 +1450,10 @@ pub struct CodeGen {
     pub(crate) auto_namespace: bool,
     /// In module mode, emit `import std;` and avoid explicit standard-header includes.
     pub(crate) use_import_std_in_modules: bool,
+    /// Already-validated, fully rendered include directives requested for this
+    /// module's global module fragment.  Kept separate from the fixed runtime
+    /// baseline so an empty list leaves legacy output byte-identical.
+    pub(crate) explicit_module_gmf_includes: Vec<String>,
     /// Prefer `rusty::Unit` spelling for Rust unit `()` in generated type
     /// positions to reduce direct `std::tuple<>` surface in output.
     pub(crate) prefer_rusty_unit_alias: bool,
@@ -2088,6 +2092,7 @@ impl CodeGen {
             cxx_namespace: None,
             auto_namespace: false,
             use_import_std_in_modules: false,
+            explicit_module_gmf_includes: Vec::new(),
             prefer_rusty_unit_alias: false,
             prefer_rusty_view_aliases: false,
             // Pro/proxy facade lowering removed — interface+adapter is
@@ -4018,6 +4023,10 @@ impl CodeGen {
         self.use_import_std_in_modules = enabled;
     }
 
+    pub fn set_explicit_module_gmf_includes(&mut self, includes: Vec<String>) {
+        self.explicit_module_gmf_includes = includes;
+    }
+
     /// Configure a C++ namespace to wrap all exported items in.
     /// `Some("foo::bar")` emits `export namespace foo::bar { … }` around
     /// the items in module mode; `None` keeps the legacy flat-export
@@ -4669,6 +4678,9 @@ impl CodeGen {
             // This avoids named-module ODR conflicts with libstdc++ declarations.
             self.writeln("module;");
             self.newline();
+            for include in self.explicit_module_gmf_includes.clone() {
+                self.writeln(&include);
+            }
         }
 
         let use_import_std = self.module_name.is_some() && self.use_import_std_in_modules;

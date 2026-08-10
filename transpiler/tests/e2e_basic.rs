@@ -233,6 +233,161 @@ fn test_module_name_flag() {
 }
 
 #[test]
+fn test_module_preamble_single_file_preserves_include_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("lib.rs");
+    let output_path = dir.path().join("lib.cppm");
+    let preamble = dir.path().join("module-preamble.toml");
+    std::fs::write(&input, "pub fn hello() {}\n").unwrap();
+    std::fs::write(
+        &preamble,
+        r#"
+version = 1
+
+[[module]]
+name = "demo"
+includes = [
+    { path = "demo/local.hpp", form = "quote" },
+    { path = "sys/types.h", form = "angle" },
+]
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(&input)
+        .arg("--module-name")
+        .arg("demo")
+        .arg("--module-preamble")
+        .arg(&preamble)
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    let module_fragment = cpp.find("\nmodule;\n").unwrap();
+    let local = cpp.find("#include \"demo/local.hpp\"").unwrap();
+    let system = cpp.find("#include <sys/types.h>").unwrap();
+    let module_decl = cpp.find("export module demo;").unwrap();
+    assert!(module_fragment < local && local < system && system < module_decl);
+}
+
+#[test]
+fn test_module_preamble_is_rejected_without_module_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("lib.rs");
+    let preamble = dir.path().join("module-preamble.toml");
+    std::fs::write(&input, "pub fn hello() {}\n").unwrap();
+    std::fs::write(
+        &preamble,
+        "version = 1\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"demo/local.hpp\", form = \"quote\" }]\n",
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(&input)
+        .arg("--module-preamble")
+        .arg(&preamble)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires module output"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_module_preamble_is_not_silently_ignored_by_non_transpile_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let preamble = dir.path().join("module-preamble.toml");
+    std::fs::write(
+        &preamble,
+        "version = 1\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"demo/local.hpp\", form = \"quote\" }]\n",
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg("--module-preamble")
+        .arg(&preamble)
+        .arg("--build-info")
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires module output"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_module_preamble_crate_mode_selects_each_row_and_rejects_stale_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("lib.rs"), "pub mod net;\n").unwrap();
+    std::fs::write(src.join("net.rs"), "pub fn port() -> i32 { 7 }\n").unwrap();
+    let preamble = dir.path().join("module-preamble.toml");
+    std::fs::write(
+        &preamble,
+        "version = 1\n[[module]]\nname = \"demo.net\"\nincludes = [{ path = \"demo/net.hpp\", form = \"quote\" }]\n",
+    )
+    .unwrap();
+    let output_dir = dir.path().join("cpp-out");
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--module-preamble")
+        .arg(&preamble)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let root_cpp = std::fs::read_to_string(output_dir.join("demo.cppm")).unwrap();
+    let net_cpp = std::fs::read_to_string(output_dir.join("demo.net.cppm")).unwrap();
+    assert!(!root_cpp.contains("demo/net.hpp"));
+    assert!(net_cpp.contains("#include \"demo/net.hpp\""));
+
+    std::fs::write(
+        &preamble,
+        "version = 1\n[[module]]\nname = \"demo.removed\"\nincludes = [{ path = \"demo/old.hpp\", form = \"quote\" }]\n",
+    )
+    .unwrap();
+    let stale_output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(dir.path().join("stale-out"))
+        .arg("--module-preamble")
+        .arg(&preamble)
+        .output()
+        .expect("failed to run");
+    assert!(!stale_output.status.success());
+    let stderr = String::from_utf8_lossy(&stale_output.stderr);
+    assert!(stderr.contains("stale/uncollected"), "stderr: {stderr}");
+    assert!(stderr.contains("demo.removed"), "stderr: {stderr}");
+}
+
+#[test]
 fn test_cmake_generation() {
     let dir = tempfile::tempdir().unwrap();
     let src_dir = dir.path().join("src");

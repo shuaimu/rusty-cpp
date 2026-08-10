@@ -553,6 +553,34 @@ rusty-cpp-transpiler --crate path/to/Cargo.toml --expand
 rusty-cpp-transpiler input.rs -o output.cppm --verify
 ```
 
+Modules that need platform or project headers in the global module fragment can
+use a strict, versioned TOML sidecar:
+
+```toml
+version = 1
+
+[[module]]
+name = "my_crate.epoll"
+includes = [
+    { path = "sys/epoll.h", form = "angle", when = { target_os = ["linux"] } },
+    { path = "my_crate/reactor.hpp", form = "quote" },
+]
+```
+
+```bash
+rusty-cpp-transpiler --crate path/to/Cargo.toml --output-dir cpp_out \
+  --module-preamble module-preamble.toml --preamble-target-os linux
+```
+
+These ordered includes are emitted after `module;` and before the fixed runtime
+includes and `export module`. The schema accepts only angle/quote include specs,
+not raw directives, macros, pragmas, or snippets. Paths must be relative and
+cannot contain traversal components, delimiters, controls, whitespace, or
+backslashes. Unknown fields, duplicate/conflicting includes, duplicate module
+rows, and rows not collected by the current crate are errors. A sidecar with a
+`target_os` condition requires the explicit `--preamble-target-os` argument;
+the host OS is never inferred, so cross-compilation fails closed.
+
 Compiling the output requires a clang toolchain with C++20 modules support (the test matrix builds with `clang++ -std=c++23`); the emitted code `#include`s the header-only `rusty/` runtime from this repository. Generated code can also call *into* existing C++: `use cpp::...` imports resolve against a user-supplied C++ module symbol index (`--cpp-module-index`).
 
 ### What's covered

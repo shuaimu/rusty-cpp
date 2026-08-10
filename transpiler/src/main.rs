@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
@@ -70,6 +70,14 @@ struct Cli {
     /// C++ module symbol index sidecar file(s) for `use cpp::...` imports (JSON or TOML)
     #[arg(long = "cpp-module-index")]
     cpp_module_index: Vec<PathBuf>,
+
+    /// Versioned TOML sidecar containing per-module global-fragment includes
+    #[arg(long, value_name = "PATH", conflicts_with = "cmake")]
+    module_preamble: Option<PathBuf>,
+
+    /// Explicit target_os used to evaluate module-preamble conditions
+    #[arg(long, value_name = "OS", requires = "module_preamble")]
+    preamble_target_os: Option<String>,
 
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
@@ -262,6 +270,7 @@ fn transpile_crate(
     expand: bool,
     verify: bool,
     transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
 ) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
@@ -302,6 +311,7 @@ fn transpile_crate(
                         expand,
                         verify,
                         transpile_options,
+                        None,
                     ) {
                         Ok(()) => {
                             local_dep_dirs.push(dep.name.clone());
@@ -339,12 +349,21 @@ fn transpile_crate(
                 let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
                 let extension_method_hints =
                     transpile::collect_extension_method_hints(&expanded_source);
+                let expanded_options = if let Some(manifest) = module_preamble {
+                    let selected = manifest.select_for_modules([crate_name.as_str()])?;
+                    let mut opts = transpile_options.clone();
+                    opts.explicit_gmf_includes =
+                        selected.get(crate_name).cloned().unwrap_or_default();
+                    opts
+                } else {
+                    transpile_options.clone()
+                };
                 match transpile::transpile_with_type_map_and_extension_hints_and_options(
                     &expanded_source,
                     Some(crate_name),
                     type_map,
                     &extension_method_hints,
-                    transpile_options,
+                    &expanded_options,
                 ) {
                     Ok(cpp_output) => {
                         std::fs::write(&cppm_path, &cpp_output)
@@ -418,6 +437,11 @@ fn transpile_crate(
         .iter()
         .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
         .collect();
+    let module_preambles = if let Some(manifest) = module_preamble {
+        manifest.select_for_modules(crate_module_names.iter().map(String::as_str))?
+    } else {
+        BTreeMap::new()
+    };
     let crate_transpile_options = {
         let mut opts = transpile_options.clone();
         opts.cross_file_enums = cross_file_enums;
@@ -442,12 +466,18 @@ fn transpile_crate(
             }
         };
 
+        let mut module_options = crate_transpile_options.clone();
+        module_options.explicit_gmf_includes = module_preambles
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_default();
+
         match transpile::transpile_with_type_map_and_extension_hints_and_options(
             &source,
             Some(&module_name),
             type_map,
             &extension_method_hints,
-            &crate_transpile_options,
+            &module_options,
         ) {
             Ok(cpp_output) => {
                 if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
@@ -4137,6 +4167,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: args.import_std,
+        explicit_gmf_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -4655,6 +4686,11 @@ fn find_rusty_include_dir() -> PathBuf {
 fn main() {
     let cli = Cli::parse();
 
+    if cli.module_preamble.is_some() && (cli.build_info || cli.command.is_some()) {
+        eprintln!("Error: --module-preamble requires module output");
+        process::exit(1);
+    }
+
     if cli.build_info {
         println!(
             r#"{{"git_hash":"{}","git_dirty":{}}}"#,
@@ -4739,6 +4775,17 @@ fn main() {
             }
         }
     };
+    let module_preamble_manifest = if let Some(path) = cli.module_preamble.as_ref() {
+        match transpile::load_module_preamble_file(path, cli.preamble_target_os.as_deref()) {
+            Ok(manifest) => Some(manifest),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     let transpile_options = transpile::TranspileOptions {
         // Crate mode's collect pass sees whole files; the sibling-block
         // cpp_inherit harvest is an inline-rust-only need.
@@ -4752,6 +4799,7 @@ fn main() {
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: false,
+        explicit_gmf_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -4777,6 +4825,7 @@ fn main() {
             cli.expand,
             cli.verify,
             &transpile_options,
+            module_preamble_manifest.as_ref(),
         ) {
             Ok(()) => {}
             Err(e) => {
@@ -4837,13 +4886,32 @@ fn main() {
         }
     };
 
+    let mut single_transpile_options = transpile_options;
+    if let Some(manifest) = module_preamble_manifest.as_ref() {
+        let Some(module_name) = cli.module_name.as_deref() else {
+            eprintln!(
+                "Error: --module-preamble requires module output; pass --module-name for single-file transpilation"
+            );
+            process::exit(1);
+        };
+        let selected = match manifest.select_for_modules([module_name]) {
+            Ok(selected) => selected,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        };
+        single_transpile_options.explicit_gmf_includes =
+            selected.get(module_name).cloned().unwrap_or_default();
+    }
+
     let cpp_output = match transpile::transpile_full_with_options(
         &source,
         cli.module_name.as_deref(),
         &type_map,
         &HashSet::new(),
         None,
-        &transpile_options,
+        &single_transpile_options,
     ) {
         Ok(output) => output,
         Err(e) => {

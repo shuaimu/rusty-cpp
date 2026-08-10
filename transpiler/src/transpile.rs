@@ -198,6 +198,356 @@ fn default_cpp_module_symbol_index_version() -> u32 {
     1
 }
 
+/// Delimiter used for an explicitly requested global-module-fragment include.
+///
+/// This deliberately models only the two C++ include forms.  The preamble API
+/// does not accept arbitrary preprocessor text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GmfIncludeForm {
+    Angle,
+    Quote,
+}
+
+/// One validated-by-transpilation include request for a C++ module's global
+/// module fragment.  Entries are emitted in the order supplied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GmfIncludeSpec {
+    pub path: String,
+    pub form: GmfIncludeForm,
+}
+
+impl GmfIncludeSpec {
+    fn render(&self) -> String {
+        match self.form {
+            GmfIncludeForm::Angle => format!("#include <{}>", self.path),
+            GmfIncludeForm::Quote => format!("#include \"{}\"", self.path),
+        }
+    }
+}
+
+const MODULE_PREAMBLE_FILE_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModulePreambleFile {
+    version: u32,
+    #[serde(default, rename = "module")]
+    modules: Vec<ModulePreambleFileRow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModulePreambleFileRow {
+    name: String,
+    #[serde(default)]
+    includes: Vec<GmfIncludeFileSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GmfIncludeFileSpec {
+    path: String,
+    form: GmfIncludeFileForm,
+    #[serde(default)]
+    when: Option<GmfIncludeFileCondition>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum GmfIncludeFileForm {
+    Angle,
+    Quote,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GmfIncludeFileCondition {
+    target_os: Vec<String>,
+}
+
+/// A loaded, target-filtered module-preamble sidecar.  Selection is separate
+/// from loading so crate mode can reject rows that no emitted module collected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModulePreambleManifest {
+    source: PathBuf,
+    modules: BTreeMap<String, Vec<GmfIncludeSpec>>,
+}
+
+impl ModulePreambleManifest {
+    /// Select preambles for one complete emission set.  Missing rows are fine
+    /// (most modules need no additional headers), but every row present in the
+    /// sidecar must be collected.  That makes renamed/deleted module rows a
+    /// deterministic error instead of silently ignoring stale configuration.
+    pub fn select_for_modules<'a, I>(
+        &self,
+        emitted_modules: I,
+    ) -> Result<BTreeMap<String, Vec<GmfIncludeSpec>>, String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let emitted: std::collections::BTreeSet<String> = emitted_modules
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let stale: Vec<&str> = self
+            .modules
+            .keys()
+            .filter(|name| !emitted.contains(*name))
+            .map(String::as_str)
+            .collect();
+        if !stale.is_empty() {
+            let emitted_label = if emitted.is_empty() {
+                "<none>".to_string()
+            } else {
+                emitted.iter().cloned().collect::<Vec<_>>().join(", ")
+            };
+            return Err(format!(
+                "Module preamble {} has stale/uncollected [[module]] row(s): {} (emitted modules: {})",
+                self.source.display(),
+                stale.join(", "),
+                emitted_label
+            ));
+        }
+
+        Ok(self
+            .modules
+            .iter()
+            .filter(|(name, _)| emitted.contains(*name))
+            .map(|(name, includes)| (name.clone(), includes.clone()))
+            .collect())
+    }
+}
+
+fn validate_module_preamble_name(name: &str) -> Result<(), String> {
+    let valid_segment = |segment: &str| {
+        let mut chars = segment.chars();
+        chars
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    };
+    if name.is_empty() || !name.split('.').all(valid_segment) {
+        return Err(format!(
+            "invalid module preamble name {:?}: expected dot-separated C++ identifiers",
+            name
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target_os_name(target_os: &str) -> Result<(), String> {
+    if target_os.is_empty()
+        || !target_os
+            .chars()
+            .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid module-preamble target_os {:?}: expected lowercase ASCII letters, digits, or underscore",
+            target_os
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the injection-safe subset accepted by the structured preamble
+/// API.  Paths are portable, relative include names; directives, delimiters,
+/// escapes, whitespace, traversal, and duplicate/conflicting rows are rejected.
+pub fn validate_explicit_gmf_includes(includes: &[GmfIncludeSpec]) -> Result<(), String> {
+    let mut paths: BTreeMap<&str, GmfIncludeForm> = BTreeMap::new();
+    for (index, include) in includes.iter().enumerate() {
+        let path = include.path.as_str();
+        if path.is_empty() {
+            return Err(format!("GMF include #{} has an empty path", index + 1));
+        }
+        if Path::new(path).is_absolute() || path.starts_with('/') {
+            return Err(format!(
+                "GMF include #{} path {:?} must be relative",
+                index + 1,
+                path
+            ));
+        }
+        if path.chars().any(char::is_control) {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a control character",
+                index + 1,
+                path
+            ));
+        }
+        if path.contains(['\"', '\'', '<', '>']) {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a quote or include delimiter",
+                index + 1,
+                path
+            ));
+        }
+        if path.contains('\\') {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a backslash; use forward slashes",
+                index + 1,
+                path
+            ));
+        }
+        if !path.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/')
+        }) {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a disallowed character",
+                index + 1,
+                path
+            ));
+        }
+        if path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            return Err(format!(
+                "GMF include #{} path {:?} contains an empty, '.' or '..' component",
+                index + 1,
+                path
+            ));
+        }
+        if let Some(previous_form) = paths.insert(path, include.form) {
+            let kind = if previous_form == include.form {
+                "duplicate"
+            } else {
+                "conflicting angle/quote"
+            };
+            return Err(format!(
+                "GMF include #{} is a {} entry for path {:?}",
+                index + 1,
+                kind,
+                path
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Load the strict version-1 TOML sidecar used by `--module-preamble`.
+///
+/// `when = { target_os = [...] }` is the only supported condition.  If any
+/// condition is present, the caller must name the intended target explicitly;
+/// host autodetection would be wrong for cross compilation, so omission fails
+/// closed.
+pub fn load_module_preamble_file(
+    path: &Path,
+    target_os: Option<&str>,
+) -> Result<ModulePreambleManifest, String> {
+    if let Some(target_os) = target_os {
+        validate_target_os_name(target_os)?;
+    }
+    let content = fs::read_to_string(path).map_err(|e| {
+        format!(
+            "Failed to read module preamble {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    let file: ModulePreambleFile = toml::from_str(&content)
+        .map_err(|e| format!("Invalid TOML module preamble {}: {}", path.display(), e))?;
+    if file.version != MODULE_PREAMBLE_FILE_VERSION {
+        return Err(format!(
+            "Unsupported module preamble version {} in {} (expected version {})",
+            file.version,
+            path.display(),
+            MODULE_PREAMBLE_FILE_VERSION
+        ));
+    }
+    if file.modules.is_empty() {
+        return Err(format!(
+            "Module preamble {} must contain at least one [[module]] row",
+            path.display()
+        ));
+    }
+
+    let has_condition = file
+        .modules
+        .iter()
+        .flat_map(|row| &row.includes)
+        .any(|include| include.when.is_some());
+    if has_condition && target_os.is_none() {
+        return Err(format!(
+            "Module preamble {} contains a target_os condition; pass --preamble-target-os explicitly",
+            path.display()
+        ));
+    }
+
+    let mut modules = BTreeMap::new();
+    for row in file.modules {
+        validate_module_preamble_name(&row.name)
+            .map_err(|e| format!("{} in {}", e, path.display()))?;
+        if row.includes.is_empty() {
+            return Err(format!(
+                "Module preamble {} row {:?} has no includes",
+                path.display(),
+                row.name
+            ));
+        }
+
+        let mut unfiltered = Vec::with_capacity(row.includes.len());
+        let mut conditions = Vec::with_capacity(row.includes.len());
+        for include in row.includes {
+            if let Some(condition) = &include.when {
+                if condition.target_os.is_empty() {
+                    return Err(format!(
+                        "Module preamble {} row {:?} has an empty target_os condition",
+                        path.display(),
+                        row.name
+                    ));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for value in &condition.target_os {
+                    validate_target_os_name(value).map_err(|e| {
+                        format!("{} in module {:?} of {}", e, row.name, path.display())
+                    })?;
+                    if !seen.insert(value) {
+                        return Err(format!(
+                            "Module preamble {} row {:?} repeats target_os {:?}",
+                            path.display(),
+                            row.name,
+                            value
+                        ));
+                    }
+                }
+            }
+            unfiltered.push(GmfIncludeSpec {
+                path: include.path,
+                form: match include.form {
+                    GmfIncludeFileForm::Angle => GmfIncludeForm::Angle,
+                    GmfIncludeFileForm::Quote => GmfIncludeForm::Quote,
+                },
+            });
+            conditions.push(include.when);
+        }
+        validate_explicit_gmf_includes(&unfiltered)
+            .map_err(|e| format!("{} in module {:?} of {}", e, row.name, path.display()))?;
+
+        let selected = unfiltered
+            .into_iter()
+            .zip(conditions)
+            .filter_map(|(include, condition)| {
+                let enabled = condition.as_ref().is_none_or(|condition| {
+                    let target_os = target_os.expect("conditions require target_os above");
+                    condition.target_os.iter().any(|value| value == target_os)
+                });
+                enabled.then_some(include)
+            })
+            .collect::<Vec<_>>();
+        if modules.insert(row.name.clone(), selected).is_some() {
+            return Err(format!(
+                "Module preamble {} repeats [[module]] name {:?}",
+                path.display(),
+                row.name
+            ));
+        }
+    }
+
+    Ok(ModulePreambleManifest {
+        source: path.to_path_buf(),
+        modules,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranspileOptions {
     /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
@@ -227,6 +577,10 @@ pub struct TranspileOptions {
     /// In module mode, prefer `import std;` over explicit standard-header includes.
     /// Requires Stage D toolchain setup that provides a prebuilt `std` module.
     pub use_import_std_in_modules: bool,
+    /// Ordered, structured include requests for this module's global module
+    /// fragment.  Rejected for non-module output and validated before parsing
+    /// or code generation.  Empty preserves the historical output byte-for-byte.
+    pub explicit_gmf_includes: Vec<GmfIncludeSpec>,
     /// Prefer `rusty::Unit` alias spelling for Rust `()` in generated
     /// output. Defaults to `true` (see `impl Default`) — the two C++
     /// types are identical via `using Unit = std::tuple<>;` but the
@@ -716,6 +1070,7 @@ impl Default for TranspileOptions {
             emit_ufcs_trait_manifest_path: None,
             dependency_ufcs_trait_manifests: Vec::new(),
             use_import_std_in_modules: false,
+            explicit_gmf_includes: Vec::new(),
             // Default to the `rusty::Unit` alias spelling (replacing
             // `std::tuple<>` post-emission). The two C++ types are
             // identical via `using Unit = std::tuple<>;`, but the alias
@@ -1007,6 +1362,13 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
+    validate_explicit_gmf_includes(&options.explicit_gmf_includes)?;
+    if module_name.is_none() && !options.explicit_gmf_includes.is_empty() {
+        return Err(
+            "Explicit GMF includes require module output (provide a C++ module name)"
+                .to_string(),
+        );
+    }
     let profile_transpile = std::env::var_os("RUSTY_CPP_PROFILE_TRANSPILE").is_some();
     let profile_this_call = profile_transpile && rust_source.lines().take(2001).count() >= 2000;
     let profile_start = std::time::Instant::now();
@@ -1085,6 +1447,13 @@ pub fn transpile_full_with_options(
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_cpp_type_aliases(options.cpp_type_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
+    codegen.set_explicit_module_gmf_includes(
+        options
+            .explicit_gmf_includes
+            .iter()
+            .map(GmfIncludeSpec::render)
+            .collect(),
+    );
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
     codegen.set_auto_namespace(options.auto_namespace);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
@@ -2188,6 +2557,219 @@ mod tests {
     fn test_transpile_error() {
         let result = transpile("fn {{{ invalid", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_explicit_gmf_includes_are_ordered_before_module_declaration() {
+        let source = "pub fn answer() -> i32 { 42 }";
+        let baseline = transpile(source, Some("demo.preamble")).unwrap();
+        let empty_options = transpile_full_with_options(
+            source,
+            Some("demo.preamble"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &TranspileOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(baseline, empty_options, "empty preamble changed legacy bytes");
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(baseline.as_bytes())),
+            "7ba59e308ba31cf408c7b3a3f83c856d4a5ab888f5e4fa7361437708fc24cd86",
+            "default module output drifted from the ba70 no-preamble baseline"
+        );
+
+        let options = TranspileOptions {
+            explicit_gmf_includes: vec![
+                GmfIncludeSpec {
+                    path: "demo/first.hpp".to_string(),
+                    form: GmfIncludeForm::Quote,
+                },
+                GmfIncludeSpec {
+                    path: "sys/types.h".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+            ],
+            ..TranspileOptions::default()
+        };
+        let output = transpile_full_with_options(
+            source,
+            Some("demo.preamble"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .unwrap();
+        let repeated = transpile_full_with_options(
+            source,
+            Some("demo.preamble"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(output, repeated, "explicit preamble output is not deterministic");
+        let module_fragment = output.find("\nmodule;\n").unwrap();
+        let first = output.find("#include \"demo/first.hpp\"").unwrap();
+        let second = output.find("#include <sys/types.h>").unwrap();
+        let fixed = output.find("#include <cstdint>").unwrap();
+        let declaration = output.find("export module demo.preamble;").unwrap();
+        assert!(
+            module_fragment < first && first < second && second < fixed && fixed < declaration
+        );
+    }
+
+    #[test]
+    fn test_explicit_gmf_includes_require_module_output() {
+        let options = TranspileOptions {
+            explicit_gmf_includes: vec![GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            }],
+            ..TranspileOptions::default()
+        };
+        let error = transpile_full_with_options(
+            "fn f() {}",
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .unwrap_err();
+        assert!(error.contains("require module output"), "{error}");
+    }
+
+    #[test]
+    fn test_explicit_gmf_include_validation_rejects_injection_and_collisions() {
+        for invalid in [
+            "/absolute.hpp",
+            "../escape.hpp",
+            "dir/../escape.hpp",
+            "dir//header.hpp",
+            "dir/./header.hpp",
+            "dir\\header.hpp",
+            "header.hpp\n#define BAD 1",
+            "header.hpp\"",
+            "<header.hpp>",
+            "header.hpp;bad",
+            "header with spaces.hpp",
+        ] {
+            let error = validate_explicit_gmf_includes(&[GmfIncludeSpec {
+                path: invalid.to_string(),
+                form: GmfIncludeForm::Quote,
+            }])
+            .unwrap_err();
+            assert!(error.contains("GMF include"), "path={invalid:?}: {error}");
+        }
+
+        let duplicate = vec![
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            },
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            },
+        ];
+        assert!(
+            validate_explicit_gmf_includes(&duplicate)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+
+        let conflict = vec![
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            },
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Angle,
+            },
+        ];
+        assert!(
+            validate_explicit_gmf_includes(&conflict)
+                .unwrap_err()
+                .contains("conflicting")
+        );
+    }
+
+    #[test]
+    fn test_module_preamble_sidecar_filters_target_and_rejects_stale_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("module-preamble.toml");
+        std::fs::write(
+            &path,
+            r#"
+version = 1
+
+[[module]]
+name = "demo.net"
+includes = [
+    { path = "sys/epoll.h", form = "angle", when = { target_os = ["linux", "android"] } },
+    { path = "demo/net.hpp", form = "quote" },
+]
+"#,
+        )
+        .unwrap();
+
+        let missing_target = load_module_preamble_file(&path, None).unwrap_err();
+        assert!(missing_target.contains("--preamble-target-os"));
+
+        let linux = load_module_preamble_file(&path, Some("linux")).unwrap();
+        let selected = linux.select_for_modules(["demo", "demo.net"]).unwrap();
+        assert!(
+            !selected.contains_key("demo"),
+            "an emitted module without a sidecar row must remain valid and empty"
+        );
+        assert_eq!(
+            selected["demo.net"],
+            vec![
+                GmfIncludeSpec {
+                    path: "sys/epoll.h".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+                GmfIncludeSpec {
+                    path: "demo/net.hpp".to_string(),
+                    form: GmfIncludeForm::Quote,
+                },
+            ]
+        );
+
+        let windows = load_module_preamble_file(&path, Some("windows")).unwrap();
+        assert_eq!(
+            windows.select_for_modules(["demo.net"]).unwrap()["demo.net"],
+            vec![GmfIncludeSpec {
+                path: "demo/net.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            }]
+        );
+
+        let stale = linux.select_for_modules(["demo"]).unwrap_err();
+        assert!(stale.contains("stale/uncollected"), "{stale}");
+        assert!(stale.contains("demo.net"), "{stale}");
+    }
+
+    #[test]
+    fn test_module_preamble_sidecar_denies_unknown_fields_at_every_level() {
+        let cases = [
+            "version = 1\nunknown = true\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"x.h\", form = \"angle\" }]\n",
+            "version = 1\n[[module]]\nname = \"demo\"\nunknown = true\nincludes = [{ path = \"x.h\", form = \"angle\" }]\n",
+            "version = 1\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"x.h\", form = \"angle\", unknown = true }]\n",
+            "version = 1\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"x.h\", form = \"angle\", when = { target_os = [\"linux\"], feature = [\"x\"] } }]\n",
+        ];
+        for (index, content) in cases.into_iter().enumerate() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(format!("unknown-{index}.toml"));
+            std::fs::write(&path, content).unwrap();
+            let error = load_module_preamble_file(&path, Some("linux")).unwrap_err();
+            assert!(error.contains("unknown field"), "case {index}: {error}");
+        }
     }
 
     #[test]
