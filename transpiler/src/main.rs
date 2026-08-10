@@ -268,12 +268,24 @@ struct ParityTestArgs {
 #[derive(Parser)]
 struct InlineRustArgs {
     /// Validate marker structure and rust_sha256 hashes
-    #[arg(long, conflicts_with = "rewrite")]
+    #[arg(long, conflicts_with_all = ["rewrite", "emit_rust"])]
     check: bool,
 
     /// Rewrite GEN regions with deterministic markers and generated C++ fallback
-    #[arg(long, conflicts_with = "check")]
+    #[arg(long, conflicts_with_all = ["check", "emit_rust"])]
     rewrite: bool,
+
+    /// Emit normalized Rust payloads to OUTPUT without modifying the source file
+    #[arg(
+        long,
+        value_name = "OUTPUT",
+        conflicts_with_all = ["check", "rewrite"]
+    )]
+    emit_rust: Option<PathBuf>,
+
+    /// Emit only this block id (repeat to choose multiple blocks and their order)
+    #[arg(long = "block-id", value_name = "ID", requires = "emit_rust")]
+    block_ids: Vec<String>,
 
     /// C++ files containing inline Rust blocks
     #[arg(long = "files", required = true, num_args = 1..)]
@@ -4870,8 +4882,15 @@ fn main() {
                     inline_rust::InlineRustMode::Rewrite
                 } else if args.check {
                     inline_rust::InlineRustMode::Check
+                } else if let Some(output) = &args.emit_rust {
+                    inline_rust::InlineRustMode::EmitRust {
+                        output: output.clone(),
+                        block_ids: args.block_ids.clone(),
+                    }
                 } else {
-                    eprintln!("inline-rust error: either --check or --rewrite must be provided");
+                    eprintln!(
+                        "inline-rust error: one of --check, --rewrite, or --emit-rust must be provided"
+                    );
                     process::exit(2);
                 };
                 let options = inline_rust::InlineRustOptions {

@@ -761,6 +761,46 @@ fn add(a: i32, b: i32) -> i32 {{
     )
 }
 
+const INLINE_RUST_FIRST: &str = "fn first() -> i32 {\n    1\n}";
+const INLINE_RUST_SECOND: &str = "fn second() -> i32 {\n    2\n}";
+
+fn inline_rust_emit_fixture() -> String {
+    format!(
+        r#"#if RUSTYCPP_RUST
+{INLINE_RUST_FIRST}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.first version=1 rust_sha256=d65aec84cdd9517a9441838327ee2678f6af0a73364499331d155c6f4bb090ae*/
+// generated first
+/*RUSTYCPP:GEN-END id=demo.first*/
+
+#if RUSTYCPP_RUST
+{INLINE_RUST_SECOND}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.second version=1 rust_sha256=d042b306f6e1e636c47813a66ec381e91b4431c3b95a53cd90abd44914fb9d16*/
+// generated second
+/*RUSTYCPP:GEN-END id=demo.second*/
+"#
+    )
+}
+
+fn emit_rust(
+    file: &std::path::Path,
+    output: &std::path::Path,
+    ids: &[&str],
+) -> std::process::Output {
+    let mut command = transpiler_bin();
+    command
+        .arg("inline-rust")
+        .arg("--emit-rust")
+        .arg(output)
+        .arg("--files")
+        .arg(file);
+    for id in ids {
+        command.arg("--block-id").arg(id);
+    }
+    command.output().expect("failed to run emit-rust")
+}
+
 #[test]
 fn test_inline_rust_check_fails_on_hash_mismatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -822,6 +862,143 @@ fn test_inline_rust_rewrite_then_check_passes() {
         "check stderr: {}",
         String::from_utf8_lossy(&check.stderr)
     );
+}
+
+#[test]
+fn test_inline_rust_emit_all_in_source_order_and_selected_in_requested_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("demo.hpp");
+    let all_output = dir.path().join("all.rs");
+    let selected_output = dir.path().join("selected.rs");
+    let source = inline_rust_emit_fixture();
+    std::fs::write(&file, &source).unwrap();
+
+    let all = emit_rust(&file, &all_output, &[]);
+    assert!(
+        all.status.success(),
+        "emit-all stderr: {}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&all_output).unwrap(),
+        format!("{INLINE_RUST_FIRST}\n\n{INLINE_RUST_SECOND}\n")
+    );
+
+    let selected = emit_rust(&file, &selected_output, &["demo.second", "demo.first"]);
+    assert!(
+        selected.status.success(),
+        "emit-selected stderr: {}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&selected_output).unwrap(),
+        format!("{INLINE_RUST_SECOND}\n\n{INLINE_RUST_FIRST}\n")
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+}
+
+#[test]
+fn test_inline_rust_emit_requires_exactly_one_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.hpp");
+    let second = dir.path().join("second.hpp");
+    let output_path = dir.path().join("out.rs");
+    std::fs::write(&first, inline_rust_emit_fixture()).unwrap();
+    std::fs::write(&second, inline_rust_emit_fixture()).unwrap();
+    std::fs::write(&output_path, "sentinel").unwrap();
+
+    let output = transpiler_bin()
+        .arg("inline-rust")
+        .arg("--emit-rust")
+        .arg(&output_path)
+        .arg("--files")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .expect("failed to run emit-rust");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires exactly one --files input"));
+    assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "sentinel");
+}
+
+#[test]
+fn test_inline_rust_emit_rejects_missing_and_duplicate_requested_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("demo.hpp");
+    let output_path = dir.path().join("out.rs");
+    std::fs::write(&file, inline_rust_emit_fixture()).unwrap();
+    std::fs::write(&output_path, "sentinel").unwrap();
+
+    let missing = emit_rust(&file, &output_path, &["demo.missing"]);
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("missing inline block id=demo.missing")
+    );
+    assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "sentinel");
+
+    let duplicate = emit_rust(&file, &output_path, &["demo.first", "demo.first"]);
+    assert!(!duplicate.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr)
+            .contains("duplicate requested block id=demo.first")
+    );
+    assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "sentinel");
+}
+
+#[test]
+fn test_inline_rust_emit_requires_matching_hash_gen_v1_and_gen_region() {
+    let dir = tempfile::tempdir().unwrap();
+    let output_path = dir.path().join("out.rs");
+
+    let bad_hash_file = dir.path().join("bad_hash.hpp");
+    let bad_hash = inline_rust_emit_fixture().replace(
+        "d65aec84cdd9517a9441838327ee2678f6af0a73364499331d155c6f4bb090ae",
+        "deadbeef",
+    );
+    std::fs::write(&bad_hash_file, bad_hash).unwrap();
+    std::fs::write(&output_path, "sentinel").unwrap();
+    let bad_hash_output = emit_rust(&bad_hash_file, &output_path, &["demo.first"]);
+    assert!(!bad_hash_output.status.success());
+    assert!(String::from_utf8_lossy(&bad_hash_output.stderr).contains("hash mismatch"));
+    assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "sentinel");
+
+    let bad_version_file = dir.path().join("bad_version.hpp");
+    let bad_version = inline_rust_emit_fixture().replacen("version=1", "version=2", 1);
+    std::fs::write(&bad_version_file, bad_version).unwrap();
+    let bad_version_output = emit_rust(&bad_version_file, &output_path, &["demo.first"]);
+    assert!(!bad_version_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad_version_output.stderr)
+            .contains("unsupported GEN marker version 2; expected 1")
+    );
+    assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "sentinel");
+
+    let missing_gen_file = dir.path().join("missing_gen.hpp");
+    std::fs::write(
+        &missing_gen_file,
+        format!("#if RUSTYCPP_RUST\n{INLINE_RUST_FIRST}\n#endif\n"),
+    )
+    .unwrap();
+    let missing_gen_output = emit_rust(&missing_gen_file, &output_path, &[]);
+    assert!(!missing_gen_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_gen_output.stderr).contains("missing generated region")
+    );
+    assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "sentinel");
+}
+
+#[test]
+fn test_inline_rust_emit_refuses_to_overwrite_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("demo.hpp");
+    let source = inline_rust_emit_fixture();
+    std::fs::write(&file, &source).unwrap();
+
+    let output = emit_rust(&file, &file, &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to emit Rust over source"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
 }
 
 // ── #[cpp_ctor] lowering ────────────────────────────────
