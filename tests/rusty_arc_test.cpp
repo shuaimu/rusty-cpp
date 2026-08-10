@@ -9,10 +9,113 @@
 #include "../include/rusty/arc.hpp"
 #include <cassert>
 #include <cstdio>
+#include <memory>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace rusty;
+
+struct ArcNewCounts {
+    int copies = 0;
+    int moves = 0;
+    int conversions = 0;
+};
+
+struct ArcNewObserved {
+    std::shared_ptr<ArcNewCounts> counts;
+    int value;
+
+    ArcNewObserved(std::shared_ptr<ArcNewCounts> counts, int value)
+        : counts(std::move(counts)), value(value) {}
+
+    ArcNewObserved(const ArcNewObserved& other)
+        : counts(other.counts), value(other.value) {
+        ++counts->copies;
+    }
+
+    ArcNewObserved(ArcNewObserved&& other) noexcept
+        : counts(std::move(other.counts)), value(other.value) {
+        ++counts->moves;
+    }
+};
+
+struct ArcNewConvertible {
+    std::shared_ptr<ArcNewCounts> counts;
+    int value;
+
+    ArcNewConvertible(int value)
+        : counts(std::make_shared<ArcNewCounts>()), value(value) {
+        ++counts->conversions;
+    }
+};
+
+struct ArcNewPair {
+    int first;
+    int second;
+};
+
+using ArcNewCopyFactory = Arc<ArcNewObserved> (*)(const ArcNewObserved&);
+using ArcNewMoveFactory = Arc<ArcNewObserved> (*)(ArcNewObserved&&);
+
+static_assert(sizeof(Arc<int>) == sizeof(void*));
+static_assert(alignof(Arc<int>) == alignof(void*));
+static_assert(requires(const ArcNewObserved& value) {
+    Arc<ArcNewObserved>::new_(value);
+});
+static_assert(requires(ArcNewObserved&& value) {
+    Arc<ArcNewObserved>::new_(std::move(value));
+});
+static_assert(requires {
+    static_cast<ArcNewCopyFactory>(&Arc<ArcNewObserved>::new_);
+    static_cast<ArcNewMoveFactory>(&Arc<ArcNewObserved>::new_);
+    Arc<std::string>::new_("convertible");
+    Arc<ArcNewConvertible>::new_(7);
+    Arc<ArcNewPair>::new_({1, 2});
+});
+
+void test_arc_new_direct_copy_move_and_compatibility() {
+    printf("test_arc_new_direct_copy_move_and_compatibility: ");
+
+    auto copy_counts = std::make_shared<ArcNewCounts>();
+    const ArcNewObserved copied_source(copy_counts, 11);
+    auto copied = Arc<ArcNewObserved>::new_(copied_source);
+    assert(copied->value == 11);
+    assert(copy_counts->copies == 1);
+    assert(copy_counts->moves == 0);
+
+    auto move_counts = std::make_shared<ArcNewCounts>();
+    ArcNewObserved moved_source(move_counts, 22);
+    auto moved = Arc<ArcNewObserved>::new_(std::move(moved_source));
+    assert(moved->value == 22);
+    assert(move_counts->copies == 0);
+    assert(move_counts->moves == 1);
+
+    int evaluations = 0;
+    auto side_effect = [&]() {
+        ++evaluations;
+        return ArcNewObserved(std::make_shared<ArcNewCounts>(), 33);
+    };
+    auto evaluated_once = Arc<ArcNewObserved>::new_(side_effect());
+    assert(evaluations == 1);
+    assert(evaluated_once->value == 33);
+    assert(evaluated_once->counts->copies == 0);
+    assert(evaluated_once->counts->moves == 1);
+
+    auto converted = Arc<std::string>::new_("convertible");
+    assert(*converted == "convertible");
+
+    auto converted_custom = Arc<ArcNewConvertible>::new_(44);
+    assert(converted_custom->value == 44);
+    assert(converted_custom->counts->conversions == 1);
+
+    auto braced = Arc<ArcNewPair>::new_({1, 2});
+    assert(braced->first == 1);
+    assert(braced->second == 2);
+
+    printf("PASS\n");
+}
 
 // Test basic construction
 void test_arc_construction() {
@@ -184,7 +287,8 @@ void test_arc_assignment() {
 
 int main() {
     printf("=== Testing rusty::Arc<T> ===\n");
-    
+
+    test_arc_new_direct_copy_move_and_compatibility();
     test_arc_construction();
     test_arc_clone();
     test_arc_move();

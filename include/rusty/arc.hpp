@@ -120,10 +120,18 @@ public:
         return Arc<T>::new_(T{});
     }
 
-    // Rust-idiomatic factory method - Arc::new()
+    // Rust-idiomatic factory method - Arc::new(). Keep separate copy and move
+    // overloads so the payload is constructed directly in the control block:
+    // a by-value parameter would add a second observable move for an owned
+    // argument before allocating it.
     // @lifetime: owned
-    static Arc<T> new_(T value) {
-        return Arc<T>(new ControlBlock(std::move(value)));
+    static Arc<T> new_(const T& value) {
+        return make(value);
+    }
+
+    // @lifetime: owned
+    static Arc<T> new_(T&& value) {
+        return make(std::move(value));
     }
 
     // Factory method for in-place construction with arguments
