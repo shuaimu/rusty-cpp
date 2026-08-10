@@ -5,6 +5,29 @@ fn transpiler_bin() -> Command {
 }
 
 #[test]
+fn test_cli_build_info_reports_embedded_revision_before_file_validation() {
+    let output = transpiler_bin()
+        .args(["--build-info", "definitely-does-not-exist.rs"])
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "{{\"git_hash\":\"{}\",\"git_dirty\":{}}}\n",
+            env!("RUSTY_CPP_GIT_HASH"),
+            env!("RUSTY_CPP_GIT_DIRTY")
+        )
+    );
+}
+
+#[test]
 fn test_cli_missing_input() {
     let output = transpiler_bin().output().expect("failed to run");
     assert!(!output.status.success());

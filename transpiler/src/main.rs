@@ -28,6 +28,10 @@ fn count_slot_files(s: &[slots::Slot]) -> usize {
 #[command(name = "rusty-cpp-transpiler")]
 #[command(about = "Transpile Rust source code to C++ using rusty-cpp types")]
 struct Cli {
+    /// Print the embedded source revision as one-line JSON and exit
+    #[arg(long)]
+    build_info: bool,
+
     /// Input Rust source file (.rs) — not needed with --crate or subcommands
     input: Option<PathBuf>,
 
@@ -4650,6 +4654,15 @@ fn find_rusty_include_dir() -> PathBuf {
 
 fn main() {
     let cli = Cli::parse();
+
+    if cli.build_info {
+        println!(
+            r#"{{"git_hash":"{}","git_dirty":{}}}"#,
+            env!("RUSTY_CPP_GIT_HASH"),
+            env!("RUSTY_CPP_GIT_DIRTY")
+        );
+        return;
+    }
 
     // Handle subcommands
     if let Some(ref command) = cli.command {
