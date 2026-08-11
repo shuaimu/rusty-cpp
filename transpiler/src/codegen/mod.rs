@@ -682,6 +682,9 @@ pub struct CodeGen {
     /// `emit_file`.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
     pub(crate) ufcs_declared_trait_modules: std::collections::BTreeMap<String, String>,
+    /// `Trait::Assoc` → short bound-trait name, from LOCAL trait declarations
+    /// plus every dependency manifest (§208 phase 2 projection routing).
+    pub(crate) ufcs_trait_assoc_bounds: std::collections::BTreeMap<String, String>,
     /// Traits whose RuntimeHelper struct was actually EMITTED (generic
     /// traits and non-module builds skip it) — gates the manifest's
     /// declared_trait_modules so consumers never route to a missing helper.
@@ -2076,6 +2079,7 @@ impl CodeGen {
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
+            ufcs_trait_assoc_bounds: std::collections::BTreeMap::new(),
             emitted_runtime_helper_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
@@ -3675,6 +3679,18 @@ impl CodeGen {
             .filter(|(name, _)| self.ufcs_declared_trait_names.contains(*name))
             .map(|(name, methods)| (name.clone(), methods.clone()))
             .collect();
+        let preserved_collapse_methods: Vec<String> =
+            preserved_collapse_trait_method_list();
+        let trait_assoc_type_bounds: std::collections::BTreeMap<String, String> = self
+            .ufcs_trait_assoc_bounds
+            .iter()
+            .filter(|(key, _)| {
+                key.split("::")
+                    .next()
+                    .is_some_and(|t| self.ufcs_declared_trait_names.contains(t))
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         // HYGIENE-ALIAS table (book § 32): glob-only re-export shells → the namespace they
         // alias, so a consumer resolves a hygiene-numbered module reference through the
         // recorded linkage instead of by matching crate-local expansion numbers.
@@ -3748,6 +3764,8 @@ impl CodeGen {
                 .map(|(name, path)| (name.clone(), path.clone()))
                 .collect(),
             declared_trait_methods,
+            trait_assoc_type_bounds,
+            preserved_collapse_methods,
             trait_method_has_receiver: self
                 .trait_method_has_receiver
                 .iter()
@@ -4269,6 +4287,23 @@ impl CodeGen {
     fn merge_dependency_ufcs_trait_manifests(&mut self) {
         let manifests = std::mem::take(&mut self.dependency_ufcs_trait_manifests);
         for m in &manifests {
+            // §208 phase 2: projection routing needs the DECLARING crate's
+            // assoc-type bounds; local decls win on key collision.
+            for (k, v) in &m.trait_assoc_type_bounds {
+                self.ufcs_trait_assoc_bounds
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
+            }
+            for (t, methods) in &m.declared_trait_methods {
+                self.ufcs_declared_trait_methods
+                    .entry(t.clone())
+                    .or_insert_with(|| methods.clone());
+            }
+            for pair in &m.preserved_collapse_methods {
+                if let Some((t, meth)) = pair.split_once("::") {
+                    record_preserved_collapse_trait_method(t, meth);
+                }
+            }
             for (method, traits) in &m.method_owners {
                 if !self
                     .ufcs_method_classes
@@ -4846,6 +4881,8 @@ impl CodeGen {
             crate::transpile::collect_declared_trait_names(&file.items);
         self.ufcs_declared_trait_modules =
             crate::transpile::collect_declared_trait_modules(&file.items);
+        self.ufcs_trait_assoc_bounds
+            .extend(crate::transpile::collect_trait_assoc_type_bounds(&file.items));
         self.ufcs_declared_trait_methods =
             crate::transpile::collect_declared_trait_methods(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
@@ -48727,6 +48764,46 @@ pub(crate) fn record_preserved_collapse_body(
             .or_default()
             .push((tag.to_string(), trait_head.to_string(), method.to_string()));
     }
+    let short = trait_head.rsplit("::").next().unwrap_or(trait_head).trim();
+    record_preserved_collapse_trait_method(short, method);
+}
+
+/// (trait short name, method) pairs that have a preserved collapse body — from
+/// THIS process's collect phase plus every dependency manifest. The §208
+/// call-site probe fires ONLY for pairs in this set, so ordinary generic calls
+/// (`s.serialize_map(..)`) keep their existing, richer emission paths.
+pub(crate) fn record_preserved_collapse_trait_method(trait_short: &str, method: &str) {
+    if let Ok(mut guard) = preserved_collapse_trait_methods().lock() {
+        guard
+            .get_or_insert_with(std::collections::BTreeSet::new)
+            .insert(format!("{}::{}", trait_short, method));
+    }
+}
+
+pub(crate) fn preserved_collapse_trait_method_exists(trait_short: &str, method: &str) -> bool {
+    preserved_collapse_trait_methods()
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.as_ref()
+                .map(|set| set.contains(&format!("{}::{}", trait_short, method)))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn preserved_collapse_trait_method_list() -> Vec<String> {
+    preserved_collapse_trait_methods()
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|set| set.iter().cloned().collect()))
+        .unwrap_or_default()
+}
+
+fn preserved_collapse_trait_methods()
+-> &'static std::sync::Mutex<Option<std::collections::BTreeSet<String>>> {
+    static SET: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
+        std::sync::Mutex::new(None);
+    &SET
 }
 
 /// Most signature collisions are benign — a derive-generated body against an

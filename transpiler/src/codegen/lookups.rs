@@ -3390,19 +3390,14 @@ impl CodeGen {
     /// `S::Ok` is unambiguous and can route through `<Trait>Traits<S>`. Returns
     /// the `trait_associated_type_names` key (short trait name) iff exactly one
     /// of `type_param`'s bound traits declares `assoc_name`.
-    /// §208 phase 2: the trait bound of a BARE-type-param receiver, when
-    /// exactly ONE of `owners` matches a bound of that param. `x` typed `X`
-    /// with `X: TrA` and owners {TrA, TrB} → TrA. Returns None on zero or
-    /// ambiguous matches — the caller keeps the bound-blind chain, which is
-    /// today's behaviour.
-    pub(super) fn receiver_bound_trait_among(
-        &self,
-        receiver: &syn::Expr,
-        owners: &[String],
-    ) -> Option<String> {
+    /// §208: candidate bound-trait SHORT names for a receiver, from its
+    /// declared Rust type — a bare type param yields ALL its bound traits; an
+    /// assoc projection (`S::Assoc` / `<S as Tr>::Assoc`) yields the assoc
+    /// type's DECLARED BOUND (via ufcs_trait_assoc_bounds: local decls +
+    /// dependency manifests). Reference/paren/group wrappers are peeled —
+    /// receivers typically type as `&X`.
+    fn receiver_candidate_bound_traits(&self, receiver: &syn::Expr) -> Option<Vec<String>> {
         let ty = self.infer_simple_expr_type(receiver)?;
-        // Receivers are typically `&X` / `&mut X` — peel reference/paren/group
-        // wrappers down to the named type before the bare-param check.
         let mut inner: &syn::Type = &ty;
         loop {
             match inner {
@@ -3413,33 +3408,106 @@ impl CodeGen {
             }
         }
         let syn::Type::Path(tp) = inner else { return None };
-        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+        let projection = if let Some(q) = &tp.qself {
+            let mut qi: &syn::Type = &q.ty;
+            loop {
+                match qi {
+                    syn::Type::Reference(r) => qi = &r.elem,
+                    syn::Type::Paren(pn) => qi = &pn.elem,
+                    syn::Type::Group(g) => qi = &g.elem,
+                    _ => break,
+                }
+            }
+            match (qi, tp.path.segments.last()) {
+                (syn::Type::Path(qp), Some(last))
+                    if qp.qself.is_none() && qp.path.segments.len() == 1 =>
+                {
+                    Some((
+                        qp.path.segments[0].ident.to_string(),
+                        last.ident.to_string(),
+                    ))
+                }
+                _ => None,
+            }
+        } else if tp.path.segments.len() == 2 {
+            Some((
+                tp.path.segments[0].ident.to_string(),
+                tp.path.segments[1].ident.to_string(),
+            ))
+        } else {
+            None
+        };
+        if let Some((owner_param, assoc)) = projection {
+            if !self.is_type_param_in_scope(&owner_param) {
+                return None;
+            }
+            let declaring = self.lookup_trait_for_assoc_via_param_bound(&owner_param, &assoc)?;
+            let declaring_short = declaring.rsplit("::").next().unwrap_or(&declaring);
+            let bound = self
+                .ufcs_trait_assoc_bounds
+                .get(&format!("{}::{}", declaring_short, assoc))?;
+            return Some(vec![bound.clone()]);
+        }
+        if tp.path.segments.len() != 1 {
             return None;
         }
         let param = tp.path.segments[0].ident.to_string();
         if !self.is_type_param_in_scope(&param) {
             return None;
         }
-        let mut hits: Vec<String> = Vec::new();
+        let mut out: Vec<String> = Vec::new();
         for scope in self.trait_bound_type_param_scopes.iter().rev() {
             for (bound_trait, bound_param) in scope {
                 if bound_param != &param {
                     continue;
                 }
-                let bound_short = bound_trait.rsplit("::").next().unwrap_or(bound_trait);
-                for owner in owners {
-                    let owner_short = owner.rsplit("::").next().unwrap_or(owner);
-                    if owner_short == bound_short && !hits.contains(owner) {
-                        hits.push(owner.clone());
-                    }
+                let short = bound_trait
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(bound_trait)
+                    .to_string();
+                if !out.contains(&short) {
+                    out.push(short);
                 }
             }
         }
-        if hits.len() == 1 {
-            hits.pop()
-    } else {
-            None
+        if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// §208 phase 2a: the unique candidate trait among the UFCS OWNER list.
+    pub(super) fn receiver_bound_trait_among(
+        &self,
+        receiver: &syn::Expr,
+        owners: &[String],
+    ) -> Option<String> {
+        let candidates = self.receiver_candidate_bound_traits(receiver)?;
+        let mut hits: Vec<String> = Vec::new();
+        for owner in owners {
+            let owner_short = owner.rsplit("::").next().unwrap_or(owner);
+            if candidates.iter().any(|c| c == owner_short) && !hits.contains(owner) {
+                hits.push(owner.clone());
+            }
         }
+        if hits.len() == 1 { hits.pop() } else { None }
+    }
+
+    /// §208 projection increment: the unique candidate trait that actually HAS
+    /// a preserved collapse body for this method (local registry + dependency
+    /// manifests). This is the guard that keeps the call-site probe from
+    /// hijacking ordinary generic calls: `s.serialize_map(..)` matches no
+    /// preserved pair and keeps its existing emission path.
+    pub(super) fn receiver_collapse_probe_trait(
+        &self,
+        receiver: &syn::Expr,
+        method: &str,
+    ) -> Option<String> {
+        let candidates = self.receiver_candidate_bound_traits(receiver)?;
+        let mut hits: Vec<String> = candidates
+            .into_iter()
+            .filter(|b| crate::codegen::preserved_collapse_trait_method_exists(b, method))
+            .collect();
+        hits.dedup();
+        if hits.len() == 1 { hits.pop() } else { None }
     }
 
     pub(super) fn lookup_trait_for_assoc_via_param_bound(

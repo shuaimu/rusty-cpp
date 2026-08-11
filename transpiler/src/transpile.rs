@@ -35,6 +35,18 @@ pub struct UfcsTraitManifest {
     /// unless the dep's trait actually provides the same method.
     #[serde(default)]
     pub declared_trait_methods: BTreeMap<String, Vec<String>>,
+    /// `Trait::Assoc` → the SHORT name of the assoc type's first non-marker
+    /// trait bound (`Serializer::SerializeMap` → `SerializeMap`). A consumer
+    /// typing a local as the projection `S::SerializeMap` uses this to route a
+    /// method call on it to the bound trait's preserved collapse body
+    /// (§208 phase 2) — it never sees the dependency's trait declaration.
+    #[serde(default)]
+    pub trait_assoc_type_bounds: BTreeMap<String, String>,
+    /// `TraitShort::method` pairs whose impl-collapse LOSING body was preserved
+    /// as a `rusty_<Trait>_<method>` member somewhere in this crate's emission
+    /// (§208). Consumers probe those members only for pairs in this list.
+    #[serde(default)]
+    pub preserved_collapse_methods: Vec<String>,
     /// `Trait::method` → whether the trait item's first param is `self`.
     /// A consumer lowering the trait-STATIC call form `T::method(a0, ...)`
     /// on a generic param T may treat `a0` as the receiver ONLY when the
@@ -580,6 +592,52 @@ fn collect_declared_trait_methods_into(
             _ => {}
         }
     }
+}
+
+/// `Trait::Assoc` → short name of the assoc type's first non-marker trait
+/// bound, from this crate's trait DECLARATIONS. Marker-ish bounds that never
+/// own the methods being routed (Sized/Send/Sync/Clone/Copy/Debug + lifetimes)
+/// are skipped so `type Item: Clone + Iterator` still records `Iterator`.
+pub fn collect_trait_assoc_type_bounds(
+    items: &[syn::Item],
+) -> std::collections::BTreeMap<String, String> {
+    fn walk(items: &[syn::Item], out: &mut std::collections::BTreeMap<String, String>) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    for ti in &t.items {
+                        if let syn::TraitItem::Type(at) = ti {
+                            for b in &at.bounds {
+                                if let syn::TypeParamBound::Trait(tb) = b
+                                    && let Some(seg) = tb.path.segments.last()
+                                {
+                                    let short = seg.ident.to_string();
+                                    if matches!(
+                                        short.as_str(),
+                                        "Sized" | "Send" | "Sync" | "Clone" | "Copy" | "Debug"
+                                    ) {
+                                        continue;
+                                    }
+                                    out.entry(format!("{}::{}", t.ident, at.ident))
+                                        .or_insert(short);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(items, &mut out);
+    out
 }
 
 /// Map each method name to the set of crate-declared traits that have a

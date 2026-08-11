@@ -6988,6 +6988,41 @@ impl CodeGen {
                 }
             }
         }
+        // §208 collapse-probe fallback: cross-crate collapsed methods never
+        // classify TraitOnly (`end` is Both/Inherent — it collides with
+        // range/inherent names) and have no local owner map, so the UFCS
+        // interception above never sees them; they emit as PLAIN member calls
+        // and land on the collapsed body. When the receiver's declared bound
+        // (bare param or assoc projection) names a trait with a RECORDED
+        // preserved body for this method — local registry or a dependency
+        // manifest — probe `rusty_<Trait>_<m>` with the plain member as the
+        // fallback. The recorded-pair guard keeps every ordinary generic call
+        // on its existing path.
+        {
+            let method_name = mc.method.to_string();
+            if mc.turbofish.is_none()
+                && !Self::method_prefers_runtime_helper_namespace(&method_name)
+                && !self.method_call_is_raw_pointer_intrinsic(mc, &method_name)
+                && let Some(bound) =
+                    self.receiver_collapse_probe_trait(&mc.receiver, &method_name)
+            {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                let args: Vec<String> =
+                    mc.args.iter().map(|a| self.emit_expr_to_string(a)).collect();
+                let tag = format!(
+                    "rusty_{}_{}",
+                    crate::codegen::sanitize_collapse_trait_tag(&bound),
+                    method_name
+                );
+                return self.emit_multi_owner_ufcs_call(
+                    &[],
+                    &receiver,
+                    &args,
+                    &escape_cpp_keyword(&method_name),
+                    Some(tag.as_str()),
+                );
+            }
+        }
         if matches!(mc.method.to_string().as_str(), "compact" | "readable") && mc.args.is_empty() {
             // serde_test::Configure extension helpers are test-only adapters.
             // Keep parity execution moving by treating them as identity.
