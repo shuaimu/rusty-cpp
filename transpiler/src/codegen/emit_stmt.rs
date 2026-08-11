@@ -1678,11 +1678,48 @@ impl CodeGen {
                         // equality form.
                         let data_unit_emit = variant_ctx.and_then(|ctx| {
                             let key = format!("{}_{}", ctx.enum_name, raw_ident);
-                            if self.data_enum_unit_variants.contains(&key) {
-                                Some(format!("{}_{}", ctx.enum_name, raw_ident))
-                            } else {
-                                None
+                            if !self.data_enum_unit_variants.contains(&key) {
+                                return None;
                             }
+                            // The bare tag only resolves where the enum's own
+                            // module is in scope. A UFCS free fn emitted into
+                            // ANOTHER module (serde_json's write_char_escape in
+                            // read_mod; CharEscape lives in ser) needs the
+                            // owner-qualified spelling — same scoped-owner
+                            // recovery as data_enum_variant_struct_type_name.
+                            let mut scoped_owners: Vec<&String> = self
+                                .data_enum_types
+                                .iter()
+                                .filter(|n| {
+                                    n.contains("::")
+                                        && n.rsplit("::").next()
+                                            == Some(ctx.enum_name.as_str())
+                                })
+                                .collect();
+                            scoped_owners.sort();
+                            scoped_owners.dedup();
+                            if scoped_owners.len() == 1 {
+                                let owner_ns = scoped_owners[0]
+                                    .rsplit_once("::")
+                                    .map(|(ns, _)| ns)
+                                    .unwrap_or("");
+                                let current = self.module_stack.join("::");
+                                if !owner_ns.is_empty()
+                                    && current != owner_ns
+                                    && !current.starts_with(&format!("{}::", owner_ns))
+                                {
+                                    let esc = owner_ns
+                                        .split("::")
+                                        .map(escape_cpp_keyword)
+                                        .collect::<Vec<_>>()
+                                        .join("::");
+                                    return Some(format!(
+                                        "{}::{}_{}",
+                                        esc, ctx.enum_name, raw_ident
+                                    ));
+                                }
+                            }
+                            Some(format!("{}_{}", ctx.enum_name, raw_ident))
                         });
                         // A bare C-like enum variant (`use Enum::*`) compares
                         // against the scoped `Enum::VARIANT` — C++20 `enum class`
