@@ -13415,10 +13415,27 @@ impl CodeGen {
         let arg_is_closure = matches!(self.peel_paren_group_expr(arg), syn::Expr::Closure(_));
         let suppress_placeholder_expected_for_closure = arg_is_closure
             && expected_ty.is_some_and(|expected| {
-                self.type_is_bare_generic_param_like(expected)
+                (self.type_is_bare_generic_param_like(expected)
                     && self
                         .extract_callable_return_type_from_type(expected)
+                        .is_none())
+                    // §209: a callable expected whose RETURN carries a type
+                    // param NOT in scope here — the CALLEE's own generic, e.g.
+                    // parse_str_bytes' `F: FnOnce(..) -> Result<T>` seen from a
+                    // caller that resolved T concretely — cannot be spelled:
+                    // the closure tail emitted `error::Result<T>::Ok`,
+                    // serde_json's parse-order-first error ×3. A deduced
+                    // return beats an unspellable qualification.
+                    || self
+                        .extract_callable_return_type_from_type(expected)
+                        .as_ref()
+                        .is_some_and(|ret| {
+                            self.type_contains_unbound_single_letter_generic(ret)
+                        })
+                    || (self
+                        .extract_callable_return_type_from_type(expected)
                         .is_none()
+                        && self.type_contains_unbound_single_letter_generic(expected))
             });
         let effective_expected_ty = if suppress_placeholder_expected_for_closure {
             None
