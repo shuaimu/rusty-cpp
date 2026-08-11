@@ -48538,15 +48538,163 @@ pub(crate) fn resolve_impl_method_conflict(
     } else {
         (&existing, &merged)
     };
+    // §206 body preservation: a collapse used to DISCARD the losing body, which
+    // is how serde_json's seven Compound::end impls became one array-closing
+    // member (every non-empty object serialized as `{"a":1]`). When the loss
+    // would be real — different bodies, neither side derived — keep the loser
+    // as a member under a trait-tagged name (`rusty_<TraitPath>_<method>`)
+    // instead. The winner keeps the plain name, so nothing observable changes
+    // until call-site routing consults the tagged members (phase 2); until
+    // then the tagged body is exactly as dead as it was, but no longer GONE.
+    let loser_origin = if should_replace {
+        prior_origin.as_deref()
+    } else {
+        Some(origin)
+    };
+    let kept_origin_for_preserve = if should_replace {
+        Some(origin)
+    } else {
+        prior_origin.as_deref()
+    };
+    let preserved_name = preserve_dropped_collapse_body(
+        entry,
+        type_name,
+        kept,
+        dropped,
+        loser_origin,
+        kept_origin_for_preserve,
+    );
     warn_on_lossy_impl_method_conflict(
         type_name,
         kept,
         dropped,
         prior_origin.as_deref(),
         origin,
+        preserved_name.as_deref(),
     );
     if should_replace {
         entry[existing_index] = syn::ImplItem::Fn(merged);
+    }
+}
+
+/// §206: keep a collapse's losing body as a trait-tagged member instead of
+/// discarding it. Returns the tagged name if preserved. Preservation is
+/// deliberately conservative — exactly the cases the lossy warning fires for:
+/// bodies that actually differ, neither side automatically derived, and a
+/// nameable trait origin for the loser. Everything else keeps today's drop.
+/// Normalize a self-type spelling for collapse comparison: drop whitespace,
+/// reference sigils, `mut`, and lifetimes, so `&'a ByteArray<N>` compares equal
+/// to `ByteArray<N>` while `Box<[T],A>` stays distinct from `Box<T,A>`.
+fn normalize_collapse_self_ty(self_ty: &str) -> String {
+    let mut out = String::new();
+    let mut chars = self_ty.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            c if c.is_whitespace() => {}
+            '&' => {}
+            '\'' => {
+                while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') {
+                    chars.next();
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.replace("mut", "")
+}
+
+fn preserve_dropped_collapse_body(
+    entry: &mut Vec<syn::ImplItem>,
+    type_name: &str,
+    kept: &syn::ImplItemFn,
+    dropped: &syn::ImplItemFn,
+    loser_origin: Option<&str>,
+    kept_origin: Option<&str>,
+) -> Option<String> {
+    if impl_method_is_automatically_derived(kept) || impl_method_is_automatically_derived(dropped) {
+        return None;
+    }
+    if is_assoc_self_forwarder_method(kept) || is_assoc_self_forwarder_method(dropped) {
+        return None;
+    }
+    if kept.block.to_token_stream().to_string() == dropped.block.to_token_stream().to_string() {
+        return None;
+    }
+    let origin = loser_origin?;
+    let (trait_part, dropped_self) = split_impl_origin(origin)?;
+    let trait_head = trait_part.split('<').next().unwrap_or(trait_part).trim();
+    if trait_head.is_empty() || trait_head == "inherent" {
+        return None;
+    }
+    // Preserve only the shapes phase-2 routing can use AND that compile when
+    // hoisted onto the merged primary:
+    //   - DIFFERENT-TRAIT (trait heads differ): the body was written for this
+    //     exact self type; it is valid as a member.
+    //   - SELF-TYPE differing only by REFERENCE wrappers (&'a T vs T): same
+    //     head + args, so the body's member references resolve.
+    // Skip SELF-TYPE with differing generic args (Box<[T]> vs Box<T>): the
+    // loser body references capabilities of ITS self type that the merged
+    // primary does not have (to_vec_in / clone_from_slice on the slice Box),
+    // and preserving it broke alloc's build. Those need real partial
+    // specializations (#205's constrained-overload shape), not a hoist.
+    if let Some((kept_trait_part, kept_self)) = kept_origin.and_then(split_impl_origin) {
+        let kept_head = kept_trait_part
+            .split('<')
+            .next()
+            .unwrap_or(kept_trait_part)
+            .trim();
+        if kept_head == trait_head
+            && normalize_collapse_self_ty(kept_self) != normalize_collapse_self_ty(dropped_self)
+        {
+            return None;
+        }
+    }
+    let mut san = String::new();
+    for ch in trait_head.chars() {
+        if ch.is_ascii_alphanumeric() {
+            san.push(ch);
+        } else if !san.ends_with('_') {
+            san.push('_');
+        }
+    }
+    let san = san.trim_matches('_');
+    if san.is_empty() {
+        return None;
+    }
+    let base = format!("rusty_{}_{}", san, dropped.sig.ident);
+    let taken = |entry: &Vec<syn::ImplItem>, name: &str| {
+        entry.iter().any(|it| matches!(it, syn::ImplItem::Fn(f) if f.sig.ident == name))
+    };
+    let mut tag = base.clone();
+    let mut n = 2usize;
+    while taken(entry, &tag) {
+        tag = format!("{}_{}", base, n);
+        n += 1;
+    }
+    let mut preserved = dropped.clone();
+    preserved.sig.ident = syn::Ident::new(&tag, preserved.sig.ident.span());
+    entry.push(syn::ImplItem::Fn(preserved));
+    record_preserved_collapse_body(type_name, &tag, trait_head, &dropped.sig.ident.to_string());
+    Some(tag)
+}
+
+/// Registry of preserved collapse bodies: type -> [(tagged member, trait path,
+/// original method)]. Phase-2 routing consults this to know that a receiver
+/// bound by `trait_head` should probe `tag` before the plain member.
+pub(crate) fn record_preserved_collapse_body(
+    type_name: &str,
+    tag: &str,
+    trait_head: &str,
+    method: &str,
+) {
+    static PRESERVED: std::sync::Mutex<Option<HashMap<String, Vec<(String, String, String)>>>> =
+        std::sync::Mutex::new(None);
+    if let Ok(mut guard) = PRESERVED.lock() {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .entry(type_name.to_string())
+            .or_default()
+            .push((tag.to_string(), trait_head.to_string(), method.to_string()));
     }
 }
 
@@ -48637,6 +48785,7 @@ fn warn_on_lossy_impl_method_conflict(
     dropped: &syn::ImplItemFn,
     kept_origin: Option<&str>,
     dropped_origin: &str,
+    preserved_as: Option<&str>,
 ) {
     if impl_method_is_automatically_derived(kept) || impl_method_is_automatically_derived(dropped) {
         return;
@@ -48655,14 +48804,18 @@ fn warn_on_lossy_impl_method_conflict(
             return;
         }
     }
+    let preserved_note = match preserved_as {
+        Some(tag) => format!("preserved as member `{}` (not yet routed)", tag),
+        None => "DISCARDED".to_string(),
+    };
     match kept_origin {
         Some(ko) => eprintln!(
-            "warning: {}::{}: two impls collapse to a single C++ signature — one \
-             body is kept and the other discarded, so the port compiles and may \
-             do the wrong thing.\n  kept:    {}\n  dropped: {}\n  cause:   {}\n\
+            "warning: {}::{}: two impls collapse to a single C++ signature — the \
+             losing body is {}.\n  kept:    {}\n  dropped: {}\n  cause:   {}\n\
                (see task #206)",
             type_name,
             kept.sig.ident,
+            preserved_note,
             ko,
             dropped_origin,
             classify_impl_collapse(ko, dropped_origin),
