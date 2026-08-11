@@ -4211,13 +4211,25 @@ impl CodeGen {
     }
 
     fn emit_cpp_abi_support(&mut self) {
-        if self.cpp_abi_plan.is_empty() {
+        if !self.cpp_abi_plan.needs_string_adapter()
+            && !self.cpp_abi_plan.needs_vector_adapter()
+        {
             return;
         }
-        self.writeln("namespace rusty_cpp_abi_detail {");
+        // Inline blocks are rendered inside the carrier's `export namespace`.
+        // C++ forbids internal-linkage declarations in that context, so use
+        // inline COMDAT helpers there. Named-module/crate output keeps the
+        // stricter internal-linkage spelling used by the original adapter.
+        let helper_prefix = if self.inline_rust_block {
+            "inline "
+        } else {
+            "static inline "
+        };
+        let detail_namespace = self.cpp_abi_plan.detail_namespace();
+        self.writeln(&format!("namespace {detail_namespace} {{"));
         self.indent += 1;
         if self.cpp_abi_plan.needs_string_adapter() {
-            self.writeln("static inline rusty::Vec<uint8_t> bytes_from_std_string(const std::string& input) {");
+            self.writeln(&format!("{helper_prefix}rusty::Vec<uint8_t> bytes_from_std_string(const std::string& input) {{"));
             self.indent += 1;
             self.writeln("auto output = rusty::Vec<uint8_t>::with_capacity(input.size());");
             self.writeln("for (unsigned char byte : input) {");
@@ -4228,9 +4240,9 @@ impl CodeGen {
             self.writeln("return output;");
             self.indent -= 1;
             self.writeln("}");
-            self.writeln(
-                "static inline std::string std_string_from_bytes(rusty::Vec<uint8_t> input) {",
-            );
+            self.writeln(&format!(
+                "{helper_prefix}std::string std_string_from_bytes(rusty::Vec<uint8_t> input) {{"
+            ));
             self.indent += 1;
             self.writeln("if (input.size() == 0) {");
             self.indent += 1;
@@ -4244,14 +4256,14 @@ impl CodeGen {
             self.writeln("}");
         }
         if self.cpp_abi_plan.needs_vector_adapter() {
-            self.writeln("static inline std::span<const double> f64_span_from_std_vector(const std::vector<double>& input) {");
+            self.writeln(&format!("{helper_prefix}std::span<const double> f64_span_from_std_vector(const std::vector<double>& input) {{"));
             self.indent += 1;
             self.writeln("return std::span<const double>(input.data(), input.size());");
             self.indent -= 1;
             self.writeln("}");
         }
         self.indent -= 1;
-        self.writeln("} // namespace rusty_cpp_abi_detail");
+        self.writeln(&format!("}} // namespace {detail_namespace}"));
         self.newline();
     }
 

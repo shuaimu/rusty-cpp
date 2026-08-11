@@ -77,6 +77,9 @@ pub(crate) struct CppAbiEmissionPlan {
     pub(crate) aliases: BTreeMap<(ModulePath, String), VectorAliasContract>,
     pub(crate) facades: BTreeMap<CallableKey, CallableFacade>,
     pub(crate) semantic_helpers: BTreeMap<(ModulePath, String), CallableKey>,
+    emit_string_support: bool,
+    emit_vector_support: bool,
+    inline_identity: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,18 +132,30 @@ impl CppAbiEmissionPlan {
     }
 
     pub(crate) fn needs_string_adapter(&self) -> bool {
-        self.facades.values().any(|facade| {
+        self.emit_string_support
+    }
+
+    pub(crate) fn needs_vector_adapter(&self) -> bool {
+        self.emit_vector_support
+    }
+
+    pub(crate) fn detail_namespace(&self) -> String {
+        self.inline_identity
+            .as_ref()
+            .map(|identity| format!("rusty_cpp_abi_detail_{identity}"))
+            .unwrap_or_else(|| "rusty_cpp_abi_detail".to_string())
+    }
+
+    fn derive_support_requirements(&mut self) {
+        self.emit_string_support = self.facades.values().any(|facade| {
             facade.contract.returns.is_some()
                 || facade
                     .contract
                     .params
                     .values()
                     .any(|adapter| matches!(adapter, ParamAdapter::StdStringBytes))
-        })
-    }
-
-    pub(crate) fn needs_vector_adapter(&self) -> bool {
-        !self.aliases.is_empty()
+        });
+        self.emit_vector_support = !self.aliases.is_empty();
     }
 }
 
@@ -874,6 +889,288 @@ fn simple_impl_owner(implementation: &syn::ItemImpl) -> Result<String, String> {
     Ok(ident_key(&owner.path.segments[0].ident))
 }
 
+/// A single inline block after the carrier-wide ABI pass.  The emission plan
+/// contains only facades physically provided by this block; `dependencies`
+/// names earlier provider blocks whose semantic helpers this block calls.
+#[derive(Clone, Debug)]
+pub(crate) struct CppAbiInlineBlockPlan {
+    pub(crate) lowered: syn::File,
+    pub(crate) emission: CppAbiEmissionPlan,
+    pub(crate) dependencies: BTreeSet<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CppAbiInlineCarrierPlan {
+    pub(crate) blocks: Vec<CppAbiInlineBlockPlan>,
+    pub(crate) adapted_blocks: BTreeSet<usize>,
+}
+
+fn joined_inline_file(files: &[syn::File]) -> syn::File {
+    syn::File {
+        shebang: None,
+        attrs: Vec::new(),
+        items: files
+            .iter()
+            .flat_map(|file| file.items.iter().cloned())
+            .collect(),
+    }
+}
+
+/// Collect the canonical callable/alias tails supplied by one carrier.  The
+/// caller uses this cheap first pass to reserve names across all requested
+/// carriers before any file is rendered or written.
+pub(crate) fn inline_contract_names(files: &[syn::File]) -> Result<BTreeSet<String>, String> {
+    let contracts = collect(&joined_inline_file(files))?;
+    Ok(reserved_contract_names(&contracts))
+}
+
+pub(crate) fn inline_generated_helper_names(
+    files: &[syn::File],
+    inline_identity: &str,
+) -> Result<BTreeSet<String>, String> {
+    let contracts = collect(&joined_inline_file(files))?;
+    Ok(contracts
+        .callables
+        .keys()
+        .map(|key| inline_helper_stem(key, inline_identity))
+        .collect())
+}
+
+pub(crate) fn inline_external_contract_indexes(
+    carriers: &[Vec<syn::File>],
+) -> Result<Vec<ExternalContractIndex>, String> {
+    let mut global = GlobalContractIndex::default();
+    for (index, files) in carriers.iter().enumerate() {
+        global.add(
+            index,
+            &ModulePath(Vec::new()),
+            &collect(&joined_inline_file(files))?,
+        );
+    }
+    Ok((0..carriers.len())
+        .map(|index| global.external_for(index))
+        .collect())
+}
+
+/// Reject a public C++ spelling supplied by an adapter in one carrier when an
+/// ordinary Rust item in another carrier projects to that same spelling.
+/// Lexical bindings and items below a distinct Rust module are deliberately
+/// outside this namespace/member census.
+pub(crate) fn validate_inline_projected_cpp_name_collisions(
+    sources: &[String],
+    carriers: &[Vec<syn::File>],
+) -> Result<(), String> {
+    if sources.len() != carriers.len() {
+        return Err("inline cpp_abi projected-name census input mismatch".to_string());
+    }
+
+    let mut census = ProjectedCppCensus::default();
+    for (source, files) in sources.iter().zip(carriers) {
+        let joined = joined_inline_file(files);
+        let contracts = collect(&joined)?;
+        collect_projected_cpp_names(
+            &joined.items,
+            &ModulePath(Vec::new()),
+            &[],
+            &contracts,
+            source,
+            None,
+            None,
+            &mut census,
+        );
+    }
+    census.validate().map_err(|error| {
+        format!("inline-rust cpp_abi projected public-name preflight failed: {error}")
+    })
+}
+
+struct ExternalInlineQualifiedPathAudit<'a> {
+    names: &'a BTreeSet<String>,
+    error: Option<String>,
+}
+
+impl ExternalInlineQualifiedPathAudit<'_> {
+    fn audit(&mut self, path: &syn::Path, qself: bool) {
+        let explicit_rust_root = path.segments.first().is_some_and(|segment| {
+            matches!(ident_key(&segment.ident).as_str(), "crate" | "self" | "super")
+        });
+        if self.error.is_none()
+            && (qself || path.leading_colon.is_some() || explicit_rust_root)
+            && path
+                .segments
+                .last()
+                .is_some_and(|segment| self.names.contains(&ident_key(&segment.ident)))
+        {
+            self.error = Some(format!(
+                "qualified path `{}` has a cross-carrier cpp_abi name",
+                path.to_token_stream()
+            ));
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ExternalInlineQualifiedPathAudit<'_> {
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.audit(&path.path, path.qself.is_some());
+        if self.error.is_none() {
+            syn::visit::visit_expr_path(self, path);
+        }
+    }
+
+    fn visit_type_path(&mut self, path: &'ast syn::TypePath) {
+        self.audit(&path.path, path.qself.is_some());
+        if self.error.is_none() {
+            syn::visit::visit_type_path(self, path);
+        }
+    }
+}
+
+/// Validate and lower all blocks in one physical C++ carrier as one ordered
+/// Rust module.  Only same-block and earlier-block semantic helper calls are
+/// resolvable.  Later providers remain reserved so a forward call fails rather
+/// than silently binding to the public STL facade.
+pub(crate) fn prepare_inline_carrier(
+    files: &[syn::File],
+    external_contracts: &ExternalContractIndex,
+    inline_identity: &str,
+) -> Result<CppAbiInlineCarrierPlan, String> {
+    for (index, file) in files.iter().enumerate() {
+        validate_cpp_abi_file_attrs(
+            &file.attrs,
+            &format!("inline block {} source", index + 1),
+        )?;
+    }
+    let joined = joined_inline_file(files);
+    let contracts = collect(&joined)?;
+    validate_lowering_surface(&joined, &contracts)?;
+
+    if !external_contracts.values.is_empty() || !external_contracts.types.is_empty() {
+        let known_modules = BTreeSet::new();
+        let mut audit =
+            ScopedCrossFileAudit::new(external_contracts, &known_modules, Vec::new());
+        audit.audit_module_items(&joined.items);
+        if let Some(error) = audit.error {
+            return Err(error.replace(
+                "cpp_abi crate preflight found a sibling-file reference",
+                "inline-rust cpp_abi preflight found a cross-carrier reference",
+            ));
+        }
+        let external_names = external_contracts.all_names();
+        let mut qualified = ExternalInlineQualifiedPathAudit {
+            names: &external_names,
+            error: None,
+        };
+        qualified.visit_file(&joined);
+        if let Some(error) = qualified.error {
+            return Err(format!(
+                "inline-rust cpp_abi preflight found a cross-carrier reference: {error}"
+            ));
+        }
+    }
+
+    let helper_names = allocate_inline_helper_names(&joined, &contracts, inline_identity)?;
+    let mut provider_by_key = BTreeMap::<CallableKey, usize>::new();
+    let mut locals = Vec::with_capacity(files.len());
+    let mut adapted_blocks = BTreeSet::new();
+    for (index, file) in files.iter().enumerate() {
+        let local = collect(file)?;
+        if !local.callables.is_empty() || !local.aliases.is_empty() {
+            // This deliberately pins alias+const_ref and static-method owners
+            // to one block for the first inline implementation slice.
+            validate_lowering_surface(file, &local)?;
+            adapted_blocks.insert(index);
+        }
+        for key in local.callables.keys() {
+            if provider_by_key.insert(key.clone(), index).is_some() {
+                return Err(format!(
+                    "duplicate inline cpp_abi provider for callable `{key:?}`"
+                ));
+            }
+        }
+        locals.push(local);
+    }
+    if provider_by_key.len() != contracts.callables.len() {
+        return Err("inline cpp_abi provider census did not match carrier contracts".to_string());
+    }
+
+    let mut needs_string_support = contracts.callables.values().any(|contract| {
+        contract.returns.is_some()
+            || contract
+                .params
+                .values()
+                .any(|adapter| matches!(adapter, ParamAdapter::StdStringBytes))
+    });
+    let mut needs_vector_support = !contracts.aliases.is_empty();
+    let support_owner = adapted_blocks.iter().next().copied();
+
+    let mut blocks = Vec::with_capacity(files.len());
+    for (index, (file, local)) in files.iter().zip(locals.iter()).enumerate() {
+        let available = provider_by_key
+            .iter()
+            .filter_map(|(key, provider)| (*provider <= index).then_some(key.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut lowered = file.clone();
+        let used = rewrite_semantic_calls_with_available(
+            &mut lowered,
+            &contracts,
+            &helper_names,
+            &available,
+            &BTreeSet::new(),
+        )?;
+        if !used.is_empty() {
+            adapted_blocks.insert(index);
+        }
+        let dependencies = used
+            .iter()
+            .filter_map(|key| provider_by_key.get(key).copied())
+            .filter(|provider| *provider < index)
+            .collect::<BTreeSet<_>>();
+
+        let mut emission = CppAbiEmissionPlan {
+            aliases: local.aliases.clone(),
+            inline_identity: Some(inline_identity.to_string()),
+            ..CppAbiEmissionPlan::default()
+        };
+        for (key, contract) in &local.callables {
+            let helper_name = helper_names
+                .get(key)
+                .expect("validated inline cpp_abi helper name")
+                .clone();
+            emission.semantic_helpers.insert(
+                (key_module(key).clone(), helper_name.clone()),
+                key.clone(),
+            );
+            emission.facades.insert(
+                key.clone(),
+                CallableFacade {
+                    contract: contract.clone(),
+                    helper_name,
+                },
+            );
+        }
+        if support_owner == Some(index) {
+            emission.emit_string_support = std::mem::take(&mut needs_string_support);
+            emission.emit_vector_support = std::mem::take(&mut needs_vector_support);
+        }
+        lower_module_items(
+            &mut lowered.items,
+            &ModulePath(Vec::new()),
+            local,
+            &helper_names,
+        )?;
+        blocks.push(CppAbiInlineBlockPlan {
+            lowered,
+            emission,
+            dependencies,
+        });
+    }
+
+    Ok(CppAbiInlineCarrierPlan {
+        blocks,
+        adapted_blocks,
+    })
+}
+
 /// Validate and lower the source-owned ABI markers.  `None` is the exact
 /// no-marker fast path: callers must pass the original parsed file to codegen
 /// so an unannotated source cannot be perturbed by this feature.
@@ -907,6 +1204,7 @@ pub(crate) fn lower(file: &syn::File) -> Result<Option<(syn::File, CppAbiEmissio
             },
         );
     }
+    plan.derive_support_requirements();
     lower_module_items(
         &mut lowered.items,
         &ModulePath(Vec::new()),
@@ -1396,7 +1694,8 @@ impl GlobalContractIndex {
     }
 }
 
-struct ExternalContractIndex {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExternalContractIndex {
     values: BTreeSet<Vec<String>>,
     types: BTreeSet<Vec<String>>,
     provider_modules: BTreeSet<Vec<String>>,
@@ -1654,6 +1953,17 @@ impl<'a> ScopedCrossFileAudit<'a> {
             .iter()
             .map(|segment| ident_key(&segment.ident))
             .collect::<Vec<_>>();
+        if semantic.len() == 1 {
+            let name = &semantic[0];
+            let bound = if type_namespace {
+                self.type_bound(name)
+            } else {
+                self.value_bound(name)
+            };
+            if bound {
+                return;
+            }
+        }
         let (canonical, explicit) = self.canonical_path(path);
         let exact = if type_namespace {
             self.external.types.contains(&canonical)
@@ -2291,6 +2601,53 @@ fn helper_stem(key: &CallableKey) -> String {
             format!("rusty_cpp_abi_sem_{owner}_{name}")
         }
     }
+}
+
+fn inline_helper_stem(key: &CallableKey, identity: &str) -> String {
+    helper_stem(key).replacen(
+        "rusty_cpp_abi_sem_",
+        &format!("rusty_cpp_abi_sem_{identity}_"),
+        1,
+    )
+}
+
+fn allocate_inline_helper_names(
+    file: &syn::File,
+    contracts: &CppAbiContracts,
+    identity: &str,
+) -> Result<BTreeMap<CallableKey, String>, String> {
+    if identity.is_empty()
+        || !identity
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err("inline cpp_abi identity must be a nonempty C++ identifier fragment".to_string());
+    }
+    let detail = format!("rusty_cpp_abi_detail_{identity}");
+    let mut names_by_module = BTreeMap::<ModulePath, BTreeSet<String>>::new();
+    collect_namespace_item_names(&file.items, &ModulePath(Vec::new()), &mut names_by_module);
+    if names_by_module
+        .values()
+        .any(|names| names.contains(&detail))
+    {
+        return Err(format!(
+            "source item `{detail}` collides with the reserved inline cpp_abi conversion namespace"
+        ));
+    }
+    let mut result = BTreeMap::new();
+    for key in contracts.callables.keys() {
+        let module = key_module(key);
+        let helper = inline_helper_stem(key, identity);
+        let occupied = names_by_module.entry(module.clone()).or_default();
+        if !occupied.insert(helper.clone()) {
+            return Err(format!(
+                "inline cpp_abi semantic helper name `{helper}` collides in module `{}`",
+                module.0.join("::")
+            ));
+        }
+        result.insert(key.clone(), helper);
+    }
+    Ok(result)
 }
 
 fn allocate_helper_names(
@@ -3713,12 +4070,35 @@ fn rewrite_semantic_calls(
     contracts: &CppAbiContracts,
     helper_names: &BTreeMap<CallableKey, String>,
 ) -> Result<(), String> {
+    let available = helper_names.keys().cloned().collect::<BTreeSet<_>>();
+    rewrite_semantic_calls_with_available(
+        file,
+        contracts,
+        helper_names,
+        &available,
+        &BTreeSet::new(),
+    )
+    .map(|_| ())
+}
+
+fn rewrite_semantic_calls_with_available(
+    file: &mut syn::File,
+    contracts: &CppAbiContracts,
+    helper_names: &BTreeMap<CallableKey, String>,
+    available: &BTreeSet<CallableKey>,
+    extra_reserved_tails: &BTreeSet<String>,
+) -> Result<BTreeSet<CallableKey>, String> {
+    let mut used = BTreeSet::new();
     rewrite_module_calls(
         &mut file.items,
         &ModulePath(Vec::new()),
         contracts,
         helper_names,
-    )
+        available,
+        extra_reserved_tails,
+        &mut used,
+    )?;
+    Ok(used)
 }
 
 fn rewrite_module_calls(
@@ -3726,10 +4106,13 @@ fn rewrite_module_calls(
     module: &ModulePath,
     contracts: &CppAbiContracts,
     helper_names: &BTreeMap<CallableKey, String>,
+    available: &BTreeSet<CallableKey>,
+    extra_reserved_tails: &BTreeSet<String>,
+    used: &mut BTreeSet<CallableKey>,
 ) -> Result<(), String> {
-    let mut local_free = BTreeMap::new();
-    let mut local_methods = BTreeMap::new();
-    let mut reserved_tails = BTreeSet::new();
+    let mut local_free = BTreeMap::<String, (CallableKey, String)>::new();
+    let mut local_methods = BTreeMap::<(String, String), (CallableKey, String)>::new();
+    let mut reserved_tails = extra_reserved_tails.clone();
     for (key, helper) in helper_names {
         match key {
             CallableKey::Free {
@@ -3737,8 +4120,8 @@ fn rewrite_module_calls(
                 name,
             } => {
                 reserved_tails.insert(name.clone());
-                if owner_module == module {
-                    local_free.insert(name.clone(), helper.clone());
+                if owner_module == module && available.contains(key) {
+                    local_free.insert(name.clone(), (key.clone(), helper.clone()));
                 }
             }
             CallableKey::InherentStatic {
@@ -3747,8 +4130,11 @@ fn rewrite_module_calls(
                 name,
             } => {
                 reserved_tails.insert(name.clone());
-                if owner_module == module {
-                    local_methods.insert((owner.clone(), name.clone()), helper.clone());
+                if owner_module == module && available.contains(key) {
+                    local_methods.insert(
+                        (owner.clone(), name.clone()),
+                        (key.clone(), helper.clone()),
+                    );
                 }
             }
         }
@@ -3759,7 +4145,7 @@ fn rewrite_module_calls(
             Item::Fn(function) => {
                 let mut rewrite = CallRewrite::new(&local_free, &local_methods, &reserved_tails);
                 rewrite.visit_block_mut(&mut function.block);
-                rewrite.finish()?;
+                used.extend(rewrite.finish()?);
             }
             Item::Impl(implementation) => {
                 for impl_item in &mut implementation.items {
@@ -3767,7 +4153,7 @@ fn rewrite_module_calls(
                         let mut rewrite =
                             CallRewrite::new(&local_free, &local_methods, &reserved_tails);
                         rewrite.visit_block_mut(&mut method.block);
-                        rewrite.finish()?;
+                        used.extend(rewrite.finish()?);
                     }
                 }
             }
@@ -3775,7 +4161,15 @@ fn rewrite_module_calls(
                 if let Some((_, nested)) = &mut item_mod.content {
                     let mut path = module.0.clone();
                     path.push(ident_key(&item_mod.ident));
-                    rewrite_module_calls(nested, &ModulePath(path), contracts, helper_names)?;
+                    rewrite_module_calls(
+                        nested,
+                        &ModulePath(path),
+                        contracts,
+                        helper_names,
+                        available,
+                        extra_reserved_tails,
+                        used,
+                    )?;
                 }
             }
             _ => {}
@@ -3786,17 +4180,18 @@ fn rewrite_module_calls(
 }
 
 struct CallRewrite<'a> {
-    local_free: &'a BTreeMap<String, String>,
-    local_methods: &'a BTreeMap<(String, String), String>,
+    local_free: &'a BTreeMap<String, (CallableKey, String)>,
+    local_methods: &'a BTreeMap<(String, String), (CallableKey, String)>,
     reserved_tails: &'a BTreeSet<String>,
     errors: Vec<String>,
+    used: BTreeSet<CallableKey>,
     direct_callee_depth: usize,
 }
 
 impl<'a> CallRewrite<'a> {
     fn new(
-        local_free: &'a BTreeMap<String, String>,
-        local_methods: &'a BTreeMap<(String, String), String>,
+        local_free: &'a BTreeMap<String, (CallableKey, String)>,
+        local_methods: &'a BTreeMap<(String, String), (CallableKey, String)>,
         reserved_tails: &'a BTreeSet<String>,
     ) -> Self {
         Self {
@@ -3804,19 +4199,23 @@ impl<'a> CallRewrite<'a> {
             local_methods,
             reserved_tails,
             errors: Vec::new(),
+            used: BTreeSet::new(),
             direct_callee_depth: 0,
         }
     }
 
-    fn finish(self) -> Result<(), String> {
+    fn finish(self) -> Result<BTreeSet<CallableKey>, String> {
         if self.errors.is_empty() {
-            Ok(())
+            Ok(self.used)
         } else {
             Err(self.errors.join("; "))
         }
     }
 
-    fn resolve_direct(&self, path: &syn::ExprPath) -> Result<Option<&str>, String> {
+    fn resolve_direct(
+        &self,
+        path: &syn::ExprPath,
+    ) -> Result<Option<(CallableKey, String)>, String> {
         if path.qself.is_some() || path.path.leading_colon.is_some() {
             return self.reject_if_reserved_tail(path);
         }
@@ -3828,20 +4227,23 @@ impl<'a> CallRewrite<'a> {
             .collect();
         if segments.len() == 1 {
             if let Some(helper) = self.local_free.get(&segments[0]) {
-                return Ok(Some(helper));
+                return Ok(Some(helper.clone()));
             }
         } else if segments.len() == 2 {
             if let Some(helper) = self
                 .local_methods
                 .get(&(segments[0].clone(), segments[1].clone()))
             {
-                return Ok(Some(helper));
+                return Ok(Some(helper.clone()));
             }
         }
         self.reject_if_reserved_tail(path)
     }
 
-    fn reject_if_reserved_tail(&self, path: &syn::ExprPath) -> Result<Option<&str>, String> {
+    fn reject_if_reserved_tail(
+        &self,
+        path: &syn::ExprPath,
+    ) -> Result<Option<(CallableKey, String)>, String> {
         let tail = path.path.segments.last().map(|s| ident_key(&s.ident));
         if tail
             .as_ref()
@@ -3861,9 +4263,10 @@ impl VisitMut for CallRewrite<'_> {
     fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
         if let Expr::Path(path) = call.func.as_mut() {
             match self.resolve_direct(path) {
-                Ok(Some(helper)) => {
+                Ok(Some((key, helper))) => {
+                    self.used.insert(key);
                     path.path = syn::Path::from(proc_macro2::Ident::new(
-                        helper,
+                        &helper,
                         path.path
                             .segments
                             .last()
@@ -6004,6 +6407,147 @@ mod tests {
                 "accepted impl-dependent body: {source}"
             );
         }
+    }
+
+    #[test]
+    fn inline_lowering_rewrites_ordered_calls_and_records_dependencies() {
+        let provider = syn::parse_str::<syn::File>(
+            r#"
+                #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes), returns(std_string_bytes)))]
+                pub fn zero_pad(v: Vec<u8>) -> Vec<u8> { v }
+            "#,
+        )
+        .unwrap();
+        let consumer = syn::parse_str::<syn::File>(
+            "pub fn format(v: Vec<u8>) -> Vec<u8> { zero_pad(v) }",
+        )
+        .unwrap();
+        let plan = prepare_inline_carrier(
+            &[provider, consumer],
+            &ExternalContractIndex::default(),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(plan.adapted_blocks, BTreeSet::from([0, 1]));
+        assert!(plan.blocks[0].dependencies.is_empty());
+        assert_eq!(plan.blocks[1].dependencies, BTreeSet::from([0]));
+        assert!(plan.blocks[0].emission.needs_string_adapter());
+        assert!(!plan.blocks[1].emission.needs_string_adapter());
+        let consumer = plan.blocks[1].lowered.to_token_stream().to_string();
+        assert!(consumer.contains("rusty_cpp_abi_sem_test_zero_pad"), "{consumer}");
+    }
+
+    #[test]
+    fn inline_lowering_rejects_backward_calls_and_function_values() {
+        for consumer in [
+            "pub fn format(v: Vec<u8>) -> Vec<u8> { zero_pad(v) }",
+            "pub fn format() { let _f = zero_pad; }",
+        ] {
+            let first = syn::parse_str::<syn::File>(consumer).unwrap();
+            let provider = syn::parse_str::<syn::File>(
+                r#"
+                    #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes), returns(std_string_bytes)))]
+                    pub fn zero_pad(v: Vec<u8>) -> Vec<u8> { v }
+                "#,
+            )
+            .unwrap();
+            let error = prepare_inline_carrier(
+                &[first, provider],
+                &ExternalContractIndex::default(),
+                "test",
+            )
+            .expect_err("backward/non-call use must fail");
+            assert!(error.contains("zero_pad"), "{error}");
+        }
+    }
+
+    #[test]
+    fn inline_lowering_rejects_external_names_and_consumer_inner_cfg() {
+        let external_use = syn::parse_str::<syn::File>(
+            "pub fn use_external(v: Vec<u8>) -> Vec<u8> { external_adapter(v) }",
+        )
+        .unwrap();
+        let error = prepare_inline_carrier(
+            &[external_use],
+            &ExternalContractIndex {
+                values: BTreeSet::from([vec!["external_adapter".to_string()]]),
+                ..ExternalContractIndex::default()
+            },
+            "test",
+        )
+        .expect_err("cross-carrier call must fail");
+        assert!(
+            error.contains("cross-carrier") || error.contains("adapted sibling"),
+            "{error}"
+        );
+
+        let provider = syn::parse_str::<syn::File>(
+            r#"
+                #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes)))]
+                pub fn adapted(v: Vec<u8>) {}
+            "#,
+        )
+        .unwrap();
+        let consumer = syn::parse_str::<syn::File>(
+            "#![cfg(any())]\npub fn ordinary() {}",
+        )
+        .unwrap();
+        let error = prepare_inline_carrier(
+            &[provider, consumer],
+            &ExternalContractIndex::default(),
+            "test",
+        )
+        .expect_err("consumer inner cfg must not disappear");
+        assert!(error.contains("inline block 2 source"), "{error}");
+    }
+
+    #[test]
+    fn inline_projected_census_rejects_cross_carrier_public_name_collisions() {
+        let adapted_free = syn::parse_str::<syn::File>(
+            r#"
+                #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes)))]
+                pub fn foo(v: Vec<u8>) {}
+            "#,
+        )
+        .unwrap();
+        let ordinary_free = syn::parse_str::<syn::File>("pub fn foo(v: i32) -> i32 { v }")
+            .unwrap();
+        let error = validate_inline_projected_cpp_name_collisions(
+            &["adapted.cpp".to_string(), "ordinary.cpp".to_string()],
+            &[vec![adapted_free.clone()], vec![ordinary_free]],
+        )
+        .expect_err("return-only/overload public name must fail closed across modules");
+        assert!(error.contains("foo") && error.contains("ordinary.cpp"), "{error}");
+
+        let alias = syn::parse_str::<syn::File>(
+            r#"
+                #[cfg_attr(any(), cpp_abi_alias(std_vector))]
+                pub type Weights = Vec<f64>;
+                pub struct Picker;
+                impl Picker {
+                    #[cfg_attr(any(), cpp_abi(param(v, const_ref(Weights))))]
+                    pub fn choose(v: &[f64]) {}
+                }
+            "#,
+        )
+        .unwrap();
+        let ordinary_type = syn::parse_str::<syn::File>("pub struct Weights;").unwrap();
+        let error = validate_inline_projected_cpp_name_collisions(
+            &["alias.cpp".to_string(), "type.cpp".to_string()],
+            &[vec![alias], vec![ordinary_type]],
+        )
+        .expect_err("adapted alias and ordinary type must not share a public C++ spelling");
+        assert!(error.contains("Weights") && error.contains("type.cpp"), "{error}");
+
+        let nested = syn::parse_str::<syn::File>(
+            "pub mod local { pub fn foo(v: i32) -> i32 { v } }",
+        )
+        .unwrap();
+        validate_inline_projected_cpp_name_collisions(
+            &["adapted.cpp".to_string(), "nested.cpp".to_string()],
+            &[vec![adapted_free], vec![nested]],
+        )
+        .expect("a distinct nested namespace does not collide with root facade foo");
     }
 
     #[test]

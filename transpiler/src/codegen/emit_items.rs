@@ -52,6 +52,7 @@ impl CodeGen {
         facade: &crate::cpp_abi::CallableFacade,
     ) {
         let mut args = Vec::new();
+        let detail_namespace = self.cpp_abi_plan.detail_namespace();
         for (index, arg) in sig.inputs.iter().enumerate() {
             let syn::FnArg::Typed(arg) = arg else {
                 continue;
@@ -66,14 +67,14 @@ impl CodeGen {
                 Some(crate::cpp_abi::ParamAdapter::StdStringBytes) => {
                     let local = format!("rusty_cpp_abi_arg_{index}");
                     self.writeln(&format!(
-                        "auto {local} = rusty_cpp_abi_detail::bytes_from_std_string({name});"
+                        "auto {local} = {detail_namespace}::bytes_from_std_string({name});"
                     ));
                     args.push(format!("std::move({local})"));
                 }
                 Some(crate::cpp_abi::ParamAdapter::ConstRef { .. }) => {
                     let local = format!("rusty_cpp_abi_arg_{index}");
                     self.writeln(&format!(
-                        "auto {local} = rusty_cpp_abi_detail::f64_span_from_std_vector({name});"
+                        "auto {local} = {detail_namespace}::f64_span_from_std_vector({name});"
                     ));
                     args.push(local);
                 }
@@ -83,7 +84,7 @@ impl CodeGen {
         let call = format!("{}({})", facade.helper_name, args.join(", "));
         if facade.contract.returns.is_some() {
             self.writeln(&format!("auto rusty_cpp_abi_result = {call};"));
-            self.writeln("return rusty_cpp_abi_detail::std_string_from_bytes(std::move(rusty_cpp_abi_result));");
+            self.writeln(&format!("return {detail_namespace}::std_string_from_bytes(std::move(rusty_cpp_abi_result));"));
         } else if matches!(&sig.output, syn::ReturnType::Default)
             || matches!(&sig.output, syn::ReturnType::Type(_, ty) if matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty()))
         {
@@ -361,10 +362,10 @@ impl CodeGen {
         // fn that happens to share a re-export target's name (semver's test
         // util `version` vs the crate's re-exported `version`) would otherwise
         // emit the ill-formed `export static`.
-        let force_cpp_abi_static = self
+        let cpp_abi_semantic_helper = self
             .cpp_abi_plan
             .is_semantic_helper(&self.module_stack, &f.sig.ident.to_string());
-        let export_prefix = if !force_cpp_abi_static
+        let export_prefix = if !cpp_abi_semantic_helper
             && !self.should_emit_internal_linkage_function(f)
             && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
                 || self.should_force_export_private_root_module_function(f))
@@ -378,13 +379,20 @@ impl CodeGen {
         } else {
             ""
         };
+        let linkage_prefix = if cpp_abi_semantic_helper {
+            if self.inline_rust_block {
+                "inline "
+            } else {
+                "static "
+            }
+        } else if self.should_emit_internal_linkage_function(f) {
+            "static "
+        } else {
+            ""
+        };
         let static_prefix = format!(
             "{}{}",
-            if force_cpp_abi_static || self.should_emit_internal_linkage_function(f) {
-                "static "
-            } else {
-                ""
-            },
+            linkage_prefix,
             constexpr_prefix
         );
         self.emit_template_declaration_with_type_defaults(
@@ -789,10 +797,10 @@ impl CodeGen {
         // fn that happens to share a re-export target's name (semver's test
         // util `version` vs the crate's re-exported `version`) would otherwise
         // emit the ill-formed `export static`.
-        let force_cpp_abi_static = self
+        let cpp_abi_semantic_helper = self
             .cpp_abi_plan
             .is_semantic_helper(&self.module_stack, &f.sig.ident.to_string());
-        let export_prefix = if !force_cpp_abi_static
+        let export_prefix = if !cpp_abi_semantic_helper
             && !self.should_emit_internal_linkage_function(f)
             && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
                 || self.should_force_export_private_root_module_function(f))
@@ -806,13 +814,20 @@ impl CodeGen {
         } else {
             ""
         };
+        let linkage_prefix = if cpp_abi_semantic_helper {
+            if self.inline_rust_block {
+                "inline "
+            } else {
+                "static "
+            }
+        } else if self.should_emit_internal_linkage_function(f) {
+            "static "
+        } else {
+            ""
+        };
         let static_prefix = format!(
             "{}{}",
-            if force_cpp_abi_static || self.should_emit_internal_linkage_function(f) {
-                "static "
-            } else {
-                ""
-            },
+            linkage_prefix,
             constexpr_prefix
         );
         // Template declarations must be emitted outside the function's type-param scope.

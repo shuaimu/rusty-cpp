@@ -6576,6 +6576,23 @@ move this block to a header/module interface, or provide matching declarations m
 
 This keeps v1 intentionally strict and prevents silent ODR/linkage regressions during incremental migration.
 
+#### 12.8.1 Source-Owned C++ ABI Adapters
+
+Inline module carriers may preserve a narrow, source-owned legacy STL boundary with inert Rust attributes:
+
+- `#[cfg_attr(any(), cpp_abi(...))]` on a free function or static inherent method
+- `#[cfg_attr(any(), cpp_abi_alias(std_vector))]` on a public `Vec<f64>` alias
+
+The supported adapters are deliberately closed: `std_string_bytes` maps by-value `Vec<u8>` parameters and returns to `std::string`, while `const_ref(Alias)` maps `&[f64]` to `const std::vector<double>&`. A marked vector alias and its `const_ref` consumer MUST be in the same block. Unsupported attributes, shapes, uses, or placements fail closed.
+
+An adapted callable and every block that calls it MUST be in the same physical carrier and the same full immediate `export namespace` scope. A direct call may target a provider in the current block or an earlier block only. Backward or cross-file references, function values, qualified/imported/macro-mediated uses, ambiguous names, and lexical shadows are rejected. This ordering rule does not add cross-block type inference.
+
+The carrier MUST contain exactly one unconditional top-level `export module` declaration. Exact unconditional top-level `import std;` and `import rusty;` declarations MUST follow it and precede every participating block. If `<rusty/rusty.hpp>` is also included, it MUST be an exact global-module-fragment include: `module;` is the first meaningful host construct, followed by the include and then the export-module declaration. Conditional, macro-produced, or otherwise ambiguous host prerequisites are rejected.
+
+Generated semantic and conversion helpers are `inline`, carrier/module-uniquely named implementation details; conversion support is emitted once in its owning block. Public ABI facades remain ordinary non-inline definitions so their legacy strong symbols are preserved. Host code remains responsible for its own declarations and imports.
+
+For a multi-file command, adapter preflight and rendering complete for every input before any file is atomically replaced; `--check` runs the same validation without writing. `--emit-rust --block-id` includes the required earlier-provider dependency closure in deterministic dependency-first order. Marker-free carriers retain the legacy byte path.
+
 ### 12.9 Assignment Expressions, Unit Semantics, and Statement Peephole
 
 Rust assignment and compound-assignment are expressions, but their value is always unit `()`.

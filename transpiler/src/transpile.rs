@@ -1362,6 +1362,53 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
+    transpile_full_with_options_impl(
+        rust_source,
+        module_name,
+        type_map,
+        extension_method_hints,
+        crate_name,
+        options,
+        None,
+    )
+}
+
+/// Render a cpp_abi file that was already collected, globally validated, and
+/// lowered by the ordered inline-block preflight.  This seam is intentionally
+/// crate-private: ordinary standalone callers must continue through
+/// `transpile_full_with_options`, which rejects module-less ABI facades.
+pub(crate) fn transpile_prepared_inline_cpp_abi(
+    file: syn::File,
+    plan: crate::cpp_abi::CppAbiEmissionPlan,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    options: &TranspileOptions,
+) -> Result<String, String> {
+    if !options.inline_rust_block {
+        return Err(
+            "prepared cpp_abi rendering requires inline-rust code generation".to_string(),
+        );
+    }
+    transpile_full_with_options_impl(
+        "",
+        None,
+        type_map,
+        extension_method_hints,
+        None,
+        options,
+        Some((file, plan)),
+    )
+}
+
+fn transpile_full_with_options_impl(
+    rust_source: &str,
+    module_name: Option<&str>,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    crate_name: Option<&str>,
+    options: &TranspileOptions,
+    prepared_cpp_abi: Option<(syn::File, crate::cpp_abi::CppAbiEmissionPlan)>,
+) -> Result<String, String> {
     validate_explicit_gmf_includes(&options.explicit_gmf_includes)?;
     if module_name.is_none() && !options.explicit_gmf_includes.is_empty() {
         return Err(
@@ -1386,14 +1433,19 @@ pub fn transpile_full_with_options(
         }
     };
     log_profile("start");
-    let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
-        .map_err(|e| format!("Parse error: {}", e))?;
-    log_profile("parse_with_expand_hygiene_fallback");
-    let (file, cpp_abi_plan) = match crate::cpp_abi::lower(&file)? {
-        Some((lowered, plan)) => (lowered, plan),
-        None => (file, crate::cpp_abi::CppAbiEmissionPlan::default()),
+    let is_prepared_inline = prepared_cpp_abi.is_some();
+    let (file, cpp_abi_plan) = if let Some(prepared) = prepared_cpp_abi {
+        prepared
+    } else {
+        let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
+            .map_err(|e| format!("Parse error: {}", e))?;
+        log_profile("parse_with_expand_hygiene_fallback");
+        match crate::cpp_abi::lower(&file)? {
+            Some((lowered, plan)) => (lowered, plan),
+            None => (file, crate::cpp_abi::CppAbiEmissionPlan::default()),
+        }
     };
-    if !cpp_abi_plan.is_empty() && module_name.is_none() {
+    if !cpp_abi_plan.is_empty() && module_name.is_none() && !is_prepared_inline {
         return Err(
             "cpp_abi adapters require named C++ module output; standalone output is unsupported"
                 .to_string(),

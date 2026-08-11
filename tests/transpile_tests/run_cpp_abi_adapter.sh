@@ -14,6 +14,8 @@ elif [[ $# -ne 0 ]]; then
 fi
 
 SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_core.rs"
+INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_inline.cppm"
+MARKER_FREE_INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/inline_rust_marker_free.cppm"
 SIBLING_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_sibling_crate/Cargo.toml"
 ASSERT_EXTERNAL_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_assert_external_crate/Cargo.toml"
 ASSERT_BINDING_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_assert_binding_crate/Cargo.toml"
@@ -32,11 +34,41 @@ BAD_DEP_ROOT="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_dependency_prefligh
 CLOSURE_FIXTURES="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_dependency_closure"
 REJECT_FIXTURES="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_reject"
 GENERATED="${WORK_DIR}/cpp_abi_core.cppm"
+INLINE_GENERATED="${WORK_DIR}/cpp_abi_inline.cppm"
+INLINE_RUST="${WORK_DIR}/cpp_abi_inline.rs"
+MARKER_FREE_INLINE_GENERATED="${WORK_DIR}/inline_rust_marker_free.cppm"
 RUST_LIB="${WORK_DIR}/libcpp_abi_core.rlib"
 BUILD_DIR="${WORK_DIR}/build"
 
 mkdir -p "${WORK_DIR}"
 cargo build -p rusty-cpp-transpiler
+
+cp "${INLINE_SOURCE}" "${INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --rewrite --files "${INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --check --files "${INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --emit-rust "${INLINE_RUST}" --files "${INLINE_GENERATED}"
+rustc --edition=2024 --crate-type=lib "${INLINE_RUST}" \
+    -o "${WORK_DIR}/libcpp_abi_inline.rlib"
+
+[[ "$(grep -Ec '^namespace rusty_cpp_abi_detail_m_[0-9a-f]{64} \{' \
+    "${INLINE_GENERATED}")" -eq 1 ]]
+grep -Eq 'return rusty_cpp_abi_sem_m_[0-9a-f]{64}_echo_bytes\(' \
+    "${INLINE_GENERATED}"
+grep -Fq 'std::string echo_bytes(std::string bytes) {' "${INLINE_GENERATED}"
+grep -Fq 'std::string InlineCodec::via_earlier(std::string bytes) {' \
+    "${INLINE_GENERATED}"
+! grep -Fq 'inline std::string echo_bytes(std::string bytes) {' \
+    "${INLINE_GENERATED}"
+! grep -Fq 'inline std::string InlineCodec::via_earlier(std::string bytes) {' \
+    "${INLINE_GENERATED}"
+
+cp "${MARKER_FREE_INLINE_SOURCE}" "${MARKER_FREE_INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --rewrite --files "${MARKER_FREE_INLINE_GENERATED}"
+cmp -s "${MARKER_FREE_INLINE_SOURCE}" "${MARKER_FREE_INLINE_GENERATED}"
 
 for fixture in \
     local_item_fn_shadow \
@@ -326,9 +358,12 @@ cmake -S "${REPO_ROOT}/transpiler/tests/cpp_abi_core" -B "${BUILD_DIR}" -G Ninja
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \
     -DRUSTY_CPP_SOURCE_DIR="${REPO_ROOT}" \
-    -DCPP_ABI_GENERATED_MODULE="${GENERATED}"
-cmake --build "${BUILD_DIR}" --target cpp_abi_core_runtime -j "${JOBS:-2}"
-ctest --test-dir "${BUILD_DIR}" --output-on-failure -R '^cpp_abi_core_runtime$'
+    -DCPP_ABI_GENERATED_MODULE="${GENERATED}" \
+    -DCPP_ABI_INLINE_MODULE="${INLINE_GENERATED}"
+cmake --build "${BUILD_DIR}" \
+    --target cpp_abi_core_runtime cpp_abi_inline_runtime -j "${JOBS:-2}"
+ctest --test-dir "${BUILD_DIR}" --output-on-failure \
+    -R '^cpp_abi_(core|inline)_runtime$'
 
 MODULE_OBJECT="$(find "${BUILD_DIR}" -path '*cpp_abi_core.cppm.o' -type f -print -quit)"
 [[ -n "${MODULE_OBJECT}" ]]
@@ -345,4 +380,23 @@ printf '%s\n' "${STRONG_SYMBOLS}" | grep -Fq 'private_::struct_@cpp_abi_core::pa
 LOCAL_HELPERS="$(nm -C "${MODULE_OBJECT}" | awk '$2 == "t" && /rusty_cpp_abi_sem_/ { print $0 }')"
 [[ "$(printf '%s\n' "${LOCAL_HELPERS}" | sed '/^$/d' | wc -l)" -eq 5 ]]
 
-echo "cpp_abi adapter compile/runtime/symbol gate passed"
+INLINE_MODULE_OBJECT="$(find "${BUILD_DIR}" -path '*cpp_abi_inline.cppm.o' \
+    -type f -print -quit)"
+[[ -n "${INLINE_MODULE_OBJECT}" ]]
+INLINE_STRONG_SYMBOLS="$(nm -C "${INLINE_MODULE_OBJECT}" | \
+    awk '$2 ~ /^[TDB]$/ { print $0 }')"
+[[ "$(printf '%s\n' "${INLINE_STRONG_SYMBOLS}" | sed '/^$/d' | wc -l)" -eq 4 ]]
+printf '%s\n' "${INLINE_STRONG_SYMBOLS}" | \
+    grep -Fq 'initializer for module cpp_abi_inline'
+printf '%s\n' "${INLINE_STRONG_SYMBOLS}" | grep -Fq 'echo_bytes@cpp_abi_inline'
+printf '%s\n' "${INLINE_STRONG_SYMBOLS}" | \
+    grep -Fq 'InlineCodec@cpp_abi_inline::via_earlier'
+printf '%s\n' "${INLINE_STRONG_SYMBOLS}" | \
+    grep -Fq 'InlineCodec@cpp_abi_inline::count_weights'
+! printf '%s\n' "${INLINE_STRONG_SYMBOLS}" | grep -Fq 'rusty_cpp_abi_'
+
+INLINE_WEAK_HELPERS="$(nm -C "${INLINE_MODULE_OBJECT}" | \
+    awk '$2 == "W" && /rusty_cpp_abi_(detail|sem)_/ { print $0 }')"
+[[ "$(printf '%s\n' "${INLINE_WEAK_HELPERS}" | sed '/^$/d' | wc -l)" -eq 6 ]]
+
+echo "cpp_abi crate and inline adapter compile/runtime/symbol gate passed"

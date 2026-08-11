@@ -624,7 +624,7 @@ rusty-cpp-transpiler inline-rust --check --files src/*.cpp
 rusty-cpp-transpiler inline-rust --rewrite --files src/*.cpp
 ```
 
-The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. V1 deliberately accepts a conservative Rust subset (free functions, structs with named fields, inherent impls, `Option`/`Result`/`Vec`/`String`, standard control flow) and keeps each block local to its translation unit — no cross-TU declaration magic. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the normative grammar and subset.
+The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. V1 deliberately accepts a conservative Rust subset (free functions, structs with named fields, inherent impls, `Option`/`Result`/`Vec`/`String`, standard control flow) and keeps each block local to its translation unit — no cross-TU declaration magic. Source-owned `cpp_abi` adapters may preserve selected legacy STL signatures across blocks in one module carrier: direct calls may target only providers in the same or an earlier block, and the carrier must satisfy the strict module/import/namespace contract. Every requested file is preflighted and rendered before atomic replacement. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the normative grammar and subset.
 
 ---
 
