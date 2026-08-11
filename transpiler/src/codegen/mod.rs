@@ -13485,6 +13485,39 @@ impl CodeGen {
             return wrapped;
         }
 
+        // A GENERIC free fn passed as a callable arg (`parse_str_bytes(...,
+        // as_str)` — read_mod::as_str is generic in Rust): C++ cannot deduce
+        // the callee's F from a raw function template-id. Wrap in a
+        // forwarding lambda. Module-fn paths only (every segment lowercase),
+        // and only when the fn is KNOWN generic — plain fns bind fine and
+        // keep their address-of semantics.
+        if let syn::Expr::Path(p) = self.peel_paren_group_expr(arg)
+            && p.qself.is_none()
+            && p.path.segments.iter().all(|s| {
+                s.arguments.is_none()
+                    && s.ident
+                        .to_string()
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_lowercase())
+            })
+            && self
+                .lookup_function_type_param_names_with_import_fallback(arg)
+                .is_some_and(|params| !params.is_empty())
+        {
+            // A LOCAL BINDING can shadow a generic fn's name (std port broke
+            // with capture-less lambdas referencing locals). A genuine free-fn
+            // arg emits QUALIFIED (`::crate::mod::as_str`); a bare emission is
+            // a local — leave it alone.
+            let callee = self.emit_expr_to_string(arg);
+            if callee.contains("::") {
+                return format!(
+                    "[](auto&&... __fa) -> decltype(auto) {{ return {}(std::forward<decltype(__fa)>(__fa)...); }}",
+                    callee
+                );
+            }
+        }
+
         let arg_is_closure = matches!(self.peel_paren_group_expr(arg), syn::Expr::Closure(_));
         let suppress_placeholder_expected_for_closure = arg_is_closure
             && expected_ty.is_some_and(|expected| {
