@@ -3003,7 +3003,21 @@ impl CodeGen {
 
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
-        self.register_local_binding_pattern(pat);
+        // §208 feeder: a plain un-annotated `let map = serializer
+        //     .serialize_map(len)?;` used to register with ty=None (measured:
+        // 12x "register map ty=None"), so collapse-probe routing could never
+        // see the local's projection type. When the initializer is a
+        // trait-bounded method call whose declared return is a `Self::X`
+        // projection, register that projection instead. Every other shape
+        // still registers None exactly as before.
+        if let syn::Pat::Ident(pi) = pat
+            && let Some(init) = &local.init
+            && let Some(proj_ty) = self.infer_local_binding_projection_from_call(&init.expr)
+        {
+            self.register_local_binding(pi.ident.to_string(), Some(proj_ty));
+        } else {
+            self.register_local_binding_pattern(pat);
+        }
         // `let PAT = EXPR else { DIVERGE };` — the diverge block was silently
         // DROPPED (the None path aborted through an unguarded unwrap) and the
         // matched-path bindings dangled (auto&& over an unwrap() prvalue).

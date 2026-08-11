@@ -685,6 +685,8 @@ pub struct CodeGen {
     /// `Trait::Assoc` → short bound-trait name, from LOCAL trait declarations
     /// plus every dependency manifest (§208 phase 2 projection routing).
     pub(crate) ufcs_trait_assoc_bounds: std::collections::BTreeMap<String, String>,
+    /// `Trait::method` → return-projection assoc short name (local + manifests).
+    pub(crate) ufcs_trait_method_return_assoc: std::collections::BTreeMap<String, String>,
     /// Traits whose RuntimeHelper struct was actually EMITTED (generic
     /// traits and non-module builds skip it) — gates the manifest's
     /// declared_trait_modules so consumers never route to a missing helper.
@@ -2080,6 +2082,7 @@ impl CodeGen {
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
             ufcs_trait_assoc_bounds: std::collections::BTreeMap::new(),
+            ufcs_trait_method_return_assoc: std::collections::BTreeMap::new(),
             emitted_runtime_helper_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
@@ -3681,6 +3684,16 @@ impl CodeGen {
             .collect();
         let preserved_collapse_methods: Vec<String> =
             preserved_collapse_trait_method_list();
+        let trait_method_return_assoc: std::collections::BTreeMap<String, String> = self
+            .ufcs_trait_method_return_assoc
+            .iter()
+            .filter(|(key, _)| {
+                key.split("::")
+                    .next()
+                    .is_some_and(|t| self.ufcs_declared_trait_names.contains(t))
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let trait_assoc_type_bounds: std::collections::BTreeMap<String, String> = self
             .ufcs_trait_assoc_bounds
             .iter()
@@ -3766,6 +3779,7 @@ impl CodeGen {
             declared_trait_methods,
             trait_assoc_type_bounds,
             preserved_collapse_methods,
+            trait_method_return_assoc,
             trait_method_has_receiver: self
                 .trait_method_has_receiver
                 .iter()
@@ -4303,6 +4317,11 @@ impl CodeGen {
                 if let Some((t, meth)) = pair.split_once("::") {
                     record_preserved_collapse_trait_method(t, meth);
                 }
+            }
+            for (k, v) in &m.trait_method_return_assoc {
+                self.ufcs_trait_method_return_assoc
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
             }
             for (method, traits) in &m.method_owners {
                 if !self
@@ -4883,6 +4902,8 @@ impl CodeGen {
             crate::transpile::collect_declared_trait_modules(&file.items);
         self.ufcs_trait_assoc_bounds
             .extend(crate::transpile::collect_trait_assoc_type_bounds(&file.items));
+        self.ufcs_trait_method_return_assoc
+            .extend(crate::transpile::collect_trait_method_return_assocs(&file.items));
         self.ufcs_declared_trait_methods =
             crate::transpile::collect_declared_trait_methods(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls

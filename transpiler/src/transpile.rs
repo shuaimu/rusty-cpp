@@ -47,6 +47,13 @@ pub struct UfcsTraitManifest {
     /// (§208). Consumers probe those members only for pairs in this list.
     #[serde(default)]
     pub preserved_collapse_methods: Vec<String>,
+    /// `Trait::method` → the SHORT name of the first `Self::X` projection in
+    /// the method's declared RETURN type (`Serializer::serialize_map` →
+    /// `SerializeMap`, from `Result<Self::SerializeMap, Self::Error>`). Lets a
+    /// consumer type an un-annotated `let m = s.serialize_map(..)?` local as
+    /// the projection so §208 collapse-probe routing can fire on it.
+    #[serde(default)]
+    pub trait_method_return_assoc: BTreeMap<String, String>,
     /// `Trait::method` → whether the trait item's first param is `self`.
     /// A consumer lowering the trait-STATIC call form `T::method(a0, ...)`
     /// on a generic param T may treat `a0` as the receiver ONLY when the
@@ -592,6 +599,51 @@ fn collect_declared_trait_methods_into(
             _ => {}
         }
     }
+}
+
+/// `Trait::method` → the first `Self::X` projection ident in the declared
+/// return type. Token-level scan: `Result < Self :: SerializeMap , ... >`
+/// yields `SerializeMap` (the payload projection comes first in Result/Option
+/// spellings, which is the case this feeds).
+pub fn collect_trait_method_return_assocs(
+    items: &[syn::Item],
+) -> std::collections::BTreeMap<String, String> {
+    fn first_self_projection(ty: &syn::Type) -> Option<String> {
+        let text = quote::ToTokens::to_token_stream(ty).to_string();
+        let idx = text.find("Self :: ")?;
+        let rest = &text[idx + "Self :: ".len()..];
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if ident.is_empty() { None } else { Some(ident) }
+    }
+    fn walk(items: &[syn::Item], out: &mut std::collections::BTreeMap<String, String>) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    for ti in &t.items {
+                        if let syn::TraitItem::Fn(f) = ti
+                            && let syn::ReturnType::Type(_, ret) = &f.sig.output
+                            && let Some(assoc) = first_self_projection(ret)
+                        {
+                            out.entry(format!("{}::{}", t.ident, f.sig.ident))
+                                .or_insert(assoc);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(items, &mut out);
+    out
 }
 
 /// `Trait::Assoc` → short name of the assoc type's first non-marker trait

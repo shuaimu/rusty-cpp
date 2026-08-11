@@ -4340,10 +4340,64 @@ impl CodeGen {
         None
     }
 
+    /// §208 let-binding feeder: `let map = serializer.serialize_map(len)?` —
+    /// when the (try-peeled) init is a method call on a receiver whose bound
+    /// trait declares the method's return as a `Self::X` projection, the
+    /// local's type IS that projection (`S::SerializeMap`). Returns None for
+    /// every other shape, so callers' existing inference is unaffected.
+    pub(super) fn infer_local_binding_projection_from_call(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let mut expr = self.peel_paren_group_expr(expr);
+        loop {
+            match expr {
+                syn::Expr::Try(t) => expr = self.peel_paren_group_expr(&t.expr),
+                syn::Expr::Await(a) => expr = self.peel_paren_group_expr(&a.base),
+                // Expanded `tri!(...)` is a MATCH over the call, not Expr::Try
+                // (measured: emit_local saw Expr::Match while other callers
+                // pre-peeled to the call). Peeling the scrutinee is safe: for
+                // any non-Result shape the trait-method lookup below fails.
+                syn::Expr::Match(m) => expr = self.peel_paren_group_expr(&m.expr),
+                _ => break,
+            }
+        }
+        let syn::Expr::MethodCall(mc) = expr else { return None };
+        let candidates = self.receiver_candidate_bound_traits(&mc.receiver)?;
+        let recv_ty = self.infer_simple_expr_type(&mc.receiver)?;
+        let mut inner: &syn::Type = &recv_ty;
+        loop {
+            match inner {
+                syn::Type::Reference(r) => inner = &r.elem,
+                syn::Type::Paren(p) => inner = &p.elem,
+                syn::Type::Group(g) => inner = &g.elem,
+                _ => break,
+            }
+        }
+        let syn::Type::Path(tp) = inner else { return None };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let owner = tp.path.segments[0].ident.to_string();
+        if !self.is_type_param_in_scope(&owner) {
+            return None;
+        }
+        let method = mc.method.to_string();
+        for b in &candidates {
+            if let Some(assoc) = self
+                .ufcs_trait_method_return_assoc
+                .get(&format!("{}::{}", b, method))
+            {
+                return syn::parse_str::<syn::Type>(&format!("{}::{}", owner, assoc)).ok();
+            }
+        }
+        None
+    }
+
     pub(super) fn infer_local_binding_type_from_initializer(
         &self,
         init_expr: &syn::Expr,
     ) -> Option<syn::Type> {
+        if let Some(ty) = self.infer_local_binding_projection_from_call(init_expr) {
+            return Some(ty);
+        }
         let expr = self.extract_value_expr(init_expr)?;
         match expr {
             syn::Expr::Closure(closure) => match &closure.output {

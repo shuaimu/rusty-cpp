@@ -3396,7 +3396,7 @@ impl CodeGen {
     /// type's DECLARED BOUND (via ufcs_trait_assoc_bounds: local decls +
     /// dependency manifests). Reference/paren/group wrappers are peeled —
     /// receivers typically type as `&X`.
-    fn receiver_candidate_bound_traits(&self, receiver: &syn::Expr) -> Option<Vec<String>> {
+    pub(super) fn receiver_candidate_bound_traits(&self, receiver: &syn::Expr) -> Option<Vec<String>> {
         let ty = self.infer_simple_expr_type(receiver)?;
         let mut inner: &syn::Type = &ty;
         loop {
@@ -3441,12 +3441,32 @@ impl CodeGen {
             if !self.is_type_param_in_scope(&owner_param) {
                 return None;
             }
-            let declaring = self.lookup_trait_for_assoc_via_param_bound(&owner_param, &assoc)?;
-            let declaring_short = declaring.rsplit("::").next().unwrap_or(&declaring);
-            let bound = self
-                .ufcs_trait_assoc_bounds
-                .get(&format!("{}::{}", declaring_short, assoc))?;
-            return Some(vec![bound.clone()]);
+            // Do NOT go through lookup_trait_for_assoc_via_param_bound: it
+            // resolves the declaring trait via trait_associated_type_names,
+            // which is fed from LOCAL trait declarations only — for a foreign
+            // trait (serde_core's Serializer seen from serde_json) it returns
+            // None (measured: `map` inferred `S :: SerializeMap`, candidates
+            // None). The param's own bound traits plus the manifest-fed
+            // ufcs_trait_assoc_bounds are sufficient: S is bound by Serializer,
+            // and "Serializer::SerializeMap" names the assoc's declared bound.
+            let mut hits: Vec<String> = Vec::new();
+            for scope in self.trait_bound_type_param_scopes.iter().rev() {
+                for (bound_trait, bound_param) in scope {
+                    if bound_param != &owner_param {
+                        continue;
+                    }
+                    let declaring_short =
+                        bound_trait.rsplit("::").next().unwrap_or(bound_trait);
+                    if let Some(bound) = self
+                        .ufcs_trait_assoc_bounds
+                        .get(&format!("{}::{}", declaring_short, assoc))
+                        && !hits.contains(bound)
+                    {
+                        hits.push(bound.clone());
+                    }
+                }
+            }
+            return if hits.is_empty() { None } else { Some(hits) };
         }
         if tp.path.segments.len() != 1 {
             return None;
