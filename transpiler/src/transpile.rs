@@ -1445,6 +1445,21 @@ fn transpile_full_with_options_impl(
             None => (file, crate::cpp_abi::CppAbiEmissionPlan::default()),
         }
     };
+    if !is_prepared_inline {
+        cpp_abi_plan.validate_flat_import_namespace(
+            options.cxx_namespace.as_deref(),
+            "crate/module transpilation",
+        )?;
+    }
+    if cpp_abi_plan.has_flat_imports()
+        && !is_prepared_inline
+        && options.crate_module_names.is_empty()
+    {
+        return Err(
+            "cpp_import_namespace requires prepared crate mode or prepared inline-rust mode; direct named-module transpilation cannot prove the physical sibling import"
+                .to_string(),
+        );
+    }
     if !cpp_abi_plan.is_empty() && module_name.is_none() && !is_prepared_inline {
         return Err(
             "cpp_abi adapters require named C++ module output; standalone output is unsupported"

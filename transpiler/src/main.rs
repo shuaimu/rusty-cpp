@@ -771,7 +771,10 @@ fn transpile_crate(
         source_units.push((rs_path.clone(), source));
     }
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
-    let has_cpp_abi = cpp_abi::preflight_crate_sources(&source_units)?;
+    let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
+        &source_units,
+        transpile_options.cxx_namespace.as_deref(),
+    )?;
     if has_cpp_abi {
         validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
         if expand {
@@ -1337,6 +1340,124 @@ mod tests {
 #[cfg_attr(any(), cpp_abi(param(bytes, std_string_bytes), returns(std_string_bytes)))]
 pub fn adapted(bytes: Vec<u8>) -> Vec<u8> { bytes }
 "#;
+
+    #[test]
+    fn cpp_import_namespace_crate_mode_keeps_dependency_private_and_ordered() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod rand; pub mod outer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/rand.rs",
+            "pub fn randgen_rand_max() -> f64 { 1.0 }\npub fn randgen_rand_raw() -> u64 { 7 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/outer.rs",
+            "pub mod rand; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/outer/rand.rs",
+            "pub fn unrelated() -> u64 { 99 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/outer/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::{randgen_rand_max, randgen_rand_raw};
+pub fn draw() -> f64 { randgen_rand_raw() as f64 / randgen_rand_max() }
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap();
+
+        let consumer = std::fs::read_to_string(output.join("rrr.outer.consumer.cppm")).unwrap();
+        let module = consumer
+            .find("export module rrr.outer.consumer;")
+            .unwrap();
+        let import = consumer.find("import rrr.rand;").unwrap();
+        let namespace = consumer.find("namespace rrr {").unwrap();
+        let body = consumer.find("randgen_rand_raw()").unwrap();
+        assert!(module < import && import < namespace && namespace < body, "{consumer}");
+        assert!(!consumer.contains("using ::rrr::"), "{consumer}");
+        assert!(!consumer.contains("import rrr.outer.rand;"), "{consumer}");
+        assert!(!consumer.contains("namespace rand ="), "{consumer}");
+        assert!(!consumer.contains("::rrr::rand::"), "{consumer}");
+        let slots = std::fs::read_to_string(output.join("rusty_hand_slots.md")).unwrap();
+        assert!(slots.contains("0 slot(s)") && slots.contains("No slots detected"), "{slots}");
+
+        let mismatch = fixture.path().join("mismatch-out");
+        options.cxx_namespace = Some("wrong".to_string());
+        let error = transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &mismatch,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("does not match active C++ namespace"), "{error}");
+        assert!(!mismatch.exists());
+
+        let inline_child = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            inline_child.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            inline_child.path(),
+            "src/lib.rs",
+            "pub mod rand { pub fn randgen_rand_raw() -> u64 { 7 } } pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            inline_child.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::randgen_rand_raw;
+pub fn draw() -> u64 { randgen_rand_raw() }
+"#,
+        );
+        let inline_child_output = inline_child.path().join("out");
+        options.cxx_namespace = Some("rrr".to_string());
+        let error = transpile_crate(
+            &inline_child.path().join("Cargo.toml"),
+            &inline_child_output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("physical generated root module"), "{error}");
+        assert!(!inline_child_output.exists());
+    }
 
     #[test]
     fn cpp_abi_crate_mode_requires_an_explicit_modern_edition() {

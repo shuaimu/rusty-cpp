@@ -15,6 +15,8 @@ fi
 
 SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_core.rs"
 INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_inline.cppm"
+FLAT_IMPORT_INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_import_namespace_inline.cppm"
+FLAT_IMPORT_CRATE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_import_namespace_crate"
 MARKER_FREE_INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/inline_rust_marker_free.cppm"
 SIBLING_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_sibling_crate/Cargo.toml"
 ASSERT_EXTERNAL_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_assert_external_crate/Cargo.toml"
@@ -36,11 +38,20 @@ REJECT_FIXTURES="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_reject"
 GENERATED="${WORK_DIR}/cpp_abi_core.cppm"
 INLINE_GENERATED="${WORK_DIR}/cpp_abi_inline.cppm"
 INLINE_RUST="${WORK_DIR}/cpp_abi_inline.rs"
+FLAT_IMPORT_INLINE_OUTPUT="${WORK_DIR}/cpp_import_namespace_inline"
+FLAT_IMPORT_INLINE_GENERATED="${FLAT_IMPORT_INLINE_OUTPUT}/rrr.inline_consumer.cppm"
+FLAT_IMPORT_INLINE_RUST="${FLAT_IMPORT_INLINE_OUTPUT}/rrr.inline_consumer.rs"
+FLAT_IMPORT_INLINE_SELECTED_RUST="${FLAT_IMPORT_INLINE_OUTPUT}/rrr.inline_unrelated.rs"
+FLAT_IMPORT_CRATE_OUTPUT="${WORK_DIR}/cpp_import_namespace_crate"
+FLAT_IMPORT_CRATE_MODULE="${FLAT_IMPORT_CRATE_OUTPUT}/rrr.request_options.cppm"
 MARKER_FREE_INLINE_GENERATED="${WORK_DIR}/inline_rust_marker_free.cppm"
 RUST_LIB="${WORK_DIR}/libcpp_abi_core.rlib"
 BUILD_DIR="${WORK_DIR}/build"
 
-mkdir -p "${WORK_DIR}"
+mkdir -p "${WORK_DIR}" "${FLAT_IMPORT_INLINE_OUTPUT}"
+FLAT_IMPORT_CRATE_INPUT="$(mktemp -d "${WORK_DIR}/cpp-import-namespace-input.XXXXXX")"
+cp -R "${FLAT_IMPORT_CRATE_SOURCE}/." "${FLAT_IMPORT_CRATE_INPUT}/"
+FLAT_IMPORT_CRATE="${FLAT_IMPORT_CRATE_INPUT}/Cargo.toml"
 cargo build -p rusty-cpp-transpiler
 
 cp "${INLINE_SOURCE}" "${INLINE_GENERATED}"
@@ -52,6 +63,98 @@ cp "${INLINE_SOURCE}" "${INLINE_GENERATED}"
     --emit-rust "${INLINE_RUST}" --files "${INLINE_GENERATED}"
 rustc --edition=2024 --crate-type=lib "${INLINE_RUST}" \
     -o "${WORK_DIR}/libcpp_abi_inline.rlib"
+
+CARGO_TARGET_DIR="${WORK_DIR}/flat-import-cargo-target" \
+    cargo check --quiet --manifest-path "${FLAT_IMPORT_CRATE}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" \
+    --cxx-namespace rrr \
+    --crate "${FLAT_IMPORT_CRATE}" \
+    --output-dir "${FLAT_IMPORT_CRATE_OUTPUT}"
+test -f "${FLAT_IMPORT_CRATE_MODULE}"
+grep -Fq 'import rrr.rand;' "${FLAT_IMPORT_CRATE_MODULE}"
+grep -Fq 'namespace rrr {' "${FLAT_IMPORT_CRATE_MODULE}"
+grep -Fq 'randgen_rand_raw()' "${FLAT_IMPORT_CRATE_MODULE}"
+! grep -Fq 'using ::rrr::' "${FLAT_IMPORT_CRATE_MODULE}"
+! grep -Fq 'namespace rand =' "${FLAT_IMPORT_CRATE_MODULE}"
+! grep -Fq '::rrr::rand::' "${FLAT_IMPORT_CRATE_MODULE}"
+FLAT_CRATE_MODULE_LINE="$(grep -nF 'export module rrr.request_options;' \
+    "${FLAT_IMPORT_CRATE_MODULE}" | cut -d: -f1)"
+FLAT_CRATE_IMPORT_LINE="$(grep -nF 'import rrr.rand;' \
+    "${FLAT_IMPORT_CRATE_MODULE}" | cut -d: -f1)"
+FLAT_CRATE_NAMESPACE_LINE="$(grep -nF 'namespace rrr {' \
+    "${FLAT_IMPORT_CRATE_MODULE}" | head -n1 | cut -d: -f1)"
+(( FLAT_CRATE_MODULE_LINE < FLAT_CRATE_IMPORT_LINE &&
+   FLAT_CRATE_IMPORT_LINE < FLAT_CRATE_NAMESPACE_LINE ))
+grep -Fq '0 slot(s)' "${FLAT_IMPORT_CRATE_OUTPUT}/rusty_hand_slots.md"
+
+cp "${FLAT_IMPORT_INLINE_SOURCE}" "${FLAT_IMPORT_INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --rewrite --files "${FLAT_IMPORT_INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --check --files "${FLAT_IMPORT_INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --emit-rust "${FLAT_IMPORT_INLINE_RUST}" \
+    --files "${FLAT_IMPORT_INLINE_GENERATED}"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+    --emit-rust "${FLAT_IMPORT_INLINE_SELECTED_RUST}" \
+    --files "${FLAT_IMPORT_INLINE_GENERATED}" \
+    --block-id rrr.inline_unrelated
+! grep -Fq 'cpp_import_namespace' "${FLAT_IMPORT_INLINE_SELECTED_RUST}"
+! grep -Fq 'randgen_rand_' "${FLAT_IMPORT_INLINE_SELECTED_RUST}"
+rustc --edition=2024 --crate-type=lib --crate-name rrr_inline_unrelated -Dwarnings \
+    "${FLAT_IMPORT_INLINE_SELECTED_RUST}" \
+    -o "${FLAT_IMPORT_INLINE_OUTPUT}/librrr_inline_unrelated.rlib"
+grep -Fq 'import rrr.rand;' "${FLAT_IMPORT_INLINE_GENERATED}"
+grep -Fq 'randgen_rand_raw()' "${FLAT_IMPORT_INLINE_GENERATED}"
+! grep -Fq 'using ::rrr::' "${FLAT_IMPORT_INLINE_GENERATED}"
+! grep -Fq 'namespace rand =' "${FLAT_IMPORT_INLINE_GENERATED}"
+! grep -Fq 'rusty_cpp_abi_' "${FLAT_IMPORT_INLINE_GENERATED}"
+FLAT_INLINE_MODULE_LINE="$(grep -nF 'export module rrr.inline_consumer;' \
+    "${FLAT_IMPORT_INLINE_GENERATED}" | cut -d: -f1)"
+FLAT_INLINE_IMPORT_LINE="$(grep -nF 'import rrr.rand;' \
+    "${FLAT_IMPORT_INLINE_GENERATED}" | cut -d: -f1)"
+FLAT_INLINE_NAMESPACE_LINE="$(grep -nF 'export namespace rrr {' \
+    "${FLAT_IMPORT_INLINE_GENERATED}" | cut -d: -f1)"
+(( FLAT_INLINE_MODULE_LINE < FLAT_INLINE_IMPORT_LINE &&
+   FLAT_INLINE_IMPORT_LINE < FLAT_INLINE_NAMESPACE_LINE ))
+
+FLAT_IMPORT_HOST_NEGATIVE_DIR="${WORK_DIR}/cpp_import_namespace_host_negative"
+mkdir -p "${FLAT_IMPORT_HOST_NEGATIVE_DIR}"
+awk '
+    NR == 1 { print "#define REEXPORT export import rrr.rand;" }
+    { print }
+    $0 == "import rrr.rand;" { print "REEXPORT" }
+' "${FLAT_IMPORT_INLINE_SOURCE}" \
+    >"${FLAT_IMPORT_HOST_NEGATIVE_DIR}/reexport.cppm"
+awk '
+    NR == 1 {
+        print "#define CAT_(a, b) a ## b"
+        print "#define CAT(a, b) CAT_(a, b)"
+    }
+    { print }
+    $0 == "import rrr.rand;" { print "CAT(ex, port) CAT(im, port) rrr.rand;" }
+' "${FLAT_IMPORT_INLINE_SOURCE}" \
+    >"${FLAT_IMPORT_HOST_NEGATIVE_DIR}/token_paste.cppm"
+awk '
+    NR == 1 { print "#define PROVIDER rrr.rand" }
+    { print }
+    $0 == "import rrr.rand;" { print "export import PROVIDER;" }
+' "${FLAT_IMPORT_INLINE_SOURCE}" \
+    >"${FLAT_IMPORT_HOST_NEGATIVE_DIR}/provider_alias.cppm"
+for host_case in reexport token_paste provider_alias; do
+    HOST_NEGATIVE="${FLAT_IMPORT_HOST_NEGATIVE_DIR}/${host_case}.cppm"
+    HOST_NEGATIVE_BEFORE="${HOST_NEGATIVE}.before"
+    HOST_NEGATIVE_LOG="${FLAT_IMPORT_HOST_NEGATIVE_DIR}/${host_case}.log"
+    cp "${HOST_NEGATIVE}" "${HOST_NEGATIVE_BEFORE}"
+    if "${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
+        --rewrite --files "${HOST_NEGATIVE}" >"${HOST_NEGATIVE_LOG}" 2>&1
+    then
+        echo "cpp_import_namespace host re-export assembly unexpectedly passed: ${host_case}" >&2
+        exit 1
+    fi
+    cmp -s "${HOST_NEGATIVE_BEFORE}" "${HOST_NEGATIVE}"
+    grep -Eq 'module re-export|top-level module-import zone' "${HOST_NEGATIVE_LOG}"
+done
 
 [[ "$(grep -Ec '^namespace rusty_cpp_abi_detail_m_[0-9a-f]{64} \{' \
     "${INLINE_GENERATED}")" -eq 1 ]]
@@ -359,11 +462,25 @@ cmake -S "${REPO_ROOT}/transpiler/tests/cpp_abi_core" -B "${BUILD_DIR}" -G Ninja
     -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \
     -DRUSTY_CPP_SOURCE_DIR="${REPO_ROOT}" \
     -DCPP_ABI_GENERATED_MODULE="${GENERATED}" \
-    -DCPP_ABI_INLINE_MODULE="${INLINE_GENERATED}"
+    -DCPP_ABI_INLINE_MODULE="${INLINE_GENERATED}" \
+    -DCPP_IMPORT_NAMESPACE_CRATE_MODULE="${FLAT_IMPORT_CRATE_MODULE}" \
+    -DCPP_IMPORT_NAMESPACE_INLINE_MODULE="${FLAT_IMPORT_INLINE_GENERATED}"
 cmake --build "${BUILD_DIR}" \
-    --target cpp_abi_core_runtime cpp_abi_inline_runtime -j "${JOBS:-2}"
+    --target cpp_abi_core_runtime cpp_abi_inline_runtime \
+        cpp_import_namespace_runtime -j "${JOBS:-2}"
 ctest --test-dir "${BUILD_DIR}" --output-on-failure \
-    -R '^cpp_abi_(core|inline)_runtime$'
+    -R '^(cpp_abi_(core|inline)|cpp_import_namespace)_runtime$'
+
+NONREEXPORT_LOG="${WORK_DIR}/cpp_import_namespace_nonreexport.log"
+if cmake --build "${BUILD_DIR}" \
+    --target cpp_import_namespace_nonreexport -j "${JOBS:-2}" \
+    >"${NONREEXPORT_LOG}" 2>&1
+then
+    echo "private cpp_import_namespace provider leaf was re-exported" >&2
+    exit 1
+fi
+grep -Eq "randgen_rand_raw.*(not visible|no member|declaration.*not reachable|must be imported)" \
+    "${NONREEXPORT_LOG}"
 
 MODULE_OBJECT="$(find "${BUILD_DIR}" -path '*cpp_abi_core.cppm.o' -type f -print -quit)"
 [[ -n "${MODULE_OBJECT}" ]]

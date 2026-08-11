@@ -136,6 +136,23 @@ impl CodeGen {
         None
     }
 
+    /// Resolve the exact physical crate child named by a
+    /// `crate::<child>::...` flat-import contract.  This intentionally does
+    /// not use ancestor-sibling lookup: from `crate::outer::consumer`, Rust's
+    /// `crate::rand` still names the root child `crate::rand`, even when a
+    /// nearer `crate::outer::rand` module also exists.
+    pub(super) fn resolve_crate_root_child_module_path(
+        &self,
+        segment: &str,
+    ) -> Option<String> {
+        let current = self.module_name.as_deref()?;
+        let crate_module = current.split('.').next()?;
+        let candidate = format!("{crate_module}.{segment}");
+        self.crate_module_names
+            .contains(&candidate)
+            .then_some(candidate)
+    }
+
     /// Resolve a `use` path that names a MODULE of this crate (rather
     /// than an item inside one) to that module's C++ module name.
     ///

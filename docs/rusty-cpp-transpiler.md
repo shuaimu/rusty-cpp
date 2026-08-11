@@ -6593,6 +6593,99 @@ Generated semantic and conversion helpers are `inline`, carrier/module-uniquely 
 
 For a multi-file command, adapter preflight and rendering complete for every input before any file is atomically replaced; `--check` runs the same validation without writing. `--emit-rust --block-id` includes the required earlier-provider dependency closure in deterministic dependency-first order. Marker-free carriers retain the legacy byte path.
 
+#### 12.8.2 Private Imports in a Shared C++ Namespace
+
+An adapter crate may import unadapted public leaves from one crate child whose
+C++ module exports into the same flat namespace:
+
+```rust
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::{randgen_rand_max, randgen_rand_raw};
+```
+
+This is a source-owned exception to the ordinary sibling-module namespace
+mapping. The accepted form is exact and closed:
+
+1. The attribute MUST be the sole, inert
+   `#[cfg_attr(any(), cpp_import_namespace(NS))]` attribute on a private
+   `use` item. `NS` is a canonical, non-raw C++ namespace path and MUST exactly
+   equal the active `--cxx-namespace` (crate mode) or the block's full immediate
+   `export namespace` path (inline mode).
+2. The use tree MUST be `crate::<one-child>::Name` or a nonempty group of
+   simple, unique `Name` leaves. Public uses, glob/`self` imports, renames,
+   deeper paths, raw identifiers, C++ keywords, active or malformed markers,
+   companion attributes, and macro-assembled markers are rejected.
+   An imported leaf is reserved in its Rust module: another item, ordinary
+   `use`, glob, generic, or lexical binding may not shadow it, and opaque
+   attribute or macro tokens may not mention it. Every shadow/collision check
+   compares the shared escaped C++ spelling as well as Rust syntax, so a raw
+   Rust keyword cannot alias a permitted suffixed leaf (for example
+   `r#static` versus `static_`).
+3. Crate mode requires `<one-child>` to be exactly one physical generated
+   crate-root module (an inline `mod` is not sufficient) and retains that exact
+   root-child named-module dependency before the namespace opens; a nearer
+   same-named nested module never substitutes for `crate::<one-child>`. Inline
+   mode requires the exact private, unconditional top-level sibling import
+   before the marked block (for example `import rrr.rand;`). From the sole
+   `export module` terminator through the participating `export namespace`
+   opener, only complete unconditional private literal named-module imports
+   are accepted. Missing, late, conditional, exported (`export import`),
+   differently named, macro-assembled, or otherwise prefixed imports fail
+   closed. A second exported import of the provider anywhere in the carrier is
+   forbidden even when the required private import is also present;
+   preprocessor `export`/`import` assembly and token-pasting are rejected.
+4. The generated C++ deliberately emits no `using` declaration or namespace
+   alias. The imported declaration is already visible to unqualified calls in
+   the validated shared namespace; adding a `using` inside an exported
+   namespace would incorrectly re-export Rust's private import through the
+   consumer module.
+5. The crate-mode provider leaf MUST be a direct, exact-public,
+   unconditional, ordinary non-generic free function at the physical child's
+   source root. Missing/private leaves, constants, types, re-exports, adapted
+   functions or owners, and other callable shapes are rejected before output.
+   The ordinary whole-crate sibling audit remains authoritative, and this
+   contract does not authorize cross-crate adapter calls. (Inline mode instead
+   validates the exact host module import because the provider's Rust source is
+   not part of the carrier.)
+6. The leaf may be referenced only through the marked module's unqualified
+   Rust binding. Qualified provider/binding paths, unmarked imports or provider
+   aliases, and references from sibling or descendant modules are rejected in
+   crate preflight. Imports or aliases of a marked consumer module—or any of
+   its module ancestors—are also rejected, closing descendant qualified-access
+   aliases. While a flat contract exists, `crate`/`self`/`super` root aliases
+   and `extern crate self` aliases are rejected so those checks cannot be
+   bypassed. Unrelated ordinary aliases remain permitted.
+7. Every physical source root emits into the same explicit C++ namespace.
+   Therefore a source-root item or use binding outside the exact provider may
+   not have an imported leaf's escaped C++ name, and source-root glob imports fail closed;
+   otherwise an ambient declaration could collide with or hide the provider.
+   Within the provider, only the validated direct leaf function may have that
+   C++ spelling; a second raw/item/use/foreign spelling collision is rejected.
+   Lexical bindings and declarations inside a genuine nested module namespace
+   remain permitted outside the marked module. Block-local functions,
+   constants, statics, and non-generic types also remain permitted. At a
+   physical source root, a colliding block-local generic type, impl-forced
+   type, or static referenced by such a type fails closed because code
+   generation may namespace-hoist it or otherwise cannot safely lower it as a
+   block-local C++ declaration. The same local names inside a genuine nested
+   Rust module remain in that module's nested C++ namespace and are permitted.
+8. Inline references MUST additionally remain in the physical block that
+   contains the marked `use`. This makes `--emit-rust --block-id` closed by
+   construction: selecting an unrelated block neither adds an unused import nor
+   silently emits Rust with a missing binding. Cross-block and nested-module
+   mentions are rejected during carrier preflight. Because generated calls are
+   deliberately unqualified, every imported leaf identifier is also reserved
+   in host C++ outside comments, literals, and the replaceable Rust/GEN regions;
+   host declarations, aliases, macros, and preprocessor tokens cannot capture
+   it.
+
+A flat-import-only block does not request string/vector adapter support,
+semantic helpers, `import rusty;`, or earlier-provider dependency closure.
+Marker-only files still activate crate/inline preflight; sources without any
+reserved marker retain the exact legacy fast path. Direct single-file named
+module transpilation is unsupported because it has neither the crate physical
+module census nor the prepared inline host-import proof.
+
 ### 12.9 Assignment Expressions, Unit Semantics, and Statement Peephole
 
 Rust assignment and compound-assignment are expressions, but their value is always unit `()`.

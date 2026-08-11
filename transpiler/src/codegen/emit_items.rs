@@ -5876,6 +5876,32 @@ impl CodeGen {
     }
 
     pub(super) fn emit_use(&mut self, u: &syn::ItemUse) {
+        let flat_import = self
+            .cpp_abi_plan
+            .flat_import_for_use(&self.module_stack, u)
+            .map(|(namespace, child, leaves)| {
+                (namespace.to_string(), child.to_string(), leaves.to_vec())
+            });
+        if let Some((_namespace, child, _leaves)) = flat_import {
+            // The contract's Rust path is exactly `crate::<child>::...`, so its
+            // dependency is the exact generated root-child module.  Do not
+            // use nearest ancestor-sibling lookup: preflight requires a direct
+            // root-level free function and rejects inline children/re-exports.
+            let sibling_module = self.resolve_crate_root_child_module_path(&child);
+            if !self.crate_module_names.is_empty() && sibling_module.is_none() {
+                self.cpp_abi_codegen_error = Some(format!(
+                    "cpp_import_namespace crate child `{child}` does not resolve to a generated sibling module"
+                ));
+                return;
+            }
+            if let Some(sibling_module) = sibling_module
+                && self.sibling_modules_imported.insert(sibling_module.clone())
+            {
+                self.writeln(&format!("import {sibling_module};"));
+            }
+            return;
+        }
+
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
 
         // Detect external crate imports

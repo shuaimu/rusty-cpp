@@ -104,6 +104,37 @@ const MAX: i32 = 100;
 }
 
 #[test]
+fn test_cpp_import_namespace_rejects_direct_named_module_without_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("consumer.rs");
+    let output_path = dir.path().join("consumer.cppm");
+    std::fs::write(
+        &input,
+        r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::randgen_rand_raw;
+pub fn draw() -> u64 { randgen_rand_raw() }
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(&input)
+        .args(["-o", output_path.to_str().unwrap()])
+        .args(["-m", "rrr.consumer", "--cxx-namespace", "rrr"])
+        .output()
+        .expect("failed to run direct named-module rejection probe");
+
+    assert!(!output.status.success());
+    assert!(!output_path.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires prepared crate mode or prepared inline-rust mode"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn test_cli_default_output_name() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("hello.rs");

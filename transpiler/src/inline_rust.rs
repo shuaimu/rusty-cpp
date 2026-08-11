@@ -647,6 +647,260 @@ fn export_namespace_scope_at(tokens: &[CppHostToken], offset: usize) -> Option<S
     Some(full.join("::"))
 }
 
+fn cpp_module_name_at(tokens: &[CppHostToken], export_offset: usize) -> Option<String> {
+    let start = tokens.iter().position(|token| token.offset == export_offset)?;
+    if tokens.get(start)?.text != "export" || tokens.get(start + 1)?.text != "module" {
+        return None;
+    }
+    let mut name = String::new();
+    for token in tokens.iter().skip(start + 2) {
+        if token.text == ";" {
+            return (!name.is_empty()).then_some(name);
+        }
+        name.push_str(&token.text);
+    }
+    None
+}
+
+fn exact_global_module_import_positions(
+    carrier: &LoadedCarrier,
+    tokens: &[CppHostToken],
+    module: &str,
+) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let at_declaration_boundary = tokens[..index]
+            .iter()
+            .rev()
+            .find(|token| !token.preprocessor)
+            .is_none_or(|token| matches!(token.text.as_str(), ";" | "}"));
+        if tokens[index].text != "import"
+            || tokens[index].preprocessor
+            || tokens[index].conditional_depth != 0
+            || !at_declaration_boundary
+            || cpp_offset_in_preprocessor_directive(
+                &carrier.content,
+                &carrier.blocks,
+                tokens[index].offset,
+            )
+            || cpp_preprocessor_depth_at(
+                &carrier.content,
+                &carrier.blocks,
+                tokens[index].offset,
+            ) != 0
+            || cpp_brace_depth_at(tokens, tokens[index].offset) != 0
+        {
+            index += 1;
+            continue;
+        }
+        let start = tokens[index].offset;
+        let mut imported = String::new();
+        let mut exact_surface = true;
+        index += 1;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if token.preprocessor
+                || token.conditional_depth != 0
+                || cpp_offset_in_preprocessor_directive(
+                    &carrier.content,
+                    &carrier.blocks,
+                    token.offset,
+                )
+                || cpp_preprocessor_depth_at(
+                    &carrier.content,
+                    &carrier.blocks,
+                    token.offset,
+                ) != 0
+                || cpp_brace_depth_at(tokens, token.offset) != 0
+            {
+                exact_surface = false;
+            }
+            if token.text == ";" {
+                break;
+            }
+            imported.push_str(&token.text);
+            index += 1;
+        }
+        if index < tokens.len() && exact_surface && imported == module {
+            positions.push(start);
+        }
+        index += 1;
+    }
+    positions
+}
+
+fn potentially_exported_module_import(
+    tokens: &[CppHostToken],
+    module: &str,
+) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        if token.text != "import" {
+            return false;
+        }
+        let exported = token.preprocessor
+            || index
+                .checked_sub(1)
+                .and_then(|previous| tokens.get(previous))
+                .is_some_and(|candidate| candidate.text == "export")
+            || tokens[..index]
+                .iter()
+                .rev()
+                .find(|candidate| !candidate.preprocessor)
+                .is_some_and(|candidate| candidate.text == "export");
+        if !exported {
+            return false;
+        }
+        let mut imported = String::new();
+        for candidate in &tokens[index + 1..] {
+            if candidate.preprocessor && !token.preprocessor {
+                continue;
+            }
+            if candidate.text == ";" {
+                return imported == module;
+            }
+            imported.push_str(&candidate.text);
+        }
+        false
+    })
+}
+
+fn literal_named_module_tokens(tokens: &[CppHostToken]) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let is_identifier = |token: &CppHostToken| {
+        let mut characters = token.text.chars();
+        characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    };
+    let mut expect_identifier = true;
+    let mut saw_partition = false;
+    for token in tokens {
+        if expect_identifier {
+            if !is_identifier(token) {
+                return false;
+            }
+        } else if token.text == "." {
+            // A module name and partition may each contain dotted components.
+        } else if token.text == ":" && !saw_partition {
+            saw_partition = true;
+        } else {
+            return false;
+        }
+        expect_identifier = !expect_identifier;
+    }
+    !expect_identifier
+}
+
+fn validate_flat_import_module_zone(
+    carrier: &LoadedCarrier,
+    tokens: &[CppHostToken],
+    module_declaration: usize,
+    block_offset: usize,
+    scope: &str,
+) -> Result<(), String> {
+    let module_start = tokens
+        .iter()
+        .position(|token| token.offset == module_declaration)
+        .ok_or_else(|| {
+            format!(
+                "{}: cannot locate inline cpp_import_namespace module declaration",
+                carrier.path.display()
+            )
+        })?;
+    let module_end = (module_start..tokens.len())
+        .find(|index| tokens[*index].text == ";")
+        .ok_or_else(|| {
+            format!(
+                "{}: malformed module declaration before cpp_import_namespace block",
+                carrier.path.display()
+            )
+        })?;
+
+    let mut open_braces = Vec::new();
+    for (index, token) in tokens.iter().enumerate().take_while(|(_, token)| {
+        token.offset < block_offset
+    }) {
+        if token.preprocessor || token.conditional_depth != 0 {
+            continue;
+        }
+        match token.text.as_str() {
+            "{" => open_braces.push(index),
+            "}" => {
+                open_braces.pop();
+            }
+            _ => {}
+        }
+    }
+    let namespace_open = open_braces.last().copied().ok_or_else(|| {
+        format!(
+            "{}: cpp_import_namespace block is not inside its export namespace",
+            carrier.path.display()
+        )
+    })?;
+    let namespace_start = (module_end + 1..namespace_open)
+        .rev()
+        .find(|index| {
+            tokens[*index].text == "export"
+                && tokens
+                    .get(*index + 1)
+                    .is_some_and(|token| token.text == "namespace")
+                && tokens[*index..namespace_open]
+                    .iter()
+                    .all(|token| !token.preprocessor && token.conditional_depth == 0)
+                && tokens[*index + 2..namespace_open]
+                    .iter()
+                    .map(|token| token.text.as_str())
+                    .collect::<String>()
+                    == scope
+        })
+        .ok_or_else(|| {
+            format!(
+                "{}: cannot locate exact `export namespace {scope}` opener for cpp_import_namespace block",
+                carrier.path.display()
+            )
+        })?;
+
+    let mut index = module_end + 1;
+    while index < namespace_start {
+        let token = &tokens[index];
+        if token.preprocessor
+            || token.conditional_depth != 0
+            || token.text != "import"
+        {
+            return Err(format!(
+                "{}: cpp_import_namespace requires the top-level module-import zone to contain only unconditional private literal `import <named.module>;` declarations before `export namespace {scope}`; found `{}`",
+                carrier.path.display(),
+                token.text
+            ));
+        }
+        let name_start = index + 1;
+        index = name_start;
+        while index < namespace_start
+            && !tokens[index].preprocessor
+            && tokens[index].conditional_depth == 0
+            && tokens[index].text != ";"
+        {
+            index += 1;
+        }
+        if index == namespace_start
+            || tokens[index].preprocessor
+            || tokens[index].conditional_depth != 0
+            || !literal_named_module_tokens(&tokens[name_start..index])
+        {
+            return Err(format!(
+                "{}: cpp_import_namespace requires a complete unconditional private literal named-module import before `export namespace {scope}`",
+                carrier.path.display()
+            ));
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
 fn cpp_abi_carrier_identity(carrier: &LoadedCarrier) -> Result<String, String> {
     validate_cpp_abi_preprocessor_surface(carrier)?;
     let tokens = cpp_host_tokens(&carrier.content, &carrier.blocks);
@@ -748,19 +1002,43 @@ fn validate_cpp_abi_host(
     carrier: &LoadedCarrier,
     plan: &crate::cpp_abi::CppAbiInlineCarrierPlan,
 ) -> Result<(), String> {
-    if plan.adapted_blocks.is_empty() {
+    if plan.adapted_blocks.is_empty() && plan.flat_import_blocks.is_empty() {
         return Ok(());
     }
+    validate_cpp_abi_preprocessor_surface(carrier)?;
     let tokens = cpp_host_tokens(&carrier.content, &carrier.blocks);
-    if let Some(token) = tokens
-        .iter()
-        .find(|token| token.text.starts_with("rusty_cpp_abi_"))
+    if !plan.flat_import_blocks.is_empty()
+        && let Some(token) = tokens.iter().find(|token| {
+            token.preprocessor && matches!(token.text.as_str(), "export" | "import")
+        })
     {
         return Err(format!(
-            "{}: host C++ identifier `{}` collides with reserved inline cpp_abi generated names",
+            "{}: inline cpp_import_namespace rejects preprocessor macro/directive token `{}` because it can assemble a module re-export",
             carrier.path.display(),
             token.text
         ));
+    }
+    if !plan.flat_import_blocks.is_empty()
+        && cpp_preprocessor_directives(&carrier.content, &carrier.blocks)
+            .iter()
+            .any(|directive| directive.keyword == "define" && directive.operand.contains("##"))
+    {
+        return Err(format!(
+            "{}: inline cpp_import_namespace rejects preprocessor token-pasting because it can assemble a reserved host identifier or module re-export",
+            carrier.path.display()
+        ));
+    }
+    if !plan.adapted_blocks.is_empty() {
+        if let Some(token) = tokens
+            .iter()
+            .find(|token| token.text.starts_with("rusty_cpp_abi_"))
+        {
+            return Err(format!(
+                "{}: host C++ identifier `{}` collides with reserved inline cpp_abi generated names",
+                carrier.path.display(),
+                token.text
+            ));
+        }
     }
 
     let module_declarations = token_sequence_positions(&tokens, &["export", "module"])
@@ -779,6 +1057,12 @@ fn validate_cpp_abi_host(
         ));
     }
     let module_declaration = module_declarations[0];
+    let module_name = cpp_module_name_at(&tokens, module_declaration).ok_or_else(|| {
+        format!(
+            "{}: malformed `export module` declaration for inline cpp_import_namespace",
+            carrier.path.display()
+        )
+    })?;
     let global_module_fragments = token_sequence_positions(&tokens, &["module", ";"])
         .into_iter()
         .filter(|position| {
@@ -812,7 +1096,8 @@ fn validate_cpp_abi_host(
             })
             .collect::<Vec<_>>();
     let rusty_headers = exact_global_rusty_header_positions(carrier, &tokens);
-    if !rusty_header_candidates.is_empty()
+    if !plan.adapted_blocks.is_empty()
+        && !rusty_header_candidates.is_empty()
         && (rusty_header_candidates.iter().any(|directive| {
             directive.intro != CppDirectiveIntro::Hash
                 || directive.operand != "<rusty/rusty.hpp>"
@@ -899,6 +1184,96 @@ fn validate_cpp_abi_host(
         } else {
             expected_scope = Some(scope);
         }
+    }
+
+    for index in &plan.flat_import_blocks {
+        let block = &carrier.blocks[*index];
+        let offset = block.replace_start;
+        if cpp_preprocessor_depth_at(&carrier.content, &carrier.blocks, offset) != 0 {
+            return Err(format!(
+                "{}:{}: cpp_import_namespace block id={} must be in unconditional host C++",
+                carrier.path.display(),
+                block.if_line,
+                block.id
+            ));
+        }
+        if module_declaration >= offset {
+            return Err(format!(
+                "{}:{}: cpp_import_namespace block id={} must follow the C++ module declaration",
+                carrier.path.display(),
+                block.if_line,
+                block.id
+            ));
+        }
+        let Some(scope) = export_namespace_scope_at(&tokens, offset) else {
+            return Err(format!(
+                "{}:{}: cpp_import_namespace block id={} must be directly inside an `export namespace`",
+                carrier.path.display(),
+                block.if_line,
+                block.id
+            ));
+        };
+        if let Some(expected) = &expected_scope {
+            if expected != &scope {
+                return Err(format!(
+                    "{}:{}: cpp_import_namespace block id={} is in export namespace `{scope}`, expected `{expected}`",
+                    carrier.path.display(),
+                    block.if_line,
+                    block.id
+                ));
+            }
+        } else {
+            expected_scope = Some(scope.clone());
+        }
+        for (namespace, child, leaves) in plan.flat_import_requirements(*index) {
+            if namespace != scope {
+                return Err(format!(
+                    "{}:{}: cpp_import_namespace `{namespace}` does not match enclosing export namespace `{scope}` for block id={}",
+                    carrier.path.display(),
+                    block.if_line,
+                    block.id
+                ));
+            }
+            let crate_module = module_name.split('.').next().unwrap_or(module_name.as_str());
+            let required_module = format!("{crate_module}.{child}");
+            if potentially_exported_module_import(&tokens, &required_module) {
+                return Err(format!(
+                    "{}:{}: cpp_import_namespace block id={} must not export required provider module `{required_module}`",
+                    carrier.path.display(),
+                    block.if_line,
+                    block.id
+                ));
+            }
+            if !exact_global_module_import_positions(carrier, &tokens, &required_module)
+                .iter()
+                .any(|position| module_declaration < *position && *position < offset)
+            {
+                return Err(format!(
+                    "{}:{}: cpp_import_namespace block id={} requires a prior exact `import {required_module};`",
+                    carrier.path.display(),
+                    block.if_line,
+                    block.id
+                ));
+            }
+            if let Some(token) = tokens.iter().find(|token| {
+                leaves.iter().any(|leaf| leaf == &token.text)
+            }) {
+                return Err(format!(
+                    "{}:{}: host C++ identifier `{}` collides with a cpp_import_namespace leaf for block id={}",
+                    carrier.path.display(),
+                    token.offset,
+                    token.text,
+                    block.id
+                ));
+            }
+        }
+        validate_flat_import_module_zone(
+            carrier,
+            &tokens,
+            module_declaration,
+            offset,
+            &scope,
+        )?;
     }
     Ok(())
 }
@@ -2321,6 +2696,282 @@ pub fn second_bytes(v: Vec<u8>) -> Vec<u8> { v }
         );
         assert!(output.contains("std::string first_bytes(std::string v)"));
         assert!(output.contains("std::string second_bytes(std::string v)"));
+    }
+
+    #[test]
+    fn cpp_import_namespace_inline_is_flat_private_and_adapter_free() {
+        let content = r#"export module rrr.consumer;
+import rrr.rand;
+export namespace rrr {
+#if RUSTYCPP_RUST
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::{randgen_rand_max, randgen_rand_raw};
+pub fn draw() -> f64 {
+    randgen_rand_raw() as f64 / randgen_rand_max()
+}
+#endif
+} // namespace rrr
+"#
+        .to_string();
+        let path = PathBuf::from("flat-only.cppm");
+        let blocks = parse_blocks(&path, &content).unwrap();
+        let mut carriers = vec![LoadedCarrier {
+            path: path.clone(),
+            content: content.clone(),
+            blocks,
+            cpp_abi: None,
+        }];
+        prepare_cpp_abi_carriers(&mut carriers).unwrap();
+        let plan = carriers[0].cpp_abi.as_ref().unwrap();
+        assert!(plan.adapted_blocks.is_empty());
+        assert_eq!(plan.flat_import_blocks, BTreeSet::from([0]));
+
+        let output = rewrite_content_with_plan(
+            &path,
+            &content,
+            &carriers[0].blocks,
+            Some(plan),
+        )
+        .unwrap();
+        assert_eq!(output.matches("import rrr.rand;").count(), 1, "{output}");
+        assert!(!output.contains("using ::rrr::"), "{output}");
+        assert!(!output.contains("namespace rand ="), "{output}");
+        assert!(!output.contains("rusty_cpp_abi_detail"), "{output}");
+        assert!(!output.contains("rusty_cpp_abi_sem"), "{output}");
+        assert!(!output.contains("import rusty;"), "{output}");
+        assert!(output.contains("randgen_rand_raw()"), "{output}");
+
+        let comment_and_literal = content.replace(
+            "export namespace rrr {",
+            "export namespace rrr {\n// randgen_rand_raw is mentioned only in a comment\nconstexpr char flat_import_note[] = \"randgen_rand_max\";",
+        );
+        let blocks = parse_blocks(Path::new("comment-and-literal"), &comment_and_literal).unwrap();
+        let mut control_carriers = vec![LoadedCarrier {
+            path: PathBuf::from("comment-and-literal"),
+            content: comment_and_literal,
+            blocks,
+            cpp_abi: None,
+        }];
+        prepare_cpp_abi_carriers(&mut control_carriers).unwrap();
+
+        for (label, broken, expected) in [
+            (
+                "missing import",
+                content.replace("import rrr.rand;\n", ""),
+                "requires a prior exact `import rrr.rand;`",
+            ),
+            (
+                "different import",
+                content.replace("import rrr.rand;", "import rrr.other;"),
+                "requires a prior exact `import rrr.rand;`",
+            ),
+            (
+                "exported import",
+                content.replace("import rrr.rand;", "export import rrr.rand;"),
+                "must not export required provider module `rrr.rand`",
+            ),
+            (
+                "private plus exported import",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand;\nexport import rrr.rand;",
+                ),
+                "must not export required provider module `rrr.rand`",
+            ),
+            (
+                "private plus late exported import",
+                format!("{content}\nexport import rrr.rand;\n"),
+                "must not export required provider module `rrr.rand`",
+            ),
+            (
+                "private plus conditional exported import",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand;\n#if ENABLE_RAND\nexport import rrr.rand;\n#endif",
+                ),
+                "must not export required provider module `rrr.rand`",
+            ),
+            (
+                "private plus conditionally split exported import",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand;\n#if ENABLE_RAND\nexport\n#endif\nimport rrr.rand;",
+                ),
+                "must not export required provider module `rrr.rand`",
+            ),
+            (
+                "private plus macro-assembled exported import",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand;\n#define REEXPORT export import rrr.rand;\nREEXPORT",
+                ),
+                "can assemble a module re-export",
+            ),
+            (
+                "private plus split macro-assembled exported import",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand;\n#define E export\n#define I import\nE I rrr.rand;",
+                ),
+                "can assemble a module re-export",
+            ),
+            (
+                "private plus command-line-style reexport invocation",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand;\nREEXPORT",
+                ),
+                "top-level module-import zone",
+            ),
+            (
+                "private plus token-pasted reexport invocation",
+                content
+                    .replace(
+                        "export module rrr.consumer;",
+                        "#define CAT_(a, b) a ## b\n#define CAT(a, b) CAT_(a, b)\nexport module rrr.consumer;",
+                    )
+                    .replace(
+                        "import rrr.rand;",
+                        "import rrr.rand;\nCAT(ex, port) CAT(im, port) rrr.rand;",
+                    ),
+                "rejects preprocessor token-pasting",
+            ),
+            (
+                "private plus provider-macro reexport invocation",
+                content
+                    .replace(
+                        "export module rrr.consumer;",
+                        "#define PROVIDER rrr.rand\nexport module rrr.consumer;",
+                    )
+                    .replace(
+                        "import rrr.rand;",
+                        "import rrr.rand;\nexport import PROVIDER;",
+                    ),
+                "top-level module-import zone",
+            ),
+            (
+                "conditionally split exported import",
+                content.replace(
+                    "import rrr.rand;",
+                    "#if ENABLE_RAND\nexport\n#endif\nimport rrr.rand;",
+                ),
+                "must not export required provider module `rrr.rand`",
+            ),
+            (
+                "conditionally split import semicolon",
+                content.replace(
+                    "import rrr.rand;",
+                    "import rrr.rand\n#if ENABLE_RAND\n;\n#endif",
+                ),
+                "requires a prior exact `import rrr.rand;`",
+            ),
+            (
+                "late import",
+                format!(
+                    "{}import rrr.rand;\n",
+                    content.replace("import rrr.rand;\n", "")
+                ),
+                "requires a prior exact `import rrr.rand;`",
+            ),
+            (
+                "conditional import",
+                content.replace(
+                    "import rrr.rand;",
+                    "#if ENABLE_RAND\nimport rrr.rand;\n#endif",
+                ),
+                "requires a prior exact `import rrr.rand;`",
+            ),
+            (
+                "namespace mismatch",
+                content.replace("cpp_import_namespace(rrr)", "cpp_import_namespace(other)"),
+                "does not match enclosing export namespace",
+            ),
+            (
+                "full namespace mismatch",
+                content
+                    .replace("export namespace rrr {", "export namespace outer::rrr {")
+                    .replace(
+                        "cpp_import_namespace(rrr)",
+                        "cpp_import_namespace(outer)",
+                ),
+                "does not match enclosing export namespace",
+            ),
+            (
+                "marker-only host line splice",
+                content.replace("import rrr.rand;\n", "import rrr.rand;\\\n"),
+                "line continuations",
+            ),
+            (
+                "marker-only host digraph",
+                content.replace(
+                    "import rrr.rand;",
+                    "%:if 0\nimport rrr.rand;\n#endif",
+                ),
+                "`%:`",
+            ),
+            (
+                "marker-only conditional brace",
+                content
+                    .replace(
+                        "export namespace rrr {",
+                        "#if FEATURE\nnamespace outer {\n#endif\nexport namespace rrr {",
+                    )
+                    .replace(
+                        "} // namespace rrr",
+                        "} // namespace rrr\n#if FEATURE\n}\n#endif",
+                    ),
+                "neutral brace scope",
+            ),
+            (
+                "host macro captures imported leaf",
+                content.replace(
+                    "export namespace rrr {",
+                    "#define randgen_rand_raw() 7\nexport namespace rrr {",
+                ),
+                "host C++ identifier `randgen_rand_raw` collides",
+            ),
+            (
+                "host token-pasted declaration captures imported leaf",
+                content
+                    .replace(
+                        "export module rrr.consumer;",
+                        "#define CAT_(a, b) a ## b\n#define CAT(a, b) CAT_(a, b)\nexport module rrr.consumer;",
+                    )
+                    .replace(
+                        "export namespace rrr {",
+                        "export namespace rrr {\ninline unsigned long long CAT(randgen_rand_, raw)() { return 7; }",
+                    ),
+                "rejects preprocessor token-pasting",
+            ),
+            (
+                "host declaration shadows imported leaf",
+                content.replace(
+                    "export namespace rrr {",
+                    "export namespace rrr {\ninline unsigned long long randgen_rand_raw() { return 7; }",
+                ),
+                "host C++ identifier `randgen_rand_raw` collides",
+            ),
+            (
+                "host alias shadows imported leaf",
+                content.replace(
+                    "export namespace rrr {",
+                    "export namespace rrr {\nusing randgen_rand_max = unsigned long long;",
+                ),
+                "host C++ identifier `randgen_rand_max` collides",
+            ),
+        ] {
+            let blocks = parse_blocks(Path::new(label), &broken).unwrap();
+            let original = broken.clone();
+            let mut broken_carriers = vec![LoadedCarrier {
+                path: PathBuf::from(label),
+                content: broken,
+                blocks,
+                cpp_abi: None,
+            }];
+            let error = prepare_cpp_abi_carriers(&mut broken_carriers).expect_err(label);
+            assert!(error.contains(expected), "{label}: {error}");
+            assert_eq!(broken_carriers[0].content, original, "{label}");
+        }
     }
 
     #[test]
