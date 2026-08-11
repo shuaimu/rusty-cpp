@@ -6951,12 +6951,39 @@ impl CodeGen {
                     // Multi-owner (Fix A): try each owner's qualified `<Tr>_::m`
                     // rather than the unqualified `m`, which would clash with a
                     // same-named module/namespace (serde's `de::size_hint`).
-                    let callees: Vec<String> = traits
+                    let mut callees: Vec<String> = traits
                         .iter()
                         .map(|t| format!("{}::{}", self.ufcs_trait_namespace(t), escaped))
                         .collect();
+                    // §208 phase 2: this chain is BOUND-BLIND — an
+                    // unconstrained template callee is always viable, so with
+                    // `X: TrA, Y: TrB` both receivers ran TrA's body (probe212:
+                    // rustc a=11 b=22, port a=11 b=21). When the receiver's
+                    // declared type is a bare type param bound by exactly one
+                    // of the owners, put that owner's callee first and probe
+                    // its preserved collapse member ahead of everything.
+                    let owner_list: Vec<String> = traits.iter().cloned().collect();
+                    let bound_owner =
+                        self.receiver_bound_trait_among(&mc.receiver, &owner_list);
+                    let tagged_storage;
+                    let mut tagged_member: Option<&str> = None;
+                    if let Some(owner) = &bound_owner {
+                        let preferred =
+                            format!("{}::{}", self.ufcs_trait_namespace(owner), escaped);
+                        if let Some(pos) = callees.iter().position(|c| c == &preferred) {
+                            let c = callees.remove(pos);
+                            callees.insert(0, c);
+                        }
+                        let short = owner.rsplit("::").next().unwrap_or(owner);
+                        tagged_storage = format!(
+                            "rusty_{}_{}",
+                            crate::codegen::sanitize_collapse_trait_tag(short),
+                            method_name
+                        );
+                        tagged_member = Some(tagged_storage.as_str());
+                    }
                     return self.emit_multi_owner_ufcs_call(
-                        &callees, &receiver, &args, &escaped,
+                        &callees, &receiver, &args, &escaped, tagged_member,
                     );
                 }
             }
@@ -22105,11 +22132,21 @@ impl CodeGen {
             // callee (direct, then deref'd), member only as the final else — so
             // the foreign-trait case the comment above describes still resolves
             // through the member branch, just no longer ahead of the real one.
+            // §208 phase 2: a FOREIGN collapsed trait has no `<Tr>_::m` free
+            // fn, so the qualified call used to fall through to the collapsed
+            // member. The trait is named right here — probe its preserved
+            // collapse body first.
+            let qualified_tag = format!(
+                "rusty_{}_{}",
+                crate::codegen::sanitize_collapse_trait_tag(&owner_leaf),
+                method_name
+            );
             return Some(self.emit_multi_owner_ufcs_call(
                 std::slice::from_ref(&callee),
                 &recv,
                 &extra_args,
                 &escape_cpp_keyword(&method_name),
+                Some(qualified_tag.as_str()),
             ));
         }
 

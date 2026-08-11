@@ -3390,6 +3390,58 @@ impl CodeGen {
     /// `S::Ok` is unambiguous and can route through `<Trait>Traits<S>`. Returns
     /// the `trait_associated_type_names` key (short trait name) iff exactly one
     /// of `type_param`'s bound traits declares `assoc_name`.
+    /// §208 phase 2: the trait bound of a BARE-type-param receiver, when
+    /// exactly ONE of `owners` matches a bound of that param. `x` typed `X`
+    /// with `X: TrA` and owners {TrA, TrB} → TrA. Returns None on zero or
+    /// ambiguous matches — the caller keeps the bound-blind chain, which is
+    /// today's behaviour.
+    pub(super) fn receiver_bound_trait_among(
+        &self,
+        receiver: &syn::Expr,
+        owners: &[String],
+    ) -> Option<String> {
+        let ty = self.infer_simple_expr_type(receiver)?;
+        // Receivers are typically `&X` / `&mut X` — peel reference/paren/group
+        // wrappers down to the named type before the bare-param check.
+        let mut inner: &syn::Type = &ty;
+        loop {
+            match inner {
+                syn::Type::Reference(r) => inner = &r.elem,
+                syn::Type::Paren(pn) => inner = &pn.elem,
+                syn::Type::Group(g) => inner = &g.elem,
+                _ => break,
+            }
+        }
+        let syn::Type::Path(tp) = inner else { return None };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let param = tp.path.segments[0].ident.to_string();
+        if !self.is_type_param_in_scope(&param) {
+            return None;
+        }
+        let mut hits: Vec<String> = Vec::new();
+        for scope in self.trait_bound_type_param_scopes.iter().rev() {
+            for (bound_trait, bound_param) in scope {
+                if bound_param != &param {
+                    continue;
+                }
+                let bound_short = bound_trait.rsplit("::").next().unwrap_or(bound_trait);
+                for owner in owners {
+                    let owner_short = owner.rsplit("::").next().unwrap_or(owner);
+                    if owner_short == bound_short && !hits.contains(owner) {
+                        hits.push(owner.clone());
+                    }
+                }
+            }
+        }
+        if hits.len() == 1 {
+            hits.pop()
+    } else {
+            None
+        }
+    }
+
     pub(super) fn lookup_trait_for_assoc_via_param_bound(
         &self,
         type_param: &str,

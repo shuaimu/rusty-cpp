@@ -36022,6 +36022,7 @@ impl CodeGen {
         receiver_expr: &str,
         extra_args: &[String],
         member_leaf: &str,
+        tagged_member: Option<&str>,
     ) -> String {
         let direct_receiver = "std::forward<decltype(__self)>(__self)";
         let deref_receiver =
@@ -36066,6 +36067,23 @@ impl CodeGen {
         let direct_args = join_args(direct_receiver, &direct_arg_uses);
         let deref_args = join_args(deref_receiver, &deref_arg_uses);
         let mut branches = String::new();
+        // §208 phase 2: when the call site knows the receiver's TRAIT (from a
+        // generic bound or an explicit qualification), probe the preserved
+        // collapse body `rusty_<Trait>_<m>` FIRST. That member exists only
+        // where an impl-collapse fired (2d42a92b), so every non-colliding
+        // type falls through to the chain below byte-identically.
+        if let Some(tag) = tagged_member {
+            for (recv, uses) in [
+                (direct_receiver, &direct_arg_uses),
+                (deref_receiver, &deref_arg_uses),
+            ] {
+                let call = format!("{}.{}({})", recv, tag, uses.join(", "));
+                branches.push_str(&format!(
+                    "if constexpr (requires {{ {}; }}) {{ return {}; }} else ",
+                    call, call
+                ));
+            }
+        }
         for callee in callees {
             let call = format!("{}({})", callee, direct_args);
             branches.push_str(&format!(
@@ -48649,15 +48667,14 @@ fn preserve_dropped_collapse_body(
             return None;
         }
     }
-    let mut san = String::new();
-    for ch in trait_head.chars() {
-        if ch.is_ascii_alphanumeric() {
-            san.push(ch);
-        } else if !san.ends_with('_') {
-            san.push('_');
-        }
-    }
-    let san = san.trim_matches('_');
+    // SHORT trait name, not the module-qualified head: a call site recovering
+    // the trait from a generic BOUND (`X: TrA`, `type SerializeMap:
+    // SerializeMap`) only knows the short spelling, and the tag must be
+    // computable identically at both ends. Same-short-name different-module
+    // collisions on one type (io::Write vs fmt::Write) fall to the _2 suffix;
+    // the only such site in the matrix (Either::write_fmt) has no call sites.
+    let trait_short = trait_head.rsplit("::").next().unwrap_or(trait_head).trim();
+    let san = sanitize_collapse_trait_tag(trait_short);
     if san.is_empty() {
         return None;
     }
@@ -48676,6 +48693,20 @@ fn preserve_dropped_collapse_body(
     entry.push(syn::ImplItem::Fn(preserved));
     record_preserved_collapse_body(type_name, &tag, trait_head, &dropped.sig.ident.to_string());
     Some(tag)
+}
+
+/// Shared tag sanitizer for preserved collapse bodies. Preserve-time and every
+/// call-site probe MUST agree on this spelling, so both go through here.
+pub(crate) fn sanitize_collapse_trait_tag(name: &str) -> String {
+    let mut san = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            san.push(ch);
+        } else if !san.ends_with('_') {
+            san.push('_');
+        }
+    }
+    san.trim_matches('_').to_string()
 }
 
 /// Registry of preserved collapse bodies: type -> [(tagged member, trait path,
