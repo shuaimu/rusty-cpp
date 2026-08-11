@@ -13826,7 +13826,15 @@ impl CodeGen {
             return None;
         }
         let enum_name = &segments[enum_idx];
-        if !self.data_enum_types.contains(enum_name) {
+        // A module-nested data enum registers only its SCOPED key
+        // (`ser::Compound`); a struct literal spelled bare inside that module
+        // (`Compound::Map { ser, state }`) must still resolve — the bare miss
+        // sent serde_json's Compound::Map to the crate TYPE map::Map.
+        if !self.data_enum_types.contains(enum_name)
+            && !self
+                .data_enum_types
+                .contains(&self.scoped_type_key(enum_name))
+        {
             return None;
         }
         let variant_name = &segments[variant_idx];
