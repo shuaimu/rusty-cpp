@@ -44692,17 +44692,23 @@ impl CodeGen {
         let key_ty = &mapped_args[0];
         let value_ty = &mapped_args[1];
         let mapped = match item {
+            // These three used to spell rusty::detail::HashMap*EntryProxy/
+            // HashMapEntryProbe — templates that exist NOWHERE (an emission
+            // path written against machinery that never landed), and the
+            // first parse-order error in serde_json's module build. The btree
+            // port exports the real types, and every consumer of a
+            // BTreeMap-backed map already imports btree_port.btree.map.
             "VacantEntry" => format!(
-                "rusty::detail::HashMapVacantEntryProxy<rusty::BTreeMap<{}, {}>, {}>",
-                key_ty, value_ty, key_ty
+                "btree_port::btree::map::VacantEntry<{}, {}>",
+                key_ty, value_ty
             ),
             "OccupiedEntry" => format!(
-                "rusty::detail::HashMapOccupiedEntryProxy<rusty::BTreeMap<{}, {}>, {}>",
-                key_ty, value_ty, key_ty
+                "btree_port::btree::map::OccupiedEntry<{}, {}>",
+                key_ty, value_ty
             ),
             "Entry" => format!(
-                "rusty::detail::HashMapEntryProbe<rusty::BTreeMap<{}, {}>, {}>",
-                key_ty, value_ty, key_ty
+                "btree_port::btree::map::Entry<{}, {}>",
+                key_ty, value_ty
             ),
             "Iter" => format!(
                 "decltype(std::declval<const rusty::BTreeMap<{}, {}>&>().iter())",
