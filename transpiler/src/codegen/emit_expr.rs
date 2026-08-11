@@ -6214,11 +6214,16 @@ impl CodeGen {
         if !self.local_declared_types.contains(&owner_name) {
             return None;
         }
-        // Some dependency trait must declare the method AND carry its module
-        // path (manifest declared_trait_modules).
+        // Some dependency trait must declare the method WITH A DEFAULT BODY
+        // (manifest trait_default_methods) AND carry its module path
+        // (declared_trait_modules). The RuntimeHelper only carries default
+        // bodies — a REQUIRED method (serde's `Error::custom`) has no helper
+        // member, and since the helper type is non-dependent, the fallback
+        // branch would be a hard parse error even though it never
+        // instantiates. Required methods keep the plain member-call emission.
         let mut helper: Option<(String, String, String)> = None;
         for m in &self.dependency_ufcs_trait_manifests {
-            for (trait_name, methods) in &m.declared_trait_methods {
+            for (trait_name, methods) in &m.trait_default_methods {
                 if !methods.iter().any(|mm| mm == &method) {
                     continue;
                 }

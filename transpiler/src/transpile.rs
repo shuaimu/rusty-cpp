@@ -35,6 +35,13 @@ pub struct UfcsTraitManifest {
     /// unless the dep's trait actually provides the same method.
     #[serde(default)]
     pub declared_trait_methods: BTreeMap<String, Vec<String>>,
+    /// Declared trait name → the subset of its methods WITH default bodies.
+    /// The `<Trait>RuntimeHelper` only carries these, so a consumer's
+    /// member-vs-helper static dispatch must fall back to the helper ONLY for
+    /// methods in this list — a required method (serde's `Error::custom`) has
+    /// no helper member and the fallback branch is eagerly ill-formed.
+    #[serde(default)]
+    pub trait_default_methods: BTreeMap<String, Vec<String>>,
     /// `Trait::Assoc` → the SHORT name of the assoc type's first non-marker
     /// trait bound (`Serializer::SerializeMap` → `SerializeMap`). A consumer
     /// typing a local as the projection `S::SerializeMap` uses this to route a
@@ -574,6 +581,51 @@ pub fn collect_declared_trait_methods(
     out
 }
 
+/// Like `collect_declared_trait_methods`, but only methods WITH a default
+/// body. Feeds the manifest's `trait_default_methods` so a consumer's
+/// static-dispatch fallback (`<Trait>RuntimeHelper::method<Owner>`) is only
+/// emitted for methods the helper actually carries — the helper is built
+/// from default bodies, so a REQUIRED method (serde's `Error::custom`) has
+/// no helper member, and the fallback branch is a hard parse error (the
+/// helper type is non-dependent, so clang checks the never-taken branch
+/// eagerly).
+pub fn collect_trait_default_methods(
+    items: &[syn::Item],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    collect_trait_default_methods_into(items, &mut out);
+    out
+}
+
+fn collect_trait_default_methods_into(
+    items: &[syn::Item],
+    out: &mut std::collections::BTreeMap<String, Vec<String>>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Trait(t) => {
+                let entry = out.entry(t.ident.to_string()).or_insert_with(Vec::new);
+                for ti in &t.items {
+                    if let syn::TraitItem::Fn(f) = ti
+                        && f.default.is_some()
+                    {
+                        let name = f.sig.ident.to_string();
+                        if !entry.contains(&name) {
+                            entry.push(name);
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_trait_default_methods_into(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_declared_trait_methods_into(
     items: &[syn::Item],
     out: &mut std::collections::BTreeMap<String, Vec<String>>,
@@ -609,6 +661,19 @@ pub fn collect_trait_method_return_assocs(
     items: &[syn::Item],
 ) -> std::collections::BTreeMap<String, String> {
     fn first_self_projection(ty: &syn::Type) -> Option<String> {
+        // For a `Result<A, B>` return, only the OK position feeds a
+        // `let x = call()?` binding — scanning the whole type made
+        // `next_entry` (`Result<Option<(K, V)>, Self::Error>`) record
+        // `Error`, which then leaked into the call's V template arg
+        // (leaf5202). Recurse into A; the Err arg never types the binding.
+        if let syn::Type::Path(tp) = ty
+            && let Some(seg) = tp.path.segments.last()
+            && seg.ident == "Result"
+            && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+            && let Some(syn::GenericArgument::Type(ok_ty)) = ab.args.first()
+        {
+            return first_self_projection(ok_ty);
+        }
         let text = quote::ToTokens::to_token_stream(ty).to_string();
         let idx = text.find("Self :: ")?;
         let rest = &text[idx + "Self :: ".len()..];
@@ -3007,6 +3072,10 @@ mod tests {
             function_arg_pass_styles: std::collections::BTreeMap::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
+            trait_assoc_type_bounds: std::collections::BTreeMap::new(),
+            trait_default_methods: std::collections::BTreeMap::new(),
+            preserved_collapse_methods: Vec::new(),
+            trait_method_return_assoc: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
@@ -3093,6 +3162,10 @@ mod tests {
             function_arg_pass_styles: std::collections::BTreeMap::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
+            trait_assoc_type_bounds: std::collections::BTreeMap::new(),
+            trait_default_methods: std::collections::BTreeMap::new(),
+            preserved_collapse_methods: Vec::new(),
+            trait_method_return_assoc: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_byvalue_test.json");
