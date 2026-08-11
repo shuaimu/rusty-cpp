@@ -1356,6 +1356,77 @@ impl CodeGen {
         })
     }
 
+    /// True if `method`'s SIGNATURE (return type or a by-VALUE parameter)
+    /// names a sibling type that is still incomplete here — in a
+    /// NON-DEPENDENT type. Bodies are only eagerly checked for `Type::item`
+    /// static accesses, but clang eagerly checks NON-DEPENDENT signature
+    /// types of an inline member DEFINITION even in a class template: a
+    /// by-value param of incomplete type is ill-formed, and a concrete
+    /// `Option<Incomplete>` return instantiates at parse time (serde_json's
+    /// Value↔Map mutual recursion). The in-class declaration is legal with
+    /// incomplete types, so deferring just the definition out-of-line fixes
+    /// it. Two narrowings keep the out-of-line template path's brittle edges
+    /// unhit: top-level reference positions are skipped (behind `&` no
+    /// completeness is required), and any type mentioning an in-scope
+    /// template param (class or method) is DEPENDENT — clang checks it
+    /// lazily, so inline emission is fine and deferring it would only drag
+    /// constrained-overload siblings through paths that can't go out-of-line
+    /// (btree's `split` group broke alloc exactly that way).
+    fn method_signature_references_incomplete_sibling(
+        &self,
+        method: &syn::ImplItemFn,
+        owner_name: &str,
+        owner_generics: &syn::Generics,
+    ) -> bool {
+        fn non_reference_tokens(ty: &syn::Type, out: &mut Vec<String>) {
+            match ty {
+                syn::Type::Paren(p) => non_reference_tokens(&p.elem, out),
+                syn::Type::Group(g) => non_reference_tokens(&g.elem, out),
+                syn::Type::Reference(_) => {}
+                _ => out.push(quote::ToTokens::to_token_stream(ty).to_string()),
+            }
+        }
+        let mut sig_types: Vec<String> = Vec::new();
+        if let syn::ReturnType::Type(_, ty) = &method.sig.output {
+            non_reference_tokens(ty, &mut sig_types);
+        }
+        for input in &method.sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                non_reference_tokens(&pt.ty, &mut sig_types);
+            }
+        }
+        if sig_types.is_empty() {
+            return false;
+        }
+        let dependent_names: Vec<String> = owner_generics
+            .params
+            .iter()
+            .chain(method.sig.generics.params.iter())
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
+        fn ident_in(hay: &str, needle: &str) -> bool {
+            hay.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|seg| seg == needle)
+        }
+        let owner_leaf = owner_name.rsplit("::").next().unwrap_or(owner_name);
+        sig_types.iter().any(|toks| {
+            if dependent_names.iter().any(|p| ident_in(toks, p)) {
+                return false;
+            }
+            self.local_declared_types.iter().any(|t| {
+                let leaf = t.rsplit("::").next().unwrap_or(t);
+                leaf != owner_leaf
+                    && leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    && !self.defined_types.contains(leaf)
+                    && ident_in(toks, leaf)
+            })
+        })
+    }
+
     /// Rust `[T; 0]` fields exist to force struct ALIGNMENT under repr(C)
     /// with ZERO size. `std::array<T, 0>` delivers neither: it drops T's
     /// alignment AND has sizeof 1 (libstdc++ dummy member — not an empty
@@ -2318,7 +2389,12 @@ impl CodeGen {
                     // statically accesses a still-incomplete sibling needs it.
                     // (Non-template structs keep the proven blanket deferral.)
                     && (!struct_has_emitted_template_params
-                        || self.method_body_references_incomplete_sibling(method, &name_str))
+                        || self.method_body_references_incomplete_sibling(method, &name_str)
+                        || self.method_signature_references_incomplete_sibling(
+                            method,
+                            &name_str,
+                            &s.generics,
+                        ))
                 {
                     let prev_decl_only = self.method_emission_declaration_only;
                     let prev_out_of_line_owner = self.method_emission_out_of_line_owner.clone();
