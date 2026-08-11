@@ -1842,6 +1842,13 @@ pub struct CodeGen {
     /// methods get redirected to the alias's underlying struct so
     /// they land in the struct's body just like a direct-target impl.
     pub(crate) cross_file_type_alias_tails: HashMap<String, String>,
+    /// Validated source-owned ABI facades for this file. Empty for the exact
+    /// ordinary-code fast path.
+    pub(crate) cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan,
+    /// First internal scheduling invariant violated while emitting a validated
+    /// source-owned ABI facade.  The facade emitter records the diagnostic and
+    /// suppresses ordinary lowering; the transpile entry point propagates it.
+    pub(crate) cpp_abi_codegen_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2197,6 +2204,8 @@ impl CodeGen {
             cross_file_unit_struct_tails: HashSet::new(),
             cross_file_cpp_inherit_pairs: Vec::new(),
             cross_file_type_alias_tails: HashMap::new(),
+            cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan::default(),
+            cpp_abi_codegen_error: None,
         }
     }
 
@@ -4193,6 +4202,59 @@ impl CodeGen {
         self.cross_file_type_alias_tails = map;
     }
 
+    pub fn set_cpp_abi_plan(&mut self, plan: crate::cpp_abi::CppAbiEmissionPlan) {
+        self.cpp_abi_plan = plan;
+    }
+
+    pub(crate) fn take_cpp_abi_codegen_error(&mut self) -> Option<String> {
+        self.cpp_abi_codegen_error.take()
+    }
+
+    fn emit_cpp_abi_support(&mut self) {
+        if self.cpp_abi_plan.is_empty() {
+            return;
+        }
+        self.writeln("namespace rusty_cpp_abi_detail {");
+        self.indent += 1;
+        if self.cpp_abi_plan.needs_string_adapter() {
+            self.writeln("static inline rusty::Vec<uint8_t> bytes_from_std_string(const std::string& input) {");
+            self.indent += 1;
+            self.writeln("auto output = rusty::Vec<uint8_t>::with_capacity(input.size());");
+            self.writeln("for (unsigned char byte : input) {");
+            self.indent += 1;
+            self.writeln("output.push(static_cast<uint8_t>(byte));");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln("return output;");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln(
+                "static inline std::string std_string_from_bytes(rusty::Vec<uint8_t> input) {",
+            );
+            self.indent += 1;
+            self.writeln("if (input.size() == 0) {");
+            self.indent += 1;
+            self.writeln("return {};");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln(
+                "return std::string(reinterpret_cast<const char*>(input.data()), input.size());",
+            );
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        if self.cpp_abi_plan.needs_vector_adapter() {
+            self.writeln("static inline std::span<const double> f64_span_from_std_vector(const std::vector<double>& input) {");
+            self.indent += 1;
+            self.writeln("return std::span<const double>(input.data(), input.size());");
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        self.indent -= 1;
+        self.writeln("} // namespace rusty_cpp_abi_detail");
+        self.newline();
+    }
+
 
     /// Emit a complete Rust file as C++ code.
     /// Uses a two-pass approach: first collects impl blocks, then emits items
@@ -4300,6 +4362,7 @@ impl CodeGen {
         self.method_emission_declaration_only = false;
         self.method_emission_out_of_line_owner = None;
         self.method_emission_skip_conflict_registration = false;
+        self.cpp_abi_codegen_error = None;
         self.trait_static_default_methods.clear();
         self.trait_declared_paths.clear();
         self.cpp_marker_trait_paths.clear();
@@ -4697,6 +4760,10 @@ impl CodeGen {
             self.writeln("#include <any>");
             self.writeln("#include <string>");
             self.writeln("#include <string_view>");
+            if self.cpp_abi_plan.needs_vector_adapter() {
+                self.writeln("#include <span>");
+                self.writeln("#include <vector>");
+            }
             self.writeln("#include <charconv>");
             self.writeln("#include <cstdlib>");
             self.writeln("#include <cstdio>");  // std::fprintf for the RUSTY_PANIC_ABORT branch of panicking::do_panic_
@@ -4844,6 +4911,7 @@ impl CodeGen {
         } else {
             false
         };
+        self.emit_cpp_abi_support();
         // Pre-scan: detect module names that collide with function names
         // in the same scope, and register renames to avoid C++ namespace shadowing.
         self.detect_namespace_function_collisions(&file.items, &[]);
@@ -54929,7 +54997,7 @@ fn escape_cpp_char_literal_content(value: char) -> String {
     }
 }
 
-fn escape_cpp_keyword(name: &str) -> String {
+pub(crate) fn escape_cpp_keyword(name: &str) -> String {
     // Rust raw identifiers (`r#match`, `r#type`) stringify WITH the prefix —
     // `#` is not valid in a C++ identifier. Strip it, then keyword-escape
     // the bare name as usual (`r#match` → `match`; `r#try` → `try_`).

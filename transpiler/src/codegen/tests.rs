@@ -73,6 +73,46 @@ fn transpile_str_with_by_value_cycle_breaking_prototype(rust_code: &str) -> Stri
     cg.into_output()
 }
 
+#[test]
+fn cpp_abi_method_facade_scheduling_mismatch_is_a_fatal_diagnostic() {
+    let file: syn::File = syn::parse_str(
+        r#"
+            pub struct Codec;
+            impl Codec {
+                #[cfg_attr(any(), cpp_abi(returns(std_string_bytes)))]
+                pub fn encode() -> Vec<u8> { vec![1] }
+            }
+        "#,
+    )
+    .unwrap();
+    let (lowered, plan) = crate::cpp_abi::lower(&file)
+        .unwrap()
+        .expect("adapter contract must lower");
+    let method = lowered
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Impl(item_impl) => item_impl.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) => Some(method.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("lowered facade method");
+
+    let mut cg = CodeGen::new();
+    cg.set_cpp_abi_plan(plan);
+    cg.current_struct = Some("Codec".to_string());
+    cg.emit_method(&method);
+
+    assert!(!cg.output.contains("unreachable"));
+    let diagnostic = cg
+        .take_cpp_abi_codegen_error()
+        .expect("missing out-of-line scheduling must be fatal");
+    assert!(diagnostic.contains("Codec::encode"), "{diagnostic}");
+    assert!(cg.take_cpp_abi_codegen_error().is_none());
+}
+
 /// §13.14 Phase-4: transpile with the constraint-solver engine flag on
 /// (deterministic via the setter, independent of the ambient env var).
 fn transpile_str_infer_engine(rust_code: &str) -> String {

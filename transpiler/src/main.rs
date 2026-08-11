@@ -7,6 +7,7 @@ use std::process::{self, Output};
 
 mod cmake;
 mod codegen;
+mod cpp_abi;
 mod inline_rust;
 mod metadata;
 mod slots;
@@ -263,6 +264,477 @@ struct InlineRustArgs {
 /// Transpile an entire Rust crate in one command.
 /// Walks all .rs files, transpiles each with the correct module name,
 /// and generates CMakeLists.txt.
+fn validate_cpp_abi_conventional_lib_crate(
+    cargo: &cmake::CargoToml,
+    sources: &[PathBuf],
+) -> Result<(), String> {
+    let lib_path = cargo
+        .lib
+        .as_ref()
+        .and_then(|target| target.path.as_deref())
+        .unwrap_or("src/lib.rs")
+        .replace('\\', "/");
+    if lib_path != "src/lib.rs" || !sources.iter().any(|path| path == Path::new("src/lib.rs")) {
+        return Err(
+            "cpp_abi crate mode currently requires the conventional src/lib.rs library target"
+                .to_string(),
+        );
+    }
+    if cargo.bins.as_ref().is_some_and(|bins| !bins.is_empty())
+        || sources.iter().any(|path| {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            normalized == "src/main.rs" || normalized.starts_with("src/bin/")
+        })
+    {
+        return Err(
+            "cpp_abi crate mode currently supports one library target and no binary targets"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn reject_cpp_abi_in_nonconventional_target_roots(
+    cargo: &cmake::CargoToml,
+    project_dir: &Path,
+) -> Result<(), String> {
+    let mut declared_roots = Vec::<PathBuf>::new();
+    if let Some(path) = cargo
+        .lib
+        .as_ref()
+        .and_then(|target| target.path.as_deref())
+        && path.replace('\\', "/") != "src/lib.rs"
+    {
+        declared_roots.push(PathBuf::from(path));
+    }
+    if let Some(bins) = &cargo.bins {
+        declared_roots.extend(
+            bins.iter()
+                .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+        );
+    }
+    declared_roots.sort();
+    declared_roots.dedup();
+    for relative in declared_roots {
+        let full = project_dir.join(&relative);
+        let Ok(source) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        if cpp_abi::source_mentions_reserved_marker(&source) {
+            return Err(format!(
+                "cpp_abi is present in declared target {} but crate mode currently supports only the conventional src/lib.rs library target",
+                relative.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct CppAbiClosureReport {
+    any_cpp_abi: bool,
+    issues: BTreeSet<String>,
+}
+
+struct CppAbiClosurePreflight {
+    expand: bool,
+    report: CppAbiClosureReport,
+    root_manifest: Option<PathBuf>,
+    visited: BTreeSet<PathBuf>,
+    active: Vec<PathBuf>,
+}
+
+fn validate_cpp_abi_manifest_edition(manifest_source: &str) -> Result<(), String> {
+    let manifest = toml::from_str::<toml::Value>(manifest_source)
+        .map_err(|error| format!("could not inspect package.edition: {error}"))?;
+    let edition = manifest
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("edition"));
+    match edition.and_then(toml::Value::as_str) {
+        Some("2018" | "2021" | "2024") => Ok(()),
+        Some(unsupported) => Err(format!(
+            "cpp_abi crate mode requires an explicit Rust 2018, 2021, or 2024 package.edition; found `{unsupported}`"
+        )),
+        None if edition.is_none() => Err(
+            "cpp_abi crate mode requires an explicit Rust 2018, 2021, or 2024 package.edition; an omitted edition selects Rust 2015"
+                .to_string(),
+        ),
+        None => Err(
+            "cpp_abi crate mode requires an explicitly resolved Rust 2018, 2021, or 2024 package.edition; workspace-inherited or non-string editions are unsupported"
+                .to_string(),
+        ),
+    }
+}
+
+impl CppAbiClosurePreflight {
+    fn new(expand: bool) -> Self {
+        Self {
+            expand,
+            report: CppAbiClosureReport::default(),
+            root_manifest: None,
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn manifest_key(path: &Path) -> PathBuf {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return canonical;
+        }
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        let mut cursor = absolute.as_path();
+        let mut missing = Vec::new();
+        loop {
+            if let Ok(mut canonical) = std::fs::canonicalize(cursor) {
+                for component in missing.into_iter().rev() {
+                    canonical.push(component);
+                }
+                return canonical;
+            }
+            let Some(component) = cursor.file_name() else {
+                return absolute;
+            };
+            missing.push(component.to_os_string());
+            let Some(parent) = cursor.parent() else {
+                return absolute;
+            };
+            cursor = parent;
+        }
+    }
+
+    fn issue(&mut self, message: impl Into<String>) {
+        self.report.issues.insert(message.into());
+    }
+
+    fn note_cpp_abi(&mut self, cargo_toml_path: &Path) {
+        self.report.any_cpp_abi = true;
+        let manifest = Self::manifest_key(cargo_toml_path);
+        if self
+            .root_manifest
+            .as_ref()
+            .is_some_and(|root| root != &manifest)
+        {
+            self.issue(format!(
+                "local dependency {} contains cpp_abi contracts; cross-crate adapter calls are unsupported",
+                cargo_toml_path.display()
+            ));
+        }
+    }
+
+    fn collect_rs_files(&mut self, project_dir: &Path) -> Vec<PathBuf> {
+        fn recurse(
+            this: &mut CppAbiClosurePreflight,
+            project_dir: &Path,
+            directory: &Path,
+            active_directories: &mut Vec<PathBuf>,
+            files: &mut Vec<PathBuf>,
+        ) {
+            let canonical_directory = match std::fs::canonicalize(directory) {
+                Ok(path) => path,
+                Err(error) => {
+                    this.issue(format!(
+                        "could not resolve source directory {}: {error}",
+                        directory.display()
+                    ));
+                    return;
+                }
+            };
+            if let Some(cycle_start) = active_directories
+                .iter()
+                .position(|active| active == &canonical_directory)
+            {
+                let mut cycle = active_directories[cycle_start..]
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>();
+                cycle.push(canonical_directory.display().to_string());
+                this.issue(format!(
+                    "source directory symlink cycle at {}: {}",
+                    directory.display(),
+                    cycle.join(" -> ")
+                ));
+                return;
+            }
+            active_directories.push(canonical_directory);
+
+            let entries = match std::fs::read_dir(directory) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    this.issue(format!(
+                        "could not read source directory {}: {error}",
+                        directory.display()
+                    ));
+                    active_directories.pop();
+                    return;
+                }
+            };
+            let mut entries = entries.collect::<Vec<_>>();
+            entries.sort_by(|left, right| match (left, right) {
+                (Ok(left), Ok(right)) => left.path().cmp(&right.path()),
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(left), Err(right)) => left.to_string().cmp(&right.to_string()),
+            });
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        this.issue(format!(
+                            "could not enumerate source directory {}: {error}",
+                            directory.display()
+                        ));
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                // Follow both file and directory symlinks, matching the
+                // legacy collector's effective path semantics. Keep the
+                // lexical path for module identity and diagnostics.
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        this.issue(format!(
+                            "could not inspect source path {}: {error}",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                };
+                if metadata.is_dir() {
+                    recurse(this, project_dir, &path, active_directories, files);
+                } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                    match path.strip_prefix(project_dir) {
+                        Ok(relative) => files.push(relative.to_path_buf()),
+                        Err(error) => this.issue(format!(
+                            "could not make source path {} project-relative: {error}",
+                            path.display()
+                        )),
+                    }
+                }
+            }
+            active_directories.pop();
+        }
+
+        let src = project_dir.join("src");
+        match std::fs::symlink_metadata(&src) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                self.issue(format!(
+                    "could not inspect source directory {}: {error}",
+                    src.display()
+                ));
+                return Vec::new();
+            }
+        }
+        let mut files = Vec::new();
+        recurse(self, project_dir, &src, &mut Vec::new(), &mut files);
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    fn read_source_units(
+        &mut self,
+        project_dir: &Path,
+        cargo_toml_path: &Path,
+    ) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+        let sources = self.collect_rs_files(project_dir);
+        let mut units = Vec::with_capacity(sources.len());
+        for relative in &sources {
+            let full = project_dir.join(relative);
+            match std::fs::read_to_string(&full) {
+                Ok(source) => {
+                    if cpp_abi::source_mentions_reserved_marker(&source) {
+                        self.note_cpp_abi(cargo_toml_path);
+                    }
+                    units.push((relative.clone(), source));
+                }
+                Err(error) => self.issue(format!(
+                    "could not read Rust source {}: {error}",
+                    full.display()
+                )),
+            }
+        }
+        (sources, units)
+    }
+
+    fn scan_declared_target_roots(
+        &mut self,
+        cargo: &cmake::CargoToml,
+        project_dir: &Path,
+        cargo_toml_path: &Path,
+    ) -> bool {
+        let mut mentions_cpp_abi = false;
+        let mut declared = Vec::<PathBuf>::new();
+        if let Some(path) = cargo.lib.as_ref().and_then(|target| target.path.as_deref())
+            && path.replace('\\', "/") != "src/lib.rs"
+        {
+            declared.push(PathBuf::from(path));
+        }
+        if let Some(bins) = &cargo.bins {
+            declared.extend(
+                bins.iter()
+                    .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+            );
+        }
+        declared.sort();
+        declared.dedup();
+        for relative in declared {
+            let full = project_dir.join(&relative);
+            match std::fs::read_to_string(&full) {
+                Ok(source) => {
+                    if cpp_abi::source_mentions_reserved_marker(&source) {
+                        mentions_cpp_abi = true;
+                        self.note_cpp_abi(cargo_toml_path);
+                    }
+                }
+                Err(error) => self.issue(format!(
+                    "could not read declared Rust target {}: {error}",
+                    full.display()
+                )),
+            }
+        }
+        mentions_cpp_abi
+    }
+
+    fn scan_sources_without_manifest(&mut self, project_dir: &Path, manifest: &Path) {
+        let (_, source_units) = self.read_source_units(project_dir, manifest);
+        if source_units
+            .iter()
+            .any(|(_, source)| cpp_abi::source_mentions_reserved_marker(source))
+            && let Err(error) = cpp_abi::preflight_crate_sources(&source_units)
+        {
+            self.issue(format!("{}: {error}", manifest.display()));
+        }
+    }
+
+    fn visit_manifest(&mut self, cargo_toml_path: &Path) {
+        let visit_key = Self::manifest_key(cargo_toml_path);
+        if let Some(cycle_start) = self.active.iter().position(|path| path == &visit_key) {
+            let mut cycle = self.active[cycle_start..]
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            cycle.push(visit_key.display().to_string());
+            self.issue(format!(
+                "local dependency cycle detected: {}",
+                cycle.join(" -> ")
+            ));
+            return;
+        }
+        if !self.visited.insert(visit_key.clone()) {
+            return;
+        }
+        self.active.push(visit_key);
+
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+        let manifest_source = match std::fs::read_to_string(cargo_toml_path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.issue(format!(
+                    "could not read local dependency manifest {}: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.scan_sources_without_manifest(project_dir, cargo_toml_path);
+                self.active.pop();
+                return;
+            }
+        };
+        let cargo = match toml::from_str::<cmake::CargoToml>(&manifest_source) {
+            Ok(cargo) => cargo,
+            Err(error) => {
+                self.issue(format!(
+                    "could not parse local dependency manifest {}: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.scan_sources_without_manifest(project_dir, cargo_toml_path);
+                self.active.pop();
+                return;
+            }
+        };
+
+        let (sources, source_units) = self.read_source_units(project_dir, cargo_toml_path);
+        let declared_target_mentions_cpp_abi =
+            self.scan_declared_target_roots(&cargo, project_dir, cargo_toml_path);
+        let crate_mentions_cpp_abi = declared_target_mentions_cpp_abi
+            || source_units
+            .iter()
+            .any(|(_, source)| cpp_abi::source_mentions_reserved_marker(source));
+        if crate_mentions_cpp_abi {
+            if let Err(error) = validate_cpp_abi_manifest_edition(&manifest_source) {
+                self.issue(format!("{}: {error}", cargo_toml_path.display()));
+            }
+            match cpp_abi::preflight_crate_sources(&source_units) {
+                Ok(true) => {
+                    if let Err(error) = validate_cpp_abi_conventional_lib_crate(&cargo, &sources) {
+                        self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    }
+                    if self.expand {
+                        self.issue(format!(
+                            "{}: cpp_abi crate mode does not support --expand because expansion removes inert ABI markers",
+                            cargo_toml_path.display()
+                        ));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => self.issue(format!("{}: {error}", cargo_toml_path.display())),
+            }
+        }
+        if let Err(error) = reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir) {
+            self.issue(format!("{}: {error}", cargo_toml_path.display()));
+        }
+
+        let mut dependencies = cmake::extract_dependencies(&cargo)
+            .into_iter()
+            .filter(|dependency| dependency.is_local)
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for dependency in dependencies {
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            self.visit_manifest(&project_dir.join(relative).join("Cargo.toml"));
+        }
+        self.active.pop();
+    }
+
+    fn finish(self) -> Result<bool, String> {
+        if self.report.any_cpp_abi && !self.report.issues.is_empty() {
+            return Err(format!(
+                "cpp_abi whole local-dependency closure preflight failed before output:\n- {}",
+                self.report
+                    .issues
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            ));
+        }
+        Ok(self.report.any_cpp_abi)
+    }
+}
+
+fn preflight_cpp_abi_whole_dependency_closure(
+    cargo_toml_path: &Path,
+    expand: bool,
+) -> Result<bool, String> {
+    let mut preflight = CppAbiClosurePreflight::new(expand);
+    preflight.root_manifest = Some(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
 fn transpile_crate(
     cargo_toml_path: &Path,
     output_dir: &Path,
@@ -276,12 +748,39 @@ fn transpile_crate(
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let crate_name = &cargo.package.name;
+
+    // The checked, symlink-aware closure walk must run before the legacy
+    // source collector: a source-directory symlink cycle would otherwise be
+    // followed indefinitely before cpp_abi gets a chance to fail closed.
+    // Marker-free closures still retain the legacy result and output path.
+    preflight_cpp_abi_whole_dependency_closure(cargo_toml_path, expand)?;
     let sources = cmake::collect_source_files(project_dir);
 
     if sources.is_empty() {
         return Err("No .rs source files found in src/".to_string());
     }
 
+    // Source-owned ABI contracts need a crate-wide view before any output or
+    // dependency directory can be created. Read every source exactly once;
+    // marker-free crates continue through the ordinary per-file path below.
+    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
+    for rs_path in &sources {
+        let full_rs_path = project_dir.join(rs_path);
+        let source = std::fs::read_to_string(&full_rs_path)
+            .map_err(|error| format!("Error reading {}: {error}", full_rs_path.display()))?;
+        source_units.push((rs_path.clone(), source));
+    }
+    reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
+    let has_cpp_abi = cpp_abi::preflight_crate_sources(&source_units)?;
+    if has_cpp_abi {
+        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
+        if expand {
+            return Err(
+                "cpp_abi crate mode does not support --expand because expansion removes inert ABI markers"
+                    .to_string(),
+            );
+        }
+    }
     // Create output directory
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
@@ -315,6 +814,12 @@ fn transpile_crate(
                     ) {
                         Ok(()) => {
                             local_dep_dirs.push(dep.name.clone());
+                        }
+                        Err(e) if e.contains("cpp_abi") => {
+                            return Err(format!(
+                                "cpp_abi dependency preflight for '{}' failed: {}",
+                                dep.name, e
+                            ));
                         }
                         Err(e) => {
                             eprintln!(
@@ -411,15 +916,12 @@ fn transpile_crate(
     let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
     let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
     let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
-    for rs_path in &sources {
-        let full_rs_path = project_dir.join(rs_path);
-        if let Ok(source) = std::fs::read_to_string(&full_rs_path) {
-            extension_method_hints.extend(transpile::collect_extension_method_hints(&source));
-            cross_file_enums.extend(transpile::collect_crate_enum_decls(&source));
-            cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(&source));
-            cross_file_structs.extend(transpile::collect_crate_struct_decls(&source));
-            cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(&source));
-        }
+    for (_, source) in &source_units {
+        extension_method_hints.extend(transpile::collect_extension_method_hints(source));
+        cross_file_enums.extend(transpile::collect_crate_enum_decls(source));
+        cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(source));
+        cross_file_structs.extend(transpile::collect_crate_struct_decls(source));
+        cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(source));
     }
     // Build a per-crate transpile options clone with the collected cross-file
     // enum decls and impl blocks injected. This lets each file's codegen seed
@@ -452,19 +954,9 @@ fn transpile_crate(
         opts
     };
 
-    for rs_path in &sources {
+    for (rs_path, source) in &source_units {
         let (cppm_path, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
-        let full_rs_path = project_dir.join(rs_path);
         let full_cppm_path = output_dir.join(&cppm_path);
-
-        let source = match std::fs::read_to_string(&full_rs_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("  Error reading {}: {}", full_rs_path.display(), e);
-                error_count += 1;
-                continue;
-            }
-        };
 
         let mut module_options = crate_transpile_options.clone();
         module_options.explicit_gmf_includes = module_preambles
@@ -473,7 +965,7 @@ fn transpile_crate(
             .unwrap_or_default();
 
         match transpile::transpile_with_type_map_and_extension_hints_and_options(
-            &source,
+            source,
             Some(&module_name),
             type_map,
             &extension_method_hints,
@@ -803,6 +1295,471 @@ fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_closure_fixture(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture file parent")).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn closure_manifest(name: &str, dependencies: &[(&str, &str)]) -> String {
+        let mut manifest =
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");
+        if !dependencies.is_empty() {
+            manifest.push_str("\n[dependencies]\n");
+            for (dependency, path) in dependencies {
+                manifest.push_str(&format!("{dependency} = {{ path = \"{path}\" }}\n"));
+            }
+        }
+        manifest
+    }
+
+    fn assert_cpp_abi_crate_fails_without_output(manifest: &Path, expected: &str) {
+        let output = manifest
+            .parent()
+            .expect("manifest parent")
+            .join("cpp_abi_test_output");
+        let error = transpile_crate(
+            manifest,
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &transpile::TranspileOptions::default(),
+            None,
+        )
+        .expect_err("cpp_abi fixture must fail before output");
+        assert!(error.contains(expected), "{error}");
+        assert!(!output.exists(), "created output at {}", output.display());
+    }
+
+    const CLOSURE_ADAPTER: &str = r#"
+#[cfg_attr(any(), cpp_abi(param(bytes, std_string_bytes), returns(std_string_bytes)))]
+pub fn adapted(bytes: Vec<u8>) -> Vec<u8> { bytes }
+"#;
+
+    #[test]
+    fn cpp_abi_crate_mode_requires_an_explicit_modern_edition() {
+        for (label, edition, expected) in [
+            (
+                "explicit_2015",
+                "edition = \"2015\"\n",
+                "found `2015`",
+            ),
+            (
+                "omitted",
+                "",
+                "an omitted edition selects Rust 2015",
+            ),
+            (
+                "workspace_inherited",
+                "edition.workspace = true\n",
+                "workspace-inherited or non-string editions are unsupported",
+            ),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let mut manifest = format!(
+                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\n{edition}\n[workspace]\n"
+            );
+            if label == "workspace_inherited" {
+                manifest.push_str("\n[workspace.package]\nedition = \"2015\"\n");
+            }
+            write_closure_fixture(fixture.path(), "Cargo.toml", &manifest);
+            write_closure_fixture(fixture.path(), "src/lib.rs", CLOSURE_ADAPTER);
+            let manifest_path = fixture.path().join("Cargo.toml");
+
+            let error = preflight_cpp_abi_whole_dependency_closure(&manifest_path, false)
+                .expect_err("unsupported edition must fail closed");
+            assert!(error.contains(expected), "{label}: {error}");
+            assert_cpp_abi_crate_fails_without_output(&manifest_path, expected);
+        }
+
+        for edition in ["2018", "2021", "2024"] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"edition_{edition}\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n\n[workspace]\n"
+                ),
+            );
+            write_closure_fixture(fixture.path(), "src/lib.rs", CLOSURE_ADAPTER);
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("Cargo.toml"),
+                    false,
+                )
+                .unwrap(),
+                true,
+                "explicit Rust {edition} must be supported"
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_abi_edition_guard_does_not_change_marker_free_crates() {
+        for (label, edition) in [("explicit_2015", "edition = \"2015\"\n"), ("omitted", "")]
+        {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"marker_free_{label}\"\nversion = \"0.1.0\"\n{edition}\n[workspace]\n"
+                ),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "src/lib.rs",
+                "pub fn ordinary() -> u32 { 1 }\n",
+            );
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("Cargo.toml"),
+                    false,
+                )
+                .unwrap(),
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_reports_missing_malformed_and_cycles_deterministically() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "root/Cargo.toml",
+            &closure_manifest(
+                "root",
+                &[("z_missing", "../z_missing"), ("a_missing", "../a_missing")],
+            ),
+        );
+        write_closure_fixture(fixture.path(), "root/src/lib.rs", CLOSURE_ADAPTER);
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &fixture.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("a_missing/Cargo.toml"), "{error}");
+        assert!(error.contains("z_missing/Cargo.toml"), "{error}");
+        assert!(
+            error.find("a_missing/Cargo.toml").unwrap()
+                < error.find("z_missing/Cargo.toml").unwrap(),
+            "{error}"
+        );
+
+        let malformed = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            malformed.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("bad", "../bad")]),
+        );
+        write_closure_fixture(malformed.path(), "root/src/lib.rs", CLOSURE_ADAPTER);
+        write_closure_fixture(malformed.path(), "bad/Cargo.toml", "not valid toml = [");
+        write_closure_fixture(malformed.path(), "bad/src/lib.rs", CLOSURE_ADAPTER);
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &malformed.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("could not parse local dependency manifest"),
+            "{error}"
+        );
+
+        let cycle = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            cycle.path(),
+            "a/Cargo.toml",
+            &closure_manifest("a", &[("b", "../b")]),
+        );
+        write_closure_fixture(cycle.path(), "a/src/lib.rs", CLOSURE_ADAPTER);
+        write_closure_fixture(
+            cycle.path(),
+            "b/Cargo.toml",
+            &closure_manifest("b", &[("a", "../a")]),
+        );
+        write_closure_fixture(cycle.path(), "b/src/lib.rs", "pub fn ordinary() {}\n");
+        let error =
+            preflight_cpp_abi_whole_dependency_closure(&cycle.path().join("a/Cargo.toml"), false)
+                .unwrap_err();
+        assert!(error.contains("local dependency cycle detected"), "{error}");
+        assert!(error.matches("a/Cargo.toml").count() >= 2, "{error}");
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_accepts_valid_two_level_and_diamond_graphs() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("left", "../left"), ("right", "../right")]),
+        );
+        write_closure_fixture(fixture.path(), "root/src/lib.rs", CLOSURE_ADAPTER);
+        write_closure_fixture(
+            fixture.path(),
+            "left/Cargo.toml",
+            &closure_manifest("left", &[("leaf", "../leaf")]),
+        );
+        write_closure_fixture(fixture.path(), "left/src/lib.rs", "pub fn left() {}\n");
+        write_closure_fixture(
+            fixture.path(),
+            "right/Cargo.toml",
+            &closure_manifest("right", &[("leaf", "../leaf")]),
+        );
+        write_closure_fixture(fixture.path(), "right/src/lib.rs", "pub fn right() {}\n");
+        write_closure_fixture(
+            fixture.path(),
+            "leaf/Cargo.toml",
+            &closure_manifest("leaf", &[]),
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "leaf/src/lib.rs",
+            "pub fn leaf() -> u32 { 1 }\n",
+        );
+        assert_eq!(
+            preflight_cpp_abi_whole_dependency_closure(
+                &fixture.path().join("root/Cargo.toml"),
+                false,
+            )
+            .unwrap(),
+            true
+        );
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_rejects_adapters_in_local_dependencies() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("dep_adapter", "../dep")]),
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "root/src/lib.rs",
+            "pub fn call(bytes: Vec<u8>) -> Vec<u8> { dep_adapter::adapted(bytes) }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "dep/Cargo.toml",
+            &closure_manifest("dep_adapter", &[]),
+        );
+        write_closure_fixture(fixture.path(), "dep/src/lib.rs", CLOSURE_ADAPTER);
+
+        let root_manifest = fixture.path().join("root/Cargo.toml");
+        let error = preflight_cpp_abi_whole_dependency_closure(&root_manifest, false)
+            .expect_err("cross-crate adapter must fail closed");
+        assert!(error.contains("local dependency"), "{error}");
+        assert!(error.contains("cross-crate adapter calls"), "{error}");
+        assert_cpp_abi_crate_fails_without_output(&root_manifest, "cross-crate adapter calls");
+
+        assert_eq!(
+            preflight_cpp_abi_whole_dependency_closure(
+                &fixture.path().join("dep/Cargo.toml"),
+                false,
+            )
+            .unwrap(),
+            true
+        );
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_preserves_marker_free_incomplete_dependency_behavior() {
+        for malformed in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "root/Cargo.toml",
+                &closure_manifest("root", &[("bad", "../bad")]),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "root/src/lib.rs",
+                "pub fn ordinary() -> u32 { 1 }\n",
+            );
+            if malformed {
+                write_closure_fixture(fixture.path(), "bad/Cargo.toml", "invalid = [");
+                write_closure_fixture(
+                    fixture.path(),
+                    "bad/src/lib.rs",
+                    "pub fn ordinary() -> u32 { 2 }\n",
+                );
+            }
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("root/Cargo.toml"),
+                    false,
+                )
+                .unwrap(),
+                false
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_abi_closure_preflight_follows_logical_file_and_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let file_link = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            file_link.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("missing", "../missing")]),
+        );
+        write_closure_fixture(file_link.path(), "root/real.rs", CLOSURE_ADAPTER);
+        std::fs::create_dir_all(file_link.path().join("root/src")).unwrap();
+        symlink("../real.rs", file_link.path().join("root/src/lib.rs")).unwrap();
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &file_link.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("missing/Cargo.toml"), "{error}");
+        assert_cpp_abi_crate_fails_without_output(
+            &file_link.path().join("root/Cargo.toml"),
+            "missing/Cargo.toml",
+        );
+
+        let directory_link = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            directory_link.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("missing", "../missing")]),
+        );
+        write_closure_fixture(directory_link.path(), "root/src/lib.rs", "pub mod api;\n");
+        write_closure_fixture(
+            directory_link.path(),
+            "root/real_api/mod.rs",
+            CLOSURE_ADAPTER,
+        );
+        symlink(
+            "../real_api",
+            directory_link.path().join("root/src/api"),
+        )
+        .unwrap();
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &directory_link.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("missing/Cargo.toml"), "{error}");
+        assert_cpp_abi_crate_fails_without_output(
+            &directory_link.path().join("root/Cargo.toml"),
+            "missing/Cargo.toml",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_abi_closure_preflight_reports_broken_links_and_directory_cycles() {
+        use std::os::unix::fs::symlink;
+
+        for label in ["broken source link", "source directory cycle"] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "root/Cargo.toml",
+                &closure_manifest(
+                    "root",
+                    &[("adapter", "../adapter"), ("problem", "../problem")],
+                ),
+            );
+            write_closure_fixture(fixture.path(), "root/src/lib.rs", "pub fn root() {}\n");
+            write_closure_fixture(
+                fixture.path(),
+                "adapter/Cargo.toml",
+                &closure_manifest("adapter", &[]),
+            );
+            write_closure_fixture(fixture.path(), "adapter/src/lib.rs", CLOSURE_ADAPTER);
+            write_closure_fixture(
+                fixture.path(),
+                "problem/Cargo.toml",
+                &closure_manifest("problem", &[]),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "problem/src/lib.rs",
+                "pub fn ordinary() {}\n",
+            );
+            let problem = fixture.path().join("problem");
+            if label == "broken source link" {
+                symlink("missing-target.rs", problem.join("src/ghost.rs")).unwrap();
+            } else {
+                symlink(".", problem.join("src/loop")).unwrap();
+            }
+
+            let error = preflight_cpp_abi_whole_dependency_closure(
+                &fixture.path().join("root/Cargo.toml"),
+                false,
+            )
+            .expect_err(label);
+            match label {
+                "broken source link" => {
+                    assert!(error.contains("could not inspect source path"), "{error}");
+                    assert!(error.contains("ghost.rs"), "{error}");
+                }
+                _ => assert!(error.contains("source directory symlink cycle"), "{error}"),
+            }
+            let expected = if label == "broken source link" {
+                "ghost.rs"
+            } else {
+                "source directory symlink cycle"
+            };
+            assert_cpp_abi_crate_fails_without_output(
+                &fixture.path().join("root/Cargo.toml"),
+                expected,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_abi_symlink_scan_allows_aliases_and_preserves_marker_free_gating() {
+        use std::os::unix::fs::symlink;
+
+        let aliases = tempfile::tempdir().unwrap();
+        write_closure_fixture(aliases.path(), "crate/src/lib.rs", "pub fn root() {}\n");
+        write_closure_fixture(aliases.path(), "crate/real/mod.rs", "pub fn item() {}\n");
+        symlink("../real", aliases.path().join("crate/src/left")).unwrap();
+        symlink("../real", aliases.path().join("crate/src/right")).unwrap();
+        let mut preflight = CppAbiClosurePreflight::new(false);
+        let files = preflight.collect_rs_files(&aliases.path().join("crate"));
+        assert!(files.contains(&PathBuf::from("src/left/mod.rs")));
+        assert!(files.contains(&PathBuf::from("src/right/mod.rs")));
+        assert!(preflight.report.issues.is_empty());
+
+        for label in ["broken", "cycle"] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "root/Cargo.toml",
+                &closure_manifest("root", &[]),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "root/src/lib.rs",
+                "pub fn ordinary() {}\n",
+            );
+            let root = fixture.path().join("root");
+            if label == "broken" {
+                symlink("missing.rs", root.join("src/ghost.rs")).unwrap();
+            } else {
+                symlink(".", root.join("src/loop")).unwrap();
+            }
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("root/Cargo.toml"),
+                    false,
+                )
+                .expect(label),
+                false
+            );
+        }
+    }
 
     #[test]
     fn test_collect_rusty_test_entries_from_cppm_uses_wrapper_exports_only() {

@@ -1389,6 +1389,17 @@ pub fn transpile_full_with_options(
     let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
         .map_err(|e| format!("Parse error: {}", e))?;
     log_profile("parse_with_expand_hygiene_fallback");
+    let (file, cpp_abi_plan) = match crate::cpp_abi::lower(&file)? {
+        Some((lowered, plan)) => (lowered, plan),
+        None => (file, crate::cpp_abi::CppAbiEmissionPlan::default()),
+    };
+    if !cpp_abi_plan.is_empty() && module_name.is_none() {
+        return Err(
+            "cpp_abi adapters require named C++ module output; standalone output is unsupported"
+                .to_string(),
+        );
+    }
+    log_profile("cpp_abi_lower");
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
     log_profile("file_contains_cpp_module_imports");
     if has_cpp_module_imports {
@@ -1466,6 +1477,7 @@ pub fn transpile_full_with_options(
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_crate_module_names(options.crate_module_names.clone());
+    codegen.set_cpp_abi_plan(cpp_abi_plan);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -1481,6 +1493,9 @@ pub fn transpile_full_with_options(
     log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
     log_profile("codegen_emit_file");
+    if let Some(error) = codegen.take_cpp_abi_codegen_error() {
+        return Err(error);
+    }
     // UFCS cross-crate: emit this crate's trait manifest (declared traits +
     // actually-emitted `<Tr>_::m` owner map) for dependents to consume.
     if let Some(path) = options.emit_ufcs_trait_manifest_path.as_ref() {

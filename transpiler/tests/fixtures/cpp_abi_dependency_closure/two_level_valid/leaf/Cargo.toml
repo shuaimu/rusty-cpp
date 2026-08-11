@@ -1,0 +1,4 @@
+[package]
+name = "cppabi_closure_two_level_valid_leaf"
+version = "0.1.0"
+edition = "2024"

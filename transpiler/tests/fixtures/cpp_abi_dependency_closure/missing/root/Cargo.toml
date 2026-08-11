@@ -1,0 +1,7 @@
+[package]
+name = "cppabi_closure_missing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gone = { path = "../gone" }

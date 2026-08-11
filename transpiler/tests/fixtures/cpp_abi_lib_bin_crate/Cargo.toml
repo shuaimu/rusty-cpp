@@ -1,0 +1,4 @@
+[package]
+name = "cppabi_lib_bin_repro"
+version = "0.1.0"
+edition = "2024"

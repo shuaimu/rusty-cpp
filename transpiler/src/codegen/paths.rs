@@ -1070,7 +1070,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     /// The `write`/`read` carve-out below is the same idea applied
     /// earlier and more narrowly: both are in the C++-keyword list, and
     /// both are safe as members.
-    pub(super) fn escape_cpp_method_name(method_name: &str) -> String {
+    pub(crate) fn escape_cpp_method_name(method_name: &str) -> String {
         if matches!(method_name, "write" | "read") {
             method_name.to_string()
         } else {

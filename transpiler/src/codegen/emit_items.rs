@@ -2,6 +2,138 @@ use super::*;
 use super::predicates::AutoTrait;
 
 impl CodeGen {
+    fn cpp_abi_facade_params(
+        &self,
+        sig: &syn::Signature,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) -> Vec<String> {
+        sig.inputs
+            .iter()
+            .filter_map(|arg| {
+                let syn::FnArg::Typed(arg) = arg else {
+                    return None;
+                };
+                let syn::Pat::Ident(pattern) = arg.pat.as_ref() else {
+                    return None;
+                };
+                let rust_name = pattern.ident.to_string();
+                let name = escape_cpp_keyword(&rust_name);
+                let ty = match facade
+                    .contract
+                    .params
+                    .get(rust_name.strip_prefix("r#").unwrap_or(&rust_name))
+                {
+                    Some(crate::cpp_abi::ParamAdapter::StdStringBytes) => "std::string".to_string(),
+                    Some(crate::cpp_abi::ParamAdapter::ConstRef { alias, .. }) => {
+                        format!("const {}&", escape_cpp_keyword(alias))
+                    }
+                    None => self.resolve_param_cpp_type(&arg.ty),
+                };
+                Some(format!("{} {}", ty, name))
+            })
+            .collect()
+    }
+
+    fn cpp_abi_facade_return_type(
+        &self,
+        sig: &syn::Signature,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) -> String {
+        if facade.contract.returns.is_some() {
+            "std::string".to_string()
+        } else {
+            self.map_return_type(&sig.output)
+        }
+    }
+
+    fn emit_cpp_abi_facade_body(
+        &mut self,
+        sig: &syn::Signature,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) {
+        let mut args = Vec::new();
+        for (index, arg) in sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(arg) = arg else {
+                continue;
+            };
+            let syn::Pat::Ident(pattern) = arg.pat.as_ref() else {
+                continue;
+            };
+            let rust_name = pattern.ident.to_string();
+            let key = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
+            let name = escape_cpp_keyword(&rust_name);
+            match facade.contract.params.get(key) {
+                Some(crate::cpp_abi::ParamAdapter::StdStringBytes) => {
+                    let local = format!("rusty_cpp_abi_arg_{index}");
+                    self.writeln(&format!(
+                        "auto {local} = rusty_cpp_abi_detail::bytes_from_std_string({name});"
+                    ));
+                    args.push(format!("std::move({local})"));
+                }
+                Some(crate::cpp_abi::ParamAdapter::ConstRef { .. }) => {
+                    let local = format!("rusty_cpp_abi_arg_{index}");
+                    self.writeln(&format!(
+                        "auto {local} = rusty_cpp_abi_detail::f64_span_from_std_vector({name});"
+                    ));
+                    args.push(local);
+                }
+                None => args.push(name),
+            }
+        }
+        let call = format!("{}({})", facade.helper_name, args.join(", "));
+        if facade.contract.returns.is_some() {
+            self.writeln(&format!("auto rusty_cpp_abi_result = {call};"));
+            self.writeln("return rusty_cpp_abi_detail::std_string_from_bytes(std::move(rusty_cpp_abi_result));");
+        } else if matches!(&sig.output, syn::ReturnType::Default)
+            || matches!(&sig.output, syn::ReturnType::Type(_, ty) if matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty()))
+        {
+            self.writeln(&format!("{call};"));
+        } else {
+            self.writeln(&format!("return {call};"));
+        }
+    }
+
+    fn emit_cpp_abi_free_facade_decl(
+        &mut self,
+        f: &syn::ItemFn,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) {
+        let export_prefix = if self.should_export_item(&f.vis, &f.sig.ident.to_string()) {
+            "export "
+        } else {
+            ""
+        };
+        let return_type = self.cpp_abi_facade_return_type(&f.sig, facade);
+        let params = self.cpp_abi_facade_params(&f.sig, facade).join(", ");
+        self.writeln(&format!(
+            "{export_prefix}{return_type} {}({params});",
+            escape_cpp_keyword(&f.sig.ident.to_string())
+        ));
+    }
+
+    fn emit_cpp_abi_free_facade_definition(
+        &mut self,
+        f: &syn::ItemFn,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) {
+        self.emit_doc_comments(&f.attrs);
+        let export_prefix = if self.should_export_item(&f.vis, &f.sig.ident.to_string()) {
+            "export "
+        } else {
+            ""
+        };
+        let return_type = self.cpp_abi_facade_return_type(&f.sig, facade);
+        let params = self.cpp_abi_facade_params(&f.sig, facade).join(", ");
+        self.writeln(&format!(
+            "{export_prefix}{return_type} {}({params}) {{",
+            escape_cpp_keyword(&f.sig.ident.to_string())
+        ));
+        self.indent += 1;
+        self.emit_cpp_abi_facade_body(&f.sig, facade);
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
     /// Resolve crate-LOCAL type aliases in a forward-declaration's parameter
     /// list. A C++ type alias cannot be forward-declared, and the function
     /// forward-decl block precedes the module bodies where the aliases are
@@ -49,6 +181,14 @@ impl CodeGen {
     }
 
     pub(super) fn emit_function_forward_decl(&mut self, f: &syn::ItemFn, allow_non_unit: bool) -> bool {
+        if let Some(facade) = self
+            .cpp_abi_plan
+            .free_facade(&self.module_stack, &f.sig.ident.to_string())
+            .cloned()
+        {
+            self.emit_cpp_abi_free_facade_decl(f, &facade);
+            return true;
+        }
         // Skip Rust libtest scaffolding and #[test] entrypoints in forward declarations.
         // Those are emitted via dedicated test-wrapper paths, not as top-level functions.
         if self.is_rust_libtest_main(f) || Self::has_test_attr(&f.attrs) {
@@ -221,7 +361,11 @@ impl CodeGen {
         // fn that happens to share a re-export target's name (semver's test
         // util `version` vs the crate's re-exported `version`) would otherwise
         // emit the ill-formed `export static`.
-        let export_prefix = if !self.should_emit_internal_linkage_function(f)
+        let force_cpp_abi_static = self
+            .cpp_abi_plan
+            .is_semantic_helper(&self.module_stack, &f.sig.ident.to_string());
+        let export_prefix = if !force_cpp_abi_static
+            && !self.should_emit_internal_linkage_function(f)
             && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
                 || self.should_force_export_private_root_module_function(f))
         {
@@ -236,7 +380,7 @@ impl CodeGen {
         };
         let static_prefix = format!(
             "{}{}",
-            if self.should_emit_internal_linkage_function(f) {
+            if force_cpp_abi_static || self.should_emit_internal_linkage_function(f) {
                 "static "
             } else {
                 ""
@@ -262,6 +406,14 @@ impl CodeGen {
     }
 
     pub(super) fn emit_function(&mut self, f: &syn::ItemFn) {
+        if let Some(facade) = self
+            .cpp_abi_plan
+            .free_facade(&self.module_stack, &f.sig.ident.to_string())
+            .cloned()
+        {
+            self.emit_cpp_abi_free_facade_definition(f, &facade);
+            return;
+        }
         // const fns already fully defined in the forward phase must not
         // define again (C++ redefinition error). The early pass inserts
         // into the set AFTER its own emit_function call, so only the
@@ -637,7 +789,11 @@ impl CodeGen {
         // fn that happens to share a re-export target's name (semver's test
         // util `version` vs the crate's re-exported `version`) would otherwise
         // emit the ill-formed `export static`.
-        let export_prefix = if !self.should_emit_internal_linkage_function(f)
+        let force_cpp_abi_static = self
+            .cpp_abi_plan
+            .is_semantic_helper(&self.module_stack, &f.sig.ident.to_string());
+        let export_prefix = if !force_cpp_abi_static
+            && !self.should_emit_internal_linkage_function(f)
             && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
                 || self.should_force_export_private_root_module_function(f))
         {
@@ -652,7 +808,7 @@ impl CodeGen {
         };
         let static_prefix = format!(
             "{}{}",
-            if self.should_emit_internal_linkage_function(f) {
+            if force_cpp_abi_static || self.should_emit_internal_linkage_function(f) {
                 "static "
             } else {
                 ""
@@ -3726,8 +3882,16 @@ impl CodeGen {
             return false;
         }
 
+        let cpp_abi_alias = self
+            .cpp_abi_plan
+            .alias(&self.module_stack, &alias_rust_name)
+            .is_some();
         self.push_type_param_scope(&t.generics);
-        let mut target = self.map_type(&t.ty);
+        let mut target = if cpp_abi_alias {
+            "std::vector<double>".to_string()
+        } else {
+            self.map_type(&t.ty)
+        };
         self.pop_type_param_scope();
         target = Self::rewrite_private_keyword_namespace_in_type_path(&target);
         if self.block_depth > 0 {
@@ -7084,6 +7248,58 @@ impl CodeGen {
         self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty))
     }
 
+    fn try_emit_cpp_abi_method_facade(&mut self, method: &syn::ImplItemFn) -> bool {
+        let Some(owner) = self.current_struct.clone() else {
+            return false;
+        };
+        let Some(facade) = self
+            .cpp_abi_plan
+            .method_facade(&self.module_stack, &owner, &method.sig.ident.to_string())
+            .cloned()
+        else {
+            return false;
+        };
+        let name = Self::escape_cpp_method_name(&method.sig.ident.to_string());
+        let params = self.cpp_abi_facade_params(&method.sig, &facade);
+        if !self.method_emission_skip_conflict_registration {
+            let conflict_key = self.emitted_method_conflict_key(&name, "", "", true, &params);
+            if !self.mark_emitted_method_conflict_key(conflict_key) {
+                return true;
+            }
+        }
+        let return_type = self.cpp_abi_facade_return_type(&method.sig, &facade);
+        if self.method_emission_declaration_only {
+            self.emit_doc_comments(&method.attrs);
+            self.writeln(&format!(
+                "static {return_type} {name}({});",
+                params.join(", ")
+            ));
+            return true;
+        }
+        let Some(out_of_line_owner) = self.method_emission_out_of_line_owner.clone() else {
+            // Lowering validates the narrow owner shapes that the struct
+            // emitter schedules for an out-of-line definition.  Never fall
+            // through to ordinary method emission if that invariant changes:
+            // the lowered semantic body is intentionally `unreachable!()`.
+            if self.cpp_abi_codegen_error.is_none() {
+                self.cpp_abi_codegen_error = Some(format!(
+                    "cpp_abi internal scheduling error: static facade `{}::{}` was not emitted as an out-of-line owner definition",
+                    owner, method.sig.ident
+                ));
+            }
+            return true;
+        };
+        self.writeln(&format!(
+            "{return_type} {out_of_line_owner}::{name}({}) {{",
+            params.join(", ")
+        ));
+        self.indent += 1;
+        self.emit_cpp_abi_facade_body(&method.sig, &facade);
+        self.indent -= 1;
+        self.writeln("}");
+        true
+    }
+
     pub(super) fn emit_method(&mut self, method: &syn::ImplItemFn) {
         // #88: expose the declaring impl's instantiated Self type to body
         // emission (types `self.FIELD` when the field's declared type is a
@@ -7103,6 +7319,9 @@ impl CodeGen {
     }
 
     fn emit_method_inner(&mut self, method: &syn::ImplItemFn) {
+        if self.try_emit_cpp_abi_method_facade(method) {
+            return;
+        }
         let profile_method = std::env::var_os("RUSTY_CPP_PROFILE_METHODS").is_some();
         let method_profile_start = if profile_method {
             let owner = self.current_struct.as_deref().unwrap_or("<free-impl>");

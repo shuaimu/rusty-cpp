@@ -1,0 +1,4 @@
+[package]
+name = "cppabi_edition_workspace_repro"
+version = "0.1.0"
+edition.workspace = true

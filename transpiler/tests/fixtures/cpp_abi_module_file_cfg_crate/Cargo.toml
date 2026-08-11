@@ -1,0 +1,7 @@
+[package]
+name = "cppabi_module_file_cfg_repro"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
