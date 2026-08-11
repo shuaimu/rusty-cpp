@@ -1502,6 +1502,30 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     bound_target = Some(root_target);
                     from_root_scope = true;
                 }
+                // Impl methods MERGED into another module's type (value/de.rs
+                // bodies emitted inside serde_json's `namespace map`) emit
+                // under the TARGET module's alias scope, so the origin
+                // module's `use serde::de::Unexpected` is invisible here and
+                // `Unexpected::Map` came out bare. When no scope on the stack
+                // binds the name but every scope that does agrees on ONE
+                // target, that unique binding is safe to use. TYPE paths only
+                // (uppercase first, 2+ segments) — module-name firsts would
+                // re-spell established module::fn mappings.
+                if bound_target.is_none()
+                    && !block_root_scope_binding_for_local_type
+                    && !block_root_scope_binding_for_local_fn
+                    && !block_root_scope_binding_for_rooted_module_path
+                    && segments.len() > 1
+                    && first
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase())
+                    && let Some(unique_target) =
+                        self.resolve_unique_scope_import_binding_path_any_scope(&first)
+                {
+                    bound_target = Some(unique_target);
+                    from_root_scope = true;
+                }
                 let Some(bound_target) = bound_target else {
                     break;
                 };
@@ -3191,6 +3215,20 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
         if self.is_option_some_path(path) {
             return "rusty::Some".to_string();
+        }
+        if std::env::var_os("RUSTY_DBG_USE").is_some()
+            && path.segments.len() >= 2
+            && path.segments[path.segments.len() - 2].ident == "Unexpected"
+        {
+            let v = path.segments[path.segments.len() - 1].ident.to_string();
+            eprintln!(
+                "[DBG_UNEXP] mods=[{}] variant={} unit_set={} wrapper_set={}",
+                self.module_stack.join("::"),
+                v,
+                self.data_enum_unit_variants
+                    .contains(&format!("Unexpected_{}", v)),
+                self.data_enum_wrapper_types.contains("Unexpected")
+            );
         }
         // Keep unit data-enum variant lowering before import-bound rewrites so
         // qualified paths like `de::Unexpected::UnitVariant` become values.

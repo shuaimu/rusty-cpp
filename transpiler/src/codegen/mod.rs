@@ -4189,6 +4189,36 @@ impl CodeGen {
                 output = Self::boundary_replace_path(&output, from, to);
             }
         }
+        // BARE static-access references to a dependency type (`Unexpected::Map`)
+        // survive only where a using-declaration covers them; impl bodies MERGED
+        // into another module's type (value/de.rs bodies inside serde_json's
+        // `namespace map`) emit under the TARGET module's scope and came out
+        // bare. Rewrite `X::` absolutely when (a) nothing local claims X (type,
+        // module, or a `using X =` alias anywhere in the output — an in-class
+        // alias like `using Error = ...` must keep its bare meaning), and
+        // (b) the reference is a SCOPE PREFIX (follower `::`) — value/alias/
+        // param positions are untouched.
+        for m in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                continue;
+            }
+            for dt in &m.declared_types {
+                if dt.module_path.is_empty()
+                    || !dt.name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    || self.local_declared_types.contains(&dt.name)
+                    || self.declared_module_names.contains(&dt.name)
+                {
+                    continue;
+                }
+                if !output.contains(&format!("{}::", dt.name))
+                    || output.contains(&format!("using {} =", dt.name))
+                {
+                    continue;
+                }
+                let to = format!("::{}::{}::{}", m.module, dt.module_path, dt.name);
+                output = Self::boundary_replace_scope_prefix(&output, &dt.name, &to);
+            }
+        }
         if !purview_repls.is_empty()
             && let Some(export_idx) = output.find("\nexport module ")
         {
@@ -4249,6 +4279,30 @@ impl CodeGen {
             } else {
                 from
             });
+            i = after;
+        }
+        out.push_str(&text[i..]);
+        out
+    }
+
+    /// Replace bare `from` with `to` ONLY where it is used as a scope prefix:
+    /// preceded by a non-ident non-colon boundary AND immediately followed by
+    /// `::`. `using X = ...`, `typename X`, and value positions are untouched,
+    /// as are already-qualified `mod::X::` spellings (preceding `:`).
+    fn boundary_replace_scope_prefix(text: &str, from: &str, to: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(from) {
+            let pos = i + rel;
+            let after = pos + from.len();
+            let before_ok = pos == 0 || {
+                let c = bytes[pos - 1];
+                !(c.is_ascii_alphanumeric() || c == b'_' || c == b':')
+            };
+            let follower_ok = text[after..].starts_with("::");
+            out.push_str(&text[i..pos]);
+            out.push_str(if before_ok && follower_ok { to } else { from });
             i = after;
         }
         out.push_str(&text[i..]);

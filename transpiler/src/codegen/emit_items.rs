@@ -6144,6 +6144,16 @@ impl CodeGen {
     }
 
     pub(super) fn emit_use(&mut self, u: &syn::ItemUse) {
+        if std::env::var_os("RUSTY_DBG_USE").is_some() {
+            let toks = quote::ToTokens::to_token_stream(&u.tree).to_string();
+            if toks.contains("Unexpected") {
+                eprintln!(
+                    "[DBG_USE] mods=[{}] use {}",
+                    self.module_stack.join("::"),
+                    &toks[..toks.len().min(140)]
+                );
+            }
+        }
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
 
         // Detect external crate imports
