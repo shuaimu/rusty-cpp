@@ -1450,6 +1450,14 @@ impl CodeGen {
 
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name_str = s.ident.to_string();
+        if std::env::var_os("RUSTY_DBG_USE").is_some() && name_str == "Adapter" {
+            eprintln!(
+                "[DBG_HOIST] Adapter: class_param_stack={:?} type_param_scopes={:?} current_struct={:?}",
+                self.emitting_class_template_param_stack,
+                self.type_param_scopes,
+                self.current_struct,
+            );
+        }
         // Completeness tracking for method-body deferral: a type is COMPLETE once
         // emit_struct reaches it (structs are emitted in definition order). A
         // sibling whose emit_struct has NOT yet run is still incomplete here, so a
@@ -1539,10 +1547,33 @@ impl CodeGen {
             let close = rest.find(')')?;
             rest.get(open + 1..close)?.trim().parse::<u64>().ok()
         });
+        // The template header's param filter consults current_struct (the
+        // hoisted-local special case in
+        // template_param_is_already_visible_for_emission): set it to THIS
+        // struct for the header emission, else a hoisted Adapter<'ser, W, F>
+        // is judged by the ENCLOSING struct's identity and its params get
+        // filtered as in-scope (the hoist site's fn scope carries the
+        // absorbed impl generics).
+        let prev_struct_for_header = self.current_struct.clone();
+        self.current_struct = Some(name_str.clone());
         self.emit_template_declaration_with_type_defaults(
             &s.generics,
             export_prefix,
             &format!("struct {}{} {{", name, base_clause),
+        );
+        self.current_struct = prev_struct_for_header;
+        // This struct's emission is now ACTIVE: its params cover nested
+        // emissions (hoisted local types, its own methods) until the close.
+        self.emitting_class_template_param_stack.push(
+            s.generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                    syn::GenericParam::Lifetime(_) => None,
+                })
+                .collect(),
         );
         let struct_body_scan_start = self.output.len();
         self.push_type_param_scope(&s.generics);
@@ -2432,7 +2463,15 @@ impl CodeGen {
                     self.output = String::new();
                     self.indent = saved_indent.saturating_sub(1);
                     self.push_deferred_method_definition_scope();
+                    // The deferred definition flushes at NAMESPACE scope — no
+                    // enclosing class covers anything there, so a fn-local
+                    // type hoisted during this emission must carry its full
+                    // template header (Adapter<'ser, W, F> in serde_json's
+                    // collect_str lost W/F to the enclosing class's params).
+                    let saved_class_params =
+                        std::mem::take(&mut self.emitting_class_template_param_stack);
                     self.emit_method(method);
+                    self.emitting_class_template_param_stack = saved_class_params;
                     let mut deferred_definition = std::mem::take(&mut self.output);
                     let nested_deferred_defs = self
                         .deferred_method_definitions_stack
@@ -2988,6 +3027,7 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("};");
         }
+        self.emitting_class_template_param_stack.pop();
         self.pop_type_param_scope();
     }
 
@@ -3711,7 +3751,13 @@ impl CodeGen {
                             self.output = String::new();
                             self.indent = saved_indent.saturating_sub(1);
                             self.push_deferred_method_definition_scope();
+                            // Namespace-scope flush: suspend the class-params
+                            // stack (see the struct-path defer site above).
+                            let saved_class_params = std::mem::take(
+                                &mut self.emitting_class_template_param_stack,
+                            );
                             self.emit_method(method);
+                            self.emitting_class_template_param_stack = saved_class_params;
                             let mut deferred_definition = std::mem::take(&mut self.output);
                             let nested_deferred_defs = self
                                 .deferred_method_definitions_stack

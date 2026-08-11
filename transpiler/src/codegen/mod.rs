@@ -1135,6 +1135,13 @@ pub struct CodeGen {
     /// Tracks unit variant names of data enums (e.g., "ErrorKind_Empty").
     /// Used to distinguish unit variant path values from constructor references.
     pub(crate) data_enum_unit_variants: HashSet<String>,
+    /// Template-param NAMES of every struct whose emit_struct is currently
+    /// ACTIVE (pushed after its own header emits, popped at its close). A
+    /// hoisted fn-local type's param is "already visible" only when an
+    /// actively-emitting enclosing class covers it (alloc's nested Dropper
+    /// under VecDeque<T, A>) — a name-resolution scope pushed by the hoist
+    /// site does NOT cover a namespace-scope emission (serde_json's Adapter).
+    pub(crate) emitting_class_template_param_stack: Vec<HashSet<String>>,
     /// Known variant identifiers for each data enum (Rust names, unescaped).
     /// Used to avoid rewriting associated-method calls as enum variant constructors.
     pub(crate) data_enum_variants_by_enum: HashMap<String, HashSet<String>>,
@@ -2175,6 +2182,7 @@ impl CodeGen {
             slice_tail_view_types: HashMap::new(),
             data_enum_wrapper_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
+            emitting_class_template_param_stack: Vec::new(),
             data_enum_variants_by_enum: HashMap::new(),
             data_enum_variant_indices_by_enum: HashMap::new(),
             data_enum_variant_names: HashSet::new(),
@@ -46506,10 +46514,24 @@ impl CodeGen {
 
     fn template_param_is_already_visible_for_emission(&self, name: &str) -> bool {
         if self.current_struct_is_hoisted_local_type() {
+            // A hoisted fn-local type emits at NAMESPACE scope — no enclosing
+            // template exists there, and Rust forbids local types referencing
+            // outer generics (E0401), so when emitting the STRUCT'S OWN
+            // header every param asked about is the type's own and must be
+            // emitted. The last-scope check filtered params whose names
+            // collide with the hoist site's pushed fn generics — a trait-impl
+            // method lowered to a free fn absorbs the impl's params
+            // (serde_json collect_str: fn scope {W, F, T}), so
+            // Adapter<'ser, W, F> lost its whole header. The right notion of
+            // "visible" here is: an actively-EMITTING enclosing class covers
+            // the name (alloc's Dropper<T> nested inside VecDeque<T, A>'s
+            // body must NOT redeclare T; and once the hoisted struct's own
+            // header has emitted, its own params are on this stack so its
+            // METHODS don't force-shadow them either).
             return self
-                .type_param_scopes
-                .last()
-                .is_some_and(|scope| scope.contains(name));
+                .emitting_class_template_param_stack
+                .iter()
+                .any(|scope| scope.contains(name));
         }
         self.is_type_param_in_scope(name)
     }
