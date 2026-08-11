@@ -36175,6 +36175,67 @@ impl CodeGen {
                 arg_call_list
             );
         }
+        // A trait-namespace callee's overloads can COLLAPSE into width-
+        // widened signatures that reject the other int widths (itoa's
+        // Integer impls fold into two Sealed_::write_ overloads whose
+        // MaybeUninit buffer capacity fits exactly one width). The crate's
+        // own `rusty_ext` width-agnostic helper handles those calls — probe
+        // it before the hard else, but ONLY when the crate is known to emit
+        // that helper: naming a nonexistent namespace inside `requires` is
+        // a parse error, not a soft failure.
+        if std::env::var_os("RUSTY_DBG_USE").is_some() && callee_base.contains("write_") {
+            eprintln!(
+                "[DBG_WRITE] callee={} ext_trait_keys={:?}",
+                callee,
+                self.extension_trait_impl_methods
+                    .keys()
+                    .collect::<Vec<_>>()
+            );
+        }
+        let rusty_ext_fallback: Option<String> = callee_base
+            .rsplit_once("::")
+            .and_then(|(owner_path, _)| {
+                if !owner_path.rsplit("::").next().unwrap_or("").ends_with('_') {
+                    return None;
+                }
+                // Gate on the PRE-PASS collection (extension_trait_impl_
+                // methods), not the emitted registry: dispatchers can emit
+                // BEFORE the crate's rusty_ext block fills the registry
+                // (order-dependent misses on itoa's Buffer::format). The
+                // helper's namespace comes from the TRAIT KEY's Rust module
+                // (itoa's Sealed lives in `mod private` → the helper is
+                // `private_::rusty_ext::write_`), not from the callee's
+                // root-relative `Sealed_::` spelling.
+                let trait_ns = owner_path.rsplit("::").next().unwrap_or("");
+                let trait_rust_name = trait_ns.strip_suffix('_').unwrap_or(trait_ns);
+                self.extension_trait_impl_methods
+                    .iter()
+                    .find_map(|(trait_key, methods)| {
+                        let (key_module, key_trait) = trait_key
+                            .rsplit_once("::")
+                            .unwrap_or(("", trait_key.as_str()));
+                        if key_trait != trait_rust_name
+                            || !methods.iter().any(|m| {
+                                escape_cpp_keyword(&m.method.sig.ident.to_string())
+                                    == callee_leaf
+                            })
+                        {
+                            return None;
+                        }
+                        let module_cpp = key_module
+                            .split("::")
+                            .filter(|s| !s.is_empty())
+                            .map(escape_cpp_keyword)
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        let sibling = if module_cpp.is_empty() {
+                            format!("rusty_ext::{}", callee_leaf)
+                        } else {
+                            format!("{}::rusty_ext::{}", module_cpp, callee_leaf)
+                        };
+                        Some(format!("{}({})", sibling, deref_args.join(", ")))
+                    })
+            });
         // MEMBER tier first: rustc resolves INHERENT methods before trait
         // methods at each deref level. The trait free fn's requires-check
         // only probes the SIGNATURE (an unconstrained template is always
@@ -36182,6 +36243,20 @@ impl CodeGen {
         // hijacked receivers with a same-named inherent method and
         // hard-errored in the body — indexmap's `m.sorted_by(4-arg move
         // closure)` (inherent) fell into Itertools_::sorted_by (2-arg cmp).
+        if let Some(rx_call) = rusty_ext_fallback {
+            return format!(
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                member_call,
+                member_call,
+                direct_call,
+                direct_call,
+                deref_call,
+                deref_call,
+                rx_call,
+                arg_call_list
+            );
+        }
         format!(
             "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
             arg_param_list,

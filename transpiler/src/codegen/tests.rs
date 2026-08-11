@@ -27381,7 +27381,13 @@ fn test_option_replace_insert_array_rotate() {
     let g = transpile_str(
         "pub fn f() -> i32 { let mut o: Option<i32> = None; let b = o.get_or_insert_default(); *b += 9; o.unwrap_or(0) }",
     );
-    assert!(g.contains("auto& b = o.get_or_insert_default()"), "ref binding: {g}");
+    // auto&& also binds the returned lvalue as a true reference (mutation
+    // reaches the Option) — the unverifiable-reference bindings emit && now.
+    assert!(
+        g.contains("auto& b = o.get_or_insert_default()")
+            || g.contains("auto&& b = o.get_or_insert_default()"),
+        "ref binding: {g}"
+    );
 }
 
 #[test]

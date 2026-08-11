@@ -4212,10 +4212,21 @@ impl CodeGen {
                     .is_some_and(|init| self.init_expr_yields_maybe_guard(&init.expr));
                 let ref_suffix = if init_is_uncertain_guard_call && type_str == "auto" {
                     "&&"
-                } else if emits_ref_binding
-                    || (init_returns_reference_binding && !init_reference_lowers_to_value)
-                {
+                } else if emits_ref_binding {
                     "&"
+                } else if init_returns_reference_binding && !init_reference_lowers_to_value {
+                    // The model says the init returns a reference, but when
+                    // the full type could NOT be inferred (dispatcher on a
+                    // generic receiver: itoa's `i.write(buf)` -> &str), the
+                    // C++ lowering may be a VALUE (rusty_ext::write_ returns
+                    // string_view) — `auto&` can't bind that prvalue. auto&&
+                    // aliases the true reference case and lifetime-extends
+                    // the value case, right either way.
+                    if inferred_binding_ty.is_none() && type_str == "auto" {
+                        "&&"
+                    } else {
+                        "&"
+                    }
                 } else if init_is_try_unwrap
                     && type_str == "auto"
                     && !(is_mut && self.reassigned_vars.contains(&name_str))
