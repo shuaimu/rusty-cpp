@@ -35307,15 +35307,48 @@ impl CodeGen {
             "std::forward<decltype(__recv)>(__recv)->{}({})",
             method_call, else_arg
         );
+        // write_all is an io::Write DEFAULT method — a type implementing only
+        // `write` (serde_json's WriterFormatter) has no such member on either
+        // receiver shape. Final tier: the runtime free helper
+        // `rusty::io::write_all` (member-probe + write_-loop fallback,
+        // io.hpp), which takes both Writer& and Writer*.
+        let runtime_fallback = |arg: &str| {
+            if method_name == "write_all" {
+                format!(
+                    "rusty::io::write_all(std::forward<decltype(__recv)>(__recv), {})",
+                    arg
+                )
+            } else {
+                String::new()
+            }
+        };
+        let (fallback_then, fallback_else) = (runtime_fallback(&then_arg), runtime_fallback(&else_arg));
+        if fallback_then.is_empty() {
+            return Some(format!(
+                "([&](auto&& __recv) -> decltype(auto) {{ if ({}) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }} else {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }} }}({}))",
+                cond,
+                object_then,
+                object_then,
+                pointer_then,
+                object_else,
+                object_else,
+                pointer_else,
+                receiver
+            ));
+        }
         Some(format!(
-            "([&](auto&& __recv) -> decltype(auto) {{ if ({}) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }} else {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }} }}({}))",
+            "([&](auto&& __recv) -> decltype(auto) {{ if ({}) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }} else {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }} }}({}))",
             cond,
             object_then,
             object_then,
             pointer_then,
+            pointer_then,
+            fallback_then,
             object_else,
             object_else,
             pointer_else,
+            pointer_else,
+            fallback_else,
             receiver
         ))
     }
