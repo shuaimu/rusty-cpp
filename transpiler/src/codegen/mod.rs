@@ -56950,6 +56950,7 @@ fn classify_use_import(path: &str) -> UseImportAction {
             | "std::fmt::Write"
             | "core::fmt::Write"
             | "self::fmt::Write"
+            | "serde_core::ser::fmt::Write"
             | "super::fmt::Write"
             | "crate::fmt::Write"
             | "rusty::fmt::Write"

@@ -2222,6 +2222,25 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     return Self::strip_crate_root_cpp_path(&emitted);
                 }
                 "self" if segments.len() > 1 => {
+                    // `self::X::Y` where X is a USE-ALIAS of the current
+                    // scope (serde_json ser's `use core::fmt::{self, ..}`
+                    // makes `self::fmt::Write` mean rusty::fmt::Write):
+                    // strip `self::` and resolve through the normal
+                    // machinery. ONLY for known aliases — genuine
+                    // self-module items (once_cell's `self::addr::<T>`
+                    // strict-provenance helpers) must keep the module-stack
+                    // prefix or plain-path mapping mangles them.
+                    let head_is_alias = self.import_alias_names.contains(&segments[1])
+                        || self
+                            .resolve_scope_import_binding_path(&segments[1])
+                            .is_some();
+                    if head_is_alias {
+                        let mut rebased = path.clone();
+                        rebased.leading_colon = None;
+                        rebased.segments =
+                            path.segments.iter().skip(1).cloned().collect();
+                        return self.emit_path_to_string(&rebased);
+                    }
                     let mut resolved = if self.module_stack.is_empty() {
                         Vec::new()
                     } else {
