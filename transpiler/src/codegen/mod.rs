@@ -1274,6 +1274,11 @@ pub struct CodeGen {
     /// copyable types keep the const modeling for as_const'd dispatch
     /// (btree B3). Populated beside `copy_derived_types`.
     pub(crate) move_only_types: HashSet<String>,
+    /// Nested fns referenced by fn-local struct/impl items, collected at the
+    /// method hoist point and EMITTED by the emit_stmt struct fallthrough
+    /// right before the struct itself (the only position that precedes the
+    /// in-class member bodies in the deferred flush).
+    pub(crate) pending_local_hoist_fns: Vec<(String, syn::ItemFn)>,
     /// Types with a Clone derive or `impl Clone` — `rusty::clone` is legal
     /// on them. The tail-self clone lowering requires BOTH move-only and
     /// clone-capable; a move-only type without Clone (serde_json's Error)
@@ -2237,6 +2242,7 @@ impl CodeGen {
             struct_field_types: std::rc::Rc::new(HashMap::new()),
             copy_derived_types: HashSet::new(),
             move_only_types: HashSet::new(),
+            pending_local_hoist_fns: Vec::new(),
             clone_capable_types: HashSet::new(),
             struct_field_order: std::rc::Rc::new(HashMap::new()),
             struct_field_cpp_names: std::rc::Rc::new(HashMap::new()),
@@ -4867,6 +4873,7 @@ impl CodeGen {
         std::rc::Rc::make_mut(&mut self.struct_field_types).clear();
         self.copy_derived_types.clear();
         self.move_only_types.clear();
+        self.pending_local_hoist_fns.clear();
         self.clone_capable_types.clear();
         std::rc::Rc::make_mut(&mut self.struct_field_order).clear();
         std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).clear();

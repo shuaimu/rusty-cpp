@@ -1051,11 +1051,24 @@ impl CodeGen {
         // (non-template classes look the name up immediately). The block's
         // lambda lowering still runs and shadows locally.
         for nested in &Self::collect_local_fns_referenced_by_local_items(fn_block) {
-            let nested_name = nested.sig.ident.to_string();
-            if self.declared_item_names.contains(&nested_name) {
+            // Dedupe PER NAMESPACE: two enclosing fns in different modules
+            // can nest same-named helpers, and each namespace needs its own
+            // emission (a global key skipped serde_json's second io_error).
+            let nested_key = format!(
+                "{}::{}",
+                self.module_stack.join("::"),
+                nested.sig.ident
+            );
+            if self.declared_item_names.contains(&nested_key) {
+                if std::env::var("RUSTY_DBG_HOIST").is_ok() {
+                    eprintln!("DBG_HOIST skip {} (method-side={})", nested_key, true);
+                }
                 continue;
             }
-            self.declared_item_names.insert(nested_name);
+            if std::env::var("RUSTY_DBG_HOIST").is_ok() {
+                eprintln!("DBG_HOIST emit {}", nested_key);
+            }
+            self.declared_item_names.insert(nested_key);
             self.emit_function(nested);
         }
         let filtered_function_block = if hoisted_local_type_names.is_empty() {
@@ -1461,6 +1474,26 @@ impl CodeGen {
     }
 
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
+        // Drain pending nested-fn hoists for THIS namespace before the
+        // struct's text: its in-class member bodies look the names up
+        // immediately (WriterFormatter::write_ → io_error). emit_struct is
+        // the one chokepoint every emission route passes through.
+        if !self.pending_local_hoist_fns.is_empty() {
+            let ns = self.module_stack.join("::");
+            let pending = std::mem::take(&mut self.pending_local_hoist_fns);
+            for (fn_ns, nested) in pending {
+                if fn_ns != ns {
+                    self.pending_local_hoist_fns.push((fn_ns, nested));
+                    continue;
+                }
+                let nested_key = format!("{}::{}", ns, nested.sig.ident);
+                if self.declared_item_names.contains(&nested_key) {
+                    continue;
+                }
+                self.declared_item_names.insert(nested_key);
+                self.emit_function(&nested);
+            }
+        }
         let name_str = s.ident.to_string();
         if std::env::var_os("RUSTY_DBG_USE").is_some() && name_str == "Adapter" {
             eprintln!(
@@ -7528,18 +7561,26 @@ impl CodeGen {
             }
             self.pop_type_param_scope();
         }
-        // Method-side twin of the emit_function nested-fn hoist: nested fns
-        // referenced by sibling local struct/impl/enum items must exist at
-        // namespace scope BEFORE those items' in-class method bodies
-        // (Display-for-Value's WriterFormatter nests `fn io_error`).
-        if !declaration_only {
-            for nested in &Self::collect_local_fns_referenced_by_local_items(&method.block) {
-                let nested_name = nested.sig.ident.to_string();
-                if self.declared_item_names.contains(&nested_name) {
-                    continue;
+        // Method-side nested-fn hoist: nested fns referenced by sibling local
+        // struct/impl/enum items must exist at namespace scope BEFORE those
+        // items' in-class member bodies (Display-for-Value's WriterFormatter
+        // nests `fn io_error`). Direct emission here lands either inside the
+        // class declaration (declaration pass) or after the struct
+        // (definition pass) — so STASH them; the emit_stmt struct
+        // fallthrough drains the stash right before the struct.
+        {
+            let ns = self.module_stack.join("::");
+            for nested in Self::collect_local_fns_referenced_by_local_items(&method.block) {
+                // APPEND (don't assign): the deferred body flush that drains
+                // this runs after OTHER methods' emit_method_inner calls,
+                // which would wipe an assigned stash.
+                if !self
+                    .pending_local_hoist_fns
+                    .iter()
+                    .any(|(n, f)| *n == ns && f.sig.ident == nested.sig.ident)
+                {
+                    self.pending_local_hoist_fns.push((ns.clone(), nested));
                 }
-                self.declared_item_names.insert(nested_name);
-                self.emit_function(nested);
             }
         }
         let filtered_method_block = if declaration_only || hoisted_local_type_names.is_empty() {
