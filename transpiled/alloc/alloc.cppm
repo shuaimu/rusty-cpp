@@ -20791,7 +20791,11 @@ namespace vec {
             using namespace vec::spec_from_iter_nested;
             // @unsafe
             {
-                this->append_elements(const_cast<std::add_pointer_t<std::add_const_t<std::span<const T>>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<std::span<const T>>>>>(rusty::addr_of_temp(std::move(iterator.as_slice())))));
+                // Rust: `self.append_elements(iterator.as_slice() as _)` — the
+                // raw-slice-pointer cast is a no-op here; append_elements
+                // takes the span by value. (This IntoIter specialization was
+                // unreachable before the rusty::iter rvalue into_iter tier.)
+                this->append_elements(iterator.as_slice());
             }
             iterator.forget_remaining_elements();
         }

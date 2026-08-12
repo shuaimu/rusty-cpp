@@ -6932,10 +6932,10 @@ struct BalancingContext {
         // @unsafe
         {
             left_node.len_mut() = static_cast<uint16_t>(new_left_len);
-            const auto parent_key = slice_remove(rusty::as_mut_slice(parent_node.key_area_mut(rusty::range_to(old_parent_len))), std::move(parent_idx));
+            auto parent_key = slice_remove(rusty::as_mut_slice(parent_node.key_area_mut(rusty::range_to(old_parent_len))), std::move(parent_idx));
             ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(left_node.key_area_mut(std::move(old_left_len)), std::move(parent_key));
             move_to_slice(rusty::as_mut_slice(right_node.key_area_mut(rusty::range_to(right_len))), rusty::as_mut_slice(left_node.key_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len))));
-            const auto parent_val = slice_remove(rusty::as_mut_slice(parent_node.val_area_mut(rusty::range_to(old_parent_len))), std::move(parent_idx));
+            auto parent_val = slice_remove(rusty::as_mut_slice(parent_node.val_area_mut(rusty::range_to(old_parent_len))), std::move(parent_idx));
             ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(left_node.val_area_mut(std::move(old_left_len)), std::move(parent_val));
             move_to_slice(rusty::as_mut_slice(right_node.val_area_mut(rusty::range_to(right_len))), rusty::as_mut_slice(left_node.val_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, new_left_len))));
             slice_remove(rusty::as_mut_slice([&]() { auto _slice_ref_tmp = parent_node.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_parent_len) + 1)); auto _span = std::span(_slice_ref_tmp); return _span; }()), rusty::detail::deref_if_pointer_like(parent_idx) + static_cast<size_t>(1));

@@ -5199,7 +5199,10 @@ written += 1; }();
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }
-    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::rusty::port::vec::Vec<T>>())) iterator) {
+    // lvalue declval: the borrowing slice iter. An rvalue here now resolves
+    // to vec::IntoIter (rusty::iter into_iter tier) and collides with the
+    // stubbed IntoIter overload below (VecDeque::IntoIter aliases vec's).
+    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::rusty::port::vec::Vec<T>&>())) iterator) {
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }

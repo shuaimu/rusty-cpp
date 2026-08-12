@@ -6696,7 +6696,7 @@ return std::move(out_tree); }(); } if (rusty::detail::variant_index(rusty::detai
         auto [k, v] = rusty::detail::deref_if_pointer_like(kv.into_kv());
         in_edge = kv.right_edge();
         auto k_shadow1 = rusty::clone(((rusty::detail::deref_if_pointer_like(k))));
-        const auto v_shadow1 = rusty::clone(((rusty::detail::deref_if_pointer_like(v))));
+        auto v_shadow1 = rusty::clone(((rusty::detail::deref_if_pointer_like(v))));
         auto subtree = __self(__self, in_edge.descend(), rusty::clone(alloc));
         auto [subroot, sublength] = rusty::detail::deref_if_pointer_like([&]() { auto subtree_shadow1 = rusty::mem::manually_drop_new(std::move(subtree));
 auto root = rusty::ptr::read(&rusty::detail::deref_if_pointer((*subtree_shadow1)).root);

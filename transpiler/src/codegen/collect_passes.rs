@@ -10633,6 +10633,14 @@ impl CodeGen {
                         (method_name.as_str(), idx),
                         ("set", 0)
                             | ("push", 0)
+                            // btree's internal node push(k, v, edge)
+                            // consumes ALL value slots, not just arg 0.
+                            | ("push", 1)
+                            // MaybeUninit::write takes T by value; a const
+                            // binding decays its move-wrap to a deleted
+                            // copy for move-only payloads (btree balancing
+                            // `slice_remove` → `write` with String keys).
+                            | ("write", 0)
                             | ("try_push", 0)
                             | ("insert", 1)
                             | ("try_insert", 1)
