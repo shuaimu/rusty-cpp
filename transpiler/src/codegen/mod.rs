@@ -5783,9 +5783,23 @@ impl CodeGen {
                 .join(", ");
             let template_use = params.join(", ");
             self.writeln(&format!("template<{}>", template_decl));
+            // The specialization may be emitted OUTSIDE the inner type's
+            // module — qualify through its module path (de::IoRead, not the
+            // bare IoRead the emission scope can't see).
+            let qualified_inner = match self.local_type_module_path.get(&inner) {
+                Some(module) if !module.is_empty() => {
+                    let module_cpp = module
+                        .split("::")
+                        .map(escape_cpp_keyword)
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    format!("{}::{}", module_cpp, inner)
+                }
+                _ => inner.clone(),
+            };
             self.writeln(&format!(
                 "struct __TemplateArgs<{}<{}>> {{",
-                inner, template_use
+                qualified_inner, template_use
             ));
             for (i, p) in params.iter().enumerate() {
                 self.writeln(&format!("    using arg_{} = {};", i, p));
