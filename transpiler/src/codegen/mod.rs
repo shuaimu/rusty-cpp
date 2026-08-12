@@ -702,6 +702,11 @@ pub struct CodeGen {
     /// `<Trait>RuntimeHelper` actually carries). Populated in `emit_file`;
     /// feeds the manifest's `trait_default_methods`.
     pub(crate) ufcs_trait_default_methods: std::collections::BTreeMap<String, Vec<String>>,
+    /// Trait name → ALL associated-type names it declares. Populated in
+    /// `emit_file`; feeds the manifest's `trait_assoc_type_names` so a
+    /// consumer's method-param projections through this trait's bound keep
+    /// their spelled returns.
+    pub(crate) ufcs_trait_assoc_type_names: std::collections::BTreeMap<String, Vec<String>>,
     /// UFCS Phase 7: method name → crate-declared traits whose CONCRETE
     /// (non-generic) impls emit a `<Tr>_::m` free function. When exactly
     /// one trait owns a name, the method-call shim qualifies its free call to
@@ -2097,6 +2102,7 @@ impl CodeGen {
             emitted_runtime_helper_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
             ufcs_trait_default_methods: std::collections::BTreeMap::new(),
+            ufcs_trait_assoc_type_names: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_default_method_bare_prefix_len: std::collections::HashMap::new(),
@@ -3701,6 +3707,12 @@ impl CodeGen {
             .filter(|(name, _)| self.ufcs_declared_trait_names.contains(*name))
             .map(|(name, methods)| (name.clone(), methods.clone()))
             .collect();
+        let trait_assoc_type_names: std::collections::BTreeMap<String, Vec<String>> = self
+            .ufcs_trait_assoc_type_names
+            .iter()
+            .filter(|(name, _)| self.ufcs_declared_trait_names.contains(*name))
+            .map(|(name, assocs)| (name.clone(), assocs.clone()))
+            .collect();
         let preserved_collapse_methods: Vec<String> =
             preserved_collapse_trait_method_list();
         let trait_method_return_assoc: std::collections::BTreeMap<String, String> = self
@@ -3797,6 +3809,7 @@ impl CodeGen {
                 .collect(),
             declared_trait_methods,
             trait_default_methods,
+            trait_assoc_type_names,
             trait_assoc_type_bounds,
             preserved_collapse_methods,
             trait_method_return_assoc,
@@ -4391,6 +4404,15 @@ impl CodeGen {
                 self.ufcs_trait_default_methods
                     .entry(t.clone())
                     .or_insert_with(|| methods.clone());
+            }
+            // Dep trait assoc NAMES flow into the (otherwise local-only)
+            // trait_associated_type_names so method-param projections through
+            // a DEPENDENCY bound (S: Serializer -> S::Ok) count as declared
+            // and keep their spelled return types.
+            for (t, assocs) in &m.trait_assoc_type_names {
+                self.trait_associated_type_names
+                    .entry(t.clone())
+                    .or_insert_with(|| assocs.clone());
             }
             for pair in &m.preserved_collapse_methods {
                 if let Some((t, meth)) = pair.split_once("::") {
@@ -4987,6 +5009,8 @@ impl CodeGen {
             crate::transpile::collect_declared_trait_methods(&file.items);
         self.ufcs_trait_default_methods =
             crate::transpile::collect_trait_default_methods(&file.items);
+        self.ufcs_trait_assoc_type_names =
+            crate::transpile::collect_trait_assoc_type_names(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
         // emit a `<Tr>_::m` free function, for shim qualification.
         self.ufcs_method_trait_owners = crate::transpile::collect_concrete_trait_impl_method_owners(

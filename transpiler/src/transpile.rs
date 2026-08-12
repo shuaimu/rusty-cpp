@@ -35,6 +35,15 @@ pub struct UfcsTraitManifest {
     /// unless the dep's trait actually provides the same method.
     #[serde(default)]
     pub declared_trait_methods: BTreeMap<String, Vec<String>>,
+    /// Declared trait name → ALL of its associated-type NAMES (`Serializer`
+    /// → [Ok, Error, SerializeSeq, …]). Feeds the consumer's
+    /// trait_associated_type_names so a method-param projection through a
+    /// DEPENDENCY trait bound (`S: Serializer`, `-> Result<S::Ok, S::Error>`)
+    /// counts as declared and keeps its spelled return type — the local-only
+    /// map made such returns soften to `auto`, which is uncallable between a
+    /// deferred declaration and its flushed definition.
+    #[serde(default)]
+    pub trait_assoc_type_names: BTreeMap<String, Vec<String>>,
     /// Declared trait name → the subset of its methods WITH default bodies.
     /// The `<Trait>RuntimeHelper` only carries these, so a consumer's
     /// member-vs-helper static dispatch must fall back to the helper ONLY for
@@ -589,6 +598,42 @@ pub fn collect_declared_trait_methods(
 /// no helper member, and the fallback branch is a hard parse error (the
 /// helper type is non-dependent, so clang checks the never-taken branch
 /// eagerly).
+/// Trait name → ALL associated-type names it declares (bounds not required —
+/// `type Ok;` counts). Feeds the manifest's `trait_assoc_type_names`.
+pub fn collect_trait_assoc_type_names(
+    items: &[syn::Item],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    fn walk(
+        items: &[syn::Item],
+        out: &mut std::collections::BTreeMap<String, Vec<String>>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let entry = out.entry(t.ident.to_string()).or_insert_with(Vec::new);
+                    for ti in &t.items {
+                        if let syn::TraitItem::Type(at) = ti {
+                            let name = at.ident.to_string();
+                            if !entry.contains(&name) {
+                                entry.push(name);
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(items, &mut out);
+    out
+}
+
 pub fn collect_trait_default_methods(
     items: &[syn::Item],
 ) -> std::collections::BTreeMap<String, Vec<String>> {
@@ -3073,6 +3118,7 @@ mod tests {
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
             trait_assoc_type_bounds: std::collections::BTreeMap::new(),
+            trait_assoc_type_names: std::collections::BTreeMap::new(),
             trait_default_methods: std::collections::BTreeMap::new(),
             preserved_collapse_methods: Vec::new(),
             trait_method_return_assoc: std::collections::BTreeMap::new(),
@@ -3163,6 +3209,7 @@ mod tests {
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
             trait_assoc_type_bounds: std::collections::BTreeMap::new(),
+            trait_assoc_type_names: std::collections::BTreeMap::new(),
             trait_default_methods: std::collections::BTreeMap::new(),
             preserved_collapse_methods: Vec::new(),
             trait_method_return_assoc: std::collections::BTreeMap::new(),
