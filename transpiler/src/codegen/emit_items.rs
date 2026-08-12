@@ -4024,6 +4024,18 @@ impl CodeGen {
     }
 
     pub(super) fn emit_const(&mut self, c: &syn::ItemConst) {
+        if Self::should_skip_cfg_attrs(&c.attrs) {
+            return;
+        }
+        if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&c.attrs) {
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cannot preserve unsupported #[cfg] predicate on const {}: {}",
+                    c.ident, predicate
+                ));
+            }
+            return;
+        }
         // A wildcard const (`const _: () = ...;`) is one of two things and
         // they need different answers.
         //
@@ -4044,7 +4056,14 @@ impl CodeGen {
         // immune to the collision above and can simply be emitted.
         if c.ident == "_" {
             if let Some(cond) = Self::wildcard_const_assertion(&c.expr) {
+                let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+                if let Some(predicate) = &cfg_guard {
+                    self.writeln(&format!("#if {}", predicate));
+                }
                 self.emit_static_assertion(&cond, &c.expr);
+                if let Some(predicate) = &cfg_guard {
+                    self.writeln(&format!("#endif  // {}", predicate));
+                }
             }
             return;
         }
@@ -4058,7 +4077,9 @@ impl CodeGen {
         if self.block_depth == 0 {
             let rust_name = c.ident.to_string();
             let scoped_name = self.scoped_const_key(&rust_name);
-            if self.forward_emitted_consts.contains(&scoped_name) {
+            let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+            let variant_key = Self::cfg_item_variant_key(&scoped_name, cfg_guard.as_deref());
+            if self.forward_emitted_consts.contains(&variant_key) {
                 return;
             }
         }
@@ -4083,6 +4104,10 @@ impl CodeGen {
             ));
             return;
         }
+        let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#if {}", cond));
+        }
         if self.is_local_new_const_constructor_call(&c.expr) {
             let rust_name = c.ident.to_string();
             let cpp_name = self.allocate_local_cpp_name(&rust_name);
@@ -4099,6 +4124,9 @@ impl CodeGen {
 
             if let Some(scope) = self.local_cpp_bindings.last_mut() {
                 scope.insert(rust_name, format!("{}()", cpp_name));
+            }
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#endif  // {}", cond));
             }
             return;
         }
@@ -4136,6 +4164,9 @@ impl CodeGen {
                 "{}const {} {} = {};",
                 export_prefix, ty, cpp_name, storage_name
             ));
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#endif  // {}", cond));
+            }
             return;
         }
         let expr_requires_runtime_storage = expr.contains("thread_local ")
@@ -4188,9 +4219,24 @@ impl CodeGen {
                 export_prefix, storage, ty, cpp_name, expr
             ));
         }
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#endif  // {}", cond));
+        }
     }
 
     pub(super) fn emit_static(&mut self, s: &syn::ItemStatic) {
+        if Self::should_skip_cfg_attrs(&s.attrs) {
+            return;
+        }
+        if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&s.attrs) {
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cannot preserve unsupported #[cfg] predicate on static {}: {}",
+                    s.ident, predicate
+                ));
+            }
+            return;
+        }
         if self.is_rust_libtest_metadata_type(&s.ty) {
             self.writeln(&format!(
                 "// Rust-only libtest metadata static skipped: {}",
@@ -4222,7 +4268,14 @@ impl CodeGen {
             (false, true) => "inline thread_local ",
             (false, false) => "inline ",
         };
+        let cfg_guard = Self::cfg_cpp_guard(&s.attrs);
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#if {}", cond));
+        }
         self.writeln(&format!("{}{} {} = {};", storage, ty, name, expr));
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#endif  // {}", cond));
+        }
     }
 
     pub(super) fn emit_trait(&mut self, t: &syn::ItemTrait) {
@@ -5889,7 +5942,7 @@ impl CodeGen {
             // root-level free function and rejects inline children/re-exports.
             let sibling_module = self.resolve_crate_root_child_module_path(&child);
             if !self.crate_module_names.is_empty() && sibling_module.is_none() {
-                self.cpp_abi_codegen_error = Some(format!(
+                self.codegen_error = Some(format!(
                     "cpp_import_namespace crate child `{child}` does not resolve to a generated sibling module"
                 ));
                 return;
@@ -7322,8 +7375,8 @@ impl CodeGen {
             // emitter schedules for an out-of-line definition.  Never fall
             // through to ordinary method emission if that invariant changes:
             // the lowered semantic body is intentionally `unreachable!()`.
-            if self.cpp_abi_codegen_error.is_none() {
-                self.cpp_abi_codegen_error = Some(format!(
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
                     "cpp_abi internal scheduling error: static facade `{}::{}` was not emitted as an out-of-line owner definition",
                     owner, method.sig.ident
                 ));

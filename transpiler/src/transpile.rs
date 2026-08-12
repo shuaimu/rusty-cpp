@@ -1560,7 +1560,7 @@ fn transpile_full_with_options_impl(
     log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
     log_profile("codegen_emit_file");
-    if let Some(error) = codegen.take_cpp_abi_codegen_error() {
+    if let Some(error) = codegen.take_codegen_error() {
         return Err(error);
     }
     // UFCS cross-crate: emit this crate's trait manifest (declared traits +

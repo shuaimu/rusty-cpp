@@ -107,10 +107,10 @@ fn cpp_abi_method_facade_scheduling_mismatch_is_a_fatal_diagnostic() {
 
     assert!(!cg.output.contains("unreachable"));
     let diagnostic = cg
-        .take_cpp_abi_codegen_error()
+        .take_codegen_error()
         .expect("missing out-of-line scheduling must be fatal");
     assert!(diagnostic.contains("Codec::encode"), "{diagnostic}");
-    assert!(cg.take_cpp_abi_codegen_error().is_none());
+    assert!(cg.take_codegen_error().is_none());
 }
 
 /// §13.14 Phase-4: transpile with the constraint-solver engine flag on
@@ -16819,6 +16819,241 @@ fn test_cfg_target_os_lowers_to_an_if_guard() {
     let opens = out.matches("#if defined(__linux__)").count();
     let closes = out.matches("#endif  // defined(__linux__)").count();
     assert_eq!(opens, closes, "guard must balance:\n{out}");
+}
+
+#[test]
+fn test_cfg_target_os_preserves_const_and_static_variants() {
+    let source =
+        r#"
+        const fn mac_value() -> i32 { 35 }
+        const fn other_value() -> i32 { 11 }
+
+        #[cfg(target_os = "macos")]
+        pub const CODE: i32 = 60;
+        #[cfg(not(target_os = "macos"))]
+        pub const CODE: i32 = 110;
+
+        #[cfg(target_os = "macos")]
+        pub const COMPUTED: i32 = mac_value();
+        #[cfg(not(target_os = "macos"))]
+        pub const COMPUTED: i32 = other_value();
+
+        #[cfg(target_os = "macos")]
+        pub static SLOT: i32 = 1;
+        #[cfg(not(target_os = "macos"))]
+        pub static SLOT: i32 = 2;
+        "#;
+    let out = transpile_str(source);
+
+    let mac = "defined(__APPLE__)";
+    let other = "!(defined(__APPLE__))";
+    assert_eq!(out.matches(&format!("#if {mac}")).count(), 5, "{out}");
+    assert_eq!(out.matches(&format!("#if {other}")).count(), 5, "{out}");
+    assert!(
+        out.contains("constexpr int32_t CODE = static_cast<int32_t>(60);")
+            && out.contains("constexpr int32_t CODE = static_cast<int32_t>(110);"),
+        "mutually exclusive literal consts must both survive:\n{out}"
+    );
+    assert_eq!(
+        out.matches("extern const int32_t COMPUTED;").count(),
+        2,
+        "both guarded declarations must survive:\n{out}"
+    );
+    assert!(
+        out.contains("constexpr int32_t COMPUTED = ::mac_value();")
+            && out.contains("constexpr int32_t COMPUTED = ::other_value();"),
+        "both guarded definitions must survive:\n{out}"
+    );
+    assert_eq!(
+        out.matches("extern int32_t SLOT;").count(),
+        2,
+        "both guarded static declarations must survive:\n{out}"
+    );
+    assert!(
+        out.contains("inline int32_t SLOT = static_cast<int32_t>(1);")
+            && out.contains("inline int32_t SLOT = static_cast<int32_t>(2);"),
+        "both guarded static definitions must survive:\n{out}"
+    );
+    assert_eq!(out.matches(&format!("#endif  // {mac}")).count(), 5, "{out}");
+    assert_eq!(
+        out.matches(&format!("#endif  // {other}")).count(),
+        5,
+        "{out}"
+    );
+
+    let module_out = transpile_str_module(source, "cfg_items");
+    assert!(
+        module_out.contains("export constexpr int32_t CODE = static_cast<int32_t>(60);")
+            && module_out
+                .contains("export constexpr int32_t CODE = static_cast<int32_t>(110);"),
+        "both guarded literal variants must stay exported:\n{module_out}"
+    );
+    assert_eq!(
+        module_out
+            .matches("export extern const int32_t COMPUTED;")
+            .count(),
+        2,
+        "both guarded computed declarations must stay exported:\n{module_out}"
+    );
+    assert_eq!(
+        module_out.matches("export extern int32_t SLOT;").count(),
+        2,
+        "both guarded static declarations must stay exported:\n{module_out}"
+    );
+    assert!(
+        module_out.contains("export constexpr int32_t COMPUTED = ::mac_value();")
+            && module_out.contains("export constexpr int32_t COMPUTED = ::other_value();"),
+        "both guarded computed definitions must stay exported:\n{module_out}"
+    );
+}
+
+#[test]
+fn test_cfg_target_os_guards_local_const_static_and_factory_variants() {
+    let out = transpile_str(
+        r#"
+        fn f() -> i32 {
+            #[cfg(target_os = "macos")]
+            const CODE: i32 = 60;
+            #[cfg(not(target_os = "macos"))]
+            const CODE: i32 = 110;
+
+            #[cfg(target_os = "macos")]
+            static SLOT: i32 = 1;
+            #[cfg(not(target_os = "macos"))]
+            static SLOT: i32 = 2;
+
+            #[cfg(target_os = "linux")]
+            const FACTORY: ArrayVec<Vec<u8>, 10> = ArrayVec::new_const();
+
+            CODE + SLOT
+        }
+        "#,
+    );
+
+    let mac = "defined(__APPLE__)";
+    let other = "!(defined(__APPLE__))";
+    assert_eq!(out.matches(&format!("#if {mac}")).count(), 2, "{out}");
+    assert_eq!(out.matches(&format!("#if {other}")).count(), 2, "{out}");
+    assert_eq!(out.matches("#if defined(__linux__)").count(), 1, "{out}");
+    assert_eq!(out.matches("constexpr int32_t CODE").count(), 2, "{out}");
+    assert_eq!(out.matches("static int32_t SLOT").count(), 2, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.contains("CODE") && line.contains("SLOT") && line.contains(';')),
+        "the post-declaration use must resolve to both selected variants:\n{out}"
+    );
+    assert!(
+        !out.contains("CODE_shadow") && !out.contains("SLOT_shadow"),
+        "cfg variants must retain their shared source binding:\n{out}"
+    );
+    assert_eq!(
+        out.matches("const auto FACTORY = []() -> ArrayVec").count(),
+        1,
+        "{out}"
+    );
+    assert_eq!(out.matches(&format!("#endif  // {mac}")).count(), 2, "{out}");
+    assert_eq!(
+        out.matches(&format!("#endif  // {other}")).count(),
+        2,
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("#endif  // defined(__linux__)").count(),
+        1,
+        "{out}"
+    );
+}
+
+#[test]
+fn test_cfg_target_os_guards_wildcard_const_assertions() {
+    let out = transpile_str(
+        r#"
+        #[cfg(target_os = "macos")]
+        const _: () = assert!(false);
+        #[cfg(not(target_os = "macos"))]
+        const _: () = assert!(true);
+        "#,
+    );
+
+    assert!(
+        out.contains("#if defined(__APPLE__)\nstatic_assert(false"),
+        "the Apple assertion must remain guarded:\n{out}"
+    );
+    assert!(
+        out.contains("#if !(defined(__APPLE__))\nstatic_assert(true"),
+        "the non-Apple assertion must remain guarded:\n{out}"
+    );
+}
+
+#[test]
+fn test_cfg_const_and_static_reject_unsupported_predicates() {
+    for (kind, source) in [
+        (
+            "const",
+            r#"#[cfg(feature = "optional")] pub const CODE: i32 = 1;"#,
+        ),
+        (
+            "mixed const",
+            r#"
+            #[cfg(target_os = "linux")]
+            #[cfg(feature = "optional")]
+            pub const CODE: i32 = 1;
+            "#,
+        ),
+        (
+            "static",
+            r#"#[cfg(feature = "optional")] pub static SLOT: i32 = 1;"#,
+        ),
+        (
+            "cfg_attr const",
+            r#"
+            #[cfg_attr(target_os = "linux", cfg(target_arch = "aarch64"))]
+            pub const CODE: i32 = 1;
+            "#,
+        ),
+        (
+            "nested cfg_attr const",
+            r#"
+            #[cfg_attr(
+                target_os = "linux",
+                cfg_attr(target_arch = "x86_64", cfg(target_arch = "aarch64"))
+            )]
+            pub const CODE: i32 = 1;
+            "#,
+        ),
+    ] {
+        let file: syn::File = syn::parse_str(source).unwrap();
+        let mut cg = CodeGen::new();
+        cg.emit_file(&file, None);
+        let error = cg
+            .take_codegen_error()
+            .unwrap_or_else(|| panic!("{kind} must fail closed"));
+        assert!(
+            error.contains("unsupported #[cfg] predicate"),
+            "{kind}: {error}"
+        );
+    }
+}
+
+#[test]
+fn test_known_false_cfg_const_and_static_skip_before_unsupported_check() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg(test)]
+        #[cfg(feature = "optional")]
+        pub const TEST_CODE: i32 = 1;
+
+        #[cfg(any())]
+        #[cfg(feature = "optional")]
+        pub static TEST_SLOT: i32 = 1;
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.emit_file(&file, None);
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(!out.contains("TEST_CODE") && !out.contains("TEST_SLOT"), "{out}");
 }
 
 #[test]

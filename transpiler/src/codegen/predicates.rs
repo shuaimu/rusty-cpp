@@ -702,6 +702,48 @@ impl CodeGen {
         })
     }
 
+    /// Return the first `#[cfg]` predicate that cannot be preserved by the
+    /// C++ preprocessor lowering. Const/static emission uses this fail-closed
+    /// check before it starts either the forward or definition pass: emitting
+    /// an unsupported predicate unguarded would create a platform-dependent
+    /// definition that rustc never sees, while partially retaining one of
+    /// several `#[cfg]` attributes changes their required AND semantics.
+    pub(crate) fn unsupported_cfg_cpp_attr(attrs: &[syn::Attribute]) -> Option<String> {
+        for attr in attrs.iter().filter(|a| a.path().is_ident("cfg_attr")) {
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Some(attr.meta.to_token_stream().to_string());
+            };
+            if args
+                .iter()
+                .skip(1)
+                .any(|payload| {
+                    payload.path().is_ident("cfg") || payload.path().is_ident("cfg_attr")
+                })
+            {
+                return Some(attr.meta.to_token_stream().to_string());
+            }
+        }
+        for attr in attrs.iter().filter(|a| a.path().is_ident("cfg")) {
+            if !matches!(Self::eval_cfg_meta(&attr.meta), CfgEval::Unknown) {
+                continue;
+            }
+            let syn::Meta::List(list) = &attr.meta else {
+                return Some(attr.meta.to_token_stream().to_string());
+            };
+            let Ok(args) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Some(attr.meta.to_token_stream().to_string());
+            };
+            if args.len() != 1 || Self::cfg_meta_to_cpp(&args[0]).is_none() {
+                return Some(attr.meta.to_token_stream().to_string());
+            }
+        }
+        None
+    }
+
     /// One `cfg` predicate -> C++ condition. `None` for anything not
     /// recognised, which propagates up and leaves the item unguarded
     /// rather than guessing.

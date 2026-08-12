@@ -1845,10 +1845,10 @@ pub struct CodeGen {
     /// Validated source-owned ABI facades for this file. Empty for the exact
     /// ordinary-code fast path.
     pub(crate) cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan,
-    /// First internal scheduling invariant violated while emitting a validated
-    /// source-owned ABI facade.  The facade emitter records the diagnostic and
-    /// suppresses ordinary lowering; the transpile entry point propagates it.
-    pub(crate) cpp_abi_codegen_error: Option<String>,
+    /// First fatal diagnostic recorded during emission. A producer records the
+    /// error and suppresses unsafe/incorrect output; the transpile entry point
+    /// propagates it instead of returning a partial translation.
+    pub(crate) codegen_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2205,7 +2205,7 @@ impl CodeGen {
             cross_file_cpp_inherit_pairs: Vec::new(),
             cross_file_type_alias_tails: HashMap::new(),
             cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan::default(),
-            cpp_abi_codegen_error: None,
+            codegen_error: None,
         }
     }
 
@@ -4206,8 +4206,8 @@ impl CodeGen {
         self.cpp_abi_plan = plan;
     }
 
-    pub(crate) fn take_cpp_abi_codegen_error(&mut self) -> Option<String> {
-        self.cpp_abi_codegen_error.take()
+    pub(crate) fn take_codegen_error(&mut self) -> Option<String> {
+        self.codegen_error.take()
     }
 
     fn emit_cpp_abi_support(&mut self) {
@@ -4374,7 +4374,7 @@ impl CodeGen {
         self.method_emission_declaration_only = false;
         self.method_emission_out_of_line_owner = None;
         self.method_emission_skip_conflict_registration = false;
-        self.cpp_abi_codegen_error = None;
+        self.codegen_error = None;
         self.trait_static_default_methods.clear();
         self.trait_declared_paths.clear();
         self.cpp_marker_trait_paths.clear();
@@ -10040,7 +10040,8 @@ impl CodeGen {
         let ordered_items = self.order_items_for_emission(items, false, false);
         let mut emitted_names = HashSet::new();
         let mut emitted_consts = HashSet::new();
-        let mut emitted_statics = HashSet::new();
+        let mut emitted_const_variants = HashSet::new();
+        let mut emitted_static_variants = HashSet::new();
         let mut emitted_aliases = HashSet::new();
         let mut emitted_modules = HashSet::new();
         let mut emitted_any = false;
@@ -10231,6 +10232,15 @@ impl CodeGen {
             if Self::has_cfg_test(&c.attrs) {
                 continue;
             }
+            if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&c.attrs) {
+                if self.codegen_error.is_none() {
+                    self.codegen_error = Some(format!(
+                        "cannot preserve unsupported #[cfg] predicate on const {}: {}",
+                        c.ident, predicate
+                    ));
+                }
+                continue;
+            }
             if c.ident == "_" || self.is_rust_libtest_metadata_type(&c.ty) {
                 continue;
             }
@@ -10239,13 +10249,18 @@ impl CodeGen {
             }
             let rust_name = c.ident.to_string();
             let scoped_name = self.scoped_const_key(&rust_name);
-            if self.forward_emitted_consts.contains(&scoped_name) {
+            let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+            let variant_key = Self::cfg_item_variant_key(&scoped_name, cfg_guard.as_deref());
+            if self.forward_emitted_consts.contains(&variant_key) {
                 continue;
             }
             let name = escape_cpp_keyword(&rust_name);
-            if !emitted_consts.insert(name.clone()) {
+            if !emitted_const_variants
+                .insert(Self::cfg_item_variant_key(&name, cfg_guard.as_deref()))
+            {
                 continue;
             }
+            emitted_consts.insert(name.clone());
             let export_prefix =
                 if self.should_export_item_at_module_depth(&c.vis, module_depth, &rust_name) {
                     "export "
@@ -10255,6 +10270,9 @@ impl CodeGen {
             let ty = self.map_type(&c.ty);
             if type_string_has_auto_placeholder(&ty) {
                 continue;
+            }
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#if {}", cond));
             }
             let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
             let expr_requires_runtime_storage = expr.contains("thread_local ")
@@ -10275,7 +10293,7 @@ impl CodeGen {
                     "{}constexpr {} {} = {};",
                     export_prefix, ty, name, expr
                 ));
-                self.forward_emitted_consts.insert(scoped_name);
+                self.forward_emitted_consts.insert(variant_key);
             } else if ty.contains('*') {
                 // Preserve pointer mutability in forward declarations for const items.
                 // `extern const T* name;` changes pointee constness; emit `T* const`
@@ -10283,6 +10301,9 @@ impl CodeGen {
                 self.writeln(&format!("{}extern {} const {};", export_prefix, ty, name));
             } else {
                 self.writeln(&format!("{}extern const {} {};", export_prefix, ty, name));
+            }
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#endif  // {}", cond));
             }
             emitted_any = true;
         }
@@ -10294,12 +10315,24 @@ impl CodeGen {
             if Self::has_cfg_test(&s.attrs) {
                 continue;
             }
+            if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&s.attrs) {
+                if self.codegen_error.is_none() {
+                    self.codegen_error = Some(format!(
+                        "cannot preserve unsupported #[cfg] predicate on static {}: {}",
+                        s.ident, predicate
+                    ));
+                }
+                continue;
+            }
             if self.is_rust_libtest_metadata_type(&s.ty) {
                 continue;
             }
             let rust_name = s.ident.to_string();
             let name = escape_cpp_keyword(&rust_name);
-            if !emitted_statics.insert(name.clone()) {
+            let cfg_guard = Self::cfg_cpp_guard(&s.attrs);
+            if !emitted_static_variants
+                .insert(Self::cfg_item_variant_key(&name, cfg_guard.as_deref()))
+            {
                 continue;
             }
             let export_prefix =
@@ -10330,7 +10363,13 @@ impl CodeGen {
             } else {
                 "extern"
             };
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#if {}", cond));
+            }
             self.writeln(&format!("{}{} {} {};", export_prefix, storage, ty, name));
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#endif  // {}", cond));
+            }
             emitted_any = true;
         }
 
@@ -13661,6 +13700,14 @@ impl CodeGen {
         } else {
             format!("{}::{}", self.module_stack.join("::"), const_name)
         }
+    }
+
+    /// Distinguish mutually exclusive Rust items that deliberately share a
+    /// name, such as `#[cfg(target_os = "macos")] const CODE` and its
+    /// `#[cfg(not(...))]` counterpart. Rustc sees one item per target; the
+    /// source translator sees both and must retain both guarded variants.
+    fn cfg_item_variant_key(name: &str, guard: Option<&str>) -> String {
+        format!("{}\u{1f}{}", name, guard.unwrap_or_default())
     }
 
 
