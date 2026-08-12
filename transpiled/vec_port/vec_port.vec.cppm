@@ -4672,6 +4672,13 @@ struct Vec {
     // operator[]<I> and a size_t-only mutable overload.
     template<typename I>
     T& operator[](I index) { return this->as_mut_ptr()[index]; }
+    // Rust `Vec::get(index) -> Option<&T>` (bounds-checked borrow).
+    rusty::Option<const T&> get(size_t index) const {
+        if (index < this->len_field) {
+            return rusty::Option<const T&>(this->as_ptr()[index]);
+        }
+        return rusty::Option<const T&>(rusty::None);
+    }
     T* begin() { return this->as_mut_ptr(); }
     T* end() { return this->as_mut_ptr() + this->len_field; }
     const T* begin() const { return this->as_ptr(); }

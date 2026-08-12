@@ -6749,6 +6749,12 @@ return VacantEntry{.key = std::move(key), .handle = rusty::Some(handle), .dorman
     static constexpr BTreeMap<K, V, A> new_in(A alloc) {
         return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>{rusty::None}, static_cast<size_t>(0), rusty::mem::manually_drop_new(std::move(alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
     }
+    // Rust `Index for BTreeMap`: `map[key]` borrows the value, panicking on a
+    // missing key (get().unwrap() preserves that).
+    template<typename Q>
+    const V& index(const Q& key) const {
+        return this->get(key).unwrap();
+    }
     template<typename Q>
     rusty::Option<const V&> get(const Q& key) const {
         auto root_node = RUSTY_TRY_OPT(this->root.as_ref()).reborrow();
