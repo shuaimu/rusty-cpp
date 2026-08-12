@@ -1829,6 +1829,17 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
         self.pop_cpp_binding_scope();
     }
 
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        // Rust item bodies establish their own safety context. In particular,
+        // a function, module, const, static, impl, or trait declared inside an
+        // `unsafe` block does not inherit that block's permission to perform
+        // unsafe operations. Expression bodies such as closures are not items
+        // and continue to inherit their enclosing lexical safety context.
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_item(self, item);
+        self.unsafe_context_depth = enclosing_unsafe_context;
+    }
+
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         let Some((_, items)) = &module.content else {
             return;
@@ -1844,27 +1855,33 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
 
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
         self.context_stack.push(function.sig.ident.to_string());
-        let was_unsafe = function.sig.unsafety.is_some();
-        if was_unsafe {
-            self.unsafe_context_depth += 1;
-        }
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_signature(self, &function.sig);
+        self.unsafe_context_depth = usize::from(function.sig.unsafety.is_some());
         visit::visit_block(self, &function.block);
-        if was_unsafe {
-            self.unsafe_context_depth -= 1;
-        }
+        self.unsafe_context_depth = enclosing_unsafe_context;
         self.context_stack.pop();
     }
 
     fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
         self.context_stack.push(method.sig.ident.to_string());
-        let was_unsafe = method.sig.unsafety.is_some();
-        if was_unsafe {
-            self.unsafe_context_depth += 1;
-        }
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_signature(self, &method.sig);
+        self.unsafe_context_depth = usize::from(method.sig.unsafety.is_some());
         visit::visit_block(self, &method.block);
-        if was_unsafe {
-            self.unsafe_context_depth -= 1;
+        self.unsafe_context_depth = enclosing_unsafe_context;
+        self.context_stack.pop();
+    }
+
+    fn visit_trait_item_fn(&mut self, method: &'ast syn::TraitItemFn) {
+        self.context_stack.push(method.sig.ident.to_string());
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_signature(self, &method.sig);
+        self.unsafe_context_depth = usize::from(method.sig.unsafety.is_some());
+        if let Some(block) = &method.default {
+            visit::visit_block(self, block);
         }
+        self.unsafe_context_depth = enclosing_unsafe_context;
         self.context_stack.pop();
     }
 
@@ -1880,6 +1897,43 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
         self.unsafe_context_depth += 1;
         visit::visit_expr_unsafe(self, unsafe_expr);
         self.unsafe_context_depth -= 1;
+    }
+
+    fn visit_type_array(&mut self, array: &'ast syn::TypeArray) {
+        self.visit_type(&array.elem);
+        // Array/repeat lengths and const generic arguments are lowered as
+        // anonymous const items, so they do not inherit lexical unsafety.
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        self.visit_expr(&array.len);
+        self.unsafe_context_depth = enclosing_unsafe_context;
+    }
+
+    fn visit_expr_repeat(&mut self, repeat: &'ast syn::ExprRepeat) {
+        for attribute in &repeat.attrs {
+            self.visit_attribute(attribute);
+        }
+        self.visit_expr(&repeat.expr);
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        self.visit_expr(&repeat.len);
+        self.unsafe_context_depth = enclosing_unsafe_context;
+    }
+
+    fn visit_generic_argument(&mut self, argument: &'ast syn::GenericArgument) {
+        match argument {
+            syn::GenericArgument::Const(expression) => {
+                let enclosing_unsafe_context =
+                    std::mem::replace(&mut self.unsafe_context_depth, 0);
+                self.visit_expr(expression);
+                self.unsafe_context_depth = enclosing_unsafe_context;
+            }
+            syn::GenericArgument::AssocConst(assoc_const) => {
+                let enclosing_unsafe_context =
+                    std::mem::replace(&mut self.unsafe_context_depth, 0);
+                visit::visit_assoc_const(self, assoc_const);
+                self.unsafe_context_depth = enclosing_unsafe_context;
+            }
+            _ => visit::visit_generic_argument(self, argument),
+        }
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -4159,6 +4213,256 @@ fn max2(lo: i32, hi: i32) -> i32 {
 
         assert!(output.contains("// @unsafe"));
         assert!(output.contains("std::max("));
+    }
+
+    #[test]
+    fn test_cpp_module_unsafe_context_does_not_cross_nested_item_boundaries() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+fn outer() {
+    unsafe {
+        fn nested_fn() -> i32 { cpp_std::max(1, 2) }
+
+        struct Local;
+        impl Local {
+            fn nested_method() -> i32 { cpp_std::max(3, 4) }
+            const NESTED_ASSOC_CONST: i32 = cpp_std::max(5, 6);
+        }
+        trait LocalTrait {
+            fn nested_default() -> i32 { cpp_std::max(7, 8) }
+            const NESTED_ASSOC_DEFAULT: i32 = cpp_std::max(9, 10);
+        }
+
+        const NESTED_CONST: i32 = cpp_std::max(11, 12);
+        static NESTED_STATIC: i32 = cpp_std::max(13, 14);
+
+        mod nested_module {
+            use cpp::std as cpp_std;
+            pub fn nested_module_fn() -> i32 { cpp_std::max(15, 16) }
+        }
+    }
+}
+
+fn safe_closure() {
+    let _call_later = || cpp_std::max(17, 18);
+}
+"#,
+        )
+        .expect("nested item safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert_eq!(
+            diagnostics.len(),
+            9,
+            "each safe nested item and safe closure call must be rejected: {diagnostics:#?}"
+        );
+        for context in [
+            "outer::nested_fn",
+            "outer::nested_method",
+            "outer::nested_default",
+            "outer::nested_module::nested_module_fn",
+            "safe_closure",
+        ] {
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic.contains(context)),
+                "missing violation in {context}: {diagnostics:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cpp_module_unsafe_context_keeps_unsafe_items_blocks_and_closures() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+unsafe fn unsafe_function() -> i32 { cpp_std::max(1, 2) }
+
+struct Host;
+impl Host {
+    unsafe fn unsafe_method() -> i32 { cpp_std::max(3, 4) }
+}
+trait HostTrait {
+    unsafe fn unsafe_default() -> i32 { cpp_std::max(5, 6) }
+}
+
+fn outer() {
+    unsafe {
+        fn nested_explicit_block() -> i32 { unsafe { cpp_std::max(7, 8) } }
+        unsafe fn nested_unsafe_fn() -> i32 { cpp_std::max(9, 10) }
+
+        struct Local;
+        impl Local {
+            unsafe fn nested_unsafe_method() -> i32 { cpp_std::max(11, 12) }
+            fn nested_explicit_method() -> i32 { unsafe { cpp_std::max(13, 14) } }
+        }
+        trait LocalTrait {
+            unsafe fn nested_unsafe_default() -> i32 { cpp_std::max(15, 16) }
+            fn nested_explicit_default() -> i32 { unsafe { cpp_std::max(17, 18) } }
+        }
+
+        let _inherits_unsafe_block = || cpp_std::max(19, 20);
+    }
+}
+"#,
+        )
+        .expect("positive item safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert!(
+            diagnostics.is_empty(),
+            "unsafe functions/methods, explicit unsafe blocks, and closures inside an unsafe block remain allowed: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_callable_signatures_never_inherit_unsafe_context() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+fn outer() {
+    unsafe {
+        fn safe_free(_: [u8; cpp_std::max(1, 2) as usize]) {}
+        unsafe fn unsafe_free(_: [u8; cpp_std::max(3, 4) as usize]) {}
+
+        struct Local;
+        impl Local {
+            fn safe_method(_: [u8; cpp_std::max(5, 6) as usize]) {}
+            unsafe fn unsafe_method(_: [u8; cpp_std::max(7, 8) as usize]) {}
+        }
+        trait LocalTrait {
+            fn safe_trait_method(_: [u8; cpp_std::max(9, 10) as usize]);
+            unsafe fn unsafe_trait_method(_: [u8; cpp_std::max(11, 12) as usize]);
+        }
+    }
+}
+"#,
+        )
+        .expect("signature safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert_eq!(
+            diagnostics.len(),
+            6,
+            "safe and unsafe callable signatures must both reject implicit unsafe context: {diagnostics:#?}"
+        );
+        for context in [
+            "outer::safe_free",
+            "outer::unsafe_free",
+            "outer::safe_method",
+            "outer::unsafe_method",
+            "outer::safe_trait_method",
+            "outer::unsafe_trait_method",
+        ] {
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic.contains(context)),
+                "missing signature violation in {context}: {diagnostics:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cpp_module_callable_signatures_allow_explicit_unsafe_blocks() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+fn safe_free(_: [u8; (unsafe { cpp_std::max(1, 2) }) as usize]) {}
+unsafe fn unsafe_free(_: [u8; (unsafe { cpp_std::max(3, 4) }) as usize]) {}
+
+struct Host;
+impl Host {
+    fn safe_method(_: [u8; (unsafe { cpp_std::max(5, 6) }) as usize]) {}
+    unsafe fn unsafe_method(_: [u8; (unsafe { cpp_std::max(7, 8) }) as usize]) {}
+}
+trait HostTrait {
+    fn safe_trait_method(_: [u8; (unsafe { cpp_std::max(9, 10) }) as usize]);
+    unsafe fn unsafe_trait_method(_: [u8; (unsafe { cpp_std::max(11, 12) }) as usize]);
+}
+"#,
+        )
+        .expect("explicitly unsafe signature fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert!(
+            diagnostics.is_empty(),
+            "explicit unsafe blocks in callable signatures must remain allowed: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_anonymous_consts_do_not_inherit_unsafe_context() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+struct Generic<const N: usize>;
+trait HasConst { const N: usize; }
+fn takes<const N: usize>() {}
+
+fn outer() {
+    unsafe {
+        let _repeat = [0; { cpp_std::max(1, 2) as usize }];
+        let _: [i32; { cpp_std::max(3, 4) as usize }];
+        let _: Generic<{ cpp_std::max(5, 6) as usize }>;
+        takes::<{ cpp_std::max(7, 8) as usize }>();
+        let _: &dyn HasConst<N = { cpp_std::max(9, 10) as usize }>;
+    }
+}
+"#,
+        )
+        .expect("anonymous const safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert_eq!(
+            diagnostics.len(),
+            5,
+            "repeat/array lengths and positional/associated const arguments must establish fresh safe contexts: {diagnostics:#?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.contains("outer")),
+            "all anonymous-const violations should retain their lexical diagnostic label: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_anonymous_consts_allow_only_explicit_unsafe_context() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+struct Generic<const N: usize>;
+trait HasConst { const N: usize; }
+fn takes<const N: usize>() {}
+
+fn explicit() {
+    let _repeat = [0; { (unsafe { cpp_std::max(1, 2) }) as usize }];
+    let _: [i32; { (unsafe { cpp_std::max(3, 4) }) as usize }];
+    let _: Generic<{ (unsafe { cpp_std::max(5, 6) }) as usize }>;
+    takes::<{ (unsafe { cpp_std::max(7, 8) }) as usize }>();
+    let _: &dyn HasConst<N = { (unsafe { cpp_std::max(9, 10) }) as usize }>;
+}
+
+fn lexical_expressions_still_inherit() {
+    unsafe {
+        let _repeat_element = [cpp_std::max(11, 12); 1];
+        let _closure = || cpp_std::max(13, 14);
+        let _async_block = async { cpp_std::max(15, 16) };
+        let _inline_const = const { cpp_std::max(17, 18) };
+    }
+}
+"#,
+        )
+        .expect("explicitly unsafe anonymous const fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert!(
+            diagnostics.is_empty(),
+            "explicit unsafe blocks in anonymous consts and lexical closure/async/inline-const inheritance must remain allowed: {diagnostics:#?}"
+        );
     }
 
     #[test]
