@@ -75,6 +75,14 @@ public:
     explicit Error(const std::string& message)
         : kind_(Kind::Other), message_(message) {}
 
+    // Rust `io::Error::new(kind, msg)` — emitted as `new_`. The message
+    // arrives as whatever string-ish carrier the call site produced
+    // (rusty::String, string_view, a literal).
+    template<typename M>
+    static Error new_(Kind kind, M&& message) {
+        return Error(kind, std::string(std::string_view(std::forward<M>(message))));
+    }
+
     Kind kind() const { return kind_; }
     const std::string& to_string() const { return message_; }
     const char* what() const { return message_.c_str(); }

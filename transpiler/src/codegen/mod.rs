@@ -54430,6 +54430,10 @@ struct DebugMap {\n\
 struct Formatter {\n\
     mutable std::string out_;\n\
     std::string str() const { return out_; }\n\
+    // Rust `f.alternate()` ({:#} flag). This shim only backs plain `{}`\n\
+    // formatting (to_string/Display), so the flag is always false; the\n\
+    // fmt_rt cutover (task #60) carries the real spec.\n\
+    bool alternate() const { return false; }\n\
     struct DebugTuple {\n\
         const Formatter* formatter;\n\
         bool first = true;\n\

@@ -7026,6 +7026,56 @@ impl CodeGen {
             .collect()
     }
 
+    /// Nested `fn` items referenced by sibling fn-local struct/impl/enum
+    /// items. Those items' methods emit in-class at namespace scope, where a
+    /// lambda-lowered nested fn is out of reach — serde_json's Display path
+    /// nests `struct WriterFormatter` + `impl io::Write` + `fn io_error`, and
+    /// the hoisted `write_` member's `map_err(io_error)` found nothing.
+    /// Nested fns are capture-free in Rust, so a namespace emission is sound.
+    pub(super) fn collect_local_fns_referenced_by_local_items(
+        block: &syn::Block,
+    ) -> Vec<syn::ItemFn> {
+        use syn::visit::Visit;
+        struct PathIdentCollector<'a> {
+            out: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for PathIdentCollector<'_> {
+            fn visit_path(&mut self, path: &'ast syn::Path) {
+                for seg in &path.segments {
+                    self.out.insert(seg.ident.to_string());
+                }
+                syn::visit::visit_path(self, path);
+            }
+        }
+        let mut referenced: HashSet<String> = HashSet::new();
+        for stmt in &block.stmts {
+            let syn::Stmt::Item(item) = stmt else {
+                continue;
+            };
+            if matches!(
+                item,
+                syn::Item::Struct(_) | syn::Item::Impl(_) | syn::Item::Enum(_)
+            ) {
+                let mut collector = PathIdentCollector {
+                    out: &mut referenced,
+                };
+                collector.visit_item(item);
+            }
+        }
+        block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Fn(f))
+                    if referenced.contains(&f.sig.ident.to_string()) =>
+                {
+                    Some(f.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Local GENERIC `type X<T> = …` aliases in a function body. C++ forbids
     /// in-function templates, so these must be hoisted to namespace scope (where
     /// `template<typename T> using X = …` is legal). Non-generic local aliases are

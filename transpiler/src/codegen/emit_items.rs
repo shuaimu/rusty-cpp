@@ -1046,6 +1046,18 @@ impl CodeGen {
             self.hoisted_local_type_name_scopes.pop();
             self.pop_type_param_scope();
         }
+        // Nested fns referenced by sibling local struct/impl/enum items must
+        // exist at namespace scope BEFORE those items' in-class method bodies
+        // (non-template classes look the name up immediately). The block's
+        // lambda lowering still runs and shadows locally.
+        for nested in &Self::collect_local_fns_referenced_by_local_items(fn_block) {
+            let nested_name = nested.sig.ident.to_string();
+            if self.declared_item_names.contains(&nested_name) {
+                continue;
+            }
+            self.declared_item_names.insert(nested_name);
+            self.emit_function(nested);
+        }
         let filtered_function_block = if hoisted_local_type_names.is_empty() {
             None
         } else {
@@ -7512,6 +7524,20 @@ impl CodeGen {
                 self.hoisted_local_type_name_scopes.pop();
             }
             self.pop_type_param_scope();
+        }
+        // Method-side twin of the emit_function nested-fn hoist: nested fns
+        // referenced by sibling local struct/impl/enum items must exist at
+        // namespace scope BEFORE those items' in-class method bodies
+        // (Display-for-Value's WriterFormatter nests `fn io_error`).
+        if !declaration_only {
+            for nested in &Self::collect_local_fns_referenced_by_local_items(&method.block) {
+                let nested_name = nested.sig.ident.to_string();
+                if self.declared_item_names.contains(&nested_name) {
+                    continue;
+                }
+                self.declared_item_names.insert(nested_name);
+                self.emit_function(nested);
+            }
         }
         let filtered_method_block = if declaration_only || hoisted_local_type_names.is_empty() {
             None
