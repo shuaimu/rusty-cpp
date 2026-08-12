@@ -6556,6 +6556,14 @@ struct Entry : std::variant<Entry_Vacant<K, V, A>, Entry_Occupied<K, V, A>> {
     using variant = std::variant<Entry_Vacant<K, V, A>, Entry_Occupied<K, V, A>>;
     using variant::variant;
     static Entry<K, V, A> Vacant(VacantEntry<K, V, A> _0) { return Entry<K, V, A>{Entry_Vacant<K, V, A>{std::forward<decltype(_0)>(_0)}}; }
+    // Cross-crate variant probes: a consumer crate matching over this enum
+    // can't see the variant order, so its match lowers to duck-typed
+    // is_<variant>()/<variant>_entry() member probes (serde_json's map
+    // wrapper Entry conversion). Vacant is index 0, Occupied index 1.
+    bool is_vacant() const { return rusty::detail::variant_index(*this) == 0; }
+    bool is_occupied() const { return rusty::detail::variant_index(*this) == 1; }
+    VacantEntry<K, V, A>& vacant_entry() { return std::get<0>(*this)._0; }
+    OccupiedEntry<K, V, A>& occupied_entry() { return std::get<1>(*this)._0; }
     static Entry<K, V, A> Occupied(OccupiedEntry<K, V, A> _0) { return Entry<K, V, A>{Entry_Occupied<K, V, A>{std::forward<decltype(_0)>(_0)}}; }
 
 
