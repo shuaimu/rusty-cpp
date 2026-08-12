@@ -4269,6 +4269,19 @@ impl CodeGen {
                 output = Self::boundary_replace_scope_prefix(&output, &dt.name, &to);
             }
         }
+        // Global spelling pass: `typename Self_::X` is ill-formed wherever the
+        // UFCS `Self_&&` receiver deduced to an lvalue reference (extension
+        // free-fn BODIES construct `rusty::Result<..., typename Self_::Error>`
+        // independently of the head's return-type pipeline). remove_cvref is
+        // identity for by-value Self_, and the existing `typename ` prefix is
+        // preserved — the earlier alloc breakage came from a helper DROPPING
+        // the prefix, not from remove_cvref itself.
+        if output.contains("typename Self_::") {
+            output = output.replace(
+                "typename Self_::",
+                "typename std::remove_cvref_t<Self_>::",
+            );
+        }
         if !purview_repls.is_empty()
             && let Some(export_idx) = output.find("\nexport module ")
         {
