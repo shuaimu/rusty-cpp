@@ -2301,7 +2301,17 @@ decltype(auto) iter(Range&& range) {
     // `begin()` returning a pointer, STL `std::begin`/`std::end`).
     // NB: the dispatcher is a namespace-scope functor, not a local generic
     // lambda — see `detail::iter_deref_dispatch` and issue #31.
-    if constexpr (requires {
+    //
+    // Rust IntoIterator-on-owned: an RVALUE receiver with a consuming
+    // `.into_iter()` yields the CONSUMING iterator. The borrowing `.iter()`
+    // tier below would hand back const-ref items (std::move on them degrades
+    // to a deleted copy for move-only payloads) AND a dangling borrow of the
+    // temporary — serde_json's MapDeserializer stored
+    // `rusty::iter(<prvalue BTreeMap>)` as a field.
+    if constexpr (!std::is_lvalue_reference_v<Range>
+        && requires { std::forward<Range>(range).into_iter(); }) {
+        return std::forward<Range>(range).into_iter();
+    } else if constexpr (requires {
         rusty::deref_call(std::forward<Range>(range), detail::iter_deref_dispatch{});
     }) {
         return rusty::deref_call(std::forward<Range>(range), detail::iter_deref_dispatch{});
