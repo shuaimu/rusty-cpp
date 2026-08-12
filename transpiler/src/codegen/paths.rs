@@ -2234,6 +2234,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     return resolved.join("::");
                 }
                 "super" if segments.len() > 1 => {
+                    let parent_is_crate_root = self.module_stack.len() <= 1;
                     let mut resolved = if self.module_stack.len() > 1 {
                         self.module_stack[..self.module_stack.len() - 1].to_vec()
                     } else {
@@ -2242,6 +2243,21 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     resolved.extend(segments[1..].iter().cloned());
                     for seg in &mut resolved {
                         *seg = escape_cpp_keyword(seg);
+                    }
+                    // `super::ser::X` from a top-level module resolves to the
+                    // CRATE ROOT; emitted relative, `ser::X` rebinds to a
+                    // same-named SIBLING namespace at the use site
+                    // (serde_json's value::ser shadowed the root ser for the
+                    // Display-for-Value to_writer calls). Qualify through the
+                    // crate wrap namespace so lookup starts at the root.
+                    if parent_is_crate_root {
+                        if let Some(ref crate_name) = self.crate_name {
+                            return format!(
+                                "::{}::{}",
+                                escape_cpp_keyword(crate_name),
+                                resolved.join("::")
+                            );
+                        }
                     }
                     return resolved.join("::");
                 }
