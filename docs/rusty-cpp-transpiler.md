@@ -2565,6 +2565,13 @@ kind = "function"
 callable_signatures = ["int(int,int)"]
 ```
 
+The module-map key is the named-module identity used by the emitted `import`;
+`namespace` is the C++ namespace that qualifies that module's indexed exports.
+They need not be equal. Namespace values are restricted to nonempty C++
+identifier paths separated by `::` (no leading `::`, dotted paths, templates,
+punctuation, C++ keywords, double underscores, or a leading underscore on the
+global segment).
+
 CLI configuration:
 
 - pass one or more `--cpp-module-index <path>` flags in single-file, crate, or parity flows.
@@ -2572,6 +2579,9 @@ CLI configuration:
 - when `use cpp::...` imports are present and no non-empty index is configured, transpilation fails immediately.
 
 If a `cpp::` import or referenced symbol cannot be resolved, transpilation fails with an explicit import/symbol error.
+
+Calls require an explicit Rust `unsafe` context after the module, symbol, and
+callable signature match the index.
 
 #### MVP Support Limits (Enforced)
 

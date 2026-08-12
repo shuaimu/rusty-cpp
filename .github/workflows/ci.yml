@@ -59,6 +59,13 @@ jobs:
           ./tests/transpile_tests/run_cpp_module_interop_compile.sh \
             --work-dir "${RUNNER_TEMP}/rusty-cpp-module-interop"
 
+      - name: Run indexed namespace interop runtime check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          ./cmake-example-project/tests/run_cpp_rust_member_interop.sh \
+            --rustycpp-dir "${GITHUB_WORKSPACE}" \
+            --work-dir "${RUNNER_TEMP}/rusty-cpp-indexed-namespace-interop"
+
       - name: Run source-owned C++ ABI adapter gate
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
@@ -72,6 +79,7 @@ jobs:
           name: cpp-module-interop-artifacts-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/rusty-cpp-module-interop/**
+            ${{ runner.temp }}/rusty-cpp-indexed-namespace-interop/**
             ${{ runner.temp }}/rusty-cpp-abi-adapter/**
           if-no-files-found: warn
           retention-days: 14

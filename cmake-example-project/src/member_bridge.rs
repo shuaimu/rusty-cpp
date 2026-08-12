@@ -11,9 +11,16 @@ impl RustAccumulator {
 
     // This demonstrates Rust -> C++ member-call interop:
     // `cpp_host::Counter::add(counter, delta)` lowers to `counter.add(delta)`.
+    // The free call uses the index's export namespace (`interop::api`) while
+    // retaining `interop.host` as the imported named-module identity.
     pub unsafe fn pull_from_cpp<T>(&mut self, counter: &mut T, delta: i32) -> i32 {
         let updated = cpp_host::Counter::add(counter, delta);
         self.total += updated;
+        self.total
+    }
+
+    pub fn add_cpp_bias(&mut self) -> i32 {
+        self.total = unsafe { cpp_host::apply_bias(self.total) };
         self.total
     }
 

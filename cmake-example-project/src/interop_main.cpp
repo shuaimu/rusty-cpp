@@ -8,8 +8,9 @@ public:
     // This demonstrates C++ -> Rust member-call interop from a C++ class method.
     int run_round(RustAccumulator& acc, int delta) {
         const int pulled = acc.pull_from_cpp(counter_, delta);
+        const int biased = acc.add_cpp_bias();
         const int bumped = acc.bump(3);
-        return pulled + bumped + acc.current() + counter_.value();
+        return pulled + biased + bumped + acc.current() + counter_.value();
     }
 
     int counter_value() const {
@@ -17,7 +18,7 @@ public:
     }
 
 private:
-    interop::host::Counter counter_;
+    interop::api::Counter counter_;
 };
 
 int main() {
@@ -26,13 +27,13 @@ int main() {
 
     // Expected:
     // pull_from_cpp with delta=2 -> counter=12, total=17
-    // bump(3) -> total=20
-    // score = 17 + 20 + 20 + 12 = 69
+    // add_cpp_bias -> total=21; bump(3) -> total=24
+    // score = 17 + 21 + 24 + 24 + 12 = 98
     const int score = session.run_round(acc, 2);
-    if (score != 69) {
+    if (score != 98) {
         return 1;
     }
-    if (acc.current() != 20) {
+    if (acc.current() != 24) {
         return 2;
     }
     if (session.counter_value() != 12) {

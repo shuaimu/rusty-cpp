@@ -171,6 +171,7 @@ pub struct CppModuleIndexSymbol {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CppModuleSymbolIndexFile {
     #[serde(default = "default_cpp_module_symbol_index_version")]
     version: u32,
@@ -179,6 +180,7 @@ struct CppModuleSymbolIndexFile {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CppModuleIndexModuleFile {
     #[serde(default)]
     namespace: Option<String>,
@@ -187,6 +189,7 @@ struct CppModuleIndexModuleFile {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CppModuleIndexSymbolFile {
     #[serde(default)]
     kind: Option<String>,
@@ -1173,8 +1176,21 @@ fn merge_cpp_module_symbol_index_file(
             ));
         }
 
+        let namespace = module
+            .namespace
+            .map(|namespace| {
+                canonical_cpp_export_namespace_path(&namespace).map_err(|detail| {
+                    format!(
+                        "C++ module symbol index {} has invalid namespace for module '{}': {}",
+                        source_path.display(),
+                        module_path,
+                        detail
+                    )
+                })
+            })
+            .transpose()?;
         let incoming = CppModuleIndexModule {
-            namespace: module.namespace,
+            namespace,
             symbols: module
                 .symbols
                 .into_iter()
@@ -1249,6 +1265,51 @@ fn canonical_cpp_module_path(path: &str) -> String {
     path.trim().replace('.', "::")
 }
 
+fn canonical_cpp_export_namespace_path(path: &str) -> Result<String, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("namespace must not be empty".to_string());
+    }
+    if path.starts_with("::") {
+        return Err("leading `::` is not supported".to_string());
+    }
+
+    let mut segments = Vec::new();
+    for (segment_index, raw_segment) in path.split("::").enumerate() {
+        let segment = raw_segment.trim();
+        if segment.is_empty() {
+            return Err("namespace contains an empty identifier segment".to_string());
+        }
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return Err("namespace contains an empty identifier segment".to_string());
+        };
+        if !(first.is_ascii_alphabetic() || first == '_')
+            || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(format!(
+                "namespace segment '{}' is not a C++ identifier",
+                segment
+            ));
+        }
+        let reserved_identifier = crate::codegen::escape_cpp_keyword(segment) != segment
+            || segment.contains("__")
+            || (segment_index == 0 && segment.starts_with('_'))
+            || segment
+                .strip_prefix('_')
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|ch| ch.is_ascii_uppercase());
+        if reserved_identifier {
+            return Err(format!(
+                "namespace segment '{}' is reserved in C++",
+                segment
+            ));
+        }
+        segments.push(segment);
+    }
+    Ok(segments.join("::"))
+}
+
 fn cpp_symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
     symbol
         .kind
@@ -1276,6 +1337,25 @@ fn collect_cpp_module_member_symbol_map(
         }
     }
     by_module
+}
+
+fn collect_cpp_module_export_namespace_map(
+    index: &CppModuleSymbolIndex,
+) -> Result<HashMap<String, String>, String> {
+    let mut by_module = HashMap::new();
+    for (module_path, module_entry) in &index.modules {
+        let Some(namespace) = module_entry.namespace.as_ref() else {
+            continue;
+        };
+        let namespace = canonical_cpp_export_namespace_path(namespace).map_err(|detail| {
+            format!(
+                "C++ module symbol index has invalid namespace for module '{}': {}",
+                module_path, detail
+            )
+        })?;
+        by_module.insert(module_path.clone(), namespace);
+    }
+    Ok(by_module)
 }
 
 /// Transpile Rust source code to C++ code.
@@ -1548,6 +1628,8 @@ fn transpile_full_with_options_impl(
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
+        let export_namespaces = collect_cpp_module_export_namespace_map(index)?;
+        codegen.set_cpp_module_export_namespaces(export_namespaces);
     }
     // UFCS cross-crate (book § 3.2.7): load dependency trait manifests so the
     // classifier + call-site qualification know the dependency's trait methods
@@ -1904,12 +1986,7 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         module: &'b CppModuleIndexModule,
         symbol_name: &str,
     ) -> Option<&'b CppModuleIndexSymbol> {
-        module.symbols.get(symbol_name).or_else(|| {
-            symbol_name
-                .rsplit("::")
-                .next()
-                .and_then(|tail| module.symbols.get(tail))
-        })
+        module.symbols.get(symbol_name)
     }
 
     fn symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
@@ -3848,6 +3925,123 @@ callable_signatures = ["int(int,int)"]
     }
 
     #[test]
+    fn test_load_cpp_module_symbol_index_rejects_removed_safe_field() {
+        let dir = tempdir().expect("tempdir");
+        let index_path = dir.path().join("cpp_index.toml");
+        std::fs::write(
+            &index_path,
+            r#"
+version = 1
+[modules.std.symbols.max]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+safe = true
+"#,
+        )
+        .expect("write toml index");
+
+        let err = load_cpp_module_symbol_index_files(&[index_path])
+            .expect_err("removed safe metadata must be rejected");
+        assert!(err.contains("Invalid TOML C++ module symbol index"));
+        assert!(err.contains("unknown field `safe`"));
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_canonicalizes_and_merges_namespace() {
+        let dir = tempdir().expect("tempdir");
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::fs::write(
+            &first,
+            r#"
+version = 1
+[modules."rrr::logging"]
+namespace = " rrr :: logging_api "
+[modules."rrr::logging".symbols.first]
+kind = "function"
+callable_signatures = ["void()"]
+"#,
+        )
+        .expect("write first index");
+        std::fs::write(
+            &second,
+            r#"
+version = 1
+[modules."rrr::logging"]
+namespace = "rrr::logging_api"
+[modules."rrr::logging".symbols.second]
+kind = "function"
+callable_signatures = ["void()"]
+"#,
+        )
+        .expect("write second index");
+
+        let index =
+            load_cpp_module_symbol_index_files(&[first, second]).expect("merge canonical paths");
+        let module = index.modules.get("rrr::logging").expect("merged module");
+        assert_eq!(module.namespace.as_deref(), Some("rrr::logging_api"));
+        assert!(module.symbols.contains_key("first"));
+        assert!(module.symbols.contains_key("second"));
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_rejects_conflicting_namespace() {
+        let dir = tempdir().expect("tempdir");
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::fs::write(
+            &first,
+            "version = 1\n[modules.demo]\nnamespace = \"one\"\n",
+        )
+        .expect("write first index");
+        std::fs::write(
+            &second,
+            "version = 1\n[modules.demo]\nnamespace = \"two\"\n",
+        )
+        .expect("write second index");
+
+        let err = load_cpp_module_symbol_index_files(&[first, second])
+            .expect_err("conflicting namespace must be rejected");
+        assert!(err.contains("conflicting namespace"));
+        assert!(err.contains("'one' vs 'two'"));
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_rejects_invalid_namespace() {
+        for invalid in [
+            "",
+            "::rrr",
+            "rrr::",
+            "rrr::::logging",
+            "rrr.logging",
+            "rrr::logging<int>",
+            "rrr::class",
+            "_rrr::logging",
+            "rrr::_Logging",
+            "rrr::log__detail",
+            "rrr; injected",
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let index_path = dir.path().join("cpp_index.toml");
+            std::fs::write(
+                &index_path,
+                format!(
+                    "version = 1\n[modules.demo]\nnamespace = {:?}\n",
+                    invalid
+                ),
+            )
+            .expect("write invalid index");
+
+            let err = load_cpp_module_symbol_index_files(&[index_path])
+                .expect_err("invalid namespace must be rejected");
+            assert!(
+                err.contains("invalid namespace for module 'demo'"),
+                "invalid={invalid:?}, err={err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_cpp_module_import_requires_symbol_index() {
         let err = transpile("use cpp::std as cpp_std;\nfn f() {}", None)
             .expect_err("cpp import without index should fail");
@@ -3965,6 +4159,253 @@ fn max2(lo: i32, hi: i32) -> i32 {
 
         assert!(output.contains("// @unsafe"));
         assert!(output.contains("std::max("));
+    }
+
+    #[test]
+    fn test_cpp_module_nested_symbol_identity_matches_exact_index_entries() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "host".to_string(),
+                    CppModuleIndexModule {
+                        namespace: Some("host_api".to_string()),
+                        symbols: BTreeMap::from([
+                            (
+                                "other::increment".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("function".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                            (
+                                "Counter::add".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("method".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                        ]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::host;
+fn nested(v: i32) -> i32 {
+    unsafe { host::other::increment(v) }
+}
+fn member<T>(counter: &mut T, v: i32) -> i32 {
+    unsafe { host::Counter::add(counter, v) }
+}
+"#,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("exact nested function and member identities should transpile");
+
+        assert!(output.contains("host_api::other::increment("), "Got: {output}");
+        assert!(output.contains("rusty::deref_call("), "Got: {output}");
+        assert!(output.contains("__mdisp_add"), "Got: {output}");
+        assert!(!output.contains("host_api::Counter::add("), "Got: {output}");
+    }
+
+    #[test]
+    fn test_cpp_module_nested_symbol_identity_rejects_tail_only_index_entries() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "host".to_string(),
+                    CppModuleIndexModule {
+                        namespace: Some("host_api".to_string()),
+                        symbols: BTreeMap::from([
+                            (
+                                "increment".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("function".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                            (
+                                "add".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("method".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                        ]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+
+        let nested_err = transpile_full_with_options(
+            "use cpp::host; fn f(v: i32) -> i32 { unsafe { host::other::increment(v) } }",
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("tail-only function entry must not match a nested symbol");
+        assert!(nested_err.contains("symbol is not present"));
+        assert!(nested_err.contains("symbol `other::increment`"));
+
+        let member_err = transpile_full_with_options(
+            "use cpp::host; fn f<T>(c: &mut T, v: i32) -> i32 { unsafe { host::Counter::add(c, v) } }",
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("tail-only method entry must not match a nested symbol");
+        assert!(member_err.contains("symbol is not present"));
+        assert!(member_err.contains("symbol `Counter::add`"));
+    }
+
+    #[test]
+    fn test_cpp_module_import_identity_is_separate_from_export_namespace() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "log_line".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec![
+                    "void(int,int,const int8_t*,const std::string&)".to_string(),
+                ],
+            },
+        );
+        modules.insert(
+            "rrr::logging".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("rrr".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::rrr::logging as cpp_logging;
+fn write(message: &String) {
+    unsafe { cpp_logging::log_line(3, 0, core::ptr::null(), message) }
+}
+"#,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("indexed namespace should transpile");
+
+        assert!(output.contains("import rrr.logging;"));
+        assert!(output.contains("rrr::log_line("));
+        assert!(!output.contains("rrr::logging::log_line("));
+    }
+
+    #[test]
+    fn test_cpp_module_export_namespace_keeps_index_resolution_fail_closed() {
+        let source = r#"
+use cpp::rrr::logging as cpp_logging;
+fn write(message: &String) {
+    unsafe { cpp_logging::log_line(3, 0, core::ptr::null(), message) }
+}
+"#;
+
+        let symbol = CppModuleIndexSymbol {
+            kind: Some("function".to_string()),
+            callable_signatures: vec!["void(int,int,const int8_t*,const std::string&)".to_string()],
+        };
+        let wrong_module_options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr".to_string(),
+                    CppModuleIndexModule {
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::from([("log_line".to_string(), symbol.clone())]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+        let err = transpile_full_with_options(
+            source,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &wrong_module_options,
+        )
+        .expect_err("matching namespace must not substitute for module identity");
+        assert!(err.contains("module path is not present"));
+        assert!(err.contains("module `rrr::logging`"));
+
+        let wrong_symbol_options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr::logging".to_string(),
+                    CppModuleIndexModule {
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::new(),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+        let err = transpile_full_with_options(
+            source,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &wrong_symbol_options,
+        )
+        .expect_err("export namespace must not bypass indexed symbol lookup");
+        assert!(err.contains("symbol is not present"));
+        assert!(err.contains("symbol `log_line`"));
+
+        let wrong_signature_options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr::logging".to_string(),
+                    CppModuleIndexModule {
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::from([(
+                            "log_line".to_string(),
+                            CppModuleIndexSymbol {
+                                kind: Some("function".to_string()),
+                                callable_signatures: vec!["void(int,int)".to_string()],
+                            },
+                        )]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+        let err = transpile_full_with_options(
+            source,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &wrong_signature_options,
+        )
+        .expect_err("export namespace must not bypass indexed signature matching");
+        assert!(err.contains("call cannot be matched to indexed callable family"));
+        assert!(err.contains("arity 4"));
+        assert!(err.contains("void(int,int)"));
     }
 
     #[test]

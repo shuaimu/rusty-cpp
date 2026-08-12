@@ -1604,6 +1604,13 @@ pub struct CodeGen {
     /// Keys are canonical module paths without `cpp::` (e.g., `std`), values contain
     /// symbol names as recorded in the index (e.g., `vector::push_back`).
     pub(crate) cpp_module_member_symbols: HashMap<String, HashSet<String>>,
+    /// Indexed C++ export namespace by named-module identity.
+    ///
+    /// A `use cpp::rrr::logging` binding still imports the named module
+    /// `rrr.logging`, while an index entry may place that module's exported
+    /// symbols in the enclosing `rrr` namespace. Keep those two identities
+    /// separate so symbol qualification never changes the module import.
+    pub(crate) cpp_module_export_namespaces: HashMap<String, String>,
     /// True while emitting function forward declaration signatures.
     /// Used to qualify single-segment type paths that depend on `use` aliases
     /// emitted later in the namespace body.
@@ -2138,6 +2145,7 @@ impl CodeGen {
             cpp_module_import_paths: Vec::new(),
             cpp_module_import_path_keys: HashSet::new(),
             cpp_module_member_symbols: HashMap::new(),
+            cpp_module_export_namespaces: HashMap::new(),
             in_forward_decl_signature: false,
             in_constraint_emit: std::cell::Cell::new(false),
             suppress_dependent_assoc_traits_routing: std::cell::Cell::new(false),
@@ -4012,6 +4020,13 @@ impl CodeGen {
         cpp_module_member_symbols: HashMap<String, HashSet<String>>,
     ) {
         self.cpp_module_member_symbols = cpp_module_member_symbols;
+    }
+
+    pub fn set_cpp_module_export_namespaces(
+        &mut self,
+        cpp_module_export_namespaces: HashMap<String, String>,
+    ) {
+        self.cpp_module_export_namespaces = cpp_module_export_namespaces;
     }
 
     pub fn set_external_crate_module_aliases(
@@ -39063,13 +39078,7 @@ impl CodeGen {
         let Some(module_symbols) = self.cpp_module_member_symbols.get(module_path) else {
             return false;
         };
-        if module_symbols.contains(symbol_name) {
-            return true;
-        }
-        symbol_name
-            .rsplit("::")
-            .next()
-            .is_some_and(|tail| module_symbols.contains(tail))
+        module_symbols.contains(symbol_name)
     }
 
 
@@ -42113,7 +42122,12 @@ impl CodeGen {
         let first_segment = path.segments.first()?.ident.to_string();
         let module_path = self.name_resolver.cpp_binding(&first_segment)?;
 
-        let mut resolved_segments: Vec<String> = module_path
+        let symbol_namespace = self
+            .cpp_module_export_namespaces
+            .get(module_path)
+            .map(String::as_str)
+            .unwrap_or(module_path);
+        let mut resolved_segments: Vec<String> = symbol_namespace
             .split("::")
             .map(str::trim)
             .filter(|segment| !segment.is_empty())
