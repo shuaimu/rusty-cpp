@@ -2833,10 +2833,44 @@ impl CodeGen {
                 syn::Item::Enum(e) => (e.ident.to_string(), &e.attrs),
                 _ => continue,
             };
-            if self.extract_derives(attrs).iter().any(|d| d == "Copy") {
+            let derives = self.extract_derives(attrs);
+            if derives.iter().any(|d| d == "Copy") {
                 self.copy_derived_types.insert(ident.clone());
                 let scoped = self.scoped_type_key(&ident);
                 self.copy_derived_types.insert(scoped);
+            }
+            if derives.iter().any(|d| d == "Clone") {
+                self.clone_capable_types.insert(ident.clone());
+                let scoped = self.scoped_type_key(&ident);
+                self.clone_capable_types.insert(scoped);
+            }
+        }
+        // Sibling registry: types whose fields (or enum variant payloads)
+        // contain a known move-only type emit without a usable copy ctor.
+        // One-level check, no transitive closure — serde_json's Value
+        // qualifies directly via its String/Vec/Map payloads.
+        for item in items {
+            let (ident, is_move_only) = match item {
+                syn::Item::Struct(s) => (
+                    s.ident.to_string(),
+                    s.fields
+                        .iter()
+                        .any(|f| Self::type_contains_known_move_only(&f.ty)),
+                ),
+                syn::Item::Enum(e) => (
+                    e.ident.to_string(),
+                    e.variants.iter().any(|v| {
+                        v.fields
+                            .iter()
+                            .any(|f| Self::type_contains_known_move_only(&f.ty))
+                    }),
+                ),
+                _ => continue,
+            };
+            if is_move_only {
+                self.move_only_types.insert(ident.clone());
+                let scoped = self.scoped_type_key(&ident);
+                self.move_only_types.insert(scoped);
             }
         }
         for item in items {
@@ -3023,6 +3057,11 @@ impl CodeGen {
                         self.copy_derived_types.insert(type_name.clone());
                         let scoped = self.scoped_type_key(&type_name);
                         self.copy_derived_types.insert(scoped);
+                    }
+                    if trait_name.as_deref() == Some("Clone") {
+                        self.clone_capable_types.insert(type_name.clone());
+                        let scoped = self.scoped_type_key(&type_name);
+                        self.clone_capable_types.insert(scoped);
                     }
                     if trait_name.as_deref() == Some("Display") {
                         self.display_impl_types.insert(type_name.clone());

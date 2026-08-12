@@ -1266,6 +1266,19 @@ pub struct CodeGen {
     /// be called on a const receiver; e.g. hashbrown's `Tag`/`Group` predicate
     /// methods). Populated in the `collect_impl_blocks` pre-pass.
     pub(crate) copy_derived_types: HashSet<String>,
+    /// Structs/enums whose fields (or variant payloads) contain a known
+    /// move-only type (String, Vec, Box, maps, …) — emitted without a usable
+    /// copy ctor. Consulted by the tail-`self` receiver decision: consuming
+    /// `fn f(self) -> Self { self }` must be a NON-const method for these
+    /// (a const method's `std::move((*this))` is a deleted copy), while
+    /// copyable types keep the const modeling for as_const'd dispatch
+    /// (btree B3). Populated beside `copy_derived_types`.
+    pub(crate) move_only_types: HashSet<String>,
+    /// Types with a Clone derive or `impl Clone` — `rusty::clone` is legal
+    /// on them. The tail-self clone lowering requires BOTH move-only and
+    /// clone-capable; a move-only type without Clone (serde_json's Error)
+    /// keeps the move spelling, matching its non-const emission.
+    pub(crate) clone_capable_types: HashSet<String>,
     /// Named struct field declaration order keyed by struct name.
     /// Used for constructor-style lowering when designated initializers are unavailable.
     pub(crate) struct_field_order: std::rc::Rc<HashMap<String, Vec<String>>>,
@@ -1567,6 +1580,13 @@ pub struct CodeGen {
     /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
     /// Used to lower deref of `self` correctly (`*self` should not become `*(*this)` recursion).
     pub(crate) self_receiver_ref_scopes: Vec<bool>,
+    /// Parallel to `self_receiver_ref_scopes`: true when the current method's
+    /// receiver is BY-VALUE `mut self`. A by-value NON-mut receiver with a
+    /// bare tail `self` is provably emitted const (the non-const arms of the
+    /// qualifier decision all require `mut` or Rust-illegal bodies), which
+    /// the tail-self lowering uses to clone instead of emitting a deleted
+    /// const-move for move-only types.
+    pub(crate) self_receiver_val_mut_scopes: Vec<bool>,
     /// Pattern bindings introduced as `ref`/`ref mut` in the current emission scope.
     /// Used for reference-aware unary deref lowering in match/visit arms.
     pub(crate) pattern_ref_bindings: Vec<HashSet<String>>,
@@ -2216,6 +2236,8 @@ impl CodeGen {
             iflet_result_counter: 0,
             struct_field_types: std::rc::Rc::new(HashMap::new()),
             copy_derived_types: HashSet::new(),
+            move_only_types: HashSet::new(),
+            clone_capable_types: HashSet::new(),
             struct_field_order: std::rc::Rc::new(HashMap::new()),
             struct_field_cpp_names: std::rc::Rc::new(HashMap::new()),
             struct_reference_fields: HashMap::new(),
@@ -2283,6 +2305,7 @@ impl CodeGen {
             param_bindings: Vec::new(),
             callable_param_bound_scopes: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
+            self_receiver_val_mut_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
             deref_method_scopes: Vec::new(),
             deref_mut_method_scopes: Vec::new(),
@@ -4843,6 +4866,8 @@ impl CodeGen {
         self.module_body_forward_decl_pass = false;
         std::rc::Rc::make_mut(&mut self.struct_field_types).clear();
         self.copy_derived_types.clear();
+        self.move_only_types.clear();
+        self.clone_capable_types.clear();
         std::rc::Rc::make_mut(&mut self.struct_field_order).clear();
         std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).clear();
         self.struct_reference_fields.clear();
@@ -4893,6 +4918,7 @@ impl CodeGen {
         self.hoisted_local_type_name_scopes.clear();
         self.movable_match_binding_scopes.borrow_mut().clear();
         self.self_receiver_ref_scopes.clear();
+        self.self_receiver_val_mut_scopes.clear();
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
@@ -22418,6 +22444,69 @@ impl CodeGen {
         v.found
     }
 
+    /// Recursive one-level walk: does `ty` mention a type whose emission has
+    /// no usable copy ctor (String/Vec/Box/maps/…)? Feeds `move_only_types`.
+    pub(super) fn type_contains_known_move_only(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => tp.path.segments.iter().any(|seg| {
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "String"
+                        | "Vec"
+                        | "VecDeque"
+                        | "Box"
+                        | "BTreeMap"
+                        | "BTreeSet"
+                        | "HashMap"
+                        | "HashSet"
+                        | "Map"
+                        | "OsString"
+                        | "PathBuf"
+                ) || match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(ab) => {
+                        ab.args.iter().any(|a| match a {
+                            syn::GenericArgument::Type(t) => {
+                                Self::type_contains_known_move_only(t)
+                            }
+                            _ => false,
+                        })
+                    }
+                    _ => false,
+                }
+            }),
+            syn::Type::Tuple(t) => t.elems.iter().any(Self::type_contains_known_move_only),
+            syn::Type::Array(a) => Self::type_contains_known_move_only(&a.elem),
+            syn::Type::Paren(p) => Self::type_contains_known_move_only(&p.elem),
+            syn::Type::Group(g) => Self::type_contains_known_move_only(&g.elem),
+            // References/pointers are copyable regardless of the referent.
+            _ => false,
+        }
+    }
+
+    /// True when the current struct/enum has Clone available (see
+    /// `clone_capable_types`).
+    pub(super) fn current_struct_is_clone_capable(&self) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        self.clone_capable_types.contains(struct_name)
+            || self
+                .clone_capable_types
+                .contains(&self.scoped_type_key(struct_name))
+    }
+
+    /// True when the current struct/enum is registered move-only (see
+    /// `move_only_types`).
+    pub(super) fn current_struct_is_known_move_only(&self) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        self.move_only_types.contains(struct_name)
+            || self
+                .move_only_types
+                .contains(&self.scoped_type_key(struct_name))
+    }
+
     fn body_moves_out_self_field(block: &syn::Block) -> bool {
         use syn::visit::Visit;
         struct V {
@@ -33311,10 +33400,24 @@ impl CodeGen {
             Some(syn::FnArg::Receiver(recv)) if recv.reference.is_some()
         );
         self.self_receiver_ref_scopes.push(is_ref);
+        let is_val_mut = matches!(
+            inputs.first(),
+            Some(syn::FnArg::Receiver(recv))
+                if recv.reference.is_none() && recv.mutability.is_some()
+        );
+        self.self_receiver_val_mut_scopes.push(is_val_mut);
     }
 
     fn pop_self_receiver_ref_scope(&mut self) {
         self.self_receiver_ref_scopes.pop();
+        self.self_receiver_val_mut_scopes.pop();
+    }
+
+    fn current_self_receiver_is_val_mut(&self) -> bool {
+        self.self_receiver_val_mut_scopes
+            .last()
+            .copied()
+            .unwrap_or(false)
     }
 
     fn current_self_receiver_is_reference(&self) -> bool {
@@ -48859,6 +48962,31 @@ pub(crate) fn resolve_impl_method_conflict(
     // Conflicts are rare, so cloning to sidestep the borrow is cheap.
     let existing = existing.clone();
     let should_replace = should_replace_conflicting_impl_method(&existing, &merged);
+    // A ref-self impl colliding with its value-self twin (`impl Tr for &T` vs
+    // `impl Tr for T`): the merged C++ signature is the VALUE shape, so the
+    // value-self impl must win the plain name. Hoisting the ref-self body
+    // under the value receiver miscompiles consuming bodies — serde_json's
+    // `IntoDeserializer for &Value` won and `fn(self) -> Self { self }`
+    // became a const method doing `std::move(*this)` (deleted copy).
+    let ref_value_twin_preference = (|| {
+        let exist_origin = prior_origin.as_deref()?;
+        let (cand_trait, cand_self) = split_impl_origin(origin)?;
+        let (exist_trait, exist_self) = split_impl_origin(exist_origin)?;
+        if cand_trait.split('<').next()?.trim() != exist_trait.split('<').next()?.trim() {
+            return None;
+        }
+        if normalize_collapse_self_ty(cand_self) != normalize_collapse_self_ty(exist_self) {
+            return None;
+        }
+        let cand_ref = cand_self.trim_start().starts_with('&');
+        let exist_ref = exist_self.trim_start().starts_with('&');
+        match (exist_ref, cand_ref) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
+    })();
+    let should_replace = ref_value_twin_preference.unwrap_or(should_replace);
     let (kept, dropped) = if should_replace {
         (&merged, &existing)
     } else {
@@ -48998,9 +49126,49 @@ fn preserve_dropped_collapse_body(
     }
     let mut preserved = dropped.clone();
     preserved.sig.ident = syn::Ident::new(&tag, preserved.sig.ident.span());
+    // Ref-self loser hoisted onto the value-self twin: its `Self` returns were
+    // references, but the hoisted signature returns BY VALUE, so a returned
+    // borrow must clone (`Default for &Value` returned `&DEFAULT` from a
+    // static — peeled to `return DEFAULT`, a deleted copy of a non-Copy
+    // static). Same trait head + normalize-equal self = the ref-wrapper case.
+    let ref_self_loser = kept_origin
+        .and_then(split_impl_origin)
+        .is_some_and(|(kh, _)| kh.split('<').next().unwrap_or(kh).trim() == trait_head)
+        && dropped_self.trim_start().starts_with('&');
+    if ref_self_loser {
+        clone_borrowed_returns_in_block(&mut preserved.block);
+    }
     entry.push(syn::ImplItem::Fn(preserved));
     record_preserved_collapse_body(type_name, &tag, trait_head, &dropped.sig.ident.to_string());
     Some(tag)
+}
+
+/// Rewrite the return positions of a preserved ref-self body for value-self
+/// hoisting: `&X` returned where the hoisted signature returns by value must
+/// become `X.clone()`. Tail expression + top-level `return` statements only —
+/// the bodies this machinery preserves are short trait-impl forwarders.
+fn clone_borrowed_returns_in_block(block: &mut syn::Block) {
+    for stmt in &mut block.stmts {
+        match stmt {
+            syn::Stmt::Expr(expr, _) => clone_borrowed_return_expr(expr),
+            _ => {}
+        }
+    }
+}
+
+fn clone_borrowed_return_expr(expr: &mut syn::Expr) {
+    match expr {
+        syn::Expr::Reference(r) if r.mutability.is_none() => {
+            let inner = (*r.expr).clone();
+            *expr = syn::parse_quote!(#inner.clone());
+        }
+        syn::Expr::Return(r) => {
+            if let Some(inner) = r.expr.as_mut() {
+                clone_borrowed_return_expr(inner);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Shared tag sanitizer for preserved collapse bodies. Preserve-time and every

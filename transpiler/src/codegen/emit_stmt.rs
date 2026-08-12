@@ -458,8 +458,23 @@ impl CodeGen {
                     )
                     && !self.current_self_receiver_is_reference()
                 {
+                    // Non-mut by-value receiver ⇒ the method was emitted
+                    // const; `std::move((*this))` there is `const T&&`, a
+                    // deleted copy for move-only types (serde_json's
+                    // `fn into_deserializer(self) -> Value { self }`).
+                    // Clone instead — same value, and the const modeling
+                    // stays (btree B3 as_const dispatch).
+                    let const_move_only = !self.current_self_receiver_is_val_mut()
+                        && self.current_struct_is_known_move_only()
+                        && self.current_struct_is_clone_capable();
                     expr_str = if let Some(self_name) = self.current_self_path_override() {
-                        format!("std::move({})", self_name)
+                        if const_move_only {
+                            format!("rusty::clone({})", self_name)
+                        } else {
+                            format!("std::move({})", self_name)
+                        }
+                    } else if const_move_only {
+                        "rusty::clone((*this))".to_string()
                     } else {
                         "std::move((*this))".to_string()
                     };

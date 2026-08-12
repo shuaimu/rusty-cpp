@@ -23003,8 +23003,21 @@ impl CodeGen {
                                 if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
                         ) && !self.current_self_receiver_is_reference()
                         {
+                            // See the tail-self note in emit_stmt: a non-mut
+                            // by-value receiver was emitted const, where a
+                            // move from *this is a deleted copy for
+                            // move-only types — clone instead.
+                            let const_move_only = !self.current_self_receiver_is_val_mut()
+                                && self.current_struct_is_known_move_only()
+                                && self.current_struct_is_clone_capable();
                             val = if let Some(self_name) = self.current_self_path_override() {
-                                format!("std::move({})", self_name)
+                                if const_move_only {
+                                    format!("rusty::clone({})", self_name)
+                                } else {
+                                    format!("std::move({})", self_name)
+                                }
+                            } else if const_move_only {
+                                "rusty::clone((*this))".to_string()
                             } else {
                                 "std::move((*this))".to_string()
                             };
