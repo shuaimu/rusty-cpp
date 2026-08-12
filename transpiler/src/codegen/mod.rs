@@ -18370,6 +18370,11 @@ impl CodeGen {
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
         return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
+        // UFCS heads deduce `Self_&&` as an lvalue reference for `&mut self`
+        // receivers (Compound<...>&), where a leading `typename Self_::Error`
+        // is ill-formed — spell through remove_cvref (identity for value Self_).
+        return_type =
+            return_type.replace("typename Self_::", "typename std::remove_cvref_t<Self_>::");
         self.suppress_dependent_assoc_traits_routing
             .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
@@ -18525,6 +18530,11 @@ impl CodeGen {
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
         return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
+        // UFCS heads deduce `Self_&&` as an lvalue reference for `&mut self`
+        // receivers (Compound<...>&), where a leading `typename Self_::Error`
+        // is ill-formed — spell through remove_cvref (identity for value Self_).
+        return_type =
+            return_type.replace("typename Self_::", "typename std::remove_cvref_t<Self_>::");
         self.suppress_dependent_assoc_traits_routing
             .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
@@ -18704,6 +18714,11 @@ impl CodeGen {
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
         return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
+        // UFCS heads deduce `Self_&&` as an lvalue reference for `&mut self`
+        // receivers (Compound<...>&), where a leading `typename Self_::Error`
+        // is ill-formed — spell through remove_cvref (identity for value Self_).
+        return_type =
+            return_type.replace("typename Self_::", "typename std::remove_cvref_t<Self_>::");
         self.suppress_dependent_assoc_traits_routing
             .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {

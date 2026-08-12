@@ -540,7 +540,7 @@ impl CodeGen {
             );
             out = Self::replace_type_token_at_ident_boundary(
                 &out,
-                "typename Self_::Item",
+                "typename std::remove_cvref_t<Self_>::Item",
                 "rusty::detail::associated_item_t<std::remove_reference_t<Self_>>",
             );
             out
@@ -2226,6 +2226,12 @@ impl CodeGen {
                         // `Self_`; keep `Self::Assoc` qualified as a dependent name
                         // (`typename Self_::Assoc`) instead of stripping to bare.
                         let tail = path_str.trim_start_matches("Self::").to_string();
+                        // NB: do NOT spell remove_cvref here — the
+                        // maybe_prefix helper's dependent-name detection keys
+                        // on the leading segment, and a `std::`-led spelling
+                        // loses its `typename` (broke alloc body declarators).
+                        // The UFCS-head lvalue-ref case is handled by the
+                        // return-type pipeline replace in mod.rs instead.
                         return self
                             .maybe_prefix_typename_for_dependent_path(format!("Self_::{}", tail));
                     }
@@ -2883,7 +2889,7 @@ impl CodeGen {
                                         base = "rusty::detail::associated_item_t<std::remove_reference_t<Self_>>"
                                             .to_string();
                                     } else {
-                                        base = format!("typename Self_::{}", tail);
+                                        base = format!("typename std::remove_cvref_t<Self_>::{}", tail);
                                     }
                                 } else {
                                     base = base.trim_start_matches("Self::").to_string();

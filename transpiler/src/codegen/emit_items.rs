@@ -5376,7 +5376,10 @@ impl CodeGen {
             .iter()
             .filter_map(|item| {
                 if let syn::TraitItem::Type(assoc) = item {
-                    Some(format!("typename Self_::{}", assoc.ident))
+                    Some(format!(
+                        "typename std::remove_cvref_t<Self_>::{}",
+                        assoc.ident
+                    ))
                 } else {
                     None
                 }
