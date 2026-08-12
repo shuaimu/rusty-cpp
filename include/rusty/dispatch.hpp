@@ -135,6 +135,20 @@ struct diverging_value {
     [[noreturn]] operator T() const {
         std::abort();
     }
+    // Reference-returning contexts (`T& unwrap_or_else(f)` with a diverging
+    // closure — Rust `.unwrap_or_else(|| panic!())` on a `&mut` Option view)
+    // need an lvalue binding; the panic fires before any use. Constrained to
+    // non-copyable T so value contexts keep the unambiguous operator above
+    // (both would be viable for copyable T and make `int x = dv` ambiguous).
+    // The self-exclusion must come FIRST: asking is_copy_constructible of
+    // diverging_value itself re-enters this operator's constraint
+    // ("satisfaction of constraint depends on itself").
+    template<typename T>
+        requires (!std::is_same_v<std::remove_cv_t<T>, diverging_value>
+            && !std::is_copy_constructible_v<T>)
+    [[noreturn]] operator T&() const {
+        std::abort();
+    }
 };
 
 /// @brief Move-capture surrogate for a reference-typed binding in a `move`
