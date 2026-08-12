@@ -2126,7 +2126,7 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         let member_style_arity = (path_expr.path.segments.len() > 2
             && call_arity > 0
             && Self::symbol_is_member_method(&symbol))
-        .then_some(call_arity - 1);
+        .then(|| call_arity - 1);
         if Self::symbol_is_template(&symbol) && symbol.callable_signatures.is_empty() {
             self.record_diagnostic(
                 &call_site,
@@ -4617,6 +4617,46 @@ fn write(message: &String) {
         assert!(output.contains("import rrr.logging;"));
         assert!(output.contains("rrr::log_line("));
         assert!(!output.contains("rrr::logging::log_line("));
+    }
+
+    #[test]
+    fn test_cpp_module_zero_argument_template_call_does_not_underflow() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr::reactor".to_string(),
+                    CppModuleIndexModule {
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::from([(
+                            "create_sp_box_event".to_string(),
+                            CppModuleIndexSymbol {
+                                kind: Some("function_template".to_string()),
+                                callable_signatures: vec!["BoxEvent<T>()".to_string()],
+                            },
+                        )]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::rrr::reactor as cpp_reactor;
+fn make<T>() {
+    unsafe { cpp_reactor::create_sp_box_event::<T>(); }
+}
+"#,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("zero-argument indexed template call should transpile");
+
+        assert!(output.contains("import rrr.reactor;"));
+        assert!(output.contains("rrr::create_sp_box_event<T>()"));
     }
 
     #[test]

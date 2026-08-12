@@ -1980,11 +1980,14 @@ fn item_macro_introduces_assert(item: &syn::ItemMacro) -> bool {
 
 /// The only macro surface admitted while crate-mode ABI contracts are active.
 /// Keep this structural and deliberately narrow: the built-in must be the
-/// exact unqualified `assert!(EXPR)` spelling, use parentheses, and contain
-/// one expression with no message/trailing argument. Because syntax alone
-/// cannot distinguish a shadowing imported macro from the built-in, `assert`
-/// is also a reserved macro-binding name everywhere in an adapter crate.
-fn parse_exact_single_expr_assert(mac: &syn::Macro) -> Option<Expr> {
+/// exact unqualified `assert!(EXPR)` or `assert!(EXPR, "literal")` spelling,
+/// use parentheses, and contain no trailing argument. The diagnostic literal
+/// must contain only printable ASCII and no format braces; it is otherwise
+/// inert, and only `EXPR` is returned for recursive auditing. Because syntax
+/// alone cannot distinguish a shadowing imported macro from the built-in,
+/// `assert` is also a reserved macro-binding name everywhere in an adapter
+/// crate.
+fn parse_admitted_assert_expression(mac: &syn::Macro) -> Option<Expr> {
     if mac.path.leading_colon.is_some()
         || mac.path.segments.len() != 1
         || mac.path.segments[0].ident.to_string() != "assert"
@@ -1993,7 +1996,27 @@ fn parse_exact_single_expr_assert(mac: &syn::Macro) -> Option<Expr> {
     {
         return None;
     }
-    syn::parse2::<Expr>(mac.tokens.clone()).ok()
+    let parser = |input: syn::parse::ParseStream<'_>| {
+        let expression: Expr = input.parse()?;
+        if input.is_empty() {
+            return Ok(expression);
+        }
+        input.parse::<Token![,]>()?;
+        let message: syn::LitStr = input.parse()?;
+        if !message
+            .value()
+            .chars()
+            .all(|character| matches!(character, ' '..='~') && !matches!(character, '{' | '}'))
+        {
+            return Err(input
+                .error("assert literal messages must be printable ASCII without format braces"));
+        }
+        if !input.is_empty() {
+            return Err(input.error("assert literal message must be the final argument"));
+        }
+        Ok(expression)
+    };
+    parser.parse2(mac.tokens.clone()).ok()
 }
 
 #[derive(Default)]
@@ -2076,7 +2099,7 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
             return;
         }
         if !self.inside_assert_expression
-            && let Some(expression) = parse_exact_single_expr_assert(mac)
+            && let Some(expression) = parse_admitted_assert_expression(mac)
         {
             self.inside_assert_expression = true;
             self.visit_expr(&expression);
@@ -2673,7 +2696,7 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
             return;
         }
         if !self.inside_assert_expression
-            && let Some(expression) = parse_exact_single_expr_assert(mac)
+            && let Some(expression) = parse_admitted_assert_expression(mac)
         {
             self.inside_assert_expression = true;
             self.visit_expr(&expression);
@@ -5042,11 +5065,11 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
             return;
         }
         if !self.inside_assert_expression
-            && let Some(expression) = parse_exact_single_expr_assert(mac)
+            && let Some(expression) = parse_admitted_assert_expression(mac)
         {
             if token_stream_mentions_names(mac.tokens.clone(), self.names) {
                 self.error = Some(format!(
-                    "the admitted `assert!(EXPR)` cannot mention a cpp_abi callable or alias; found `{}`",
+                    "the admitted `assert!(EXPR[, \"literal\"])` cannot mention a cpp_abi callable or alias; found `{}`",
                     mac.tokens
                 ));
                 return;
@@ -5059,7 +5082,7 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
         }
         if self.inside_assert_expression {
             self.error = Some(format!(
-                "nested opaque macro `{}` is unsupported inside the admitted `assert!(EXPR)`",
+                "nested opaque macro `{}` is unsupported inside the admitted `assert!(EXPR[, \"literal\"])`",
                 mac.path.to_token_stream()
             ));
             return;
@@ -8208,7 +8231,7 @@ mod tests {
     }
 
     #[test]
-    fn crate_preflight_allows_only_one_expression_unqualified_assert_macro() {
+    fn crate_preflight_allows_only_exact_unqualified_assert_forms() {
         let provider = r#"
             #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes)))]
             pub fn adapted(v: Vec<u8>) -> bool { !v.is_empty() }
@@ -8217,19 +8240,82 @@ mod tests {
             "{provider}\npub fn checked(value: usize) -> usize {{ assert!(value < 8); value }}"
         );
         assert_rustc_valid(&valid_source, "single-expression assert with adapter");
-        assert_eq!(
-            preflight_crate_sources(&crate_units(&[("src/lib.rs", &valid_source)])).unwrap(),
-            true
-        );
+        assert!(preflight_crate_sources(&crate_units(&[("src/lib.rs", &valid_source)])).unwrap());
+
+        for (label, message, emitted) in [
+            (
+                "cooked literal-message assert with adapter",
+                r#""cooked message""#,
+                r#"throw std::logic_error("cooked message");"#,
+            ),
+            (
+                "raw literal-message assert with adapter",
+                r##"r#"raw message: adapted cpp_abi assert!(matches!())"#"##,
+                r#"throw std::logic_error("raw message: adapted cpp_abi assert!(matches!())");"#,
+            ),
+            (
+                "quoted and backslashed literal-message assert with adapter",
+                r#""quote: \" and slash: \\ end""#,
+                r#"throw std::logic_error("quote: \" and slash: \\ end");"#,
+            ),
+        ] {
+            let literal_message = format!(
+                "{provider}\npub fn checked(value: usize) -> usize {{ assert!(value < 8, {message}); value }}"
+            );
+            assert_rustc_valid(&literal_message, label);
+            assert!(
+                preflight_crate_sources(&crate_units(&[("src/lib.rs", &literal_message)]))
+                    .unwrap()
+            );
+            let cpp = crate::transpile::transpile(&literal_message, Some("literal_assert"))
+                .unwrap_or_else(|error| panic!("{label} failed to transpile: {error}"));
+            assert!(
+                cpp.contains(emitted),
+                "{label} changed message bytes:\n{cpp}"
+            );
+        }
 
         for (label, invocation) in [
             ("arbitrary macro", "assert_eq!(1, 1);"),
-            ("assert message", "assert!(true, \"message\");"),
+            (
+                "assert implicit capture",
+                "let value = 1; assert!(true, \"message {value}\");",
+            ),
+            (
+                "assert positional format",
+                "let value = 1; assert!(true, \"message {}\", value);",
+            ),
+            (
+                "assert named format",
+                "let value = 1; assert!(true, \"message {shown}\", shown = value);",
+            ),
+            (
+                "assert escaped braces",
+                "assert!(true, \"message {{literal}}\");",
+            ),
+            (
+                "assert raw-string braces",
+                "let value = 1; assert!(true, r#\"message {value}\"#);",
+            ),
+            ("assert NUL", "assert!(true, \"message\\0tail\");"),
+            (
+                "assert control followed by hex digit",
+                r#"assert!(true, "message \u{1}A");"#,
+            ),
+            ("assert newline", "assert!(true, \"line\\nbreak\");"),
+            ("assert tab", "assert!(true, \"column\\ttwo\");"),
+            ("assert Unicode", "assert!(true, \"café\");"),
             ("assert trailing comma", "assert!(true,);"),
-            ("qualified assert", "core::assert!(true);"),
+            (
+                "assert literal message trailing comma",
+                "assert!(true, \"message\",);",
+            ),
+            ("qualified assert", "core::assert!(true, \"message\");"),
+            ("brace-delimited assert", "assert! { true };"),
+            ("bracket-delimited assert", "assert![true];"),
             (
                 "nested opaque macro",
-                "assert!(matches!(Some(1), Some(_)));",
+                "assert!(matches!(Some(1), Some(_)), \"message\");",
             ),
         ] {
             let source = format!("{provider}\npub fn checked() {{ {invocation} }}");
@@ -8244,11 +8330,91 @@ mod tests {
             ("src/api.rs", provider),
             (
                 "src/sibling.rs",
-                "pub fn bad() { assert!(crate::api::adapted(Vec::new())); }",
+                "pub fn bad() { assert!(crate::api::adapted(Vec::new()), \"message\"); }",
             ),
         ]);
         let error = preflight_crate_sources(&external).unwrap_err();
         assert!(error.contains("sibling-file reference"), "{error}");
+    }
+
+    #[test]
+    fn admitted_assert_literal_preserves_quote_and_backslash_bytes_in_clang_runtime() {
+        let compiler = ["clang++", "clang++-22", "clang++-21"]
+            .into_iter()
+            .find(|candidate| {
+                std::process::Command::new(candidate)
+                    .arg("--version")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok()
+            });
+        let Some(compiler) = compiler else {
+            eprintln!("skipping assert literal runtime proof: no clang++ in PATH");
+            return;
+        };
+        let source = r##"
+            #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes)))]
+            pub fn adapted(v: Vec<u8>) { let _ = v; }
+
+            pub fn checked() {
+                assert!(false, r#"quote: " and slash: \ end"#);
+            }
+        "##;
+        assert_rustc_valid(source, "quoted and backslashed assert literal");
+        assert!(preflight_crate_sources(&crate_units(&[("src/lib.rs", source)])).unwrap());
+
+        let emission_source = r##"
+            pub fn checked() {
+                assert!(false, r#"quote: " and slash: \ end"#);
+            }
+        "##;
+        let mut cpp = crate::transpile::transpile(emission_source, None).unwrap();
+        assert!(
+            cpp.contains(r#"throw std::logic_error("quote: \" and slash: \\ end");"#),
+            "assert message was not escaped exactly:\n{cpp}"
+        );
+        cpp.push_str(
+            r#"
+int main() {
+    try {
+        checked();
+    } catch (const std::logic_error& error) {
+        return std::string_view(error.what()) == R"(quote: " and slash: \ end)" ? 0 : 2;
+    }
+    return 3;
+}
+"#,
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let cpp_path = temp.path().join("assert_literal.cpp");
+        let binary_path = temp.path().join("assert_literal");
+        std::fs::write(&cpp_path, cpp).unwrap();
+        let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("include");
+        let compile = std::process::Command::new(compiler)
+            .arg("-std=c++23")
+            .arg("-I")
+            .arg(include_dir)
+            .arg(&cpp_path)
+            .arg("-o")
+            .arg(&binary_path)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "assert literal C++ compile failed:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = std::process::Command::new(binary_path).output().unwrap();
+        assert!(
+            run.status.success(),
+            "assert literal runtime byte check failed with {:?}:\n{}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 
     #[test]
@@ -8292,7 +8458,8 @@ mod tests {
             let file = syn::parse_str(&source).unwrap();
             let error = lower(&file).expect_err(label);
             assert!(
-                error.contains("nested opaque macro") && error.contains("assert!(EXPR)"),
+                error.contains("nested opaque macro")
+                    && error.contains("assert!(EXPR[, \"literal\"])"),
                 "{label}: {error}"
             );
             let error =
