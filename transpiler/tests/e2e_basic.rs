@@ -793,6 +793,417 @@ fn test_crate_mode_with_path_dependency() {
     assert!(stdout.contains("will transpile recursively"));
 }
 
+#[test]
+fn test_crate_mode_uses_exact_local_rusty_package_as_rustc_only_runtime_facade() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let runtime_dir = dir.path().join("rusty-rustc");
+    std::fs::create_dir_all(runtime_dir.join("src")).unwrap();
+    std::fs::write(
+        runtime_dir.join("Cargo.toml"),
+        "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        runtime_dir.join("src/lib.rs"),
+        "#![deny(unsafe_code)]\npub struct Function<F: ?Sized> { inner: Option<Box<F>> }\n",
+    )
+    .unwrap();
+
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(app_dir.join("src")).unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\nrusty = { path = \"../rusty-rustc\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("src/lib.rs"),
+        "pub type Callback = rusty::Function<dyn Fn(i32) -> i32>;\n",
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = std::fs::read_to_string(out_dir.join("app.cppm")).unwrap();
+    assert!(
+        generated.contains("rusty::Function<int32_t(int32_t) const>"),
+        "{generated}"
+    );
+    assert!(
+        !out_dir.join("rusty").exists(),
+        "runtime facade must not produce a generated dependency directory"
+    );
+    let cmake = std::fs::read_to_string(out_dir.join("CMakeLists.txt")).unwrap();
+    assert!(!cmake.contains("add_subdirectory(rusty)"), "{cmake}");
+    assert!(!cmake.contains("PRIVATE rusty"), "{cmake}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("provided by the rusty C++ runtime"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("rustc facade is not generated"), "{stdout}");
+}
+
+#[test]
+fn test_crate_mode_rusty_runtime_identity_mismatches_fail_before_output() {
+    for (case_name, dependency, runtime_manifest, expected) in [
+        (
+            "package_mismatch",
+            "rusty = { path = \"../runtime\" }",
+            Some(
+                "[package]\nname = \"not-rusty\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+            ),
+            "refusing to omit a non-runtime crate",
+        ),
+        (
+            "library_mismatch",
+            "rusty = { path = \"../runtime\" }",
+            Some(
+                "[package]\nname = \"rusty\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"not_rusty\"\npath = \"src/lib.rs\"\n",
+            ),
+            "does not expose an ordinary Rust library target named exactly 'rusty'",
+        ),
+        (
+            "renamed_reserved_package",
+            "runtime = { package = \"rusty\", path = \"../runtime\" }",
+            Some(
+                "[package]\nname = \"rusty\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+            ),
+            "renames reserved runtime package 'rusty'",
+        ),
+        (
+            "registry_package",
+            "rusty = \"1\"",
+            None,
+            "reserved for an exact local path dependency",
+        ),
+        (
+            "optional_runtime",
+            "rusty = { path = \"../runtime\", optional = true }",
+            Some(
+                "[package]\nname = \"rusty\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+            ),
+            "reserved runtime identity 'rusty' but is optional",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(runtime_manifest) = runtime_manifest {
+            let runtime_dir = dir.path().join("runtime");
+            std::fs::create_dir_all(runtime_dir.join("src")).unwrap();
+            std::fs::write(runtime_dir.join("Cargo.toml"), runtime_manifest).unwrap();
+            std::fs::write(runtime_dir.join("src/lib.rs"), "pub struct Facade;\n").unwrap();
+        }
+
+        let app_dir = dir.path().join("app");
+        std::fs::create_dir_all(app_dir.join("src")).unwrap();
+        std::fs::write(
+            app_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{dependency}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(app_dir.join("src/lib.rs"), "pub fn marker_free() {}\n").unwrap();
+
+        let out_dir = dir.path().join("cpp_out");
+        let output = transpiler_bin()
+            .arg("--crate")
+            .arg(app_dir.join("Cargo.toml"))
+            .arg("--output-dir")
+            .arg(&out_dir)
+            .output()
+            .expect("failed to run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "case {case_name} unexpectedly passed"
+        );
+        assert!(stderr.contains(expected), "case {case_name}: {stderr}");
+        assert!(
+            !out_dir.exists(),
+            "case {case_name} created output before identity validation"
+        );
+    }
+}
+
+#[test]
+fn test_crate_mode_preserves_unrelated_workspace_inherited_dependency() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper_dir = dir.path().join("helper");
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(helper_dir.join("src")).unwrap();
+    std::fs::create_dir_all(app_dir.join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"helper\"]\nresolver = \"2\"\n\n[workspace.dependencies]\nhelper = { path = \"helper\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        helper_dir.join("Cargo.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(helper_dir.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nhelper = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(app_dir.join("src/lib.rs"), "pub fn marker_free() {}\n").unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out_dir.join("app.cppm").exists());
+}
+
+#[test]
+fn test_crate_mode_resolves_exact_workspace_inherited_rusty_facade() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime_dir = dir.path().join("runtime");
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(runtime_dir.join("src")).unwrap();
+    std::fs::create_dir_all(app_dir.join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"runtime\"]\nresolver = \"2\"\n\n[workspace.dependencies]\nrusty = { path = \"runtime\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        runtime_dir.join("Cargo.toml"),
+        "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        runtime_dir.join("src/lib.rs"),
+        "pub struct Function<F: ?Sized> { inner: Option<Box<F>> }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nrusty = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("src/lib.rs"),
+        "pub type Callback = rusty::Function<dyn Fn()>;\n",
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!out_dir.join("rusty").exists());
+    let cmake = std::fs::read_to_string(out_dir.join("CMakeLists.txt")).unwrap();
+    assert!(!cmake.contains("add_subdirectory(rusty)"), "{cmake}");
+    assert!(!cmake.contains("PRIVATE rusty"), "{cmake}");
+}
+
+#[test]
+fn test_crate_mode_rejects_workspace_alias_to_reserved_rusty_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime_dir = dir.path().join("runtime");
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(runtime_dir.join("src")).unwrap();
+    std::fs::create_dir_all(app_dir.join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"runtime\"]\nresolver = \"2\"\n\n[workspace.dependencies]\nruntime = { package = \"rusty\", path = \"runtime\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        runtime_dir.join("Cargo.toml"),
+        "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(runtime_dir.join("src/lib.rs"), "pub struct Function;\n").unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nruntime = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(app_dir.join("src/lib.rs"), "pub fn marker_free() {}\n").unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("renames reserved runtime package 'rusty'"),
+        "{stderr}"
+    );
+    assert!(!out_dir.exists());
+}
+
+#[test]
+fn test_crate_mode_rejects_nonordinary_rusty_library_targets() {
+    for (case_name, runtime_manifest) in [
+        (
+            "autolib_disabled",
+            "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2021\"\nautolib = false\n\n[[bin]]\nname = \"rusty-tool\"\npath = \"src/main.rs\"\n",
+        ),
+        (
+            "proc_macro",
+            "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+        ),
+        (
+            "cdylib_only",
+            "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_dir = dir.path().join("runtime");
+        let app_dir = dir.path().join("app");
+        std::fs::create_dir_all(runtime_dir.join("src")).unwrap();
+        std::fs::create_dir_all(app_dir.join("src")).unwrap();
+        std::fs::write(runtime_dir.join("Cargo.toml"), runtime_manifest).unwrap();
+        std::fs::write(runtime_dir.join("src/lib.rs"), "pub struct Facade;\n").unwrap();
+        std::fs::write(runtime_dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            app_dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nrusty = { path = \"../runtime\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app_dir.join("src/lib.rs"), "pub fn marker_free() {}\n").unwrap();
+
+        let out_dir = dir.path().join("cpp_out");
+        let output = transpiler_bin()
+            .arg("--crate")
+            .arg(app_dir.join("Cargo.toml"))
+            .arg("--output-dir")
+            .arg(&out_dir)
+            .output()
+            .expect("failed to run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "case {case_name}: {stderr}");
+        assert!(
+            stderr.contains("does not expose an ordinary Rust library target named exactly 'rusty'"),
+            "case {case_name}: {stderr}"
+        );
+        assert!(!out_dir.exists(), "case {case_name} created output");
+    }
+}
+
+#[test]
+fn test_crate_mode_target_qualified_rusty_identity_fails_before_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(app_dir.join("src")).unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[target.'cfg(unix)'.dependencies]\nruntime = { package = \"rusty\", version = \"1\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app_dir.join("src/lib.rs"), "pub fn marker_free() {}\n").unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("target-qualified dependency 'runtime'"),
+        "{stderr}"
+    );
+    assert!(!out_dir.exists(), "created output at {}", out_dir.display());
+}
+
+#[test]
+fn test_crate_mode_transitive_rusty_identity_mismatch_fails_before_root_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let impostor_dir = dir.path().join("impostor");
+    std::fs::create_dir_all(impostor_dir.join("src")).unwrap();
+    std::fs::write(
+        impostor_dir.join("Cargo.toml"),
+        "[package]\nname = \"not-rusty\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(impostor_dir.join("src/lib.rs"), "pub struct Impostor;\n").unwrap();
+
+    let middle_dir = dir.path().join("middle");
+    std::fs::create_dir_all(middle_dir.join("src")).unwrap();
+    std::fs::write(
+        middle_dir.join("Cargo.toml"),
+        "[package]\nname = \"middle\"\nversion = \"0.1.0\"\n\n[dependencies]\nrusty = { path = \"../impostor\" }\n",
+    )
+    .unwrap();
+    std::fs::write(middle_dir.join("src/lib.rs"), "pub fn middle() {}\n").unwrap();
+
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(app_dir.join("src")).unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmiddle = { path = \"../middle\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app_dir.join("src/lib.rs"), "pub fn app() {}\n").unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("failed to run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("whole local-dependency closure preflight failed before output"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("refusing to omit a non-runtime crate"),
+        "{stderr}"
+    );
+    assert!(!out_dir.exists(), "created output at {}", out_dir.display());
+}
+
 // ── parity-test subcommand tests ────────────────────────
 
 #[test]

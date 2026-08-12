@@ -43776,31 +43776,8 @@ impl CodeGen {
     /// Map Box<dyn Fn/FnMut/FnOnce> to the appropriate C++ function type.
     /// All Box<dyn Fn*> → rusty::Function since Box implies ownership.
     fn try_map_fn_trait_boxed(&self, tb: &syn::TraitBound) -> Option<String> {
-        let last_seg = tb.path.segments.last()?;
-        let trait_name = last_seg.ident.to_string();
-
-        if !matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce") {
-            return None;
-        }
-
-        if let syn::PathArguments::Parenthesized(args) = &last_seg.arguments {
-            let param_types: Vec<String> = args
-                .inputs
-                .iter()
-                .map(|t| self.map_callable_surface_type(t))
-                .collect();
-            let return_type = match &args.output {
-                syn::ReturnType::Default => "void".to_string(),
-                syn::ReturnType::Type(_, ty) => self.map_callable_surface_type(ty),
-            };
-            Some(format!(
-                "rusty::Function<{}({})>",
-                return_type,
-                param_types.join(", ")
-            ))
-        } else {
-            None
-        }
+        let signature = self.try_map_fn_trait_bare_signature(tb)?;
+        Some(format!("rusty::Function<{signature}>"))
     }
 
     /// Clone parent context for nested block emission (for example closure bodies).

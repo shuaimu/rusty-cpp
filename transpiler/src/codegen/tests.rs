@@ -8957,9 +8957,19 @@ fn test_box_dyn_fn_once() {
 }
 
 #[test]
+fn test_box_dyn_fn_is_const_callable() {
+    let out = transpile_str("fn apply(f: Box<dyn Fn(i32) -> i32>) {}");
+    assert!(
+        out.contains("rusty::Function<int32_t(int32_t) const> f"),
+        "{out}"
+    );
+}
+
+#[test]
 fn test_box_dyn_fn_mut_uses_rusty_function() {
     let out = transpile_str("fn apply(f: Box<dyn FnMut(i32) -> i32>) {}");
     assert!(out.contains("rusty::Function<int32_t(int32_t)> f"));
+    assert!(!out.contains("int32_t(int32_t) const"), "{out}");
 }
 
 #[test]

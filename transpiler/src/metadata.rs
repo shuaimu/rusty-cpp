@@ -24,6 +24,39 @@ pub struct LocalDependencyPackage {
     pub extern_crate_roots: Vec<String>,
 }
 
+/// Cargo-resolved view of one direct dependency from a package manifest.
+///
+/// Unlike the raw TOML dependency table, this includes values inherited from
+/// `[workspace.dependencies]` and therefore preserves the selected package
+/// identity for renamed dependencies.
+#[derive(Debug, Clone)]
+pub struct ManifestDependency {
+    pub dependency_key: String,
+    pub package_name: String,
+    pub source: Option<String>,
+    pub path: Option<PathBuf>,
+    pub kind: Option<String>,
+    pub target: Option<String>,
+    pub optional: bool,
+}
+
+/// Cargo-resolved target identity for one package manifest.
+#[derive(Debug, Clone)]
+pub struct ManifestTarget {
+    pub name: String,
+    pub kind: Vec<String>,
+    pub crate_types: Vec<String>,
+    pub src_path: PathBuf,
+}
+
+/// Exact Cargo package, dependency, and target identities for one manifest.
+#[derive(Debug, Clone)]
+pub struct ManifestIdentity {
+    pub package_name: String,
+    pub dependencies: Vec<ManifestDependency>,
+    pub targets: Vec<ManifestTarget>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TargetKind {
     Lib,
@@ -101,6 +134,21 @@ struct Package {
     version: String,
     targets: Vec<Target>,
     manifest_path: PathBuf,
+    #[serde(default)]
+    dependencies: Vec<PackageDependency>,
+}
+
+#[derive(Deserialize)]
+struct PackageDependency {
+    name: String,
+    source: Option<String>,
+    #[serde(default)]
+    rename: Option<String>,
+    #[serde(default)]
+    optional: bool,
+    kind: Option<String>,
+    target: Option<String>,
+    path: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +198,8 @@ struct ResolveDepKind {
 struct Target {
     name: String,
     kind: Vec<String>,
+    #[serde(default)]
+    crate_types: Vec<String>,
     src_path: String,
 }
 
@@ -392,6 +442,80 @@ pub fn discover_targets(
     Ok((pkg.name.clone(), targets))
 }
 
+/// Ask Cargo for the exact package/dependency/target identities represented by
+/// a manifest without resolving or downloading the dependency graph.
+///
+/// `--no-deps` is sufficient here: Cargo still expands workspace-inherited
+/// dependency declarations and reports the package's own targets, while the
+/// command remains independent of registry availability.
+pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentity, String> {
+    let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let output = std::process::Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--no-deps")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .current_dir(project_dir)
+        .output()
+        .map_err(|error| format!("Failed to run cargo metadata: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Failed to parse cargo metadata: {error}"))?;
+    let requested_manifest = canonicalized_path(manifest_path);
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| canonicalized_path(&package.manifest_path) == requested_manifest)
+        .ok_or_else(|| {
+            format!(
+                "cargo metadata did not report the requested package manifest {}",
+                manifest_path.display()
+            )
+        })?;
+
+    let dependencies = package
+        .dependencies
+        .iter()
+        .map(|dependency| ManifestDependency {
+            dependency_key: dependency
+                .rename
+                .clone()
+                .unwrap_or_else(|| dependency.name.clone()),
+            package_name: dependency.name.clone(),
+            source: dependency.source.clone(),
+            path: dependency.path.clone(),
+            kind: dependency.kind.clone(),
+            target: dependency.target.clone(),
+            optional: dependency.optional,
+        })
+        .collect();
+    let targets = package
+        .targets
+        .iter()
+        .map(|target| ManifestTarget {
+            name: target.name.clone(),
+            kind: target.kind.clone(),
+            crate_types: target.crate_types.clone(),
+            src_path: PathBuf::from(&target.src_path),
+        })
+        .collect();
+
+    Ok(ManifestIdentity {
+        package_name: package.name.clone(),
+        dependencies,
+        targets,
+    })
+}
+
 /// Discover resolved dependency packages for the selected package.
 ///
 /// Returns dependency packages in deterministic dependency order
@@ -627,6 +751,7 @@ mod tests {
         let proc_macro_target = Target {
             name: "pollster_macro".to_string(),
             kind: vec!["proc-macro".to_string()],
+            crate_types: vec!["proc-macro".to_string()],
             src_path: "src/lib.rs".to_string(),
         };
         assert!(!target_is_library_like(&proc_macro_target));
@@ -634,6 +759,7 @@ mod tests {
         let lib_target = Target {
             name: "pollster".to_string(),
             kind: vec!["lib".to_string()],
+            crate_types: vec!["lib".to_string()],
             src_path: "src/lib.rs".to_string(),
         };
         assert!(target_is_library_like(&lib_target));
@@ -745,12 +871,14 @@ mod tests {
                     version: "0.0.0".to_string(),
                     targets: vec![],
                     manifest_path: xtask_manifest,
+                    dependencies: vec![],
                 },
                 Package {
                     name: "root_pkg".to_string(),
                     version: "0.1.0".to_string(),
                     targets: vec![],
                     manifest_path: root_manifest.clone(),
+                    dependencies: vec![],
                 },
             ],
         };
@@ -783,12 +911,14 @@ mod tests {
                     version: "0.1.0".to_string(),
                     targets: vec![],
                     manifest_path: root_manifest.clone(),
+                    dependencies: vec![],
                 },
                 Package {
                     name: "xtask".to_string(),
                     version: "0.0.0".to_string(),
                     targets: vec![],
                     manifest_path: member_manifest,
+                    dependencies: vec![],
                 },
             ],
         };

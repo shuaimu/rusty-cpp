@@ -334,6 +334,7 @@ fn reject_cpp_abi_in_nonconventional_target_roots(
 struct CppAbiClosureReport {
     any_cpp_abi: bool,
     issues: BTreeSet<String>,
+    runtime_dependency_issues: BTreeSet<String>,
 }
 
 struct CppAbiClosurePreflight {
@@ -411,6 +412,10 @@ impl CppAbiClosurePreflight {
 
     fn issue(&mut self, message: impl Into<String>) {
         self.report.issues.insert(message.into());
+    }
+
+    fn runtime_dependency_issue(&mut self, message: impl Into<String>) {
+        self.report.runtime_dependency_issues.insert(message.into());
     }
 
     fn note_cpp_abi(&mut self, cargo_toml_path: &Path) {
@@ -660,6 +665,18 @@ impl CppAbiClosurePreflight {
                 return;
             }
         };
+        let dependencies = cmake::extract_dependencies(&cargo);
+        let runtime_provided =
+            match validate_rustc_only_runtime_dependencies(cargo_toml_path, &dependencies) {
+                Ok(runtime_provided) => runtime_provided,
+                Err(error) => {
+                    self.runtime_dependency_issue(format!(
+                        "{}: {error}",
+                        cargo_toml_path.display()
+                    ));
+                    HashSet::new()
+                }
+            };
 
         let (sources, source_units) = self.read_source_units(project_dir, cargo_toml_path);
         let declared_target_mentions_cpp_abi =
@@ -692,7 +709,7 @@ impl CppAbiClosurePreflight {
             self.issue(format!("{}: {error}", cargo_toml_path.display()));
         }
 
-        let mut dependencies = cmake::extract_dependencies(&cargo)
+        let mut dependencies = dependencies
             .into_iter()
             .filter(|dependency| dependency.is_local)
             .collect::<Vec<_>>();
@@ -702,6 +719,15 @@ impl CppAbiClosurePreflight {
                 .then_with(|| left.path.cmp(&right.path))
         });
         for dependency in dependencies {
+            if dependency.target.is_some() {
+                continue;
+            }
+            if runtime_provided.contains(&dependency.name)
+                || dependency.name == RUSTY_RUNTIME_CRATE_NAME
+                || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
+            {
+                continue;
+            }
             let Some(relative) = dependency.path.as_deref() else {
                 continue;
             };
@@ -711,6 +737,16 @@ impl CppAbiClosurePreflight {
     }
 
     fn finish(self) -> Result<bool, String> {
+        if !self.report.runtime_dependency_issues.is_empty() {
+            return Err(format!(
+                "rustc-only runtime dependency whole local-dependency closure preflight failed before output:\n- {}",
+                self.report
+                    .runtime_dependency_issues
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            ));
+        }
         if self.report.any_cpp_abi && !self.report.issues.is_empty() {
             return Err(format!(
                 "cpp_abi whole local-dependency closure preflight failed before output:\n- {}",
@@ -735,6 +771,206 @@ fn preflight_cpp_abi_whole_dependency_closure(
     preflight.finish()
 }
 
+const RUSTY_RUNTIME_CRATE_NAME: &str = "rusty";
+
+/// Identify the Rust-only facade for types supplied by the C++ runtime.
+///
+/// `rusty` is a reserved generated-code namespace, so silently treating a
+/// registry crate, renamed package, or mismatched local target as the runtime
+/// would make crate mode omit real code.  Only an exact local dependency and
+/// exact Cargo package/library identity may take the runtime-provided path.
+fn validate_rustc_only_runtime_dependencies(
+    cargo_toml_path: &Path,
+    dependencies: &[cmake::CrateDep],
+) -> Result<HashSet<String>, String> {
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+    let mut runtime_provided = HashSet::new();
+    let resolved_manifest = if dependencies
+        .iter()
+        .any(|dependency| dependency.workspace_inherited)
+    {
+        Some(metadata::inspect_manifest_identity(cargo_toml_path).map_err(|error| {
+            format!(
+                "could not resolve workspace-inherited dependency identities for {} with Cargo: {error}",
+                cargo_toml_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+
+    for dependency in dependencies {
+        let resolved_dependency;
+        let dependency = if dependency.workspace_inherited {
+            let resolved_manifest = resolved_manifest
+                .as_ref()
+                .expect("workspace dependency resolution was requested above");
+            let mut matches = resolved_manifest.dependencies.iter().filter(|candidate| {
+                candidate.dependency_key == dependency.name
+                    && candidate.kind.is_none()
+                    && cargo_target_selectors_match(
+                        candidate.target.as_deref(),
+                        dependency.target.as_deref(),
+                    )
+            });
+            let candidate = matches.next().ok_or_else(|| {
+                format!(
+                    "Cargo did not report an exact resolved identity for workspace-inherited dependency '{}'{}",
+                    dependency.name,
+                    dependency
+                        .target
+                        .as_deref()
+                        .map(|target| format!(" under target '{target}'"))
+                        .unwrap_or_default()
+                )
+            })?;
+            if matches.next().is_some() {
+                return Err(format!(
+                    "Cargo reported ambiguous resolved identities for workspace-inherited dependency '{}'",
+                    dependency.name
+                ));
+            }
+            resolved_dependency = cmake::CrateDep {
+                name: candidate.dependency_key.clone(),
+                package: (candidate.package_name != candidate.dependency_key)
+                    .then(|| candidate.package_name.clone()),
+                version: dependency.version.clone(),
+                path: candidate
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                is_local: candidate.source.is_none() && candidate.path.is_some(),
+                workspace_inherited: false,
+                optional: candidate.optional,
+                target: dependency.target.clone(),
+            };
+            &resolved_dependency
+        } else {
+            dependency
+        };
+        let declared_package = dependency.package.as_deref().unwrap_or(&dependency.name);
+        let is_reserved_identity = dependency.name == RUSTY_RUNTIME_CRATE_NAME
+            || declared_package == RUSTY_RUNTIME_CRATE_NAME;
+
+        if !is_reserved_identity {
+            continue;
+        }
+        if let Some(target) = dependency.target.as_deref() {
+            return Err(format!(
+                "target-qualified dependency '{}' under target '{}' uses reserved runtime identity '{}'; the rustc-only facade must be one exact unconditional local path dependency",
+                dependency.name, target, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+        if dependency.optional {
+            return Err(format!(
+                "dependency '{}' uses reserved runtime identity '{}' but is optional; the rustc-only facade must be one exact unconditional local path dependency",
+                dependency.name, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        if dependency.name != RUSTY_RUNTIME_CRATE_NAME {
+            return Err(format!(
+                "dependency '{}' renames reserved runtime package '{}'; use the exact local dependency key '{}'",
+                dependency.name, RUSTY_RUNTIME_CRATE_NAME, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        if declared_package != RUSTY_RUNTIME_CRATE_NAME {
+            return Err(format!(
+                "dependency '{}' selects package '{}', but that dependency name is reserved for the '{}' C++ runtime facade",
+                dependency.name, declared_package, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+        if !dependency.is_local {
+            return Err(format!(
+                "dependency '{}' is reserved for an exact local path dependency that provides the rustc-only C++ runtime facade",
+                RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        let dependency_path = dependency.path.as_deref().ok_or_else(|| {
+            format!(
+                "local runtime dependency '{}' has no path",
+                RUSTY_RUNTIME_CRATE_NAME
+            )
+        })?;
+        let dependency_dir = project_dir.join(dependency_path);
+        let manifest_path = dependency_dir.join("Cargo.toml");
+        let runtime_identity = metadata::inspect_manifest_identity(&manifest_path).map_err(|error| {
+            format!(
+                "could not validate rustc-only runtime dependency '{}' at {} with Cargo: {error}",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display()
+            )
+        })?;
+
+        if runtime_identity.package_name != RUSTY_RUNTIME_CRATE_NAME {
+            return Err(format!(
+                "dependency '{}' at {} declares Cargo package '{}'; refusing to omit a non-runtime crate",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                runtime_identity.package_name
+            ));
+        }
+
+        let mut ordinary_library_targets = runtime_identity.targets.iter().filter(|target| {
+            target.name == RUSTY_RUNTIME_CRATE_NAME
+                && !target.kind.iter().any(|kind| kind == "proc-macro")
+                && target
+                    .crate_types
+                    .iter()
+                    .any(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"))
+        });
+        let library_target = ordinary_library_targets.next().ok_or_else(|| {
+            let reported = runtime_identity
+                .targets
+                .iter()
+                .map(|target| format!("{} ({})", target.name, target.kind.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "runtime package '{}' at {} does not expose an ordinary Rust library target named exactly '{}'; Cargo reported: {}",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                RUSTY_RUNTIME_CRATE_NAME,
+                if reported.is_empty() { "no targets" } else { &reported }
+            )
+        })?;
+        if ordinary_library_targets.next().is_some() {
+            return Err(format!(
+                "runtime package '{}' at {} exposes more than one ordinary library target named '{}'; refusing ambiguous facade identity",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        if !library_target.src_path.is_file() {
+            return Err(format!(
+                "runtime package '{}' at {} has no library source at {}",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                library_target.src_path.display()
+            ));
+        }
+
+        runtime_provided.insert(dependency.name.clone());
+    }
+
+    Ok(runtime_provided)
+}
+
+fn cargo_target_selectors_match(resolved: Option<&str>, declared: Option<&str>) -> bool {
+    match (resolved, declared) {
+        (None, None) => true,
+        (Some(resolved), Some(declared)) => resolved
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .eq(declared.chars().filter(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
 fn transpile_crate(
     cargo_toml_path: &Path,
     output_dir: &Path,
@@ -748,6 +984,9 @@ fn transpile_crate(
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let crate_name = &cargo.package.name;
+    let deps = cmake::extract_dependencies(&cargo);
+    let runtime_provided_dependencies =
+        validate_rustc_only_runtime_dependencies(cargo_toml_path, &deps)?;
 
     // The checked, symlink-aware closure walk must run before the legacy
     // source collector: a source-directory symlink cycle would otherwise be
@@ -789,12 +1028,23 @@ fn transpile_crate(
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
 
     // Detect and handle dependencies
-    let deps = cmake::extract_dependencies(&cargo);
     let mut local_dep_dirs: Vec<String> = Vec::new();
 
-    if !deps.is_empty() {
+    let unconditional_dependencies = deps
+        .iter()
+        .filter(|dependency| dependency.target.is_none())
+        .collect::<Vec<_>>();
+    if !unconditional_dependencies.is_empty() {
         println!("\nDependencies:");
-        for dep in &deps {
+        for dep in unconditional_dependencies {
+            if runtime_provided_dependencies.contains(&dep.name) {
+                let dep_path = dep.path.as_deref().unwrap_or("?");
+                println!(
+                    "  {} (local: {}) — provided by the rusty C++ runtime; rustc facade is not generated",
+                    dep.name, dep_path
+                );
+                continue;
+            }
             if dep.is_local {
                 let dep_path = dep.path.as_deref().unwrap_or("?");
                 println!(
