@@ -36347,6 +36347,23 @@ impl CodeGen {
                 deref_receiver, callee_leaf, callee_targs, member_args
             )
         };
+        // Member tier with RAW-forwarded args, probed before the deref-args
+        // member tier: deref_if_pointer_like unboxes deref-view containers
+        // (rusty::Vec -> its span view), so a member taking `Vec<u8>&`
+        // (serde_json's Read::parse_str scratch buffer) never matched the
+        // deref-args probe — the call fell through to the trait free fn,
+        // where the `impl Read for &mut R` BLANKET lowering matched the
+        // concrete receiver (C++ erased Rust's terminating `&mut` peel) and
+        // recursed until stack overflow, at RUNTIME.
+        let member_args_direct = direct_arg_uses.join(", ");
+        let member_call_direct = if callee_targs.is_empty() {
+            format!("{}.{}({})", deref_receiver, callee_leaf, member_args_direct)
+        } else {
+            format!(
+                "{}.template {}{}({})",
+                deref_receiver, callee_leaf, callee_targs, member_args_direct
+            )
+        };
         // `[]` (no capture) not `[&]`: the receiver and every arg are passed
         // as lambda *parameters*, so the body captures nothing — and a
         // capturing lambda is illegal at namespace scope, where this shim
@@ -36454,8 +36471,10 @@ impl CodeGen {
         // closure)` (inherent) fell into Itertools_::sorted_by (2-arg cmp).
         if let Some(rx_call) = rusty_ext_fallback {
             return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
                 arg_param_list,
+                member_call_direct,
+                member_call_direct,
                 member_call,
                 member_call,
                 direct_call,
@@ -36467,8 +36486,10 @@ impl CodeGen {
             );
         }
         format!(
-            "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+            "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
             arg_param_list,
+            member_call_direct,
+            member_call_direct,
             member_call,
             member_call,
             direct_call,
