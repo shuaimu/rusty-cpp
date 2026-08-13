@@ -1625,6 +1625,15 @@ fn transpile_full_with_options_impl(
             None => (file, crate::cpp_abi::CppAbiEmissionPlan::default()),
         }
     };
+    let cpp_name_plan = crate::cpp_name::collect(&file)?;
+    if !cpp_name_plan.is_empty()
+        && (module_name.is_none() || is_prepared_inline || options.inline_rust_block)
+    {
+        return Err(
+            "cpp_name requires named-module or crate-mode output and is not supported in inline/module-less transpilation"
+                .to_string(),
+        );
+    }
     if !is_prepared_inline {
         cpp_abi_plan.validate_flat_import_namespace(
             options.cxx_namespace.as_deref(),
@@ -1729,6 +1738,7 @@ fn transpile_full_with_options_impl(
     );
     codegen.set_crate_module_names(options.crate_module_names.clone());
     codegen.set_cpp_abi_plan(cpp_abi_plan);
+    codegen.set_cpp_name_plan(cpp_name_plan);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);

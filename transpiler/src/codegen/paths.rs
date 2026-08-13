@@ -3038,6 +3038,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
+        if let Some(target) = self.cpp_name_call_target(path) {
+            return target;
+        }
         // A trait comparison method used as a VALUE (a function reference, e.g.
         // `it.merge_join_by(other, Ord::cmp)` / `k_smallest_relaxed_by(k, Ord::cmp)`).
         // Emitted verbatim, `Ord::cmp` is an undeclared identifier in C++. Lower to

@@ -8,6 +8,7 @@ use std::process::{self, Output};
 mod cmake;
 mod codegen;
 mod cpp_abi;
+mod cpp_name;
 mod inline_rust;
 mod metadata;
 mod slots;
@@ -328,6 +329,44 @@ fn reject_cpp_abi_in_nonconventional_target_roots(
         }
     }
     Ok(())
+}
+
+fn effective_local_dependencies_for_manifest(
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+    manifest_path: &Path,
+) -> Result<Vec<cmake::CrateDep>, String> {
+    let dependencies = graph.direct_dependencies(manifest_path).ok_or_else(|| {
+        format!(
+            "Cargo's target-filtered dependency graph for '{}' omitted local manifest {}",
+            graph.target_triple,
+            manifest_path.display()
+        )
+    })?;
+    dependencies
+        .iter()
+        .map(|dependency| {
+            let package_dir = dependency.manifest_path.parent().ok_or_else(|| {
+                format!(
+                    "Cargo reported a dependency manifest without a parent directory: {}",
+                    dependency.manifest_path.display()
+                )
+            })?;
+            Ok(cmake::CrateDep {
+                name: dependency.dependency_key.clone(),
+                package: (dependency.package_name != dependency.dependency_key)
+                    .then(|| dependency.package_name.clone()),
+                version: None,
+                path: Some(package_dir.to_string_lossy().into_owned()),
+                is_local: true,
+                workspace_inherited: false,
+                // This edge exists only when Cargo selected the optional
+                // dependency through the effective feature set.
+                optional: false,
+                // Cargo already evaluated the selector for target_triple.
+                target: None,
+            })
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -666,15 +705,15 @@ impl CppAbiClosurePreflight {
             }
         };
         let dependencies = cmake::extract_dependencies(&cargo);
-        let runtime_provided =
+        let runtime_validation =
             match validate_rustc_only_runtime_dependencies(cargo_toml_path, &dependencies) {
-                Ok(runtime_provided) => runtime_provided,
+                Ok(runtime_validation) => runtime_validation,
                 Err(error) => {
                     self.runtime_dependency_issue(format!(
                         "{}: {error}",
                         cargo_toml_path.display()
                     ));
-                    HashSet::new()
+                    RustcRuntimeValidation::default()
                 }
             };
 
@@ -722,7 +761,9 @@ impl CppAbiClosurePreflight {
             if dependency.target.is_some() {
                 continue;
             }
-            if runtime_provided.contains(&dependency.name)
+            if runtime_validation
+                .runtime_provided
+                .contains(&dependency.name)
                 || dependency.name == RUSTY_RUNTIME_CRATE_NAME
                 || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
             {
@@ -772,6 +813,266 @@ fn preflight_cpp_abi_whole_dependency_closure(
 }
 
 const RUSTY_RUNTIME_CRATE_NAME: &str = "rusty";
+const RUSTY_CPP_MARKERS_PACKAGE_NAME: &str = "rusty-cpp-markers";
+
+#[derive(Default)]
+struct RustcRuntimeValidation {
+    runtime_provided: HashSet<String>,
+    trusted_cpp_inherit_provenance: bool,
+}
+
+fn use_tree_binds_name(tree: &syn::UseTree, needle: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => use_tree_binds_name(&path.tree, needle),
+        syn::UseTree::Name(name) => name.ident == needle,
+        syn::UseTree::Rename(rename) => rename.rename == needle,
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_binds_name(item, needle)),
+        syn::UseTree::Glob(_) => true,
+    }
+}
+
+fn source_has_exact_cpp_inherit_facade_export(source: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    if file.attrs.iter().any(|attr| {
+        !matches!(
+            attr.path().get_ident().map(ToString::to_string).as_deref(),
+            Some("doc" | "allow" | "warn" | "deny" | "forbid")
+        )
+    }) {
+        return false;
+    }
+    let mut trusted_exports = 0usize;
+    let mut competing_bindings = 0usize;
+    let mut local_marker_roots = 0usize;
+    for item in &file.items {
+        match item {
+            syn::Item::Use(item) if use_tree_binds_name(&item.tree, "cpp_inherit") => {
+                competing_bindings += 1;
+                let exact_tree = matches!(
+                    &item.tree,
+                    syn::UseTree::Path(root)
+                        if root.ident == "rusty_cpp_markers"
+                            && matches!(root.tree.as_ref(), syn::UseTree::Name(name) if name.ident == "cpp_inherit")
+                );
+                let inert_attrs = item.attrs.iter().all(|attr| attr.path().is_ident("doc"));
+                if exact_tree && inert_attrs && matches!(item.vis, syn::Visibility::Public(_)) {
+                    trusted_exports += 1;
+                }
+            }
+            syn::Item::Use(item)
+                if use_tree_binds_name(&item.tree, "rusty_cpp_markers") =>
+            {
+                local_marker_roots += 1
+            }
+            syn::Item::Fn(item) if item.sig.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Struct(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Enum(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Union(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Trait(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Type(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Mod(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Mod(item) if item.ident == "rusty_cpp_markers" => {
+                local_marker_roots += 1
+            }
+            syn::Item::ExternCrate(item)
+                if item
+                    .rename
+                    .as_ref()
+                    .map(|(_, rename)| rename == "cpp_inherit")
+                    .unwrap_or(item.ident == "cpp_inherit") =>
+            {
+                competing_bindings += 1
+            }
+            syn::Item::ExternCrate(item)
+                if item
+                    .rename
+                    .as_ref()
+                    .map(|(_, rename)| rename == "rusty_cpp_markers")
+                    .unwrap_or(item.ident == "rusty_cpp_markers") =>
+            {
+                local_marker_roots += 1
+            }
+            syn::Item::Macro(item)
+                if item
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == "cpp_inherit") =>
+            {
+                competing_bindings += 1
+            }
+            _ => {}
+        }
+    }
+    trusted_exports == 1 && competing_bindings == 1 && local_marker_roots == 0
+}
+
+fn type_is_unqualified_token_stream(ty: &syn::Type) -> bool {
+    matches!(
+        ty,
+        syn::Type::Path(path)
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && path.path.is_ident("TokenStream")
+    )
+}
+
+fn source_is_exact_inert_cpp_inherit_marker(source: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    if file
+        .attrs
+        .iter()
+        .any(|attr| !attr.path().is_ident("doc"))
+    {
+        return false;
+    }
+    let mut saw_token_stream_import = false;
+    let mut saw_cpp_inherit = false;
+    for item in &file.items {
+        match item {
+            syn::Item::Use(item)
+                if item.attrs.iter().all(|attr| attr.path().is_ident("doc"))
+                    && matches!(item.vis, syn::Visibility::Inherited)
+                    && matches!(
+                        &item.tree,
+                        syn::UseTree::Path(root)
+                            if root.ident == "proc_macro"
+                                && matches!(root.tree.as_ref(), syn::UseTree::Name(name) if name.ident == "TokenStream")
+                    ) =>
+            {
+                if saw_token_stream_import {
+                    return false;
+                }
+                saw_token_stream_import = true;
+            }
+            syn::Item::Fn(function) if function.sig.ident == "cpp_inherit" => {
+                if saw_cpp_inherit
+                    || !matches!(function.vis, syn::Visibility::Public(_))
+                    || function.sig.constness.is_some()
+                    || function.sig.asyncness.is_some()
+                    || function.sig.unsafety.is_some()
+                    || function.sig.abi.is_some()
+                    || !function.sig.generics.params.is_empty()
+                    || function.sig.generics.where_clause.is_some()
+                {
+                    return false;
+                }
+                let proc_attrs = function
+                    .attrs
+                    .iter()
+                    .filter(|attr| attr.path().is_ident("proc_macro_attribute"))
+                    .count();
+                if proc_attrs != 1
+                    || function.attrs.iter().any(|attr| {
+                        !attr.path().is_ident("doc")
+                            && !attr.path().is_ident("proc_macro_attribute")
+                    })
+                {
+                    return false;
+                }
+                let parameters = function.sig.inputs.iter().collect::<Vec<_>>();
+                let exact_parameters = matches!(
+                    parameters.as_slice(),
+                    [syn::FnArg::Typed(attribute), syn::FnArg::Typed(item)]
+                        if type_is_unqualified_token_stream(&attribute.ty)
+                            && type_is_unqualified_token_stream(&item.ty)
+                            && matches!(item.pat.as_ref(), syn::Pat::Ident(ident) if ident.ident == "item" && ident.by_ref.is_none() && ident.subpat.is_none())
+                );
+                let exact_return = matches!(
+                    &function.sig.output,
+                    syn::ReturnType::Type(_, ty) if type_is_unqualified_token_stream(ty)
+                );
+                let exact_body = matches!(
+                    function.block.stmts.as_slice(),
+                    [syn::Stmt::Expr(syn::Expr::Path(path), None)]
+                        if path.attrs.is_empty()
+                            && path.qself.is_none()
+                            && path.path.leading_colon.is_none()
+                            && path.path.is_ident("item")
+                );
+                if !exact_parameters || !exact_return || !exact_body {
+                    return false;
+                }
+                saw_cpp_inherit = true;
+            }
+            // The trusted marker crate is intentionally two declarations. An
+            // extra item could shadow the imported token type or alter the
+            // proc-macro entry point through conditional compilation.
+            _ => return false,
+        }
+    }
+    saw_token_stream_import && saw_cpp_inherit
+}
+
+fn validate_cpp_inherit_runtime_provenance(
+    runtime_identity: &metadata::ManifestIdentity,
+    runtime_library_source: &Path,
+) -> bool {
+    let Some(marker_dependency) = runtime_identity.dependencies.iter().find(|dependency| {
+        dependency.dependency_key == RUSTY_CPP_MARKERS_PACKAGE_NAME
+            && dependency.package_name == RUSTY_CPP_MARKERS_PACKAGE_NAME
+            && dependency.source.is_none()
+            && dependency.path.is_some()
+            && dependency.kind.is_none()
+            && dependency.target.is_none()
+            && !dependency.optional
+    }) else {
+        return false;
+    };
+    if runtime_identity
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.dependency_key == RUSTY_CPP_MARKERS_PACKAGE_NAME
+                || dependency.package_name == RUSTY_CPP_MARKERS_PACKAGE_NAME
+        })
+        .count()
+        != 1
+    {
+        return false;
+    }
+    let Some(marker_dir) = marker_dependency.path.as_deref() else {
+        return false;
+    };
+    let marker_manifest = marker_dir.join("Cargo.toml");
+    let Ok(marker_identity) = metadata::inspect_manifest_identity(&marker_manifest) else {
+        return false;
+    };
+    if marker_identity.package_name != RUSTY_CPP_MARKERS_PACKAGE_NAME
+        || !marker_identity.dependencies.is_empty()
+    {
+        return false;
+    }
+    let mut targets = marker_identity.targets.iter().filter(|target| {
+        target.name == "rusty_cpp_markers"
+            && target.kind.iter().any(|kind| kind == "proc-macro")
+            && target
+                .crate_types
+                .iter()
+                .any(|crate_type| crate_type == "proc-macro")
+    });
+    let Some(marker_target) = targets.next() else {
+        return false;
+    };
+    if targets.next().is_some() || marker_identity.targets.len() != 1 {
+        return false;
+    }
+    let Ok(runtime_source) = std::fs::read_to_string(runtime_library_source) else {
+        return false;
+    };
+    let Ok(marker_source) = std::fs::read_to_string(&marker_target.src_path) else {
+        return false;
+    };
+    source_has_exact_cpp_inherit_facade_export(&runtime_source)
+        && source_is_exact_inert_cpp_inherit_marker(&marker_source)
+}
 
 /// Identify the Rust-only facade for types supplied by the C++ runtime.
 ///
@@ -782,9 +1083,9 @@ const RUSTY_RUNTIME_CRATE_NAME: &str = "rusty";
 fn validate_rustc_only_runtime_dependencies(
     cargo_toml_path: &Path,
     dependencies: &[cmake::CrateDep],
-) -> Result<HashSet<String>, String> {
+) -> Result<RustcRuntimeValidation, String> {
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
-    let mut runtime_provided = HashSet::new();
+    let mut validation = RustcRuntimeValidation::default();
     let resolved_manifest = if dependencies
         .iter()
         .any(|dependency| dependency.workspace_inherited)
@@ -954,10 +1255,14 @@ fn validate_rustc_only_runtime_dependencies(
             ));
         }
 
-        runtime_provided.insert(dependency.name.clone());
+        validation.trusted_cpp_inherit_provenance = validate_cpp_inherit_runtime_provenance(
+            &runtime_identity,
+            &library_target.src_path,
+        );
+        validation.runtime_provided.insert(dependency.name.clone());
     }
 
-    Ok(runtime_provided)
+    Ok(validation)
 }
 
 fn cargo_target_selectors_match(resolved: Option<&str>, declared: Option<&str>) -> bool {
@@ -971,6 +1276,890 @@ fn cargo_target_selectors_match(resolved: Option<&str>, declared: Option<&str>) 
     }
 }
 
+fn resolve_workspace_inherited_dependencies(
+    cargo_toml_path: &Path,
+    dependencies: &[cmake::CrateDep],
+) -> Result<Vec<cmake::CrateDep>, String> {
+    let resolved_manifest = if dependencies
+        .iter()
+        .any(|dependency| dependency.workspace_inherited)
+    {
+        Some(metadata::inspect_manifest_identity(cargo_toml_path).map_err(|error| {
+            format!(
+                "could not resolve workspace-inherited dependency identities for {} with Cargo: {error}",
+                cargo_toml_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+    dependencies
+        .iter()
+        .map(|dependency| {
+            if !dependency.workspace_inherited {
+                return Ok(dependency.clone());
+            }
+            let resolved_manifest = resolved_manifest
+                .as_ref()
+                .expect("workspace dependency resolution was requested above");
+            let mut matches = resolved_manifest.dependencies.iter().filter(|candidate| {
+                candidate.dependency_key == dependency.name
+                    && candidate.kind.is_none()
+                    && cargo_target_selectors_match(
+                        candidate.target.as_deref(),
+                        dependency.target.as_deref(),
+                    )
+            });
+            let candidate = matches.next().ok_or_else(|| {
+                format!(
+                    "Cargo did not report an exact resolved identity for workspace-inherited dependency '{}'{}",
+                    dependency.name,
+                    dependency
+                        .target
+                        .as_deref()
+                        .map(|target| format!(" under target '{target}'"))
+                        .unwrap_or_default()
+                )
+            })?;
+            if matches.next().is_some() {
+                return Err(format!(
+                    "Cargo reported ambiguous resolved identities for workspace-inherited dependency '{}'",
+                    dependency.name
+                ));
+            }
+            Ok(cmake::CrateDep {
+                name: candidate.dependency_key.clone(),
+                package: (candidate.package_name != candidate.dependency_key)
+                    .then(|| candidate.package_name.clone()),
+                version: dependency.version.clone(),
+                path: candidate
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                is_local: candidate.source.is_none() && candidate.path.is_some(),
+                workspace_inherited: false,
+                optional: candidate.optional,
+                target: dependency.target.clone(),
+            })
+        })
+        .collect()
+}
+
+struct PreparedCrateCodegen {
+    extension_method_hints: HashSet<String>,
+    module_preambles: BTreeMap<String, Vec<transpile::GmfIncludeSpec>>,
+    options: transpile::TranspileOptions,
+}
+
+fn prepare_crate_codegen(
+    sources: &[PathBuf],
+    source_units: &[(PathBuf, String)],
+    crate_name: &str,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+) -> Result<PreparedCrateCodegen, String> {
+    let mut extension_method_hints = HashSet::new();
+    let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
+    let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
+    let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
+    let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
+    for (_, source) in source_units {
+        extension_method_hints.extend(transpile::collect_extension_method_hints(source));
+        cross_file_enums.extend(transpile::collect_crate_enum_decls(source));
+        cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(source));
+        cross_file_structs.extend(transpile::collect_crate_struct_decls(source));
+        cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(source));
+    }
+
+    let crate_module_names: Vec<String> = sources
+        .iter()
+        .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
+        .collect();
+    let module_preambles = if let Some(manifest) = module_preamble {
+        manifest.select_for_modules(crate_module_names.iter().map(String::as_str))?
+    } else {
+        BTreeMap::new()
+    };
+    let mut options = transpile_options.clone();
+    options.cross_file_enums = cross_file_enums;
+    options.cross_file_impl_blocks = cross_file_impl_blocks;
+    options.cross_file_structs = cross_file_structs;
+    options.cross_file_type_aliases = cross_file_type_aliases;
+    options.crate_module_names = crate_module_names;
+    Ok(PreparedCrateCodegen {
+        extension_method_hints,
+        module_preambles,
+        options,
+    })
+}
+
+fn preflight_cpp_name_crate_sources_exact(
+    cargo: &cmake::CargoToml,
+    sources: &[PathBuf],
+    source_units: &[(PathBuf, String)],
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    trusted_cpp_inherit_provenance: bool,
+) -> Result<bool, String> {
+    let has_cpp_name = cpp_name::preflight_crate_sources_with_cpp_inherit_provenance(
+        source_units,
+        trusted_cpp_inherit_provenance,
+    )?;
+    if has_cpp_name && expand {
+        return Err(
+            "cpp_name crate mode does not support --expand because expansion removes inert name markers"
+                .to_string(),
+        );
+    }
+    if !has_cpp_name {
+        return Ok(false);
+    }
+
+    // The final cpp_name collision proof deliberately uses the same type
+    // mapper as declaration/definition emission. Keep this helper entirely
+    // in memory so it is safe to run over the whole local dependency graph
+    // before the caller creates or changes any output directory.
+    let crate_name = &cargo.package.name;
+    let prepared = prepare_crate_codegen(
+        sources,
+        source_units,
+        crate_name,
+        transpile_options,
+        module_preamble,
+    )?;
+    let mut crate_options = prepared.options;
+    // A preflight is observational. Even if a library caller supplied an
+    // emission path, proving cpp_name must never write a UFCS sidecar.
+    crate_options.emit_ufcs_trait_manifest_path = None;
+
+    for (rs_path, source) in source_units {
+        if !cpp_name::source_mentions_reserved_marker(source) {
+            continue;
+        }
+        let (_, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
+        let mut module_options = crate_options.clone();
+        module_options.explicit_gmf_includes = prepared
+            .module_preambles
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_default();
+        transpile::transpile_with_type_map_and_extension_hints_and_options(
+            source,
+            Some(&module_name),
+            type_map,
+            &prepared.extension_method_hints,
+            &module_options,
+        )
+        .map_err(|error| {
+            format!(
+                "{}: cpp_name exact emission preflight failed: {error}",
+                rs_path.display()
+            )
+        })?;
+    }
+    Ok(true)
+}
+
+#[derive(Default)]
+struct CppNameClosureReport {
+    any_cpp_name: bool,
+    issues: BTreeSet<String>,
+}
+
+/// Read-only crate-mode cpp_name validation for every local crate that the
+/// ordinary recursive generator can visit. The graph is completed before the
+/// root output directory is touched, so a late dependency collision cannot
+/// leave a partial parent tree behind.
+struct CppNameClosurePreflight<'a> {
+    type_map: &'a types::UserTypeMap,
+    expand: bool,
+    transpile_options: &'a transpile::TranspileOptions,
+    effective_dependencies: Option<&'a metadata::EffectiveLocalNormalDependencyGraph>,
+    root_manifest: PathBuf,
+    root_module_preamble: Option<&'a transpile::ModulePreambleManifest>,
+    report: CppNameClosureReport,
+    visited: BTreeSet<PathBuf>,
+    active: Vec<PathBuf>,
+}
+
+impl<'a> CppNameClosurePreflight<'a> {
+    fn new(
+        cargo_toml_path: &Path,
+        type_map: &'a types::UserTypeMap,
+        expand: bool,
+        transpile_options: &'a transpile::TranspileOptions,
+        root_module_preamble: Option<&'a transpile::ModulePreambleManifest>,
+    ) -> Self {
+        Self {
+            type_map,
+            expand,
+            transpile_options,
+            effective_dependencies: None,
+            root_manifest: CppAbiClosurePreflight::manifest_key(cargo_toml_path),
+            root_module_preamble,
+            report: CppNameClosureReport::default(),
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn with_effective_dependencies(
+        cargo_toml_path: &Path,
+        type_map: &'a types::UserTypeMap,
+        expand: bool,
+        transpile_options: &'a transpile::TranspileOptions,
+        root_module_preamble: Option<&'a transpile::ModulePreambleManifest>,
+        effective_dependencies: &'a metadata::EffectiveLocalNormalDependencyGraph,
+    ) -> Self {
+        Self {
+            type_map,
+            expand,
+            transpile_options,
+            effective_dependencies: Some(effective_dependencies),
+            root_manifest: CppAbiClosurePreflight::manifest_key(cargo_toml_path),
+            root_module_preamble,
+            report: CppNameClosureReport::default(),
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn issue(&mut self, message: impl Into<String>) {
+        self.report.issues.insert(message.into());
+    }
+
+    fn collect_sources(&mut self, project_dir: &Path) -> Vec<PathBuf> {
+        // Reuse the checked, symlink-aware walker already used by cpp_abi.
+        // Its report is local to this one scan; move all structural failures
+        // into the cpp_name closure report so a graph containing cpp_name
+        // fails closed rather than falling through to the legacy walker.
+        let mut collector = CppAbiClosurePreflight::new(false);
+        let sources = collector.collect_rs_files(project_dir);
+        for issue in collector.report.issues {
+            self.issue(issue);
+        }
+        sources
+    }
+
+    fn read_source_units(&mut self, project_dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+        let sources = self.collect_sources(project_dir);
+        let mut source_units = Vec::with_capacity(sources.len());
+        for relative in &sources {
+            let full = project_dir.join(relative);
+            match std::fs::read_to_string(&full) {
+                Ok(source) => source_units.push((relative.clone(), source)),
+                Err(error) => self.issue(format!(
+                    "could not read Rust source {}: {error}",
+                    full.display()
+                )),
+            }
+        }
+        (sources, source_units)
+    }
+
+    fn note_markers_without_manifest(&mut self, project_dir: &Path) {
+        let (_, source_units) = self.read_source_units(project_dir);
+        if source_units
+            .iter()
+            .any(|(_, source)| cpp_name::source_mentions_reserved_marker(source))
+        {
+            self.report.any_cpp_name = true;
+        }
+    }
+
+    fn visit_manifest(&mut self, cargo_toml_path: &Path) {
+        let visit_key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+        if let Some(cycle_start) = self.active.iter().position(|path| path == &visit_key) {
+            let mut cycle = self.active[cycle_start..]
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            cycle.push(visit_key.display().to_string());
+            self.issue(format!(
+                "local dependency cycle detected during cpp_name preflight: {}",
+                cycle.join(" -> ")
+            ));
+            return;
+        }
+        if !self.visited.insert(visit_key.clone()) {
+            return;
+        }
+        self.active.push(visit_key.clone());
+
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+        let manifest_source = match std::fs::read_to_string(cargo_toml_path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.issue(format!(
+                    "could not read local dependency manifest {} during cpp_name preflight: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.note_markers_without_manifest(project_dir);
+                self.active.pop();
+                return;
+            }
+        };
+        let cargo = match toml::from_str::<cmake::CargoToml>(&manifest_source) {
+            Ok(cargo) => cargo,
+            Err(error) => {
+                self.issue(format!(
+                    "could not parse local dependency manifest {} during cpp_name preflight: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.note_markers_without_manifest(project_dir);
+                self.active.pop();
+                return;
+            }
+        };
+        let declared_dependencies = cmake::extract_dependencies(&cargo);
+        let runtime_validation =
+            match validate_rustc_only_runtime_dependencies(cargo_toml_path, &declared_dependencies)
+            {
+                Ok(validation) => validation,
+                Err(error) => {
+                    self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    RustcRuntimeValidation::default()
+                }
+            };
+        let traversal_dependencies = if let Some(graph) = self.effective_dependencies {
+            match effective_local_dependencies_for_manifest(graph, cargo_toml_path) {
+                Ok(dependencies) => dependencies,
+                Err(error) => {
+                    self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    Vec::new()
+                }
+            }
+        } else {
+            declared_dependencies
+        };
+
+        let (sources, source_units) = self.read_source_units(project_dir);
+        let mentions_cpp_name = source_units
+            .iter()
+            .any(|(_, source)| cpp_name::source_mentions_reserved_marker(source));
+        if mentions_cpp_name {
+            self.report.any_cpp_name = true;
+            let module_preamble = (visit_key == self.root_manifest)
+                .then_some(self.root_module_preamble)
+                .flatten();
+            if let Err(error) = preflight_cpp_name_crate_sources_exact(
+                &cargo,
+                &sources,
+                &source_units,
+                self.type_map,
+                self.expand,
+                self.transpile_options,
+                module_preamble,
+                runtime_validation.trusted_cpp_inherit_provenance,
+            ) {
+                self.issue(format!("{}: {error}", cargo_toml_path.display()));
+            }
+        }
+
+        let mut dependencies = traversal_dependencies
+            .into_iter()
+            .filter(|dependency| dependency.is_local && dependency.target.is_none())
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for dependency in dependencies {
+            // Match generation exactly: the authenticated rustc-only facade
+            // is supplied by the C++ runtime and is never transpiled.
+            if runtime_validation
+                .runtime_provided
+                .contains(&dependency.name)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            self.visit_manifest(&project_dir.join(relative).join("Cargo.toml"));
+        }
+        self.active.pop();
+    }
+
+    fn finish(self) -> Result<bool, String> {
+        if self.report.any_cpp_name && !self.report.issues.is_empty() {
+            return Err(format!(
+                "cpp_name whole local-dependency closure preflight failed before output:\n- {}",
+                self.report
+                    .issues
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            ));
+        }
+        Ok(self.report.any_cpp_name)
+    }
+}
+
+fn preflight_cpp_name_whole_dependency_closure(
+    cargo_toml_path: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+) -> Result<bool, String> {
+    let mut preflight = CppNameClosurePreflight::new(
+        cargo_toml_path,
+        type_map,
+        expand,
+        transpile_options,
+        module_preamble,
+    );
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+fn preflight_cpp_name_effective_dependency_closure(
+    cargo_toml_path: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+) -> Result<bool, String> {
+    let requested = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    if requested != graph.root_manifest() {
+        return Err(format!(
+            "Cargo's target-filtered dependency graph root {} does not match requested manifest {}",
+            graph.root_manifest().display(),
+            requested.display()
+        ));
+    }
+    let mut preflight = CppNameClosurePreflight::with_effective_dependencies(
+        cargo_toml_path,
+        type_map,
+        expand,
+        transpile_options,
+        module_preamble,
+        graph,
+    );
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+/// Cheap, output-free over-approximation used to decide whether Cargo's exact
+/// target-selected graph is required. It follows every declared local normal
+/// dependency, including optional and target-qualified entries; the later
+/// target-filtered closure discards unselected edges.
+fn dependency_closure_may_have_cpp_name(cargo_toml_path: &Path) -> bool {
+    fn cargo_config_may_select_local_path_override(project_dir: &Path) -> Result<bool, ()> {
+        fn value_mentions_path(value: &toml::Value) -> bool {
+            match value {
+                toml::Value::Table(table) => {
+                    table.contains_key("path") || table.values().any(value_mentions_path)
+                }
+                toml::Value::Array(values) => values.iter().any(value_mentions_path),
+                _ => false,
+            }
+        }
+
+        fn inspect_config(
+            path: &Path,
+            active: &mut BTreeSet<PathBuf>,
+            visited: &mut BTreeSet<PathBuf>,
+        ) -> Result<bool, ()> {
+            let key = CppAbiClosurePreflight::manifest_key(path);
+            if visited.contains(&key) {
+                return Ok(false);
+            }
+            if !active.insert(key.clone()) {
+                return Err(());
+            }
+            let source = std::fs::read_to_string(path).map_err(|_| ())?;
+            let config = toml::from_str::<toml::Value>(&source).map_err(|_| ())?;
+            let table = config.as_table().ok_or(())?;
+
+            if let Some(includes) = table.get("include") {
+                let includes = includes.as_array().ok_or(())?;
+                for include in includes {
+                    let (relative, optional) = match include {
+                        toml::Value::String(path) => (path.as_str(), false),
+                        toml::Value::Table(table) => {
+                            let path = table.get("path").and_then(toml::Value::as_str).ok_or(())?;
+                            let optional = table
+                                .get("optional")
+                                .map(|value| value.as_bool().ok_or(()))
+                                .transpose()?
+                                .unwrap_or(false);
+                            (path, optional)
+                        }
+                        _ => return Err(()),
+                    };
+                    let include_path = Path::new(relative);
+                    let include_path = if include_path.is_absolute() {
+                        include_path.to_path_buf()
+                    } else {
+                        path.parent().ok_or(())?.join(include_path)
+                    };
+                    if optional && !include_path.is_file() {
+                        continue;
+                    }
+                    if inspect_config(&include_path, active, visited)? {
+                        return Ok(true);
+                    }
+                }
+            }
+
+            // Both Cargo's legacy `paths` override and configuration-level
+            // `[patch]` can turn a declared registry/git dependency into a
+            // selected local package. `[replace]` is scanned conservatively
+            // as well, even though Cargo currently documents it for manifests.
+            let has_local_override = table.get("paths").is_some()
+                || ["patch", "replace"]
+                    .iter()
+                    .any(|name| table.get(*name).is_some_and(value_mentions_path));
+            active.remove(&key);
+            visited.insert(key);
+            Ok(has_local_override)
+        }
+
+        let mut cargo_directories = Vec::new();
+        if let Some(cargo_home) = metadata::effective_cargo_home(project_dir) {
+            cargo_directories.push(cargo_home);
+        }
+        cargo_directories.extend(
+            project_dir
+                .ancestors()
+                .map(|directory| directory.join(".cargo")),
+        );
+
+        let mut active = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        for cargo_directory in cargo_directories {
+            let legacy = cargo_directory.join("config");
+            let modern = cargo_directory.join("config.toml");
+            // Cargo prefers the extensionless legacy file when both exist.
+            let config = if legacy.is_file() {
+                Some(legacy)
+            } else if modern.is_file() {
+                Some(modern)
+            } else {
+                None
+            };
+            if let Some(config) = config
+                && inspect_config(&config, &mut active, &mut visited)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn workspace_may_have_local_path_overrides(cargo_toml_path: &Path) -> Result<bool, ()> {
+        fn override_value_mentions_path(value: &toml::Value) -> bool {
+            match value {
+                toml::Value::Table(table) => {
+                    table.contains_key("path") || table.values().any(override_value_mentions_path)
+                }
+                toml::Value::Array(values) => values.iter().any(override_value_mentions_path),
+                _ => false,
+            }
+        }
+
+        fn inspect_manifest(path: &Path) -> Result<(bool, bool, Option<PathBuf>), ()> {
+            let source = std::fs::read_to_string(path).map_err(|_| ())?;
+            let manifest = toml::from_str::<toml::Value>(&source).map_err(|_| ())?;
+            let has_local_override = ["patch", "replace"]
+                .iter()
+                .any(|name| manifest.get(name).is_some_and(override_value_mentions_path));
+            let declares_workspace = manifest.get("workspace").is_some();
+            let explicit_workspace = manifest
+                .get("package")
+                .and_then(toml::Value::as_table)
+                .and_then(|package| package.get("workspace"))
+                .and_then(toml::Value::as_str)
+                .map(PathBuf::from);
+            Ok((has_local_override, declares_workspace, explicit_workspace))
+        }
+
+        let (requested_override, requested_workspace, explicit_workspace) =
+            inspect_manifest(cargo_toml_path)?;
+        if requested_workspace {
+            return Ok(requested_override);
+        }
+        let package_dir = cargo_toml_path.parent().ok_or(())?;
+        if let Some(workspace) = explicit_workspace {
+            let workspace_manifest = if workspace.is_absolute() {
+                workspace.join("Cargo.toml")
+            } else {
+                package_dir.join(workspace).join("Cargo.toml")
+            };
+            return inspect_manifest(&workspace_manifest).map(|(overrides, _, _)| overrides);
+        }
+
+        // Cargo discovers an implicit workspace by walking ancestor manifests
+        // until the nearest `[workspace]`. Only overrides at that root apply.
+        for ancestor in package_dir.ancestors().skip(1) {
+            let candidate = ancestor.join("Cargo.toml");
+            if !candidate.is_file() {
+                continue;
+            }
+            let (overrides, declares_workspace, _) = inspect_manifest(&candidate)?;
+            if declares_workspace {
+                return Ok(overrides);
+            }
+        }
+        // A standalone package is its own workspace root, even without an
+        // explicit `[workspace]` table.
+        Ok(requested_override)
+    }
+
+    fn visit(cargo_toml_path: &Path, visited: &mut BTreeSet<PathBuf>) -> bool {
+        let key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+        if !visited.insert(key) {
+            return false;
+        }
+        let Ok(manifest_source) = std::fs::read_to_string(cargo_toml_path) else {
+            return false;
+        };
+        let Ok(cargo) = toml::from_str::<cmake::CargoToml>(&manifest_source) else {
+            return false;
+        };
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+
+        // Cargo configuration participates in dependency selection but is not
+        // represented in a package's dependency tables. Its path overrides
+        // therefore need their own conservative witness before the manifest
+        // walk can decide that the exact graph is unnecessary.
+        match cargo_config_may_select_local_path_override(project_dir) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(_) => return true,
+        }
+
+        // Reuse the symlink-aware source walker. Its authoritative diagnostics
+        // are retained by the subsequent closure preflight.
+        let mut collector = CppAbiClosurePreflight::new(false);
+        let source_paths = collector.collect_rs_files(project_dir);
+        for relative in source_paths {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| cpp_name::source_mentions_reserved_marker(&source))
+            {
+                return true;
+            }
+        }
+        let mut declared_roots = cargo
+            .lib
+            .as_ref()
+            .and_then(|target| target.path.as_deref())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(bins) = &cargo.bins {
+            declared_roots.extend(
+                bins.iter()
+                    .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+            );
+        }
+        for relative in declared_roots {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| cpp_name::source_mentions_reserved_marker(&source))
+            {
+                return true;
+            }
+        }
+
+        let declared = cmake::extract_dependencies(&cargo);
+        let dependencies =
+            match resolve_workspace_inherited_dependencies(cargo_toml_path, &declared) {
+                Ok(dependencies) => dependencies,
+                // This scan is an over-approximation only. On uncertainty, force
+                // the exact Cargo graph path; never let an unresolved inherited
+                // edge hide a selected dependency-owned cpp_name contract.
+                Err(_) => return true,
+            };
+        for dependency in dependencies {
+            if !dependency.is_local
+                || dependency.name == RUSTY_RUNTIME_CRATE_NAME
+                || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            if visit(&project_dir.join(relative).join("Cargo.toml"), visited) {
+                return true;
+            }
+        }
+        // Cargo may redirect a registry/git dependency to a local package via
+        // workspace `[patch]` or `[replace]`. Such an edge has no declared
+        // dependency `path`, so any local override forces the exact Cargo
+        // graph path. That graph remains authoritative and discards unused
+        // versions/sources before preflight or recursive generation.
+        match workspace_may_have_local_path_overrides(cargo_toml_path) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            // This scan chooses whether exact Cargo selection is needed. On
+            // uncertainty, force that safe path rather than hiding a selected
+            // dependency-owned cpp_name contract.
+            Err(_) => return true,
+        }
+        false
+    }
+
+    let cargo_toml_path = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    visit(&cargo_toml_path, &mut BTreeSet::new())
+}
+
+/// Run exact per-file lowering across selected local dependencies without
+/// touching the requested output tree. A cpp_name root uses this as its final
+/// atomic gate before the first `create_dir_all`.
+fn preflight_local_dependency_codegen_without_output(
+    dependencies: &[cmake::CrateDep],
+    project_dir: &Path,
+    runtime_provided_dependencies: &HashSet<String>,
+    type_map: &types::UserTypeMap,
+    transpile_options: &transpile::TranspileOptions,
+    effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let mut dependencies = dependencies
+        .iter()
+        .filter(|dependency| dependency.target.is_none() && dependency.is_local)
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for dependency in dependencies {
+        if runtime_provided_dependencies.contains(&dependency.name) {
+            continue;
+        }
+        let dependency_path = dependency.path.as_deref().ok_or_else(|| {
+            format!(
+                "local dependency '{}' has no path during atomic codegen preflight",
+                dependency.name
+            )
+        })?;
+        let manifest = project_dir.join(dependency_path).join("Cargo.toml");
+        if !manifest.is_file() {
+            return Err(format!(
+                "local dependency '{}' manifest does not exist at {}",
+                dependency.name,
+                manifest.display()
+            ));
+        }
+        preflight_crate_codegen_without_output(
+            &manifest,
+            type_map,
+            transpile_options,
+            effective_dependencies,
+            visited,
+        )
+        .map_err(|error| {
+            format!(
+                "dependency '{}' codegen failed before output: {error}",
+                dependency.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn preflight_crate_codegen_without_output(
+    cargo_toml_path: &Path,
+    type_map: &types::UserTypeMap,
+    transpile_options: &transpile::TranspileOptions,
+    effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let manifest_key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    if !visited.insert(manifest_key) {
+        return Ok(());
+    }
+
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+    let crate_name = &cargo.package.name;
+    let declared_dependencies = cmake::extract_dependencies(&cargo);
+    let runtime_validation =
+        validate_rustc_only_runtime_dependencies(cargo_toml_path, &declared_dependencies)?;
+    let dependencies = if let Some(graph) = effective_dependencies {
+        effective_local_dependencies_for_manifest(graph, cargo_toml_path)?
+    } else {
+        resolve_workspace_inherited_dependencies(cargo_toml_path, &declared_dependencies)?
+    };
+    let sources = cmake::collect_source_files(project_dir);
+    if sources.is_empty() {
+        return Err("No .rs source files found in src/".to_string());
+    }
+
+    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
+    for source_path in &sources {
+        let full_source_path = project_dir.join(source_path);
+        let source = std::fs::read_to_string(&full_source_path)
+            .map_err(|error| format!("Error reading {}: {error}", full_source_path.display()))?;
+        source_units.push((source_path.clone(), source));
+    }
+    reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
+    let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
+        &source_units,
+        transpile_options.cxx_namespace.as_deref(),
+    )?;
+    if has_cpp_abi {
+        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
+    }
+    preflight_cpp_name_crate_sources_exact(
+        &cargo,
+        &sources,
+        &source_units,
+        type_map,
+        false,
+        transpile_options,
+        None,
+        runtime_validation.trusted_cpp_inherit_provenance,
+    )?;
+
+    let prepared =
+        prepare_crate_codegen(&sources, &source_units, crate_name, transpile_options, None)?;
+    let mut prepared_options = prepared.options;
+    // This pass is observational even when a library caller requested a UFCS
+    // manifest for final emission.
+    prepared_options.emit_ufcs_trait_manifest_path = None;
+    for (path, source) in &source_units {
+        let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
+        let mut module_options = prepared_options.clone();
+        module_options.explicit_gmf_includes = prepared
+            .module_preambles
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_default();
+        transpile::transpile_with_type_map_and_extension_hints_and_options(
+            source,
+            Some(&module_name),
+            type_map,
+            &prepared.extension_method_hints,
+            &module_options,
+        )
+        .map_err(|error| {
+            format!(
+                "codegen preflight for {} failed before output: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    preflight_local_dependency_codegen_without_output(
+        &dependencies,
+        project_dir,
+        &runtime_validation.runtime_provided,
+        type_map,
+        transpile_options,
+        effective_dependencies,
+        visited,
+    )
+}
+
 fn transpile_crate(
     cargo_toml_path: &Path,
     output_dir: &Path,
@@ -980,19 +2169,93 @@ fn transpile_crate(
     transpile_options: &transpile::TranspileOptions,
     module_preamble: Option<&transpile::ModulePreambleManifest>,
 ) -> Result<(), String> {
+    transpile_crate_impl(
+        cargo_toml_path,
+        output_dir,
+        type_map,
+        expand,
+        verify,
+        transpile_options,
+        module_preamble,
+        false,
+        None,
+    )
+}
+
+fn transpile_crate_impl(
+    cargo_toml_path: &Path,
+    output_dir: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    verify: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    inherited_atomic_dependency_errors: bool,
+    inherited_effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
+) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let crate_name = &cargo.package.name;
     let deps = cmake::extract_dependencies(&cargo);
-    let runtime_provided_dependencies =
-        validate_rustc_only_runtime_dependencies(cargo_toml_path, &deps)?;
+    let runtime_validation = validate_rustc_only_runtime_dependencies(cargo_toml_path, &deps)?;
 
     // The checked, symlink-aware closure walk must run before the legacy
     // source collector: a source-directory symlink cycle would otherwise be
     // followed indefinitely before cpp_abi gets a chance to fail closed.
     // Marker-free closures still retain the legacy result and output path.
     preflight_cpp_abi_whole_dependency_closure(cargo_toml_path, expand)?;
+    let owned_effective_dependencies = if inherited_atomic_dependency_errors
+        || !dependency_closure_may_have_cpp_name(cargo_toml_path)
+    {
+        None
+    } else {
+        Some(
+            metadata::resolve_effective_local_normal_dependency_graph(cargo_toml_path).map_err(
+                |error| {
+                    format!(
+                        "cpp_name requires an exact Cargo target-selected normal local-dependency graph before output: {error}"
+                    )
+                },
+            )?,
+        )
+    };
+    let (closure_has_cpp_name, effective_dependencies) = if inherited_atomic_dependency_errors {
+        (true, inherited_effective_dependencies)
+    } else if let Some(graph) = owned_effective_dependencies.as_ref() {
+        let selected_has_cpp_name = preflight_cpp_name_effective_dependency_closure(
+            cargo_toml_path,
+            type_map,
+            expand,
+            transpile_options,
+            module_preamble,
+            graph,
+        )?;
+        if selected_has_cpp_name {
+            (true, owned_effective_dependencies.as_ref())
+        } else {
+            // The over-approximation saw cpp_name only in an unselected edge.
+            // Retain Cargo's graph for generation so that target-disabled or
+            // feature-disabled marker crates remain unvisited there as well.
+            (false, owned_effective_dependencies.as_ref())
+        }
+    } else {
+        (
+            preflight_cpp_name_whole_dependency_closure(
+                cargo_toml_path,
+                type_map,
+                expand,
+                transpile_options,
+                module_preamble,
+            )?,
+            None,
+        )
+    };
+    let atomic_dependency_errors = inherited_atomic_dependency_errors || closure_has_cpp_name;
+    let exact_generation_dependencies = effective_dependencies
+        .map(|graph| effective_local_dependencies_for_manifest(graph, cargo_toml_path))
+        .transpose()?;
+    let generation_dependencies = exact_generation_dependencies.as_deref().unwrap_or(&deps);
     let sources = cmake::collect_source_files(project_dir);
 
     if sources.is_empty() {
@@ -1015,6 +2278,16 @@ fn transpile_crate(
         transpile_options.cxx_namespace.as_deref(),
     )?;
     let has_cpp_abi = cpp_abi_preflight.has_contracts;
+    let _has_cpp_name = preflight_cpp_name_crate_sources_exact(
+        &cargo,
+        &sources,
+        &source_units,
+        type_map,
+        expand,
+        transpile_options,
+        module_preamble,
+        runtime_validation.trusted_cpp_inherit_provenance,
+    )?;
     if has_cpp_abi {
         validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
         if expand {
@@ -1024,6 +2297,65 @@ fn transpile_crate(
             );
         }
     }
+    // A cpp_name crate promises fail-closed generation. Lower every root
+    // source before the first output mutation and retain those exact bytes for
+    // the write phase, so final emission cannot diverge from its preflight.
+    let prepared_cpp_name_codegen = if closure_has_cpp_name {
+        Some(prepare_crate_codegen(
+            &sources,
+            &source_units,
+            crate_name,
+            transpile_options,
+            module_preamble,
+        )?)
+    } else {
+        None
+    };
+    let prepared_cpp_name_outputs = if let Some(prepared) = &prepared_cpp_name_codegen {
+        let mut outputs = Vec::with_capacity(source_units.len());
+        for (path, source) in &source_units {
+            let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
+            let mut module_options = prepared.options.clone();
+            module_options.explicit_gmf_includes = prepared
+                .module_preambles
+                .get(&module_name)
+                .cloned()
+                .unwrap_or_default();
+            let output = transpile::transpile_with_type_map_and_extension_hints_and_options(
+                source,
+                Some(&module_name),
+                type_map,
+                &prepared.extension_method_hints,
+                &module_options,
+            )
+            .map_err(|error| {
+                format!(
+                    "cpp_name root codegen preflight for {} failed before output: {error}",
+                    path.display()
+                )
+            })?;
+            outputs.push(output);
+        }
+        Some(outputs)
+    } else {
+        None
+    };
+    if closure_has_cpp_name && !inherited_atomic_dependency_errors {
+        let mut visited = BTreeSet::new();
+        visited.insert(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
+        preflight_local_dependency_codegen_without_output(
+            generation_dependencies,
+            project_dir,
+            &runtime_validation.runtime_provided,
+            type_map,
+            transpile_options,
+            effective_dependencies,
+            &mut visited,
+        )
+        .map_err(|error| {
+            format!("cpp_name dependency codegen preflight failed before output: {error}")
+        })?;
+    }
     // Create output directory
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
@@ -1031,14 +2363,14 @@ fn transpile_crate(
     // Detect and handle dependencies
     let mut local_dep_dirs: Vec<String> = Vec::new();
 
-    let unconditional_dependencies = deps
+    let unconditional_dependencies = generation_dependencies
         .iter()
         .filter(|dependency| dependency.target.is_none())
         .collect::<Vec<_>>();
     if !unconditional_dependencies.is_empty() {
         println!("\nDependencies:");
         for dep in unconditional_dependencies {
-            if runtime_provided_dependencies.contains(&dep.name) {
+            if runtime_validation.runtime_provided.contains(&dep.name) {
                 let dep_path = dep.path.as_deref().unwrap_or("?");
                 println!(
                     "  {} (local: {}) — provided by the rusty C++ runtime; rustc facade is not generated",
@@ -1057,7 +2389,7 @@ fn transpile_crate(
                 let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
                 if dep_cargo_toml.exists() {
                     let dep_out_dir = output_dir.join(&dep.name);
-                    match transpile_crate(
+                    match transpile_crate_impl(
                         &dep_cargo_toml,
                         &dep_out_dir,
                         type_map,
@@ -1065,13 +2397,15 @@ fn transpile_crate(
                         verify,
                         transpile_options,
                         None,
+                        atomic_dependency_errors,
+                        effective_dependencies,
                     ) {
                         Ok(()) => {
                             local_dep_dirs.push(dep.name.clone());
                         }
-                        Err(e) if e.contains("cpp_abi") => {
+                        Err(e) if atomic_dependency_errors => {
                             return Err(format!(
-                                "cpp_abi dependency preflight for '{}' failed: {}",
+                                "cpp_name dependency generation for '{}' failed: {}",
                                 dep.name, e
                             ));
                         }
@@ -1082,6 +2416,12 @@ fn transpile_crate(
                             );
                         }
                     }
+                } else if atomic_dependency_errors {
+                    return Err(format!(
+                        "cpp_name dependency generation for '{}' failed: Cargo.toml not found at {}",
+                        dep.name,
+                        dep_cargo_toml.display()
+                    ));
                 } else {
                     eprintln!(
                         "  Warning: Cargo.toml not found for local dep '{}' at {}",
@@ -1208,7 +2548,7 @@ fn transpile_crate(
         opts
     };
 
-    for (rs_path, source) in &source_units {
+    for (source_index, (rs_path, source)) in source_units.iter().enumerate() {
         let (cppm_path, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
         let full_cppm_path = output_dir.join(&cppm_path);
 
@@ -1226,13 +2566,18 @@ fn transpile_crate(
             .cloned()
             .unwrap_or_default();
 
-        match transpile::transpile_with_type_map_and_extension_hints_and_options(
-            source,
-            Some(&module_name),
-            type_map,
-            &extension_method_hints,
-            &module_options,
-        ) {
+        let transpile_result = if let Some(outputs) = &prepared_cpp_name_outputs {
+            Ok(outputs[source_index].clone())
+        } else {
+            transpile::transpile_with_type_map_and_extension_hints_and_options(
+                source,
+                Some(&module_name),
+                type_map,
+                &extension_method_hints,
+                &module_options,
+            )
+        };
+        match transpile_result {
             Ok(cpp_output) => {
                 if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
                     eprintln!("  Error writing {}: {}", full_cppm_path.display(), e);
@@ -7211,6 +8556,19 @@ fn main() {
     });
 
     let source = if cli.expand {
+        let original = match std::fs::read_to_string(input_path) {
+            Ok(source) => source,
+            Err(e) => {
+                eprintln!("Error reading '{}': {}", input_path.display(), e);
+                process::exit(1);
+            }
+        };
+        if cpp_name::source_mentions_reserved_marker(&original) {
+            eprintln!(
+                "Error: cpp_name does not support --expand because expansion removes inert name markers"
+            );
+            process::exit(1);
+        }
         match run_cargo_expand(input_path) {
             Ok(s) => s,
             Err(e) => {
