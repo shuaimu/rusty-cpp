@@ -1453,6 +1453,99 @@ pub fn transpile_full_with_options(
     )
 }
 
+/// Validate the narrow `extern "Rust"` seam used by named C++ modules whose
+/// definitions live in a C++ module implementation unit.
+///
+/// A Rust-ABI foreign declaration has no literal C++ linkage-specification
+/// equivalent: `extern "Rust"` is not a C++ language linkage.  In named-module
+/// output we deliberately lower it to an ordinary module-attached C++
+/// declaration.  Outside a named module there is no implementation-unit
+/// ownership contract to bind that declaration to, so fail before emitting an
+/// invalid or silently different ABI surface.
+fn validate_rust_abi_foreign_declarations(
+    file: &syn::File,
+    module_name: Option<&str>,
+) -> Result<(), String> {
+    struct Validator<'a> {
+        module_name: Option<&'a str>,
+        block_depth: usize,
+        error: Option<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Validator<'_> {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            self.block_depth += 1;
+            syn::visit::visit_block(self, block);
+            self.block_depth -= 1;
+        }
+
+        fn visit_item_foreign_mod(&mut self, foreign: &'ast syn::ItemForeignMod) {
+            if self.error.is_some()
+                || foreign.abi.name.as_ref().map(syn::LitStr::value).as_deref() != Some("Rust")
+            {
+                syn::visit::visit_item_foreign_mod(self, foreign);
+                return;
+            }
+
+            if self.module_name.is_none() {
+                self.error = Some(
+                    "`extern \"Rust\"` declarations require named C++ module output".to_string(),
+                );
+                return;
+            }
+            if foreign.unsafety.is_none() {
+                self.error = Some(
+                    "`extern \"Rust\"` declarations must use an `unsafe extern` block".to_string(),
+                );
+                return;
+            }
+            if self.block_depth != 0 {
+                self.error = Some(
+                    "`extern \"Rust\"` declarations are only supported at module scope"
+                        .to_string(),
+                );
+                return;
+            }
+
+            for item in &foreign.items {
+                let syn::ForeignItem::Fn(function) = item else {
+                    self.error = Some(
+                        "named-module `extern \"Rust\"` supports function declarations only"
+                            .to_string(),
+                    );
+                    return;
+                };
+                if function.sig.variadic.is_some() {
+                    self.error = Some(format!(
+                        "named-module `extern \"Rust\"` function `{}` cannot be variadic",
+                        function.sig.ident
+                    ));
+                    return;
+                }
+                if function.attrs.iter().any(|attr| {
+                    attr.path().is_ident("link_name") || attr.path().is_ident("link_ordinal")
+                }) {
+                    self.error = Some(format!(
+                        "named-module `extern \"Rust\"` function `{}` cannot override its link name",
+                        function.sig.ident
+                    ));
+                    return;
+                }
+            }
+
+            syn::visit::visit_item_foreign_mod(self, foreign);
+        }
+    }
+
+    let mut validator = Validator {
+        module_name,
+        block_depth: 0,
+        error: None,
+    };
+    syn::visit::Visit::visit_file(&mut validator, file);
+    validator.error.map_or(Ok(()), Err)
+}
+
 /// Render a cpp_abi file that was already collected, globally validated, and
 /// lowered by the ordered inline-block preflight.  This seam is intentionally
 /// crate-private: ordinary standalone callers must continue through
@@ -1531,6 +1624,7 @@ fn transpile_full_with_options_impl(
             "crate/module transpilation",
         )?;
     }
+    validate_rust_abi_foreign_declarations(&file, module_name)?;
     if cpp_abi_plan.has_flat_imports()
         && !is_prepared_inline
         && options.crate_module_names.is_empty()

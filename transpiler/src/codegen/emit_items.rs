@@ -997,6 +997,75 @@ impl CodeGen {
     }
 
     pub(super) fn emit_foreign_mod(&mut self, fm: &syn::ItemForeignMod) {
+        // Rust's native ABI is not a C++ language-linkage string.  In named
+        // module output, an `unsafe extern "Rust"` block is the source-side
+        // spelling for declarations whose ordinary C++ definitions live in a
+        // module implementation unit.  Emit each declaration directly so it
+        // is attached to the active C++ module/namespace, and export only the
+        // Rust-public surface.  The transpile preflight rejects this ABI in
+        // direct mode and rejects unsupported foreign item kinds.
+        if self.module_name.is_some()
+            && fm.abi.name.as_ref().map(syn::LitStr::value).as_deref() == Some("Rust")
+        {
+            if Self::should_skip_cfg_attrs(&fm.attrs) {
+                return;
+            }
+            if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&fm.attrs) {
+                if self.codegen_error.is_none() {
+                    self.codegen_error = Some(format!(
+                        "cannot preserve unsupported #[cfg] predicate on extern Rust block: {}",
+                        predicate
+                    ));
+                }
+                return;
+            }
+            let block_cfg_guard = Self::cfg_cpp_guard(&fm.attrs);
+            if let Some(condition) = &block_cfg_guard {
+                self.writeln(&format!("#if {}", condition));
+            }
+            for item in &fm.items {
+                let syn::ForeignItem::Fn(f) = item else {
+                    continue;
+                };
+                if Self::should_skip_cfg_attrs(&f.attrs) {
+                    continue;
+                }
+                if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&f.attrs) {
+                    if self.codegen_error.is_none() {
+                        self.codegen_error = Some(format!(
+                            "cannot preserve unsupported #[cfg] predicate on extern Rust function {}: {}",
+                            f.sig.ident, predicate
+                        ));
+                    }
+                    continue;
+                }
+                let name_str = f.sig.ident.to_string();
+                let name = escape_cpp_keyword(&name_str);
+                let return_type = self.map_return_type(&f.sig.output);
+                let params = self.map_fn_params(&f.sig.inputs);
+                let export_prefix = if self.should_export_item(&f.vis, &name_str) {
+                    "export "
+                } else {
+                    ""
+                };
+                let cfg_guard = Self::cfg_cpp_guard(&f.attrs);
+                if let Some(condition) = &cfg_guard {
+                    self.writeln(&format!("#if {}", condition));
+                }
+                self.writeln(&format!(
+                    "{}{} {}({});",
+                    export_prefix, return_type, name, params
+                ));
+                if let Some(condition) = &cfg_guard {
+                    self.writeln(&format!("#endif  // {}", condition));
+                }
+            }
+            if let Some(condition) = &block_cfg_guard {
+                self.writeln(&format!("#endif  // {}", condition));
+            }
+            return;
+        }
+
         // extern "C" { fn foo(...); } → extern "C" { declarations }
         let abi = if let Some(abi_name) = &fm.abi.name {
             format!("\"{}\"", abi_name.value())

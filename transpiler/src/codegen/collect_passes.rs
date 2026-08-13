@@ -4141,6 +4141,28 @@ impl CodeGen {
                 syn::Item::Trait(t) => {
                     self.declared_item_names.insert(t.ident.to_string());
                 }
+                syn::Item::ForeignMod(foreign)
+                    if self.module_name.is_some()
+                        && foreign
+                            .abi
+                            .name
+                            .as_ref()
+                            .map(syn::LitStr::value)
+                            .as_deref()
+                            == Some("Rust") =>
+                {
+                    // These declarations are emitted as ordinary C++ names in
+                    // the active named-module namespace.  Register their root
+                    // ownership so call-site absolutization and the namespace
+                    // wrapper rewrite `::f()` to `::<namespace>::f()` instead
+                    // of escaping to an unrelated global symbol.
+                    for item in &foreign.items {
+                        if let syn::ForeignItem::Fn(function) = item {
+                            self.declared_item_names
+                                .insert(function.sig.ident.to_string());
+                        }
+                    }
+                }
                 syn::Item::Mod(m) => {
                     self.declared_item_names.insert(m.ident.to_string());
                     self.declared_module_names.insert(m.ident.to_string());
