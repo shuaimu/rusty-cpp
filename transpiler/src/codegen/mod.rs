@@ -38135,6 +38135,36 @@ impl CodeGen {
         }
     }
 
+    /// A Rust `crate::`-rooted call that resolves to a BARE single-segment
+    /// C++ name loses its rooting (the path emitter pops `crate` and joins
+    /// the rest). Inside a class body the bare name can rebind to a
+    /// same-named MEMBER (serde_json: `impl FromStr for Value` calls
+    /// `crate::from_str`, but the member `Value::from_str` shadows the
+    /// crate-scope template). Re-root such callees in the crate namespace.
+    pub(crate) fn requalify_crate_rooted_bare_callee(
+        &self,
+        call: &syn::ExprCall,
+        func: &str,
+    ) -> Option<String> {
+        if func.contains("::") || func.contains('<') {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.path.segments.len() != 2
+            || path_expr
+                .path
+                .segments
+                .first()
+                .is_none_or(|seg| seg.ident != "crate")
+        {
+            return None;
+        }
+        let krate = self.crate_name.as_deref()?;
+        Some(format!("::{}::{}", escape_cpp_keyword(krate), func))
+    }
+
     fn expected_from_str_target_type(&self, expected_ty: Option<&syn::Type>) -> Option<syn::Type> {
         if let Some(ok_ty) = self.expected_result_type_arg_owned(expected_ty, 0) {
             return Some(
@@ -39572,7 +39602,24 @@ impl CodeGen {
                 .collect::<Vec<_>>()
                 .join("::");
             let owner_cpp = if owner_prefix.is_empty() {
-                "Deserializer".to_string()
+                // A bare `Deserializer::from_str(..)` written in the struct's
+                // own module can be RELOCATED into another namespace by the
+                // impl-grouping pass (serde_json: `impl FromStr for Number`
+                // lives in de.rs but emits into `namespace number`, where a
+                // using-declaration for serde_core's Deserializer TRAIT
+                // shadows the struct). Anchor through the declaring module,
+                // absolute so no enclosing scope can rebind it.
+                match self.local_type_module_path.get(&owner_name) {
+                    Some(module) if !module.is_empty() => {
+                        let module_cpp = module
+                            .split("::")
+                            .map(escape_cpp_keyword)
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        format!("::{}::Deserializer", module_cpp)
+                    }
+                    _ => "Deserializer".to_string(),
+                }
             } else {
                 format!("{}::Deserializer", owner_prefix)
             };

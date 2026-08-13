@@ -17517,6 +17517,7 @@ impl CodeGen {
             func = self.rewrite_seed_ctor_path_string(&func);
             func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
             let arg = self.emit_expr_maybe_move(&call.args[0]);
+            let crate_rooted = self.requalify_crate_rooted_bare_callee(call, &func);
             if matches!(func.as_str(), "from_str" | "::from_str")
                 && let Some(ok_ty) = self.expected_from_str_target_type(expected_ty)
             {
@@ -17525,9 +17526,11 @@ impl CodeGen {
                     && !ok_cpp.contains("/* TODO")
                     && !type_string_has_auto_placeholder(&ok_cpp)
                 {
+                    let func = crate_rooted.as_deref().unwrap_or(func.as_str());
                     return format!("{}<{}>(rusty::to_string_view({}))", func, ok_cpp, arg);
                 }
             }
+            let func = crate_rooted.unwrap_or(func);
             return format!("{}(rusty::to_string_view({}))", func, arg);
         }
         if let syn::Expr::Path(path_expr) = call.func.as_ref()
@@ -18001,7 +18004,7 @@ impl CodeGen {
 
         // General data enum variant constructor: `EnumName::VariantName(args)`
         // → `EnumName_VariantName{args}` when EnumName is a known data enum.
-        if let Some(variant_ctor) = self.try_emit_data_enum_variant_constructor(call) {
+        if let Some(variant_ctor) = self.try_emit_data_enum_variant_constructor(call, expected_ty) {
             return variant_ctor;
         }
         if let Some(c_like_variant) = self.try_emit_c_like_enum_variant_zero_arg_call(call) {
@@ -18969,6 +18972,7 @@ impl CodeGen {
             }
             if func_leaf == "from_str" {
                 let arg = self.emit_expr_maybe_move(&call.args[0]);
+                let crate_rooted = self.requalify_crate_rooted_bare_callee(call, &func);
                 if matches!(func.as_str(), "from_str" | "::from_str")
                     && let Some(ok_ty) = self
                         .expected_from_str_target_type(effective_resolved_hint)
@@ -18979,9 +18983,11 @@ impl CodeGen {
                         && !ok_cpp.contains("/* TODO")
                         && !type_string_has_auto_placeholder(&ok_cpp)
                     {
+                        let func = crate_rooted.as_deref().unwrap_or(func.as_str());
                         return format!("{}<{}>(rusty::to_string_view({}))", func, ok_cpp, arg);
                     }
                 }
+                let func = crate_rooted.unwrap_or(func);
                 return format!("{}(rusty::to_string_view({}))", func, arg);
             }
         }
@@ -21117,7 +21123,11 @@ impl CodeGen {
     /// Detect and emit a general data enum variant constructor call.
     /// E.g., `ErrorKind::LeadingZero(pos)` → `ErrorKind_LeadingZero{pos}`
     /// when `ErrorKind` is a known data enum type.
-    pub(super) fn try_emit_data_enum_variant_constructor(&self, call: &syn::ExprCall) -> Option<String> {
+    pub(super) fn try_emit_data_enum_variant_constructor(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
         let syn::Expr::Path(ep) = call.func.as_ref() else {
             return None;
         };
@@ -21344,6 +21354,79 @@ impl CodeGen {
                     "{}<{}>::{}({})",
                     owner_cpp,
                     targs.join(", "),
+                    escape_cpp_keyword(variant_name),
+                    args.join(", ")
+                ));
+            }
+        }
+
+        // NON-generic wrapper-form enum with no expected ENUM type in sight:
+        // the bare alternative aggregate TYPES as the alternative, not the
+        // enum — a closure returning `Value::Number(b.into())` made collect()
+        // materialize vector<Value_Number>, which never converts to
+        // Vec<Value>. Rust types this expression as the ENUM, so construct
+        // through the emitted static factory, which does too. When the
+        // expected type IS this enum, keep the aggregate — the caller's wrap
+        // machinery adds `Enum{...}` around it.
+        let expected_is_this_enum = expected_ty.is_some_and(|ty| {
+            self.expected_data_enum_name(ty)
+                .or_else(|| {
+                    self.expected_type_path(ty)
+                        .and_then(|p| p.segments.last())
+                        .map(|seg| seg.ident.to_string())
+                })
+                .is_some_and(|name| {
+                    let tail = name.rsplit("::").next().unwrap_or(name.as_str());
+                    tail == *enum_name
+                        || (tail == "Self"
+                            && self
+                                .current_struct
+                                .as_ref()
+                                .and_then(|s| s.rsplit("::").next())
+                                .is_some_and(|t| t == *enum_name))
+                })
+        });
+        if !expected_is_this_enum
+            && (self.has_impls_for_type(enum_name)
+                || self.impl_method_self_tys.contains_key(enum_name)
+                || self.impl_method_receiver_kinds.contains_key(enum_name))
+            && self
+                .declared_type_key_for_path(&enum_path)
+                .and_then(|key| self.declared_type_params.get(&key))
+                .is_none_or(|params| params.is_empty())
+        {
+            // The aggregate's qualified spelling already resolved the RIGHT
+            // referent (serde's ContentSerializer aggregates as
+            // `serde_core_private::Content_Bytes` — the dependency's enum, not
+            // serde's same-named local one) — derive the owner from it by
+            // stripping the variant suffix. Only a BARE alternative spelling
+            // (serde_core's UFCS free fns see `Unexpected_Bool` but not
+            // `Unexpected`) falls back to the declaring-module anchor.
+            let qualified_owner_from_struct = cpp_variant_struct
+                .strip_suffix(&format!("_{}", canonical_variant_name))
+                .or_else(|| cpp_variant_struct.strip_suffix(&format!("_{}", variant_name)))
+                .filter(|owner| owner.contains("::"))
+                .map(ToString::to_string);
+            let owner_cpp = qualified_owner_from_struct.unwrap_or_else(|| {
+                match self.local_type_module_path.get(enum_name.as_str()) {
+                    Some(module) if !module.is_empty() => {
+                        let module_cpp = module
+                            .split("::")
+                            .map(escape_cpp_keyword)
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        format!("::{}::{}", module_cpp, escape_cpp_keyword(enum_name))
+                    }
+                    _ => self.emit_path_to_string(&enum_path),
+                }
+            });
+            if !owner_cpp.is_empty()
+                && !owner_cpp.contains("/* TODO")
+                && !type_string_has_auto_placeholder(&owner_cpp)
+            {
+                return Some(format!(
+                    "{}::{}({})",
+                    owner_cpp,
                     escape_cpp_keyword(variant_name),
                     args.join(", ")
                 ));
