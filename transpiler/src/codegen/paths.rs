@@ -1101,6 +1101,85 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // Rust child modules do not inherit a parent's `use`, but they may
+        // explicitly reach it with `self::` / `super::`. Resolve only the
+        // exact lexical source identity proven by crate preflight. A bare
+        // same-tail path never enters this branch and cannot borrow the
+        // parent's authorization.
+        if path.leading_colon.is_none()
+            && segments
+                .first()
+                .is_some_and(|segment| matches!(segment.as_str(), "self" | "super"))
+        {
+            let mut lexical = self.module_stack.clone();
+            let mut index = 0usize;
+            if segments[index] == "self" {
+                index += 1;
+            } else {
+                while index < segments.len() && segments[index] == "super" {
+                    lexical.pop();
+                    index += 1;
+                }
+            }
+            if segments.len().saturating_sub(index) == 1 {
+                let leaf = &segments[index];
+                let mut targets = self
+                    .flat_import_type_authorizations
+                    .iter()
+                    .filter(|authorization| {
+                        authorization.consumer_physical_module == self.current_physical_module
+                            && authorization.consumer_lexical_module.0 == lexical
+                            && authorization.leaf == *leaf
+                    })
+                    .map(|authorization| {
+                        format!("::{}::{}", authorization.cpp_namespace, authorization.leaf)
+                    })
+                    .collect::<Vec<_>>();
+                targets.sort();
+                targets.dedup();
+                if targets.len() == 1 {
+                    return targets.remove(0);
+                }
+            }
+        }
+        // A `crate::<this physical file module>::...` path names a symbol in
+        // this named module.  The physical file-module segment is not an
+        // emitted C++ namespace; the configured namespace is.  Resolve this
+        // exact qualified identity before any tail-based recovery, but only
+        // when the path contains a leaf from this source's proven flat-import
+        // tuple.  This keeps `crate::consumer::external::Leaf` distinct from
+        // the marked bare `Leaf` while leaving unrelated crate paths alone.
+        if path.leading_colon.is_none()
+            && segments.first().is_some_and(|segment| segment == "crate")
+            && !self.current_physical_module.0.is_empty()
+            && segments[1..].starts_with(&self.current_physical_module.0)
+        {
+            let relative = &segments[1 + self.current_physical_module.0.len()..];
+            let mut namespaces = self
+                .flat_import_type_authorizations
+                .iter()
+                .filter(|authorization| {
+                    authorization.consumer_physical_module == self.current_physical_module
+                        && relative
+                            .iter()
+                            .any(|segment| segment == &authorization.leaf)
+                })
+                .map(|authorization| authorization.cpp_namespace.clone())
+                .collect::<Vec<_>>();
+            namespaces.sort();
+            namespaces.dedup();
+            if namespaces.len() == 1 && !relative.is_empty() {
+                return format!(
+                    "::{}::{}",
+                    namespaces.remove(0),
+                    relative
+                        .iter()
+                        .map(|segment| escape_cpp_keyword(segment))
+                        .collect::<Vec<_>>()
+                        .join("::")
+                );
+            }
+        }
         // General Layer 1 Stage B: expand a `use <std-mod>::{self}` MODULE self-alias
         // whose target is a std/alloc/core module, so a bare `vec::Drain` (from
         // `use alloc::vec::{self, Vec}`, which binds `vec` → `std::vec`) reaches the
@@ -2067,6 +2146,17 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 .chars()
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
+            // A flat-import authorization belongs only to the exact bare
+            // binding introduced by its marked `use`.  A qualified
+            // `external::Leaf` (or `other::Leaf`, `self::Leaf`, etc.) keeps
+            // its own Rust identity and must never enter tail-only recovery.
+            && !self
+                .flat_import_type_authorizations
+                .iter()
+                .any(|authorization| {
+                    authorization.consumer_physical_module == self.current_physical_module
+                        && authorization.leaf == segments[1]
+                })
             && !matches!(segments[0].as_str(), "std" | "core" | "alloc" | "rusty")
             && !self.is_type_param_in_scope(&segments[0])
             && segments[0] != "Self"
@@ -3029,6 +3119,29 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 }
                 return "(*this)".to_string();
             }
+            // These four single-segment constructors are owned by Rust's
+            // prelude Option/Result surface unless an exact lexical binding
+            // shadows them.  Resolve them before globally seeded C-like enum
+            // metadata: importing the TYPE `ChannelError` must never make its
+            // `None` variant visible, so `None` cannot become
+            // `ChannelError::None` merely because that enum is known.
+            let canonical_prelude_ctor = self.canonical_variant_name(&name).to_string();
+            if matches!(canonical_prelude_ctor.as_str(), "None" | "Some" | "Ok" | "Err")
+                && self.lookup_local_binding_type(&name).is_none()
+                && !self.is_local_binding_in_scope(&name)
+                && self
+                    .resolve_scope_import_binding_target_for_exact_scope(
+                        &self.module_stack.join("::"),
+                        &name,
+                    )
+                    .is_none()
+                && !self.glob_imported_enum_tails.iter().any(|owner| {
+                    self.path_matches_c_like_enum_const(owner, &name)
+                        || self.enum_has_variant_name(owner, &canonical_prelude_ctor)
+                })
+            {
+                return format!("rusty::{canonical_prelude_ctor}");
+            }
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
                 if self.is_delayed_init_local(&name) {
                     return format!("{}.value()", mapped);
@@ -3122,18 +3235,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 if let Some(owner) = builtin_owner {
                     return format!("{}::{}", owner, name);
                 }
-            }
-        }
-        if path.segments.len() == 1 {
-            let canonical = self
-                .canonical_variant_name(&path.segments[0].ident.to_string())
-                .to_string();
-            match canonical.as_str() {
-                "None" => return "rusty::None".to_string(),
-                "Some" => return "rusty::Some".to_string(),
-                "Ok" => return "rusty::Ok".to_string(),
-                "Err" => return "rusty::Err".to_string(),
-                _ => {}
             }
         }
         if path.segments.len() >= 3 {

@@ -13700,6 +13700,9 @@ impl CodeGen {
         path_expr: &syn::ExprPath,
         expected_ty: Option<&syn::Type>,
     ) -> Option<String> {
+        if self.is_associated_const_value_path(&path_expr.path) {
+            return None;
+        }
         let expected_ty = expected_ty?;
         if path_expr.path.segments.len() == 1 {
             let local_name = path_expr.path.segments[0].ident.to_string();

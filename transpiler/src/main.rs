@@ -1010,10 +1010,11 @@ fn transpile_crate(
         source_units.push((rs_path.clone(), source));
     }
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
-    let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
+    let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
         transpile_options.cxx_namespace.as_deref(),
     )?;
+    let has_cpp_abi = cpp_abi_preflight.has_contracts;
     if has_cpp_abi {
         validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
         if expand {
@@ -1212,6 +1213,14 @@ fn transpile_crate(
         let full_cppm_path = output_dir.join(&cppm_path);
 
         let mut module_options = crate_transpile_options.clone();
+        module_options.flat_import_type_authorizations = cpp_abi_preflight
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_source.as_path() == rs_path.as_path()
+            })
+            .cloned()
+            .collect();
         module_options.explicit_gmf_includes = module_preambles
             .get(&module_name)
             .cloned()
@@ -1555,6 +1564,54 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
+    fn snapshot_output_tree(root: &Path) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
+        fn visit(root: &Path, directory: &Path, out: &mut Vec<(PathBuf, &'static str, Vec<u8>)>) {
+            let mut entries = std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect::<Vec<_>>();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.file_type().is_symlink() {
+                    out.push((
+                        relative,
+                        "symlink",
+                        std::fs::read_link(&path)
+                            .unwrap()
+                            .to_string_lossy()
+                            .as_bytes()
+                            .to_vec(),
+                    ));
+                } else if metadata.is_dir() {
+                    out.push((relative, "directory", Vec::new()));
+                    visit(root, &path, out);
+                } else {
+                    out.push((relative, "file", std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+
+        let mut snapshot = Vec::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn seed_atomic_output(root: &Path, label: &str) {
+        std::fs::create_dir_all(root.join("deep/inner")).unwrap();
+        std::fs::write(root.join("alpha.txt"), format!("alpha:{label}\n")).unwrap();
+        std::fs::write(root.join("deep/beta.txt"), format!("beta:{label}\nline-two\n"))
+            .unwrap();
+        let mut binary = vec![0, 1, 2, 0xff];
+        binary.extend_from_slice(label.as_bytes());
+        binary.push(0);
+        std::fs::write(root.join("deep/inner/binary.bin"), binary).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../alpha.txt", root.join("deep/alpha-link")).unwrap();
+    }
+
     fn closure_manifest(name: &str, dependencies: &[(&str, &str)]) -> String {
         let mut manifest =
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");
@@ -1707,6 +1764,961 @@ pub fn draw() -> u64 { randgen_rand_raw() }
         .unwrap_err();
         assert!(error.contains("physical generated root module"), "{error}");
         assert!(!inline_child_output.exists());
+    }
+
+    #[test]
+    fn cpp_import_namespace_crate_mode_flattens_proven_sibling_types() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            r#"
+#[repr(i32)]
+#[cfg_attr(not(any()), derive(Clone, Copy))]
+pub enum ChannelError { None = 0 }
+#[repr(C)]
+pub struct ChannelFrame { pub value: i32 }
+pub trait ChannelBase { fn code(&self) -> i32; }
+pub type ChannelProxy = Box<dyn ChannelBase>;
+"#,
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::{ChannelBase, ChannelError, ChannelFrame, ChannelProxy};
+pub mod external {
+    #[repr(i32)]
+    pub enum ChannelError { Foreign = 11 }
+    #[repr(C)]
+    pub struct ChannelFrame { pub foreign: i32 }
+}
+use self::external::ChannelFrame as OtherLeaf;
+pub struct LocalChannel { pub value: i32 }
+#[cpp_inherit]
+impl ChannelBase for LocalChannel {
+    fn code(&self) -> i32 { self.value }
+}
+pub fn inspect(
+    frame: &ChannelFrame,
+    foreign: &external::ChannelFrame,
+    renamed: &OtherLeaf,
+    _: Option<ChannelProxy>,
+) -> ChannelError {
+    let _ = frame.value + foreign.foreign + renamed.foreign;
+    ChannelError::None
+}
+pub fn external_enum_value() -> external::ChannelError {
+    external::ChannelError::Foreign
+}
+pub fn make_external(value: i32) -> external::ChannelFrame {
+    external::ChannelFrame { foreign: value }
+}
+pub fn inspect_crate(value: &crate::consumer::external::ChannelFrame) -> i32 {
+    value.foreign
+}
+pub fn external_enum_crate() -> crate::consumer::external::ChannelError {
+    crate::consumer::external::ChannelError::Foreign
+}
+pub mod nested {
+    pub fn inspect_super(value: &super::external::ChannelFrame) -> i32 { value.foreign }
+    pub fn inspect_crate(value: &crate::consumer::external::ChannelFrame) -> i32 {
+        value.foreign
+    }
+}
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap();
+
+        let consumer = std::fs::read_to_string(output.join("rrr.consumer.cppm")).unwrap();
+        assert_eq!(
+            consumer
+                .lines()
+                .filter(|line| line.trim() == "import rrr.channel;")
+                .count(),
+            1,
+            "{consumer}"
+        );
+        assert!(!consumer.contains("export import rrr.channel;"), "{consumer}");
+        for leaf in [
+            "ChannelBase",
+            "ChannelError",
+            "ChannelFrame",
+            "ChannelProxy",
+        ] {
+            assert!(
+                consumer.contains(&format!("using ::rrr::{leaf};")),
+                "{consumer}"
+            );
+        }
+        assert!(
+            consumer.contains("struct LocalChannel : public ChannelBase"),
+            "{consumer}"
+        );
+        assert!(consumer.contains("::rrr::ChannelFrame"), "{consumer}");
+        assert!(
+            consumer.contains("const external::ChannelFrame& foreign"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("const external::ChannelFrame& renamed"),
+            "{consumer}"
+        );
+        assert!(
+            !consumer.contains("const ::rrr::ChannelFrame& foreign"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("external::ChannelError external_enum_value()"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("external::ChannelFrame make_external(int32_t value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains(
+                "int32_t inspect_crate(const ::rrr::external::ChannelFrame& value)"
+            ),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("::rrr::external::ChannelError external_enum_crate()"),
+            "{consumer}"
+        );
+        assert!(!consumer.contains("::consumer::external::"), "{consumer}");
+        assert!(!consumer.contains("::rrr::channel::"), "{consumer}");
+    }
+
+    #[test]
+    fn cpp_import_namespace_nested_type_binding_is_lexical() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+pub mod marked {
+    #[cfg_attr(any(), cpp_import_namespace(rrr))]
+    use crate::channel::Target;
+    pub fn inspect(value: &Target) -> i32 { value.value }
+    pub mod child {
+        use super::Target;
+        use super::Target as ImportedTarget;
+        pub fn inspect_super(value: &super::Target) -> i32 { value.value }
+        pub fn inspect_import(value: &Target) -> i32 { value.value }
+        pub fn inspect_alias(value: &ImportedTarget) -> i32 { value.value }
+        pub fn inspect_generic<Target>(_: &Target) {}
+    }
+}
+pub mod sibling {
+    #[repr(C)]
+    pub struct Target { pub other: i32 }
+    pub fn inspect(value: &Target) -> i32 { value.other }
+}
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap();
+
+        let consumer = std::fs::read_to_string(output.join("rrr.consumer.cppm")).unwrap();
+        assert_eq!(
+            consumer
+                .lines()
+                .filter(|line| line.trim() == "import rrr.channel;")
+                .count(),
+            1,
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect(const Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect_super(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect_import(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("using ImportedTarget = ::rrr::Target;"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect_alias(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("void inspect_generic(const Target& _")
+                && !consumer.contains("void inspect_generic(const ::rrr::Target&"),
+            "{consumer}"
+        );
+        assert!(!consumer.contains("::rrr::channel::"), "{consumer}");
+    }
+
+    #[test]
+    fn cpp_import_namespace_rejects_unbound_descendant_constructors_before_output() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            r#"
+#[repr(C)]
+pub struct ChannelFrame { pub value: i32 }
+#[repr(i32)]
+pub enum ChannelError { None = 0 }
+"#,
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::{ChannelError, ChannelFrame};
+pub mod nested {
+    pub fn invalid_struct(value: i32) -> i32 { ChannelFrame { value }.value }
+    pub fn invalid_enum() -> i32 { ChannelError::None as i32 }
+}
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        let error = transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect_err("unbound descendant flat type leaf");
+        assert!(error.contains("without an exact local binding"), "{error}");
+        assert!(error.contains("consumer::nested"), "{error}");
+        assert!(
+            !output.exists(),
+            "crate preflight must reject before creating the output directory"
+        );
+    }
+
+    #[test]
+    fn cpp_import_namespace_rejects_wrong_namespace_shadow_atomically() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+pub mod nested {
+    pub fn invalid(Target: usize, value: &Target) -> usize {
+        let _ = value;
+        Target
+    }
+}
+"#,
+        );
+
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        let manifest = fixture.path().join("Cargo.toml");
+        let absent = fixture.path().join("absent-output");
+        let error = transpile_crate(
+            &manifest,
+            &absent,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect_err("a value binding cannot satisfy the imported type leaf");
+        assert!(error.contains("type namespace"), "{error}");
+        assert!(!absent.exists(), "preflight created an absent output");
+
+        let existing = fixture.path().join("existing-output");
+        std::fs::create_dir(&existing).unwrap();
+        let sentinel = existing.join("keep.txt");
+        std::fs::write(&sentinel, "preserve\n").unwrap();
+        let error = transpile_crate(
+            &manifest,
+            &existing,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect_err("wrong-namespace rejection with preexisting output");
+        assert!(error.contains("type namespace"), "{error}");
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "preserve\n");
+        let entries = std::fs::read_dir(&existing)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("keep.txt")]);
+    }
+
+    #[test]
+    fn cpp_import_namespace_cfg_presence_matches_cargo_and_is_atomic() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+
+        let manifest = fixture.path().join("Cargo.toml");
+        let options = transpile::TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..Default::default()
+        };
+        for (label, nested) in [
+            (
+                "cfg-type",
+                "#[cfg(any())] pub struct Target { pub local: usize } pub fn invalid(value: &Target) -> usize { value.local }",
+            ),
+            (
+                "cfg-attr-type",
+                "#[cfg_attr(not(any()), cfg(any()))] pub struct Target { pub local: usize } pub fn invalid(value: &Target) -> usize { value.local }",
+            ),
+            (
+                "cfg-value",
+                "#[cfg(any())] pub const Target: usize = 1; pub fn invalid() -> usize { Target }",
+            ),
+            (
+                "cfg-constructor",
+                "#[cfg(any())] pub struct Target(pub usize); pub fn invalid() -> usize { Target(1).0 }",
+            ),
+            (
+                "cfg-module",
+                "#[cfg(any())] pub mod Target { pub const VALUE: usize = 1; } pub fn invalid() -> usize { Target::VALUE }",
+            ),
+            (
+                "cfg-import-alias",
+                "pub struct Other; #[cfg(any())] use self::Other as Target; pub fn invalid(_: &Target) {}",
+            ),
+            (
+                "cfg-attr-import-alias",
+                "pub struct Other; #[cfg_attr(not(any()), cfg(any()))] use self::Other as Target; pub fn invalid(_: &Target) {}",
+            ),
+            (
+                "cfg-pattern-binding",
+                "pub fn invalid() -> usize { #[cfg(any())] let Target = 1usize; Target }",
+            ),
+            (
+                "cfg-variant-pattern-head",
+                "pub enum Other { #[cfg(any())] Target } use self::Other::Target; pub fn invalid() { let _ = Target; }",
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!(
+                    r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+
+pub mod nested {{
+    {nested}
+}}
+"#
+                ),
+            );
+
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert!(
+                !cargo.status.success(),
+                "Cargo unexpectedly accepted the {label} fixture"
+            );
+            assert!(
+                !cargo.stderr.is_empty(),
+                "Cargo rejected {label} without a diagnostic"
+            );
+
+            let absent = fixture.path().join(format!("{label}-absent-output"));
+            let error = transpile_crate(
+                &manifest,
+                &absent,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("cfg-disabled evidence must fail before absent output");
+            assert!(
+                error.contains("without an exact local binding")
+                    || error.contains("unsupported presence/path attributes"),
+                "{label}: {error}"
+            );
+            assert!(!absent.exists(), "{label}: preflight created absent output");
+
+            let existing = fixture.path().join(format!("{label}-existing-output"));
+            std::fs::create_dir(&existing).unwrap();
+            let sentinel = existing.join("keep.txt");
+            std::fs::write(&sentinel, format!("preserve-{label}\n")).unwrap();
+            let error = transpile_crate(
+                &manifest,
+                &existing,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("cfg-disabled evidence must preserve existing output");
+            assert!(
+                error.contains("without an exact local binding")
+                    || error.contains("unsupported presence/path attributes"),
+                "{label}: {error}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).unwrap(),
+                format!("preserve-{label}\n")
+            );
+            let entries = std::fs::read_dir(&existing)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                entries,
+                vec![std::ffi::OsString::from("keep.txt")],
+                "{label}: invalid preflight added output files"
+            );
+        }
+
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+
+pub mod nested {
+    pub struct Other;
+    impl Other { pub const Target: usize = 7; }
+    pub fn valid() -> usize { self::Other::Target }
+}
+"#,
+        );
+        let cargo = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--quiet")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "Cargo rejected associated-member fixture: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+
+        let associated_output = fixture.path().join("associated-output");
+        transpile_crate(
+            &manifest,
+            &associated_output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect("a distinctly qualified associated member must transpile");
+        let consumer_cpp =
+            std::fs::read_to_string(associated_output.join("rrr.consumer.cppm")).unwrap();
+        assert!(
+            consumer_cpp.contains("return nested::Other::Target;")
+                || consumer_cpp.contains("return Other::Target;"),
+            "associated const was misclassified as a constructor:\n{consumer_cpp}"
+        );
+        assert!(!consumer_cpp.contains("Other::Target{}"), "{consumer_cpp}");
+    }
+
+    #[test]
+    fn cpp_import_namespace_foreign_member_presence_matches_cargo_and_is_atomic() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+
+        let manifest = fixture.path().join("Cargo.toml");
+        let options = transpile::TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..Default::default()
+        };
+        for (label, foreign, use_, cargo_valid) in [
+            (
+                "cfg-disabled-foreign-fn",
+                "#[cfg(any())] fn Target() -> usize;",
+                "pub fn invalid() -> usize { unsafe { Target() } }",
+                false,
+            ),
+            (
+                "cfg-attr-disabled-foreign-fn",
+                "#[cfg_attr(all(), cfg(any()))] fn Target() -> usize;",
+                "pub fn invalid() -> usize { unsafe { Target() } }",
+                false,
+            ),
+            (
+                "unknown-target-foreign-fn",
+                "#[cfg(target_os = \"linux\")] fn Target() -> usize;",
+                "pub fn valid_for_cargo() -> usize { unsafe { Target() } }",
+                true,
+            ),
+            (
+                "cfg-disabled-foreign-static",
+                "#[cfg(any())] static Target: usize;",
+                "pub fn invalid() -> usize { unsafe { Target } }",
+                false,
+            ),
+            (
+                "cfg-attr-disabled-foreign-static",
+                "#[cfg_attr(all(), cfg(any()))] static Target: usize;",
+                "pub fn invalid() -> usize { unsafe { Target } }",
+                false,
+            ),
+            (
+                "unknown-target-foreign-static",
+                "#[cfg(target_os = \"linux\")] static Target: usize;",
+                "pub fn valid_for_cargo() -> usize { unsafe { Target } }",
+                true,
+            ),
+            (
+                "cfg-disabled-foreign-type",
+                "#[cfg(any())] type Target;",
+                "pub fn invalid(_: &Target) {}",
+                false,
+            ),
+            (
+                "cfg-attr-disabled-foreign-type",
+                "#[cfg_attr(all(), cfg(any()))] type Target;",
+                "pub fn invalid(_: &Target) {}",
+                false,
+            ),
+            (
+                "unknown-target-foreign-type",
+                "#[cfg(target_os = \"windows\")] type Target;",
+                "pub fn invalid(_: &Target) {}",
+                false,
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!(
+                    r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+
+pub mod nested {{
+    unsafe extern "C" {{
+        {foreign}
+    }}
+    {use_}
+}}
+"#,
+                ),
+            );
+
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                cargo.status.success(),
+                cargo_valid,
+                "Cargo parity mismatch for {label}: {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+
+            let absent = fixture.path().join(format!("{label}-absent-output"));
+            let error = transpile_crate(
+                &manifest,
+                &absent,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("conditional foreign member must not prove a descendant binding");
+            assert!(error.contains("without an exact local binding"), "{label}: {error}");
+            assert!(!absent.exists(), "{label}: preflight created absent output");
+
+            let existing = fixture.path().join(format!("{label}-existing-output"));
+            seed_atomic_output(&existing, label);
+            let before = snapshot_output_tree(&existing);
+            let error = transpile_crate(
+                &manifest,
+                &existing,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("conditional foreign member must preserve existing output");
+            assert!(error.contains("without an exact local binding"), "{label}: {error}");
+            assert_eq!(snapshot_output_tree(&existing), before, "{label}");
+        }
+    }
+
+    #[test]
+    fn cpp_import_namespace_enclosing_foreign_block_presence_matches_cargo_and_is_atomic() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[features]\ndefault = [\"present\"]\npresent = []\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+
+        let manifest = fixture.path().join("Cargo.toml");
+        let options = transpile::TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..Default::default()
+        };
+        let marker = r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+"#;
+
+        for (label, body) in [
+            (
+                "enclosing-cfg-disabled-foreign-fn",
+                r#"
+#[cfg(any())]
+unsafe extern "C" { fn Target() -> usize; }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-cfg-attr-disabled-foreign-fn",
+                r#"
+#[cfg_attr(all(), cfg(any()))]
+unsafe extern "C" { fn Target() -> usize; }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-nested-cfg-attr-disabled-foreign-macro",
+                r#"
+#[cfg_attr(all(), cfg_attr(all(), cfg(any())))]
+unsafe extern "C" { Target!(); }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "member-cfg-disabled-verbatim-safe-fn",
+                r#"
+unsafe extern "C" {
+    #[cfg(any())]
+    safe fn Target() -> usize;
+}
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-decisively-absent-foreign-type",
+                r#"
+#[cfg(all(any(target_os = "linux"), not(all())))]
+unsafe extern "C" { type Target; }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-static-present-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg(any(target_os = "impossible", all()))]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn valid() -> usize { unsafe { Target() } }
+}
+"#,
+            ),
+            (
+                "mixed-member-presence",
+                r#"
+unsafe extern "C" {
+    #[cfg(any())]
+    fn Target() -> usize;
+    fn Other() -> usize;
+}
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!("{marker}\n{body}"),
+            );
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "Cargo rejected {label}: {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+
+            let output = fixture.path().join(format!("{label}-output"));
+            transpile_crate(
+                &manifest,
+                &output,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{label} should transpile: {error}"));
+            assert!(output.join("rusty_hand_slots.md").is_file(), "{label}");
+        }
+
+        for (label, body, cargo_valid, expected_error) in [
+            (
+                "enclosing-unknown-target-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn cargo_valid() -> usize { unsafe { Target() } }
+}
+"#,
+                true,
+                "without an exact local binding",
+            ),
+            (
+                "enclosing-unknown-feature-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg(feature = "present")]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn cargo_valid() -> usize { unsafe { Target() } }
+}
+"#,
+                true,
+                "without an exact local binding",
+            ),
+            (
+                "enclosing-unknown-cfg-attr-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg_attr(target_os = "linux", cfg(any()))]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn cargo_invalid() -> usize { unsafe { Target() } }
+}
+"#,
+                false,
+                "without an exact local binding",
+            ),
+            (
+                "enclosing-unknown-target-foreign-macro",
+                r#"
+#[cfg(target_os = "linux")]
+unsafe extern "C" { Target!(); }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+                false,
+                "opaque macro syntax",
+            ),
+            (
+                "member-unknown-target-verbatim-safe-fn",
+                r#"
+unsafe extern "C" {
+    #[cfg(target_os = "linux")]
+    safe fn Target() -> usize;
+}
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+                true,
+                "opaque foreign item syntax",
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!("{marker}\n{body}"),
+            );
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                cargo.status.success(),
+                cargo_valid,
+                "Cargo parity mismatch for {label}: {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+
+            let absent = fixture.path().join(format!("{label}-absent-output"));
+            let error = transpile_crate(
+                &manifest,
+                &absent,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("unknown enclosing presence must fail closed");
+            assert!(error.contains(expected_error), "{label}: {error}");
+            assert!(!absent.exists(), "{label}: preflight created absent output");
+
+            let existing = fixture.path().join(format!("{label}-existing-output"));
+            seed_atomic_output(&existing, label);
+            let before = snapshot_output_tree(&existing);
+            let error = transpile_crate(
+                &manifest,
+                &existing,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("unknown enclosing presence must preserve existing output");
+            assert!(error.contains(expected_error), "{label}: {error}");
+            assert_eq!(snapshot_output_tree(&existing), before, "{label}");
+        }
     }
 
     #[test]
@@ -5507,6 +6519,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_impl_blocks: Vec::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
+        flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: None,
         auto_namespace: false,
@@ -6139,6 +7152,7 @@ fn main() {
         cross_file_impl_blocks: Vec::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
+        flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: cli.cxx_namespace.clone(),
         auto_namespace: cli.auto_namespace,

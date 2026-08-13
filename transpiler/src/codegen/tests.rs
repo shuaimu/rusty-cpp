@@ -23984,6 +23984,41 @@ fn test_bare_glob_variant_remains_unresolved_when_owner_is_ambiguous() {
 }
 
 #[test]
+fn test_bare_option_none_is_not_hijacked_by_known_c_like_enum_variant() {
+    let out = transpile_str(
+        r#"
+        #[repr(i32)]
+        enum ChannelError { None = 0, Closed = 1 }
+
+        struct State { pending: Option<i32> }
+
+        fn clear(state: &mut State) {
+            state.pending = None;
+        }
+        "#,
+    );
+    assert!(out.contains("state_shadow1).pending = rusty::Option<int32_t>{rusty::None};"), "{out}");
+    assert!(!out.contains("state.pending = ChannelError::None;"), "{out}");
+}
+
+#[test]
+fn test_explicit_glob_imported_c_like_enum_none_keeps_enum_owner() {
+    let out = transpile_str(
+        r#"
+        #[repr(i32)]
+        enum Status { None = 0, Active = 1 }
+
+        fn status() -> Status {
+            use Status::*;
+            None
+        }
+        "#,
+    );
+    assert!(out.contains("return Status::None;"), "{out}");
+    assert!(!out.contains("return rusty::None;"), "{out}");
+}
+
+#[test]
 fn test_self_by_value_method_emits_as_const_callable() {
     // Regression for btree_port B3 (const-correctness drift).
     // `fn forget_type(self)` in Rust consumes ownership of self but

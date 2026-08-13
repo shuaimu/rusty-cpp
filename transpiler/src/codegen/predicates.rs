@@ -4512,6 +4512,9 @@ impl CodeGen {
         if path.segments.len() < 2 {
             return false;
         }
+        if self.lookup_associated_const_type(path).is_some() {
+            return true;
+        }
         let Some(owner_seg) = path.segments.iter().nth_back(1) else {
             return false;
         };

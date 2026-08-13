@@ -3143,6 +3143,30 @@ impl CodeGen {
         if owner_tail != owner {
             candidates.push(self.scoped_type_key(&owner_tail));
         }
+        let scope = self.module_stack.join("::");
+        if let Some(imported_owner) =
+            self.resolve_scope_import_binding_target_in_scope_chain(&scope, &owner_tail)
+        {
+            let imported_segments = imported_owner
+                .trim()
+                .trim_start_matches("::")
+                .split("::")
+                .filter(|segment| {
+                    !segment.is_empty() && !matches!(*segment, "crate" | "self" | "super")
+                })
+                .collect::<Vec<_>>();
+            if !imported_segments.is_empty() {
+                let imported = imported_segments.join("::");
+                let imported_tail = imported_segments
+                    .last()
+                    .expect("non-empty imported owner")
+                    .to_string();
+                candidates.push(imported.clone());
+                candidates.push(imported_tail.clone());
+                candidates.push(self.scoped_type_key(&imported));
+                candidates.push(self.scoped_type_key(&imported_tail));
+            }
+        }
         candidates.sort();
         candidates.dedup();
 

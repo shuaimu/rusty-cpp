@@ -6009,7 +6009,7 @@ impl CodeGen {
             .map(|(namespace, child, leaves)| {
                 (namespace.to_string(), child.to_string(), leaves.to_vec())
             });
-        if let Some((_namespace, child, _leaves)) = flat_import {
+        if let Some((namespace, child, leaves)) = flat_import {
             // The contract's Rust path is exactly `crate::<child>::...`, so its
             // dependency is the exact generated root-child module.  Do not
             // use nearest ancestor-sibling lookup: preflight requires a direct
@@ -6025,6 +6025,26 @@ impl CodeGen {
                 && self.sibling_modules_imported.insert(sibling_module.clone())
             {
                 self.writeln(&format!("import {sibling_module};"));
+            }
+            let marked_leaves = leaves.clone();
+            for leaf in leaves {
+                if self
+                    .flat_import_type_authorizations
+                    .iter()
+                    .any(|authorization| {
+                        authorization.consumer_physical_module
+                            == self.current_physical_module
+                            && authorization.consumer_lexical_module.0 == self.module_stack
+                            && authorization.marked_rust_child == child
+                            && authorization.marked_leaves == marked_leaves
+                            && authorization.leaf == leaf
+                            && authorization.cpp_namespace == namespace
+                            && authorization.provider_physical_module.0
+                                == [child.clone()]
+                    })
+                {
+                    self.writeln(&format!("using ::{namespace}::{leaf};"));
+                }
             }
             return;
         }
@@ -6079,6 +6099,11 @@ impl CodeGen {
         };
         for raw_path in &paths {
             let path = self.rewrite_external_crate_import_path(raw_path);
+            // Preserve the exact Rust source identity before generic import
+            // resolution can collapse `super::Leaf` onto an unrelated local
+            // same-tail declaration. The late pass remains as an idempotent
+            // guard for paths introduced by later generic rewrites.
+            let path = self.rewrite_flat_import_type_using_path(&path);
             if let Some(cpp_import) = classify_cpp_module_use_import(&path) {
                 self.record_cpp_module_use_import(&cpp_import);
                 if cpp_import.explicit_alias {
@@ -6402,6 +6427,7 @@ impl CodeGen {
                         self.rewrite_global_using_path_for_private_alias_root(&using_path);
                     let using_path =
                         self.rewrite_using_path_for_module_runtime_helper_trait(&using_path);
+                    let using_path = self.rewrite_flat_import_type_using_path(&using_path);
                     // Collapse a renamed re-export of a Rust primitive
                     // (`pub use core::primitive::u8 as yaml_char_t;`) to the C++
                     // primitive (`using yaml_char_t = uint8_t;`). Otherwise the
