@@ -55318,6 +55318,14 @@ struct Cow_Owned {\n\
     bool operator<(const Cow_Owned& other) const { return _0 < other._0; }\n\
 };\n\
 using Cow = std::variant<Cow_Borrowed, Cow_Owned>;\n\
+inline std::string_view cow_view(const Cow& c) {\n\
+    return std::visit([](const auto& v) -> std::string_view {\n\
+        return std::string_view(v._0);\n\
+    }, c);\n\
+}\n\
+// Rust `cow == \"literal\"` / cross-variant Cow equality.\n\
+inline bool operator==(const Cow& c, std::string_view s) { return cow_view(c) == s; }\n\
+inline bool operator==(std::string_view s, const Cow& c) { return cow_view(c) == s; }\n\
 inline Cow clone(const Cow& value) {\n\
     if (const auto* borrowed = std::get_if<Cow_Borrowed>(&value)) {\n\
         return Cow_Borrowed{borrowed->_0};\n\
