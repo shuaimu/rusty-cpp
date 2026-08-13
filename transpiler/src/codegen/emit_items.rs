@@ -3818,7 +3818,12 @@ impl CodeGen {
                     .forward_emitted_c_like_enums
                     .contains(&scoped_enum_name);
             if !already_defined {
-                self.writeln(&format!("{}enum class {} {{", export_prefix, name));
+                self.writeln(&format!(
+                    "{}enum class {}{} {{",
+                    export_prefix,
+                    name,
+                    c_like_enum_underlying_suffix(e)
+                ));
                 self.indent += 1;
                 let variants = self.render_c_like_enum_variants(e);
                 self.writeln(&variants.join(",\n    "));
@@ -6024,6 +6029,13 @@ impl CodeGen {
             return;
         }
 
+        if let Some(sibling_module) = self.resolve_crate_module_underscore_import(u) {
+            if self.sibling_modules_imported.insert(sibling_module.clone()) {
+                self.writeln(&format!("import {sibling_module};"));
+            }
+            return;
+        }
+
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
 
         // Detect external crate imports
@@ -6246,6 +6258,10 @@ impl CodeGen {
                     ));
                     continue;
                 }
+            }
+            if is_external && use_import_is_underscore_alias(&resolved_path) {
+                self.writeln("// Rust-only external underscore import omitted.");
+                continue;
             }
             if is_external {
                 let allow_external_mapping = is_supported_external_import_mapping(&resolved_path);

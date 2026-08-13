@@ -2499,9 +2499,6 @@ impl CodeGen {
                                         return "rusty::io::DynWrite".to_string();
                                     }
                                 }
-                                if self.module_name.is_some() {
-                                    return "void*".to_string();
-                                }
                                 // Collect all trait names for multi-bound
                                 let trait_paths: Vec<&syn::Path> = to
                                     .bounds
@@ -2511,6 +2508,25 @@ impl CodeGen {
                                         _ => None,
                                     })
                                     .collect();
+                                // Named-module mode historically erased every boxed
+                                // trait object to `void*`.  That remains the safe
+                                // fallback for an unknown/external trait, but a trait
+                                // declared by this emitted source has a concrete C++
+                                // interface class below.  Preserve that local owner as
+                                // `rusty::Box<Trait>` so public proxy aliases retain
+                                // their established ABI.
+                                if self.module_name.is_some()
+                                    && trait_paths.iter().any(|path| {
+                                        path.segments.len() != 1
+                                            || path.segments.last().is_none_or(|segment| {
+                                                !self
+                                                    .ufcs_declared_trait_names
+                                                    .contains(&segment.ident.to_string())
+                                            })
+                                    })
+                                {
+                                    return "void*".to_string();
+                                }
                                 let trait_names: Vec<String> = trait_paths
                                     .iter()
                                     .filter_map(|p| p.segments.last().map(|s| s.ident.to_string()))

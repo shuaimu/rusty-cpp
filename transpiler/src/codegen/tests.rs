@@ -419,7 +419,42 @@ fn test_module_c_like_enum_function_parameter_stays_nominal() {
     );
     assert!(out.contains("export int32_t code(Code v);"), "{out}");
     assert!(out.contains("export int32_t code(Code v) {"), "{out}");
+    assert!(out.contains("export enum class Code : int32_t;"), "{out}");
+    assert!(out.contains("export enum class Code : int32_t {"), "{out}");
     assert!(!out.contains("code(auto v)"), "{out}");
+}
+
+#[test]
+fn test_module_c_like_enum_preserves_explicit_integer_repr() {
+    for (rust_repr, cpp_repr) in [
+        ("i8", "int8_t"),
+        ("u8", "uint8_t"),
+        ("i16", "int16_t"),
+        ("u16", "uint16_t"),
+        ("i32", "int32_t"),
+        ("u32", "uint32_t"),
+        ("i64", "int64_t"),
+        ("u64", "uint64_t"),
+        ("i128", "__int128"),
+        ("u128", "unsigned __int128"),
+        ("isize", "intptr_t"),
+        ("usize", "uintptr_t"),
+    ] {
+        let source = format!("#[repr({rust_repr})] pub enum Code {{ Zero = 0, One = 1 }}");
+        let out = transpile_str_module(&source, "rrr.enums");
+        assert!(
+            out.contains(&format!("export enum class Code : {cpp_repr};")),
+            "repr({rust_repr}) forward declaration was not preserved:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("export enum class Code : {cpp_repr} {{")),
+            "repr({rust_repr}) definition was not preserved:\n{out}"
+        );
+    }
+
+    let unrepresented = transpile_str_module("pub enum Code { Zero, One }", "rrr.enums");
+    assert!(unrepresented.contains("export enum class Code;"), "{unrepresented}");
+    assert!(unrepresented.contains("export enum class Code {"), "{unrepresented}");
 }
 
 #[test]
@@ -7738,6 +7773,35 @@ fn test_interface_traits_box_dyn_maps_to_rusty_box_of_interface() {
     );
     assert!(out.contains("void f(rusty::Box<Animal> a)"), "{out}");
     assert!(!out.contains("pro::proxy<"), "{out}");
+}
+
+#[test]
+fn test_named_module_box_dyn_local_interface_keeps_typed_owner() {
+    let out = transpile_str_module(
+        "pub trait Connection { fn close(&mut self); } pub type Proxy = Box<dyn Connection>;",
+        "rrr.channel",
+    );
+    assert!(out.contains("using Proxy = rusty::Box<Connection>;"), "{out}");
+    assert!(!out.contains("using Proxy = void*;"), "{out}");
+}
+
+#[test]
+fn test_named_module_box_dyn_unknown_interface_remains_fail_closed() {
+    let out = transpile_str_module(
+        "pub type Proxy = Box<dyn external::Connection>;",
+        "rrr.channel",
+    );
+    assert!(out.contains("using Proxy = void*;"), "{out}");
+}
+
+#[test]
+fn test_named_module_box_dyn_external_same_tail_remains_fail_closed() {
+    let out = transpile_str_module(
+        "pub trait Connection { fn close(&mut self); } pub type Proxy = Box<dyn external::Connection>;",
+        "rrr.channel",
+    );
+    assert!(out.contains("using Proxy = void*;"), "{out}");
+    assert!(!out.contains("using Proxy = rusty::Box<Connection>;"), "{out}");
 }
 
 #[test]
@@ -16528,6 +16592,59 @@ fn test_use_naming_sibling_module_emits_import() {
             "`use {path};` must import the sibling module:\n{out}"
         );
     }
+}
+
+#[test]
+fn test_crate_module_import_as_underscore_is_private_and_alias_free() {
+    let file: syn::File = syn::parse_str(
+        "#[allow(unused_imports)] use crate::provider as _;\npub fn value() -> i32 { 7 }",
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("probe");
+    cg.set_crate_module_names(
+        ["probe.provider", "probe.consumer"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    cg.set_cxx_namespace(Some("probe".to_string()));
+    cg.emit_file(&file, Some("probe.consumer"));
+    let out = cg.into_output();
+
+    let module = out.find("export module probe.consumer;").unwrap();
+    let import = out.find("import probe.provider;").unwrap();
+    let namespace = out.find("namespace probe {").unwrap();
+    assert!(module < import && import < namespace, "{out}");
+    assert_eq!(out.matches("import probe.provider;").count(), 1, "{out}");
+    assert!(!out.contains("export import probe.provider;"), "{out}");
+    assert!(!out.contains("namespace provider ="), "{out}");
+    assert!(!out.contains("namespace _ ="), "{out}");
+    assert!(!out.contains("using _ ="), "{out}");
+}
+
+#[test]
+fn test_crate_item_import_as_underscore_imports_exact_owner_only() {
+    let out = transpile_str_module_with_sibling_modules(
+        "#[allow(unused_imports)] use crate::provider::Extension as _;",
+        "probe.consumer",
+        &["probe.provider", "probe.consumer"],
+    );
+    assert_eq!(out.matches("import probe.provider;").count(), 1, "{out}");
+    assert!(!out.contains("using _ ="), "{out}");
+    assert!(!out.contains("namespace _ ="), "{out}");
+}
+
+#[test]
+fn test_external_same_tail_underscore_import_cannot_select_local_sibling() {
+    let out = transpile_str_module_with_sibling_modules(
+        "#[allow(unused_imports)] use external::provider as _;",
+        "probe.consumer",
+        &["probe.external.provider", "probe.consumer"],
+    );
+    assert!(!out.contains("import probe.external.provider;"), "{out}");
+    assert!(!out.contains("using _ ="), "{out}");
+    assert!(!out.contains("namespace _ ="), "{out}");
 }
 
 #[test]

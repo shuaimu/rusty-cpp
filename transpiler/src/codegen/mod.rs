@@ -9755,7 +9755,11 @@ impl CodeGen {
                         self.emit_template_declaration_without_type_defaults(
                             &e.generics,
                             export_prefix,
-                            &format!("enum class {};", name),
+                            &format!(
+                                "enum class {}{};",
+                                name,
+                                c_like_enum_underlying_suffix(e)
+                            ),
                         );
                         self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
                     } else if self.enum_uses_struct_wrapper(e) {
@@ -9914,6 +9918,9 @@ impl CodeGen {
         let resolved_path = self.resolve_unqualified_local_import_path(&path);
         let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
         let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
+        if use_import_is_underscore_alias(&resolved_path) {
+            return None;
+        }
         let use_action = classify_use_import(&resolved_path);
         match use_action {
             UseImportAction::Raw(statement) => {
@@ -10106,7 +10113,11 @@ impl CodeGen {
                         self.emit_template_declaration_without_type_defaults(
                             &e.generics,
                             export_prefix,
-                            &format!("enum class {};", name),
+                            &format!(
+                                "enum class {}{};",
+                                name,
+                                c_like_enum_underlying_suffix(e)
+                            ),
                         );
                         self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
                         self.emit_c_like_enum_inherent_method_forward_decls(
@@ -11161,6 +11172,7 @@ impl CodeGen {
         let target_path = normalized_scope_target.trim();
         if local_name.is_empty()
             || target_path.is_empty()
+            || local_name == "_"
             || local_name == "*"
             || local_name == "self"
             || local_name == "crate"
@@ -54001,6 +54013,11 @@ fn split_use_import_alias(path: &str) -> Option<(&str, &str)> {
     Some((alias, target))
 }
 
+fn use_import_is_underscore_alias(path: &str) -> bool {
+    split_use_import_alias(normalize_use_import_path(path))
+        .is_some_and(|(alias, _)| alias.trim() == "_")
+}
+
 fn parse_namespace_alias_target(statement: &str) -> Option<&str> {
     let trimmed = statement.trim().strip_suffix(';')?;
     let rest = trimmed.strip_prefix("namespace ")?;
@@ -54118,6 +54135,61 @@ fn enum_is_c_like(item: &syn::ItemEnum) -> bool {
             .variants
             .iter()
             .all(|variant| variant.fields.is_empty())
+}
+
+fn c_like_enum_underlying_suffix(item: &syn::ItemEnum) -> &'static str {
+    for attr in &item.attrs {
+        if !attr.path().is_ident("repr") {
+            continue;
+        }
+        let Ok(reprs) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        for repr in reprs {
+            let syn::Meta::Path(path) = repr else {
+                continue;
+            };
+            if path.is_ident("i8") {
+                return " : int8_t";
+            }
+            if path.is_ident("u8") {
+                return " : uint8_t";
+            }
+            if path.is_ident("i16") {
+                return " : int16_t";
+            }
+            if path.is_ident("u16") {
+                return " : uint16_t";
+            }
+            if path.is_ident("i32") {
+                return " : int32_t";
+            }
+            if path.is_ident("u32") {
+                return " : uint32_t";
+            }
+            if path.is_ident("i64") {
+                return " : int64_t";
+            }
+            if path.is_ident("u64") {
+                return " : uint64_t";
+            }
+            if path.is_ident("i128") {
+                return " : __int128";
+            }
+            if path.is_ident("u128") {
+                return " : unsigned __int128";
+            }
+            if path.is_ident("isize") {
+                return " : intptr_t";
+            }
+            if path.is_ident("usize") {
+                return " : uintptr_t";
+            }
+        }
+    }
+    ""
 }
 
 fn rewrite_either_import(path: &str) -> Option<UseImportAction> {

@@ -199,6 +199,40 @@ impl CodeGen {
         None
     }
 
+    /// Resolve Rust's intentionally-unbound module import
+    /// (`use crate::provider as _;`) to its physical sibling C++ module.
+    ///
+    /// The underscore binding exists only to bring an implementation or other
+    /// dependency into scope; it must not become a C++ type/namespace alias.
+    /// Keep this deliberately narrower than ordinary renamed imports: only an
+    /// exact `_` alias whose complete target is a known crate-local module or
+    /// an item owned by one is accepted.
+    pub(super) fn resolve_crate_module_underscore_import(
+        &self,
+        item: &syn::ItemUse,
+    ) -> Option<String> {
+        // Preserve `crate::` here.  The ordinary emission flattener removes it,
+        // which would make an external same-tail path indistinguishable from a
+        // crate-local one and could import the wrong sibling module.
+        let paths = self.flatten_use_tree_preserve_crate(&item.tree, "");
+        if paths.len() != 1 {
+            return None;
+        }
+        let normalized = normalize_use_import_path(&paths[0]);
+        let (alias, target) = split_use_import_alias(normalized)?;
+        if alias.trim() != "_" {
+            return None;
+        }
+        let target = target.trim().strip_prefix("crate::")?;
+        self.resolve_crate_module_use_path(target).or_else(|| {
+            let segments: Vec<&str> = target
+                .split("::")
+                .filter(|segment| !segment.is_empty())
+                .collect();
+            self.resolve_item_owner_module(&segments)
+        })
+    }
+
     /// The module that DECLARES the item named by a use path — the
     /// path minus its final segment, resolved as a module.
     ///
