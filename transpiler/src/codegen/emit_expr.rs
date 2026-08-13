@@ -6755,6 +6755,24 @@ impl CodeGen {
                                 callee = format!("{}<{}>", callee, access_cpp);
                             }
                         }
+                        // next_entry is the two-arg sibling: `<K, V>` from the
+                        // expected `Result<Option<(K, V)>, E>` (or the in-scope
+                        // Map local's key/value hint) — same short-circuit gap
+                        // as #36, one method further. The member-call path
+                        // already does both (see the next_entry blocks near
+                        // `infer_serde_next_entry_template_args_from_expected`).
+                        if mc.args.is_empty()
+                            && mc.turbofish.is_none()
+                            && method_name == "next_entry"
+                            && !callee.contains('<')
+                            && let Some(access_args) = self
+                                .infer_serde_next_entry_template_args_from_expected(expected_ty)
+                                .or_else(|| {
+                                    self.infer_serde_next_entry_template_args_from_in_scope_map_hint()
+                                })
+                        {
+                            callee = format!("{}{}", callee, access_args);
+                        }
                         // A method TURBOFISH supplies generics C++ can't deduce
                         // (`.sum1::<i32>()` — S only in the return type). The
                         // free fn declares Self_ FIRST, and explicit template
