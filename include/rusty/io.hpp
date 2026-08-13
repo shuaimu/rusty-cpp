@@ -600,12 +600,29 @@ requires(std::is_integral_v<Elem>)
         Error(Error::Kind::Unsupported, "io::write target is read-only span"));
 }
 
+// Rust's `impl io::Write for Vec<u8>`: a growable byte container appends the
+// whole buffer and never fails. Keyed on `extend_from_slice(span<const u8>)`
+// so rusty::Vec<uint8_t> qualifies while rusty::String (whose push is a
+// UTF-8-encoding char push) does not.
+template<typename Writer>
+Result<size_t> write(Writer& writer, std::span<const uint8_t> buf)
+requires(
+    !requires(Writer& w, std::span<const uint8_t> b) { w.write(b); } &&
+    !requires(Writer& w, std::span<const uint8_t> b) { w.write_(b); } &&
+    !detail::is_integral_span_v<Writer> &&
+    requires(Writer& w, std::span<const uint8_t> b) { w.extend_from_slice(b); })
+{
+    writer.extend_from_slice(buf);
+    return Result<size_t>::ok(buf.size());
+}
+
 template<typename Writer>
 Result<size_t> write(Writer&, std::span<const uint8_t>)
 requires(
     !requires(Writer& w, std::span<const uint8_t> b) { w.write(b); } &&
     !requires(Writer& w, std::span<const uint8_t> b) { w.write_(b); } &&
-    !detail::is_integral_span_v<Writer>)
+    !detail::is_integral_span_v<Writer> &&
+    !requires(Writer& w, std::span<const uint8_t> b) { w.extend_from_slice(b); })
 {
     return Result<size_t>::err(
         Error(Error::Kind::Unsupported, "type does not implement io::write"));
