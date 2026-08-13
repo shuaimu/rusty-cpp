@@ -2652,6 +2652,8 @@ impl CodeGen {
     pub(super) fn infer_match_arms_common_type(&self, arms: &[syn::Arm]) -> Option<syn::Type> {
         let mut common: Option<syn::Type> = None;
         let mut saw_option_none_arm = false;
+        let mut deferred_ok_payloads: Vec<syn::Type> = Vec::new();
+        let mut deferred_err_payloads: Vec<syn::Type> = Vec::new();
         for arm in arms {
             if self.is_expr_diverging(&arm.body) {
                 continue;
@@ -2663,6 +2665,22 @@ impl CodeGen {
             let arm_value_expr = self
                 .extract_match_arm_value_expr(&arm.body)
                 .unwrap_or(&arm.body);
+            // Bare `Ok(x)` / `Err(x)` arms defer — see
+            // resolve_deferred_result_ctor_common_type.
+            if let Some((ctor, ctor_arg)) = self.extract_constructor_call_expr(arm_value_expr)
+                && matches!(ctor.as_str(), "Ok" | "Err")
+                && self
+                    .data_enum_owner_syn_type_from_variant_ctor_expr(arm_value_expr)
+                    .is_none()
+            {
+                let payload_ty = self.infer_simple_expr_type(ctor_arg)?;
+                if ctor == "Ok" {
+                    deferred_ok_payloads.push(payload_ty);
+                } else {
+                    deferred_err_payloads.push(payload_ty);
+                }
+                continue;
+            }
             let Some(arm_ty) = self
                 .data_enum_owner_syn_type_from_variant_ctor_expr(arm_value_expr)
                 .or_else(|| self.infer_local_binding_type_from_initializer(arm_value_expr))
@@ -2677,6 +2695,13 @@ impl CodeGen {
                 return None;
             }
         }
+        if !deferred_ok_payloads.is_empty() || !deferred_err_payloads.is_empty() {
+            common = self.resolve_deferred_result_ctor_common_type(
+                common,
+                deferred_ok_payloads,
+                deferred_err_payloads,
+            )?;
+        }
         if saw_option_none_arm {
             let common_ty = common?;
             if self.expected_option_type_arg(Some(&common_ty)).is_some()
@@ -2687,6 +2712,49 @@ impl CodeGen {
             return None;
         }
         common
+    }
+
+    /// Combine the common type inferred from non-ctor arms with deferred bare
+    /// `Ok(x)` / `Err(x)` arm payloads. A bare Result ctor pins only its OWN
+    /// slot — typing it standalone yields the degenerate `Result<X, X>`, which
+    /// poisons the merge when a sibling arm carries the real Result type
+    /// (serde_json's `Some(_) => Err(..), None => value`). So: a sibling
+    /// Result wins; an Ok payload plus an Err payload combine into the real
+    /// pair; a single-flavor tail falls back to the historical degenerate
+    /// fill. A non-Result sibling means the arms genuinely disagree — bail
+    /// like the old merge failure did.
+    fn resolve_deferred_result_ctor_common_type(
+        &self,
+        common: Option<syn::Type>,
+        deferred_ok_payloads: Vec<syn::Type>,
+        deferred_err_payloads: Vec<syn::Type>,
+    ) -> Option<Option<syn::Type>> {
+        match common {
+            Some(common_ty) => {
+                let cpp = self.map_type(&common_ty);
+                if cpp.contains("Result<") {
+                    Some(Some(common_ty))
+                } else {
+                    None
+                }
+            }
+            None => {
+                let ok_ty = deferred_ok_payloads.into_iter().next();
+                let err_ty = deferred_err_payloads.into_iter().next();
+                match (ok_ty, err_ty) {
+                    (Some(ok_ty), Some(err_ty)) => {
+                        Some(Some(self.make_result_type(ok_ty, err_ty)))
+                    }
+                    (Some(ok_ty), None) => {
+                        Some(Some(self.make_result_type(ok_ty.clone(), ok_ty)))
+                    }
+                    (None, Some(err_ty)) => {
+                        Some(Some(self.make_result_type(err_ty.clone(), err_ty)))
+                    }
+                    (None, None) => Some(None),
+                }
+            }
+        }
     }
 
     pub(super) fn infer_match_arm_type_with_scrutinee_bindings(
@@ -2727,6 +2795,8 @@ impl CodeGen {
     ) -> Option<syn::Type> {
         let mut common: Option<syn::Type> = None;
         let mut saw_option_none_arm = false;
+        let mut deferred_ok_payloads: Vec<syn::Type> = Vec::new();
+        let mut deferred_err_payloads: Vec<syn::Type> = Vec::new();
 
         for arm in &match_expr.arms {
             if self.is_expr_diverging(&arm.body) {
@@ -2739,6 +2809,22 @@ impl CodeGen {
             let arm_value_expr = self
                 .extract_match_arm_value_expr(&arm.body)
                 .unwrap_or(&arm.body);
+            // Bare `Ok(x)` / `Err(x)` arms defer — see
+            // resolve_deferred_result_ctor_common_type.
+            if let Some((ctor, ctor_arg)) = self.extract_constructor_call_expr(arm_value_expr)
+                && matches!(ctor.as_str(), "Ok" | "Err")
+                && self
+                    .data_enum_owner_syn_type_from_variant_ctor_expr(arm_value_expr)
+                    .is_none()
+            {
+                let payload_ty = self.infer_simple_expr_type(ctor_arg)?;
+                if ctor == "Ok" {
+                    deferred_ok_payloads.push(payload_ty);
+                } else {
+                    deferred_err_payloads.push(payload_ty);
+                }
+                continue;
+            }
             let Some(arm_ty) = self
                 .data_enum_owner_syn_type_from_variant_ctor_expr(arm_value_expr)
                 .or_else(|| {
@@ -2755,6 +2841,14 @@ impl CodeGen {
             if !self.merge_match_common_arm_type(&mut common, arm_ty) {
                 return None;
             }
+        }
+
+        if !deferred_ok_payloads.is_empty() || !deferred_err_payloads.is_empty() {
+            common = self.resolve_deferred_result_ctor_common_type(
+                common,
+                deferred_ok_payloads,
+                deferred_err_payloads,
+            )?;
         }
 
         if saw_option_none_arm {
