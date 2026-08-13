@@ -288,10 +288,8 @@ impl ModulePreambleManifest {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let emitted: std::collections::BTreeSet<String> = emitted_modules
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        let emitted: std::collections::BTreeSet<String> =
+            emitted_modules.into_iter().map(str::to_string).collect();
         let stale: Vec<&str> = self
             .modules
             .keys()
@@ -390,9 +388,10 @@ pub fn validate_explicit_gmf_includes(includes: &[GmfIncludeSpec]) -> Result<(),
                 path
             ));
         }
-        if !path.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/')
-        }) {
+        if !path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/'))
+        {
             return Err(format!(
                 "GMF include #{} path {:?} contains a disallowed character",
                 index + 1,
@@ -439,13 +438,8 @@ pub fn load_module_preamble_file(
     if let Some(target_os) = target_os {
         validate_target_os_name(target_os)?;
     }
-    let content = fs::read_to_string(path).map_err(|e| {
-        format!(
-            "Failed to read module preamble {}: {}",
-            path.display(),
-            e
-        )
-    })?;
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read module preamble {}: {}", path.display(), e))?;
     let file: ModulePreambleFile = toml::from_str(&content)
         .map_err(|e| format!("Invalid TOML module preamble {}: {}", path.display(), e))?;
     if file.version != MODULE_PREAMBLE_FILE_VERSION {
@@ -777,10 +771,9 @@ pub fn collect_declared_trait_modules(
                         // Minimal escape matching codegen's module spelling
                         // (private/mut_/etc get a trailing underscore).
                         let escaped = match seg.as_str() {
-                            "private" | "mut" | "new" | "delete" | "default"
-                            | "register" | "template" | "typename" | "union"
-                            | "unsigned" | "signed" | "int" | "char" | "float"
-                            | "double" | "namespace" | "operator" | "class" => {
+                            "private" | "mut" | "new" | "delete" | "default" | "register"
+                            | "template" | "typename" | "union" | "unsigned" | "signed" | "int"
+                            | "char" | "float" | "double" | "namespace" | "operator" | "class" => {
                                 format!("{}_", seg)
                             }
                             _ => seg,
@@ -901,7 +894,12 @@ pub fn collect_concrete_trait_impl_method_owners(
     let mut assoc_const_traits = std::collections::HashSet::new();
     collect_assoc_const_trait_names_into(items, &mut assoc_const_traits);
     let mut out: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
-    collect_concrete_trait_impl_method_owners_into(items, declared_traits, &assoc_const_traits, &mut out);
+    collect_concrete_trait_impl_method_owners_into(
+        items,
+        declared_traits,
+        &assoc_const_traits,
+        &mut out,
+    );
     out
 }
 
@@ -912,7 +910,10 @@ fn collect_assoc_const_trait_names_into(
     for item in items {
         match item {
             syn::Item::Trait(t) => {
-                if t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Const(_))) {
+                if t.items
+                    .iter()
+                    .any(|ti| matches!(ti, syn::TraitItem::Const(_)))
+                {
                     out.insert(t.ident.to_string());
                 }
             }
@@ -941,8 +942,7 @@ fn collect_concrete_trait_impl_method_owners_into(
                 let Some((_, trait_path, _)) = &impl_block.trait_ else {
                     continue;
                 };
-                let Some(trait_name) =
-                    trait_path.segments.last().map(|s| s.ident.to_string())
+                let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string())
                 else {
                     continue;
                 };
@@ -1021,9 +1021,10 @@ fn collect_method_name_uses(
             syn::Item::Impl(impl_block) => {
                 // A trait impl counts as a *trait* use only when the implemented
                 // trait is crate-declared (see `classify_method_names`).
-                let impl_trait_name = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
-                    path.segments.last().map(|s| s.ident.to_string())
-                });
+                let impl_trait_name = impl_block
+                    .trait_
+                    .as_ref()
+                    .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
                 let is_crate_trait_impl = impl_trait_name
                     .as_ref()
                     .is_some_and(|n| declared_traits.contains(n));
@@ -1501,8 +1502,7 @@ fn validate_rust_abi_foreign_declarations(
             }
             if self.block_depth != 0 {
                 self.error = Some(
-                    "`extern \"Rust\"` declarations are only supported at module scope"
-                        .to_string(),
+                    "`extern \"Rust\"` declarations are only supported at module scope".to_string(),
                 );
                 return;
             }
@@ -1558,9 +1558,7 @@ pub(crate) fn transpile_prepared_inline_cpp_abi(
     options: &TranspileOptions,
 ) -> Result<String, String> {
     if !options.inline_rust_block {
-        return Err(
-            "prepared cpp_abi rendering requires inline-rust code generation".to_string(),
-        );
+        return Err("prepared cpp_abi rendering requires inline-rust code generation".to_string());
     }
     transpile_full_with_options_impl(
         "",
@@ -1585,8 +1583,7 @@ fn transpile_full_with_options_impl(
     validate_explicit_gmf_includes(&options.explicit_gmf_includes)?;
     if module_name.is_none() && !options.explicit_gmf_includes.is_empty() {
         return Err(
-            "Explicit GMF includes require module output (provide a C++ module name)"
-                .to_string(),
+            "Explicit GMF includes require module output (provide a C++ module name)".to_string(),
         );
     }
     let profile_transpile = std::env::var_os("RUSTY_CPP_PROFILE_TRANSPILE").is_some();
@@ -1607,17 +1604,48 @@ fn transpile_full_with_options_impl(
     };
     log_profile("start");
     let is_prepared_inline = prepared_cpp_abi.is_some();
-    let (file, cpp_abi_plan) = if let Some(prepared) = prepared_cpp_abi {
-        prepared
+    let validate_cpp_defaults = |file: &syn::File| {
+        if options.crate_module_names.is_empty() {
+            crate::cpp_default_args::validate_file(file, type_map)
+        } else {
+            crate::cpp_default_args::validate_file_after_crate_preflight(file, type_map)
+        }
+    };
+    let (file, cpp_abi_plan, has_cpp_defaults) = if let Some((file, plan)) = prepared_cpp_abi {
+        let has_cpp_defaults = validate_cpp_defaults(&file)?;
+        (file, plan, has_cpp_defaults)
     } else {
         let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
             .map_err(|e| format!("Parse error: {}", e))?;
         log_profile("parse_with_expand_hygiene_fallback");
+        let has_cpp_defaults = validate_cpp_defaults(&file)?;
         match crate::cpp_abi::lower(&file)? {
-            Some((lowered, plan)) => (lowered, plan),
-            None => (file, crate::cpp_abi::CppAbiEmissionPlan::default()),
+            Some((lowered, plan)) => (lowered, plan, has_cpp_defaults),
+            None => (
+                file,
+                crate::cpp_abi::CppAbiEmissionPlan::default(),
+                has_cpp_defaults,
+            ),
         }
     };
+    if has_cpp_defaults && is_prepared_inline {
+        return Err(
+            "cpp_default_argument is supported only by source files in named-module crate mode, not inline Rust blocks"
+                .to_string(),
+        );
+    }
+    if has_cpp_defaults && module_name.is_none() {
+        return Err(
+            "cpp_default_argument requires named C++ module output so the default belongs to an exported declaration"
+                .to_string(),
+        );
+    }
+    if has_cpp_defaults {
+        crate::cpp_default_args::validate_required_gmf_includes(
+            &file,
+            &options.explicit_gmf_includes,
+        )?;
+    }
     if !is_prepared_inline {
         cpp_abi_plan.validate_flat_import_namespace(
             options.cxx_namespace.as_deref(),
@@ -1766,8 +1794,7 @@ fn transpile_full_with_options_impl(
                     || trimmed.contains("operator<")
                     || trimmed.contains("operator>")
                     || trimmed.contains("operator!="));
-            if is_defaulted_declarator
-                && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
+            if is_defaulted_declarator && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
             {
                 continue;
             }
@@ -2015,14 +2042,12 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
     fn visit_generic_argument(&mut self, argument: &'ast syn::GenericArgument) {
         match argument {
             syn::GenericArgument::Const(expression) => {
-                let enclosing_unsafe_context =
-                    std::mem::replace(&mut self.unsafe_context_depth, 0);
+                let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
                 self.visit_expr(expression);
                 self.unsafe_context_depth = enclosing_unsafe_context;
             }
             syn::GenericArgument::AssocConst(assoc_const) => {
-                let enclosing_unsafe_context =
-                    std::mem::replace(&mut self.unsafe_context_depth, 0);
+                let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
                 visit::visit_assoc_const(self, assoc_const);
                 self.unsafe_context_depth = enclosing_unsafe_context;
             }
@@ -2848,6 +2873,95 @@ fn qualify_relative_path(raw: &str, module_path: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cpp_default_argument_type_map() -> UserTypeMap {
+        let mut type_map = UserTypeMap::default();
+        type_map.mappings.insert(
+            "rusty::SourceLocation".to_string(),
+            "std::source_location".to_string(),
+        );
+        type_map
+            .mappings
+            .insert("rusty::CFile".to_string(), "FILE".to_string());
+        type_map
+    }
+
+    #[test]
+    fn cpp_default_arguments_emit_only_on_named_module_forward_declarations() {
+        let source = r#"
+            pub fn verify<Expr>(
+                expr: &Expr,
+                #[cfg_attr(any(), cpp_default_argument(source_location))]
+                location: &::rusty::SourceLocation,
+            ) where Expr: Copy {}
+
+            pub unsafe fn print_stack_trace(
+                #[cfg_attr(any(), cpp_default_argument(stderr))]
+                stream: *mut ::rusty::CFile,
+            ) {}
+        "#;
+        let options = TranspileOptions {
+            explicit_gmf_includes: vec![
+                GmfIncludeSpec {
+                    path: "stdio.h".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+                GmfIncludeSpec {
+                    path: "source_location".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+            ],
+            ..TranspileOptions::default()
+        };
+        let output = transpile_full_with_options(
+            source,
+            Some("rrr.debugging"),
+            &cpp_default_argument_type_map(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("typed defaults should transpile");
+        assert_eq!(
+            output.matches(" = std::source_location::current()").count(),
+            1,
+            "source-location default must occur on one declaration only:\n{output}"
+        );
+        assert_eq!(
+            output.matches(" = stderr").count(),
+            1,
+            "stderr default must occur on one declaration only:\n{output}"
+        );
+        assert!(
+            output
+                .contains("const std::source_location& location = std::source_location::current()")
+        );
+        assert!(output.contains("FILE* stream = stderr"));
+        assert!(output.contains("const std::source_location& location)"));
+        assert!(output.contains("FILE* stream)"));
+
+        let error = transpile_with_type_map(source, None, &cpp_default_argument_type_map())
+            .expect_err("moduleless defaults must fail closed");
+        assert!(
+            error.contains("requires named C++ module output"),
+            "{error}"
+        );
+
+        let mut inline_options = TranspileOptions::default();
+        inline_options.inline_rust_block = true;
+        let inline_error = transpile_prepared_inline_cpp_abi(
+            syn::parse_file(source).expect("parse inline fixture"),
+            crate::cpp_abi::CppAbiEmissionPlan::default(),
+            &cpp_default_argument_type_map(),
+            &HashSet::new(),
+            &inline_options,
+        )
+        .expect_err("inline defaults must fail closed");
+        assert!(
+            inline_error.contains("not inline Rust blocks"),
+            "{inline_error}"
+        );
+    }
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -2879,7 +2993,10 @@ mod tests {
             &TranspileOptions::default(),
         )
         .unwrap();
-        assert_eq!(baseline, empty_options, "empty preamble changed legacy bytes");
+        assert_eq!(
+            baseline, empty_options,
+            "empty preamble changed legacy bytes"
+        );
         use sha2::{Digest, Sha256};
         assert_eq!(
             format!("{:x}", Sha256::digest(baseline.as_bytes())),
@@ -2918,15 +3035,16 @@ mod tests {
             &options,
         )
         .unwrap();
-        assert_eq!(output, repeated, "explicit preamble output is not deterministic");
+        assert_eq!(
+            output, repeated,
+            "explicit preamble output is not deterministic"
+        );
         let module_fragment = output.find("\nmodule;\n").unwrap();
         let first = output.find("#include \"demo/first.hpp\"").unwrap();
         let second = output.find("#include <sys/types.h>").unwrap();
         let fixed = output.find("#include <cstdint>").unwrap();
         let declaration = output.find("export module demo.preamble;").unwrap();
-        assert!(
-            module_fragment < first && first < second && second < fixed && fixed < declaration
-        );
+        assert!(module_fragment < first && first < second && second < fixed && fixed < declaration);
     }
 
     #[test]
@@ -3149,10 +3267,8 @@ includes = [
         assert!(
             output.contains("add(1, 2)")
                 || output.contains("::add(1, 2)")
-                || output
-                    .contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
-                || output
-                    .contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
+                || output.contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
+                || output.contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
             "{output}"
         );
     }
@@ -3252,8 +3368,7 @@ includes = [
         // the first argument inside the lambda.
         assert!(
             output.contains("rusty_ext::tap_err(result,")
-                || (output.contains("rusty_ext::tap_err(")
-                    && output.contains("})(result")),
+                || (output.contains("rusty_ext::tap_err(") && output.contains("})(result")),
             "{output}"
         );
         assert!(!output.contains("rusty::tap_err("));
@@ -3512,9 +3627,7 @@ includes = [
         // The shim is now 3-branch: a final `else` that calls the member
         // `.hello()` on the dereferenced receiver (the dyn dispatch route).
         assert!(
-            on.contains(".hello(); }")
-                || on.contains(".hello() ; }")
-                || on.contains(").hello();"),
+            on.contains(".hello(); }") || on.contains(".hello() ; }") || on.contains(").hello();"),
             "flag-on shim must end in a member-call fallback `deref(__self).hello()`\nGot: {on}"
         );
         // The member branch comes FIRST (rustc resolves inherent methods
@@ -3534,7 +3647,6 @@ includes = [
             free_call_count >= 2,
             "flag-on shim must keep both free-call branches (got {free_call_count})\nGot: {on}"
         );
-
     }
 
     #[test]
@@ -3671,7 +3783,6 @@ includes = [
             on.contains("Greet_::describe("),
             "`f.describe()` must qualify to Greet_::describe\nGot: {on}"
         );
-
     }
 
     #[test]
@@ -3701,8 +3812,7 @@ includes = [
         .expect("ufcs transpile should succeed");
 
         let text = std::fs::read_to_string(&path).expect("manifest must be written");
-        let manifest: UfcsTraitManifest =
-            serde_json::from_str(&text).expect("manifest must parse");
+        let manifest: UfcsTraitManifest = serde_json::from_str(&text).expect("manifest must parse");
         let _ = std::fs::remove_file(&path);
         assert_eq!(manifest.module, "depmod");
         assert!(
@@ -4137,11 +4247,8 @@ callable_signatures = ["void()"]
         let dir = tempdir().expect("tempdir");
         let first = dir.path().join("first.toml");
         let second = dir.path().join("second.toml");
-        std::fs::write(
-            &first,
-            "version = 1\n[modules.demo]\nnamespace = \"one\"\n",
-        )
-        .expect("write first index");
+        std::fs::write(&first, "version = 1\n[modules.demo]\nnamespace = \"one\"\n")
+            .expect("write first index");
         std::fs::write(
             &second,
             "version = 1\n[modules.demo]\nnamespace = \"two\"\n",
@@ -4173,10 +4280,7 @@ callable_signatures = ["void()"]
             let index_path = dir.path().join("cpp_index.toml");
             std::fs::write(
                 &index_path,
-                format!(
-                    "version = 1\n[modules.demo]\nnamespace = {:?}\n",
-                    invalid
-                ),
+                format!("version = 1\n[modules.demo]\nnamespace = {:?}\n", invalid),
             )
             .expect("write invalid index");
 
@@ -4359,7 +4463,9 @@ fn safe_closure() {
             "safe_closure",
         ] {
             assert!(
-                diagnostics.iter().any(|diagnostic| diagnostic.contains(context)),
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(context)),
                 "missing violation in {context}: {diagnostics:#?}"
             );
         }
@@ -4450,7 +4556,9 @@ fn outer() {
             "outer::unsafe_trait_method",
         ] {
             assert!(
-                diagnostics.iter().any(|diagnostic| diagnostic.contains(context)),
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(context)),
                 "missing signature violation in {context}: {diagnostics:#?}"
             );
         }
@@ -4607,7 +4715,10 @@ fn member<T>(counter: &mut T, v: i32) -> i32 {
         )
         .expect("exact nested function and member identities should transpile");
 
-        assert!(output.contains("host_api::other::increment("), "Got: {output}");
+        assert!(
+            output.contains("host_api::other::increment("),
+            "Got: {output}"
+        );
         assert!(output.contains("rusty::deref_call("), "Got: {output}");
         assert!(output.contains("__mdisp_add"), "Got: {output}");
         assert!(!output.contains("host_api::Counter::add("), "Got: {output}");
