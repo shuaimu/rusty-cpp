@@ -88,6 +88,982 @@ enum CallableTraitKind {
     FnOnce,
 }
 
+/// Parsed C++ parameter identities used only by the fail-closed `cpp_name`
+/// overload proof.  These are deliberately smaller than a C++ parser: every
+/// accepted production has an unambiguous type-system meaning, while a token
+/// sequence outside the grammar is `Unknown` and therefore cannot establish
+/// that two overloads are distinct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CppNameIntegerRank {
+    Char,
+    Short,
+    Int,
+    Long,
+    LongLong,
+    Int128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CppNameFundamentalIdentity {
+    Void,
+    Bool,
+    PlainChar,
+    WChar,
+    Char8,
+    Char16,
+    Char32,
+    Float,
+    Double,
+    LongDouble,
+    Integer {
+        signed: bool,
+        rank: CppNameIntegerRank,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CppNameIntegralIdentity {
+    Fixed { signed: bool, bits: u16 },
+    Target { signed: bool, family: &'static str },
+    Fundamental(CppNameFundamentalIdentity),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CppNameCv {
+    is_const: bool,
+    is_volatile: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CppNameTemplateArgument {
+    Type(CppNameCppType),
+    Value(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CppNameCppBase {
+    Integral(CppNameIntegralIdentity),
+    Named {
+        path: String,
+        arguments: Vec<CppNameTemplateArgument>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CppNameCppType {
+    Base {
+        base: CppNameCppBase,
+        cv: CppNameCv,
+    },
+    Pointer {
+        pointee: Box<CppNameCppType>,
+        cv: CppNameCv,
+    },
+    LvalueReference(Box<CppNameCppType>),
+    RvalueReference(Box<CppNameCppType>),
+    Function {
+        result: Box<CppNameCppType>,
+        parameters: Vec<CppNameCppType>,
+        variadic: bool,
+        cv: CppNameCv,
+        ref_qualifier: Option<bool>,
+        noexcept: bool,
+    },
+    Array {
+        element: Box<CppNameCppType>,
+        bound: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CppNameCppToken {
+    Ident(String),
+    Number(String),
+    Scope,
+    Less,
+    Greater,
+    Comma,
+    Star,
+    Amp,
+    AmpAmp,
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    Ellipsis,
+    Other(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CppNameIdentityRelation {
+    Same,
+    Different,
+    Unknown,
+}
+
+impl CppNameIdentityRelation {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Different, _) | (_, Self::Different) => Self::Different,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            _ => Self::Same,
+        }
+    }
+}
+
+fn cpp_name_lex_cpp_type(source: &str) -> Result<Vec<CppNameCppToken>, ()> {
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < chars.len() {
+        let ch = chars[cursor];
+        if ch.is_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = cursor;
+            cursor += 1;
+            while cursor < chars.len()
+                && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+            {
+                cursor += 1;
+            }
+            tokens.push(CppNameCppToken::Ident(chars[start..cursor].iter().collect()));
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            let start = cursor;
+            cursor += 1;
+            while cursor < chars.len()
+                && (chars[cursor].is_ascii_alphanumeric()
+                    || matches!(chars[cursor], '_' | '\'' | '.'))
+            {
+                cursor += 1;
+            }
+            tokens.push(CppNameCppToken::Number(chars[start..cursor].iter().collect()));
+            continue;
+        }
+        let next = chars.get(cursor + 1).copied();
+        let third = chars.get(cursor + 2).copied();
+        match (ch, next, third) {
+            (':', Some(':'), _) => {
+                tokens.push(CppNameCppToken::Scope);
+                cursor += 2;
+            }
+            ('&', Some('&'), _) => {
+                tokens.push(CppNameCppToken::AmpAmp);
+                cursor += 2;
+            }
+            ('.', Some('.'), Some('.')) => {
+                tokens.push(CppNameCppToken::Ellipsis);
+                cursor += 3;
+            }
+            _ => {
+                let token = match ch {
+                    '<' => CppNameCppToken::Less,
+                    '>' => CppNameCppToken::Greater,
+                    ',' => CppNameCppToken::Comma,
+                    '*' => CppNameCppToken::Star,
+                    '&' => CppNameCppToken::Amp,
+                    '(' => CppNameCppToken::LParen,
+                    ')' => CppNameCppToken::RParen,
+                    '[' => CppNameCppToken::LBracket,
+                    ']' => CppNameCppToken::RBracket,
+                    // Operators and braces are retained for conservative
+                    // non-type template-argument comparison. Quotes cannot
+                    // be tokenized safely without a full literal lexer.
+                    '+' | '-' | '/' | '%' | '|' | '^' | '!' | '~' | '=' | '?' | ':'
+                    | '{' | '}' => CppNameCppToken::Other(ch.to_string()),
+                    _ => return Err(()),
+                };
+                tokens.push(token);
+                cursor += 1;
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+fn cpp_name_cpp_token_spelling(token: &CppNameCppToken) -> &str {
+    match token {
+        CppNameCppToken::Ident(value)
+        | CppNameCppToken::Number(value)
+        | CppNameCppToken::Other(value) => value,
+        CppNameCppToken::Scope => "::",
+        CppNameCppToken::Less => "<",
+        CppNameCppToken::Greater => ">",
+        CppNameCppToken::Comma => ",",
+        CppNameCppToken::Star => "*",
+        CppNameCppToken::Amp => "&",
+        CppNameCppToken::AmpAmp => "&&",
+        CppNameCppToken::LParen => "(",
+        CppNameCppToken::RParen => ")",
+        CppNameCppToken::LBracket => "[",
+        CppNameCppToken::RBracket => "]",
+        CppNameCppToken::Ellipsis => "...",
+    }
+}
+
+#[derive(Clone)]
+struct CppNameCppTypeParser<'a> {
+    tokens: &'a [CppNameCppToken],
+    cursor: usize,
+}
+
+impl<'a> CppNameCppTypeParser<'a> {
+    fn new(tokens: &'a [CppNameCppToken]) -> Self {
+        Self { tokens, cursor: 0 }
+    }
+
+    fn peek(&self) -> Option<&CppNameCppToken> {
+        self.tokens.get(self.cursor)
+    }
+
+    fn consume_if(&mut self, predicate: impl FnOnce(&CppNameCppToken) -> bool) -> bool {
+        if self.peek().is_some_and(predicate) {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_cv(&mut self) -> Result<CppNameCv, ()> {
+        let mut cv = CppNameCv::default();
+        loop {
+            match self.peek() {
+                Some(CppNameCppToken::Ident(word)) if word == "const" => {
+                    if cv.is_const {
+                        return Err(());
+                    }
+                    cv.is_const = true;
+                    self.cursor += 1;
+                }
+                Some(CppNameCppToken::Ident(word)) if word == "volatile" => {
+                    if cv.is_volatile {
+                        return Err(());
+                    }
+                    cv.is_volatile = true;
+                    self.cursor += 1;
+                }
+                _ => return Ok(cv),
+            }
+        }
+    }
+
+    fn merge_cv(left: CppNameCv, right: CppNameCv) -> Result<CppNameCv, ()> {
+        if (left.is_const && right.is_const) || (left.is_volatile && right.is_volatile) {
+            return Err(());
+        }
+        Ok(CppNameCv {
+            is_const: left.is_const || right.is_const,
+            is_volatile: left.is_volatile || right.is_volatile,
+        })
+    }
+
+    fn fundamental_word(word: &str) -> bool {
+        matches!(
+            word,
+            "const"
+                | "volatile"
+                | "signed"
+                | "unsigned"
+                | "short"
+                | "long"
+                | "int"
+                | "char"
+                | "wchar_t"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "bool"
+                | "void"
+                | "float"
+                | "double"
+                | "__int128"
+        )
+    }
+
+    fn parse_fundamental(
+        &mut self,
+        prefix_cv: CppNameCv,
+    ) -> Result<Option<(CppNameIntegralIdentity, CppNameCv)>, ()> {
+        let Some(CppNameCppToken::Ident(first)) = self.peek() else {
+            return Ok(None);
+        };
+        if !Self::fundamental_word(first) || matches!(first.as_str(), "const" | "volatile") {
+            return Ok(None);
+        }
+
+        let start = self.cursor;
+        let mut words = Vec::<String>::new();
+        while let Some(CppNameCppToken::Ident(word)) = self.peek() {
+            if !Self::fundamental_word(word) {
+                break;
+            }
+            words.push(word.clone());
+            self.cursor += 1;
+        }
+        if words.is_empty() {
+            self.cursor = start;
+            return Ok(None);
+        }
+
+        let count = |needle: &str| words.iter().filter(|word| word.as_str() == needle).count();
+        let mut cv = prefix_cv;
+        let const_count = count("const");
+        let volatile_count = count("volatile");
+        if const_count > usize::from(!prefix_cv.is_const)
+            || volatile_count > usize::from(!prefix_cv.is_volatile)
+        {
+            return Err(());
+        }
+        cv.is_const |= const_count == 1;
+        cv.is_volatile |= volatile_count == 1;
+
+        let signed_count = count("signed");
+        let unsigned_count = count("unsigned");
+        let short_count = count("short");
+        let long_count = count("long");
+        let int_count = count("int");
+        if signed_count > 1
+            || unsigned_count > 1
+            || (signed_count == 1 && unsigned_count == 1)
+            || short_count > 1
+            || long_count > 2
+            || int_count > 1
+        {
+            return Err(());
+        }
+
+        let non_cv = words
+            .iter()
+            .filter(|word| !matches!(word.as_str(), "const" | "volatile"))
+            .count();
+        let singleton = |needle: &str| count(needle) == 1 && non_cv == 1;
+        let simple = if singleton("void") {
+            Some(CppNameFundamentalIdentity::Void)
+        } else if singleton("bool") {
+            Some(CppNameFundamentalIdentity::Bool)
+        } else if singleton("wchar_t") {
+            Some(CppNameFundamentalIdentity::WChar)
+        } else if singleton("char8_t") {
+            Some(CppNameFundamentalIdentity::Char8)
+        } else if singleton("char16_t") {
+            Some(CppNameFundamentalIdentity::Char16)
+        } else if singleton("char32_t") {
+            Some(CppNameFundamentalIdentity::Char32)
+        } else if singleton("float") {
+            Some(CppNameFundamentalIdentity::Float)
+        } else if singleton("double") {
+            Some(CppNameFundamentalIdentity::Double)
+        } else if count("double") == 1
+            && long_count == 1
+            && non_cv == 2
+            && signed_count == 0
+            && unsigned_count == 0
+        {
+            Some(CppNameFundamentalIdentity::LongDouble)
+        } else {
+            None
+        };
+        if let Some(simple) = simple {
+            return Ok(Some((CppNameIntegralIdentity::Fundamental(simple), cv)));
+        }
+
+        if count("void") != 0
+            || count("bool") != 0
+            || count("wchar_t") != 0
+            || count("char8_t") != 0
+            || count("char16_t") != 0
+            || count("char32_t") != 0
+            || count("float") != 0
+            || count("double") != 0
+        {
+            return Err(());
+        }
+
+        let char_count = count("char");
+        let int128_count = count("__int128");
+        if char_count > 1
+            || int128_count > 1
+            || (char_count == 1
+                && (short_count != 0
+                    || long_count != 0
+                    || int_count != 0
+                    || int128_count != 0))
+            || (int128_count == 1
+                && (char_count != 0 || short_count != 0 || long_count != 0 || int_count != 0))
+            || (short_count == 1 && long_count != 0)
+        {
+            return Err(());
+        }
+
+        if char_count == 1 && signed_count == 0 && unsigned_count == 0 {
+            if non_cv != 1 {
+                return Err(());
+            }
+            return Ok(Some((
+                CppNameIntegralIdentity::Fundamental(CppNameFundamentalIdentity::PlainChar),
+                cv,
+            )));
+        }
+        let rank = if char_count == 1 {
+            CppNameIntegerRank::Char
+        } else if short_count == 1 {
+            CppNameIntegerRank::Short
+        } else if int128_count == 1 {
+            CppNameIntegerRank::Int128
+        } else {
+            match long_count {
+                0 => CppNameIntegerRank::Int,
+                1 => CppNameIntegerRank::Long,
+                2 => CppNameIntegerRank::LongLong,
+                _ => return Err(()),
+            }
+        };
+        let expected_non_cv = signed_count
+            + unsigned_count
+            + short_count
+            + long_count
+            + int_count
+            + char_count
+            + int128_count;
+        if expected_non_cv != non_cv {
+            return Err(());
+        }
+        Ok(Some((
+            CppNameIntegralIdentity::Fundamental(CppNameFundamentalIdentity::Integer {
+                signed: unsigned_count == 0,
+                rank,
+            }),
+            cv,
+        )))
+    }
+
+    fn parse_qualified_name(&mut self) -> Result<(String, Vec<CppNameTemplateArgument>), ()> {
+        let global = self.consume_if(|token| matches!(token, CppNameCppToken::Scope));
+        let mut segments = Vec::<String>::new();
+        let mut arguments = Vec::new();
+        loop {
+            let Some(CppNameCppToken::Ident(segment)) = self.peek() else {
+                return Err(());
+            };
+            segments.push(segment.clone());
+            self.cursor += 1;
+            if self.consume_if(|token| matches!(token, CppNameCppToken::Less)) {
+                arguments = self.parse_template_arguments()?;
+                if matches!(self.peek(), Some(CppNameCppToken::Scope)) {
+                    // A template-id in a non-final path segment needs
+                    // dependent-name rules outside this conservative grammar.
+                    return Err(());
+                }
+            }
+            if !self.consume_if(|token| matches!(token, CppNameCppToken::Scope)) {
+                break;
+            }
+            if !arguments.is_empty() {
+                return Err(());
+            }
+        }
+        let mut path = segments.join("::");
+        if global {
+            path.insert_str(0, "::");
+        }
+        Ok((path, arguments))
+    }
+
+    fn parse_template_arguments(&mut self) -> Result<Vec<CppNameTemplateArgument>, ()> {
+        let mut arguments = Vec::new();
+        if self.consume_if(|token| matches!(token, CppNameCppToken::Greater)) {
+            return Err(());
+        }
+        loop {
+            let mut trial = self.clone();
+            let parsed_type = trial.parse_type().ok().filter(|_| {
+                matches!(
+                    trial.peek(),
+                    Some(CppNameCppToken::Comma | CppNameCppToken::Greater)
+                )
+            });
+            if let Some(ty) = parsed_type {
+                self.cursor = trial.cursor;
+                arguments.push(CppNameTemplateArgument::Type(ty));
+            } else {
+                let start = self.cursor;
+                let mut parens = 0usize;
+                let mut brackets = 0usize;
+                let mut braces = 0usize;
+                while let Some(token) = self.peek() {
+                    let at_delimiter = parens == 0
+                        && brackets == 0
+                        && braces == 0
+                        && matches!(token, CppNameCppToken::Comma | CppNameCppToken::Greater);
+                    if at_delimiter {
+                        break;
+                    }
+                    match token {
+                        CppNameCppToken::LParen => parens += 1,
+                        CppNameCppToken::RParen => parens = parens.checked_sub(1).ok_or(())?,
+                        CppNameCppToken::LBracket => brackets += 1,
+                        CppNameCppToken::RBracket => {
+                            brackets = brackets.checked_sub(1).ok_or(())?
+                        }
+                        CppNameCppToken::Other(value) if value == "{" => braces += 1,
+                        CppNameCppToken::Other(value) if value == "}" => {
+                            braces = braces.checked_sub(1).ok_or(())?
+                        }
+                        _ => {}
+                    }
+                    self.cursor += 1;
+                }
+                if start == self.cursor || parens != 0 || brackets != 0 || braces != 0 {
+                    return Err(());
+                }
+                arguments.push(CppNameTemplateArgument::Value(
+                    self.tokens[start..self.cursor]
+                        .iter()
+                        .map(cpp_name_cpp_token_spelling)
+                        .collect::<String>(),
+                ));
+            }
+            if self.consume_if(|token| matches!(token, CppNameCppToken::Comma)) {
+                continue;
+            }
+            if self.consume_if(|token| matches!(token, CppNameCppToken::Greater)) {
+                break;
+            }
+            return Err(());
+        }
+        Ok(arguments)
+    }
+
+    fn integral_typedef(path: &str) -> Option<CppNameIntegralIdentity> {
+        let normalized = path.strip_prefix("::").unwrap_or(path);
+        let basename = normalized.strip_prefix("std::").unwrap_or(normalized);
+        if basename.contains("::") {
+            return None;
+        }
+        let fixed = match basename {
+            "int8_t" => Some((true, 8)),
+            "int16_t" => Some((true, 16)),
+            "int32_t" => Some((true, 32)),
+            "int64_t" => Some((true, 64)),
+            "int128_t" => Some((true, 128)),
+            "uint8_t" => Some((false, 8)),
+            "uint16_t" => Some((false, 16)),
+            "uint32_t" => Some((false, 32)),
+            "uint64_t" => Some((false, 64)),
+            "uint128_t" => Some((false, 128)),
+            _ => None,
+        };
+        if let Some((signed, bits)) = fixed {
+            return Some(CppNameIntegralIdentity::Fixed { signed, bits });
+        }
+        match basename {
+            "size_t" => Some(CppNameIntegralIdentity::Target {
+                signed: false,
+                family: "size_t",
+            }),
+            "uintptr_t" => Some(CppNameIntegralIdentity::Target {
+                signed: false,
+                family: "uintptr_t",
+            }),
+            "ptrdiff_t" => Some(CppNameIntegralIdentity::Target {
+                signed: true,
+                family: "ptrdiff_t",
+            }),
+            "intptr_t" => Some(CppNameIntegralIdentity::Target {
+                signed: true,
+                family: "intptr_t",
+            }),
+            _ => None,
+        }
+    }
+
+    fn parse_type(&mut self) -> Result<CppNameCppType, ()> {
+        let prefix_cv = self.consume_cv()?;
+        if matches!(
+            self.peek(),
+            Some(CppNameCppToken::Ident(word))
+                if matches!(word.as_str(), "struct" | "class" | "union" | "enum")
+        ) {
+            self.cursor += 1;
+        }
+
+        let mut ty = if let Some((identity, cv)) = self.parse_fundamental(prefix_cv)? {
+            CppNameCppType::Base {
+                base: CppNameCppBase::Integral(identity),
+                cv,
+            }
+        } else {
+            let (path, arguments) = self.parse_qualified_name()?;
+            let suffix_cv = self.consume_cv()?;
+            let cv = Self::merge_cv(prefix_cv, suffix_cv)?;
+            let base = if arguments.is_empty() {
+                Self::integral_typedef(&path)
+                    .map(CppNameCppBase::Integral)
+                    .unwrap_or(CppNameCppBase::Named { path, arguments })
+            } else {
+                CppNameCppBase::Named { path, arguments }
+            };
+            CppNameCppType::Base { base, cv }
+        };
+
+        loop {
+            if self.consume_if(|token| matches!(token, CppNameCppToken::Star)) {
+                let cv = self.consume_cv()?;
+                ty = CppNameCppType::Pointer {
+                    pointee: Box::new(ty),
+                    cv,
+                };
+                continue;
+            }
+            if self.consume_if(|token| matches!(token, CppNameCppToken::AmpAmp)) {
+                ty = CppNameCppType::RvalueReference(Box::new(ty));
+                continue;
+            }
+            if self.consume_if(|token| matches!(token, CppNameCppToken::Amp)) {
+                ty = CppNameCppType::LvalueReference(Box::new(ty));
+                continue;
+            }
+            if self.consume_if(|token| matches!(token, CppNameCppToken::LParen)) {
+                let mut parameters = Vec::new();
+                let mut variadic = false;
+                if !self.consume_if(|token| matches!(token, CppNameCppToken::RParen)) {
+                    loop {
+                        if self.consume_if(|token| matches!(token, CppNameCppToken::Ellipsis)) {
+                            variadic = true;
+                            if !self
+                                .consume_if(|token| matches!(token, CppNameCppToken::RParen))
+                            {
+                                return Err(());
+                            }
+                            break;
+                        }
+                        parameters.push(self.parse_type()?);
+                        if self.consume_if(|token| matches!(token, CppNameCppToken::Comma)) {
+                            continue;
+                        }
+                        if self.consume_if(|token| matches!(token, CppNameCppToken::RParen)) {
+                            break;
+                        }
+                        return Err(());
+                    }
+                }
+                let cv = self.consume_cv()?;
+                let ref_qualifier = if self
+                    .consume_if(|token| matches!(token, CppNameCppToken::AmpAmp))
+                {
+                    Some(true)
+                } else if self.consume_if(|token| matches!(token, CppNameCppToken::Amp)) {
+                    Some(false)
+                } else {
+                    None
+                };
+                let noexcept = if matches!(
+                    self.peek(),
+                    Some(CppNameCppToken::Ident(word)) if word == "noexcept"
+                ) {
+                    self.cursor += 1;
+                    true
+                } else {
+                    false
+                };
+                ty = CppNameCppType::Function {
+                    result: Box::new(ty),
+                    parameters,
+                    variadic,
+                    cv,
+                    ref_qualifier,
+                    noexcept,
+                };
+                continue;
+            }
+            if self.consume_if(|token| matches!(token, CppNameCppToken::LBracket)) {
+                let start = self.cursor;
+                while !matches!(self.peek(), Some(CppNameCppToken::RBracket) | None) {
+                    self.cursor += 1;
+                }
+                if !self.consume_if(|token| matches!(token, CppNameCppToken::RBracket)) {
+                    return Err(());
+                }
+                let bound = self.tokens[start..self.cursor - 1]
+                    .iter()
+                    .map(cpp_name_cpp_token_spelling)
+                    .collect::<String>();
+                ty = CppNameCppType::Array {
+                    element: Box::new(ty),
+                    bound,
+                };
+                continue;
+            }
+            break;
+        }
+        Ok(ty)
+    }
+
+    fn parse_complete_parameter_list(mut self) -> Result<Vec<CppNameCppType>, ()> {
+        let mut parameters = Vec::new();
+        if self.tokens.is_empty() {
+            return Ok(parameters);
+        }
+        loop {
+            parameters.push(self.parse_type()?);
+            if self.consume_if(|token| matches!(token, CppNameCppToken::Comma)) {
+                continue;
+            }
+            if self.cursor == self.tokens.len() {
+                return Ok(parameters);
+            }
+            return Err(());
+        }
+    }
+}
+
+fn cpp_name_integral_signed(identity: CppNameIntegralIdentity) -> Option<bool> {
+    match identity {
+        CppNameIntegralIdentity::Fixed { signed, .. }
+        | CppNameIntegralIdentity::Target { signed, .. }
+        | CppNameIntegralIdentity::Fundamental(CppNameFundamentalIdentity::Integer {
+            signed,
+            ..
+        }) => Some(signed),
+        _ => None,
+    }
+}
+
+fn cpp_name_compare_integral(
+    left: CppNameIntegralIdentity,
+    right: CppNameIntegralIdentity,
+) -> CppNameIdentityRelation {
+    if left == right {
+        return CppNameIdentityRelation::Same;
+    }
+    match (left, right) {
+        (
+            CppNameIntegralIdentity::Fundamental(_),
+            CppNameIntegralIdentity::Fundamental(_),
+        )
+        | (CppNameIntegralIdentity::Fixed { .. }, CppNameIntegralIdentity::Fixed { .. }) => {
+            CppNameIdentityRelation::Different
+        }
+        _ => match (cpp_name_integral_signed(left), cpp_name_integral_signed(right)) {
+            (Some(left), Some(right)) if left == right => CppNameIdentityRelation::Unknown,
+            _ => CppNameIdentityRelation::Different,
+        },
+    }
+}
+
+fn cpp_name_compare_template_arguments(
+    left: &[CppNameTemplateArgument],
+    right: &[CppNameTemplateArgument],
+    opaque_named: bool,
+) -> CppNameIdentityRelation {
+    if left.len() != right.len() {
+        return CppNameIdentityRelation::Different;
+    }
+    left.iter()
+        .zip(right)
+        .fold(CppNameIdentityRelation::Same, |relation, (left, right)| {
+            relation.combine(match (left, right) {
+                (CppNameTemplateArgument::Type(left), CppNameTemplateArgument::Type(right)) => {
+                    cpp_name_compare_cpp_types(left, right, false, opaque_named)
+                }
+                (CppNameTemplateArgument::Value(left), CppNameTemplateArgument::Value(right))
+                    if left == right =>
+                {
+                    CppNameIdentityRelation::Same
+                }
+                (CppNameTemplateArgument::Value(left), CppNameTemplateArgument::Value(right)) => {
+                    // Checked Rust root consts are rendered as plain decimal
+                    // literals. Distinct values in that exact subset prove
+                    // distinct template specializations; other expression
+                    // spellings remain unknown because `2 + 2` and `4` may
+                    // denote the same argument.
+                    match (left.parse::<u128>(), right.parse::<u128>()) {
+                        (Ok(left), Ok(right)) if left != right => {
+                            CppNameIdentityRelation::Different
+                        }
+                        _ => CppNameIdentityRelation::Unknown,
+                    }
+                }
+                _ => CppNameIdentityRelation::Unknown,
+            })
+        })
+}
+
+fn cpp_name_compare_cpp_types(
+    left: &CppNameCppType,
+    right: &CppNameCppType,
+    parameter_top: bool,
+    opaque_named: bool,
+) -> CppNameIdentityRelation {
+    let compare_cv = |left: CppNameCv, right: CppNameCv| {
+        if parameter_top || left == right {
+            CppNameIdentityRelation::Same
+        } else {
+            CppNameIdentityRelation::Different
+        }
+    };
+    match (left, right) {
+        (
+            CppNameCppType::Base {
+                base: left_base,
+                cv: left_cv,
+            },
+            CppNameCppType::Base {
+                base: right_base,
+                cv: right_cv,
+            },
+        ) => compare_cv(*left_cv, *right_cv).combine(match (left_base, right_base) {
+            (CppNameCppBase::Integral(left), CppNameCppBase::Integral(right)) => {
+                cpp_name_compare_integral(*left, *right)
+            }
+            (
+                CppNameCppBase::Named {
+                    path: left_path,
+                    arguments: left_arguments,
+                },
+                CppNameCppBase::Named {
+                    path: right_path,
+                    arguments: right_arguments,
+                },
+            ) if left_path.trim_start_matches("::") == right_path.trim_start_matches("::") => {
+                let arguments =
+                    cpp_name_compare_template_arguments(left_arguments, right_arguments, opaque_named);
+                if opaque_named && arguments != CppNameIdentityRelation::Same {
+                    CppNameIdentityRelation::Unknown
+                } else {
+                    arguments
+                }
+            }
+            (CppNameCppBase::Named { .. }, CppNameCppBase::Named { .. }) => {
+                if opaque_named {
+                    CppNameIdentityRelation::Unknown
+                } else {
+                    CppNameIdentityRelation::Different
+                }
+            }
+            _ => {
+                if opaque_named
+                    && (matches!(left_base, CppNameCppBase::Named { .. })
+                        || matches!(right_base, CppNameCppBase::Named { .. }))
+                {
+                    CppNameIdentityRelation::Unknown
+                } else {
+                    CppNameIdentityRelation::Different
+                }
+            }
+        }),
+        (
+            CppNameCppType::Pointer {
+                pointee: left_pointee,
+                cv: left_cv,
+            },
+            CppNameCppType::Pointer {
+                pointee: right_pointee,
+                cv: right_cv,
+            },
+        ) => compare_cv(*left_cv, *right_cv)
+            .combine(cpp_name_compare_cpp_types(
+                left_pointee,
+                right_pointee,
+                false,
+                opaque_named,
+            )),
+        (
+            CppNameCppType::LvalueReference(left),
+            CppNameCppType::LvalueReference(right),
+        )
+        | (
+            CppNameCppType::RvalueReference(left),
+            CppNameCppType::RvalueReference(right),
+        ) => cpp_name_compare_cpp_types(left, right, false, opaque_named),
+        (
+            CppNameCppType::Function {
+                result: left_result,
+                parameters: left_parameters,
+                variadic: left_variadic,
+                cv: left_cv,
+                ref_qualifier: left_ref,
+                noexcept: left_noexcept,
+            },
+            CppNameCppType::Function {
+                result: right_result,
+                parameters: right_parameters,
+                variadic: right_variadic,
+                cv: right_cv,
+                ref_qualifier: right_ref,
+                noexcept: right_noexcept,
+            },
+        ) => {
+            if left_parameters.len() != right_parameters.len()
+                || left_variadic != right_variadic
+                || left_cv != right_cv
+                || left_ref != right_ref
+                || left_noexcept != right_noexcept
+            {
+                return CppNameIdentityRelation::Different;
+            }
+            left_parameters
+                .iter()
+                .zip(right_parameters)
+                .fold(
+                    cpp_name_compare_cpp_types(left_result, right_result, false, opaque_named),
+                    |relation, (left, right)| {
+                        relation.combine(cpp_name_compare_cpp_types(
+                            left,
+                            right,
+                            true,
+                            opaque_named,
+                        ))
+                    },
+                )
+        }
+        (
+            CppNameCppType::Array {
+                element: left_element,
+                bound: left_bound,
+            },
+            CppNameCppType::Array {
+                element: right_element,
+                bound: right_bound,
+            },
+        ) => {
+            let elements =
+                cpp_name_compare_cpp_types(left_element, right_element, false, opaque_named);
+            if parameter_top || left_bound == right_bound {
+                elements
+            } else {
+                elements.combine(CppNameIdentityRelation::Unknown)
+            }
+        }
+        // C++ adjusts array and function parameters to pointers before
+        // function-type identity is formed.
+        (
+            CppNameCppType::Array { element, .. },
+            CppNameCppType::Pointer { pointee, .. },
+        )
+        | (
+            CppNameCppType::Pointer { pointee, .. },
+            CppNameCppType::Array { element, .. },
+        ) if parameter_top => cpp_name_compare_cpp_types(element, pointee, false, opaque_named),
+        (CppNameCppType::Function { .. }, CppNameCppType::Pointer { pointee, .. })
+            if parameter_top => cpp_name_compare_cpp_types(left, pointee, false, opaque_named),
+        (CppNameCppType::Pointer { pointee, .. }, CppNameCppType::Function { .. })
+            if parameter_top => cpp_name_compare_cpp_types(pointee, right, false, opaque_named),
+        _ => CppNameIdentityRelation::Different,
+    }
+}
+
+#[derive(Clone)]
+struct CppNameRootConst {
+    expression: syn::Expr,
+    restricted: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallableArgPassIntent {
     Value,
@@ -1653,6 +2629,11 @@ pub struct CodeGen {
     pub(crate) required_top_level_module_aliases: HashSet<String>,
     /// Maps function names declared inside inline modules to qualified paths.
     pub(crate) module_qualified_functions: HashMap<String, String>,
+    /// Source-owned root free-function C++ spellings.  Unlike
+    /// `module_qualified_functions`, this map is an explicit checked ABI plan,
+    /// may map several Rust names to one overloaded C++ name, and is never
+    /// inferred from ordinary module layout.
+    pub(crate) cpp_name_plan: crate::cpp_name::CppNamePlan,
     /// Tracks inline module names that collide with function names in the same scope.
     /// Maps original module name to renamed C++ namespace name (e.g., "from_str" → "from_str_tests").
     pub(crate) module_namespace_renames: HashMap<String, String>,
@@ -2155,6 +3136,7 @@ impl CodeGen {
             declared_module_paths: HashSet::new(),
             required_top_level_module_aliases: HashSet::new(),
             module_qualified_functions: HashMap::new(),
+            cpp_name_plan: crate::cpp_name::CppNamePlan::default(),
             module_namespace_renames: HashMap::new(),
             emitted_method_conflict_keys: Vec::new(),
             deferred_method_definitions_stack: Vec::new(),
@@ -4221,6 +5203,1022 @@ impl CodeGen {
         self.cpp_abi_plan = plan;
     }
 
+    pub fn set_cpp_name_plan(&mut self, plan: crate::cpp_name::CppNamePlan) {
+        self.cpp_name_plan = plan;
+    }
+
+    pub(crate) fn source_owned_cpp_function_name(&self, rust_name: &str) -> Option<&str> {
+        self.module_stack
+            .is_empty()
+            .then(|| self.cpp_name_plan.function_name(rust_name))
+            .flatten()
+    }
+
+    fn cpp_name_call_target(&self, path: &syn::Path) -> Option<String> {
+        if self.cpp_name_plan.is_empty() || path.leading_colon.is_some() {
+            return None;
+        }
+        let last = path.segments.last()?;
+        let rust_spelling = last.ident.to_string();
+        let rust_name = rust_spelling
+            .strip_prefix("r#")
+            .unwrap_or(&rust_spelling)
+            .to_string();
+        let target = self.cpp_name_plan.function_name(&rust_name)?;
+        let resolves_to_root = match path.segments.len() {
+            1 => {
+                self.module_stack.is_empty()
+                    && self.lookup_local_binding_cpp_name(&rust_name).is_none()
+                    && !self.is_local_binding_in_scope(&rust_name)
+            }
+            2 => {
+                let root = path.segments[0].ident.to_string();
+                root == "crate"
+                    || (root == "self" && self.module_stack.is_empty())
+                    || (root == "super" && self.module_stack.len() == 1)
+            }
+            n => {
+                let prefix = path
+                    .segments
+                    .iter()
+                    .take(n - 1)
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                !prefix.is_empty()
+                    && prefix.iter().all(|segment| segment == "super")
+                    && prefix.len() == self.module_stack.len()
+            }
+        };
+        if !resolves_to_root {
+            return None;
+        }
+        let mut rendered = if let Some(namespace) = self.cxx_namespace.as_deref() {
+            format!("::{}::{}", namespace, target)
+        } else {
+            format!("::{}", target)
+        };
+        // The Rust identity is replaced, not the call's explicit generic
+        // arguments.  This is required for arity-zero templates, whose T
+        // cannot be deduced from parameters (`make_default::<T>()`).
+        if let Some(template_args) = self.emit_expr_path_template_args(path) {
+            rendered.push_str(&template_args);
+        }
+        Some(rendered)
+    }
+
+    fn cpp_name_type_is_usize(ty: &syn::Type) -> bool {
+        let syn::Type::Path(path) = ty else {
+            return false;
+        };
+        if path.qself.is_some() || path.path.leading_colon.is_some() {
+            return false;
+        }
+        let segments = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        matches!(
+            segments.as_slice(),
+            [name] if name == "usize"
+        ) || matches!(
+            segments.as_slice(),
+            [root, name] if matches!(root.as_str(), "std" | "core") && name == "usize"
+        ) || matches!(
+            segments.as_slice(),
+            [root, primitive, name]
+                if matches!(root.as_str(), "std" | "core")
+                    && primitive == "primitive"
+                    && name == "usize"
+        )
+    }
+
+    fn collect_cpp_name_root_consts(
+        file: &syn::File,
+    ) -> Result<std::collections::BTreeMap<String, CppNameRootConst>, String> {
+        let mut constants = std::collections::BTreeMap::new();
+        for item in &file.items {
+            let syn::Item::Const(item) = item else {
+                continue;
+            };
+            let name = item.ident.to_string();
+            let restricted = !Self::cpp_name_type_is_usize(&item.ty)
+                || !item.generics.params.is_empty()
+                || item.generics.where_clause.is_some()
+                || item.attrs.iter().any(|attr| !attr.path().is_ident("doc"));
+            if constants
+                .insert(
+                    name.clone(),
+                    CppNameRootConst {
+                        expression: (*item.expr).clone(),
+                        restricted,
+                    },
+                )
+                .is_some()
+            {
+                return Err(format!(
+                    "cpp_name cannot prove overload identity with duplicate root const `{name}`"
+                ));
+            }
+        }
+        Ok(constants)
+    }
+
+    /// Collect every source binding that can compete with a root const in
+    /// Rust's type namespace. `use` bindings are included conservatively: the
+    /// earlier provenance pass either proves them compiler-owned or rejects a
+    /// participating imported path before code generation.
+    fn collect_cpp_name_root_type_namespace(
+        file: &syn::File,
+    ) -> std::collections::BTreeSet<String> {
+        fn collect_use_bindings(
+            tree: &syn::UseTree,
+            parent_tail: Option<&str>,
+            bindings: &mut std::collections::BTreeSet<String>,
+        ) {
+            match tree {
+                syn::UseTree::Name(name) => {
+                    if name.ident == "self" {
+                        if let Some(parent_tail) = parent_tail {
+                            bindings.insert(parent_tail.to_string());
+                        }
+                    } else {
+                        bindings.insert(name.ident.to_string());
+                    }
+                }
+                syn::UseTree::Rename(rename) => {
+                    bindings.insert(rename.rename.to_string());
+                }
+                syn::UseTree::Path(path) => {
+                    let tail = path.ident.to_string();
+                    collect_use_bindings(&path.tree, Some(&tail), bindings);
+                }
+                syn::UseTree::Group(group) => {
+                    for tree in &group.items {
+                        collect_use_bindings(tree, parent_tail, bindings);
+                    }
+                }
+                syn::UseTree::Glob(_) => {
+                    // `cpp_name` source preflight rejects glob imports before
+                    // code generation because their bindings cannot be
+                    // enumerated safely.
+                }
+            }
+        }
+
+        let mut bindings = std::collections::BTreeSet::new();
+        // `String` is the only non-generic concrete type contributed by the
+        // standard prelude, and the ordinary mapper reserves that bare
+        // spelling even under `no_std`. Treat it as competing so validation
+        // never rewrites a `Type` clone to a const while emission keeps the
+        // original AST and maps it to `rusty::String`.
+        bindings.insert("String".to_string());
+        for item in &file.items {
+            let name = match item {
+                syn::Item::Enum(item) => Some(item.ident.to_string()),
+                syn::Item::ExternCrate(item) => Some(
+                    item.rename
+                        .as_ref()
+                        .map(|(_, ident)| ident.to_string())
+                        .unwrap_or_else(|| item.ident.to_string()),
+                ),
+                syn::Item::Mod(item) => Some(item.ident.to_string()),
+                syn::Item::Struct(item) => Some(item.ident.to_string()),
+                syn::Item::Trait(item) => Some(item.ident.to_string()),
+                syn::Item::TraitAlias(item) => Some(item.ident.to_string()),
+                syn::Item::Type(item) => Some(item.ident.to_string()),
+                syn::Item::Union(item) => Some(item.ident.to_string()),
+                syn::Item::Use(item) => {
+                    collect_use_bindings(&item.tree, None, &mut bindings);
+                    None
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                bindings.insert(name);
+            }
+        }
+        bindings
+    }
+
+    /// Evaluate the deliberately small, portable subset of Rust integer const
+    /// expressions accepted in a `cpp_name` parameter type.  Values are only
+    /// used as C++ type identity (array extents / const generic arguments), so
+    /// every operation is checked and every referenced name must be an exact,
+    /// unconditional crate-root `usize` const.
+    fn evaluate_cpp_name_const_expr(
+        expression: &syn::Expr,
+        constants: &std::collections::BTreeMap<String, CppNameRootConst>,
+        stack: &mut Vec<String>,
+    ) -> Result<u128, String> {
+        fn block_tail(block: &syn::Block) -> Option<&syn::Expr> {
+            match block.stmts.as_slice() {
+                [syn::Stmt::Expr(expression, None)] => Some(expression),
+                _ => None,
+            }
+        }
+
+        let fail = |reason: &str| {
+            Err(format!(
+                "cpp_name cannot prove overload identity from const expression `{}`: {reason}",
+                expression.to_token_stream()
+            ))
+        };
+
+        match expression {
+            syn::Expr::Lit(literal) if literal.attrs.is_empty() => {
+                let syn::Lit::Int(integer) = &literal.lit else {
+                    return fail("only nonnegative integer literals are supported");
+                };
+                if !matches!(integer.suffix(), "" | "usize") {
+                    return fail("integer literal suffix must be absent or `usize`");
+                }
+                let value = integer.base10_parse::<u128>().map_err(|_| {
+                    format!(
+                        "cpp_name cannot prove overload identity from integer literal `{integer}`"
+                    )
+                })?;
+                if value > usize::MAX as u128 {
+                    return fail("integer literal is outside the current target's `usize` range");
+                }
+                Ok(value)
+            }
+            syn::Expr::Paren(paren) if paren.attrs.is_empty() => {
+                Self::evaluate_cpp_name_const_expr(&paren.expr, constants, stack)
+            }
+            syn::Expr::Group(group) if group.attrs.is_empty() => {
+                Self::evaluate_cpp_name_const_expr(&group.expr, constants, stack)
+            }
+            syn::Expr::Block(block) if block.attrs.is_empty() && block.label.is_none() => {
+                let Some(tail) = block_tail(&block.block) else {
+                    return fail("const block must contain exactly one tail expression");
+                };
+                Self::evaluate_cpp_name_const_expr(tail, constants, stack)
+            }
+            syn::Expr::Const(block) if block.attrs.is_empty() => {
+                let Some(tail) = block_tail(&block.block) else {
+                    return fail("inline const must contain exactly one tail expression");
+                };
+                Self::evaluate_cpp_name_const_expr(tail, constants, stack)
+            }
+            syn::Expr::Path(path)
+                if path.attrs.is_empty()
+                    && path.qself.is_none()
+                    && path.path.leading_colon.is_none() =>
+            {
+                let mut segments = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                if segments
+                    .first()
+                    .is_some_and(|root| matches!(root.as_str(), "crate" | "self"))
+                {
+                    segments.remove(0);
+                }
+                if segments.len() != 1 {
+                    return fail("only exact crate-root const paths are supported");
+                }
+                let name = segments.remove(0);
+                let Some(constant) = constants.get(&name) else {
+                    return fail("symbolic const path does not name a checked root `usize` const");
+                };
+                if constant.restricted {
+                    return fail(
+                        "referenced root const must have exact type `usize` and only inert doc attributes",
+                    );
+                }
+                if stack.contains(&name) {
+                    return fail("cyclic root const expression");
+                }
+                stack.push(name);
+                let value =
+                    Self::evaluate_cpp_name_const_expr(&constant.expression, constants, stack);
+                stack.pop();
+                value
+            }
+            syn::Expr::Binary(binary) if binary.attrs.is_empty() => {
+                let left = Self::evaluate_cpp_name_const_expr(&binary.left, constants, stack)?;
+                let right = Self::evaluate_cpp_name_const_expr(&binary.right, constants, stack)?;
+                let value = match binary.op {
+                    syn::BinOp::Add(_) => left.checked_add(right),
+                    syn::BinOp::Sub(_) => left.checked_sub(right),
+                    syn::BinOp::Mul(_) => left.checked_mul(right),
+                    syn::BinOp::Div(_) => left.checked_div(right),
+                    syn::BinOp::Rem(_) => left.checked_rem(right),
+                    syn::BinOp::BitXor(_) => Some(left ^ right),
+                    syn::BinOp::BitAnd(_) => Some(left & right),
+                    syn::BinOp::BitOr(_) => Some(left | right),
+                    syn::BinOp::Shl(_) => u32::try_from(right)
+                        .ok()
+                        .and_then(|shift| left.checked_shl(shift)),
+                    syn::BinOp::Shr(_) => u32::try_from(right)
+                        .ok()
+                        .and_then(|shift| left.checked_shr(shift)),
+                    _ => return fail("operator is outside the checked integer subset"),
+                };
+                let value = value.ok_or_else(|| {
+                    format!(
+                        "cpp_name cannot prove overload identity from const expression `{}`: checked integer operation failed",
+                        expression.to_token_stream()
+                    )
+                })?;
+                if value > usize::MAX as u128 {
+                    return fail(
+                        "checked integer result is outside the current target's `usize` range",
+                    );
+                }
+                Ok(value)
+            }
+            _ => fail("expression is outside the checked literal/root-const/arithmetic subset"),
+        }
+    }
+
+    /// `syn` must parse an unbraced generic argument such as `Width<LEFT>`
+    /// without name resolution, so it represents `LEFT` as a type even when
+    /// rustc later resolves it in the const namespace. Recover that exact
+    /// crate-root-const shape for the validation-only AST clones only when no
+    /// primitive or source type-namespace binding competes. Primitive paths
+    /// remain types; source/compiler-owned competition fails closed because
+    /// the validation clone and original emitted AST cannot otherwise be
+    /// proven to retain one identity.
+    fn cpp_name_ambiguous_const_generic_expr(
+        argument: &syn::GenericArgument,
+        constants: &std::collections::BTreeMap<String, CppNameRootConst>,
+        type_namespace: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<syn::Expr>, String> {
+        let syn::GenericArgument::Type(syn::Type::Path(path)) = argument else {
+            return Ok(None);
+        };
+        if path.qself.is_some() || path.path.leading_colon.is_some() {
+            return Ok(None);
+        }
+        let mut segments = path.path.segments.iter().collect::<Vec<_>>();
+        let explicitly_rooted = segments
+            .first()
+            .is_some_and(|segment| matches!(segment.ident.to_string().as_str(), "crate" | "self"));
+        if segments
+            .first()
+            .is_some_and(|segment| matches!(segment.ident.to_string().as_str(), "crate" | "self"))
+        {
+            segments.remove(0);
+        }
+        if segments.len() != 1 || !matches!(segments[0].arguments, syn::PathArguments::None) {
+            return Ok(None);
+        }
+        let name = segments[0].ident.to_string();
+        if !constants.contains_key(&name) {
+            return Ok(None);
+        }
+        let primitive = !explicitly_rooted
+            && matches!(
+                name.as_str(),
+                "bool"
+                    | "char"
+                    | "f32"
+                    | "f64"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "str"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+            );
+        if primitive {
+            return Ok(None);
+        }
+        if type_namespace.contains(&name) {
+            return Err(format!(
+                "cpp_name cannot prove overload identity for generic argument `{}`: root const `{name}` competes with a source or compiler-owned type-namespace binding",
+                path.to_token_stream()
+            ));
+        }
+        Ok(Some(syn::Expr::Path(syn::ExprPath {
+            attrs: Vec::new(),
+            qself: path.qself.clone(),
+            path: path.path.clone(),
+        })))
+    }
+
+    /// True when two rendered parameter lists are not proven to denote
+    /// different C++ function parameter types. The parser canonicalizes
+    /// fundamental-specifier permutations, applies the C++ top-level cv and
+    /// array/function parameter adjustments, and recursively preserves cv in
+    /// references, pointers, function types, arrays, and template arguments.
+    /// A parse failure or target-selected typedef relationship is `Unknown`,
+    /// which deliberately rejects the overload set rather than trusting text.
+    fn cpp_name_signatures_may_have_same_identity(&self, left: &str, right: &str) -> bool {
+        if left == right {
+            return true;
+        }
+        let parse = |signature: &str| {
+            let tokens = cpp_name_lex_cpp_type(signature)?;
+            CppNameCppTypeParser::new(&tokens).parse_complete_parameter_list()
+        };
+        // An arbitrary user type-map value may itself name a C++ typedef or
+        // alias template. Distinct opaque qualified-ids therefore do not
+        // prove distinct underlying types. Built-in/source-owned mappings are
+        // compiler-controlled and keep their nominal structural comparison.
+        let opaque_named = self.user_type_map.mappings.values().any(|mapping| {
+            let mapping = mapping.trim();
+            !mapping.is_empty() && (left.contains(mapping) || right.contains(mapping))
+        });
+        let (Ok(left), Ok(right)) = (parse(left), parse(right)) else {
+            return true;
+        };
+        if left.len() != right.len() {
+            return false;
+        }
+        left.iter()
+            .zip(&right)
+            .fold(CppNameIdentityRelation::Same, |relation, (left, right)| {
+                relation.combine(cpp_name_compare_cpp_types(
+                    left,
+                    right,
+                    true,
+                    opaque_named,
+                ))
+            })
+            != CppNameIdentityRelation::Different
+    }
+
+    fn canonical_cpp_name_param_types(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
+        aliases: &std::collections::BTreeMap<String, (syn::Type, bool)>,
+        constants: &std::collections::BTreeMap<String, CppNameRootConst>,
+        type_namespace: &std::collections::BTreeSet<String>,
+    ) -> Result<String, String> {
+        struct AliasExpander<'a> {
+            aliases: &'a std::collections::BTreeMap<String, (syn::Type, bool)>,
+            constants: &'a std::collections::BTreeMap<String, CppNameRootConst>,
+            type_namespace: &'a std::collections::BTreeSet<String>,
+            type_map: &'a crate::types::UserTypeMap,
+            stack: Vec<String>,
+            const_stack: Vec<String>,
+            error: Option<String>,
+        }
+
+        impl syn::visit_mut::VisitMut for AliasExpander<'_> {
+            fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+                if self.error.is_some() {
+                    return;
+                }
+                let syn::Type::Path(type_path) = ty else {
+                    syn::visit_mut::visit_type_mut(self, ty);
+                    return;
+                };
+                if type_path.qself.is_some() {
+                    syn::visit_mut::visit_type_mut(self, ty);
+                    return;
+                }
+                let segments = type_path.path.segments.iter().collect::<Vec<_>>();
+                let alias_name = match segments.as_slice() {
+                    [alias] => Some(alias.ident.to_string()),
+                    [root, alias] if root.ident == "crate" || root.ident == "self" => {
+                        Some(alias.ident.to_string())
+                    }
+                    _ => None,
+                };
+                let Some(alias_name) = alias_name else {
+                    syn::visit_mut::visit_type_mut(self, ty);
+                    return;
+                };
+                let Some((target, restricted)) = self.aliases.get(&alias_name) else {
+                    syn::visit_mut::visit_type_mut(self, ty);
+                    return;
+                };
+
+                // A user type-map entry controls the emitted ABI and takes
+                // precedence over the source alias target. Leave it in place
+                // for the ordinary mapper to lower.
+                let joined = type_path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if self.type_map.lookup(&joined).is_some()
+                    || self.type_map.lookup(&alias_name).is_some()
+                {
+                    syn::visit_mut::visit_type_mut(self, ty);
+                    return;
+                }
+                if *restricted
+                    || !matches!(
+                        segments.last().map(|segment| &segment.arguments),
+                        Some(syn::PathArguments::None)
+                    )
+                {
+                    self.error = Some(format!(
+                        "cpp_name cannot prove overload identity through generic or conditionally attributed type alias `{alias_name}`"
+                    ));
+                    return;
+                }
+                if self.stack.contains(&alias_name) {
+                    self.error = Some(format!(
+                        "cpp_name cannot prove overload identity through cyclic type alias `{alias_name}`"
+                    ));
+                    return;
+                }
+                self.stack.push(alias_name);
+                *ty = target.clone();
+                self.visit_type_mut(ty);
+                self.stack.pop();
+            }
+
+            fn visit_generic_argument_mut(&mut self, argument: &mut syn::GenericArgument) {
+                if self.error.is_some() {
+                    return;
+                }
+                let expression = match CodeGen::cpp_name_ambiguous_const_generic_expr(
+                    argument,
+                    self.constants,
+                    self.type_namespace,
+                ) {
+                    Ok(expression) => expression,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                };
+                if let Some(expression) = expression {
+                    match CodeGen::evaluate_cpp_name_const_expr(
+                        &expression,
+                        self.constants,
+                        &mut self.const_stack,
+                    ) {
+                        Ok(value) => {
+                            let literal = syn::LitInt::new(
+                                &value.to_string(),
+                                proc_macro2::Span::call_site(),
+                            );
+                            *argument = syn::GenericArgument::Const(syn::parse_quote!(#literal));
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                    return;
+                }
+                syn::visit_mut::visit_generic_argument_mut(self, argument);
+            }
+
+            fn visit_expr_mut(&mut self, expression: &mut syn::Expr) {
+                if self.error.is_some() {
+                    return;
+                }
+                match CodeGen::evaluate_cpp_name_const_expr(
+                    expression,
+                    self.constants,
+                    &mut self.const_stack,
+                ) {
+                    Ok(value) => {
+                        let literal =
+                            syn::LitInt::new(&value.to_string(), proc_macro2::Span::call_site());
+                        *expression = syn::parse_quote!(#literal);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        }
+
+        let mut expanded_inputs = inputs.clone();
+        let mut expander = AliasExpander {
+            aliases,
+            constants,
+            type_namespace,
+            type_map: &self.user_type_map,
+            stack: Vec::new(),
+            const_stack: Vec::new(),
+            error: None,
+        };
+        for input in &mut expanded_inputs {
+            syn::visit_mut::VisitMut::visit_fn_arg_mut(&mut expander, input);
+        }
+        if let Some(error) = expander.error {
+            return Err(error);
+        }
+        let mapped = self.map_fn_param_types(&expanded_inputs);
+        let contains_auto = mapped
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .any(|word| word == "auto");
+        if mapped.contains("/* TODO") || contains_auto {
+            return Err(format!(
+                "cpp_name could not prove a concrete C++ parameter signature from `{mapped}`"
+            ));
+        }
+        // Preserve token boundaries for the structural identity proof below.
+        // The older textual key removed whitespace, turning `const size_t&`
+        // into the opaque identifier `constsize_t&` and hiding typedef
+        // equivalence inside references and other cv-qualified shapes.
+        Ok(mapped)
+    }
+
+    fn normalize_cpp_name_emitted_type_list(
+        mapped: &str,
+        phase: &str,
+    ) -> Result<String, String> {
+        if mapped.contains("/* TODO") || type_string_contains_auto_template_arg(mapped) {
+            return Err(format!(
+                "cpp_name cannot prove {phase} C++ signature from unresolved type spelling `{mapped}`"
+            ));
+        }
+        // Keep C++ token boundaries. In particular, removing whitespace turns
+        // `unsigned long int` into an unrelated identifier and makes a later
+        // identity check textual again.
+        Ok(mapped.trim().to_string())
+    }
+
+    fn cpp_name_function_with_normalized_consts(
+        function: &syn::ItemFn,
+        constants: &std::collections::BTreeMap<String, CppNameRootConst>,
+        type_namespace: &std::collections::BTreeSet<String>,
+    ) -> Result<syn::ItemFn, String> {
+        struct ConstNormalizer<'a> {
+            constants: &'a std::collections::BTreeMap<String, CppNameRootConst>,
+            type_namespace: &'a std::collections::BTreeSet<String>,
+            stack: Vec<String>,
+            error: Option<String>,
+        }
+
+        impl syn::visit_mut::VisitMut for ConstNormalizer<'_> {
+            fn visit_generic_argument_mut(&mut self, argument: &mut syn::GenericArgument) {
+                if self.error.is_some() {
+                    return;
+                }
+                let expression = match CodeGen::cpp_name_ambiguous_const_generic_expr(
+                    argument,
+                    self.constants,
+                    self.type_namespace,
+                ) {
+                    Ok(expression) => expression,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                };
+                if let Some(expression) = expression {
+                    match CodeGen::evaluate_cpp_name_const_expr(
+                        &expression,
+                        self.constants,
+                        &mut self.stack,
+                    ) {
+                        Ok(value) => {
+                            let literal = syn::LitInt::new(
+                                &value.to_string(),
+                                proc_macro2::Span::call_site(),
+                            );
+                            *argument = syn::GenericArgument::Const(syn::parse_quote!(#literal));
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                    return;
+                }
+                syn::visit_mut::visit_generic_argument_mut(self, argument);
+            }
+
+            fn visit_expr_mut(&mut self, expression: &mut syn::Expr) {
+                if self.error.is_some() {
+                    return;
+                }
+                match CodeGen::evaluate_cpp_name_const_expr(
+                    expression,
+                    self.constants,
+                    &mut self.stack,
+                ) {
+                    Ok(value) => {
+                        let literal =
+                            syn::LitInt::new(&value.to_string(), proc_macro2::Span::call_site());
+                        *expression = syn::parse_quote!(#literal);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        }
+
+        let mut normalized = function.clone();
+        let mut visitor = ConstNormalizer {
+            constants,
+            type_namespace,
+            stack: Vec::new(),
+            error: None,
+        };
+        for input in &mut normalized.sig.inputs {
+            if let syn::FnArg::Typed(input) = input {
+                visitor.visit_type_mut(&mut input.ty);
+            }
+        }
+        if let syn::ReturnType::Type(_, ty) = &mut normalized.sig.output {
+            visitor.visit_type_mut(ty);
+        }
+        visitor.error.map_or(Ok(normalized), Err)
+    }
+
+    fn exact_cpp_name_parameter_arity(signature: &str, phase: &str) -> Result<usize, String> {
+        let tokens = cpp_name_lex_cpp_type(signature).map_err(|_| {
+            format!("cpp_name cannot prove {phase} parameter arity from `{signature}`")
+        })?;
+        let parameters = CppNameCppTypeParser::new(&tokens)
+            .parse_complete_parameter_list()
+            .map_err(|_| {
+                format!("cpp_name cannot prove {phase} parameter arity from `{signature}`")
+            })?;
+        // In C++, a sole bare `void` denotes an empty parameter list, while
+        // the ordinary emitter would also attach a parameter name and make it
+        // ill-formed. Never let this special spelling masquerade as arity one.
+        if parameters.iter().any(|parameter| {
+            matches!(
+                parameter,
+                CppNameCppType::Base {
+                    base: CppNameCppBase::Integral(CppNameIntegralIdentity::Fundamental(
+                        CppNameFundamentalIdentity::Void
+                    )),
+                    ..
+                }
+            )
+        }) {
+            return Err(format!(
+                "cpp_name cannot prove {phase} parameter arity from bare `void` in `{signature}`"
+            ));
+        }
+        Ok(parameters.len())
+    }
+
+    // validate_cpp_name_function_shape restricts the generic lane to one
+    // unconstrained/`'static` type parameter and forbids it in the return
+    // type. Consequently the ordinary emitters retain this exact template
+    // head; recording it here proves the declaration and definition agree.
+    /// Return the exact return/parameter type strings used by the definition
+    /// emitter.  This key deliberately does not expand Rust aliases: the
+    /// definition path does not either, and an unresolved alias can therefore
+    /// become an abbreviated-template `auto` even when its semantic target is
+    /// known to the separate collision proof.
+    fn exact_cpp_name_definition_signature(
+        &mut self,
+        function: &syn::ItemFn,
+    ) -> Result<(String, String, String), String> {
+        self.push_type_param_scope(&function.sig.generics);
+        let return_type = self.map_return_type(&function.sig.output);
+        let param_types = self.map_fn_param_types(&function.sig.inputs);
+        self.pop_type_param_scope();
+        Ok((
+            self.template_prefix_lines(&function.sig.generics, true)
+                .join("\n"),
+            Self::normalize_cpp_name_emitted_type_list(&return_type, "definition return")?,
+            Self::normalize_cpp_name_emitted_type_list(&param_types, "definition parameter")?,
+        ))
+    }
+
+    /// Mirror `emit_function_forward_decl` closely enough to identify the
+    /// exact declaration signature, including its bare-function-alias
+    /// substitution and unresolved-path fallback.  `None` means the ordinary
+    /// emitter intentionally omits this function's forward declaration.
+    fn exact_cpp_name_forward_signature(
+        &mut self,
+        function: &syn::ItemFn,
+    ) -> Result<Option<(String, String, String)>, String> {
+        let can_forward_declare = match &function.sig.output {
+            syn::ReturnType::Default => true,
+            syn::ReturnType::Type(_, ty) => {
+                matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty()) || {
+                    self.push_type_param_scope(&function.sig.generics);
+                    let mapped = self.map_return_type(&function.sig.output);
+                    self.pop_type_param_scope();
+                    !type_string_has_auto_placeholder(&mapped)
+                }
+            }
+        };
+        if !can_forward_declare {
+            return Ok(None);
+        }
+
+        let alias_resolved_inputs = self.resolve_local_alias_fn_inputs(&function.sig.inputs);
+        self.push_type_param_scope(&function.sig.generics);
+        let previous_forward_mode = self.in_forward_decl_signature;
+        self.in_forward_decl_signature = true;
+        let mut return_type = self.map_return_type(&function.sig.output);
+        let mut param_types = self.map_fn_param_types(&alias_resolved_inputs);
+        let mut has_unresolved = self
+            .forward_decl_type_spelling_has_unresolved_scoped_path(&return_type)
+            || self.forward_decl_type_spelling_has_unresolved_scoped_path(&param_types);
+        if has_unresolved {
+            self.in_forward_decl_signature = false;
+            let fallback_return_type = self.map_return_type(&function.sig.output);
+            let fallback_param_types = self.map_fn_param_types(&alias_resolved_inputs);
+            let fallback_has_unresolved = self
+                .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_return_type)
+                || self.forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_param_types);
+            if !fallback_has_unresolved {
+                return_type = self.qualify_bare_local_types_in_type_string(&fallback_return_type);
+                param_types = self.qualify_bare_local_types_in_type_string(&fallback_param_types);
+                has_unresolved = false;
+            }
+            self.in_forward_decl_signature = true;
+        }
+        self.in_forward_decl_signature = previous_forward_mode;
+        let has_unqualified_unknown = self
+            .forward_decl_signature_has_unqualified_unknown_type_name(&return_type, &param_types);
+        self.pop_type_param_scope();
+        if has_unresolved || has_unqualified_unknown {
+            return Ok(None);
+        }
+
+        Ok(Some((
+            self.template_prefix_lines(&function.sig.generics, true)
+                .join("\n"),
+            Self::normalize_cpp_name_emitted_type_list(&return_type, "forward return")?,
+            Self::normalize_cpp_name_emitted_type_list(&param_types, "forward parameter")?,
+        )))
+    }
+
+    fn validate_cpp_name_overloads(&mut self, file: &syn::File) -> Result<(), String> {
+        if self.cpp_name_plan.is_empty() {
+            return Ok(());
+        }
+        let mut aliases = std::collections::BTreeMap::<String, (syn::Type, bool)>::new();
+        for item in &file.items {
+            let syn::Item::Type(alias) = item else {
+                continue;
+            };
+            let name = alias.ident.to_string();
+            if aliases
+                .insert(
+                    name.clone(),
+                    (
+                        (*alias.ty).clone(),
+                        !alias.generics.params.is_empty()
+                            || alias.generics.where_clause.is_some()
+                            || alias.attrs.iter().any(|attr| !attr.path().is_ident("doc")),
+                    ),
+                )
+                .is_some()
+            {
+                return Err(format!(
+                    "cpp_name cannot prove overload identity with duplicate root type alias `{name}`"
+                ));
+            }
+        }
+        let constants = Self::collect_cpp_name_root_consts(file)?;
+        let type_namespace = Self::collect_cpp_name_root_type_namespace(file);
+        let targets = self.cpp_name_plan.target_names();
+        let mut groups = std::collections::BTreeMap::<String, Vec<&syn::ItemFn>>::new();
+        for item in &file.items {
+            let syn::Item::Fn(function) = item else {
+                continue;
+            };
+            let rust_name = function.sig.ident.to_string();
+            let emitted_name = self
+                .cpp_name_plan
+                .function_name(&rust_name)
+                .unwrap_or(&rust_name);
+            if targets.contains(emitted_name) {
+                groups
+                    .entry(emitted_name.to_string())
+                    .or_default()
+                    .push(function);
+            }
+        }
+
+        for (cpp_name, functions) in groups {
+            let generic_function_count = functions
+                .iter()
+                .filter(|function| {
+                    !function.sig.generics.params.is_empty()
+                        || function.sig.generics.where_clause.is_some()
+                })
+                .count();
+            if generic_function_count != 0 && generic_function_count != functions.len() {
+                return Err(format!(
+                    "cpp_name overload set `{cpp_name}` cannot mix generic and non-generic functions"
+                ));
+            }
+            let generic_group = generic_function_count != 0;
+            let mut semantic_signatures = Vec::<(String, String)>::new();
+            let mut definition_signatures = Vec::<(String, String)>::new();
+            let mut forward_signatures = Vec::<(String, String)>::new();
+            let mut generic_definition_arities = std::collections::BTreeMap::<usize, String>::new();
+            for function in functions {
+                if function.sig.constness.is_some()
+                    || function.sig.asyncness.is_some()
+                    || function.sig.abi.is_some()
+                    || function.sig.variadic.is_some()
+                {
+                    return Err(format!(
+                        "cpp_name overload set `{cpp_name}` contains a function whose supported unconditional C++ signature cannot be proven: `{}`",
+                        function.sig.ident
+                    ));
+                }
+                crate::cpp_name::validate_cpp_name_companion_attrs(&function.attrs)?;
+                crate::cpp_name::validate_cpp_name_function_shape(function)?;
+                self.push_type_param_scope(&function.sig.generics);
+                let semantic_signature = self.canonical_cpp_name_param_types(
+                    &function.sig.inputs,
+                    &aliases,
+                    &constants,
+                    &type_namespace,
+                );
+                self.pop_type_param_scope();
+                let semantic_signature = semantic_signature?;
+                if let Some((_, first)) = semantic_signatures.iter().find(|(previous, _)| {
+                    self.cpp_name_signatures_may_have_same_identity(previous, &semantic_signature)
+                }) {
+                    return Err(format!(
+                        "cpp_name overload collision for `{cpp_name}`: Rust functions `{first}` and `{}` are not proven to have distinct semantic C++ parameter type identities (`{}` versus `{semantic_signature}`)",
+                        function.sig.ident,
+                        semantic_signatures
+                            .iter()
+                            .find(|(_, name)| name == first)
+                            .map(|(signature, _)| signature.as_str())
+                            .unwrap_or("<unknown>"),
+                    ));
+                }
+                semantic_signatures.push((semantic_signature, function.sig.ident.to_string()));
+
+                let normalized_function = Self::cpp_name_function_with_normalized_consts(
+                    function,
+                    &constants,
+                    &type_namespace,
+                )?;
+                let definition_signature =
+                    self.exact_cpp_name_definition_signature(&normalized_function)?;
+                if generic_group {
+                    let arity = Self::exact_cpp_name_parameter_arity(
+                        &definition_signature.2,
+                        "exact definition",
+                    )?;
+                    if let Some(first) =
+                        generic_definition_arities.insert(arity, function.sig.ident.to_string())
+                    {
+                        return Err(format!(
+                            "generic cpp_name overload collision for `{cpp_name}`: Rust functions `{first}` and `{}` have the same exact emitted C++ parameter arity {arity}; generic overloads are accepted only when exact emitted arity proves them distinct",
+                            function.sig.ident
+                        ));
+                    }
+                }
+                if let Some((previous, first)) =
+                    definition_signatures.iter().find(|(previous, _)| {
+                        self.cpp_name_signatures_may_have_same_identity(
+                            previous,
+                            &definition_signature.2,
+                        )
+                    })
+                {
+                    return Err(format!(
+                        "cpp_name overload collision for `{cpp_name}`: Rust functions `{first}` and `{}` are not proven to emit distinct exact definition parameter type identities (`{previous}` versus `{}`)",
+                        function.sig.ident, definition_signature.2
+                    ));
+                }
+                definition_signatures.push((
+                    definition_signature.2.clone(),
+                    function.sig.ident.to_string(),
+                ));
+
+                if let Some(forward_signature) =
+                    self.exact_cpp_name_forward_signature(&normalized_function)?
+                {
+                    if let Some((previous, first)) =
+                        forward_signatures.iter().find(|(previous, _)| {
+                            self.cpp_name_signatures_may_have_same_identity(
+                                previous,
+                                &forward_signature.2,
+                            )
+                        })
+                    {
+                        return Err(format!(
+                            "cpp_name overload collision for `{cpp_name}`: Rust functions `{first}` and `{}` are not proven to emit distinct exact forward parameter type identities (`{previous}` versus `{}`)",
+                            function.sig.ident, forward_signature.2,
+                        ));
+                    }
+                    forward_signatures
+                        .push((forward_signature.2.clone(), function.sig.ident.to_string()));
+                    if forward_signature != definition_signature {
+                        return Err(format!(
+                            "cpp_name cannot prove declaration/definition compatibility for `{}`: forward emits `{}` then `{}({})` but definition emits `{}` then `{}({})`",
+                            function.sig.ident,
+                            forward_signature.0,
+                            forward_signature.1,
+                            forward_signature.2,
+                            definition_signature.0,
+                            definition_signature.1,
+                            definition_signature.2
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn take_codegen_error(&mut self) -> Option<String> {
         self.codegen_error.take()
     }
@@ -4756,6 +6754,12 @@ impl CodeGen {
             }
         }
         log_emit("record_cycle_components");
+
+        if let Err(error) = self.validate_cpp_name_overloads(file) {
+            self.codegen_error = Some(error);
+            return;
+        }
+        log_emit("validate_cpp_name_overloads");
 
         // Pass 2: emit all items
         self.writeln("// Auto-generated by rusty-cpp-transpiler");

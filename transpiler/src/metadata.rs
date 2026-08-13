@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A discovered crate target from `cargo metadata`.
 #[derive(Debug, Clone)]
@@ -53,8 +55,50 @@ pub struct ManifestTarget {
 #[derive(Debug, Clone)]
 pub struct ManifestIdentity {
     pub package_name: String,
+    pub edition: String,
+    pub rust_version: Option<String>,
+    pub workspace_root: PathBuf,
     pub dependencies: Vec<ManifestDependency>,
     pub targets: Vec<ManifestTarget>,
+}
+
+/// One Cargo-selected normal local dependency edge.
+///
+/// `dependency_key` is the crate name visible to Rust source (and therefore
+/// preserves `package = ...` renames); `package_name` is the selected Cargo
+/// package identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveLocalNormalDependency {
+    pub dependency_key: String,
+    pub package_name: String,
+    pub manifest_path: PathBuf,
+}
+
+/// Cargo's effective normal local-dependency graph for one concrete target.
+///
+/// The graph is deliberately keyed by canonical manifest path so all crate
+/// mode phases can consume the same selection result without re-evaluating
+/// target cfg expressions or workspace inheritance independently.
+#[derive(Debug, Clone)]
+pub struct EffectiveLocalNormalDependencyGraph {
+    pub target_triple: String,
+    root_manifest: PathBuf,
+    direct_dependencies: HashMap<PathBuf, Vec<EffectiveLocalNormalDependency>>,
+}
+
+impl EffectiveLocalNormalDependencyGraph {
+    pub fn root_manifest(&self) -> &Path {
+        &self.root_manifest
+    }
+
+    pub fn direct_dependencies(
+        &self,
+        manifest_path: &Path,
+    ) -> Option<&[EffectiveLocalNormalDependency]> {
+        self.direct_dependencies
+            .get(&canonicalized_path(manifest_path))
+            .map(Vec::as_slice)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +169,7 @@ impl TargetKind {
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<Package>,
+    workspace_root: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -132,6 +177,8 @@ struct Package {
     name: String,
     #[allow(dead_code)]
     version: String,
+    edition: String,
+    rust_version: Option<String>,
     targets: Vec<Target>,
     manifest_path: PathBuf,
     #[serde(default)]
@@ -161,8 +208,10 @@ struct CargoMetadataResolved {
 struct ResolvedPackage {
     id: String,
     name: String,
+    version: String,
     manifest_path: PathBuf,
     source: Option<String>,
+    targets: Vec<Target>,
 }
 
 #[derive(Deserialize)]
@@ -481,7 +530,6 @@ pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentit
                 manifest_path.display()
             )
         })?;
-
     let dependencies = package
         .dependencies
         .iter()
@@ -511,8 +559,842 @@ pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentit
 
     Ok(ManifestIdentity {
         package_name: package.name.clone(),
+        edition: package.edition.clone(),
+        rust_version: package.rust_version.clone(),
+        workspace_root: canonicalized_path(&metadata.workspace_root),
         dependencies,
         targets,
+    })
+}
+
+/// Cargo's global configuration directory for a command launched from
+/// `project_dir`.
+///
+/// When `CARGO_HOME` is absent, Cargo does not rely on the `HOME` environment
+/// variable alone: its platform home lookup can fall back to the account
+/// database. `std::env::home_dir` intentionally provides the same fallback,
+/// so callers cannot miss a selected patch merely because both variables are
+/// unset.
+pub(crate) fn effective_cargo_home(project_dir: &Path) -> Option<PathBuf> {
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        // Cargo treats an explicitly-empty CARGO_HOME exactly like an absent
+        // one and falls back to its platform home lookup.  Do the same: using
+        // `project_dir.join("")` here would miss the account-home
+        // `.cargo/config.toml` that the Cargo subprocess still consumes.
+        if !cargo_home.is_empty() {
+            let cargo_home = PathBuf::from(cargo_home);
+            return Some(if cargo_home.is_absolute() {
+                cargo_home
+            } else {
+                project_dir.join(cargo_home)
+            });
+        }
+    }
+    #[allow(deprecated)]
+    std::env::home_dir().map(|home| {
+        let home = if home.is_absolute() {
+            home
+        } else {
+            project_dir.join(home)
+        };
+        home.join(".cargo")
+    })
+}
+
+fn configured_cargo_build_target(project_dir: &Path) -> Result<Option<String>, String> {
+    fn config_build_target(
+        config_path: &Path,
+        active: &mut HashSet<PathBuf>,
+    ) -> Result<Option<String>, String> {
+        let key = canonicalized_path(config_path);
+        if !active.insert(key.clone()) {
+            return Err(format!(
+                "Cargo configuration include cycle reaches {}",
+                config_path.display()
+            ));
+        }
+        let source = std::fs::read_to_string(config_path).map_err(|error| {
+            format!(
+                "could not read Cargo configuration {} while resolving build.target: {error}",
+                config_path.display()
+            )
+        })?;
+        let config = toml::from_str::<toml::Value>(&source).map_err(|error| {
+            format!(
+                "could not parse Cargo configuration {} while resolving build.target: {error}",
+                config_path.display()
+            )
+        })?;
+        let table = config.as_table().ok_or_else(|| {
+            format!(
+                "Cargo configuration {} is not a TOML table",
+                config_path.display()
+            )
+        })?;
+
+        let mut selected = None;
+        if let Some(includes) = table.get("include") {
+            let includes = includes.as_array().ok_or_else(|| {
+                format!(
+                    "Cargo configuration {} has a non-array include value",
+                    config_path.display()
+                )
+            })?;
+            for include in includes {
+                let (relative, optional) = match include {
+                    toml::Value::String(path) => (path.as_str(), false),
+                    toml::Value::Table(table) => {
+                        let path = table
+                            .get("path")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Cargo configuration {} has an included table without a string path",
+                                    config_path.display()
+                                )
+                            })?;
+                        let optional = table
+                            .get("optional")
+                            .map(|value| {
+                                value.as_bool().ok_or_else(|| {
+                                    format!(
+                                        "Cargo configuration {} has a non-boolean optional include flag",
+                                        config_path.display()
+                                    )
+                                })
+                            })
+                            .transpose()?
+                            .unwrap_or(false);
+                        (path, optional)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Cargo configuration {} has a malformed include entry",
+                            config_path.display()
+                        ));
+                    }
+                };
+                let include_path = Path::new(relative);
+                let include_path = if include_path.is_absolute() {
+                    include_path.to_path_buf()
+                } else {
+                    config_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join(include_path)
+                };
+                if optional && !include_path.is_file() {
+                    continue;
+                }
+                if let Some(target) = config_build_target(&include_path, active)? {
+                    selected = Some(target);
+                }
+            }
+        }
+
+        if let Some(target) = table
+            .get("build")
+            .and_then(toml::Value::as_table)
+            .and_then(|build| build.get("target"))
+        {
+            let target = target.as_str().ok_or_else(|| {
+                format!(
+                    "Cargo configuration {} has a non-string build.target; exact target selection is unsupported",
+                    config_path.display()
+                )
+            })?;
+            let target = target.trim();
+            if target.is_empty() {
+                return Err(format!(
+                    "Cargo configuration {} has an empty build.target",
+                    config_path.display()
+                ));
+            }
+            selected = Some(target.to_string());
+        }
+        active.remove(&key);
+        Ok(selected)
+    }
+
+    let mut cargo_directories = Vec::new();
+    if let Some(cargo_home) = effective_cargo_home(project_dir) {
+        cargo_directories.push(cargo_home);
+    }
+    let mut ancestors = project_dir.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    cargo_directories.extend(
+        ancestors
+            .into_iter()
+            .map(|directory| directory.join(".cargo")),
+    );
+
+    let mut selected = None;
+    for cargo_directory in cargo_directories {
+        let modern = cargo_directory.join("config.toml");
+        let legacy = cargo_directory.join("config");
+        // Cargo intentionally prefers the extensionless legacy file when both
+        // spellings exist.
+        let config_path = if legacy.is_file() {
+            legacy
+        } else if modern.is_file() {
+            modern
+        } else {
+            continue;
+        };
+        if let Some(target) = config_build_target(&config_path, &mut HashSet::new())? {
+            selected = Some(target);
+        }
+    }
+    Ok(selected)
+}
+
+fn effective_target_triple(project_dir: &Path) -> Result<String, String> {
+    if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET") {
+        let target = target.to_string_lossy().trim().to_string();
+        if target.is_empty() {
+            return Err("CARGO_BUILD_TARGET is present but empty".to_string());
+        }
+        return Ok(target);
+    }
+    if let Some(target) = configured_cargo_build_target(project_dir)? {
+        return Ok(target);
+    }
+
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = std::process::Command::new(&rustc)
+        .arg("-vV")
+        .output()
+        .map_err(|error| {
+            format!(
+                "could not execute {} -vV to determine Cargo's target: {error}",
+                Path::new(&rustc).display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} -vV failed while determining Cargo's target:\n{}",
+            Path::new(&rustc).display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("rustc -vV returned non-UTF-8 output: {error}"))?;
+    let mut hosts = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("host: "))
+        .map(str::trim)
+        .filter(|host| !host.is_empty());
+    let host = hosts
+        .next()
+        .ok_or_else(|| "rustc -vV did not report a host target".to_string())?;
+    if hosts.next().is_some() {
+        return Err("rustc -vV reported more than one host target".to_string());
+    }
+    Ok(host.to_string())
+}
+
+/// A private, process-unique Cargo workspace used to ask Cargo for the
+/// dependency graph of exactly one requested package.
+///
+/// `cargo metadata --manifest-path member/Cargo.toml` still resolves every
+/// member of the containing workspace. With resolver v2 that can unify a
+/// dependency's features with an unrelated workspace member and make optional
+/// edges look selected for the requested package. A one-package wrapper makes
+/// the requested package the only dependency root, matching `cargo check
+/// --manifest-path member/Cargo.toml` and `cargo tree -p member`.
+struct EffectiveGraphProbeDir {
+    path: PathBuf,
+}
+
+impl EffectiveGraphProbeDir {
+    fn create() -> Result<Self, String> {
+        static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
+
+        let base = std::env::temp_dir();
+        for _ in 0..1000 {
+            let sequence = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+            let path = base.join(format!(
+                "rusty-cpp-effective-graph-{}-{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "could not create Cargo effective-graph probe directory {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "could not allocate a unique Cargo effective-graph probe directory under {}",
+            base.display()
+        ))
+    }
+}
+
+impl Drop for EffectiveGraphProbeDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn resolver_default_for_edition(edition: &str) -> &'static str {
+    match edition {
+        "2024" => "3",
+        "2021" => "2",
+        _ => "1",
+    }
+}
+
+fn workspace_resolver_and_overrides(
+    workspace_root: &Path,
+) -> Result<(String, Option<toml::Value>, Option<toml::Value>), String> {
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let source = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "could not read workspace manifest {} while preparing Cargo effective-graph probe: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest = toml::from_str::<toml::Value>(&source).map_err(|error| {
+        format!(
+            "could not parse workspace manifest {} while preparing Cargo effective-graph probe: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let workspace = manifest.get("workspace").and_then(toml::Value::as_table);
+    let package = manifest.get("package").and_then(toml::Value::as_table);
+    let explicit_resolver = workspace
+        .and_then(|table| table.get("resolver"))
+        .or_else(|| package.and_then(|table| table.get("resolver")));
+    let resolver = if let Some(resolver) = explicit_resolver {
+        resolver.as_str().ok_or_else(|| {
+            format!(
+                "workspace resolver in {} is not a string",
+                manifest_path.display()
+            )
+        })?
+    } else if let Some(package) = package {
+        let edition = match package.get("edition") {
+            Some(toml::Value::String(edition)) => edition.as_str(),
+            Some(toml::Value::Table(inherited))
+                if inherited.get("workspace").and_then(toml::Value::as_bool) == Some(true) =>
+            {
+                workspace
+                    .and_then(|table| table.get("package"))
+                    .and_then(toml::Value::as_table)
+                    .and_then(|table| table.get("edition"))
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| {
+                        format!(
+                            "workspace-inherited package edition in {} has no workspace.package.edition",
+                            manifest_path.display()
+                        )
+                    })?
+            }
+            Some(_) => {
+                return Err(format!(
+                    "package edition in {} is neither a string nor workspace-inherited",
+                    manifest_path.display()
+                ));
+            }
+            None => "2015",
+        };
+        resolver_default_for_edition(edition)
+    } else {
+        // Cargo's historical default for a virtual workspace.
+        "1"
+    };
+    if !matches!(resolver, "1" | "2" | "3") {
+        return Err(format!(
+            "unsupported Cargo resolver '{resolver}' in {}",
+            manifest_path.display()
+        ));
+    }
+    Ok((
+        resolver.to_string(),
+        manifest.get("patch").cloned(),
+        manifest.get("replace").cloned(),
+    ))
+}
+
+fn absolutize_manifest_path_values(value: &mut toml::Value, base: &Path) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                if key == "path"
+                    && let toml::Value::String(path) = value
+                {
+                    let path = Path::new(path);
+                    if path.is_relative() {
+                        *value =
+                            toml::Value::String(base.join(path).to_string_lossy().into_owned());
+                    }
+                } else {
+                    absolutize_manifest_path_values(value, base);
+                }
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                absolutize_manifest_path_values(value, base);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn write_effective_graph_probe_manifest(
+    requested_manifest: &Path,
+    identity: &ManifestIdentity,
+) -> Result<EffectiveGraphProbeDir, String> {
+    let probe = EffectiveGraphProbeDir::create()?;
+    let requested_package_dir = requested_manifest.parent().ok_or_else(|| {
+        format!(
+            "requested Cargo manifest has no parent directory: {}",
+            requested_manifest.display()
+        )
+    })?;
+
+    let mut package = toml::map::Map::new();
+    package.insert(
+        "name".to_string(),
+        toml::Value::String("rusty-cpp-effective-graph-probe".to_string()),
+    );
+    package.insert(
+        "version".to_string(),
+        toml::Value::String("0.0.0".to_string()),
+    );
+    package.insert(
+        "edition".to_string(),
+        toml::Value::String(identity.edition.clone()),
+    );
+    if let Some(rust_version) = &identity.rust_version {
+        package.insert(
+            "rust-version".to_string(),
+            toml::Value::String(rust_version.clone()),
+        );
+    }
+    package.insert("publish".to_string(), toml::Value::Boolean(false));
+
+    let mut library = toml::map::Map::new();
+    library.insert(
+        "path".to_string(),
+        toml::Value::String("lib.rs".to_string()),
+    );
+
+    let mut requested_dependency = toml::map::Map::new();
+    requested_dependency.insert(
+        "package".to_string(),
+        toml::Value::String(identity.package_name.clone()),
+    );
+    requested_dependency.insert(
+        "path".to_string(),
+        toml::Value::String(requested_package_dir.to_string_lossy().into_owned()),
+    );
+    let mut dependencies = toml::map::Map::new();
+    dependencies.insert(
+        "__rusty_cpp_requested_root".to_string(),
+        toml::Value::Table(requested_dependency),
+    );
+
+    let mut manifest = toml::map::Map::new();
+    manifest.insert("package".to_string(), toml::Value::Table(package));
+    manifest.insert("lib".to_string(), toml::Value::Table(library));
+    manifest.insert("dependencies".to_string(), toml::Value::Table(dependencies));
+    let (resolver, mut patch, mut replace) =
+        workspace_resolver_and_overrides(&identity.workspace_root)?;
+    let workspace_base = &identity.workspace_root;
+    if let Some(patch) = patch.as_mut() {
+        absolutize_manifest_path_values(patch, workspace_base);
+    }
+    if let Some(replace) = replace.as_mut() {
+        absolutize_manifest_path_values(replace, workspace_base);
+    }
+
+    // Explicit isolation prevents an unrelated Cargo.toml above the system
+    // temporary directory from adopting the probe into another workspace.
+    // Preserve the requested workspace's resolver so target/build feature
+    // unification does not change merely because the probe is the graph root.
+    let mut workspace = toml::map::Map::new();
+    workspace.insert("resolver".to_string(), toml::Value::String(resolver));
+    manifest.insert("workspace".to_string(), toml::Value::Table(workspace));
+    if let Some(patch) = patch {
+        manifest.insert("patch".to_string(), patch);
+    }
+    if let Some(replace) = replace {
+        manifest.insert("replace".to_string(), replace);
+    }
+
+    let source = toml::to_string(&toml::Value::Table(manifest))
+        .map_err(|error| format!("could not serialize Cargo effective-graph probe: {error}"))?;
+    fs::write(probe.path.join("Cargo.toml"), source).map_err(|error| {
+        format!(
+            "could not write Cargo effective-graph probe manifest under {}: {error}",
+            probe.path.display()
+        )
+    })?;
+    fs::write(probe.path.join("lib.rs"), "").map_err(|error| {
+        format!(
+            "could not write Cargo effective-graph probe library under {}: {error}",
+            probe.path.display()
+        )
+    })?;
+    let source_lock = identity.workspace_root.join("Cargo.lock");
+    if source_lock.is_file() {
+        fs::copy(&source_lock, probe.path.join("Cargo.lock")).map_err(|error| {
+            format!(
+                "could not copy workspace lockfile {} into Cargo effective-graph probe: {error}",
+                source_lock.display()
+            )
+        })?;
+    }
+    Ok(probe)
+}
+
+/// Ask Cargo's feature-context-aware tree resolver which package-to-package
+/// edges belong to the target normal graph.
+///
+/// `cargo metadata` deliberately reports one feature union per package ID. In
+/// resolver v2/v3 that union can contain features enabled only by a build,
+/// development, or procedural-macro host unit. Those features must not
+/// activate optional dependencies in the package's target-normal unit.
+/// `cargo tree -e normal,no-proc-macro` retains the target feature context and
+/// prunes every host-only procedural-macro subtree. We use its tree only as an
+/// edge-selection witness, while retaining package identities and dependency
+/// aliases from metadata.
+fn resolve_normal_target_package_edges(
+    probe_manifest: &Path,
+    project_dir: &Path,
+    target_triple: &str,
+    metadata: &CargoMetadataResolved,
+    expected_root_package_id: &str,
+) -> Result<HashSet<(String, String)>, String> {
+    let output = std::process::Command::new("cargo")
+        .arg("tree")
+        .arg("--manifest-path")
+        .arg(probe_manifest)
+        .arg("--target")
+        .arg(target_triple)
+        .arg("--edges")
+        .arg("normal,no-proc-macro")
+        .arg("--prefix")
+        .arg("depth")
+        .arg("--no-dedupe")
+        .arg("--charset")
+        .arg("ascii")
+        .arg("--format")
+        .arg("{p}")
+        .arg("--color")
+        .arg("never")
+        .arg("--quiet")
+        .current_dir(project_dir)
+        .output()
+        .map_err(|error| format!("Failed to run cargo tree: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo tree --edges normal,no-proc-macro --target {target_triple} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("cargo tree returned non-UTF-8 output: {error}"))?;
+
+    // Cargo's documented `{p}` rendering for local path packages includes
+    // the exact package name/version and package directory. Construct every
+    // accepted rendering from the same metadata invocation, require it to be
+    // unique, and fail closed if a local-looking line differs. Registry/git
+    // nodes may remain opaque because local traversal stops at them.
+    let mut local_by_render = HashMap::<String, String>::new();
+    let mut local_prefixes = Vec::<String>::new();
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| package.source.is_none())
+    {
+        let package_dir = package.manifest_path.parent().ok_or_else(|| {
+            format!(
+                "Cargo metadata reported a local manifest without a parent: {}",
+                package.manifest_path.display()
+            )
+        })?;
+        let prefix = format!("{} v{} ", package.name, package.version);
+        let proc_macro_annotation = if package.targets.iter().any(target_is_proc_macro) {
+            "(proc-macro) "
+        } else {
+            ""
+        };
+        let rendered = format!("{prefix}{proc_macro_annotation}({})", package_dir.display());
+        if let Some(previous) = local_by_render.insert(rendered.clone(), package.id.clone()) {
+            return Err(format!(
+                "Cargo normal-tree rendering is ambiguous for package ids '{previous}' and '{}': {rendered}",
+                package.id
+            ));
+        }
+        local_prefixes.push(prefix);
+    }
+    local_prefixes.sort();
+    local_prefixes.dedup();
+
+    let mut stack = Vec::<Option<String>>::new();
+    let mut edges = HashSet::new();
+    let mut roots = Vec::new();
+    for (line_index, line) in stdout.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let depth_end = line.bytes().take_while(u8::is_ascii_digit).count();
+        if depth_end == 0 || depth_end == line.len() {
+            return Err(format!(
+                "could not parse Cargo normal-tree line {}: {line:?}",
+                line_index + 1
+            ));
+        }
+        let depth = line[..depth_end].parse::<usize>().map_err(|error| {
+            format!(
+                "could not parse Cargo normal-tree depth on line {}: {error}",
+                line_index + 1
+            )
+        })?;
+        if depth > stack.len() {
+            return Err(format!(
+                "Cargo normal tree skipped from depth {} to {depth} on line {}",
+                stack.len(),
+                line_index + 1
+            ));
+        }
+        let rendered = &line[depth_end..];
+        let package_id = local_by_render.get(rendered).cloned();
+        if package_id.is_none()
+            && local_prefixes
+                .iter()
+                .any(|prefix| rendered.starts_with(prefix))
+        {
+            return Err(format!(
+                "Cargo normal tree reported an inexact local package identity on line {}: {rendered}",
+                line_index + 1
+            ));
+        }
+
+        stack.truncate(depth);
+        if depth == 0 {
+            roots.push(package_id.clone());
+        } else if let (Some(Some(parent)), Some(child)) = (stack.last(), package_id.as_ref()) {
+            edges.insert((parent.clone(), child.clone()));
+        }
+        stack.push(package_id);
+    }
+    if roots.len() != 1 || roots[0].as_deref() != Some(expected_root_package_id) {
+        return Err(format!(
+            "cargo tree normal-graph root did not match probe package '{expected_root_package_id}': {roots:?}"
+        ));
+    }
+    Ok(edges)
+}
+
+fn reject_ambiguous_selected_local_aliases(
+    package: &ResolvedPackage,
+    node: &ResolveNode,
+    packages_by_id: &HashMap<&str, &ResolvedPackage>,
+    normal_package_edges: &HashSet<(String, String)>,
+) -> Result<(), String> {
+    // The tree's documented `{p}` rendering identifies packages, not the
+    // source-visible alias of an edge. If metadata reports more than one
+    // normal alias from this parent to the same selected child package, the
+    // package-pair witness cannot prove which alias survived target selection.
+    // Never guess: recursive generation uses this key in its output layout and
+    // must consume the same exact graph as preflight.
+    let mut selected_aliases_by_package = HashMap::<&str, HashSet<&str>>::new();
+    for dependency in &node.deps {
+        let has_normal_kind = dependency.dep_kinds.is_empty()
+            || dependency.dep_kinds.iter().any(|kind| kind.kind.is_none());
+        if has_normal_kind
+            && normal_package_edges.contains(&(package.id.clone(), dependency.pkg.clone()))
+        {
+            selected_aliases_by_package
+                .entry(dependency.pkg.as_str())
+                .or_default()
+                .insert(dependency.name.as_str());
+        }
+    }
+    for (dependency_package_id, aliases) in &selected_aliases_by_package {
+        if aliases.len() > 1 {
+            let dependency_package = packages_by_id.get(dependency_package_id).ok_or_else(|| {
+                format!(
+                    "effective Cargo resolve graph references unknown dependency id '{dependency_package_id}'"
+                )
+            })?;
+            let mut aliases = aliases.iter().copied().collect::<Vec<_>>();
+            aliases.sort_unstable();
+            return Err(format!(
+                "Cargo target-normal graph cannot distinguish dependency aliases {} from '{}' to package '{}'; refusing to guess",
+                aliases.join(", "),
+                package.name,
+                dependency_package.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the exact Cargo-selected target-normal local-dependency graph.
+///
+/// Cargo itself evaluates target cfg expressions and literal target triples,
+/// expands workspace-inherited declarations, and resolves optional/default
+/// features. The metadata invocation intentionally remains an unfiltered
+/// identity superset. A target-filtered metadata query would incorrectly
+/// evaluate every package against the requested target and still merge feature
+/// contexts. The normal, non-proc-macro Cargo tree below selects the exact
+/// target-context edges from that superset. Callers that own a source-level C++
+/// contract must treat any error as a pre-output failure.
+pub fn resolve_effective_local_normal_dependency_graph(
+    manifest_path: &Path,
+) -> Result<EffectiveLocalNormalDependencyGraph, String> {
+    // Normalize before deriving the Cargo working directory. A one-component
+    // relative spelling such as `Cargo.toml` has an empty parent, which cannot
+    // be passed to `Command::current_dir` even though the manifest is valid.
+    let requested_manifest = canonicalized_path(manifest_path);
+    let project_dir = requested_manifest.parent().unwrap_or(Path::new("."));
+    let target_triple = effective_target_triple(project_dir)?;
+    let requested_identity = inspect_manifest_identity(&requested_manifest)?;
+    let probe = write_effective_graph_probe_manifest(&requested_manifest, &requested_identity)?;
+    let output = std::process::Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(probe.path.join("Cargo.toml"))
+        .current_dir(project_dir)
+        .output()
+        .map_err(|error| format!("Failed to run cargo metadata: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata for effective normal graph failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let metadata: CargoMetadataResolved = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Failed to parse effective-graph cargo metadata: {error}"))?;
+    let probe_manifest = canonicalized_path(&probe.path.join("Cargo.toml"));
+    let probe_package = metadata
+        .packages
+        .iter()
+        .find(|package| canonicalized_path(&package.manifest_path) == probe_manifest)
+        .ok_or_else(|| {
+            format!(
+                "effective Cargo metadata omitted probe package {}",
+                probe_manifest.display()
+            )
+        })?;
+    let normal_package_edges = resolve_normal_target_package_edges(
+        &probe.path.join("Cargo.toml"),
+        project_dir,
+        &target_triple,
+        &metadata,
+        &probe_package.id,
+    )?;
+    let selected = select_resolved_package(&metadata, &requested_manifest, None)?;
+    let root_manifest = canonicalized_path(&selected.manifest_path);
+    let resolve = metadata.resolve.as_ref().ok_or_else(|| {
+        "effective-graph cargo metadata did not report a resolved dependency graph".to_string()
+    })?;
+
+    let packages_by_id = metadata
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package))
+        .collect::<HashMap<_, _>>();
+    let nodes_by_id = resolve
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    if !nodes_by_id.contains_key(selected.id.as_str()) {
+        return Err(format!(
+            "effective-graph cargo metadata omitted the root resolve node for {}",
+            manifest_path.display()
+        ));
+    }
+
+    let mut direct_dependencies = HashMap::new();
+    let mut pending = vec![selected.id.as_str()];
+    let mut visited = HashSet::new();
+    while let Some(package_id) = pending.pop() {
+        if !visited.insert(package_id.to_string()) {
+            continue;
+        }
+        let package = packages_by_id.get(package_id).ok_or_else(|| {
+            format!("effective Cargo resolve graph references unknown package id '{package_id}'")
+        })?;
+        if package.source.is_some() && package_id != selected.id {
+            continue;
+        }
+        let node = nodes_by_id.get(package_id).ok_or_else(|| {
+            format!(
+                "effective Cargo metadata omitted resolve node for local package '{}'",
+                package.name
+            )
+        })?;
+
+        reject_ambiguous_selected_local_aliases(
+            package,
+            node,
+            &packages_by_id,
+            &normal_package_edges,
+        )?;
+
+        let mut edges = Vec::new();
+        for dependency in &node.deps {
+            let has_normal_kind = dependency.dep_kinds.is_empty()
+                || dependency.dep_kinds.iter().any(|kind| kind.kind.is_none());
+            if !has_normal_kind {
+                continue;
+            }
+            if !normal_package_edges.contains(&(package.id.clone(), dependency.pkg.clone())) {
+                continue;
+            }
+            let dependency_package =
+                packages_by_id.get(dependency.pkg.as_str()).ok_or_else(|| {
+                    format!(
+                        "effective Cargo resolve graph references unknown dependency id '{}'",
+                        dependency.pkg
+                    )
+                })?;
+            if dependency_package.source.is_some() {
+                continue;
+            }
+            if dependency.name.trim().is_empty() {
+                return Err(format!(
+                    "effective Cargo metadata reported an empty dependency key from '{}' to '{}'",
+                    package.name, dependency_package.name
+                ));
+            }
+            let dependency_manifest = canonicalized_path(&dependency_package.manifest_path);
+            edges.push(EffectiveLocalNormalDependency {
+                dependency_key: dependency.name.clone(),
+                package_name: dependency_package.name.clone(),
+                manifest_path: dependency_manifest,
+            });
+            pending.push(dependency_package.id.as_str());
+        }
+        edges.sort_by(|left, right| {
+            left.dependency_key
+                .cmp(&right.dependency_key)
+                .then_with(|| left.package_name.cmp(&right.package_name))
+                .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+        });
+        edges.dedup();
+        direct_dependencies.insert(canonicalized_path(&package.manifest_path), edges);
+    }
+
+    Ok(EffectiveLocalNormalDependencyGraph {
+        target_triple,
+        root_manifest,
+        direct_dependencies,
     })
 }
 
@@ -869,6 +1751,8 @@ mod tests {
                 Package {
                     name: "xtask".to_string(),
                     version: "0.0.0".to_string(),
+                    edition: "2015".to_string(),
+                    rust_version: None,
                     targets: vec![],
                     manifest_path: xtask_manifest,
                     dependencies: vec![],
@@ -876,11 +1760,14 @@ mod tests {
                 Package {
                     name: "root_pkg".to_string(),
                     version: "0.1.0".to_string(),
+                    edition: "2015".to_string(),
+                    rust_version: None,
                     targets: vec![],
                     manifest_path: root_manifest.clone(),
                     dependencies: vec![],
                 },
             ],
+            workspace_root: fixture.path().to_path_buf(),
         };
 
         let selected = select_target_package(&metadata, &root_manifest, None).unwrap();
@@ -909,6 +1796,8 @@ mod tests {
                 Package {
                     name: "root_pkg".to_string(),
                     version: "0.1.0".to_string(),
+                    edition: "2015".to_string(),
+                    rust_version: None,
                     targets: vec![],
                     manifest_path: root_manifest.clone(),
                     dependencies: vec![],
@@ -916,15 +1805,179 @@ mod tests {
                 Package {
                     name: "xtask".to_string(),
                     version: "0.0.0".to_string(),
+                    edition: "2015".to_string(),
+                    rust_version: None,
                     targets: vec![],
                     manifest_path: member_manifest,
                     dependencies: vec![],
                 },
             ],
+            workspace_root: fixture.path().to_path_buf(),
         };
 
         let selected = select_target_package(&metadata, &root_manifest, Some("xtask")).unwrap();
         assert_eq!(selected.name, "xtask");
+    }
+
+    #[test]
+    fn test_configured_cargo_build_target_uses_nearest_project_config() {
+        let fixture = tempfile::tempdir().unwrap();
+        let project = fixture.path().join("workspace/member");
+        std::fs::create_dir_all(fixture.path().join(".cargo")).unwrap();
+        std::fs::create_dir_all(project.join(".cargo")).unwrap();
+        std::fs::write(
+            fixture.path().join(".cargo/config.toml"),
+            "[build]\ntarget='x86_64-pc-windows-msvc'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".cargo/config.toml"),
+            "[build]\ntarget='x86_64-unknown-linux-gnu'\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured_cargo_build_target(&project).unwrap().as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    fn test_configured_cargo_build_target_uses_legacy_precedence_and_includes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let cargo_dir = fixture.path().join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).unwrap();
+        std::fs::write(
+            cargo_dir.join("config.toml"),
+            "[build]\ntarget='x86_64-unknown-linux-gnu'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cargo_dir.join("included.toml"),
+            "[build]\ntarget='aarch64-unknown-linux-gnu'\n",
+        )
+        .unwrap();
+        std::fs::write(cargo_dir.join("config"), "include=['included.toml']\n").unwrap();
+
+        assert_eq!(
+            configured_cargo_build_target(fixture.path())
+                .unwrap()
+                .as_deref(),
+            Some("aarch64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    fn test_effective_graph_probe_preserves_workspace_resolution_context() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let member = workspace.join("member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nresolver='2'\n[patch.crates-io]\npatched={path='vendor/patched'}\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("Cargo.lock"), "probe-lock\n").unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname='member'\n").unwrap();
+
+        let identity = ManifestIdentity {
+            package_name: "member".to_string(),
+            edition: "2021".to_string(),
+            rust_version: Some("1.85".to_string()),
+            workspace_root: workspace.clone(),
+            dependencies: Vec::new(),
+            targets: Vec::new(),
+        };
+        let probe = write_effective_graph_probe_manifest(&member.join("Cargo.toml"), &identity)
+            .expect("write effective-graph probe");
+        let source = std::fs::read_to_string(probe.path.join("Cargo.toml")).unwrap();
+        let manifest = toml::from_str::<toml::Value>(&source).unwrap();
+        assert_eq!(manifest["package"]["edition"].as_str(), Some("2021"));
+        assert_eq!(manifest["package"]["rust-version"].as_str(), Some("1.85"));
+        assert_eq!(manifest["workspace"]["resolver"].as_str(), Some("2"));
+        assert_eq!(
+            manifest["patch"]["crates-io"]["patched"]["path"].as_str(),
+            Some(workspace.join("vendor/patched").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            std::fs::read_to_string(probe.path.join("Cargo.lock")).unwrap(),
+            "probe-lock\n"
+        );
+
+        let path = probe.path.clone();
+        drop(probe);
+        assert!(!path.exists(), "effective-graph probe was not removed");
+    }
+
+    #[test]
+    fn test_target_normal_package_witness_rejects_ambiguous_dependency_aliases() {
+        let packages = vec![
+            ResolvedPackage {
+                id: "path+file:///fixture/parent#0.1.0".to_string(),
+                name: "parent".to_string(),
+                version: "0.1.0".to_string(),
+                manifest_path: PathBuf::from("/fixture/parent/Cargo.toml"),
+                source: None,
+                targets: Vec::new(),
+            },
+            ResolvedPackage {
+                id: "path+file:///fixture/child#0.1.0".to_string(),
+                name: "child".to_string(),
+                version: "0.1.0".to_string(),
+                manifest_path: PathBuf::from("/fixture/child/Cargo.toml"),
+                source: None,
+                targets: Vec::new(),
+            },
+        ];
+        let packages_by_id = packages
+            .iter()
+            .map(|package| (package.id.as_str(), package))
+            .collect::<HashMap<_, _>>();
+        let child_id = packages[1].id.clone();
+        let mut node = ResolveNode {
+            id: packages[0].id.clone(),
+            deps: vec![
+                ResolveDep {
+                    name: "z_alias".to_string(),
+                    pkg: child_id.clone(),
+                    dep_kinds: vec![ResolveDepKind {
+                        kind: None,
+                        target: Some("cfg(unix)".to_string()),
+                    }],
+                },
+                ResolveDep {
+                    name: "a_alias".to_string(),
+                    pkg: child_id.clone(),
+                    dep_kinds: vec![ResolveDepKind {
+                        kind: None,
+                        target: Some("cfg(windows)".to_string()),
+                    }],
+                },
+            ],
+            features: Vec::new(),
+        };
+        let selected_pairs = HashSet::from([(packages[0].id.clone(), child_id)]);
+
+        let error = reject_ambiguous_selected_local_aliases(
+            &packages[0],
+            &node,
+            &packages_by_id,
+            &selected_pairs,
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot distinguish dependency aliases a_alias, z_alias"));
+        assert!(error.contains("from 'parent' to package 'child'"));
+        assert!(error.contains("refusing to guess"));
+
+        node.deps.truncate(1);
+        reject_ambiguous_selected_local_aliases(
+            &packages[0],
+            &node,
+            &packages_by_id,
+            &selected_pairs,
+        )
+        .expect("one metadata alias is unambiguous");
     }
 
     #[test]

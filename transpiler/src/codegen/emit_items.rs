@@ -145,7 +145,7 @@ impl CodeGen {
     /// ("no type named 'yaml_read_handler_t' in namespace ..."). Spelling the
     /// alias's UNDERLYING type in the fwd-decl sidesteps the ordering;
     /// the later definition still uses the alias.
-    fn resolve_local_alias_fn_inputs(
+    pub(super) fn resolve_local_alias_fn_inputs(
         &self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
     ) -> syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]> {
@@ -222,10 +222,14 @@ impl CodeGen {
 
         let rust_name = f.sig.ident.to_string();
         let name = self
-            .module_qualified_functions
-            .get(&rust_name)
-            .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
-            .cloned()
+            .source_owned_cpp_function_name(&rust_name)
+            .map(str::to_string)
+            .or_else(|| {
+                self.module_qualified_functions
+                    .get(&rust_name)
+                    .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
+                    .cloned()
+            })
             .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
         let is_async = f.sig.asyncness.is_some();
         let undeduced_return_type_param = self.undeduced_return_type_param_for_function(
@@ -507,10 +511,14 @@ impl CodeGen {
         }
 
         let name = self
-            .module_qualified_functions
-            .get(&fn_name)
-            .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
-            .cloned()
+            .source_owned_cpp_function_name(&fn_name)
+            .map(str::to_string)
+            .or_else(|| {
+                self.module_qualified_functions
+                    .get(&fn_name)
+                    .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
+                    .cloned()
+            })
             .unwrap_or_else(|| escape_cpp_keyword(&f.sig.ident.to_string()));
         let is_async = f.sig.asyncness.is_some();
         let undeduced_return_type_param = self.undeduced_return_type_param_for_function(
