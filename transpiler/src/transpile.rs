@@ -2,7 +2,7 @@ use crate::codegen::CodeGen;
 use crate::types::UserTypeMap;
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
@@ -641,6 +641,12 @@ pub struct TranspileOptions {
     /// so the methods are absorbed into the struct's body and the
     /// orphan emission is suppressed. Empty for single-file mode.
     pub cross_file_type_aliases: Vec<syn::ItemType>,
+    /// Source-specific, crate-preflight-proven type bindings.  Each record
+    /// retains its physical consumer/provider modules, lexical marker scope,
+    /// exact marked-use leaf group, C++ namespace, and provider kind.  An
+    /// empty set is the fail-closed default outside audited crate mode.
+    pub(crate) flat_import_type_authorizations:
+        BTreeSet<crate::cpp_abi::FlatImportTypeAuthorization>,
     /// Every C++ module name produced by the current crate-mode run
     /// (e.g. `["btree_port.btree.node", "btree_port.btree.map", …]`).
     /// Used by `emit_use` to detect when a Rust `use super::sibling::*`
@@ -1091,6 +1097,7 @@ impl Default for TranspileOptions {
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
             cross_file_type_aliases: Vec::new(),
+            flat_import_type_authorizations: BTreeSet::new(),
             crate_module_names: Vec::new(),
             cxx_namespace: None,
             auto_namespace: false,
@@ -1717,6 +1724,9 @@ fn transpile_full_with_options_impl(
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
+    codegen.set_flat_import_type_authorizations(
+        options.flat_import_type_authorizations.clone(),
+    );
     codegen.set_crate_module_names(options.crate_module_names.clone());
     codegen.set_cpp_abi_plan(cpp_abi_plan);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {

@@ -1,7 +1,7 @@
 use proc_macro2::TokenTree;
 use quote::{ToTokens, quote};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use syn;
 use syn::parse::Parser;
 use syn::parse_quote;
@@ -1849,6 +1849,14 @@ pub struct CodeGen {
     /// methods get redirected to the alias's underlying struct so
     /// they land in the struct's body just like a direct-target impl.
     pub(crate) cross_file_type_alias_tails: HashMap<String, String>,
+    /// Exact source-local bindings authorized by crate-wide cpp_abi preflight.
+    /// A leaf spelling or source-local marker alone is insufficient.
+    pub(crate) flat_import_type_authorizations:
+        BTreeSet<crate::cpp_abi::FlatImportTypeAuthorization>,
+    /// Physical Rust module of the source unit currently being emitted.  This
+    /// is retained separately from `module_stack`, which is lexical and starts
+    /// at the unit root during code generation.
+    pub(crate) current_physical_module: crate::cpp_abi::ModulePath,
     /// Validated source-owned ABI facades for this file. Empty for the exact
     /// ordinary-code fast path.
     pub(crate) cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan,
@@ -2212,6 +2220,8 @@ impl CodeGen {
             cross_file_unit_struct_tails: HashSet::new(),
             cross_file_cpp_inherit_pairs: Vec::new(),
             cross_file_type_alias_tails: HashMap::new(),
+            flat_import_type_authorizations: BTreeSet::new(),
+            current_physical_module: crate::cpp_abi::ModulePath(Vec::new()),
             cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan::default(),
             codegen_error: None,
         }
@@ -4215,6 +4225,22 @@ impl CodeGen {
             }
         }
         self.cross_file_type_alias_tails = map;
+    }
+
+    pub(crate) fn set_flat_import_type_authorizations(
+        &mut self,
+        authorizations: BTreeSet<crate::cpp_abi::FlatImportTypeAuthorization>,
+    ) {
+        let physical_modules = authorizations
+            .iter()
+            .map(|authorization| authorization.consumer_physical_module.clone())
+            .collect::<BTreeSet<_>>();
+        self.current_physical_module = if physical_modules.len() == 1 {
+            physical_modules.into_iter().next().unwrap()
+        } else {
+            crate::cpp_abi::ModulePath(Vec::new())
+        };
+        self.flat_import_type_authorizations = authorizations;
     }
 
     pub fn set_cpp_abi_plan(&mut self, plan: crate::cpp_abi::CppAbiEmissionPlan) {
@@ -11152,6 +11178,7 @@ impl CodeGen {
         // / `use <mod> as <alias>`, transitively via the name resolver) so the
         // alias never leaks into the recorded binding or downstream mangling.
         let raw_path = self.name_resolver.resolve_prefix(raw_path);
+        let raw_path = self.rewrite_flat_import_type_using_path(&raw_path);
         let raw_path = raw_path.as_str();
         let rewritten = self.rewrite_external_crate_import_path(raw_path);
         let resolved = self.resolve_unqualified_local_import_path(&rewritten);
@@ -11181,6 +11208,15 @@ impl CodeGen {
         {
             return;
         }
+        self.record_scope_import_binding_exact_target(module_path, local_name, target_path);
+    }
+
+    fn record_scope_import_binding_exact_target(
+        &mut self,
+        module_path: &[String],
+        local_name: &str,
+        target_path: &str,
+    ) {
         let scope_key = module_path.join("::");
         let escaped_scope_key = module_path
             .iter()
@@ -42274,24 +42310,8 @@ impl CodeGen {
                 }
             }
         }
-        if let Some(members) = emitted_members {
-            for member in members {
-                if member == "Self" || !Self::cpp_identifier_like(member) {
-                    continue;
-                }
-                // Out-of-line method signatures may reference nested type aliases
-                // (for example `Error`) that are emitted outside assoc-type scope.
-                let mut chars = member.chars();
-                let starts_with_upper = chars.next().is_some_and(|ch| ch.is_ascii_uppercase());
-                let has_lower = member.chars().any(|ch| ch.is_ascii_lowercase());
-                if starts_with_upper && has_lower {
-                    aliases.insert(member.clone());
-                }
-            }
-        }
         aliases.into_iter().collect()
     }
-
 
     fn emit_out_of_line_owner_assoc_aliases(&mut self, owner: &str) {
         for alias in self.current_struct_assoc_alias_idents() {

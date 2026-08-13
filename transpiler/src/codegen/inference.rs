@@ -365,6 +365,153 @@ impl CodeGen {
         None
     }
 
+    /// Resolve only an exact preflight-authorized flat type binding in the
+    /// marker's lexical Rust module.  Descendants must use a qualified Rust
+    /// path, which crate preflight either proves independently or rejects;
+    /// callers handling such a path must never tail-match this binding.
+    pub(super) fn resolve_flat_import_type_authorization_for_exact_scope(
+        &self,
+        scope_key: &str,
+        local_name: &str,
+    ) -> Option<String> {
+        let exact_module_declaration = if self.module_stack.is_empty() {
+            self.root_declared_type_names.contains(local_name)
+                || self.type_alias_targets.contains_key(local_name)
+        } else {
+            self.module_path_declares_type_name_exact(&self.module_stack, local_name)
+        };
+        if local_name.is_empty()
+            || self.is_type_param_in_scope(local_name)
+            || self.is_local_type_name_in_scope(local_name)
+            || exact_module_declaration
+            || self.current_scope_declares_function_name(local_name)
+        {
+            return None;
+        }
+        let local_variants = Self::scope_binding_key_variants(local_name);
+        let scope_variants = Self::scope_binding_key_variants(scope_key);
+        let mut targets = self
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_physical_module == self.current_physical_module
+                    && scope_variants.iter().any(|scope| {
+                        scope == &authorization.consumer_lexical_module.0.join("::")
+                    })
+                    && local_variants
+                    .iter()
+                    .any(|local| local == &authorization.leaf)
+            })
+            .map(|authorization| {
+                format!(
+                    "::{}::{}",
+                    authorization.cpp_namespace, authorization.leaf
+                )
+            })
+            .collect::<Vec<_>>();
+        targets.sort();
+        targets.dedup();
+        if targets.len() == 1 {
+            targets.pop()
+        } else {
+            None
+        }
+    }
+
+    /// Rebind a normal descendant `use super::Leaf` target back to the exact
+    /// flat C++ type identity owned by the marked parent binding. Generic use
+    /// lowering otherwise spells this as `parent::Leaf`, which is declared by
+    /// a later `using` and is therefore unavailable to early forward
+    /// declarations. Same-tail imports from unrelated modules do not match
+    /// either exact Rust source identity and remain untouched.
+    pub(super) fn rewrite_flat_import_type_consumer_binding_target(
+        &self,
+        target: &str,
+    ) -> String {
+        let normalized = target.trim().trim_start_matches("::");
+        let target_segments = normalized
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(Self::unescape_cpp_keyword_segment)
+            .collect::<Vec<_>>();
+        // Resolve Rust-relative roots before comparing identities. Recorded
+        // descendant bindings retain their source spelling (`super::Leaf`,
+        // `super::super::Leaf`, ...); tail matching that spelling is both too
+        // weak and wrong in the presence of an unrelated same-tail type.
+        let source_identity = if let Some(first) = target_segments.first() {
+            let mut base = self.current_physical_module.0.clone();
+            base.extend(self.module_stack.iter().cloned());
+            let mut index = 0usize;
+            match first.as_str() {
+                "crate" => {
+                    base.clear();
+                    index = 1;
+                }
+                "self" => index = 1,
+                "super" => {
+                    while index < target_segments.len()
+                        && target_segments[index] == "super"
+                    {
+                        base.pop();
+                        index += 1;
+                    }
+                }
+                _ => {}
+            }
+            base.extend(target_segments[index..].iter().cloned());
+            Some(base)
+        } else {
+            None
+        };
+        let mut matches = self
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_physical_module == self.current_physical_module
+            })
+            .filter(|authorization| {
+                let mut lexical_identity = authorization.consumer_lexical_module.0.clone();
+                lexical_identity.push(authorization.leaf.clone());
+                let mut physical_identity = authorization.consumer_physical_module.0.clone();
+                physical_identity.extend(lexical_identity.iter().cloned());
+                let cpp_identity = vec![
+                    authorization.cpp_namespace.clone(),
+                    authorization.leaf.clone(),
+                ];
+                target_segments == lexical_identity
+                    || target_segments == physical_identity
+                    || target_segments == cpp_identity
+                    || source_identity.as_ref() == Some(&physical_identity)
+            })
+            .map(|authorization| {
+                format!("::{}::{}", authorization.cpp_namespace, authorization.leaf)
+            })
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        if matches.len() == 1 {
+            matches.remove(0)
+        } else {
+            target.to_string()
+        }
+    }
+
+    /// Canonicalize the target of a descendant import only when its complete
+    /// Rust identity is the authorized flat type consumer binding. Preserve a
+    /// Rust rename (`use super::Leaf as Alias`) while rewriting its target; an
+    /// unrelated same-tail import never matches the complete identity.
+    pub(super) fn rewrite_flat_import_type_using_path(&self, using_path: &str) -> String {
+        if let Some((alias, target)) = split_use_import_alias(using_path) {
+            let rewritten = self.rewrite_flat_import_type_consumer_binding_target(target);
+            if rewritten != target.trim() {
+                return format!("{} = {}", alias.trim(), rewritten);
+            }
+            return using_path.to_string();
+        }
+
+        self.rewrite_flat_import_type_consumer_binding_target(using_path)
+    }
+
     pub(super) fn resolve_scope_import_binding_path_for_scope(
         &self,
         scope_key: &str,
@@ -453,6 +600,12 @@ impl CodeGen {
             return None;
         }
         self.resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
+            .or_else(|| {
+                self.resolve_flat_import_type_authorization_for_exact_scope(
+                    &scope_key,
+                    local_name,
+                )
+            })
     }
 
     pub(super) fn resolve_unique_scope_import_binding_path_any_scope(
@@ -1265,6 +1418,38 @@ impl CodeGen {
 
     pub(super) fn resolve_single_segment_scope_import_bound_type(&self, local_name: &str) -> Option<String> {
         let scope_key = self.module_stack.join("::");
+        let is_flat_type_leaf = self
+            .flat_import_type_authorizations
+            .iter()
+            .any(|authorization| {
+                authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.leaf == local_name
+            });
+        if is_flat_type_leaf {
+            // Flat type authorization is one exact Rust binding, not a
+            // permission to recover the same tail from a parent or arbitrary
+            // scope. In particular, a child module does not inherit its
+            // parent's `use`; it must qualify or import that binding exactly.
+            if self.is_type_param_in_scope(local_name) {
+                return None;
+            }
+            if let Some(target) = self
+                .resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
+            {
+                return Some(
+                    self.rewrite_flat_import_type_consumer_binding_target(&target),
+                );
+            }
+            if self.current_module_declares_type_name_exact(local_name)
+                || self.module_path_declares_type_name_exact(&self.module_stack, local_name)
+            {
+                return None;
+            }
+            return self.resolve_flat_import_type_authorization_for_exact_scope(
+                &scope_key,
+                local_name,
+            );
+        }
         let bound_target = self
             .resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
             .or_else(|| self.resolve_scope_import_binding_path_for_scope("", local_name))

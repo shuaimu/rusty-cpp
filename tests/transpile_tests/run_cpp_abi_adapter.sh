@@ -17,6 +17,7 @@ SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_core.rs"
 INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_inline.cppm"
 FLAT_IMPORT_INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_import_namespace_inline.cppm"
 FLAT_IMPORT_CRATE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_import_namespace_crate"
+FLAT_IMPORT_TYPE_CRATE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_import_namespace_type_crate"
 MARKER_FREE_INLINE_SOURCE="${REPO_ROOT}/transpiler/tests/fixtures/inline_rust_marker_free.cppm"
 SIBLING_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_sibling_crate/Cargo.toml"
 ASSERT_EXTERNAL_CRATE="${REPO_ROOT}/transpiler/tests/fixtures/cpp_abi_assert_external_crate/Cargo.toml"
@@ -44,6 +45,9 @@ FLAT_IMPORT_INLINE_RUST="${FLAT_IMPORT_INLINE_OUTPUT}/rrr.inline_consumer.rs"
 FLAT_IMPORT_INLINE_SELECTED_RUST="${FLAT_IMPORT_INLINE_OUTPUT}/rrr.inline_unrelated.rs"
 FLAT_IMPORT_CRATE_OUTPUT="${WORK_DIR}/cpp_import_namespace_crate"
 FLAT_IMPORT_CRATE_MODULE="${FLAT_IMPORT_CRATE_OUTPUT}/rrr.request_options.cppm"
+FLAT_IMPORT_TYPE_OUTPUT="${WORK_DIR}/cpp_import_namespace_type_crate"
+FLAT_IMPORT_TYPE_PROVIDER_MODULE="${FLAT_IMPORT_TYPE_OUTPUT}/rrr.channel.cppm"
+FLAT_IMPORT_TYPE_CONSUMER_MODULE="${FLAT_IMPORT_TYPE_OUTPUT}/rrr.consumer.cppm"
 MARKER_FREE_INLINE_GENERATED="${WORK_DIR}/inline_rust_marker_free.cppm"
 RUST_LIB="${WORK_DIR}/libcpp_abi_core.rlib"
 BUILD_DIR="${WORK_DIR}/build"
@@ -52,6 +56,9 @@ mkdir -p "${WORK_DIR}" "${FLAT_IMPORT_INLINE_OUTPUT}"
 FLAT_IMPORT_CRATE_INPUT="$(mktemp -d "${WORK_DIR}/cpp-import-namespace-input.XXXXXX")"
 cp -R "${FLAT_IMPORT_CRATE_SOURCE}/." "${FLAT_IMPORT_CRATE_INPUT}/"
 FLAT_IMPORT_CRATE="${FLAT_IMPORT_CRATE_INPUT}/Cargo.toml"
+FLAT_IMPORT_TYPE_INPUT="$(mktemp -d "${WORK_DIR}/cpp-import-namespace-type-input.XXXXXX")"
+cp -R "${FLAT_IMPORT_TYPE_CRATE_SOURCE}/." "${FLAT_IMPORT_TYPE_INPUT}/"
+FLAT_IMPORT_TYPE_CRATE="${FLAT_IMPORT_TYPE_INPUT}/Cargo.toml"
 cargo build -p rusty-cpp-transpiler
 
 cp "${INLINE_SOURCE}" "${INLINE_GENERATED}"
@@ -86,6 +93,78 @@ FLAT_CRATE_NAMESPACE_LINE="$(grep -nF 'namespace rrr {' \
 (( FLAT_CRATE_MODULE_LINE < FLAT_CRATE_IMPORT_LINE &&
    FLAT_CRATE_IMPORT_LINE < FLAT_CRATE_NAMESPACE_LINE ))
 grep -Fq '0 slot(s)' "${FLAT_IMPORT_CRATE_OUTPUT}/rusty_hand_slots.md"
+
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" \
+    --cxx-namespace rrr \
+    --crate "${FLAT_IMPORT_TYPE_CRATE}" \
+    --output-dir "${FLAT_IMPORT_TYPE_OUTPUT}"
+test -f "${FLAT_IMPORT_TYPE_PROVIDER_MODULE}"
+test -f "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+[[ "$(grep -Fxc 'import rrr.channel;' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}")" -eq 1 ]]
+! grep -Fq 'export import rrr.channel;' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+for imported_type in ChannelBase ChannelError ChannelFrame ChannelProxy ChannelTuple ChannelUnit; do
+    grep -Fq "using ::rrr::${imported_type};" "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+done
+! grep -Fq 'using ::rrr::helper;' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq 'using ::rrr::helper2;' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'using ImportedFrame = ::rrr::ChannelFrame;' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'struct LocalChannel : public ChannelBase' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq '::rrr::ChannelFrame' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'rusty::Option<rusty::Box<::rrr::ChannelFrame>>' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'const external::ChannelFrame& foreign' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'const external::ChannelFrame& renamed' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq 'const ::rrr::ChannelFrame& foreign' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'external::ChannelError external_enum_value()' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'external::ChannelFrame make_external(int32_t value)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'int32_t inspect_self(const external::ChannelFrame& value)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'int32_t inspect_crate(const ::rrr::external::ChannelFrame& value)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq '::rrr::external::ChannelError external_enum_crate()' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq '::consumer::external::' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'int32_t inspect_qualified(const ::rrr::ChannelFrame& value)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'int32_t inspect_imported(const ::rrr::ChannelFrame& value)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'void inspect_generic(const ChannelFrame& _)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq 'void inspect_generic(const ::rrr::ChannelFrame& _)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'int32_t inspect_sibling(const ChannelFrame& value)' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'value = rusty::Option<int32_t>{rusty::None};' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq 'value = ChannelError::None;' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'return AssociatedOwner::ChannelFrame;' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'return AssociatedAlias::ChannelFrame;' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq 'return AssociatedOwner::ChannelTuple();' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq 'ChannelFrame{}' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq 'using ChannelFrame = typename AssociatedOwner::ChannelFrame;' \
+    "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+! grep -Fq '::rrr::channel::' "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}"
+grep -Fq '0 slot(s)' "${FLAT_IMPORT_TYPE_OUTPUT}/rusty_hand_slots.md"
+
+FLAT_IMPORT_TYPE_REPEAT_OUTPUT="${WORK_DIR}/cpp_import_namespace_type_repeat"
+"${REPO_ROOT}/target/debug/rusty-cpp-transpiler" \
+    --cxx-namespace rrr \
+    --crate "${FLAT_IMPORT_TYPE_CRATE}" \
+    --output-dir "${FLAT_IMPORT_TYPE_REPEAT_OUTPUT}"
+cmp "${FLAT_IMPORT_TYPE_PROVIDER_MODULE}" \
+    "${FLAT_IMPORT_TYPE_REPEAT_OUTPUT}/rrr.channel.cppm"
+cmp "${FLAT_IMPORT_TYPE_CONSUMER_MODULE}" \
+    "${FLAT_IMPORT_TYPE_REPEAT_OUTPUT}/rrr.consumer.cppm"
 
 cp "${FLAT_IMPORT_INLINE_SOURCE}" "${FLAT_IMPORT_INLINE_GENERATED}"
 "${REPO_ROOT}/target/debug/rusty-cpp-transpiler" inline-rust \
@@ -464,12 +543,14 @@ cmake -S "${REPO_ROOT}/transpiler/tests/cpp_abi_core" -B "${BUILD_DIR}" -G Ninja
     -DCPP_ABI_GENERATED_MODULE="${GENERATED}" \
     -DCPP_ABI_INLINE_MODULE="${INLINE_GENERATED}" \
     -DCPP_IMPORT_NAMESPACE_CRATE_MODULE="${FLAT_IMPORT_CRATE_MODULE}" \
+    -DCPP_IMPORT_NAMESPACE_TYPE_PROVIDER_MODULE="${FLAT_IMPORT_TYPE_PROVIDER_MODULE}" \
+    -DCPP_IMPORT_NAMESPACE_TYPE_CONSUMER_MODULE="${FLAT_IMPORT_TYPE_CONSUMER_MODULE}" \
     -DCPP_IMPORT_NAMESPACE_INLINE_MODULE="${FLAT_IMPORT_INLINE_GENERATED}"
 cmake --build "${BUILD_DIR}" \
     --target cpp_abi_core_runtime cpp_abi_inline_runtime \
-        cpp_import_namespace_runtime -j "${JOBS:-2}"
+        cpp_import_namespace_runtime cpp_import_namespace_type_runtime -j "${JOBS:-2}"
 ctest --test-dir "${BUILD_DIR}" --output-on-failure \
-    -R '^(cpp_abi_(core|inline)|cpp_import_namespace)_runtime$'
+    -R '^(cpp_abi_(core|inline)|cpp_import_namespace(_type)?)_runtime$'
 
 NONREEXPORT_LOG="${WORK_DIR}/cpp_import_namespace_nonreexport.log"
 if cmake --build "${BUILD_DIR}" \
@@ -481,6 +562,17 @@ then
 fi
 grep -Eq "randgen_rand_raw.*(not visible|no member|declaration.*not reachable|must be imported)" \
     "${NONREEXPORT_LOG}"
+
+TYPE_NONREEXPORT_LOG="${WORK_DIR}/cpp_import_namespace_type_nonreexport.log"
+if cmake --build "${BUILD_DIR}" \
+    --target cpp_import_namespace_type_nonreexport -j "${JOBS:-2}" \
+    >"${TYPE_NONREEXPORT_LOG}" 2>&1
+then
+    echo "private cpp_import_namespace type provider was re-exported" >&2
+    exit 1
+fi
+grep -Eq "ChannelFrame.*(not visible|no member|declaration.*not reachable|must be imported)" \
+    "${TYPE_NONREEXPORT_LOG}"
 
 MODULE_OBJECT="$(find "${BUILD_DIR}" -path '*cpp_abi_core.cppm.o' -type f -print -quit)"
 [[ -n "${MODULE_OBJECT}" ]]

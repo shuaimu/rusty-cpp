@@ -3935,6 +3935,45 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Use(u) => {
+                    let flat_import = self
+                        .cpp_abi_plan
+                        .flat_import_for_use(module_path, u)
+                        .map(|(namespace, child, leaves)| {
+                            (namespace.to_string(), child.to_string(), leaves.to_vec())
+                        });
+                    if let Some((namespace, child, leaves)) = flat_import {
+                        let marked_leaves = leaves.clone();
+                        for leaf in leaves {
+                            if self
+                                .flat_import_type_authorizations
+                                .iter()
+                                .any(|authorization| {
+                                    authorization.consumer_physical_module
+                                        == self.current_physical_module
+                                        && authorization.consumer_lexical_module.0 == module_path
+                                        && authorization.marked_rust_child == child
+                                        && authorization.marked_leaves == marked_leaves
+                                        && authorization.leaf == leaf
+                                        && authorization.cpp_namespace == namespace
+                                        && authorization.provider_physical_module.0
+                                            == [child.clone()]
+                                },
+                            )
+                            {
+                                self.record_scope_import_binding_exact_target(
+                                    module_path,
+                                    &leaf,
+                                    &format!("::{namespace}::{leaf}"),
+                                );
+                            } else {
+                                self.record_scope_import_binding(
+                                    module_path,
+                                    &format!("crate::{child}::{leaf}"),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     for raw_path in self.flatten_use_tree_preserve_crate(&u.tree, "") {
                         self.record_scope_import_binding(module_path, &raw_path);
                     }

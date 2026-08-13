@@ -1835,6 +1835,65 @@ impl CodeGen {
                 }
                 if tp.qself.is_none()
                     && tp.path.segments.len() == 1
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|segment| {
+                            matches!(segment.arguments, syn::PathArguments::None)
+                        })
+                {
+                    let local_name = tp.path.segments[0].ident.to_string();
+                    let scope_key = self.module_stack.join("::");
+                    let is_flat_type_leaf = self
+                        .flat_import_type_authorizations
+                        .iter()
+                        .any(|authorization| {
+                            authorization.consumer_physical_module
+                                == self.current_physical_module
+                                && authorization.leaf == local_name
+                        });
+                    if is_flat_type_leaf {
+                        // Once crate preflight has proven a flat type leaf,
+                        // every single-segment occurrence is resolved from
+                        // its exact Rust scope. Type parameters and exact
+                        // local declarations shadow it; an exact descendant
+                        // `use` is honored; otherwise only the marker's own
+                        // scope may resolve to the flat C++ identity. Never
+                        // continue into global/unique-tail recovery.
+                        if self.is_type_param_in_scope(&local_name) {
+                            return escape_cpp_keyword(&local_name);
+                        }
+                        if let Some(bound) = self.resolve_scope_import_binding_path_for_scope(
+                            &scope_key,
+                            &local_name,
+                        )
+                        {
+                            return self.rewrite_flat_import_type_consumer_binding_target(
+                                &bound,
+                            );
+                        }
+                        if self.current_module_declares_type_name_exact(&local_name)
+                            || self.module_path_declares_type_name_exact(
+                                &self.module_stack,
+                                &local_name,
+                            )
+                        {
+                            return escape_cpp_keyword(&local_name);
+                        }
+                        if let Some(authorized) = self
+                            .resolve_flat_import_type_authorization_for_exact_scope(
+                                &scope_key,
+                                &local_name,
+                            )
+                        {
+                            return authorized;
+                        }
+                        return escape_cpp_keyword(&local_name);
+                    }
+                }
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
                     && let Some(current_struct) = self.current_struct.as_ref()
                     && let Some(seg) = tp.path.segments.first()
                 {
