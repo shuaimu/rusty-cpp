@@ -8,6 +8,7 @@ use std::process::{self, Output};
 mod cmake;
 mod codegen;
 mod cpp_abi;
+mod cpp_default_args;
 mod cpp_name;
 mod inline_rust;
 mod metadata;
@@ -295,6 +296,11 @@ fn validate_cpp_abi_conventional_lib_crate(
     Ok(())
 }
 
+fn source_mentions_cpp_source_contract(source: &str) -> bool {
+    cpp_abi::source_mentions_reserved_marker(source)
+        || cpp_default_args::source_mentions_marker(source)
+}
+
 fn reject_cpp_abi_in_nonconventional_target_roots(
     cargo: &cmake::CargoToml,
     project_dir: &Path,
@@ -321,9 +327,9 @@ fn reject_cpp_abi_in_nonconventional_target_roots(
         let Ok(source) = std::fs::read_to_string(&full) else {
             continue;
         };
-        if cpp_abi::source_mentions_reserved_marker(&source) {
+        if source_mentions_cpp_source_contract(&source) {
             return Err(format!(
-                "cpp_abi is present in declared target {} but crate mode currently supports only the conventional src/lib.rs library target",
+                "a source-owned C++ contract is present in declared target {} but crate mode currently supports only the conventional src/lib.rs library target",
                 relative.display()
             ));
         }
@@ -371,13 +377,14 @@ fn effective_local_dependencies_for_manifest(
 
 #[derive(Default)]
 struct CppAbiClosureReport {
-    any_cpp_abi: bool,
+    any_source_contract: bool,
     issues: BTreeSet<String>,
     runtime_dependency_issues: BTreeSet<String>,
 }
 
-struct CppAbiClosurePreflight {
+struct CppAbiClosurePreflight<'a> {
     expand: bool,
+    effective_dependencies: Option<&'a metadata::EffectiveLocalNormalDependencyGraph>,
     report: CppAbiClosureReport,
     root_manifest: Option<PathBuf>,
     visited: BTreeSet<PathBuf>,
@@ -394,23 +401,38 @@ fn validate_cpp_abi_manifest_edition(manifest_source: &str) -> Result<(), String
     match edition.and_then(toml::Value::as_str) {
         Some("2018" | "2021" | "2024") => Ok(()),
         Some(unsupported) => Err(format!(
-            "cpp_abi crate mode requires an explicit Rust 2018, 2021, or 2024 package.edition; found `{unsupported}`"
+            "source-owned C++ contracts require an explicit Rust 2018, 2021, or 2024 package.edition; found `{unsupported}`"
         )),
         None if edition.is_none() => Err(
-            "cpp_abi crate mode requires an explicit Rust 2018, 2021, or 2024 package.edition; an omitted edition selects Rust 2015"
+            "source-owned C++ contracts require an explicit Rust 2018, 2021, or 2024 package.edition; an omitted edition selects Rust 2015"
                 .to_string(),
         ),
         None => Err(
-            "cpp_abi crate mode requires an explicitly resolved Rust 2018, 2021, or 2024 package.edition; workspace-inherited or non-string editions are unsupported"
+            "source-owned C++ contracts require an explicitly resolved Rust 2018, 2021, or 2024 package.edition; workspace-inherited or non-string editions are unsupported"
                 .to_string(),
         ),
     }
 }
 
-impl CppAbiClosurePreflight {
+impl<'a> CppAbiClosurePreflight<'a> {
     fn new(expand: bool) -> Self {
         Self {
             expand,
+            effective_dependencies: None,
+            report: CppAbiClosureReport::default(),
+            root_manifest: None,
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn with_effective_dependencies(
+        expand: bool,
+        effective_dependencies: &'a metadata::EffectiveLocalNormalDependencyGraph,
+    ) -> Self {
+        Self {
+            expand,
+            effective_dependencies: Some(effective_dependencies),
             report: CppAbiClosureReport::default(),
             root_manifest: None,
             visited: BTreeSet::new(),
@@ -457,8 +479,8 @@ impl CppAbiClosurePreflight {
         self.report.runtime_dependency_issues.insert(message.into());
     }
 
-    fn note_cpp_abi(&mut self, cargo_toml_path: &Path) {
-        self.report.any_cpp_abi = true;
+    fn note_source_contract(&mut self, cargo_toml_path: &Path) {
+        self.report.any_source_contract = true;
         let manifest = Self::manifest_key(cargo_toml_path);
         if self
             .root_manifest
@@ -466,7 +488,7 @@ impl CppAbiClosurePreflight {
             .is_some_and(|root| root != &manifest)
         {
             self.issue(format!(
-                "local dependency {} contains cpp_abi contracts; cross-crate adapter calls are unsupported",
+                "local dependency {} contains source-owned C++ contracts; cross-crate adapter calls are unsupported",
                 cargo_toml_path.display()
             ));
         }
@@ -596,8 +618,8 @@ impl CppAbiClosurePreflight {
             let full = project_dir.join(relative);
             match std::fs::read_to_string(&full) {
                 Ok(source) => {
-                    if cpp_abi::source_mentions_reserved_marker(&source) {
-                        self.note_cpp_abi(cargo_toml_path);
+                    if source_mentions_cpp_source_contract(&source) {
+                        self.note_source_contract(cargo_toml_path);
                     }
                     units.push((relative.clone(), source));
                 }
@@ -616,7 +638,7 @@ impl CppAbiClosurePreflight {
         project_dir: &Path,
         cargo_toml_path: &Path,
     ) -> bool {
-        let mut mentions_cpp_abi = false;
+        let mut mentions_source_contract = false;
         let mut declared = Vec::<PathBuf>::new();
         if let Some(path) = cargo.lib.as_ref().and_then(|target| target.path.as_deref())
             && path.replace('\\', "/") != "src/lib.rs"
@@ -635,9 +657,9 @@ impl CppAbiClosurePreflight {
             let full = project_dir.join(&relative);
             match std::fs::read_to_string(&full) {
                 Ok(source) => {
-                    if cpp_abi::source_mentions_reserved_marker(&source) {
-                        mentions_cpp_abi = true;
-                        self.note_cpp_abi(cargo_toml_path);
+                    if source_mentions_cpp_source_contract(&source) {
+                        mentions_source_contract = true;
+                        self.note_source_contract(cargo_toml_path);
                     }
                 }
                 Err(error) => self.issue(format!(
@@ -646,17 +668,21 @@ impl CppAbiClosurePreflight {
                 )),
             }
         }
-        mentions_cpp_abi
+        mentions_source_contract
     }
 
     fn scan_sources_without_manifest(&mut self, project_dir: &Path, manifest: &Path) {
         let (_, source_units) = self.read_source_units(project_dir, manifest);
         if source_units
             .iter()
-            .any(|(_, source)| cpp_abi::source_mentions_reserved_marker(source))
-            && let Err(error) = cpp_abi::preflight_crate_sources(&source_units)
+            .any(|(_, source)| source_mentions_cpp_source_contract(source))
         {
-            self.issue(format!("{}: {error}", manifest.display()));
+            if let Err(error) = cpp_abi::preflight_crate_sources(&source_units) {
+                self.issue(format!("{}: {error}", manifest.display()));
+            }
+            if let Err(error) = cpp_default_args::preflight_crate_sources_syntax(&source_units) {
+                self.issue(format!("{}: {error}", manifest.display()));
+            }
         }
     }
 
@@ -716,15 +742,26 @@ impl CppAbiClosurePreflight {
                     RustcRuntimeValidation::default()
                 }
             };
+        let traversal_dependencies = if let Some(graph) = self.effective_dependencies {
+            match effective_local_dependencies_for_manifest(graph, cargo_toml_path) {
+                Ok(dependencies) => dependencies,
+                Err(error) => {
+                    self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    Vec::new()
+                }
+            }
+        } else {
+            dependencies
+        };
 
         let (sources, source_units) = self.read_source_units(project_dir, cargo_toml_path);
-        let declared_target_mentions_cpp_abi =
+        let declared_target_mentions_source_contract =
             self.scan_declared_target_roots(&cargo, project_dir, cargo_toml_path);
-        let crate_mentions_cpp_abi = declared_target_mentions_cpp_abi
+        let crate_mentions_source_contract = declared_target_mentions_source_contract
             || source_units
-            .iter()
-            .any(|(_, source)| cpp_abi::source_mentions_reserved_marker(source));
-        if crate_mentions_cpp_abi {
+                .iter()
+                .any(|(_, source)| source_mentions_cpp_source_contract(source));
+        if crate_mentions_source_contract {
             if let Err(error) = validate_cpp_abi_manifest_edition(&manifest_source) {
                 self.issue(format!("{}: {error}", cargo_toml_path.display()));
             }
@@ -743,12 +780,27 @@ impl CppAbiClosurePreflight {
                 Ok(false) => {}
                 Err(error) => self.issue(format!("{}: {error}", cargo_toml_path.display())),
             }
+            match cpp_default_args::preflight_crate_sources_syntax(&source_units) {
+                Ok(true) => {
+                    if let Err(error) = validate_cpp_abi_conventional_lib_crate(&cargo, &sources) {
+                        self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    }
+                    if self.expand {
+                        self.issue(format!(
+                            "{}: cpp_default_argument crate mode does not support --expand because expansion removes inert source markers",
+                            cargo_toml_path.display()
+                        ));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => self.issue(format!("{}: {error}", cargo_toml_path.display())),
+            }
         }
         if let Err(error) = reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir) {
             self.issue(format!("{}: {error}", cargo_toml_path.display()));
         }
 
-        let mut dependencies = dependencies
+        let mut dependencies = traversal_dependencies
             .into_iter()
             .filter(|dependency| dependency.is_local)
             .collect::<Vec<_>>();
@@ -788,9 +840,9 @@ impl CppAbiClosurePreflight {
                     .join("\n- ")
             ));
         }
-        if self.report.any_cpp_abi && !self.report.issues.is_empty() {
+        if self.report.any_source_contract && !self.report.issues.is_empty() {
             return Err(format!(
-                "cpp_abi whole local-dependency closure preflight failed before output:\n- {}",
+                "source-owned C++ contract whole local-dependency closure preflight failed before output:\n- {}",
                 self.report
                     .issues
                     .into_iter()
@@ -798,7 +850,7 @@ impl CppAbiClosurePreflight {
                     .join("\n- ")
             ));
         }
-        Ok(self.report.any_cpp_abi)
+        Ok(self.report.any_source_contract)
     }
 }
 
@@ -810,6 +862,98 @@ fn preflight_cpp_abi_whole_dependency_closure(
     preflight.root_manifest = Some(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
     preflight.visit_manifest(cargo_toml_path);
     preflight.finish()
+}
+
+fn preflight_cpp_source_contract_effective_dependency_closure(
+    cargo_toml_path: &Path,
+    expand: bool,
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+) -> Result<bool, String> {
+    let requested = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    if requested != graph.root_manifest() {
+        return Err(format!(
+            "Cargo's target-filtered dependency graph root {} does not match requested manifest {}",
+            graph.root_manifest().display(),
+            requested.display()
+        ));
+    }
+    let mut preflight = CppAbiClosurePreflight::with_effective_dependencies(expand, graph);
+    preflight.root_manifest = Some(requested);
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+/// Cheap, output-free over-approximation used to decide whether Cargo's exact
+/// target-selected graph is required. It deliberately follows every declared
+/// local normal dependency, including optional and target-qualified entries;
+/// the subsequent target-filtered closure discards unselected edges.
+fn dependency_closure_may_have_source_contract(cargo_toml_path: &Path) -> bool {
+    fn visit(cargo_toml_path: &Path, visited: &mut BTreeSet<PathBuf>) -> bool {
+        let key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+        if !visited.insert(key) {
+            return false;
+        }
+        let Ok(manifest_source) = std::fs::read_to_string(cargo_toml_path) else {
+            return false;
+        };
+        let Ok(cargo) = toml::from_str::<cmake::CargoToml>(&manifest_source) else {
+            return false;
+        };
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+
+        // Reuse the symlink-aware collector, but ignore its diagnostics here:
+        // the authoritative closure preflight retains ownership of errors.
+        let mut collector = CppAbiClosurePreflight::new(false);
+        let source_paths = collector.collect_rs_files(project_dir);
+        for relative in source_paths {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| source_mentions_cpp_source_contract(&source))
+            {
+                return true;
+            }
+        }
+        let mut declared_roots = cargo
+            .lib
+            .as_ref()
+            .and_then(|target| target.path.as_deref())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(bins) = &cargo.bins {
+            declared_roots.extend(
+                bins.iter()
+                    .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+            );
+        }
+        for relative in declared_roots {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| source_mentions_cpp_source_contract(&source))
+            {
+                return true;
+            }
+        }
+
+        let declared = cmake::extract_dependencies(&cargo);
+        let dependencies = resolve_workspace_inherited_dependencies(cargo_toml_path, &declared)
+            .unwrap_or(declared);
+        for dependency in dependencies {
+            if !dependency.is_local
+                || dependency.name == RUSTY_RUNTIME_CRATE_NAME
+                || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            if visit(&project_dir.join(relative).join("Cargo.toml"), visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    visit(cargo_toml_path, &mut BTreeSet::new())
 }
 
 const RUSTY_RUNTIME_CRATE_NAME: &str = "rusty";
@@ -2082,12 +2226,16 @@ fn preflight_crate_codegen_without_output(
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let crate_name = &cargo.package.name;
     let declared_dependencies = cmake::extract_dependencies(&cargo);
-    let runtime_validation =
-        validate_rustc_only_runtime_dependencies(cargo_toml_path, &declared_dependencies)?;
+    let resolved_declared_dependencies =
+        resolve_workspace_inherited_dependencies(cargo_toml_path, &declared_dependencies)?;
+    let runtime_validation = validate_rustc_only_runtime_dependencies(
+        cargo_toml_path,
+        &resolved_declared_dependencies,
+    )?;
     let dependencies = if let Some(graph) = effective_dependencies {
         effective_local_dependencies_for_manifest(graph, cargo_toml_path)?
     } else {
-        resolve_workspace_inherited_dependencies(cargo_toml_path, &declared_dependencies)?
+        resolved_declared_dependencies
     };
     let sources = cmake::collect_source_files(project_dir);
     if sources.is_empty() {
@@ -2102,14 +2250,13 @@ fn preflight_crate_codegen_without_output(
         source_units.push((source_path.clone(), source));
     }
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
-    let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
+    let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
         transpile_options.cxx_namespace.as_deref(),
     )?;
-    if has_cpp_abi {
-        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
-    }
-    preflight_cpp_name_crate_sources_exact(
+    let has_cpp_abi = cpp_abi_preflight.has_contracts;
+    let has_cpp_defaults = cpp_default_args::preflight_crate_sources(&source_units, type_map)?;
+    let has_cpp_name = preflight_cpp_name_crate_sources_exact(
         &cargo,
         &sources,
         &source_units,
@@ -2119,9 +2266,33 @@ fn preflight_crate_codegen_without_output(
         None,
         runtime_validation.trusted_cpp_inherit_provenance,
     )?;
+    if has_cpp_abi || has_cpp_defaults || has_cpp_name {
+        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
+    }
 
     let prepared =
         prepare_crate_codegen(&sources, &source_units, crate_name, transpile_options, None)?;
+    if has_cpp_defaults {
+        for (path, source) in &source_units {
+            if !cpp_default_args::source_mentions_marker(source) {
+                continue;
+            }
+            let file = syn::parse_file(source).map_err(|error| {
+                format!(
+                    "{}: could not parse cpp_default_argument source: {error}",
+                    path.display()
+                )
+            })?;
+            let module_name = cmake::map_rs_to_cppm(path, crate_name).1;
+            let includes = prepared
+                .module_preambles
+                .get(&module_name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            cpp_default_args::validate_required_gmf_includes(&file, includes)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
     let mut prepared_options = prepared.options;
     // This pass is observational even when a library caller requested a UFCS
     // manifest for final emission.
@@ -2129,6 +2300,14 @@ fn preflight_crate_codegen_without_output(
     for (path, source) in &source_units {
         let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
         let mut module_options = prepared_options.clone();
+        module_options.flat_import_type_authorizations = cpp_abi_preflight
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_source.as_path() == path.as_path()
+            })
+            .cloned()
+            .collect();
         module_options.explicit_gmf_includes = prepared
             .module_preambles
             .get(&module_name)
@@ -2200,13 +2379,14 @@ fn transpile_crate_impl(
     let deps = cmake::extract_dependencies(&cargo);
     let runtime_validation = validate_rustc_only_runtime_dependencies(cargo_toml_path, &deps)?;
 
-    // The checked, symlink-aware closure walk must run before the legacy
-    // source collector: a source-directory symlink cycle would otherwise be
-    // followed indefinitely before cpp_abi gets a chance to fail closed.
-    // Marker-free closures still retain the legacy result and output path.
-    preflight_cpp_abi_whole_dependency_closure(cargo_toml_path, expand)?;
+    // All source-owned C++ contracts share one Cargo-selected local normal
+    // dependency graph.  cpp_name has its own exact-emission proof while
+    // cpp_abi/cpp_default_argument share the syntax/type closure proof; both
+    // must finish before any output path is created.
+    let may_have_cpp_name = dependency_closure_may_have_cpp_name(cargo_toml_path);
+    let may_have_source_contract = dependency_closure_may_have_source_contract(cargo_toml_path);
     let owned_effective_dependencies = if inherited_atomic_dependency_errors
-        || !dependency_closure_may_have_cpp_name(cargo_toml_path)
+        || !(may_have_cpp_name || may_have_source_contract)
     {
         None
     } else {
@@ -2214,48 +2394,75 @@ fn transpile_crate_impl(
             metadata::resolve_effective_local_normal_dependency_graph(cargo_toml_path).map_err(
                 |error| {
                     format!(
-                        "cpp_name requires an exact Cargo target-selected normal local-dependency graph before output: {error}"
+                        "source-owned C++ contract requires an exact Cargo target-selected normal local-dependency graph before output: {error}"
                     )
                 },
             )?,
         )
     };
-    let (closure_has_cpp_name, effective_dependencies) = if inherited_atomic_dependency_errors {
-        (true, inherited_effective_dependencies)
-    } else if let Some(graph) = owned_effective_dependencies.as_ref() {
-        let selected_has_cpp_name = preflight_cpp_name_effective_dependency_closure(
-            cargo_toml_path,
-            type_map,
-            expand,
-            transpile_options,
-            module_preamble,
-            graph,
-        )?;
-        if selected_has_cpp_name {
-            (true, owned_effective_dependencies.as_ref())
-        } else {
-            // The over-approximation saw cpp_name only in an unselected edge.
-            // Retain Cargo's graph for generation so that target-disabled or
-            // feature-disabled marker crates remain unvisited there as well.
-            (false, owned_effective_dependencies.as_ref())
-        }
-    } else {
-        (
-            preflight_cpp_name_whole_dependency_closure(
+    let (closure_has_cpp_name, closure_has_source_contract, effective_dependencies) =
+        if inherited_atomic_dependency_errors {
+            (true, true, inherited_effective_dependencies)
+        } else if let Some(graph) = owned_effective_dependencies.as_ref() {
+            let selected_has_cpp_name = preflight_cpp_name_effective_dependency_closure(
                 cargo_toml_path,
                 type_map,
                 expand,
                 transpile_options,
                 module_preamble,
-            )?,
-            None,
-        )
-    };
-    let atomic_dependency_errors = inherited_atomic_dependency_errors || closure_has_cpp_name;
+                graph,
+            )?;
+            let selected_has_source_contract =
+                preflight_cpp_source_contract_effective_dependency_closure(
+                    cargo_toml_path,
+                    expand,
+                    graph,
+                )?;
+            // cpp_name's marker-free behavior deliberately retains Cargo's
+            // exact graph when its over-approximation found only an unselected
+            // marker edge.  The other contracts keep their historical path in
+            // that case unless cpp_name/config provenance already requires it.
+            let generation_graph = (selected_has_cpp_name
+                || selected_has_source_contract
+                || may_have_cpp_name)
+                .then_some(graph);
+            (
+                selected_has_cpp_name,
+                selected_has_source_contract,
+                generation_graph,
+            )
+        } else {
+            (
+                preflight_cpp_name_whole_dependency_closure(
+                    cargo_toml_path,
+                    type_map,
+                    expand,
+                    transpile_options,
+                    module_preamble,
+                )?,
+                preflight_cpp_abi_whole_dependency_closure(cargo_toml_path, expand)?,
+                None,
+            )
+        };
+    let closure_has_any_contract = closure_has_cpp_name || closure_has_source_contract;
+    let atomic_dependency_errors =
+        inherited_atomic_dependency_errors || closure_has_any_contract;
     let exact_generation_dependencies = effective_dependencies
         .map(|graph| effective_local_dependencies_for_manifest(graph, cargo_toml_path))
         .transpose()?;
-    let generation_dependencies = exact_generation_dependencies.as_deref().unwrap_or(&deps);
+    let resolved_atomic_dependencies =
+        if atomic_dependency_errors && exact_generation_dependencies.is_none() {
+            Some(resolve_workspace_inherited_dependencies(
+                cargo_toml_path,
+                &deps,
+            )?)
+        } else {
+            None
+        };
+    let generation_dependencies = exact_generation_dependencies
+        .as_deref()
+        .or(resolved_atomic_dependencies.as_deref())
+        .unwrap_or(&deps);
     let sources = cmake::collect_source_files(project_dir);
 
     if sources.is_empty() {
@@ -2278,7 +2485,7 @@ fn transpile_crate_impl(
         transpile_options.cxx_namespace.as_deref(),
     )?;
     let has_cpp_abi = cpp_abi_preflight.has_contracts;
-    let _has_cpp_name = preflight_cpp_name_crate_sources_exact(
+    let has_cpp_name = preflight_cpp_name_crate_sources_exact(
         &cargo,
         &sources,
         &source_units,
@@ -2288,19 +2495,21 @@ fn transpile_crate_impl(
         module_preamble,
         runtime_validation.trusted_cpp_inherit_provenance,
     )?;
-    if has_cpp_abi {
+    let has_cpp_defaults = cpp_default_args::preflight_crate_sources(&source_units, type_map)?;
+    if has_cpp_abi || has_cpp_name || has_cpp_defaults {
         validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
         if expand {
             return Err(
-                "cpp_abi crate mode does not support --expand because expansion removes inert ABI markers"
+                "source-owned C++ contracts do not support --expand because expansion removes inert markers"
                     .to_string(),
             );
         }
     }
-    // A cpp_name crate promises fail-closed generation. Lower every root
-    // source before the first output mutation and retain those exact bytes for
-    // the write phase, so final emission cannot diverge from its preflight.
-    let prepared_cpp_name_codegen = if closure_has_cpp_name {
+    let prepared_contract_codegen = if closure_has_any_contract
+        || has_cpp_abi
+        || has_cpp_name
+        || has_cpp_defaults
+    {
         Some(prepare_crate_codegen(
             &sources,
             &source_units,
@@ -2311,11 +2520,47 @@ fn transpile_crate_impl(
     } else {
         None
     };
-    let prepared_cpp_name_outputs = if let Some(prepared) = &prepared_cpp_name_codegen {
+    if has_cpp_defaults {
+        let prepared = prepared_contract_codegen
+            .as_ref()
+            .expect("source contract codegen context must be prepared");
+        for (path, source) in &source_units {
+            if !cpp_default_args::source_mentions_marker(source) {
+                continue;
+            }
+            let file = syn::parse_file(source).map_err(|error| {
+                format!(
+                    "{}: could not parse cpp_default_argument source: {error}",
+                    path.display()
+                )
+            })?;
+            let module_name = cmake::map_rs_to_cppm(path, crate_name).1;
+            let includes = prepared
+                .module_preambles
+                .get(&module_name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            cpp_default_args::validate_required_gmf_includes(&file, includes)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+
+    // Every active source contract promises fail-closed crate generation.
+    // Lower every root source before the first output mutation and retain
+    // those exact bytes for the write phase.
+    let prepared_contract_outputs = if let Some(prepared) = &prepared_contract_codegen {
         let mut outputs = Vec::with_capacity(source_units.len());
         for (path, source) in &source_units {
             let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
             let mut module_options = prepared.options.clone();
+            module_options.flat_import_type_authorizations = cpp_abi_preflight
+                .flat_import_type_authorizations
+                .iter()
+                .filter(|authorization| {
+                    authorization.consumer_source.as_path() == path.as_path()
+                })
+                .cloned()
+                .collect();
             module_options.explicit_gmf_includes = prepared
                 .module_preambles
                 .get(&module_name)
@@ -2330,7 +2575,7 @@ fn transpile_crate_impl(
             )
             .map_err(|error| {
                 format!(
-                    "cpp_name root codegen preflight for {} failed before output: {error}",
+                    "source-owned C++ contract root codegen preflight for {} failed before output: {error}",
                     path.display()
                 )
             })?;
@@ -2340,7 +2585,7 @@ fn transpile_crate_impl(
     } else {
         None
     };
-    if closure_has_cpp_name && !inherited_atomic_dependency_errors {
+    if closure_has_any_contract && !inherited_atomic_dependency_errors {
         let mut visited = BTreeSet::new();
         visited.insert(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
         preflight_local_dependency_codegen_without_output(
@@ -2353,7 +2598,9 @@ fn transpile_crate_impl(
             &mut visited,
         )
         .map_err(|error| {
-            format!("cpp_name dependency codegen preflight failed before output: {error}")
+            format!(
+                "source-owned C++ contract dependency codegen preflight failed before output: {error}"
+            )
         })?;
     }
     // Create output directory
@@ -2405,7 +2652,7 @@ fn transpile_crate_impl(
                         }
                         Err(e) if atomic_dependency_errors => {
                             return Err(format!(
-                                "cpp_name dependency generation for '{}' failed: {}",
+                                "source-owned C++ contract dependency generation for '{}' failed: {}",
                                 dep.name, e
                             ));
                         }
@@ -2418,7 +2665,7 @@ fn transpile_crate_impl(
                     }
                 } else if atomic_dependency_errors {
                     return Err(format!(
-                        "cpp_name dependency generation for '{}' failed: Cargo.toml not found at {}",
+                        "source-owned C++ contract dependency generation for '{}' failed: Cargo.toml not found at {}",
                         dep.name,
                         dep_cargo_toml.display()
                     ));
@@ -2505,54 +2752,22 @@ fn transpile_crate_impl(
     // can write a single `rusty_hand_slots.md` summary at the end.
     // See `slots.rs` for the rationale.
     let mut hand_slots: Vec<slots::Slot> = Vec::new();
-    let mut extension_method_hints = HashSet::new();
-    let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
-    let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
-    let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
-    let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
-    for (_, source) in &source_units {
-        extension_method_hints.extend(transpile::collect_extension_method_hints(source));
-        cross_file_enums.extend(transpile::collect_crate_enum_decls(source));
-        cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(source));
-        cross_file_structs.extend(transpile::collect_crate_struct_decls(source));
-        cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(source));
-    }
-    // Build a per-crate transpile options clone with the collected cross-file
-    // enum decls and impl blocks injected. This lets each file's codegen seed
-    // its data-enum tracking from sibling files (so bare-glob variant patterns
-    // resolve when `Foo` is declared in another file) and detect orphan-impl
-    // blocks (so out-of-line member definitions can be emitted and matching
-    // forward declarations injected into the host struct's body).
-    // Collect every C++ module name we'll produce for this crate so
-    // the codegen can convert `use super::sibling::Item;` into a
-    // proper `import sibling_module;` instead of the broken
-    // `using ::sibling::Item;`. We compute the same module name the
-    // per-file loop will use below (via `cmake::map_rs_to_cppm`) so
-    // the names match exactly.
-    let crate_module_names: Vec<String> = sources
-        .iter()
-        .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
-        .collect();
-    let module_preambles = if let Some(manifest) = module_preamble {
-        manifest.select_for_modules(crate_module_names.iter().map(String::as_str))?
-    } else {
-        BTreeMap::new()
-    };
-    let crate_transpile_options = {
-        let mut opts = transpile_options.clone();
-        opts.cross_file_enums = cross_file_enums;
-        opts.cross_file_impl_blocks = cross_file_impl_blocks;
-        opts.cross_file_structs = cross_file_structs;
-        opts.cross_file_type_aliases = cross_file_type_aliases;
-        opts.crate_module_names = crate_module_names;
-        opts
+    let prepared_codegen = match prepared_contract_codegen {
+        Some(prepared) => prepared,
+        None => prepare_crate_codegen(
+            &sources,
+            &source_units,
+            crate_name,
+            transpile_options,
+            module_preamble,
+        )?,
     };
 
     for (source_index, (rs_path, source)) in source_units.iter().enumerate() {
         let (cppm_path, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
         let full_cppm_path = output_dir.join(&cppm_path);
 
-        let mut module_options = crate_transpile_options.clone();
+        let mut module_options = prepared_codegen.options.clone();
         module_options.flat_import_type_authorizations = cpp_abi_preflight
             .flat_import_type_authorizations
             .iter()
@@ -2561,25 +2776,26 @@ fn transpile_crate_impl(
             })
             .cloned()
             .collect();
-        module_options.explicit_gmf_includes = module_preambles
+        module_options.explicit_gmf_includes = prepared_codegen
+            .module_preambles
             .get(&module_name)
             .cloned()
             .unwrap_or_default();
 
-        let transpile_result = if let Some(outputs) = &prepared_cpp_name_outputs {
-            Ok(outputs[source_index].clone())
-        } else {
-            transpile::transpile_with_type_map_and_extension_hints_and_options(
+        let transpile_result = match &prepared_contract_outputs {
+            Some(outputs) => Ok(std::borrow::Cow::Borrowed(outputs[source_index].as_str())),
+            None => transpile::transpile_with_type_map_and_extension_hints_and_options(
                 source,
                 Some(&module_name),
                 type_map,
-                &extension_method_hints,
+                &prepared_codegen.extension_method_hints,
                 &module_options,
             )
+            .map(std::borrow::Cow::Owned),
         };
         match transpile_result {
             Ok(cpp_output) => {
-                if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
+                if let Err(e) = std::fs::write(&full_cppm_path, cpp_output.as_bytes()) {
                     eprintln!("  Error writing {}: {}", full_cppm_path.display(), e);
                     error_count += 1;
                     continue;
@@ -8554,6 +8770,22 @@ fn main() {
         p.set_extension("cppm");
         p
     });
+
+    if cli.expand {
+        match std::fs::read_to_string(input_path) {
+            Ok(source) if cpp_default_args::source_mentions_marker(&source) => {
+                eprintln!(
+                    "Error: cpp_default_argument does not support --expand because expansion removes inert source markers"
+                );
+                process::exit(1);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Error reading '{}': {}", input_path.display(), error);
+                process::exit(1);
+            }
+        }
+    }
 
     let source = if cli.expand {
         let original = match std::fs::read_to_string(input_path) {

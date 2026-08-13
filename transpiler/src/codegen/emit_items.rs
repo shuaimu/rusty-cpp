@@ -181,18 +181,44 @@ impl CodeGen {
         resolved
     }
 
-    pub(super) fn emit_function_forward_decl(&mut self, f: &syn::ItemFn, allow_non_unit: bool) -> bool {
+    pub(super) fn emit_function_forward_decl(
+        &mut self,
+        f: &syn::ItemFn,
+        allow_non_unit: bool,
+    ) -> bool {
+        let has_cpp_defaults = match crate::cpp_default_args::function_has_defaults(f) {
+            Ok(value) => value,
+            Err(error) => {
+                if self.codegen_error.is_none() {
+                    self.codegen_error = Some(error);
+                }
+                return false;
+            }
+        };
         if let Some(facade) = self
             .cpp_abi_plan
             .free_facade(&self.module_stack, &f.sig.ident.to_string())
             .cloned()
         {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument cannot be combined with cpp_abi on `{}`",
+                    f.sig.ident
+                ));
+                return false;
+            }
             self.emit_cpp_abi_free_facade_decl(f, &facade);
             return true;
         }
         // Skip Rust libtest scaffolding and #[test] entrypoints in forward declarations.
         // Those are emitted via dedicated test-wrapper paths, not as top-level functions.
         if self.is_rust_libtest_main(f) || Self::has_test_attr(&f.attrs) {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument function `{}` cannot be omitted from forward declarations",
+                    f.sig.ident
+                ));
+            }
             return false;
         }
         let alias_resolved_inputs = self.resolve_local_alias_fn_inputs(&f.sig.inputs);
@@ -217,6 +243,12 @@ impl CodeGen {
             }
         };
         if !can_forward_declare {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument function `{}` cannot be forward declared exactly",
+                    f.sig.ident
+                ));
+            }
             return false;
         }
 
@@ -293,7 +325,20 @@ impl CodeGen {
         } else {
             self.map_return_type(&f.sig.output)
         };
-        let mut params = self.map_fn_params(&alias_resolved_inputs);
+        let mut params = if has_cpp_defaults {
+            match self.map_fn_params_with_cpp_defaults(&alias_resolved_inputs) {
+                Ok(params) => params,
+                Err(error) => {
+                    if self.codegen_error.is_none() {
+                        self.codegen_error = Some(error);
+                    }
+                    self.pop_type_param_scope();
+                    return false;
+                }
+            }
+        } else {
+            self.map_fn_params(&alias_resolved_inputs)
+        };
         let mut param_types = self.map_fn_param_types(&alias_resolved_inputs);
         let mut signature_has_unresolved_scoped_paths = self
             .forward_decl_type_spelling_has_unresolved_scoped_path(&return_type)
@@ -308,7 +353,21 @@ impl CodeGen {
             } else {
                 self.map_return_type(&f.sig.output)
             };
-            let fallback_params = self.map_fn_params(&alias_resolved_inputs);
+            let fallback_params = if has_cpp_defaults {
+                match self.map_fn_params_with_cpp_defaults(&alias_resolved_inputs) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        if self.codegen_error.is_none() {
+                            self.codegen_error = Some(error);
+                        }
+                        self.in_forward_decl_signature = prev_forward_decl_signature;
+                        self.pop_type_param_scope();
+                        return false;
+                    }
+                }
+            } else {
+                self.map_fn_params(&alias_resolved_inputs)
+            };
             let fallback_param_types = self.map_fn_param_types(&alias_resolved_inputs);
             let fallback_has_unresolved = self
                 .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_return_type)
@@ -336,12 +395,35 @@ impl CodeGen {
             }
         }
         self.in_forward_decl_signature = prev_forward_decl_signature;
+        let param_types_for_unknown_check = if has_cpp_defaults {
+            match self.map_fn_nondefault_param_types(&alias_resolved_inputs) {
+                Ok(types) => types,
+                Err(error) => {
+                    if self.codegen_error.is_none() {
+                        self.codegen_error = Some(error);
+                    }
+                    self.pop_type_param_scope();
+                    return false;
+                }
+            }
+        } else {
+            param_types.clone()
+        };
         let signature_has_unqualified_unknown_type = self
-            .forward_decl_signature_has_unqualified_unknown_type_name(&return_type, &param_types);
+            .forward_decl_signature_has_unqualified_unknown_type_name(
+                &return_type,
+                &param_types_for_unknown_check,
+            );
         self.pop_type_param_scope();
         if (signature_has_unresolved_scoped_paths || signature_has_unqualified_unknown_type)
             && !self.module_body_forward_decl_pass
         {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument function `{}` has a forward declaration whose parameter types cannot be resolved exactly",
+                    f.sig.ident
+                ));
+            }
             return false;
         }
 

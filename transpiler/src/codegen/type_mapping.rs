@@ -4120,6 +4120,39 @@ impl CodeGen {
         params.join(", ")
     }
 
+    pub(super) fn map_fn_params_with_cpp_defaults(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> Result<String, String> {
+        let mut params = Vec::with_capacity(inputs.len());
+        for arg in inputs {
+            match arg {
+                syn::FnArg::Typed(pat_type) => {
+                    let ty = self.resolve_param_cpp_type(&pat_type.ty);
+                    let name = match pat_type.pat.as_ref() {
+                        syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                        _ => "_".to_string(),
+                    };
+                    let mut rendered = format!("{} {}", ty, name);
+                    if let Some(kind) = crate::cpp_default_args::parameter_kind(pat_type)? {
+                        if ty != kind.required_cpp_parameter_type() {
+                            return Err(format!(
+                                "cpp_default_argument requires emitted parameter type `{}`, found `{}`",
+                                kind.required_cpp_parameter_type(),
+                                ty
+                            ));
+                        }
+                        rendered.push_str(" = ");
+                        rendered.push_str(kind.cpp_expression());
+                    }
+                    params.push(rendered);
+                }
+                syn::FnArg::Receiver(_) => params.push("/* self */".to_string()),
+            }
+        }
+        Ok(params.join(", "))
+    }
+
     pub(super) fn map_fn_param_types(
         &self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
@@ -4132,5 +4165,21 @@ impl CodeGen {
             })
             .collect();
         params.join(", ")
+    }
+
+    pub(super) fn map_fn_nondefault_param_types(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> Result<String, String> {
+        let mut params = Vec::new();
+        for arg in inputs {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            if crate::cpp_default_args::parameter_kind(pat_type)?.is_none() {
+                params.push(self.resolve_param_cpp_type(&pat_type.ty));
+            }
+        }
+        Ok(params.join(", "))
     }
 }

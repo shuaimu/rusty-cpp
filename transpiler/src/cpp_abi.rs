@@ -3124,6 +3124,70 @@ pub(crate) struct CppAbiCratePreflight {
 /// Fail-closed crate-wide audit for ordinary per-file crate mode. The returned
 /// boolean says whether any adapter exists; `false` is the exact legacy path.
 /// Local lowering still runs in each owning unit after this global audit.
+pub(crate) fn validate_source_contract_module_graph(
+    inputs: &[(PathBuf, String)],
+    contract_name: &str,
+    owner_sources: &[PathBuf],
+) -> Result<(), String> {
+    let relabel = |error: String| error.replacen("cpp_abi", contract_name, 1);
+    let mut parsed = Vec::with_capacity(inputs.len());
+    for (path, source) in inputs {
+        let base = conventional_file_module_path(path).map_err(&relabel)?;
+        let file = syn::parse_file(source).map_err(|error| {
+            format!(
+                "{contract_name} crate preflight could not parse {}: {error}",
+                path.display()
+            )
+        })?;
+        validate_cpp_abi_file_attrs(
+            &file.attrs,
+            &format!("crate source file `{}`", path.display()),
+        )
+        .map_err(&relabel)?;
+        parsed.push((path, base, file));
+    }
+
+    let mut physical_modules = BTreeMap::<ModulePath, Vec<&Path>>::new();
+    for (path, base, _) in &parsed {
+        physical_modules
+            .entry(base.clone())
+            .or_default()
+            .push(path.as_path());
+    }
+    for (module, paths) in &physical_modules {
+        if paths.len() != 1 {
+            return Err(format!(
+                "{contract_name} requires one conventional source file per Rust module `{}`; found {}",
+                module.0.join("::"),
+                paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    let mut declarations = BTreeMap::<ModulePath, Vec<CrateModuleDecl>>::new();
+    for (path, base, file) in &parsed {
+        collect_crate_module_decls(&file.items, base, path, &mut declarations);
+    }
+    validate_complete_conventional_module_graph(&physical_modules, &declarations)
+        .map_err(&relabel)?;
+    for (path, base, _) in &parsed {
+        if !owner_sources.iter().any(|owner| owner == *path) {
+            continue;
+        }
+        validate_global_provider_ancestors(
+            base,
+            &std::iter::once(base.clone()).collect(),
+            &declarations,
+        )
+        .map_err(&relabel)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn preflight_crate_sources(inputs: &[(PathBuf, String)]) -> Result<bool, String> {
     Ok(preflight_crate_sources_impl(inputs, false, None)?.has_contracts)
 }
