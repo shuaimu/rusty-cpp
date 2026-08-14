@@ -6588,6 +6588,13 @@ impl CodeGen {
                     let Some((_, trait_path, _)) = &impl_block.trait_ else {
                         continue;
                     };
+                    let blanket_forwarding =
+                        Self::impl_is_reference_forwarding_blanket(impl_block);
+                    let blanket_trait_name = trait_path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.to_string())
+                        .unwrap_or_default();
 
                     let Some(tp) = Self::impl_self_type_path(impl_block.self_ty.as_ref()) else {
                         continue;
@@ -6638,6 +6645,26 @@ impl CodeGen {
                         let syn::ImplItem::Fn(method) = impl_item else {
                             continue;
                         };
+                        // A reference-forwarding blanket impl's method whose
+                        // trait declares a DEFAULT body is IDENTITY in the
+                        // erased-reference model AND its C++ signature
+                        // collides with the default's — the collapse dropped
+                        // the default's real body and the surviving forwarder
+                        // self-recursed at runtime (serde_core next_entry).
+                        // Required methods keep the blanket entry: it is the
+                        // rusty_ext dispatch catch-all the call-site
+                        // fallbacks name, and the raw-args member tier
+                        // resolves their concrete impls first.
+                        if blanket_forwarding
+                            && self
+                                .ufcs_trait_default_methods
+                                .get(&blanket_trait_name)
+                                .is_some_and(|ms| {
+                                    ms.iter().any(|m| m == &method.sig.ident.to_string())
+                                })
+                        {
+                            continue;
+                        }
                         let mut merged = method.clone();
                         merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
                     Self::strip_tuple_arity_phantom_method_generics(&mut merged, impl_block);

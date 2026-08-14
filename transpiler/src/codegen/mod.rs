@@ -16513,11 +16513,52 @@ impl CodeGen {
     /// Build `(trait_name, free-function specs)` for a trait impl, or `None` for
     /// an inherent impl / one with no `self`-receiver methods. Shared by the
     /// declaration (early, Phase 4) and definition (late, Phase 2) emitters.
+    /// A reference-forwarding BLANKET impl (`impl<'de, A: Tr> Tr for &mut A`,
+    /// serde_core's MapAccess/SeqAccess/Deserializer, serde_json's Read) is
+    /// IDENTITY in this backend's erased-reference model: its body forwards
+    /// through one `&`/`&mut` peel that C++ doesn't represent, so its UFCS
+    /// free fn matches the CONCRETE receiver and self-recurses at runtime
+    /// (stack overflow in next_entry/parse_str). Worse, its C++ signature
+    /// collides with the trait DEFAULT's (`m(A&)`) and the collapse dropped
+    /// the default's REAL body. Skip these impls wholesale — call sites
+    /// already peel pointer-like receivers via deref_if_pointer_like.
+    pub(crate) fn impl_is_reference_forwarding_blanket(impl_block: &syn::ItemImpl) -> bool {
+        if impl_block.trait_.is_none() {
+            return false;
+        }
+        let syn::Type::Reference(r) = impl_block.self_ty.as_ref() else {
+            return false;
+        };
+        let syn::Type::Path(tp) = r.elem.as_ref() else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return false;
+        }
+        let name = tp.path.segments[0].ident.to_string();
+        impl_block.generics.params.iter().any(
+            |p| matches!(p, syn::GenericParam::Type(t) if t.ident == name.as_str()),
+        )
+    }
+
     fn ufcs_trait_impl_specs(
         impl_block: &syn::ItemImpl,
+        trait_default_methods: &std::collections::BTreeMap<String, Vec<String>>,
     ) -> Option<(String, Vec<ExtensionImplMethod>)> {
         let (_, trait_path, _) = impl_block.trait_.as_ref()?;
         let trait_name = trait_path.segments.last().map(|s| s.ident.to_string())?;
+        // See the per-method skip in collect_extension_trait_impl_methods:
+        // a reference-forwarding blanket's default-bodied methods collapse
+        // over (and drop) the trait default's real body, then self-recurse.
+        let blanket_forwarding = Self::impl_is_reference_forwarding_blanket(impl_block);
+        let blanket_default_methods: Vec<String> = if blanket_forwarding {
+            trait_default_methods
+                .get(&trait_name)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
         for impl_item in &impl_block.items {
@@ -16541,6 +16582,13 @@ impl CodeGen {
                 continue;
             };
             if !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+                continue;
+            }
+            if blanket_forwarding
+                && blanket_default_methods
+                    .iter()
+                    .any(|m| m == &method.sig.ident.to_string())
+            {
                 continue;
             }
             let mut merged = method.clone();
@@ -16631,7 +16679,9 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
-        let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
+        let Some((trait_name, specs)) =
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
+        else {
             return;
         };
         // Phase 7: only crate-declared traits get UFCS free functions; a
@@ -16735,7 +16785,9 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
-        let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
+        let Some((trait_name, specs)) =
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
+        else {
             return;
         };
         // Phase 7: only crate-declared traits get UFCS decls (mirrors the
