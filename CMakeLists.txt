@@ -798,7 +798,8 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # Tests that now `import vec_port.vec` for rusty::Vec access (after
     # the VecLegacy retirement) join the clang-only set:
     set(_vec_consuming_tests
-        test_mutex test_thread rusty_vec_test rusty_array_test)
+        test_mutex test_thread rusty_vec_test rusty_array_test
+        rusty_for_in_lvalue_borrow_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
     # Tests that `import rc_port` for the Send/Sync trait specializations
     # on rusty::Rc (which lives in rc_port post-legacy-retirement).
