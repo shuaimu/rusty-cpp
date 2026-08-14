@@ -20,6 +20,7 @@
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <cstring>
+#include <cerrno>   // Error::last_os_error / kind_from_errno
 #include <string>
 #include <string_view>
 #include <vector>
@@ -88,9 +89,67 @@ public:
     const char* what() const { return message_.c_str(); }
     Option<const void*&> source() const { return Option<const void*&>{None}; }
 
+    /// Rust's `Error::from_raw_os_error` — wraps an errno value.
+    static Error from_raw_os_error(int code) {
+        Error e(kind_from_errno(code), std::strerror(code));
+        e.os_code_ = code;
+        return e;
+    }
+
+    /// Rust's `Error::last_os_error` — the current `errno`.
+    ///
+    /// The standard way a Rust port reads a syscall's failure reason,
+    /// so a crate doing raw syscalls needs it. Reading `errno` here
+    /// rather than in transpiled code also spares that code from
+    /// declaring `__errno_location` itself, which is ill-formed: a name
+    /// declared in a module purview cannot be re-declared in the global
+    /// module, and `import std;` declares it.
+    static Error last_os_error() { return from_raw_os_error(errno); }
+
+    /// Rust's `Error::raw_os_error` — `Some(errno)` for an OS error,
+    /// `None` for an error constructed some other way.
+    Option<int> raw_os_error() const {
+        if (os_code_ == 0) {
+            return Option<int>{None};
+        }
+        return Option<int>(os_code_);
+    }
+
+    /// errno -> Kind, matching Rust's `decode_error_kind` for the codes
+    /// Kind can express; everything else is Other.
+    static Kind kind_from_errno(int code) {
+        switch (code) {
+            case ENOENT:          return Kind::NotFound;
+            case EACCES:
+            case EPERM:           return Kind::PermissionDenied;
+            case ECONNREFUSED:    return Kind::ConnectionRefused;
+            case ECONNRESET:      return Kind::ConnectionReset;
+            case ECONNABORTED:    return Kind::ConnectionAborted;
+            case ENOTCONN:        return Kind::NotConnected;
+            case EADDRINUSE:      return Kind::AddrInUse;
+            case EADDRNOTAVAIL:   return Kind::AddrNotAvailable;
+            case EPIPE:           return Kind::BrokenPipe;
+            case EEXIST:          return Kind::AlreadyExists;
+            case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+            case EWOULDBLOCK:
+#endif
+                                  return Kind::WouldBlock;
+            case EINVAL:          return Kind::InvalidInput;
+            case ETIMEDOUT:       return Kind::TimedOut;
+            case EINTR:           return Kind::Interrupted;
+            case ENOSYS:
+            case EOPNOTSUPP:      return Kind::Unsupported;
+            case ENOMEM:          return Kind::OutOfMemory;
+            default:              return Kind::Other;
+        }
+    }
+
 private:
     Kind kind_;
     std::string message_;
+    /// 0 means "not an OS error" — Rust models this as Option.
+    int os_code_ = 0;
 };
 
 using ErrorKind = Error::Kind;
@@ -879,63 +938,3 @@ inline Sink sink() { return Sink{}; }
 } // namespace rusty
 
 #endif // RUSTY_IO_HPP
-
-#include <cerrno>   // Error::last_os_error / kind_from_errno
-    /// Rust's `Error::from_raw_os_error` — wraps an errno value.
-    static Error from_raw_os_error(int code) {
-        Error e(kind_from_errno(code), std::strerror(code));
-        e.os_code_ = code;
-        return e;
-    }
-
-    /// Rust's `Error::last_os_error` — the current `errno`.
-    ///
-    /// The standard way a Rust port reads a syscall's failure reason,
-    /// so a crate doing raw syscalls needs it. Reading `errno` here
-    /// rather than in transpiled code also spares that code from
-    /// declaring `__errno_location` itself, which is ill-formed: a name
-    /// declared in a module purview cannot be re-declared in the global
-    /// module, and `import std;` declares it.
-    static Error last_os_error() { return from_raw_os_error(errno); }
-
-    /// Rust's `Error::raw_os_error` — `Some(errno)` for an OS error,
-    /// `None` for an error constructed some other way.
-    Option<int> raw_os_error() const {
-        if (os_code_ == 0) {
-            return Option<int>{None};
-        }
-        return Option<int>(os_code_);
-    }
-
-    /// errno -> Kind, matching Rust's `decode_error_kind` for the codes
-    /// Kind can express; everything else is Other.
-    static Kind kind_from_errno(int code) {
-        switch (code) {
-            case ENOENT:          return Kind::NotFound;
-            case EACCES:
-            case EPERM:           return Kind::PermissionDenied;
-            case ECONNREFUSED:    return Kind::ConnectionRefused;
-            case ECONNRESET:      return Kind::ConnectionReset;
-            case ECONNABORTED:    return Kind::ConnectionAborted;
-            case ENOTCONN:        return Kind::NotConnected;
-            case EADDRINUSE:      return Kind::AddrInUse;
-            case EADDRNOTAVAIL:   return Kind::AddrNotAvailable;
-            case EPIPE:           return Kind::BrokenPipe;
-            case EEXIST:          return Kind::AlreadyExists;
-            case EAGAIN:
-#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
-            case EWOULDBLOCK:
-#endif
-                                  return Kind::WouldBlock;
-            case EINVAL:          return Kind::InvalidInput;
-            case ETIMEDOUT:       return Kind::TimedOut;
-            case EINTR:           return Kind::Interrupted;
-            case ENOSYS:
-            case EOPNOTSUPP:      return Kind::Unsupported;
-            case ENOMEM:          return Kind::OutOfMemory;
-            default:              return Kind::Other;
-        }
-    }
-
-    /// 0 means "not an OS error" — Rust models this as Option.
-    int os_code_ = 0;
