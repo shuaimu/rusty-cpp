@@ -6381,12 +6381,17 @@ impl CodeGen {
                     // A bare short-uppercase ident is an UNBOUND generic param
                     // (`Result<T, E = Error>` recovery yielding the alias's own
                     // `E`) — emitting `.template visit_bool<E>(v)` leaves E
-                    // undeclared at the call site. Unmapped RUST primitive
-                    // spellings (i64/u64/…) are equally unusable in C++.
+                    // undeclared at the call site — UNLESS that param is in
+                    // scope here: ValueVisitor::visit_str<E>'s body forwards
+                    // to `self.visit_string(..)`, whose only viable tier is
+                    // `.template visit_string<E>(..)` with the enclosing fn's
+                    // own E. Unmapped RUST primitive spellings (i64/u64/…)
+                    // are equally unusable in C++.
                     && !(mapped.len() <= 2
                         && mapped
                             .chars()
-                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                        && !self.is_type_param_in_scope(mapped))
                     && !matches!(
                         mapped.as_str(),
                         "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32"
