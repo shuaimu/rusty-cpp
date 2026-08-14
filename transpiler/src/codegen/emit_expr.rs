@@ -6706,10 +6706,46 @@ impl CodeGen {
                 // For those, fall through to the normal member-call lowering.
                 if let Some(traits) = self.ufcs_method_trait_owners.get(&method_name) {
                     let receiver = self.emit_expr_to_string(&mc.receiver);
+                    // serde's seed idiom: trait DEFAULTS pass bare
+                    // `PhantomData` seeds (`next_entry` is
+                    // `self.next_entry_seed(PhantomData, PhantomData)`), and
+                    // Rust unifies them POSITIONALLY with the enclosing fn's
+                    // own generics (PhantomData<K>, PhantomData<V>). Without
+                    // the expected type the emission fell back to the unit
+                    // spelling `rusty::PhantomData<std::tuple<>>` and the
+                    // whole entry parse deserialized UNITS — every scalar
+                    // value errored at runtime. Mirror the unification: the
+                    // Nth bare-PhantomData arg of a `*_seed` call takes the
+                    // Nth in-scope non-Self_ type param.
+                    let seed_positional_params: Vec<String> = if method_name.ends_with("_seed") {
+                        self.ordered_type_params_in_scope()
+                            .into_iter()
+                            .filter(|p| p != "Self_")
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let mut phantom_idx = 0usize;
                     let args: Vec<String> = mc
                         .args
                         .iter()
-                        .map(|a| self.emit_expr_to_string(a))
+                        .map(|a| {
+                            if !seed_positional_params.is_empty()
+                                && Self::expr_is_bare_phantom_data(a)
+                            {
+                                let param = seed_positional_params.get(phantom_idx).cloned();
+                                phantom_idx += 1;
+                                if let Some(param) = param
+                                    && let Ok(pty) = syn::parse_str::<syn::Type>(&format!(
+                                        "PhantomData<{}>",
+                                        param
+                                    ))
+                                {
+                                    return self.emit_expr_to_string_with_expected(a, Some(&pty));
+                                }
+                            }
+                            self.emit_expr_to_string(a)
+                        })
                         .collect();
                     // Single owner → qualify `<Tr>_::m` (or `<module>::<Tr>_::m`
                     // for a dependency trait, § 3.2.7), so the unqualified

@@ -4282,6 +4282,17 @@ impl CodeGen {
                 "typename std::remove_cvref_t<Self_>::",
             );
         }
+        // Same class as the Self_ pass, one step wider: `typename P::Assoc`
+        // where P is a short fn-generic param is SFINAE-FALSE when the erased
+        // reference model instantiates P with a POINTER (Rust's
+        // `deserialize(&mut de)` deduces D = &mut Deserializer; this backend
+        // deduces D = Deserializer*). That false-failed the seed-deserialize
+        // prelude's faithful pointer tier, fell to the deref tier, and the
+        // whole PARSE mutated a by-value COPY of the Deserializer (rtproof:
+        // end() saw index 0 and errored TrailingCharacters). pointee_t peels
+        // pointers and is remove_cvref for everything else, so spellings that
+        // compiled keep their meaning.
+        output = Self::pointer_transparent_dependent_assoc_pass(&output);
         if !purview_repls.is_empty()
             && let Some(export_idx) = output.find("\nexport module ")
         {
@@ -16513,6 +16524,59 @@ impl CodeGen {
     /// Build `(trait_name, free-function specs)` for a trait impl, or `None` for
     /// an inherent impl / one with no `self`-receiver methods. Shared by the
     /// declaration (early, Phase 4) and definition (late, Phase 2) emitters.
+    /// See the call site next to the `typename Self_::` pass: rewrite
+    /// `typename P::` to `typename rusty::detail::pointee_t<P>::` for every
+    /// SHORT (1–2 char, uppercase-led) bare identifier P — the fn-generic
+    /// param shape (D, V, A, K, S, K2, …). pointee_t is identity
+    /// (cvref-stripped) for non-pointers, so already-valid spellings keep
+    /// their meaning; pointer instantiations from the erased reference model
+    /// stop being SFINAE-false.
+    fn pointer_transparent_dependent_assoc_pass(text: &str) -> String {
+        const NEEDLE: &str = "typename ";
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(pos) = rest.find(NEEDLE) {
+            let (head, tail) = rest.split_at(pos + NEEDLE.len());
+            out.push_str(head);
+            let ident_len = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .count();
+            let ident = &tail[..ident_len];
+            let after = &tail[ident_len..];
+            // First slice: ONLY the serde-shape Deserializer param `D`. The
+            // wider any-short-param version broke alloc — a downstream stage
+            // synthesizes ToOwnedTraits specializations by matching the
+            // emitted `typename B::Owned` shape, and the rewrite made the
+            // string_view/span specializations vanish. Generalizing needs
+            // that synthesis to run first (task #210).
+            let looks_like_type_param = ident == "D";
+            if looks_like_type_param && after.starts_with("::") {
+                out.push_str("rusty::detail::pointee_t<");
+                out.push_str(ident);
+                out.push('>');
+            } else {
+                out.push_str(ident);
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// True for a bare `PhantomData` path expression (no type args) — the
+    /// serde seed idiom's argument shape.
+    pub(crate) fn expr_is_bare_phantom_data(expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(pe) = expr else {
+            return false;
+        };
+        pe.qself.is_none()
+            && pe.path.segments.last().is_some_and(|seg| {
+                seg.ident == "PhantomData"
+                    && matches!(seg.arguments, syn::PathArguments::None)
+            })
+    }
+
     /// A reference-forwarding BLANKET impl (`impl<'de, A: Tr> Tr for &mut A`,
     /// serde_core's MapAccess/SeqAccess/Deserializer, serde_json's Read) is
     /// IDENTITY in this backend's erased-reference model: its body forwards

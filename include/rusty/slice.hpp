@@ -558,6 +558,15 @@ std::tuple<size_t, rusty::Option<size_t>> forwarded_size_hint(const Inner& inner
     }
 }
 
+/// Pointer-transparent pointee: the erased reference model may instantiate a
+/// by-value generic with a raw POINTER (Rust's `deserialize(&mut de)` deduces
+/// `D = &mut Deserializer`; this backend deduces `D = Deserializer*`), and a
+/// dependent `typename D::Assoc` must keep naming the POINTEE's member.
+/// Identity (cvref-stripped) for everything that isn't a pointer.
+template<typename T>
+using pointee_t =
+    std::remove_cvref_t<std::remove_pointer_t<std::remove_cvref_t<T>>>;
+
 template<typename T>
 constexpr decltype(auto) deref_if_pointer(T&& value) {
     using deref_value_type = std::remove_reference_t<T>;
