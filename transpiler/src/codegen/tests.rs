@@ -43032,6 +43032,7 @@ fn test_consumer_module_map_current_rust_scope_override_keeps_canonical_owner_un
         cg.consumer_rust_module.as_deref(),
         Some("runtime::epoll_linux")
     );
+    assert!(cg.consumer_rust_module_is_override);
     assert_eq!(cg.consumer_module_map.modules.len(), 1);
     assert!(
         cg.consumer_module_map
@@ -43046,8 +43047,6 @@ fn test_consumer_module_map_current_rust_scope_override_keeps_canonical_owner_un
     );
 }
 
-
-    assert!(cg.consumer_rust_module_is_override);
 #[test]
 fn test_consumer_module_map_canonical_fallback_does_not_enable_override_normalization() {
     let interface = crate::transpile::ConsumerModuleEntry {

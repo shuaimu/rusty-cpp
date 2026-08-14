@@ -626,6 +626,22 @@ impl CodeGen {
     }
 
     pub(super) fn emit_function(&mut self, f: &syn::ItemFn) {
+        // The normal forward pass owns C++ emission for declaration-only
+        // functions; Cargo retains and executes the Rust forwarding body.
+        if Self::has_cpp_declaration_attr(&f.attrs) {
+            let rust_name = f.sig.ident.to_string();
+            let rust_path = if self.module_stack.is_empty() {
+                rust_name
+            } else {
+                format!("{}::{}", self.module_stack.join("::"), rust_name)
+            };
+            assert!(
+                self.forward_declared_function_paths.contains(&rust_path),
+                "cpp_declaration function '{rust_path}' was not emitted by the forward-declaration pass"
+            );
+            return;
+        }
+
         // Pattern-width const-generic recovery (`.next_array()` family).
         let backpropped = Self::backprop_const_array_width_turbofish(f);
         let f = backpropped.as_ref().unwrap_or(f);
@@ -10400,20 +10416,4 @@ pub(super) fn contains_whole_word(haystack: &str, needle: &str) -> bool {
     }
     false
 }
-
-        // The normal forward pass owns C++ emission for declaration-only
-        // functions; Cargo retains and executes the Rust forwarding body.
-        if Self::has_cpp_declaration_attr(&f.attrs) {
-            let rust_name = f.sig.ident.to_string();
-            let rust_path = if self.module_stack.is_empty() {
-                rust_name
-            } else {
-                format!("{}::{}", self.module_stack.join("::"), rust_name)
-            };
-            assert!(
-                self.forward_declared_function_paths.contains(&rust_path),
-                "cpp_declaration function '{rust_path}' was not emitted by the forward-declaration pass"
-            );
-            return;
-        }
 
