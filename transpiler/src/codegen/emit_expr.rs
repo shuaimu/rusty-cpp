@@ -10349,6 +10349,10 @@ impl CodeGen {
                 self.peel_paren_group_expr(&mc.receiver),
                 syn::Expr::Path(p) if p.path.segments.len() == 1
             )
+            // A receiver whose type RESOLVES keeps the plain member call —
+            // a user type that merely looks like a runtime map must not be
+            // rerouted through the probe (std-provenance spoof tests).
+            && self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)
         {
             let recv = self.emit_expr_to_string(&mc.receiver);
             return format!(
