@@ -15872,7 +15872,21 @@ impl CodeGen {
                 let bound_owner = self
                     .resolve_scope_import_binding_path_for_scope(&scope_key, &owner)
                     .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &owner))
-                    .map(|target| target.trim_start_matches("::").to_string());
+                    .map(|target| {
+                        // Metadata keys are module paths from the crate root
+                        // WITHOUT the crate:: spelling (`read::Reference`);
+                        // bindings preserve it (`crate::read::Reference`).
+                        // Unstripped, the bound-owner lookup missed and the
+                        // early None fell the match arms back to the
+                        // enclosing-generics variant spelling
+                        // (`Reference_Borrowed<R>`) — dead arms at runtime.
+                        let t = target.trim_start_matches("::");
+                        let t = t
+                            .strip_prefix("crate::")
+                            .or_else(|| t.strip_prefix("self::"))
+                            .unwrap_or(t);
+                        t.to_string()
+                    });
                 if let Some(bound_owner) = bound_owner {
                     // If an explicit owner resolves to an imported type that does not map
                     // to local enum metadata, avoid tail-based fallback to unrelated local
