@@ -1099,7 +1099,15 @@ fn test_leaf133_tap_some_call_shape_keeps_deref_closure_param() {
         }
         "#,
     );
-    assert!(out.contains("static_cast<void>(f(&val));"));
+    // The plain `f(&val)` spelling used to be matched in the member-style
+    // orphan stub, which the UFCS lowering no longer emits; the LIVE
+    // rusty_ext free-fn body invokes the callable through the
+    // deref-tolerant wrapper (a plain callable passes through unchanged).
+    assert!(
+        out.contains("static_cast<void>(f(&val));")
+            || out.contains("static_cast<void>(rusty::detail::deref_if_pointer_like(f)(&val));"),
+        "{out}"
+    );
     assert!(out.contains("rusty_ext::tap_some("));
     assert!(
         out.contains("foo += *value") || out.contains("foo += rusty::deref_mut(value)"),
