@@ -833,15 +833,17 @@ pub fn second(other: &Right<i32>) -> i32 { **other }
 "#,
         ),
         (
-            "exact-definition-auto-alias",
+            // C8: see the crate-mode twin. Distinct alias TARGETS are
+            // distinct C++ types once the alias stays nominal; identical
+            // targets still collide.
+            "exact-definition-alias-same-identity",
             r#"
-use std::sync::Arc;
-type Left = Arc<i32>;
-type Right = Arc<bool>;
+type Left = i32;
+type Right = i32;
 #[cfg_attr(any(), cpp_name(overloaded))]
-pub fn first(value: Left) -> i32 { **value }
+pub fn first(value: Left) -> i32 { value }
 #[cfg_attr(any(), cpp_name(overloaded))]
-pub fn second(other: Right) -> i32 { **other as i32 }
+pub fn second(other: Right) -> i32 { other }
 "#,
         ),
     ] {
@@ -1359,15 +1361,22 @@ pub fn second(value: right::B) -> i32 { value }
             "cpp_name cannot prove overload identity",
         ),
         (
-            "exact-definition-auto-alias",
+            // C8 note: this case used to be spelled with `Arc<i32>` vs
+            // `Arc<bool>`, which collided only because BOTH alias parameters
+            // were softened to an abbreviated-template `auto`. Contract 8
+            // keeps a resolved concrete alias nominal, and those two ARE
+            // distinct C++ types, so that spelling is now legal. The teeth
+            // are here: two aliases with the SAME semantic identity still
+            // collide, proving the check resolves aliases rather than
+            // comparing spellings.
+            "exact-definition-alias-same-identity",
             r#"
-use std::sync::Arc;
-type Left = Arc<i32>;
-type Right = Arc<bool>;
+type Left = i32;
+type Right = i32;
 #[cfg_attr(any(), cpp_name(overloaded))]
-pub fn first(value: Left) -> i32 { **value }
+pub fn first(value: Left) -> i32 { value }
 #[cfg_attr(any(), cpp_name(overloaded))]
-pub fn second(value: Right) -> i32 { **value as i32 }
+pub fn second(value: Right) -> i32 { value }
 "#,
             "cpp_name overload collision",
         ),

@@ -43482,3 +43482,97 @@ fn test_owning_trait_object_of_a_foreign_trait_still_erases() {
         "a foreign trait object keeps the documented void* fallback: {out}"
     );
 }
+
+/// C8 (checkpoint contract 8) — a resolved CONCRETE alias in a by-value
+/// signature stays that alias. Softening it to an abbreviated-template `auto`
+/// turns an ordinary function into a template (different mangling) and erases
+/// the authenticated alias identity; `auto` is only valid for an actual
+/// source generic. Also: the runtime's `void` specializations
+/// (`rusty::Task<void>`, async.hpp:145) are what Rust's `Task<()>` names.
+#[test]
+fn test_concrete_alias_parameters_keep_their_nominal_type() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub type EventTestFn = rusty::Function<dyn Fn(i32) -> bool>;
+        pub type TaskVoid = rusty::Task<()>;
+        pub type Count = i32;
+        pub fn takes_fn(f: EventTestFn) -> bool { f(1i32) }
+        pub fn takes_task(t: TaskVoid) -> TaskVoid { t }
+        pub fn takes_count(c: Count) -> Count { c }
+        pub fn takes_generic<T>(t: T) -> T { t }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using TaskVoid = rusty::Task<void>;"),
+        "Unit in the native Task position is the void specialization: {out}"
+    );
+    assert!(
+        out.contains("bool takes_fn(EventTestFn f)"),
+        "a concrete callable alias parameter keeps its nominal type: {out}"
+    );
+    assert!(
+        out.contains("TaskVoid takes_task(TaskVoid t)"),
+        "a concrete task alias parameter keeps its nominal type: {out}"
+    );
+    assert!(
+        out.contains("Count takes_count(Count c)"),
+        "a concrete scalar alias parameter keeps its nominal type: {out}"
+    );
+    assert!(
+        !out.contains("takes_fn(auto") && !out.contains("takes_task(auto"),
+        "no alias parameter may become an abbreviated template: {out}"
+    );
+    // (neg) an ACTUAL source generic is still a template.
+    assert!(
+        out.contains("template<typename T>"),
+        "a real generic keeps its template head: {out}"
+    );
+}
+
+/// C8 — an EXPORTED alias is part of the module's public C++ surface, so it
+/// honors its authenticated type-map target instead of re-mapping the Rust
+/// right-hand side. `SrcFileCStr` was `std::string_view` at its declaration
+/// while every parameter use lowered to the mapped `const char*` — one name,
+/// two C++ types. A PRIVATE alias is internal spelling the map does not
+/// govern and is left alone.
+#[test]
+fn test_exported_alias_honors_its_authenticated_type_map() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map
+        .mappings
+        .insert("SrcFileCStr".to_string(), "const char*".to_string());
+    type_map
+        .mappings
+        .insert("LegacyStdString".to_string(), "std::string".to_string());
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub type SrcFileCStr = &'static str;
+        type LegacyStdString = String;
+        pub fn note(file: SrcFileCStr) -> SrcFileCStr { file }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("export using SrcFileCStr = const char*;"),
+        "the exported alias declaration honors its map: {out}"
+    );
+    assert!(
+        out.contains("const char* note(const char* file)"),
+        "and its uses name the same one C++ type (an alias is \
+         mangling-transparent, so either spelling is the same type — what \
+         contract 8 forbids is the two DISAGREEING): {out}"
+    );
+    assert!(
+        out.contains("using LegacyStdString = rusty::String;"),
+        "a private alias keeps its right-hand-side lowering: {out}"
+    );
+}

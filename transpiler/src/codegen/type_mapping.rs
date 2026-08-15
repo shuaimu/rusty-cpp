@@ -2566,6 +2566,31 @@ impl CodeGen {
                     }
                 }
 
+                // C8 (checkpoint contract 8): the runtime facades `rusty::Task`
+                // and `rusty::Poll` DECLARE a `void` specialization
+                // (include/rusty/async.hpp:40 / :145). Rust spells the same
+                // thing `Task<()>`, which the ordinary unit mapping turns into
+                // `rusty::Task<rusty::Unit>` — a DIFFERENT, undeclared
+                // instantiation. The authenticated native position is the
+                // `void` specialization.
+                if let Some(last_seg) = tp.path.segments.last()
+                    && matches!(last_seg.ident.to_string().as_str(), "Task" | "Poll")
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|seg| seg.ident == "rusty")
+                    && let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
+                    && args.args.len() == 1
+                    && matches!(
+                        args.args.first(),
+                        Some(syn::GenericArgument::Type(syn::Type::Tuple(tuple)))
+                            if tuple.elems.is_empty()
+                    )
+                {
+                    return format!("rusty::{}<void>", last_seg.ident);
+                }
+
                 // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or rusty::Function for Fn traits
                 if let Some(last_seg) = tp.path.segments.last() {
                     let seg_name = last_seg.ident.to_string();

@@ -48424,6 +48424,19 @@ impl CodeGen {
         {
             return None;
         }
+        // C8 (checkpoint contract 8): a resolved concrete ALIAS is not an
+        // incomplete nominal. Its using-declaration is emitted in the types
+        // phase, ahead of every function declaration, so the concrete type is
+        // available where the softening was needed. Softening it turns an
+        // ordinary function into an abbreviated template — different mangling,
+        // and the authenticated alias identity (`EventTestFn`, `FiberFn`,
+        // `TaskVoid`, `PollCmdReceiver`, `QuorumFinalizeFn`) is erased.
+        // `auto` is only valid for an actual source generic.
+        if self.type_alias_targets.contains_key(&ident)
+            || self.type_alias_targets.contains_key(&scoped_ident)
+        {
+            return None;
+        }
         let scope_key = self.module_stack.join("::");
         let has_scope_import_binding = self
             .resolve_scope_import_binding_path_for_scope(&scope_key, &ident)
