@@ -1101,6 +1101,29 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // A path ROOTED at a reserved `cpp::` module binding names a symbol of
+        // THAT C++ module and must resolve through the module's declared export
+        // namespace. Without this, an interior segment that happens to name a
+        // Rust `mod` (`use cpp::rrr::serializable;` +
+        // `serializable::Serialize_::serialize`, where `Serialize_` is a
+        // `pub mod` of the crate's own `serializable` module) fell through to
+        // the ordinary scope-import table, which re-expanded the binding to
+        // `cpp::rrr::serializable::…` and then applied `use rusty as cpp;`,
+        // emitting the nonexistent `rusty::rrr::serializable::Serialize_`.
+        // Interior segments naming TYPES already resolved correctly through the
+        // same rewrite further down the expression path; this makes the rule
+        // hold for every caller of the shared path emitter.
+        if path.leading_colon.is_none()
+            && segments.len() >= 2
+            && path.segments.first().is_some_and(|segment| {
+                self.name_resolver
+                    .cpp_binding(&segment.ident.to_string())
+                    .is_some()
+            })
+            && let Some(rewritten) = self.rewrite_cpp_import_bound_expr_path(path)
+        {
+            return rewritten;
+        }
         // A complete `crate::<root-child>::<leaf>` identity may name a flat
         // type without borrowing the marked `use` binding from another
         // source unit. Crate preflight records this authorization only after
@@ -1299,6 +1322,27 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 return "std::max".to_string();
             }
             _ => {}
+        }
+        // `crate::<module>::<Item>` under a configured `--cxx-namespace` WITHOUT
+        // `--auto-namespace`: every crate module emits its items FLAT into that
+        // one namespace (`--auto-namespace` is the mode that gives each Rust
+        // module its own C++ namespace). The Rust module segment is therefore
+        // not a C++ namespace at all, and keeping it produced
+        // `::errors::RpcError` for `crate::errors::RpcError` — a namespace no
+        // translation unit declares. Root the item at the configured namespace
+        // instead, and only when the segment is a proven sibling crate module.
+        if let Some(ns) = self.cxx_namespace.as_deref()
+            && !self.auto_namespace
+            && segments.len() >= 3
+            && segments.first().is_some_and(|seg| seg == "crate")
+            && self
+                .crate_module_names
+                .iter()
+                .any(|module| module.rsplit('.').next() == Some(segments[1].as_str()))
+        {
+            let mut flattened = vec![escape_cpp_keyword(ns)];
+            flattened.extend(segments[2..].iter().map(|segment| escape_cpp_keyword(segment)));
+            return format!("::{}", flattened.join("::"));
         }
         while segments
             .first()
@@ -2239,30 +2283,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         if let Some(first) = segments.first() {
             match first.as_str() {
                 "crate" if segments.len() > 1 => {
-                    // `crate::<module>::<Item>` under a configured
-                    // `--cxx-namespace` WITHOUT `--auto-namespace`: every crate
-                    // module emits its items FLAT into that one namespace (an
-                    // `--auto-namespace` build is the mode that gives each Rust
-                    // module its own C++ namespace). The Rust module segment is
-                    // therefore not a C++ namespace at all, and keeping it
-                    // produced `::errors::RpcError` for
-                    // `crate::errors::RpcError` — a namespace no translation
-                    // unit declares. Root the item at the configured namespace
-                    // instead, and only when the segment is a proven sibling
-                    // crate module.
-                    if let Some(ns) = self.cxx_namespace.as_deref()
-                        && !self.auto_namespace
-                        && segments.len() >= 3
-                        && self.crate_module_names.iter().any(|module| {
-                            module.rsplit('.').next() == Some(segments[1].as_str())
-                        })
-                    {
-                        let mut flattened = vec![escape_cpp_keyword(ns)];
-                        flattened.extend(
-                            segments[2..].iter().map(|segment| escape_cpp_keyword(segment)),
-                        );
-                        return format!("::{}", flattened.join("::"));
-                    }
                     let mut resolved = segments[1..].to_vec();
                     // `crate::...` is always rooted at crate/global scope.
                     let mut crate_force_leading_colon = true;
