@@ -2237,6 +2237,14 @@ pub struct CodeGen {
     /// Variables used more than once in the current block.
     /// std::move is skipped for these to avoid use-after-move errors.
     pub(crate) multi_use_vars: std::collections::HashSet<String>,
+    /// C6 (checkpoint contract 6): locals in the current block that flow into
+    /// a runtime-facade field whose native C++ type is a COPYABLE
+    /// `std::function` (see `RUNTIME_FACADE_COPYABLE_CALLABLE_FIELDS`). The
+    /// value is that authenticated C++ contract type: the local's declaration
+    /// takes it instead of the move-only boxed-callable `rusty::Function`
+    /// spelling, and a declaration that cannot express it rejects.
+    pub(crate) copyable_callable_contract_locals:
+        std::collections::HashMap<String, &'static str>,
     /// const fns whose FULL definitions were emitted during the forward
     /// phase (constexpr globals need their bodies before the const item
     /// phase); the item-phase definition pass skips these.
@@ -3122,6 +3130,7 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             deref_assigned_vars: std::collections::HashSet::new(),
             multi_use_vars: std::collections::HashSet::new(),
+            copyable_callable_contract_locals: std::collections::HashMap::new(),
             const_fns_defined_early: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
@@ -46444,6 +46453,139 @@ impl CodeGen {
     fn try_map_fn_trait_boxed(&self, tb: &syn::TraitBound) -> Option<String> {
         let signature = self.try_map_fn_trait_bare_signature(tb)?;
         Some(format!("rusty::Function<{signature}>"))
+    }
+
+    /// C6 (checkpoint contract 6): the `dyn Fn…` bound of an OWNED boxed
+    /// callable annotation — `Box<dyn Fn() + Send + Sync>`. This is the
+    /// EXPLICITLY TYPED local/field whose C++ contract the initializer must
+    /// take; without it a `Box::new(closure)` initializer picks its owner
+    /// from the closure instead (`rusty::Box<std::function<void()>>::new_`),
+    /// which is neither the declared type nor convertible to it.
+    pub(super) fn owned_boxed_callable_bound<'a>(
+        &self,
+        ty: &'a syn::Type,
+    ) -> Option<&'a syn::TraitBound> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Box" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let syn::GenericArgument::Type(inner) = args.args.first()? else {
+            return None;
+        };
+        let syn::Type::TraitObject(to) = self.peel_paren_group_type(inner) else {
+            return None;
+        };
+        let syn::TypeParamBound::Trait(tb) = to.bounds.first()? else {
+            return None;
+        };
+        // Only the callable families; `Box<dyn Trait>` keeps its own lowering.
+        let name = tb.path.segments.last()?.ident.to_string();
+        if !matches!(name.as_str(), "Fn" | "FnMut" | "FnOnce")
+            || !matches!(
+                tb.path.segments.last()?.arguments,
+                syn::PathArguments::Parenthesized(_)
+            )
+        {
+            return None;
+        }
+        Some(tb)
+    }
+
+    /// C6: the OWNING C++ contract of an owned boxed callable annotation
+    /// (`rusty::Function<R(Args) [const]>`), or None when `ty` is not one.
+    pub(super) fn owned_boxed_callable_cpp(&self, ty: &syn::Type) -> Option<String> {
+        let tb = self.owned_boxed_callable_bound(ty)?;
+        self.try_map_fn_trait_boxed(tb)
+    }
+
+    /// C6: the COPYABLE C++ contract of an owned boxed callable annotation
+    /// (`std::function<R(Args)>` — `std::function` is always const-callable,
+    /// so the Rust `Fn`/`FnMut` split carries no const suffix here).
+    pub(super) fn copyable_boxed_callable_cpp(&self, ty: &syn::Type) -> Option<String> {
+        let tb = self.owned_boxed_callable_bound(ty)?;
+        self.try_map_fn_trait(tb)
+    }
+
+    /// C6: an authenticated struct-literal field whose runtime-facade type
+    /// stores a COPYABLE `std::function`, keyed by the facade type's mapped
+    /// C++ spelling. These are runtime-owned declarations (rusty-cpp's own
+    /// `include/rusty/*.hpp`), not user names, so the contract is exact and
+    /// carries no name-tail inference:
+    ///   * `rusty::Waker::wake_fn` — `std::function<void()>`, and
+    ///     `Waker::wake()` is const (include/rusty/async.hpp:50-53). The Rust
+    ///     facade models it as `Box<dyn Fn() + Send + Sync>`, which lowers by
+    ///     the ordinary rules to the MOVE-ONLY `rusty::Function<void() const>`
+    ///     — a type `std::function` cannot be constructed from.
+    fn runtime_facade_copyable_callable_field(
+        &self,
+        path: &syn::Path,
+        field: &str,
+    ) -> Option<&'static str> {
+        const RUNTIME_FACADE_COPYABLE_CALLABLE_FIELDS: &[(&str, &str, &str)] =
+            &[("rusty::Waker", "wake_fn", "std::function<void()>")];
+        let ty: syn::Type = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: path.clone(),
+        });
+        let mapped = self.map_type(&ty);
+        let mapped = mapped.trim().trim_start_matches("::");
+        RUNTIME_FACADE_COPYABLE_CALLABLE_FIELDS
+            .iter()
+            .find(|(facade, facade_field, _)| *facade == mapped && *facade_field == field)
+            .map(|(_, _, contract)| *contract)
+    }
+
+    /// C6: collect the locals of this block that flow into a runtime-facade
+    /// field with a copyable-callable contract (`rusty::Waker { wake_fn }`).
+    /// Scanning is shorthand- and explicit-init aware and only records SIMPLE
+    /// single-segment paths — the value must be a local whose declaration this
+    /// pass can retype.
+    pub(super) fn collect_copyable_callable_contract_locals(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> std::collections::HashMap<String, &'static str> {
+        struct Finder<'a> {
+            cg: &'a CodeGen,
+            found: std::collections::HashMap<String, &'static str>,
+        }
+        impl<'ast, 'a> syn::visit::Visit<'ast> for Finder<'a> {
+            fn visit_expr_struct(&mut self, s: &'ast syn::ExprStruct) {
+                for field in &s.fields {
+                    let syn::Member::Named(name) = &field.member else {
+                        continue;
+                    };
+                    let Some(contract) = self
+                        .cg
+                        .runtime_facade_copyable_callable_field(&s.path, &name.to_string())
+                    else {
+                        continue;
+                    };
+                    if let syn::Expr::Path(p) = peel_paren_group_expr_node(&field.expr)
+                        && p.qself.is_none()
+                        && p.path.segments.len() == 1
+                    {
+                        self.found
+                            .insert(p.path.segments[0].ident.to_string(), contract);
+                    }
+                }
+                syn::visit::visit_expr_struct(self, s);
+            }
+        }
+        let mut finder = Finder {
+            cg: self,
+            found: std::collections::HashMap::new(),
+        };
+        for stmt in stmts {
+            syn::visit::Visit::visit_stmt(&mut finder, stmt);
+        }
+        finder.found
     }
 
     /// Clone parent context for nested block emission (for example closure bodies).

@@ -617,6 +617,17 @@ impl CodeGen {
         let multi_use = collect_multi_use_vars(&block.stmts);
         block_profile_mark("collect_multi_use_vars");
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
+        // Pre-scan (C6, checkpoint contract 6): locals that flow into a
+        // runtime-facade field whose native C++ type is a copyable
+        // `std::function` (`rusty::Waker { wake_fn }`). Their declarations
+        // take the authenticated contract type instead of the move-only
+        // boxed-callable spelling.
+        let callable_contracts = self.collect_copyable_callable_contract_locals(&block.stmts);
+        block_profile_mark("collect_copyable_callable_contract_locals");
+        let prev_callable_contracts = std::mem::replace(
+            &mut self.copyable_callable_contract_locals,
+            callable_contracts,
+        );
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
         block_profile_mark("collect_reassigned_vars");
@@ -1044,6 +1055,7 @@ impl CodeGen {
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;
+        self.copyable_callable_contract_locals = prev_callable_contracts;
         block_profile_mark("done");
     }
 
@@ -16720,11 +16732,146 @@ impl CodeGen {
         Some(format!("rusty::Arc<{}>::make({})", owner, args))
     }
 
+    /// C6: is this call one of Rust's owning boxed-callable constructors
+    /// (`Box::new(f)` / `Box::new_(f)` / `Box::make(f)`, with or without an
+    /// explicit turbofish owner)?
+    pub(super) fn expr_call_is_box_ctor(call: &syn::ExprCall) -> bool {
+        if call.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Path(fp) = call.func.as_ref() else {
+            return false;
+        };
+        if fp.path.segments.len() < 2 {
+            return false;
+        }
+        let method = fp.path.segments.last().map(|s| s.ident.to_string());
+        let owner = fp
+            .path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|s| s.ident.to_string());
+        matches!(method.as_deref(), Some("new" | "new_" | "make"))
+            && matches!(owner.as_deref(), Some("Box"))
+    }
+
+    /// C6 (checkpoint contract 6): `Box::new(<callable>)` whose EXPECTED type
+    /// is an explicitly declared owning boxed callable
+    /// (`Box<dyn Fn() + Send + Sync>`) is that callable — Rust's `Box` around
+    /// a `dyn Fn` IS the type-erased owning callable, and its C++ contract is
+    /// `rusty::Function<Sig>`. The owner-recovery paths instead read the
+    /// closure argument and produce `rusty::Box<std::function<void()>>::new_`
+    /// — a Box OF a callable, a different type from the declared one.
+    fn try_emit_boxed_callable_coercion(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if !Self::expr_call_is_box_ctor(call) {
+            return None;
+        }
+        let expected = expected_ty?;
+        // The annotation is either the boxed callable itself
+        // (`Box<dyn Fn() + Send + Sync>`) or a name for it — an authenticated
+        // alias (`type Factory = Box<dyn FnMut() -> …>`) that already maps to
+        // the owning callable. Both name the same C++ contract.
+        let direct = self.owned_boxed_callable_cpp(expected);
+        let contract_cpp = match direct.clone() {
+            Some(cpp) => cpp,
+            None => {
+                let mapped = self.map_type(expected);
+                let trimmed = mapped.trim_start_matches("const ").trim().to_string();
+                if trimmed.starts_with("rusty::Function<") || trimmed.starts_with("std::function<")
+                {
+                    trimmed
+                } else {
+                    return None;
+                }
+            }
+        };
+        if type_string_has_auto_placeholder(&contract_cpp) || contract_cpp.contains("/* TODO") {
+            return None;
+        }
+        // Keep the argument's own expected type exactly what the Box wraps
+        // (the `dyn Fn…` trait object), matching the make_box path below.
+        let inner_expected: Option<syn::Type> = direct.as_ref().and_then(|_| {
+            match self.peel_reference_paren_group_type(expected) {
+                syn::Type::Path(tp) => tp
+                    .path
+                    .segments
+                    .last()
+                    .and_then(|last| match &last.arguments {
+                        syn::PathArguments::AngleBracketed(args) => {
+                            args.args.iter().find_map(|arg| match arg {
+                                syn::GenericArgument::Type(inner) => Some(inner.clone()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    }),
+                _ => None,
+            }
+        });
+        let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+            &call.args[0],
+            inner_expected.as_ref(),
+        );
+        Some(format!("{}({})", contract_cpp, arg))
+    }
+
+    /// C6: emit the initializer of a local that carries a runtime-facade
+    /// COPYABLE callable contract (`rusty::Waker::wake_fn` —
+    /// `std::function<void()>`, include/rusty/async.hpp:50-53). The
+    /// declaration already carries the contract type, so the initializer is
+    /// the bare callable: a closure literal, or the callable inside the
+    /// source's owning `Box::new(...)`. Any other shape is an unsupported
+    /// coercion and rejects BEFORE output (contract 6), because silently
+    /// keeping the move-only `rusty::Function` spelling produces a
+    /// `std::function` copy-construction from a deleted constructor.
+    pub(super) fn try_emit_copyable_callable_contract_init(
+        &self,
+        expr: &syn::Expr,
+        contract_cpp: &str,
+    ) -> Option<String> {
+        let peeled = self.peel_paren_group_expr(expr);
+        let callable = match peeled {
+            syn::Expr::Call(call) if Self::expr_call_is_box_ctor(call) => {
+                self.peel_paren_group_expr(&call.args[0])
+            }
+            other => other,
+        };
+        match callable {
+            syn::Expr::Closure(_) => Some(self.emit_expr_to_string(callable)),
+            syn::Expr::Path(p)
+                if p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && self
+                        .copyable_callable_contract_locals
+                        .get(&p.path.segments[0].ident.to_string())
+                        .is_some_and(|c| *c == contract_cpp) =>
+            {
+                Some(self.emit_expr_maybe_move(callable))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // C6 (checkpoint contract 6) — boxed callable coercion. This must
+        // precede every owner-recovery path below: those infer `Box::new`'s
+        // owner from the ARGUMENT (a closure → `std::function<…>`) and emit
+        // `rusty::Box<std::function<void()>>::new_(…)`, which is neither the
+        // explicitly declared type nor convertible to it. The expected type
+        // is the authenticated contract, so the boxed callable IS the
+        // callable: emit the target callable directly.
+        if let Some(coerced) = self.try_emit_boxed_callable_coercion(call, expected_ty) {
+            return coerced;
+        }
         // This must precede expected-type call rewriting: that path can turn
         // Arc::new into an already-specialized `Arc<Owner>::new_` and return
         // before the generic smart-pointer lowering below sees the source AST.

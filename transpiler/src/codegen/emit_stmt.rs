@@ -5326,6 +5326,38 @@ impl CodeGen {
                     } else {
                         mapped_ty
                     };
+                    // C6 (checkpoint contract 6): this local flows into a
+                    // runtime-facade field that stores a COPYABLE
+                    // `std::function` (`rusty::Waker { wake_fn }`). The
+                    // authenticated contract comes from that explicitly typed
+                    // field, so the declaration takes the contract type
+                    // instead of the move-only boxed-callable
+                    // `rusty::Function<…>` spelling that `std::function`
+                    // cannot be constructed from. A declared type that cannot
+                    // express the contract rejects BEFORE output.
+                    let callable_contract = self
+                        .copyable_callable_contract_locals
+                        .get(&name_str)
+                        .copied();
+                    let mut ty = ty;
+                    if let Some(contract) = callable_contract {
+                        let declared_copyable = self.copyable_boxed_callable_cpp(&resolved_ty);
+                        if declared_copyable.as_deref() != Some(contract) {
+                            if self.codegen_error.is_none() {
+                                self.codegen_error = Some(format!(
+                                    "unsupported callable coercion: local `{}` initializes a \
+                                     runtime-facade field whose contract is `{}`, but its \
+                                     declared type lowers to `{}`",
+                                    name_str,
+                                    contract,
+                                    declared_copyable.unwrap_or(ty.clone())
+                                ));
+                            }
+                            return;
+                        }
+                        ty = contract.to_string();
+                    }
+                    let ty = ty;
                     let resolved_mut_reference_binding = Self::is_mut_reference_type(&resolved_ty);
                     let is_consumed = self
                         .consuming_method_receiver_vars
@@ -5468,7 +5500,31 @@ impl CodeGen {
                             } else {
                                 None
                             };
-                            let expr_str = if let Some(coerced) = deref_coerced {
+                            // C6: under a copyable-callable contract the
+                            // declaration already carries the contract type,
+                            // so the initializer is the bare callable —
+                            // never `rusty::Box<std::function<…>>::new_(…)`.
+                            let mut contract_init: Option<String> = None;
+                            if let Some(contract) = callable_contract {
+                                contract_init = self.try_emit_copyable_callable_contract_init(
+                                    &init.expr, contract,
+                                );
+                                if contract_init.is_none() {
+                                    if self.codegen_error.is_none() {
+                                        self.codegen_error = Some(format!(
+                                            "unsupported callable coercion: local `{}` must \
+                                             lower to the runtime contract `{}`, but its \
+                                             initializer is not a callable this coercion can \
+                                             express",
+                                            name_str, contract
+                                        ));
+                                    }
+                                    return;
+                                }
+                            }
+                            let expr_str = if let Some(contract_expr) = contract_init {
+                                contract_expr
+                            } else if let Some(coerced) = deref_coerced {
                                 coerced
                             } else if let Some(callable_item_expr) =
                                 self.emit_callable_path_item_expr(&init.expr)

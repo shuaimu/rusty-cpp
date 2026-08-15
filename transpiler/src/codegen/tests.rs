@@ -43156,3 +43156,106 @@ fn test_non_pub_interface_trait_forward_decl_shares_the_anon_namespace() {
         "`export` is ill-formed inside an anonymous namespace: {out}"
     );
 }
+
+/// C6 (checkpoint contract 6) — the EXPECTED owner/type of a boxed-callable
+/// initializer is the explicitly declared local type, not the closure the
+/// owner-recovery paths read. `Box<dyn Fn…>` IS the owning type-erased
+/// callable, so `Box::new(closure)` under that annotation lowers to the
+/// declared `rusty::Function<Sig>` — never to `rusty::Box<std::function<…>>`,
+/// a Box OF a callable, which is a different type from the declaration.
+#[test]
+fn test_boxed_callable_initializer_takes_its_declared_callable_contract() {
+    let out = transpile_str(
+        r#"
+        pub fn install() {
+            let cb: Box<dyn Fn(i32) + Send + Sync> = Box::new(move |x| {
+                let _y = x;
+            });
+            cb(3i32);
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Function<void(int32_t) const> cb = rusty::Function<void(int32_t) const>(["),
+        "the boxed callable initializer must construct the declared callable: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Box<std::function"),
+        "a Box OF a callable is not the declared boxed-callable type: {out}"
+    );
+}
+
+/// C6 — `rusty::Waker::wake_fn` is a COPYABLE `std::function<void()>` in the
+/// runtime (include/rusty/async.hpp:50-53). A local flowing into that field
+/// must lower to that contract; the ordinary boxed-callable rules give the
+/// MOVE-ONLY `rusty::Function<void() const>`, which `std::function` cannot be
+/// constructed from (deleted copy constructor) — the carrier-critical hold.
+#[test]
+fn test_waker_wake_fn_local_lowers_to_the_copyable_std_function_contract() {
+    let out = transpile_str(
+        r#"
+        pub struct Binding {
+            pub waker: rusty::Waker,
+        }
+        pub fn make_binding() -> Binding {
+            let wake_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                let _x = 1i32;
+            });
+            let waker = rusty::Waker { wake_fn };
+            Binding { waker }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::function<void()> wake_fn = ["),
+        "the waker field's copyable contract must drive the local: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Function<void() const> wake_fn"),
+        "the move-only boxed-callable spelling cannot initialize Waker::wake_fn: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Box<std::function"),
+        "no Box OF a callable may survive in the initializer: {out}"
+    );
+    assert!(
+        out.contains("rusty::Waker{.wake_fn = std::move(wake_fn)}"),
+        "the facade field initialization itself is unchanged: {out}"
+    );
+}
+
+/// C6 fail-closed — an unsupported callable coercion (a declared callable
+/// whose signature is not the facade field's contract) rejects BEFORE output
+/// instead of emitting a `std::function` construction that cannot compile.
+#[test]
+fn test_waker_wake_fn_mismatched_callable_contract_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub struct Binding {
+            pub waker: rusty::Waker,
+        }
+        pub fn make_binding() -> Binding {
+            let wake_fn: Box<dyn Fn(i32) + Send + Sync> = Box::new(move |_x| {});
+            let waker = rusty::Waker { wake_fn };
+            Binding { waker }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("a callable coercion the contract cannot express must reject");
+    assert!(error.contains("wake_fn"), "{error}");
+    assert!(error.contains("std::function<void()>"), "{error}");
+    // The rejected declaration itself never reaches the buffer, and the
+    // transpile as a whole writes no file — the error is raised before
+    // output, exactly like the H3 foreign-declaration rejection.
+    let out = cg.into_output();
+    assert!(
+        !out.contains("> wake_fn ="),
+        "a rejected coercion must not emit the local declaration: {out}"
+    );
+}
