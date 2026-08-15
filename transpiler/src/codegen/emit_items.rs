@@ -1581,6 +1581,15 @@ impl CodeGen {
         taken_member_names: &HashSet<String>,
         generics: &syn::Generics,
     ) -> Vec<String> {
+        // C++ forbids a static data member in a function-local class, so a
+        // struct declared inside a block cannot carry the markers at all
+        // ("static data member 'is_send' not allowed in local struct", the
+        // smallvec DropPanic test helper). Nothing can name such a type
+        // across a thread boundary anyway — it does not outlive the block.
+        if self.block_depth > 0 {
+            return Vec::new();
+        }
+
         let type_params: HashSet<String> = generics
             .params
             .iter()
