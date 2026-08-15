@@ -13554,6 +13554,24 @@ impl CodeGen {
                 .chars()
                 .next()
                 .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+            // C12b: the configured C++ namespace is the namespace this very
+            // module opens, so `::rrr::Tail` is resolvable in a forward
+            // declaration exactly when `Tail` is. Without this, any free
+            // function whose signature mentions a cross-module type through
+            // its qualified spelling (`::rrr::PollableProxy`) loses its whole
+            // forward declaration and its earlier call sites cannot bind.
+            // Deliberately narrow: only the configured namespace root, and
+            // only when the tail itself is a known local or imported name.
+            if first_is_namespace_like
+                && self.cxx_namespace.as_deref() == Some(first)
+                && let Some(tail) = normalized.split("::").last()
+                && (self.local_declared_types.contains(tail)
+                    || self
+                        .forward_decl_scope_import_local_names()
+                        .contains(tail))
+            {
+                continue;
+            }
             if first_is_namespace_like
                 && !self.declared_module_names.contains(first)
                 && !self.declared_module_paths.contains(first)
@@ -13681,6 +13699,7 @@ impl CodeGen {
                     return_type,
                     params,
                 )
+                || self.forward_decl_interface_trait_class_any_position(&name)
                 || (allow_imported_names && imported_local_names.contains(&name))
             {
                 return false;
@@ -13688,6 +13707,28 @@ impl CodeGen {
             Self::cpp_spelling_mentions_identifier_unqualified(return_type, &name)
                 || Self::cpp_spelling_mentions_identifier_unqualified(params, &name)
         })
+    }
+
+    /// C12: the general case of the H5 rule below.
+    ///
+    /// An interface trait this file declares is emitted as a class and is
+    /// forward-declared ahead of the function forward-decl block, so its bare
+    /// name resolves there NO MATTER WHERE it appears in the signature — not
+    /// only as a `rusty::{sync,rc}::Weak<…>` target. H5 deliberately scoped
+    /// its repair to weak targets because widening it moved frozen provider
+    /// output; byte-identical generated C++ has since been repealed as an
+    /// acceptance criterion, so the general repair is now the correct one.
+    ///
+    /// Without it, any free function taking or returning an interface trait
+    /// object (`Arc<dyn EventPollable>`, `Box<dyn PollableBase>`, …) silently
+    /// loses its whole forward declaration, and the call sites emitted
+    /// earlier in the TU have nothing to bind to. rrr.reactor hits this five
+    /// times (`waitany_make`, `waitall_make_from`, `pollworker_do_add_pollable`,
+    /// `pollable_proxy_fd`, `pollable_proxy_mode`).
+    fn forward_decl_interface_trait_class_any_position(&self, name: &str) -> bool {
+        !name.is_empty()
+            && !self.skipped_interface_traits.contains(name)
+            && self.trait_declared_path_by_short_name.contains_key(name)
     }
 
     /// An interface trait this file declares is emitted as a class AND
