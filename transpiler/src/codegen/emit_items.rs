@@ -6569,16 +6569,42 @@ impl CodeGen {
             // previously emitted nothing, leaving `time::f()` with
             // nothing declaring `time`.
             if let Some(sibling_module) = self.resolve_crate_module_use_path(&resolved_path) {
-                if self.sibling_modules_imported.insert(sibling_module.clone()) {
+                let alias = normalize_use_import_path(&resolved_path)
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                // Re-binding a name that is ALREADY a reserved `cpp::` module
+                // binding (`use cpp::rrr::debugging;` at file scope, then
+                // `use super::debugging;` inside a nested `mod`) needs no C++
+                // declaration at all: the cpp-binding table already resolves
+                // every path through it. Emitting anything here was doubly
+                // ill-formed — an `import` at namespace scope, plus an alias
+                // to a `rrr::debugging` namespace that does not exist.
+                if !alias.is_empty() && self.name_resolver.cpp_binding(&alias).is_some() {
+                    continue;
+                }
+                // A C++ `import` is only well-formed at global scope in the
+                // module purview. Inside a nested namespace the module is
+                // either already imported at the top or reachable through the
+                // enclosing scope; emitting one here cannot compile.
+                if self.module_stack.is_empty()
+                    && self.sibling_modules_imported.insert(sibling_module.clone())
+                {
                     self.writeln(&format!("import {};", sibling_module));
                 }
                 if self.cxx_namespace.is_some() {
-                    let alias = normalize_use_import_path(&resolved_path)
-                        .rsplit("::")
-                        .next()
-                        .unwrap_or_default()
-                        .to_string();
-                    let ns_path = sibling_module.replace('.', "::");
+                    // A C++ MODULE NAME is not a namespace. When the module
+                    // index declares the module's export namespace (srpc emits
+                    // every `rrr.*` module into a flat `namespace rrr`), alias
+                    // to that; only fall back to the dotted-name-as-namespace
+                    // reading when nothing is declared.
+                    let module_key = sibling_module.replace('.', "::");
+                    let ns_path = self
+                        .cpp_module_export_namespaces
+                        .get(&module_key)
+                        .cloned()
+                        .unwrap_or(module_key);
                     if !alias.is_empty() {
                         self.writeln(&format!(
                             "namespace {} = ::{};",
