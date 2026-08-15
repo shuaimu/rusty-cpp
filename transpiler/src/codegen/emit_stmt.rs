@@ -3486,7 +3486,7 @@ impl CodeGen {
                         // otherwise we'd emit `auto& opt = …` which can't
                         // bind to the by-value `Option` temporary.
                         let receiver_is_arc_get_mut = matches!(method.as_str(), "get_mut")
-                            && self.receiver_is_arc_wrapper_type(&mc.receiver);
+                            && self.receiver_get_mut_returns_option_by_value(&mc.receiver);
                         if receiver_is_arc_get_mut {
                             return false;
                         }
@@ -3653,7 +3653,7 @@ impl CodeGen {
                         // by value, not `&mut T`. Suppress the generic
                         // `get_mut → &mut T` heuristic when the receiver is an `Arc`.
                         let receiver_is_arc_get_mut = matches!(method.as_str(), "get_mut")
-                            && self.receiver_is_arc_wrapper_type(&mc.receiver);
+                            && self.receiver_get_mut_returns_option_by_value(&mc.receiver);
                         // `OnceNonZeroUsize::get_unchecked()` / `OnceBool::get_unchecked()`
                         // — the primitive-optimized once_cell variants — return their
                         // inner value BY VALUE (`NonZeroUsize` / `bool`), not by ref

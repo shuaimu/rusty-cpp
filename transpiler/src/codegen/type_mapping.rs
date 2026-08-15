@@ -3211,6 +3211,20 @@ impl CodeGen {
                         } else {
                             format!("std::span<const {}>", elem)
                         }
+                    } else if let syn::Type::TraitObject(to) = elem_ty
+                        && let Some(iface) = self.dyn_trait_object_interface_cpp_name(to)
+                    {
+                        // `*const dyn Job` / `*mut dyn Job`. A BARE `dyn Trait`
+                        // has no C++ representation, so map_type answers
+                        // `void*` for it in module mode -- correct for the
+                        // unsized value, and exactly wrong once a pointer is
+                        // wrapped around it: `*const dyn Job` then came out
+                        // `const void**`, a pointer to a pointer, and the
+                        // subsequent `(*job_mut).Ready()` had nothing to call.
+                        // Behind a pointer the trait object IS the interface
+                        // class -- the same spelling `Arc<dyn Job>` already
+                        // lowers to (`rusty::Arc<Job>`).
+                        iface
                     } else {
                         self.map_type(&p.elem)
                     }

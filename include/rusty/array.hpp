@@ -1319,6 +1319,23 @@ bool is_empty(const Container& container) {
         return static_cast<bool>(container.is_empty());
     } else if constexpr (requires { container.empty(); }) {
         return static_cast<bool>(container.empty());
+    } else if constexpr (!requires { container.len(); }
+                         && !requires { container.size(); }
+                         && !requires { container.as_str(); }
+                         && !requires { std::size(container); }
+                         && !requires { container.size_hint(); }
+                         && !requires { container.into_iter(); }
+                         && requires { (*container).is_empty(); }) {
+        // A guard (`Ref`/`RefMut`/`MutexGuard`) wrapping a payload whose
+        // ONLY emptiness surface is `is_empty()` and which has no length
+        // at all — `rusty::Function` is the case: Rust's shim really does
+        // define `Function::is_empty()`, but nothing about a callable has
+        // a length, so len's ladder bottoms out in its static_assert
+        // instead of answering. Peel exactly one level, and only after
+        // every len-ladder shape above has been excluded — that exclusion
+        // is what keeps an ITERATOR out of this arm, since `*it` yields an
+        // element rather than a container (the hazard named below).
+        return static_cast<bool>((*container).is_empty());
     } else {
         // Everything else — including a guard wrapping a container — defers
         // to len, whose ladder ends with the deref-peel arm. Peeling HERE

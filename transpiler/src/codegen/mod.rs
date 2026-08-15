@@ -5522,6 +5522,33 @@ impl CodeGen {
 
     pub fn set_cross_file_traits(&mut self, traits: &[syn::ItemTrait]) {
         self.cross_file_trait_tails = traits.iter().map(|t| t.ident.to_string()).collect();
+        // `dyn Trait` is Send/Sync exactly when the trait's supertraits say
+        // so. `collect_trait_static_default_methods` records that, but only
+        // for traits declared in the file being emitted -- so a field typed
+        // `Box<dyn PollableBase>` in reactor.rs could not see
+        // `trait PollableBase: Send` over in pollable_proxy.rs. The
+        // derivation then gave up (it returns None rather than guessing) and
+        // the generated variant struct got NO auto-trait marker at all,
+        // which is what made `mpsc::channel<PollCommand>()` reject a command
+        // enum whose variants are individually Send. Seed the crate-wide
+        // answer here, before emission; the per-file pass runs later and
+        // rewrites the local entries with the identical value.
+        for t in traits {
+            let mut auto_bounds = (false, false);
+            for bound in t.supertraits.iter() {
+                if let syn::TypeParamBound::Trait(tb) = bound
+                    && let Some(seg) = tb.path.segments.last()
+                {
+                    match seg.ident.to_string().as_str() {
+                        "Send" => auto_bounds.0 = true,
+                        "Sync" => auto_bounds.1 = true,
+                        _ => {}
+                    }
+                }
+            }
+            std::rc::Rc::make_mut(&mut self.trait_auto_trait_bounds)
+                .insert(t.ident.to_string(), auto_bounds);
+        }
     }
 
     /// Seed `#[cpp_inherit]` knowledge harvested from sibling inline-rust
@@ -16284,6 +16311,37 @@ impl CodeGen {
         false
     }
 
+    /// The C++ interface-class spelling for a `dyn Trait` trait object, or
+    /// None when the object has no interface class (an `Fn`/`FnMut` bound, a
+    /// std/core trait with no generated facade, or a multi-trait object).
+    /// Used where the trait object appears BEHIND a pointer, which is the one
+    /// position where `dyn Trait` does have a C++ spelling.
+    pub(crate) fn dyn_trait_object_interface_cpp_name(
+        &self,
+        to: &syn::TypeTraitObject,
+    ) -> Option<String> {
+        let trait_paths: Vec<&syn::Path> = to
+            .bounds
+            .iter()
+            .filter_map(|b| match b {
+                syn::TypeParamBound::Trait(tb) => Some(&tb.path),
+                _ => None,
+            })
+            .collect();
+        if trait_paths.len() != 1 {
+            return None;
+        }
+        if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first()
+            && self.try_map_fn_trait(tb).is_some()
+        {
+            return None;
+        }
+        if facade_name_for_trait_path(trait_paths[0]).is_none() {
+            return None;
+        }
+        Some(self.interface_trait_cpp_name(trait_paths[0]))
+    }
+
     fn interface_trait_cpp_name(&self, path: &syn::Path) -> String {
         let Some(last) = path.segments.last() else {
             return String::new();
@@ -26104,7 +26162,17 @@ impl CodeGen {
         } else {
             let visit_scrutinee =
                 self.emit_match_visit_scrutinee(&match_expr.expr, variant_ctx.as_ref());
-            let visit_mutably = self.match_visit_requires_mutable_binding(&match_expr.expr);
+            // A by-value move-out match (`match cmd { E::V { payload } => …}`
+            // over an OWNED local) moves the payload out of the enum. The
+            // std::visit lowering must therefore hand the arm a non-const
+            // alternative reference, or the emitted `std::move(payload)`
+            // degrades to `const T&&` and selects the deleted copy for a
+            // move-only payload (`Box<dyn PollableBase>`). The scrutinee
+            // local's own const-ness is handled by folding it into
+            // `consuming_method_receiver_vars` at block scan time.
+            let visit_mutably = self.match_visit_requires_mutable_binding(&match_expr.expr)
+                || (by_value_match_scrutinee_local(&match_expr.expr).is_some()
+                    && match_arms_bind_fields_by_value(&match_expr.arms));
             self.emit_match_as_visit(
                 &visit_scrutinee,
                 &match_expr.arms,
@@ -35267,6 +35335,22 @@ impl CodeGen {
             .last()
             .map(|seg| seg.ident.to_string())
             .unwrap_or_default();
+        // `Arc::get_mut(&mut a)` / `Rc::get_mut(&mut a)` are the ASSOCIATED
+        // spellings Rust recommends (an inherent `get_mut` on the Deref
+        // target cannot shadow them), and they return `Option<&mut T>` BY
+        // VALUE. Answering "reference-like" here made the caller emit
+        // `auto& opt = Arc<Ev>::get_mut(ev);`, which cannot bind the prvalue
+        // Option. This is the by-shape twin of the method-call carve-out
+        // that already exists in emit_stmt.
+        let owner = path_expr
+            .path
+            .segments
+            .get(path_expr.path.segments.len().wrapping_sub(2))
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if method == "get_mut" && matches!(owner.as_str(), "Arc" | "Rc") {
+            return false;
+        }
         matches!(
             method.as_str(),
             "as_ref"
@@ -35456,6 +35540,21 @@ impl CodeGen {
                     None
                 }
             });
+        // A binding type recorded as the reference PLACEHOLDER (`&mut _` /
+        // `&_`, the fallback the reference-binding promotion installs when the
+        // initializer could not be typed at all) is not knowledge -- it only
+        // records "this is a reference". Peeling it yields `Type::Infer`, which
+        // silently fell out of the resolved path below and emitted a bare
+        // `.field`. That is how `binding.context` was emitted for a local whose
+        // C++ type is `Box<StacklessWakeBinding>`, which Rust auto-derefs and
+        // C++ does not. Demote the placeholder to "unknown" so the
+        // identity-safe dispatch below runs instead.
+        let base_ty = base_ty.filter(|ty| {
+            !matches!(
+                self.peel_reference_paren_group_type(ty),
+                syn::Type::Infer(_)
+            )
+        });
         let Some(base_ty) = base_ty else {
             // UNRESOLVABLE base type. For a call through a multi-segment path
             // (a cross-crate fn like sys::yaml_emitter_initialize — return
@@ -35469,23 +35568,53 @@ impl CodeGen {
                 syn::Expr::Call(call)
                     if matches!(call.func.as_ref(), syn::Expr::Path(p) if p.path.segments.len() >= 2)
             );
+            // A local whose binding type never resolved. The
+            // `lookup_local_binding_cpp_name` probe only answers for locals
+            // that were RENAMED on the way to C++, so an ordinary local
+            // (`let binding = owners[i].bindings[idx].as_mut().unwrap();`,
+            // whose chain starts at a generic fn's raw pointer and therefore
+            // types to nothing) fell out of this arm and got a bare
+            // `binding.context` -- wrong, because the C++ value is a
+            // `Box<StacklessWakeBinding>` that Rust would have auto-derefed.
+            // Accept a snake_case single-segment path as a local too; the
+            // dispatch below is identity-safe (direct member first), so the
+            // only cost of a false positive is a noisier spelling.
             let unknown_local = matches!(
                 self.peel_paren_group_expr(base_expr),
                 syn::Expr::Path(p)
                     if p.path.segments.len() == 1
-                        && self
-                            .lookup_local_binding_cpp_name(&p.path.segments[0].ident.to_string())
-                            .is_some()
-                        && self
-                            .lookup_local_binding_type(&p.path.segments[0].ident.to_string())
-                            .is_none()
+                        && {
+                            let name = p.path.segments[0].ident.to_string();
+                            (self.lookup_local_binding_cpp_name(&name).is_some()
+                                || name
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_lowercase() || c == '_'))
+                                && self.lookup_local_binding_type(&name).is_none_or(|ty| {
+                                    // Same placeholder demotion as above: a
+                                    // recorded `&mut _` carries no struct
+                                    // identity, so the local is still unknown.
+                                    matches!(
+                                        self.peel_reference_paren_group_type(&ty),
+                                        syn::Type::Infer(_)
+                                    )
+                                })
+                        }
             );
             // A subscripted element (`self.iter.as_slice()[index].key`) whose
             // element type didn't resolve: the field may be conflict-renamed
             // (Bucket's `key` -> `key_field`) — same identity-safe dispatch.
             let unknown_index_elem =
                 matches!(self.peel_paren_group_expr(base_expr), syn::Expr::Index(_));
-            if cross_crate_call || unknown_local || unknown_index_elem {
+            // A FIELD whose own type did not resolve (`binding.ticket.slot`,
+            // where `binding` is itself an untypable local): the intermediate
+            // field may be a smart-pointer handle Rust auto-derefs
+            // (`ticket: Arc<StacklessWakeTicket>`), so the same identity-safe
+            // dispatch applies. We are already inside the unresolvable-base
+            // arm, so this adds no case that had a known type.
+            let unknown_field_base =
+                matches!(self.peel_paren_group_expr(base_expr), syn::Expr::Field(_));
+            if cross_crate_call || unknown_local || unknown_index_elem || unknown_field_base {
                 let field_cpp = escape_cpp_keyword(field_name);
                 return Some(format!(
                     "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else if constexpr (requires {{ (__r.{f}_field); }}) {{ return (__r.{f}_field); }} else if constexpr (requires {{ ((*__r).{f}); }}) {{ return ((*__r).{f}); }} else {{ return ((*__r).{f}_field); }} }}({base})",
@@ -36271,6 +36400,42 @@ impl CodeGen {
             }
         }
         self.receiver_expr_has_type_param_type(cur)
+    }
+
+    /// A CONTAINER's `get_mut` returns `Option<&mut V>` BY VALUE in Rust,
+    /// not `&mut V`: `Arc`/`Rc` (associated form), `HashMap`, `BTreeMap`,
+    /// `HashSet`/`BTreeSet`, `Vec`, `VecDeque` and the slice types all do.
+    /// Only the interior-mutability cells (`RefCell`, `Cell`, `Mutex`,
+    /// `UnsafeCell`) hand back a bare `&mut T`. The name-shaped
+    /// `*_mut => reference` heuristic cannot tell the two apart, so it
+    /// reference-bound the container answer and emitted
+    /// `auto& opt = map.get_mut(k);` -- which cannot bind the prvalue
+    /// `Option`. Alias-resolved, because the receiver is normally spelled
+    /// through a crate alias (`FdPollableMap = HashMap<i32, PollableProxy>`).
+    pub(crate) fn receiver_get_mut_returns_option_by_value(&self, receiver: &syn::Expr) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let Some(seg) = tp.path.segments.last() else {
+            return false;
+        };
+        let spelled = seg.ident.to_string();
+        let tail = self.resolve_type_alias_tail(&spelled);
+        matches!(
+            tail,
+            "Arc"
+                | "Rc"
+                | "HashMap"
+                | "BTreeMap"
+                | "HashSet"
+                | "BTreeSet"
+                | "Vec"
+                | "VecDeque"
+        )
     }
 
     fn receiver_is_arc_wrapper_type(&self, receiver: &syn::Expr) -> bool {
@@ -58643,6 +58808,72 @@ fn mut_ref_yielding_method_shape(name: &str) -> bool {
                 | "each_mut"
                 | "iter_mut"
         )
+}
+
+/// A `match` arm that DESTRUCTURES a variant and binds at least one field
+/// by value. Combined with an owned scrutinee this is Rust's move-out
+/// match: the payload leaves the enum. C++ cannot move out of a
+/// `const Alt&` visitor parameter, so both the scrutinee local and the
+/// visitor parameter have to be non-const for such a match.
+pub(crate) fn match_arms_bind_fields_by_value(arms: &[syn::Arm]) -> bool {
+    fn pat_binds_by_value(pat: &syn::Pat) -> bool {
+        match pat {
+            syn::Pat::Ident(pi) => pi.by_ref.is_none() && pi.subpat.is_none(),
+            syn::Pat::Paren(p) => pat_binds_by_value(&p.pat),
+            _ => false,
+        }
+    }
+    arms.iter().any(|arm| match &arm.pat {
+        syn::Pat::Struct(ps) => ps.fields.iter().any(|f| pat_binds_by_value(&f.pat)),
+        syn::Pat::TupleStruct(ts) => ts.elems.iter().any(pat_binds_by_value),
+        _ => false,
+    })
+}
+
+/// The scrutinee spelled as a bare single-segment local path — the only
+/// shape treated as an owned move-out scrutinee. `match &x` / `match &mut x`
+/// parse as `Expr::Reference` and `match self.f` as `Expr::Field`, so both
+/// borrowing forms are excluded by construction.
+pub(crate) fn by_value_match_scrutinee_local(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(p) = expr else {
+        return None;
+    };
+    if p.qself.is_some() || p.path.segments.len() != 1 {
+        return None;
+    }
+    let name = p.path.segments[0].ident.to_string();
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_lowercase() || c == '_')
+        .then_some(name)
+}
+
+/// Locals consumed by a by-value move-out `match` anywhere in the block.
+/// Folded into `consuming_method_receiver_vars`, which the local-qualifier
+/// ladder already reads, so the scrutinee stops being emitted `const auto`.
+fn collect_by_value_match_moved_scrutinee_vars(
+    stmts: &[syn::Stmt],
+) -> std::collections::HashSet<String> {
+    struct Scan {
+        found: std::collections::HashSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Scan {
+        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+            if let Some(name) = by_value_match_scrutinee_local(node.expr.as_ref())
+                && match_arms_bind_fields_by_value(&node.arms)
+            {
+                self.found.insert(name);
+            }
+            syn::visit::visit_expr_match(self, node);
+        }
+    }
+    let mut scan = Scan {
+        found: std::collections::HashSet::new(),
+    };
+    for stmt in stmts {
+        syn::visit::Visit::visit_stmt(&mut scan, stmt);
+    }
+    scan.found
 }
 
 /// Locals used as deref-assignment targets (`*x = …`, possibly through

@@ -633,8 +633,12 @@ impl CodeGen {
         block_profile_mark("collect_reassigned_vars");
         let deref_assigned = collect_deref_assigned_vars(&block.stmts);
         block_profile_mark("collect_deref_assigned_vars");
-        let consuming =
+        let mut consuming =
             self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
+        // A by-value move-out `match` consumes its scrutinee exactly the way a
+        // by-value method receiver does; without this the local stayed
+        // `const auto` and the non-const visitor parameters could not bind.
+        consuming.extend(collect_by_value_match_moved_scrutinee_vars(&block.stmts));
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
         let for_iterated = Self::collect_for_loop_iterated_bare_locals(&block.stmts);
         let method_pairs = Self::collect_bare_local_method_call_pairs(&block.stmts);

@@ -330,6 +330,26 @@ public:
         return *this;
     }
 
+    // @safe - Rust's erasure entry point.
+    //
+    // In the Rust facade (`rusty-rustc`), erasing a closure into a
+    // `rusty::Function<dyn FnMut(..)>` is an ASSOCIATED function --
+    // `Function::<dyn FnMut()>::from_callable(f)` -- not a constructor,
+    // because `dyn Fn` / `dyn FnMut` is not nameable as a C++-style
+    // conversion target. Source written that way lowers to
+    // `Function<void()>::from_callable(lambda)`, which had no facade to
+    // bind to. Admission criteria are exactly the converting
+    // constructor's, which it delegates to, so nothing previously
+    // ill-formed becomes well-formed by a second route.
+    template<typename Callable,
+             typename = std::enable_if_t<
+                 !std::is_same_v<std::decay_t<Callable>, Function> &&
+                 std::is_invocable_r_v<R, Callable, Args...>
+             >>
+    static Function from_callable(Callable&& callable) {
+        return Function(std::forward<Callable>(callable));
+    }
+
     // @safe - Invoke the stored callable
     R operator()(Args... args) {
         if (!vtable_) {
@@ -478,6 +498,17 @@ public:
         Function tmp(std::forward<Callable>(callable));
         *this = std::move(tmp);
         return *this;
+    }
+
+    // @safe - Rust's erasure entry point (const-signature counterpart of
+    // the `Function<R(Args...)>` overload above; see the note there).
+    template<typename Callable,
+             typename = std::enable_if_t<
+                 !std::is_same_v<std::decay_t<Callable>, Function> &&
+                 std::is_invocable_r_v<R, const std::decay_t<Callable>&, Args...>
+             >>
+    static Function from_callable(Callable&& callable) {
+        return Function(std::forward<Callable>(callable));
     }
 
     // @safe - Const invoke - callable must be const-invocable

@@ -4716,6 +4716,23 @@ struct Vec {
     T& front() { return this->as_mut_ptr()[0]; }
     const T& front() const { return this->as_ptr()[0]; }
 
+    // Rust reaches `first`/`last` through `Vec: Deref<Target = [T]>`, so
+    // `vec.last()` really is valid Rust. The port models that deref with the
+    // FREE `rusty::last` / `rusty::last_mut` helpers, which leaves the member
+    // spelling missing whenever the emitter cannot see through the receiver
+    // and lowers a member call anyway (`RefMut<Vec<usize>>` -> `g->last()`).
+    // Slice semantics exactly: shared access is const, `_mut` is the mutable
+    // form, empty is None. Written out directly rather than delegating to
+    // `rusty::last`, which member-PREFERS and would recurse into these.
+    rusty::Option<const T&> last() const {
+        if (this->len_field == 0) return rusty::Option<const T&>(rusty::None);
+        return rusty::Option<const T&>(this->as_ptr()[this->len_field - 1]);
+    }
+    rusty::Option<T&> last_mut() {
+        if (this->len_field == 0) return rusty::Option<T&>(rusty::None);
+        return rusty::Option<T&>(this->as_mut_ptr()[this->len_field - 1]);
+    }
+
 
     static Vec<T, A> new_() {
         return Vec<T, A>(RawVec<T, A>::new_(), static_cast<size_t>(0));
