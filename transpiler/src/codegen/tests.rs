@@ -43084,6 +43084,7 @@ fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
             let ev = ev0;
             let base: Arc<dyn Pollable> = ev.clone();
             let self_weak = Arc::downgrade(&base);
+            let live = Arc::strong_count(&base);
             ev
         }
         "#,
@@ -43095,12 +43096,21 @@ fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
     cg.emit_file(&file, Some("rrr.reactor"));
     assert!(cg.take_codegen_error().is_none());
     let out = cg.into_output();
+    // The recovered owner is observable on every argument-typed smart-pointer
+    // assoc call. `downgrade` itself no longer SHOWS an owner: C11 lowers it
+    // to the runtime's free `rusty::downgrade` (rusty::Arc declares no such
+    // static), so `strong_count` — same recovery, same argument — is what
+    // pins the resolved instantiation here.
     assert!(
-        out.contains("Arc<Pollable>::downgrade(base)"),
+        out.contains("Arc<Pollable>::strong_count(base)"),
         "owner must come from the argument's declared type: {out}"
     );
     assert!(
-        !out.contains("Arc<E>::downgrade"),
+        out.contains("rusty::downgrade(base)"),
+        "downgrade lowers to the runtime free function (C11): {out}"
+    );
+    assert!(
+        !out.contains("Arc<E>::"),
         "stale pre-coercion owner generic: {out}"
     );
 }
@@ -43257,5 +43267,137 @@ fn test_waker_wake_fn_mismatched_callable_contract_rejects() {
     assert!(
         !out.contains("> wake_fn ="),
         "a rejected coercion must not emit the local declaration: {out}"
+    );
+}
+
+/// C11 (checkpoint contract 11) — an authenticated `cpp_ctor` associated fn
+/// IS the C++ constructor, so a call site invokes the constructor. The
+/// historical emission `Type::new_()` names a static that the generated class
+/// never declares ("no member named 'new_' in 'rrr::Reactor'").
+#[test]
+fn test_cpp_ctor_call_lowers_to_the_constructor_and_in_place_box() {
+    let out = transpile_str(
+        r#"
+        pub struct Thing {
+            pub v: i32,
+        }
+        impl Thing {
+            #[cfg_attr(any(), cpp_ctor)]
+            pub fn new(v: i32) -> Thing {
+                Thing { v }
+            }
+        }
+        pub fn make_plain() -> Thing {
+            Thing::new(4i32)
+        }
+        pub fn make_boxed() -> Box<Thing> {
+            Box::new(Thing::new(3i32))
+        }
+        "#,
+    );
+    assert!(
+        out.contains("return Thing(static_cast<int32_t>(4));"),
+        "an unwrapped cpp_ctor call is the constructor call: {out}"
+    );
+    assert!(
+        out.contains("rusty::Box<Thing>::emplace(static_cast<int32_t>(3))"),
+        "Box::new of a cpp_ctor value takes the in-place ctor path: {out}"
+    );
+    assert!(
+        !out.contains("Thing::new_("),
+        "no nonexistent `Type::new_` static may survive: {out}"
+    );
+}
+
+/// C11 negative — an ordinary (unmarked) associated constructor keeps the
+/// static `Type::new_` factory the generated class really declares.
+#[test]
+fn test_unmarked_associated_constructor_keeps_its_static_factory() {
+    let out = transpile_str(
+        r#"
+        pub struct Plain {
+            pub v: i32,
+        }
+        impl Plain {
+            pub fn new(v: i32) -> Plain {
+                Plain { v }
+            }
+        }
+        pub fn make_plain() -> Plain {
+            Plain::new(4i32)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("Plain::new_(static_cast<int32_t>(4))"),
+        "an unmarked factory is not a constructor: {out}"
+    );
+}
+
+/// C11 family — the hand-written runtime facades. `rusty::sync::Weak` is
+/// default-constructed and declares no `new_` (include/rusty/sync/weak.hpp:28);
+/// `downgrade` is the free `rusty::downgrade` (weak.hpp:174/184), not an `Arc`
+/// static. The transpiled rc_port types DO declare both statics and are left
+/// alone.
+#[test]
+fn test_runtime_facade_weak_default_ctor_and_arc_downgrade() {
+    let out = transpile_str(
+        r#"
+        use std::sync::{Arc, Weak};
+        pub trait Thing {
+            fn go(&self);
+        }
+        pub struct Holder {
+            pub self_: Weak<dyn Thing>,
+            pub v: i32,
+        }
+        pub fn holder_make() -> Arc<Holder> {
+            let sp = Arc::new(Holder {
+                self_: Weak::<Holder>::new(),
+                v: 1i32,
+            });
+            return sp;
+        }
+        pub fn holder_weak(strong: &Arc<Holder>) -> Weak<Holder> {
+            Arc::downgrade(strong)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::sync::Weak<Thing>()"),
+        "sync Weak is default-constructed: {out}"
+    );
+    assert!(
+        !out.contains("sync::Weak<Thing>::new_()"),
+        "rusty::sync::Weak declares no `new_` static: {out}"
+    );
+    assert!(
+        out.contains("rusty::downgrade(strong)"),
+        "downgrade is the free runtime function: {out}"
+    );
+    assert!(
+        !out.contains("::downgrade(strong)") || out.contains("rusty::downgrade(strong)"),
+        "no Arc static downgrade may survive: {out}"
+    );
+}
+
+/// C11 family negative — an rc-provenance `Weak` keeps `new_`: the transpiled
+/// rc_port DOES declare that static, so collapsing it would be wrong.
+#[test]
+fn test_rc_provenance_weak_keeps_its_static_factory() {
+    let out = transpile_str(
+        r#"
+        use std::rc::{Rc, Weak};
+        pub struct Node {
+            pub parent: Weak<Node>,
+        }
+        pub fn node_make() -> Node {
+            Node { parent: Weak::<Node>::new() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rc::Weak<Node>::new_()"),
+        "rc_port's Weak keeps its static factory: {out}"
     );
 }
