@@ -30040,12 +30040,24 @@ impl CodeGen {
         source_expr: &str,
     ) -> String {
         let name = escape_cpp_keyword(&ident.to_string());
+        // GENERIC lambda, deliberately: `if constexpr` only skips INSTANTIATION
+        // of a discarded branch inside a template. In a non-template context
+        // every branch is still fully checked, so a concrete scrutinee would
+        // hard-error on the branch that does not apply (`E::V` for a variant
+        // lowering, `enum_variant_tags<E>::V` for an enum class). Taking the
+        // scrutinee as `auto&&` makes the body dependent, so the branches that
+        // do not apply are never checked. Measured: the non-generic form fails
+        // to compile in a plain function body.
         format!(
-            "([&]() -> bool {{ using _RustyArmTy = std::remove_cvref_t<decltype(\
-             rusty::detail::deref_if_pointer({src}))>; \
+            "([&](auto&& __rusty_arm) -> bool {{ using _RustyArmTy = \
+             std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(__rusty_arm))>; \
              if constexpr (requires {{ _RustyArmTy::{name}; }}) {{ \
-             return rusty::detail::deref_if_pointer({src}) == _RustyArmTy::{name}; }} \
-             else {{ return true; }} }}())",
+             return rusty::detail::deref_if_pointer(__rusty_arm) == _RustyArmTy::{name}; }} \
+             else if constexpr (requires {{ \
+             typename rusty::detail::enum_variant_tags<_RustyArmTy>::{name}; }}) {{ \
+             return rusty::detail::variant_holds<\
+             typename rusty::detail::enum_variant_tags<_RustyArmTy>::{name}>(__rusty_arm); }} \
+             else {{ return true; }} }}({src}))",
             src = source_expr,
             name = name
         )

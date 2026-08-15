@@ -1,6 +1,7 @@
 #ifndef RUSTY_NUM_HPP
 #define RUSTY_NUM_HPP
 
+#include <rusty/enum_tags.hpp>   // rusty::detail::enum_variant_tags
 #include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <bit>
 #include <compare>   // std::strong_ordering etc. for NonZero::operator<=> (~L73); relies otherwise on transitive leak
@@ -136,6 +137,22 @@ using FpCategory = std::variant<
     FpCategory_Zero,
     FpCategory_Subnormal,
     FpCategory_Normal>;
+
+// Enum-lowering channel (see rusty::detail::enum_variant_tags): FpCategory
+// lowers to std::variant, so a foreign match arm naming `Nan`/`Zero`/… cannot
+// refute with the enum-class form.
+} // namespace rusty::num
+namespace rusty { namespace detail {
+template<>
+struct enum_variant_tags<::rusty::num::FpCategory> {
+    using Nan = ::rusty::num::FpCategory_Nan;
+    using Infinite = ::rusty::num::FpCategory_Infinite;
+    using Zero = ::rusty::num::FpCategory_Zero;
+    using Subnormal = ::rusty::num::FpCategory_Subnormal;
+    using Normal = ::rusty::num::FpCategory_Normal;
+};
+} } // namespace rusty::detail
+namespace rusty::num {
 
 /// std::num::ParseIntError / ParseFloatError ports — opaque error markers
 /// (serde_yaml threads ParseIntError through `from_str_radix` fn pointers

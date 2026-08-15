@@ -1,6 +1,7 @@
 #ifndef RUSTY_NET_HPP
 #define RUSTY_NET_HPP
 
+#include <rusty/enum_tags.hpp>   // rusty::detail::enum_variant_tags
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -142,6 +143,22 @@ struct SocketAddr_V6 {
 
 using SocketAddr = std::variant<SocketAddr_V4, SocketAddr_V6>;
 
+// Enum-lowering channel (see rusty::detail::enum_variant_tags): these lower to
+// std::variant, so a foreign match arm naming `V4`/`V6` cannot refute with the
+// enum-class form. Declared beside the enums so the two cannot drift apart.
 } // namespace rusty::net
+
+namespace rusty { namespace detail {
+template<>
+struct enum_variant_tags<::rusty::net::IpAddr> {
+    using V4 = ::rusty::net::IpAddr_V4;
+    using V6 = ::rusty::net::IpAddr_V6;
+};
+template<>
+struct enum_variant_tags<::rusty::net::SocketAddr> {
+    using V4 = ::rusty::net::SocketAddr_V4;
+    using V6 = ::rusty::net::SocketAddr_V6;
+};
+} } // namespace rusty::detail
 
 #endif // RUSTY_NET_HPP

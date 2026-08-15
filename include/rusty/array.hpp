@@ -1,6 +1,7 @@
 #ifndef RUSTY_ARRAY_HPP
 #define RUSTY_ARRAY_HPP
 
+#include <rusty/enum_tags.hpp>      // rusty::detail::enum_variant_tags
 #include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <string>     // std::to_string (rusty::index panic message)
 #include <array>
@@ -1930,6 +1931,18 @@ struct Bound_Excluded {
 
 template<typename T>
 using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded<T>>;
+
+// Enum-lowering channel (see rusty::detail::enum_variant_tags): a match arm
+// naming `Unbounded`/`Included`/`Excluded` on a Bound it did not declare
+// cannot know this enum lowered to a std::variant rather than an enum class.
+namespace detail {
+template<typename T>
+struct enum_variant_tags<Bound<T>> {
+    using Unbounded = Bound_Unbounded<T>;
+    using Included = Bound_Included<T>;
+    using Excluded = Bound_Excluded<T>;
+};
+} // namespace detail
 
 // Value-position factories for Rust's `Bound::…` variant constructors —
 // `Bound` is an alias template over std::variant, so `Bound::Excluded(x)`

@@ -1,6 +1,7 @@
 #ifndef RUSTY_HPP
 #define RUSTY_HPP
 
+#include <rusty/enum_tags.hpp>   // rusty::detail::enum_variant_tags
 #include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <algorithm>
 #include <array>

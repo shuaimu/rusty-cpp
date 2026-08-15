@@ -43160,9 +43160,22 @@ fn foreign_unit_variant_arm_is_tested_not_bound() {
             out.contains(&format!("requires {{ _RustyArmTy::{}; }}", variant)),
             "arm `{variant}` must probe for the enumerator before comparing:\n{out}"
         );
+        // …and, when the enum lowered to a std::variant instead, consult the
+        // enum-lowering channel rather than falling straight through to the
+        // conservative always-match.
         assert!(
-            out.contains(&format!("_RustyArmTy::{}; }}", variant)),
-            "arm `{variant}` must compare against the enumerator when it exists:\n{out}"
+            out.contains(&format!(
+                "typename rusty::detail::enum_variant_tags<_RustyArmTy>::{};",
+                variant
+            )),
+            "arm `{variant}` must consult the enum-lowering channel:\n{out}"
         );
     }
+    // The probe must be a GENERIC lambda: `if constexpr` only skips
+    // instantiation inside a template, so a concrete scrutinee would otherwise
+    // hard-error on the branch that does not apply.
+    assert!(
+        out.contains("[&](auto&& __rusty_arm) -> bool"),
+        "the arm probe must take its scrutinee as auto&& so the branches are dependent:\n{out}"
+    );
 }
