@@ -3204,7 +3204,15 @@ impl CodeGen {
                     // Returns a wrapper struct supporting both range-for and remaining().
                     if !merged_methods.contains("iter_names") {
                         self.writeln(&format!(
-                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (FLAGS[i].name().empty()) {{ continue; }} const auto flag = FLAGS[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ v.push(std::make_tuple(FLAGS[i].name(), flag)); rem.remove(flag); }} }} return IterNames{{std::move(v), rem}}; }}",
+                            // `next()` is what makes this a Rust ITERATOR rather than
+                            // just a range. Rust's `IterNames` is an Iterator, so
+                            // `for (name, _) in &mut iter` advances it IN PLACE; without
+                            // the option protocol `has_option_like_next_v` is false, the
+                            // `&mut` lowering falls through to `rusty::iter_mut`'s
+                            // begin/end arm, and that asserts ("iter_mut requires mutable
+                            // iterator items") because `items.begin()` on a const method
+                            // yields const items. begin/end stay for plain range-for.
+                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; size_t __pos = 0; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} rusty::Option<std::tuple<std::string_view, {n}>> next() {{ if (__pos >= items.len()) {{ return rusty::None; }} return rusty::Option<std::tuple<std::string_view, {n}>>(items[__pos++]); }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (FLAGS[i].name().empty()) {{ continue; }} const auto flag = FLAGS[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ v.push(std::make_tuple(FLAGS[i].name(), flag)); rem.remove(flag); }} }} return IterNames{{std::move(v), rem}}; }}",
                             n = n
                         ));
                     }
