@@ -43104,3 +43104,55 @@ fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
         "stale pre-coercion owner generic: {out}"
     );
 }
+
+/// H4 / checkpoint contract 4 — the forward declaration of a non-pub
+/// interface trait must live in the SAME anonymous namespace as its
+/// definition.
+///
+/// Visibility gating was applied when the class was defined
+/// (`wrap_in_anon_ns = !visibility_is_any_pub(&t.vis)`) but not when it was
+/// forward-declared, so a private trait produced TWO entities: `class
+/// EventCore;` at namespace scope and `namespace { class EventCore { … }; }`
+/// further down. Root-scope adapters then inherited from the incomplete
+/// root-scope one. Anonymous namespaces in a single TU unify, so declaring
+/// the forward decl in `namespace { }` makes decl and definition one entity
+/// and the implicit using-directive keeps root-scope references working.
+#[test]
+fn test_non_pub_interface_trait_forward_decl_shares_the_anon_namespace() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub trait Exported { fn ping(&self); }
+        trait Private { fn poll(&self); }
+        pub struct Ev { pub v: i32 }
+        impl Private for Ev { fn poll(&self) {} }
+        impl Exported for Ev { fn ping(&self) {} }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // (pos) the private trait's forward decl is anon-namespaced …
+    assert!(
+        out.contains("namespace {\nclass Private;\n}"),
+        "private interface trait forward decl must share the anon namespace: {out}"
+    );
+    // … and no root-scope declaration of it survives to compete with the
+    // definition (the only other `class Private` line is the definition's).
+    assert!(
+        !out.contains("\nclass Private;\n\n") && !out.contains("\nclass Private;\nexport"),
+        "root-scope forward decl of a private interface trait remains: {out}"
+    );
+    // (neg) a pub trait keeps its exported root-scope forward declaration.
+    assert!(
+        out.contains("export class Exported;"),
+        "pub interface trait forward decl must stay at namespace scope: {out}"
+    );
+    assert!(
+        !out.contains("namespace {\nexport class"),
+        "`export` is ill-formed inside an anonymous namespace: {out}"
+    );
+}

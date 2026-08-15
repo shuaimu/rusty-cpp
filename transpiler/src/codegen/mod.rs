@@ -11950,6 +11950,19 @@ impl CodeGen {
             syn::TraitItem::Type(associated) => Some(associated.ident.to_string()),
             _ => None,
         }));
+        // …and identical in VISIBILITY GATING too (H4 / checkpoint contract
+        // 4). The definition pass wraps a non-pub trait's class in an
+        // anonymous namespace (emit_items.rs, `wrap_in_anon_ns =
+        // !visibility_is_any_pub(&t.vis)`); a forward declaration emitted at
+        // namespace scope is then a DIFFERENT entity from the definition, and
+        // root-scope adapters inheriting from it see an incomplete base.
+        // Anonymous namespaces in one TU unify, so declaring it here too
+        // makes decl and definition one class, and the implicit
+        // using-directive keeps every root-scope reference working.
+        let wrap_in_anon_ns = !Self::visibility_is_any_pub(&t.vis) && export_prefix.is_empty();
+        if wrap_in_anon_ns {
+            self.writeln("namespace {");
+        }
         if params.is_empty() {
             self.writeln(&format!("{}class {};", export_prefix, name));
         } else {
@@ -11963,6 +11976,9 @@ impl CodeGen {
                     .join(", ")
             ));
             self.writeln(&format!("class {};", name));
+        }
+        if wrap_in_anon_ns {
+            self.writeln("}");
         }
     }
 
