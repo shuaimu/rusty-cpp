@@ -3763,3 +3763,100 @@ pub fn make() -> RpcError { crate::errors::make_error(7i32) }
         "the contract is FLAT: items do not nest under the child module: {consumer}"
     );
 }
+
+/// B — a renamed callee is reachable from a sibling file. The crate-wide
+/// cpp_name audit used to be a textual token veto: any file other than the
+/// owner that so much as MENTIONED a cpp_name source or C++ identity was
+/// rejected before a single byte was written ("cross-file calls and shadowing
+/// are not supported"). A cross-file REFERENCE now resolves to the owner's
+/// audited C++ identity (all crate modules share the configured C++
+/// namespace, so the call site spells `::<ns>::<audited name>` and C++
+/// overload resolution picks the member of the owner's overload set).
+/// SHADOWING — a non-owner file that DECLARES the identity — still rejects.
+#[test]
+fn test_cross_file_audited_name_resolves_to_the_owner_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='cross_file_cpp_name'\nversion='0.0.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub mod serializable;\npub mod client;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/serializable.rs"),
+        r#"
+pub struct Sink { pub fd: i32 }
+
+#[cfg_attr(any(), cpp_name(make_sink_proxy))]
+pub fn make_sink_proxy_fd(fd: i32) -> Sink { Sink { fd } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/client.rs"),
+        r#"
+use crate::serializable::Sink;
+
+pub fn open(fd: i32) -> Sink { crate::serializable::make_sink_proxy_fd(fd) }
+"#,
+    )
+    .unwrap();
+
+    let out_dir = root.join("out");
+    let output = transpiler_bin()
+        .args(["--crate", root.join("Cargo.toml").to_str().unwrap()])
+        .args(["--output-dir", out_dir.to_str().unwrap()])
+        .args(["--cxx-namespace", "rrr"])
+        .output()
+        .expect("failed to run cross-file cpp_name probe");
+    assert!(
+        output.status.success(),
+        "a cross-file call to a renamed item must not reject: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let caller = std::fs::read_to_string(out_dir.join("cross_file_cpp_name.client.cppm")).unwrap();
+    assert!(
+        caller.contains("::rrr::make_sink_proxy("),
+        "the caller emits the OWNER's audited identity: {caller}"
+    );
+    assert!(
+        !caller.contains("make_sink_proxy_fd"),
+        "the Rust spelling must not survive at the C++ call site: {caller}"
+    );
+
+    // (neg) shadowing still rejects, atomically and before output.
+    std::fs::write(
+        root.join("src/client.rs"),
+        r#"
+pub fn make_sink_proxy_fd(fd: i32) -> i32 { fd }
+"#,
+    )
+    .unwrap();
+    let shadow_out = root.join("out_shadow");
+    let output = transpiler_bin()
+        .args(["--crate", root.join("Cargo.toml").to_str().unwrap()])
+        .args(["--output-dir", shadow_out.to_str().unwrap()])
+        .args(["--cxx-namespace", "rrr"])
+        .output()
+        .expect("failed to run cpp_name shadowing probe");
+    assert!(!output.status.success(), "shadowing must reject");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stderr.contains("shadowing an audited identity")
+            || stdout.contains("shadowing an audited identity"),
+        "diagnostic must name the shadowing: {stdout}{stderr}"
+    );
+    assert!(
+        !shadow_out.join("cross_file_cpp_name.client.cppm").exists(),
+        "a rejected crate must not write output"
+    );
+}

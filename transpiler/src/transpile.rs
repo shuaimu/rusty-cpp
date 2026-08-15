@@ -631,6 +631,10 @@ pub struct TranspileOptions {
     /// module that imports a crate trait still needs to know its interface
     /// class exists.
     pub cross_file_traits: Vec<syn::ItemTrait>,
+    /// B: crate-wide (Rust name -> audited C++ name) for cpp_name identities
+    /// owned by ANY file of the crate, so a caller in another file emits the
+    /// owner's identity instead of the crate audit rejecting the reference.
+    pub cross_file_cpp_name_targets: std::collections::BTreeMap<String, String>,
     /// Cross-file impl blocks collected during a crate-mode pre-pass —
     /// every `Item::Impl` across the crate. Used by the per-file codegen
     /// to (a) inject forward declarations for cross-module orphan impl
@@ -1870,6 +1874,7 @@ impl Default for TranspileOptions {
             inline_rust_block: false,
             cross_file_enums: Vec::new(),
             cross_file_traits: Vec::new(),
+            cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
@@ -2548,6 +2553,7 @@ fn transpile_full_with_options_impl(
     codegen.inline_rust_block = options.inline_rust_block;
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
     codegen.set_cross_file_traits(&options.cross_file_traits);
+    codegen.set_cross_file_cpp_name_targets(options.cross_file_cpp_name_targets.clone());
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());

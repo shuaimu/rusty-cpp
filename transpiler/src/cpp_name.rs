@@ -1621,6 +1621,77 @@ pub(crate) fn source_mentions_reserved_marker(source: &str) -> bool {
     }
 }
 
+/// B: every namespace-scope item name a source unit DECLARES (recursing into
+/// inline modules). Used by the crate-wide audit to tell a cross-file
+/// REFERENCE — which now resolves to the owner's audited C++ identity — from
+/// SHADOWING, which still rejects.
+fn declared_item_names_of_source(source: &str) -> Result<BTreeSet<String>, String> {
+    let file = syn::parse_file(source).map_err(|error| error.to_string())?;
+    fn walk(items: &[syn::Item], out: &mut BTreeSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Fn(f) => {
+                    out.insert(semantic_ident(&f.sig.ident));
+                }
+                syn::Item::Struct(s) => {
+                    out.insert(semantic_ident(&s.ident));
+                }
+                syn::Item::Enum(e) => {
+                    out.insert(semantic_ident(&e.ident));
+                }
+                syn::Item::Trait(t) => {
+                    out.insert(semantic_ident(&t.ident));
+                }
+                syn::Item::Type(t) => {
+                    out.insert(semantic_ident(&t.ident));
+                }
+                syn::Item::Const(c) => {
+                    out.insert(semantic_ident(&c.ident));
+                }
+                syn::Item::Static(st) => {
+                    out.insert(semantic_ident(&st.ident));
+                }
+                syn::Item::Mod(m) => {
+                    out.insert(semantic_ident(&m.ident));
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(&file.items, &mut out);
+    Ok(out)
+}
+
+/// B: the crate-wide (Rust name -> audited C++ name) map, so a file that
+/// CALLS a sibling's renamed item can emit the owner's identity. Collected
+/// with the same authenticated `collect` the owner's own plan uses.
+pub(crate) fn crate_wide_function_targets(
+    sources: &[(std::path::PathBuf, String)],
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (_, source) in sources {
+        if !source_mentions_reserved_marker(source) {
+            continue;
+        }
+        let Ok(file) = syn::parse_file(source) else {
+            continue;
+        };
+        let Ok(plan) = collect(&file) else {
+            continue;
+        };
+        for rust_name in plan.rust_names() {
+            if let Some(target) = plan.function_name(&rust_name) {
+                out.insert(rust_name, target.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Crate mode emits each source file as a separate named module.  One overload
 /// set must therefore be owned by exactly one source file; cross-module pieces
 /// cannot see one another's declarations reliably.
@@ -1739,13 +1810,35 @@ pub(crate) fn preflight_crate_sources_with_cpp_inherit_provenance(
                 _ => None,
             })
         }
+        // B: a cross-file MENTION is not automatically a violation. A call to
+        // a renamed sibling item resolves to the owner's C++ identity and
+        // emits the owner's audited name (the caller's emission is rewritten;
+        // see CodeGen::cpp_name_call_target and the crate-wide
+        // foreign-target map). What the audit must still forbid is
+        // SHADOWING: a non-owner file that DECLARES the identity, because
+        // then the same spelling names two different entities and the call
+        // site's rewrite would silently retarget it.
         if let Some(identity) = find_forbidden(tokens, &forbidden) {
-            let owner = &owner_by_identity[&identity];
-            return Err(format!(
-                "cpp_name source or C++ identity `{identity}` owned by {} is also mentioned in {}; cross-file calls and shadowing are not supported",
-                owner.display(),
-                path.display()
-            ));
+            let declared = declared_item_names_of_source(source).map_err(|error| {
+                format!(
+                    "{}: cpp_name could not audit cross-file identities: {error}",
+                    path.display()
+                )
+            })?;
+            let shadowed = owner_by_identity
+                .iter()
+                .filter(|(_, owner)| *owner != path)
+                .map(|(identity, _)| identity)
+                .find(|identity| declared.contains(*identity));
+            if let Some(identity) = shadowed {
+                let owner = &owner_by_identity[identity];
+                return Err(format!(
+                    "cpp_name source or C++ identity `{identity}` owned by {} is also DECLARED in {}; shadowing an audited identity is not supported",
+                    owner.display(),
+                    path.display()
+                ));
+            }
+            let _ = identity;
         }
     }
     Ok(any)
@@ -2126,6 +2219,9 @@ mod tests {
 
     #[test]
     fn crate_preflight_rejects_cross_file_identity_mentions() {
+        // B: a cross-file CALL is a reference to the owner's identity, not a
+        // violation — it resolves to the owner's audited C++ name at the call
+        // site (see CodeGen::cpp_name_call_target and the crate-wide map).
         let sources = vec![
             (
                 std::path::PathBuf::from("owner.rs"),
@@ -2136,7 +2232,42 @@ mod tests {
                 "fn caller() { crate::owner::rust_name(1); }".to_string(),
             ),
         ];
-        assert!(preflight_crate_sources(&sources).is_err());
+        preflight_crate_sources(&sources)
+            .expect("a cross-file call to an audited identity resolves to its owner");
+
+        // SHADOWING still rejects: a non-owner file that DECLARES the identity
+        // makes one spelling name two entities, and the call-site rewrite
+        // would silently retarget it.
+        let shadowed = vec![
+            (
+                std::path::PathBuf::from("owner.rs"),
+                "#[cfg_attr(any(), cpp_name(overloaded))] fn rust_name(value: i32) {}".to_string(),
+            ),
+            (
+                std::path::PathBuf::from("shadow.rs"),
+                "fn rust_name(value: bool) {}".to_string(),
+            ),
+        ];
+        let error = preflight_crate_sources(&shadowed)
+            .expect_err("shadowing an audited identity must reject");
+        assert!(error.contains("shadowing an audited identity"), "{error}");
+
+        // Shadowing the C++ TARGET side rejects for the same reason.
+        let shadowed_target = vec![
+            (
+                std::path::PathBuf::from("owner.rs"),
+                "#[cfg_attr(any(), cpp_name(overloaded))] fn rust_name(value: i32) {}".to_string(),
+            ),
+            (
+                std::path::PathBuf::from("shadow.rs"),
+                "fn overloaded(value: bool) {}".to_string(),
+            ),
+        ];
+        assert!(
+            preflight_crate_sources(&shadowed_target)
+                .expect_err("shadowing the C++ target must reject")
+                .contains("shadowing an audited identity")
+        );
 
         let split_overload = vec![
             (

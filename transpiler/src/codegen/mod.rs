@@ -2886,6 +2886,12 @@ pub struct CodeGen {
     /// interface class in the sibling module's purview, so an owning
     /// `Box<dyn Trait>` keeps its target instead of erasing to `void*`.
     pub(crate) cross_file_trait_tails: HashSet<String>,
+    /// B: audited cpp_name identities owned by OTHER files of this crate. A
+    /// call to one of them emits the owner's C++ identity (C++ overload
+    /// resolution then picks the member of the owner's overload set); the
+    /// caller never DECLARES those names, so this map is deliberately
+    /// separate from `cpp_name_plan`, which drives declarations.
+    pub(crate) cross_file_cpp_name_targets: std::collections::BTreeMap<String, String>,
     /// Every C++ module name produced in the current crate-mode run
     /// (e.g. `{"btree_port.btree.node", "btree_port.btree.map", …}`).
     /// Populated from `TranspileOptions::crate_module_names` before
@@ -3319,6 +3325,7 @@ impl CodeGen {
             auto_cross_module_by_value_rewrite_fields: HashSet::new(),
             cross_file_enums: Vec::new(),
             cross_file_trait_tails: HashSet::new(),
+            cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             crate_module_names: HashSet::new(),
             sibling_modules_imported: HashSet::new(),
             glob_imported_enum_tails: HashSet::new(),
@@ -5505,6 +5512,14 @@ impl CodeGen {
     /// Only the names are kept: the interface class itself is emitted by the
     /// declaring module, and this module reaches it through the
     /// using-declaration its own `use` already produces.
+    /// B: seed the crate-wide audited-name map (see the field docs).
+    pub fn set_cross_file_cpp_name_targets(
+        &mut self,
+        targets: std::collections::BTreeMap<String, String>,
+    ) {
+        self.cross_file_cpp_name_targets = targets;
+    }
+
     pub fn set_cross_file_traits(&mut self, traits: &[syn::ItemTrait]) {
         self.cross_file_trait_tails = traits.iter().map(|t| t.ident.to_string()).collect();
     }
@@ -5650,7 +5665,9 @@ impl CodeGen {
     }
 
     fn cpp_name_call_target(&self, path: &syn::Path) -> Option<String> {
-        if self.cpp_name_plan.is_empty() || path.leading_colon.is_some() {
+        if (self.cpp_name_plan.is_empty() && self.cross_file_cpp_name_targets.is_empty())
+            || path.leading_colon.is_some()
+        {
             return None;
         }
         let last = path.segments.last()?;
@@ -5659,7 +5676,23 @@ impl CodeGen {
             .strip_prefix("r#")
             .unwrap_or(&rust_spelling)
             .to_string();
-        let target = self.cpp_name_plan.function_name(&rust_name)?;
+        // B: the identity may be owned by this file or by a sibling file of
+        // the crate; either way the call site spells the owner's audited
+        // name. A name this file DECLARES is never taken from the sibling
+        // map — the crate audit rejects that shadowing before output.
+        let own_target = self.cpp_name_plan.function_name(&rust_name);
+        let foreign_target = own_target.is_none().then(|| {
+            (!self.local_declared_types.contains(&rust_name)
+                && !self.declared_item_names.contains(&rust_name))
+            .then(|| {
+                self.cross_file_cpp_name_targets
+                    .get(&rust_name)
+                    .map(String::as_str)
+            })
+            .flatten()
+        });
+        let target = own_target.or(foreign_target.flatten())?;
+        let from_sibling_owner = own_target.is_none();
         let resolves_to_root = match path.segments.len() {
             1 => {
                 self.module_stack.is_empty()
@@ -5684,7 +5717,19 @@ impl CodeGen {
                     && prefix.len() == self.module_stack.len()
             }
         };
-        if !resolves_to_root {
+        // B: a sibling file's audited identity is reached as
+        // `crate::<child>::<name>` (or bare, through a `use`). The owner's
+        // C++ identity is the same either way — all crate modules share the
+        // configured C++ namespace — so accept the crate-child path shape
+        // when the target came from the crate-wide map.
+        let resolves_to_sibling_owner = from_sibling_owner
+            && path.segments.len() >= 2
+            && path.segments[0].ident == "crate"
+            && path.segments.len() == 3
+            && self
+                .resolve_crate_root_child_module_path(&path.segments[1].ident.to_string())
+                .is_some();
+        if !resolves_to_root && !resolves_to_sibling_owner {
             return None;
         }
         let mut rendered = if let Some(namespace) = self.cxx_namespace.as_deref() {

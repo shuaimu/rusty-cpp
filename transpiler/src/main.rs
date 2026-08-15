@@ -2794,6 +2794,9 @@ fn prepare_crate_codegen(
     options.cross_file_enums = cross_file_enums;
     options.cross_file_impl_blocks = cross_file_impl_blocks;
     options.cross_file_traits = cross_file_traits;
+    // B: the crate-wide audited-name map, so a caller in one file emits the
+    // owner's C++ identity for a renamed sibling item.
+    options.cross_file_cpp_name_targets = crate::cpp_name::crate_wide_function_targets(source_units);
     options.cross_file_structs = cross_file_structs;
     options.cross_file_type_aliases = cross_file_type_aliases;
     options.crate_module_names = crate_module_names;
@@ -10605,6 +10608,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
         cross_file_traits: Vec::new(),
+        cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
@@ -11292,6 +11296,7 @@ fn main() {
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
         cross_file_traits: Vec::new(),
+        cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
