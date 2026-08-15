@@ -10526,7 +10526,9 @@ impl CodeGen {
                     }
                     emitted_any = true;
                 }
-                syn::Item::Trait(t) if self.interface_traits => {
+                syn::Item::Trait(t)
+                    if self.interface_traits
+                        && Self::trait_interface_is_plain_forward_declarable(t) => {
                     // A trait lowers to an abstract interface class, and
                     // anything holding `Arc<dyn T>` / `Box<dyn T>` names
                     // that class — possibly before it is defined, since
@@ -10885,7 +10887,9 @@ impl CodeGen {
                     }
                     emitted_any = true;
                 }
-                syn::Item::Trait(t) if self.interface_traits => {
+                syn::Item::Trait(t)
+                    if self.interface_traits
+                        && Self::trait_interface_is_plain_forward_declarable(t) => {
                     // A trait lowers to an abstract interface class, and
                     // anything holding `Arc<dyn T>` / `Box<dyn T>` names
                     // that class — possibly before it is defined, since a
@@ -14615,6 +14619,34 @@ impl CodeGen {
     /// shape; false for the implicit-private form.
     fn visibility_is_any_pub(vis: &syn::Visibility) -> bool {
         matches!(vis, syn::Visibility::Public(_) | syn::Visibility::Restricted(_))
+    }
+
+    /// Whether a trait's interface class can be forward-declared as a plain
+    /// `class X;` at namespace scope, which is the only shape the
+    /// forward-declaration pass can emit correctly.
+    ///
+    /// A forward declaration that disagrees with the definition is worse
+    /// than none at all — it introduces a SECOND entity:
+    ///   - a non-`pub` trait defines its class inside an ANONYMOUS namespace,
+    ///     so a namespace-scope declaration makes the name ambiguous;
+    ///   - a trait with type params or associated types defines a class
+    ///     TEMPLATE, unless every method is unemittable and it degrades to
+    ///     the plain marker-class shape — a declaration cannot tell those
+    ///     apart, and `template<class T> class X;` before `class X {}` is
+    ///     "redefinition as a different kind of symbol".
+    /// The motivating case (a plain object-safe trait held as
+    /// `Arc<dyn T>`/`Box<dyn T>`) is exactly the shape that survives.
+    fn trait_interface_is_plain_forward_declarable(t: &syn::ItemTrait) -> bool {
+        Self::visibility_is_any_pub(&t.vis)
+            && !t
+                .generics
+                .params
+                .iter()
+                .any(|p| matches!(p, syn::GenericParam::Type(_)))
+            && !t
+                .items
+                .iter()
+                .any(|i| matches!(i, syn::TraitItem::Type(_)))
     }
 
 
