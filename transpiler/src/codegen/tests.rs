@@ -42724,3 +42724,125 @@ fn test_explicit_associated_call_does_not_borrow_unrelated_owner_arg_types() {
         "unrelated owner's parameter type leaked into the field init: {out}"
     );
 }
+
+/// H2 / checkpoint contract 2 — absolute type-map qualification.
+///
+/// A crate-declared type alias whose user-type-map target is an ABSOLUTE
+/// single-segment global name (`ReactorFiberContext = "::srpc_fiber_ctx"`)
+/// collides with its own alias name (`type srpc_fiber_ctx = …`). The
+/// cxx-namespace close requalifies every declared item's `::<item>`
+/// references to `::<ns>::<item>` — which used to hit the alias's own RHS
+/// and produce the self-referential `using srpc_fiber_ctx =
+/// ::rrr::srpc_fiber_ctx;`, making the real global C struct unreachable.
+/// The absolute target must survive verbatim (threading.cpp precedent:
+/// `::pthread_spinlock_t` survives because it is not also a declared item).
+#[test]
+fn test_absolute_type_map_target_survives_cxx_namespace_requalify() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert(
+        "rusty::ReactorFiberContext".to_string(),
+        "::srpc_fiber_ctx".to_string(),
+    );
+    type_map.mappings.insert(
+        "rusty::ReactorFiberState".to_string(),
+        "::srpc_fiber".to_string(),
+    );
+    let file: syn::File = syn::parse_str(
+        r#"
+        type srpc_fiber_ctx = rusty::ReactorFiberContext;
+        type srpc_fiber = rusty::ReactorFiberState;
+        "#,
+    )
+    .unwrap();
+    // Production crate-mode shape: module name + --cxx-namespace, no
+    // crate-name purview wrap (main.rs passes crate_name=None per-file).
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using srpc_fiber_ctx = ::srpc_fiber_ctx;"),
+        "absolute type-map target must survive the requalify verbatim: {out}"
+    );
+    assert!(
+        out.contains("using srpc_fiber = ::srpc_fiber;"),
+        "absolute type-map target must survive the requalify verbatim: {out}"
+    );
+    assert!(
+        !out.contains("::rrr::srpc_fiber"),
+        "self-referential alias produced by requalifying the absolute target: {out}"
+    );
+}
+
+/// H2 negative control — a genuine crate-root self-reference of a
+/// NON-colliding name must still be requalified into the cxx namespace.
+/// Only names that are BOTH crate-declared items AND absolute-target
+/// leaves are exempted.
+#[test]
+fn test_non_colliding_crate_root_refs_still_requalify_under_cxx_namespace() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert(
+        "rusty::ReactorFiberContext".to_string(),
+        "::srpc_fiber_ctx".to_string(),
+    );
+    let file: syn::File = syn::parse_str(
+        r#"
+        type srpc_fiber_ctx = rusty::ReactorFiberContext;
+        pub fn helper() -> i32 {
+            42
+        }
+        pub fn caller() -> i32 {
+            helper()
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    // The colliding alias keeps its absolute target …
+    assert!(
+        out.contains("using srpc_fiber_ctx = ::srpc_fiber_ctx;"),
+        "{out}"
+    );
+    // … while a global-qualified self-reference to the crate's own free fn
+    // is still pulled into the namespace.
+    assert!(
+        !out.contains("return ::helper()"),
+        "non-colliding crate-root ref must requalify to ::rrr::helper: {out}"
+    );
+}
+
+/// H2 twin surface — the crate-name purview wrap
+/// (`wrap_module_purview_in_crate_namespace`, Rules 3/4) runs the same
+/// textual requalify over declared item names when a crate is
+/// universally namespace-wrapped. A crate-declared alias whose type-map
+/// target is an absolute single-segment global name must be exempted
+/// there too.
+#[test]
+fn test_absolute_type_map_target_survives_crate_purview_wrap() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert(
+        "rusty::ReactorFiberContext".to_string(),
+        "::srpc_fiber_ctx".to_string(),
+    );
+    let file: syn::File = syn::parse_str(
+        r#"
+        type srpc_fiber_ctx = rusty::ReactorFiberContext;
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_crate_name("rrr");
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using srpc_fiber_ctx = ::srpc_fiber_ctx;"),
+        "absolute type-map target must survive the purview-wrap requalify: {out}"
+    );
+    assert!(
+        !out.contains("::rrr::srpc_fiber_ctx"),
+        "self-referential alias produced by the purview-wrap requalify: {out}"
+    );
+}

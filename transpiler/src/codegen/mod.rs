@@ -3743,7 +3743,13 @@ impl CodeGen {
                 }
             }
         }
+        // H2 (checkpoint contract 2): a name that is the leaf of an absolute
+        // single-segment user-type-map target keeps its global `::<name>`
+        // spelling — see `absolute_type_map_target_leaves`. Twin of the
+        // root_items filter at the cxx-namespace close.
+        let absolute_target_leaves = self.absolute_type_map_target_leaves();
         let mut crate_root_types: Vec<String> = crate_root_types.into_iter().collect();
+        crate_root_types.retain(|ty| !absolute_target_leaves.contains(ty));
         crate_root_types.sort();
         for ty in &crate_root_types {
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ty);
@@ -3780,6 +3786,10 @@ impl CodeGen {
             .filter(|n| {
                 n.chars().next().is_some_and(|c| c.is_ascii_lowercase())
                     && !self.declared_module_names.contains(n.as_str())
+                    // H2: absolute-target leaves keep their global spelling
+                    // (the reactor carrier's `srpc_fiber_ctx`/`srpc_fiber`
+                    // aliases over `::srpc_fiber_ctx`/`::srpc_fiber`).
+                    && !absolute_target_leaves.contains(escape_cpp_keyword(n).as_str())
             })
             .cloned()
             .collect();
@@ -4069,6 +4079,32 @@ impl CodeGen {
         }
         out.push_str(&text[i..]);
         out
+    }
+
+    /// Leaf names of user-type-map targets that are ABSOLUTE global names
+    /// with exactly one trailing segment (`"::srpc_fiber_ctx"` →
+    /// `srpc_fiber_ctx`). A crate-declared item sharing such a name (the
+    /// reactor carrier's `type srpc_fiber_ctx = rusty::ReactorFiberContext;`
+    /// alias over the map target `::srpc_fiber_ctx`) must be EXEMPTED from
+    /// the crate-root `::<item>` → `::<ns>::<item>` requalify passes: the
+    /// leading `::` in an authenticated absolute target is semantic, and
+    /// rewriting it captures the global C name into the crate namespace,
+    /// turning the alias self-referential
+    /// (`using srpc_fiber_ctx = ::rrr::srpc_fiber_ctx;`) and making the real
+    /// global struct unreachable. Multi-segment absolute targets
+    /// (`::rrr::detail::CallbackWrapper`) never collide this way — the
+    /// requalifier's boundary check already leaves them intact.
+    fn absolute_type_map_target_leaves(&self) -> HashSet<String> {
+        self.user_type_map
+            .mappings
+            .values()
+            .filter_map(|target| {
+                let leaf = target.strip_prefix("::")?;
+                (!leaf.is_empty()
+                    && leaf.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then(|| leaf.to_string())
+            })
+            .collect()
     }
 
     fn requalify_crate_root_symbol(text: &str, crate_name: &str, sym: &str) -> String {
@@ -7431,11 +7467,17 @@ impl CodeGen {
                 // `::<ns>::<item>` by the boundary-aware
                 // `requalify_crate_root_symbol` (leaves `x::item`, `.item(`,
                 // `>::item`, and already-qualified `::<ns>::item` alone).
-                // Sorted for deterministic output.
+                // Sorted for deterministic output. Names that are ALSO the
+                // leaf of an absolute single-segment user-type-map target
+                // (`::srpc_fiber_ctx`) are exempted: their `::<name>` spelling
+                // is the authenticated global C name, not a crate-root
+                // self-reference (H2, checkpoint contract 2).
+                let absolute_target_leaves = self.absolute_type_map_target_leaves();
                 let mut root_items: Vec<String> = self
                     .declared_item_names
                     .iter()
                     .map(|n| escape_cpp_keyword(n))
+                    .filter(|n| !absolute_target_leaves.contains(n))
                     .collect();
                 root_items.sort();
                 root_items.dedup();
