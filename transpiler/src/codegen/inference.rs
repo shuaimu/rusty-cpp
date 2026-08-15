@@ -1953,7 +1953,23 @@ impl CodeGen {
         if escaped.trim_start_matches("::") == normalized {
             return None;
         }
-        if had_leading_colon && !escaped.starts_with("::") {
+        // The caller's leading `::` was valid for the path we STARTED from
+        // (a crate module root). Re-applying it to whatever the re-export
+        // chase landed on is only valid if that new root is also global. A
+        // `use dep::m as alias;` binding is emitted as a C++ namespace ALIAS
+        // inside the crate's wrap namespace, never at global scope, so
+        // `::alias::T` names nothing (serde's `::serde_core_private::Content`).
+        // The sibling resolvers already strip the forced `::` for this same
+        // hazard — see resolve_scope_import_binding_path_for_scope.
+        let resolved_root = escaped
+            .trim_start_matches("::")
+            .split("::")
+            .next()
+            .unwrap_or_default();
+        let root_is_inner_namespace_alias = !resolved_root.is_empty()
+            && self.is_local_import_alias_name(resolved_root)
+            && !self.declared_module_names.contains(resolved_root);
+        if had_leading_colon && !escaped.starts_with("::") && !root_is_inner_namespace_alias {
             Some(format!("::{}", escaped))
         } else {
             Some(escaped)
