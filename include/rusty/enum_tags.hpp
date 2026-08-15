@@ -27,11 +27,18 @@
 //
 // Declaring it beside the enum keeps the two from drifting apart, and it
 // travels with the header or module, so a consumer needs no side table and no
-// cross-crate manifest entry. The transpiler emits one for every data enum it
-// lowers, which covers crate and dependency enums by construction.
+// cross-crate manifest entry.
 //
 // A type with no specialisation is not an error: the arm falls back to the
 // conservative always-match behaviour it had before this channel existed.
+//
+// SCOPE TODAY: the specialisations below cover the data enums the RUNTIME
+// declares. The transpiler does not yet emit one for a data enum it lowers
+// itself, so a match arm naming a variant of a DEPENDENCY crate's data enum
+// still takes the always-match fallback. Emitting them from the data-enum
+// lowering (both the `using E = std::variant<...>` and the
+// `struct E : std::variant<...>` wrapper shapes, threading template
+// parameters) is the remaining half of this channel.
 
 namespace rusty {
 namespace detail {
