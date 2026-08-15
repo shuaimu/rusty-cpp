@@ -3459,6 +3459,25 @@ impl CodeGen {
                     // `let x = unsafe { recv.method() };` is a common shape
                     // for &mut T-returning unsafe methods (e.g. reborrow).
                     let peeled = peel_to_tail_expr(&init.expr);
+                    // C13: the SAME Arc carve-out, for the ASSOCIATED-call
+                    // spelling. `Arc::get_mut(&mut a)` is the form Rust
+                    // recommends (a Deref target's inherent `get_mut` cannot
+                    // shadow it), and it is what rrr.reactor writes. It is a
+                    // `syn::Expr::Call` with path `Arc::get_mut`, so the
+                    // method-call carve-out below never saw it and the local
+                    // was reference-bound: `auto& opt = Arc<Ev>::get_mut(ev);`
+                    // cannot bind the by-value `Option<T&>` temporary.
+                    if let Some(syn::Expr::Call(call)) = peeled
+                        && let syn::Expr::Path(path_expr) = call.func.as_ref()
+                        && path_expr.path.segments.len() >= 2
+                    {
+                        let segments = &path_expr.path.segments;
+                        let owner = segments[segments.len() - 2].ident.to_string();
+                        let associated = segments[segments.len() - 1].ident.to_string();
+                        if associated == "get_mut" && matches!(owner.as_str(), "Arc" | "Rc") {
+                            return false;
+                        }
+                    }
                     if let Some(syn::Expr::MethodCall(mc)) = peeled {
                         let method = mc.method.to_string();
                         // `Arc<T>::get_mut()` returns `Option<&mut T>` BY VALUE,

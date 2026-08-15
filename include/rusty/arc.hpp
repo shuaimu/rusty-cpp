@@ -290,6 +290,60 @@ public:
     T* as_ptr() const {
         return ptr ? ptr->value : nullptr;
     }
+
+    // Support the UFCS/associated-call lowering shape, exactly as `clone`
+    // above already does. In Rust these are ASSOCIATED functions, not
+    // methods -- `Arc::get_mut(&mut a)`, `Arc::as_ptr(&a)`,
+    // `Arc::strong_count(&a)` -- specifically so a `Deref` target's inherent
+    // method cannot shadow them. Source written that way lowers to
+    // `Arc<T>::get_mut(a)`, which had no facade to bind to.
+    //
+    // A static and a non-static member function may be overloaded when their
+    // parameter lists differ ([class.mem]), so the zero-argument method forms
+    // above are unaffected: `a.get_mut()` still selects the method.
+    // @safe
+    static Option<T&> get_mut(Arc& value) {
+        return value.get_mut();
+    }
+
+    // @safe
+    static Option<T&> get_mut(Arc* value) {
+        assert(value != nullptr);
+        return value->get_mut();
+    }
+
+    // @unsafe - Returns mutable pointer to potentially shared data
+    static T* as_ptr(const Arc& value) {
+        return value.as_ptr();
+    }
+
+    // @unsafe - Returns mutable pointer to potentially shared data
+    static T* as_ptr(const Arc* value) {
+        assert(value != nullptr);
+        return value->as_ptr();
+    }
+
+    // @safe
+    static size_t strong_count(const Arc& value) {
+        return value.strong_count();
+    }
+
+    // @safe
+    static size_t strong_count(const Arc* value) {
+        assert(value != nullptr);
+        return value->strong_count();
+    }
+
+    // @safe
+    static size_t weak_count(const Arc& value) {
+        return value.weak_count();
+    }
+
+    // @safe
+    static size_t weak_count(const Arc* value) {
+        assert(value != nullptr);
+        return value->weak_count();
+    }
 };
 
 // @safe - Rust-idiomatic factory function
