@@ -2245,6 +2245,22 @@ pub struct CodeGen {
     /// spelling, and a declaration that cannot express it rejects.
     pub(crate) copyable_callable_contract_locals:
         std::collections::HashMap<String, &'static str>,
+    /// H1 (checkpoint contract 1): the authenticated namespace-placement
+    /// contract — Rust item name → module-global C++ namespace. Empty unless
+    /// the source carries `#[cfg_attr(any(), cpp_namespace(::target))]`
+    /// markers, so a crate without the contract emits byte-identical output.
+    pub(crate) namespace_placement_contracts: std::collections::HashMap<String, String>,
+    /// H1: the placement scope the emitter is currently INSIDE (`None` = the
+    /// module-wide cxx namespace).
+    pub(crate) current_placement_scope: Option<String>,
+    /// H1: the placement scope the OUTPUT is currently inside; the writer
+    /// closes/reopens namespaces whenever the two disagree.
+    pub(crate) emitted_placement_scope: Option<String>,
+    /// H1: true only between the cxx-namespace open and its close, i.e. while
+    /// a placement switch is meaningful.
+    pub(crate) cxx_namespace_body_open: bool,
+    /// H1: contracted names whose cxx-namespace lookup alias is already out.
+    pub(crate) placement_lookup_aliases_emitted: std::collections::HashSet<String>,
     /// const fns whose FULL definitions were emitted during the forward
     /// phase (constexpr globals need their bodies before the const item
     /// phase); the item-phase definition pass skips these.
@@ -3136,6 +3152,11 @@ impl CodeGen {
             deref_assigned_vars: std::collections::HashSet::new(),
             multi_use_vars: std::collections::HashSet::new(),
             copyable_callable_contract_locals: std::collections::HashMap::new(),
+            namespace_placement_contracts: std::collections::HashMap::new(),
+            current_placement_scope: None,
+            emitted_placement_scope: None,
+            cxx_namespace_body_open: false,
+            placement_lookup_aliases_emitted: std::collections::HashSet::new(),
             const_fns_defined_early: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
@@ -4404,9 +4425,225 @@ impl CodeGen {
     }
 
     fn writeln(&mut self, s: &str) {
+        self.sync_placement_scope();
         self.write_indent();
         self.output.push_str(s);
         self.output.push('\n');
+    }
+
+    /// H1 (checkpoint contract 1): keep the OUTPUT's open namespace in step
+    /// with the placement scope of the item being emitted. Contracted items
+    /// are emitted IN PLACE — the module-wide `namespace <cxx>` is closed
+    /// around them and an `export namespace <target>` opened instead — so
+    /// every declaration keeps its original order and its dependencies, and
+    /// only its enclosing namespace (hence its mangling) changes.
+    fn sync_placement_scope(&mut self) {
+        if !self.cxx_namespace_body_open
+            || self.current_placement_scope == self.emitted_placement_scope
+        {
+            return;
+        }
+        let Some(cxx) = self.cxx_namespace.clone() else {
+            return;
+        };
+        if let Some(open) = self.emitted_placement_scope.clone() {
+            self.output.push_str(&format!("}} // namespace {}\n", open));
+            self.output.push_str(&format!("namespace {} {{\n", cxx));
+        }
+        if let Some(target) = self.current_placement_scope.clone() {
+            self.output.push_str(&format!("}} // namespace {}\n", cxx));
+            // Plain `namespace`, exactly like the module-wide cxx namespace
+            // above: the items inside carry their own `export`, and an outer
+            // `export namespace` would nest exports, which C++20 rejects
+            // ([module.interface]). Module attachment is unchanged, so the
+            // exported entity is `janus::X@<module>`.
+            self.output.push_str(&format!("namespace {} {{\n", target));
+            // The contracted items are a SIBLING namespace of the module-wide
+            // one, not a nested scope, so the rest of the module's types
+            // (`EventStatus`, `EventState`, the event interfaces, the
+            // callable aliases) are no longer found by unqualified lookup.
+            // A using-DIRECTIVE restores exactly that lookup without
+            // declaring anything here: no entity is placed by it, and a name
+            // this namespace declares itself still wins (its own declarative
+            // region is nearer than the directive's common enclosing scope).
+            self.output
+                .push_str(&format!("using namespace {};\n", cxx));
+        }
+        self.emitted_placement_scope = self.current_placement_scope.clone();
+    }
+
+    /// H1: the placement contract of a top-level item, if any. Members follow
+    /// their enclosing type, so an `impl` block takes its self type's
+    /// contract (marking the impl as well would be an overlapping contract,
+    /// which `collect_namespace_placement_contracts` rejects).
+    fn item_placement_scope(&self, item: &syn::Item) -> Option<String> {
+        if self.namespace_placement_contracts.is_empty() {
+            return None;
+        }
+        let name = match item {
+            syn::Item::Struct(s) => Some(s.ident.to_string()),
+            syn::Item::Enum(e) => Some(e.ident.to_string()),
+            syn::Item::Fn(f) => Some(f.sig.ident.to_string()),
+            syn::Item::Impl(i) => Self::impl_self_type_name(i),
+            _ => None,
+        }?;
+        self.namespace_placement_contracts.get(&name).cloned()
+    }
+
+    /// H1: run `body` with the item's placement scope active.
+    fn with_item_placement_scope<R>(
+        &mut self,
+        item: &syn::Item,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let scope = self.item_placement_scope(item);
+        if scope.is_none() && self.current_placement_scope.is_none() {
+            return body(self);
+        }
+        let name = match item {
+            syn::Item::Struct(s) => Some(s.ident.to_string()),
+            syn::Item::Enum(e) => Some(e.ident.to_string()),
+            syn::Item::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        };
+        let target = scope.clone();
+        let previous = std::mem::replace(&mut self.current_placement_scope, scope);
+        let out = body(self);
+        self.current_placement_scope = previous;
+        // The rest of the module still spells these names unqualified (UFCS
+        // adapters, wrapper fields, call sites). A using-DECLARATION makes
+        // the name findable from the cxx namespace WITHOUT giving the entity
+        // a second identity: the entity remains `::janus::X` and mangles
+        // there, which is what the symbol manifest checks. (A namespace or
+        // type ALIAS would be the invalid substitute the checkpoint rejects —
+        // that would place the entity itself.)
+        if let (Some(name), Some(target)) = (name, target)
+            && self.current_placement_scope.is_none()
+            && self.placement_lookup_aliases_emitted.insert(name.clone())
+        {
+            self.writeln(&format!("using ::{}::{};", target, escape_cpp_keyword(&name)));
+            // A C-like enum also lowers per-variant helper functions
+            // (`QuorumPolicy_ALL_NO()`); they are placed with their enum, so
+            // they need the same lookup aliases.
+            if let syn::Item::Enum(e) = item
+                && enum_is_c_like(e)
+            {
+                for variant in &e.variants {
+                    let helper = format!("{}_{}", name, variant.ident);
+                    if self.placement_lookup_aliases_emitted.insert(helper.clone()) {
+                        self.writeln(&format!(
+                            "using ::{}::{};",
+                            target,
+                            escape_cpp_keyword(&helper)
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// H1: collect the authenticated placement contracts of a file, rejecting
+    /// atomically (no output) on an ambiguous or overlapping contract.
+    fn collect_namespace_placement_contracts(&mut self, items: &[syn::Item]) {
+        fn walk(
+            items: &[syn::Item],
+            out: &mut std::collections::HashMap<String, String>,
+            error: &mut Option<String>,
+        ) {
+            for item in items {
+                let (name, attrs): (Option<String>, &[syn::Attribute]) = match item {
+                    syn::Item::Struct(s) => (Some(s.ident.to_string()), &s.attrs),
+                    syn::Item::Enum(e) => (Some(e.ident.to_string()), &e.attrs),
+                    syn::Item::Fn(f) => (Some(f.sig.ident.to_string()), &f.attrs),
+                    syn::Item::Type(t) => (Some(t.ident.to_string()), &t.attrs),
+                    syn::Item::Impl(i) => (CodeGen::impl_self_type_name(i), &i.attrs),
+                    syn::Item::Mod(m) => {
+                        if let Some((_, nested)) = &m.content {
+                            walk(nested, out, error);
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let target = match CodeGen::inert_cpp_namespace_target(attrs) {
+                    Ok(target) => target,
+                    Err(message) => {
+                        if error.is_none() {
+                            *error = Some(message);
+                        }
+                        continue;
+                    }
+                };
+                let Some(target) = target else {
+                    continue;
+                };
+                let Some(name) = name else {
+                    if error.is_none() {
+                        *error = Some(
+                            "`cpp_namespace` placement contract on an item with no                              C++ namespace-scope name"
+                                .to_string(),
+                        );
+                    }
+                    continue;
+                };
+                if matches!(item, syn::Item::Impl(_)) {
+                    // Members follow their enclosing type. A marked impl is an
+                    // overlapping contract for the same entity: reject rather
+                    // than pick a winner.
+                    if error.is_none() {
+                        *error = Some(format!(
+                            "overlapping `cpp_namespace` placement contract on an impl                              block for `{}`: members follow their enclosing type, so                              only the type itself may carry the contract",
+                            name
+                        ));
+                    }
+                    continue;
+                }
+                if matches!(item, syn::Item::Type(_)) {
+                    if error.is_none() {
+                        *error = Some(format!(
+                            "`cpp_namespace` placement contract on type alias `{}`: an                              alias resolves away in the mangling and carries no                              namespace identity",
+                            name
+                        ));
+                    }
+                    continue;
+                }
+                if let Some(previous) = out.get(&name)
+                    && previous != &target
+                {
+                    if error.is_none() {
+                        *error = Some(format!(
+                            "ambiguous `cpp_namespace` placement contracts for `{}`:                              `::{}` and `::{}`",
+                            name, previous, target
+                        ));
+                    }
+                    continue;
+                }
+                out.insert(name, target);
+            }
+        }
+        let mut collected = std::collections::HashMap::new();
+        let mut error = None;
+        walk(items, &mut collected, &mut error);
+        // Fail-closed: a placement contract is a statement about the C++
+        // namespace an entity lives in RELATIVE to the module-wide one. With
+        // no configured cxx namespace there is nothing to place items out of,
+        // and silently emitting them at global scope would satisfy the
+        // contract's letter while losing the distinction it exists to make.
+        if error.is_none() && !collected.is_empty() && self.cxx_namespace.is_none() {
+            error = Some(
+                "`cpp_namespace` placement contract requires a configured C++                  namespace (--cxx-namespace): placement is defined relative to                  the module-wide namespace"
+                    .to_string(),
+            );
+        }
+        if let Some(message) = error {
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(message);
+            }
+            self.namespace_placement_contracts.clear();
+            return;
+        }
+        self.namespace_placement_contracts = collected;
     }
 
     fn write_indent(&mut self) {
@@ -4416,6 +4653,7 @@ impl CodeGen {
     }
 
     fn newline(&mut self) {
+        self.sync_placement_scope();
         self.output.push('\n');
     }
 
@@ -4424,6 +4662,21 @@ impl CodeGen {
     }
 
     fn queue_deferred_method_definition(&mut self, mut definition: String) {
+        // H1: an out-of-line member definition of a contracted type belongs
+        // to that type's namespace. The deferred text is flushed verbatim
+        // (bypassing the writer), so it carries its own namespace switch.
+        if self.cxx_namespace_body_open
+            && let Some(target) = self.current_placement_scope.clone()
+            && let Some(cxx) = self.cxx_namespace.clone()
+        {
+            let mut wrapped = format!("}} // namespace {}\nnamespace {} {{\n", cxx, target);
+            wrapped.push_str(&definition);
+            if !definition.ends_with('\n') {
+                wrapped.push('\n');
+            }
+            wrapped.push_str(&format!("}} // namespace {}\nnamespace {} {{\n", target, cxx));
+            definition = wrapped;
+        }
         if !self.module_stack.is_empty() {
             let module_scope = self.escape_and_rename_qualified_name(&self.module_stack.join("::"));
             let mut wrapped = String::new();
@@ -4454,6 +4707,9 @@ impl CodeGen {
         if definitions.is_empty() {
             return;
         }
+        // H1: this flush pushes raw text; make sure the output is back in the
+        // namespace the queued definitions were wrapped against.
+        self.sync_placement_scope();
         self.newline();
         for definition in definitions {
             self.output.push_str(&definition);
@@ -6821,6 +7077,11 @@ impl CodeGen {
                 .extend(targets.iter().cloned());
         }
         self.trait_declared_paths = crate::transpile::collect_declared_trait_paths(&file.items);
+        // H1 (checkpoint contract 1): the authenticated namespace-placement
+        // contract. Collected before any emission pass so the forward-decl
+        // phase already places its declarations; with no marker in the source
+        // the map stays empty and every emission path below is untouched.
+        self.collect_namespace_placement_contracts(&file.items);
         // Opt-in non-inheriting marker registries affect generic-bound
         // lowering, including early declarations, so collect them before any
         // emission pass begins.
@@ -7139,6 +7400,8 @@ impl CodeGen {
             // just under the `NS::…` qualifier in importer scope.
             self.writeln(&format!("namespace {} {{", ns));
             self.newline();
+            // H1: placement switching is only meaningful inside this wrap.
+            self.cxx_namespace_body_open = true;
             // Auto-namespace mode: emit a `namespace <leaf> = ::<full>;`
             // alias for each imported sibling module. Lets the existing
             // path-qualified emit shapes (`map::X`, `btree_internal::Y`)
@@ -7505,10 +7768,21 @@ impl CodeGen {
                 // (`::srpc_fiber_ctx`) are exempted: their `::<name>` spelling
                 // is the authenticated global C name, not a crate-root
                 // self-reference (H2, checkpoint contract 2).
+                // H1: come back to the module-wide namespace before closing
+                // it, so a contracted item emitted last cannot leave its
+                // placement namespace open.
+                self.current_placement_scope = None;
+                self.sync_placement_scope();
+                self.cxx_namespace_body_open = false;
                 let absolute_target_leaves = self.absolute_type_map_target_leaves();
+                // H1 (checkpoint contract 1): a contracted item is NOT a
+                // crate-root item of this namespace — its `::<item>`
+                // self-references name the placement namespace instead.
+                let placement_contracts = self.namespace_placement_contracts.clone();
                 let mut root_items: Vec<String> = self
                     .declared_item_names
                     .iter()
+                    .filter(|n| !placement_contracts.contains_key(*n))
                     .map(|n| escape_cpp_keyword(n))
                     .filter(|n| !absolute_target_leaves.contains(n))
                     .collect();
@@ -7517,6 +7791,16 @@ impl CodeGen {
                 for item in &root_items {
                     self.output =
                         Self::requalify_crate_root_symbol(&self.output, &ns, item);
+                }
+                let mut placed_items: Vec<(String, String)> = placement_contracts
+                    .iter()
+                    .map(|(name, target)| (escape_cpp_keyword(name), target.clone()))
+                    .collect();
+                placed_items.sort();
+                placed_items.dedup();
+                for (item, target) in &placed_items {
+                    self.output =
+                        Self::requalify_crate_root_symbol(&self.output, target, item);
                 }
                 self.writeln(&format!("}} // namespace {}", ns));
             }
@@ -12033,11 +12317,16 @@ impl CodeGen {
                     } else {
                         ""
                     };
-                    self.emit_template_declaration_without_type_defaults(
-                        &s.generics,
-                        export_prefix,
-                        &format!("struct {};", name),
-                    );
+                    // H1: the forward declaration inhabits the contracted
+                    // namespace, exactly like the definition.
+                    let struct_decl = format!("struct {};", name);
+                    self.with_item_placement_scope(item, |cg| {
+                        cg.emit_template_declaration_without_type_defaults(
+                            &s.generics,
+                            export_prefix,
+                            &struct_decl,
+                        );
+                    });
                     emitted_any = true;
                 }
                 syn::Item::Enum(e) => {
@@ -12055,16 +12344,20 @@ impl CodeGen {
                         ""
                     };
                     if enum_is_c_like(e) {
-                        self.emit_template_declaration_without_type_defaults(
-                            &e.generics,
-                            export_prefix,
-                            &format!(
-                                "enum class {}{};",
-                                name,
-                                c_like_enum_underlying_suffix(e)
-                            ),
+                        // H1: same namespace as the definition.
+                        let enum_decl = format!(
+                            "enum class {}{};",
+                            name,
+                            c_like_enum_underlying_suffix(e)
                         );
-                        self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
+                        self.with_item_placement_scope(item, |cg| {
+                            cg.emit_template_declaration_without_type_defaults(
+                                &e.generics,
+                                export_prefix,
+                                &enum_decl,
+                            );
+                            cg.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
+                        });
                     } else if self.enum_uses_struct_wrapper(e) {
                         // Forward-declare the per-variant member structs too
                         // (not just the umbrella), so construction sites
@@ -12387,11 +12680,16 @@ impl CodeGen {
                     } else {
                         ""
                     };
-                    self.emit_template_declaration_without_type_defaults(
-                        &s.generics,
-                        export_prefix,
-                        &format!("struct {};", name),
-                    );
+                    // H1: the forward declaration inhabits the contracted
+                    // namespace, exactly like the definition.
+                    let struct_decl = format!("struct {};", name);
+                    self.with_item_placement_scope(item, |cg| {
+                        cg.emit_template_declaration_without_type_defaults(
+                            &s.generics,
+                            export_prefix,
+                            &struct_decl,
+                        );
+                    });
                     emitted_any = true;
                 }
                 syn::Item::Enum(e) => {
@@ -12409,16 +12707,20 @@ impl CodeGen {
                         ""
                     };
                     if enum_is_c_like(e) {
-                        self.emit_template_declaration_without_type_defaults(
-                            &e.generics,
-                            export_prefix,
-                            &format!(
-                                "enum class {}{};",
-                                name,
-                                c_like_enum_underlying_suffix(e)
-                            ),
+                        // H1: same namespace as the definition.
+                        let enum_decl = format!(
+                            "enum class {}{};",
+                            name,
+                            c_like_enum_underlying_suffix(e)
                         );
-                        self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
+                        self.with_item_placement_scope(item, |cg| {
+                            cg.emit_template_declaration_without_type_defaults(
+                                &e.generics,
+                                export_prefix,
+                                &enum_decl,
+                            );
+                            cg.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
+                        });
                         self.emit_c_like_enum_inherent_method_forward_decls(
                             e,
                             export_prefix,
@@ -12999,7 +13301,12 @@ impl CodeGen {
                 continue;
             }
             let allow_non_unit_forward_decl = true;
-            if self.emit_function_forward_decl(f, allow_non_unit_forward_decl) {
+            // H1: a contracted item's FORWARD DECLARATION must inhabit the
+            // same namespace as its definition, or the two are different
+            // entities (the H4 defect, one namespace out).
+            if self.with_item_placement_scope(item, |cg| {
+                cg.emit_function_forward_decl(f, allow_non_unit_forward_decl)
+            }) {
                 emitted_any = true;
             }
         }
@@ -13392,6 +13699,15 @@ impl CodeGen {
 
 
     fn emit_item(&mut self, item: &syn::Item) {
+        if self.item_placement_scope(item).is_some() {
+            // H1: emit the whole item — declaration, members, out-of-line
+            // definitions — inside its contracted namespace.
+            return self.with_item_placement_scope(item, |cg| cg.emit_item_placed(item));
+        }
+        self.emit_item_placed(item)
+    }
+
+    fn emit_item_placed(&mut self, item: &syn::Item) {
         // A `#[test] fn` declared directly inside a PRODUCTION module (and
         // its `#[rustc_test_marker]` const) is diverted to the trailing
         // harness-test block: its body uses decltype(auto) members whose

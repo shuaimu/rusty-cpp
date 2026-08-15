@@ -43576,3 +43576,209 @@ fn test_exported_alias_honors_its_authenticated_type_map() {
         "a private alias keeps its right-hand-side lowering: {out}"
     );
 }
+
+/// H1 (checkpoint contract 1) — global `::janus` namespace placement. The
+/// incumbent ABI roots the Quorum family in a module-global `janus`, still
+/// attached to the module (`janus::QuorumEvent@rrr.reactor::…`), while every
+/// ordinary crate item stays in the configured cxx namespace. Placement comes
+/// from an exact authenticated source contract, never from name inference.
+#[test]
+fn test_namespace_placement_contract_places_items_in_the_global_namespace() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        #[repr(C)]
+        pub struct QuorumEvent {
+            pub n_total_: i32,
+        }
+        impl QuorumEvent {
+            pub fn total(&self) -> i32 { self.n_total_ }
+        }
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        pub fn quorum_event_make(n_total: i32) -> QuorumEvent {
+            QuorumEvent { n_total_: n_total }
+        }
+        pub struct Wrapper {
+            pub inner: QuorumEvent,
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("namespace janus {\nusing namespace rrr;\nexport struct QuorumEvent;"),
+        "the FORWARD DECLARATION is placed too — otherwise it and the \
+         definition are two entities: {out}"
+    );
+    assert!(
+        out.contains("namespace janus {\nusing namespace rrr;\nexport struct QuorumEvent {"),
+        "the definition is placed: {out}"
+    );
+    assert!(
+        out.contains("namespace janus {\nusing namespace rrr;\nexport QuorumEvent quorum_event_make("),
+        "a contracted free function is placed: {out}"
+    );
+    assert!(
+        out.contains("int32_t QuorumEvent::total() const"),
+        "members follow their enclosing type: {out}"
+    );
+    // The out-of-line member definition sits inside janus, not the cxx
+    // namespace (defining it from rrr would be ill-formed).
+    let member_at = out.find("int32_t QuorumEvent::total() const").unwrap();
+    let janus_open = out[..member_at].rfind("namespace janus {");
+    let janus_close = out[..member_at].rfind("} // namespace janus");
+    assert!(
+        janus_open.is_some() && janus_open > janus_close,
+        "the out-of-line member definition must be inside janus: {out}"
+    );
+    // Unqualified uses elsewhere still resolve, without giving the entity a
+    // second identity.
+    assert!(
+        out.contains("using ::janus::QuorumEvent;"),
+        "a lookup using-declaration keeps the rest of the module compiling: {out}"
+    );
+    assert!(
+        !out.contains("namespace rrr::janus") && !out.contains("namespace janus = "),
+        "`rrr::janus` and namespace aliases are invalid substitutes: {out}"
+    );
+}
+
+/// H1 — with NO placement contract in the source the emission path is
+/// untouched (this is what keeps every other module byte-identical).
+#[test]
+fn test_no_namespace_placement_contract_leaves_emission_untouched() {
+    let source = r#"
+        pub struct QuorumEvent { pub n_total_: i32 }
+        pub fn quorum_event_make(n_total: i32) -> QuorumEvent {
+            QuorumEvent { n_total_: n_total }
+        }
+        "#;
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("namespace janus"),
+        "no contract, no placement: {out}"
+    );
+}
+
+/// H1 fail-closed — members follow their enclosing type, so a contract on an
+/// `impl` block is an OVERLAPPING placement contract for the same entity and
+/// rejects atomically instead of picking a winner.
+#[test]
+fn test_overlapping_namespace_placement_contract_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        pub struct QuorumEvent { pub n_total_: i32 }
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        impl QuorumEvent {
+            pub fn total(&self) -> i32 { self.n_total_ }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("an overlapping placement contract must reject");
+    assert!(error.contains("QuorumEvent"), "{error}");
+    let out = cg.into_output();
+    assert!(
+        !out.contains("namespace janus"),
+        "a rejected contract must not place anything: {out}"
+    );
+}
+
+/// H1 fail-closed — a RELATIVE target is ambiguous about exactly the
+/// distinction the contract exists to make (`rrr::janus` mangles differently
+/// from `::janus`), so it rejects rather than being guessed.
+#[test]
+fn test_relative_namespace_placement_target_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_namespace(janus))]
+        pub struct QuorumEvent { pub n_total_: i32 }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("a relative placement target must reject");
+    assert!(error.contains("relative"), "{error}");
+    let out = cg.into_output();
+    assert!(
+        !out.contains("namespace janus"),
+        "a rejected contract must not place anything: {out}"
+    );
+}
+
+/// H1 fail-closed — ambiguous, overlapping, relative or non-namespace-scope
+/// placement contracts reject ATOMICALLY, before any output.
+#[test]
+fn test_ambiguous_or_relative_placement_contracts_reject() {
+    for (source, needle) in [
+        (
+            // relative target
+            r#"
+            #[cfg_attr(any(), cpp_namespace(janus))]
+            pub struct QuorumEvent { pub v: i32 }
+            "#,
+            "relative",
+        ),
+        (
+            // multi-segment target
+            r#"
+            #[cfg_attr(any(), cpp_namespace(::rrr::janus))]
+            pub struct QuorumEvent { pub v: i32 }
+            "#,
+            "exactly one",
+        ),
+        (
+            // members follow their type: a marked impl is an overlapping contract
+            r#"
+            #[cfg_attr(any(), cpp_namespace(::janus))]
+            pub struct QuorumEvent { pub v: i32 }
+            #[cfg_attr(any(), cpp_namespace(::janus))]
+            impl QuorumEvent { pub fn v(&self) -> i32 { self.v } }
+            "#,
+            "overlapping",
+        ),
+        (
+            // an alias carries no namespace identity
+            r#"
+            #[cfg_attr(any(), cpp_namespace(::janus))]
+            pub type QuorumDanglingVec = i32;
+            "#,
+            "alias",
+        ),
+    ] {
+        let file: syn::File = syn::parse_str(source).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_cxx_namespace(Some("rrr".to_string()));
+        cg.emit_file(&file, Some("rrr.reactor"));
+        let error = cg
+            .take_codegen_error()
+            .unwrap_or_else(|| panic!("must reject: {source}"));
+        assert!(
+            error.contains(needle),
+            "diagnostic must name the defect ({needle}): {error}"
+        );
+        let out = cg.into_output();
+        assert!(
+            !out.contains("namespace janus {"),
+            "a rejected contract must not place anything: {out}"
+        );
+    }
+}

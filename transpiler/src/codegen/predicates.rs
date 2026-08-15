@@ -678,6 +678,92 @@ impl CodeGen {
         })
     }
 
+    /// H1 (checkpoint contract 1) — the authenticated NAMESPACE-PLACEMENT
+    /// contract, in the audited-naming style of `cpp_ctor`/`cpp_name`: only
+    /// the exact inert spelling `#[cfg_attr(any(), cpp_namespace(::target))]`
+    /// is honored, because a live attribute could be a proc macro and is not
+    /// authenticated by syntax alone.
+    ///
+    /// The target is ABSOLUTE by construction: a leading `::` is semantic and
+    /// means module-global placement, never nesting under the configured
+    /// cxx-namespace (`rrr::janus` mangles differently and is explicitly not
+    /// a substitute). Everything else — a relative target, a multi-segment
+    /// target, more than one marker on one item, or a malformed argument —
+    /// is REJECTED rather than guessed: `Err` is a fail-closed diagnostic.
+    pub(super) fn inert_cpp_namespace_target(
+        attrs: &[syn::Attribute],
+    ) -> Result<Option<String>, String> {
+        let mut found: Option<String> = None;
+        for attr in attrs {
+            if !Self::token_stream_mentions_ident(attr.meta.to_token_stream(), "cpp_namespace") {
+                continue;
+            }
+            if !attr.path().is_ident("cfg_attr") {
+                return Err("`cpp_namespace` placement contract must use the inert                             `#[cfg_attr(any(), cpp_namespace(::target))]` spelling"
+                    .to_string());
+            }
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            };
+            if args.len() != 2 {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            }
+            let Some(syn::Meta::List(predicate)) = args.first() else {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            };
+            if !predicate.path.is_ident("any") || !predicate.tokens.is_empty() {
+                return Err("`cpp_namespace` placement contract must be inert                             (`cfg_attr(any(), …)`)"
+                    .to_string());
+            }
+            let Some(syn::Meta::List(marker)) = args.get(1) else {
+                return Err("`cpp_namespace` placement contract needs a target:                             `cpp_namespace(::target)`"
+                    .to_string());
+            };
+            if !marker.path.is_ident("cpp_namespace") {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            }
+            let Ok(path) = syn::parse2::<syn::Path>(marker.tokens.clone()) else {
+                return Err("`cpp_namespace` target must be an absolute path                             (`::target`)"
+                    .to_string());
+            };
+            if path.leading_colon.is_none() {
+                return Err(format!(
+                    "`cpp_namespace` target `{}` is relative; placement targets are                      absolute (`::{}`) — a relative target is ambiguous about exactly                      the distinction this contract exists to make",
+                    quote::quote!(#path),
+                    quote::quote!(#path)
+                ));
+            }
+            if path.segments.len() != 1 {
+                return Err(format!(
+                    "`cpp_namespace` target `::{}` must name exactly one                      module-global namespace",
+                    path.segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                ));
+            }
+            let target = path.segments[0].ident.to_string();
+            if found.as_deref().is_some_and(|prev| prev != target) {
+                return Err(format!(
+                    "overlapping `cpp_namespace` placement contracts (`::{}` and `::{}`)                      on one item",
+                    found.unwrap_or_default(),
+                    target
+                ));
+            }
+            if found.is_some() {
+                return Err(format!(
+                    "duplicate `cpp_namespace` placement contract `::{}` on one item",
+                    target
+                ));
+            }
+            found = Some(target);
+        }
+        Ok(found)
+    }
+
     /// Opt a Rust `Drop::drop` method into a non-unwinding C++ destructor.
     /// The `cfg_attr(any(), ...)` spelling keeps the unknown marker disabled
     /// for rustc while still exposing the contract to this transpiler.

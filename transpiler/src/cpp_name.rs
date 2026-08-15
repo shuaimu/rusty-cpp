@@ -262,6 +262,7 @@ fn audited_transpiler_marker_meta(meta: &Meta) -> bool {
                     | "cpp_import_namespace"
                     | "cpp_marker_impl"
                     | "cpp_marker_trait"
+                    | "cpp_namespace"
                     | "cpp_no_auto_traits"
                     | "cpp_no_fieldwise_ctor"
                     | "cpp_noexcept"
