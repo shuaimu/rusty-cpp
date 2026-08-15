@@ -3608,11 +3608,23 @@ fn preflight_crate_sources_impl(
                             .filter(|attr| !is_cpp_abi_doc_or_lint_attr(attr))
                             .map(|attr| attr.path().to_token_stream().to_string())
                             .collect::<Vec<_>>();
+                        // A1: `unsafe` is a Rust CALLER obligation, not a
+                        // property of the emitted C++ declaration — an
+                        // imported `pub unsafe fn` has exactly the same C++
+                        // identity and signature as a safe one. The trait
+                        // MEMBER predicate above
+                        // (flat_import_trait_members_supported) already drops
+                        // the clause; keeping it here left the ratchet half
+                        // applied, so an unsafe free-function provider leaf
+                        // (crate::serializable::make_sink_proxy_buffer,
+                        // make_source_proxy_buffer) was rejected while an
+                        // unsafe trait method was accepted. Every other
+                        // clause — generics, const, async, abi, variadic —
+                        // DOES change the emitted declaration and stays.
                         let ordinary = function.sig.generics.params.is_empty()
                             && function.sig.generics.where_clause.is_none()
                             && function.sig.constness.is_none()
                             && function.sig.asyncness.is_none()
-                            && function.sig.unsafety.is_none()
                             && function.sig.abi.is_none()
                             && function.sig.variadic.is_none();
                         if !ordinary || !unsupported_attrs.is_empty() {
@@ -9862,6 +9874,20 @@ mod tests {
                 .expect_err(label);
             assert!(error.contains(expected), "{label}: {error}");
         }
+
+        // A1 (imported-unsafe-fn ratchet completion): `unsafe` is a Rust
+        // caller obligation, not a property of the emitted C++ declaration,
+        // and the trait-MEMBER predicate already accepts it. An unsafe free
+        // function provider leaf is therefore ordinary and must be ACCEPTED —
+        // this is the shape of crate::serializable::make_sink_proxy_buffer /
+        // make_source_proxy_buffer.
+        let unsafe_leaf_units = crate_units(&[
+            ("src/lib.rs", "pub mod rand; pub mod consumer;"),
+            ("src/rand.rs", "pub unsafe fn target() -> u64 { 0 }"),
+            ("src/consumer.rs", leaf_consumer),
+        ]);
+        preflight_crate_sources_with_cxx_namespace(&unsafe_leaf_units, Some("rrr"))
+            .expect("an unsafe free-function provider leaf is ordinary");
 
         for (label, provider_source, expected) in [
             (
