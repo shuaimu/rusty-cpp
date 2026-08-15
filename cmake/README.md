@@ -388,7 +388,7 @@ endif()
 
 ## Further Documentation
 
-- [Submodule Integration Guide](../docs/SUBMODULE_INTEGRATION.md) - Detailed submodule setup
+- [Submodule Integration Guide](../docs/submodule_integration.md) - Detailed submodule setup
 - [Main Project README](../README.md) - Project overview and features
 - [Examples](../examples/) - Sample projects using both integration methods
 

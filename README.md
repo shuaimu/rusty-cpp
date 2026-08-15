@@ -32,9 +32,9 @@ Which tool do I want?
 
 This project aims to catch memory safety issues at compile-time by applying Rust's proven ownership model to C++ code. It helps prevent common bugs like use-after-move, double-free, and dangling references before they reach production.
 
-Though C++ is flexible enough to mimic Rust's idioms in many ways, implementing a borrow-checking without modifying the compiler system appears to be impossible, as analyzed in [this document](https://docs.google.com/document/d/e/2PACX-1vSt2VB1zQAJ6JDMaIA9PlmEgBxz2K5Tx6w2JqJNeYCy0gU4aoubdTxlENSKNSrQ2TXqPWcuwtXe6PlO/pub). 
+Though C++ is flexible enough to mimic Rust's idioms in many ways, implementing a borrow checker without modifying the compiler system appears to be impossible, as analyzed in [this document](https://docs.google.com/document/d/e/2PACX-1vSt2VB1zQAJ6JDMaIA9PlmEgBxz2K5Tx6w2JqJNeYCy0gU4aoubdTxlENSKNSrQ2TXqPWcuwtXe6PlO/pub).
 
-We provide rusty-cpp-checker, a standalone static analyzer that enforces Rust-like ownership and borrowing rules for C++ code, bringing memory safety guarantees to existing C++ codebases without runtime overhead. rusty-cpp-checker does not bringing any new grammar into c++. Everything works through simple annoations such as adding `// @safe` enables safety checking on a function.
+We provide `rusty-cpp-checker`, a standalone static analyzer that enforces Rust-like ownership and borrowing rules for C++ code without runtime overhead. `rusty-cpp-checker` does not introduce new C++ grammar. It uses comment annotations; for example, adding `// @safe` enables safety checking for a function.
 
 
 ### Example
@@ -97,7 +97,7 @@ Cannot create mutable borrow 'mut_ref': 'value' is already borrowed by 'const_re
 
 #### Option 1: Git Submodule (Recommended)
 
-**The recommended way to use rusty-cpp** is to use cmake to do automatic checking at build. Also consider adding rusty-cpp as a submoduel so it is easy to track updates as rusty-cpp is rapidly evolving.
+**The recommended way to use rusty-cpp** is to use CMake for automatic build-time checking. Also consider adding rusty-cpp as a submodule to make updates easier to track.
 See [cmake-example-project/](cmake-example-project/) for a complete working example.
 
 
@@ -111,7 +111,7 @@ curl -sSL https://raw.githubusercontent.com/shuaimu/rusty-cpp/main/install.sh | 
 
 Or clone and run locally:
 ```bash
-git clone https://github.com/shuaimu/rusty-cpp
+git clone https://github.com/shuaimu/rusty-cpp.git
 cd rusty-cpp
 ./install.sh
 ```
@@ -121,7 +121,7 @@ cd rusty-cpp
 #### Option 3: Manual Build
 
 **Prerequisites** (must be installed before building):
-- **Rust**: 1.70+
+- **Rust**: 1.85+
 - **LLVM/Clang**: 16+ (for parsing C++)
 - **Z3**: 4.8+ (constraint solver)
 
@@ -129,7 +129,7 @@ cd rusty-cpp
 
 ```bash
 brew install llvm z3
-git clone https://github.com/shuaimu/rusty-cpp
+git clone https://github.com/shuaimu/rusty-cpp.git
 cd rusty-cpp
 cargo build --release
 ```
@@ -138,7 +138,7 @@ cargo build --release
 
 ```bash
 sudo apt-get install llvm-16-dev libclang-16-dev clang-16 libz3-dev
-git clone https://github.com/shuaimu/rusty-cpp
+git clone https://github.com/shuaimu/rusty-cpp.git
 cd rusty-cpp
 cargo build --release
 ```
@@ -165,24 +165,6 @@ rusty-cpp-checker -vv path/to/file.cpp
 # Output in JSON format (for IDE integration)
 rusty-cpp-checker --format json path/to/file.cpp
 ```
-
-#### Standalone Binary (No Environment Variables Required)
-
-For release distributions, we provide a standalone binary that doesn't require setting environment variables:
-
-```bash
-# Build standalone release
-./build_release.sh
-
-# Install from distribution
-cd dist/rusty-cpp-checker-*/
-./install.sh
-
-# Or use directly
-./rusty-cpp-checker-standalone file.cpp
-```
-
-See [RELEASE.md](RELEASE.md) for details on building and distributing standalone binaries.
 
 #### Environment Setup (macOS)
 
@@ -544,7 +526,7 @@ rusty-cpp-transpiler input.rs -o output.cppm -m my_module
 rusty-cpp-transpiler --crate path/to/Cargo.toml --output-dir cpp_out
 
 # Generate a CMakeLists.txt for the emitted modules from Cargo.toml
-rusty-cpp-transpiler --crate path/to/Cargo.toml --cmake path/to/Cargo.toml
+rusty-cpp-transpiler --cmake path/to/Cargo.toml
 
 # Crates using macros: expand first (requires cargo-expand)
 rusty-cpp-transpiler --crate path/to/Cargo.toml --expand
@@ -574,7 +556,7 @@ bash tests/transpile_tests/run_parity_matrix.sh --crate semver
 
 ## 3. Rust as an Embedded DSL in C++
 
-For codebases that can't (or shouldn't) move whole crates at once, the transpiler supports **inline Rust blocks inside `.cpp` files**. You write a function in Rust where it lives today; the tool generates and maintains the equivalent C++ right below it. Normal builds compile the generated C++ (`RUSTYCPP_RUST=0`) — consumers of your project never need a Rust toolchain.
+For codebases that can't (or shouldn't) move whole crates at once, the transpiler supports **inline Rust blocks inside C++ source and header files**. You write supported Rust items where they live today; the tool generates and maintains the equivalent C++ below them. Normal builds compile the generated C++ (`RUSTYCPP_RUST=0`) — consumers of your project never need a Rust toolchain.
 
 ```cpp
 #if RUSTYCPP_RUST
@@ -596,7 +578,7 @@ rusty-cpp-transpiler inline-rust --check --files src/*.cpp
 rusty-cpp-transpiler inline-rust --rewrite --files src/*.cpp
 ```
 
-The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. V1 deliberately accepts a conservative Rust subset (free functions, structs with named fields, inherent impls, `Option`/`Result`/`Vec`/`String`, standard control flow) and keeps each block local to its translation unit — no cross-TU declaration magic. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the normative grammar and subset.
+The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. The supported subset includes free functions, structs with named fields, inherent impls, traits and trait implementations, `Option`/`Result`/`Vec`/`String`, and standard control flow. Inline blocks do not automatically surface declarations across translation units. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the marker format.
 
 ---
 
@@ -649,7 +631,6 @@ Include the headers:
 #include <rusty/box.hpp>
 #include <rusty/refcell.hpp>
 #include <rusty/vec.hpp>
-#include <rusty/hashmap.hpp>
 ```
 
 These types are designed to work seamlessly with the borrow checker and enforce Rust's safety guarantees at runtime. They are also the runtime the transpiler (§2) emits code against — hand-written `rusty::` C++ and transpiled Rust share one type system, so the two styles mix freely in a codebase.
@@ -846,7 +827,7 @@ if (result.is_ok()) {
 
 ---
 
-## Tips in writing rusty c++
+## Tips for Writing Rusty C++
 Writing C++ that is easier to debug by adopting principles from Rust.
 
 ### Being Explicit
