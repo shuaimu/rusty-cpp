@@ -10528,7 +10528,12 @@ impl CodeGen {
                 }
                 syn::Item::Trait(t)
                     if self.interface_traits
-                        && Self::trait_interface_is_plain_forward_declarable(t) => {
+                        // A `#[cpp_marker_trait]` lowers to a template STRUCT
+                        // registry, not an interface class; its declaration
+                        // matches its definition by construction, so the
+                        // interface-shape gate does not apply to it.
+                        && (Self::has_cpp_marker_trait_attr(&t.attrs)
+                            || Self::trait_interface_is_plain_forward_declarable(t)) => {
                     // A trait lowers to an abstract interface class, and
                     // anything holding `Arc<dyn T>` / `Box<dyn T>` names
                     // that class — possibly before it is defined, since
@@ -10889,7 +10894,12 @@ impl CodeGen {
                 }
                 syn::Item::Trait(t)
                     if self.interface_traits
-                        && Self::trait_interface_is_plain_forward_declarable(t) => {
+                        // A `#[cpp_marker_trait]` lowers to a template STRUCT
+                        // registry, not an interface class; its declaration
+                        // matches its definition by construction, so the
+                        // interface-shape gate does not apply to it.
+                        && (Self::has_cpp_marker_trait_attr(&t.attrs)
+                            || Self::trait_interface_is_plain_forward_declarable(t)) => {
                     // A trait lowers to an abstract interface class, and
                     // anything holding `Arc<dyn T>` / `Box<dyn T>` names
                     // that class — possibly before it is defined, since a
