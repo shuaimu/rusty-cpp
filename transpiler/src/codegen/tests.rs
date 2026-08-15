@@ -7,6 +7,14 @@ fn transpile_str(rust_code: &str) -> String {
     cg.into_output()
 }
 
+fn transpile_str_with_authenticated_cpp_inherit(rust_code: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
+    cg.emit_file(&file, None);
+    cg.into_output()
+}
+
 fn transpile_str_module(rust_code: &str, module_name: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
     let mut cg = CodeGen::new();
@@ -2635,6 +2643,121 @@ fn hidden_cpp_ctor_on_generic_default_impl_emits_ctor_and_default_like_call() {
     assert!(
         out.contains("rusty::default_like<Envelope<T>>()"),
         "Default::default() must route through direct default construction:\n{out}"
+    );
+}
+
+#[test]
+fn cpp_ctor_arc_new_fuses_only_proven_root_local_constructor() {
+    let out = transpile_str(
+        r#"
+        use std::sync::Arc;
+
+        struct Owner {
+            value: i32,
+        }
+
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            unsafe fn new(value: i32) -> Owner {
+                Owner { value }
+            }
+        }
+
+        fn make_owner(value: i32) -> Arc<Owner> {
+            Arc::new(unsafe { Owner::new(value) })
+        }
+
+        struct Ordinary {
+            value: i32,
+        }
+
+        impl Ordinary {
+            fn new(value: i32) -> Ordinary {
+                Ordinary { value }
+            }
+        }
+
+        fn make_ordinary(value: i32) -> Arc<Ordinary> {
+            Arc::new(Ordinary::new(value))
+        }
+        "#,
+    );
+    assert!(out.contains("Owner(int32_t value)"), "{out}");
+    assert!(
+        out.contains("rusty::Arc<Owner>::make(") && !out.contains("Owner::new_("),
+        "a proven cpp_ctor must construct the Arc payload in place:\n{out}"
+    );
+    assert!(
+        out.contains("Ordinary::new_(")
+            && !out.contains("rusty::Arc<Ordinary>::make("),
+        "an ordinary Rust factory must retain the historical Arc::new path:\n{out}"
+    );
+
+    let lookalike = transpile_str(
+        r#"
+        mod fake {
+            pub struct Arc;
+            impl Arc {
+                pub fn new<T>(value: T) -> T { value }
+            }
+        }
+        use fake::Arc;
+
+        struct Owner { value: i32 }
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            fn new(value: i32) -> Owner { Owner { value } }
+        }
+        fn make(value: i32) -> Owner { Arc::new(Owner::new(value)) }
+        "#,
+    );
+    assert!(
+        !lookalike.contains("rusty::Arc<Owner>::make("),
+        "a same-spelled local/imported Arc must never enter the fusion lane:\n{lookalike}"
+    );
+
+    let local_std_root = transpile_str(
+        r#"
+        mod std {
+            pub mod sync {
+                pub struct Arc;
+                impl Arc {
+                    pub fn new<T>(value: T) -> T { value }
+                }
+            }
+        }
+        use std::sync::Arc;
+
+        struct Owner { value: i32 }
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            fn new(value: i32) -> Owner { Owner { value } }
+        }
+        fn make(value: i32) -> Owner {
+            Arc::new(Owner::new(value))
+        }
+        "#,
+    );
+    assert!(
+        !local_std_root.contains("rusty::Arc<Owner>::make("),
+        "a local module named std must not authenticate Arc fusion:\n{local_std_root}"
+    );
+
+    let extra_live_marker = transpile_str(
+        r#"
+        use std::sync::Arc;
+        struct Owner { value: i32 }
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            #[cpp_ctor]
+            fn new(value: i32) -> Owner { Owner { value } }
+        }
+        fn make(value: i32) -> Arc<Owner> { Arc::new(Owner::new(value)) }
+        "#,
+    );
+    assert!(
+        !extra_live_marker.contains("rusty::Arc<Owner>::make("),
+        "an extra live cpp_ctor marker must not authenticate fusion:\n{extra_live_marker}"
     );
 }
 
@@ -6100,6 +6223,31 @@ fn test_extern_c_block() {
 }
 
 #[test]
+fn test_extern_c_foreign_declarations_follow_module_visibility() {
+    let out = transpile_str_module(
+        r#"
+        unsafe extern "C" {
+            pub fn public_hook(value: i32) -> i32;
+            fn private_hook(value: i32) -> i32;
+        }
+        "#,
+        "foreign_visibility",
+    );
+    assert!(
+        out.contains("export int32_t public_hook(int32_t value);"),
+        "public foreign declaration must be exported from a named module:\n{out}"
+    );
+    assert!(
+        out.contains("int32_t private_hook(int32_t value);"),
+        "private foreign declaration must still be emitted:\n{out}"
+    );
+    assert!(
+        !out.contains("export int32_t private_hook(int32_t value);"),
+        "private foreign declaration leaked through the module API:\n{out}"
+    );
+}
+
+#[test]
 fn test_unsafe_block() {
     let out = transpile_str("fn f() { unsafe { let x = 1; } }");
     assert!(out.contains("// @unsafe"));
@@ -7335,6 +7483,15 @@ fn transpile_str_interface_traits(rust_code: &str) -> String {
     cg.into_output()
 }
 
+fn transpile_str_interface_traits_with_authenticated_cpp_inherit(rust_code: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
+    cg.emit_file(&file, None);
+    cg.into_output()
+}
+
 // Note: Microsoft Proxy (pro::*) facade emission was removed in commit
 // 90520f8. Tests asserting that old shape were deleted; the corresponding
 // behaviour now flows through the interface+adapter path (§ 3.2.9) tested
@@ -7440,6 +7597,35 @@ fn test_interface_traits_basic_class_and_methods() {
         out.contains("template <class U> class AnimalAdapterRef;"),
         "{out}"
     );
+}
+
+#[test]
+fn test_interface_traits_public_adapter_primaries_follow_module_visibility() {
+    let out = transpile_str_module(
+        r#"
+        pub trait Public { fn value(&self) -> i32; }
+        trait Private { fn value(&self) -> i32; }
+        "#,
+        "adapter_visibility",
+    );
+    for suffix in ["Adapter", "AdapterRef", "AdapterRefMut"] {
+        assert!(
+            out.contains(&format!(
+                "export template <class U> class Public{suffix};"
+            )),
+            "public Adapter primary must be reachable to module importers:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("template <class U> class Private{suffix};")),
+            "private Adapter primary must still be declared:\n{out}"
+        );
+        assert!(
+            !out.contains(&format!(
+                "export template <class U> class Private{suffix};"
+            )),
+            "private Adapter primary must not be exported:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -7602,6 +7788,1178 @@ fn test_interface_traits_foreign_impl_assoc_type_emits_specialization_with_assoc
         out.contains("MyToOwnedAdapter<rusty::String, rusty::String>"),
         "{out}"
     );
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_emits_partial_adapter_specializations() {
+    // A local interface trait implemented for a foreign generic container is
+    // the shape used by SRPC's Serialize/Deserialize carrier.  The adapter
+    // primary takes the implementing type as its final argument, so a generic
+    // Rust impl must lower to a C++ partial specialization, not a full
+    // `template <>` specialization containing an unbound `T`/`K`/`V`.
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self, archive: &mut Archive); }
+        struct Archive;
+        impl<T> Encode for Vec<T> {
+            fn encode(&self, archive: &mut Archive) {}
+        }
+        impl<K, V> Encode for std::collections::BTreeMap<K, V> {
+            fn encode(&self, archive: &mut Archive) {}
+        }
+        "#,
+    );
+
+    for expected in [
+        "template <typename T>\nclass EncodeAdapter<rusty::Vec<T>> final : public Encode",
+        "template <typename T>\nclass EncodeAdapterRef<rusty::Vec<T>> final : public Encode",
+        "template <typename T>\nclass EncodeAdapterRefMut<rusty::Vec<T>> final : public Encode",
+        "template <typename K, typename V>\nclass EncodeAdapter<rusty::BTreeMap<K, V>> final : public Encode",
+        "template <typename K, typename V>\nclass EncodeAdapterRef<rusty::BTreeMap<K, V>> final : public Encode",
+        "template <typename K, typename V>\nclass EncodeAdapterRefMut<rusty::BTreeMap<K, V>> final : public Encode",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`:\n{out}");
+    }
+    assert!(
+        !out.contains("skipped EncodeAdapter<rusty::Vec<T>>"),
+        "generic foreign impl regressed to a hand slot:\n{out}"
+    );
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_is_fail_closed_outside_narrow_lane() {
+    let bounded = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self); }
+        impl<T: Clone> Encode for Vec<T> { fn encode(&self) {} }
+        "#,
+    );
+    assert!(
+        bounded.contains("constrained/const generic partial specializations are unsupported"),
+        "bounded generic impl must remain a hand slot:\n{bounded}"
+    );
+    assert!(!bounded.contains("class EncodeAdapter<rusty::Vec<T>>"));
+
+    let where_bounded = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self); }
+        impl<T> Encode for Vec<T> where T: Clone { fn encode(&self) {} }
+        "#,
+    );
+    assert!(
+        where_bounded.contains("constrained/const generic partial specializations are unsupported"),
+        "where-bounded generic impl must remain a hand slot:\n{where_bounded}"
+    );
+
+    let const_generic = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self); }
+        impl<const N: usize> Encode for std::array<i32, N> { fn encode(&self) {} }
+        "#,
+    );
+    assert!(
+        const_generic
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "const-generic impl must remain a hand slot:\n{const_generic}"
+    );
+
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_allows_legacy_default_bound() {
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    for expected in [
+        "template <typename T>\nclass DecodeAdapter<rusty::Vec<T>> final : public Decode",
+        "template <typename T>\nclass DecodeAdapterRef<rusty::Vec<T>> final : public Decode",
+        "template <typename T>\nclass DecodeAdapterRefMut<rusty::Vec<T>> final : public Decode",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`:\n{out}");
+    }
+    assert!(
+        !out.contains("constrained/const generic partial specializations are unsupported"),
+        "legacy Default-only impl unexpectedly became a hand slot:\n{out}"
+    );
+
+    let clone_bound = transpile_str_interface_traits(
+        r#"
+        trait Decode { fn decode(&mut self); }
+        impl<T: Clone> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        clone_bound.contains("constrained/const generic partial specializations are unsupported"),
+        "non-Default constraints must stay fail-closed:\n{clone_bound}"
+    );
+
+    let local_shadow = transpile_str_interface_traits(
+        r#"
+        trait Default {}
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        local_shadow.contains("constrained/const generic partial specializations are unsupported"),
+        "a local same-leaf trait must not authenticate the erased std Default lane:\n{local_shadow}"
+    );
+    assert!(!local_shadow.contains("class DecodeAdapter<rusty::Vec<T>>"));
+
+    let imported_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub trait Default {} }
+        use evil::Default;
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        imported_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "an imported same-leaf trait must not authenticate the erased std Default lane:\n{imported_shadow}"
+    );
+
+    let glob_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub trait Default {} }
+        use evil::*;
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        glob_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "a glob-provided same-leaf trait must fail closed:\n{glob_shadow}"
+    );
+
+    let explicit_std = transpile_str_interface_traits(
+        r#"
+        trait Decode { fn decode(&mut self); }
+        impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        explicit_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
+        "explicit std Default must retain the narrow legacy lane:\n{explicit_std}"
+    );
+
+    let aliased_std = transpile_str_interface_traits(
+        r#"
+        use std::default::Default as StdDefault;
+        trait Decode { fn decode(&mut self); }
+        impl<T: StdDefault> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        aliased_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
+        "an exact alias of std Default must retain the narrow legacy lane:\n{aliased_std}"
+    );
+
+    let qualified_local_std_shadow = transpile_str_interface_traits(
+        r#"
+        mod scope {
+            mod std { pub mod default { pub trait Default {} } }
+            trait Decode { fn decode(&mut self); }
+            impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        qualified_local_std_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "a local `std` module must not authenticate a qualified lookalike:\n{qualified_local_std_shadow}"
+    );
+
+    let qualified_import_std_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub mod default { pub trait Default {} } }
+        mod scope {
+            use crate::evil as std;
+            trait Decode { fn decode(&mut self); }
+            impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        qualified_import_std_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "an imported `std` alias must not authenticate a qualified lookalike:\n{qualified_import_std_shadow}"
+    );
+
+    let qualified_glob_std_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub mod std { pub mod default { pub trait Default {} } } }
+        mod scope {
+            use crate::evil::*;
+            trait Decode { fn decode(&mut self); }
+            impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        qualified_glob_std_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "a glob-provided `std` root must fail closed:\n{qualified_glob_std_shadow}"
+    );
+
+    let nested_parent_import_shadows = transpile_str_interface_traits(
+        r#"
+        mod outer {
+            use std as chosen;
+            mod inner {
+                mod chosen { pub mod default { pub trait Default {} } }
+                trait Decode { fn decode(&mut self); }
+                impl<T: chosen::default::Default> Decode for Vec<T> {
+                    fn decode(&mut self) {}
+                }
+            }
+        }
+        mod bare_outer {
+            use std::default::Default;
+            mod inner {
+                trait Default {}
+                trait DecodeBare { fn decode_bare(&mut self); }
+                impl<T: Default> DecodeBare for Vec<T> {
+                    fn decode_bare(&mut self) {}
+                }
+            }
+        }
+        "#,
+    );
+    assert_eq!(
+        nested_parent_import_shadows
+            .matches("constrained/const generic partial specializations are unsupported")
+            .count(),
+        2,
+        "nearer local modules and traits must beat parent imports:\n{nested_parent_import_shadows}"
+    );
+    assert!(
+        !nested_parent_import_shadows.contains("class DecodeAdapter<rusty::Vec<T>>")
+            && !nested_parent_import_shadows
+                .contains("class DecodeBareAdapter<rusty::Vec<T>>"),
+        "a parent std import authenticated a child-local Default:\n{nested_parent_import_shadows}"
+    );
+
+    let absolute_std = transpile_str_interface_traits(
+        r#"
+        mod scope {
+            mod std { pub mod default { pub trait Default {} } }
+            trait Decode { fn decode(&mut self); }
+            impl<T: ::std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        absolute_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
+        "an absolute std path must retain the narrow legacy lane:\n{absolute_std}"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='default_shadow'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        r#"pub trait Default {}
+pub trait Decode { fn decode(&mut self); }
+impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+pub mod qualified_local {
+    pub mod std { pub mod default { pub trait Default {} } }
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod qualified_import {
+    pub mod evil { pub mod default { pub trait Default {} } }
+    use evil as std;
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod glob_shadow {
+    pub mod evil { pub trait Default {} }
+    use evil::*;
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod qualified_glob {
+    pub mod evil { pub mod std { pub mod default { pub trait Default {} } } }
+    use evil::*;
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod nested_outer {
+    use std as chosen;
+    pub mod inner {
+        pub mod chosen { pub mod default { pub trait Default {} } }
+        pub trait Decode { fn decode(&mut self); }
+        impl<T: chosen::default::Default> Decode for Vec<T> {
+            fn decode(&mut self) {}
+        }
+    }
+}
+pub mod nested_bare_outer {
+    use std::default::Default;
+    pub mod inner {
+        pub trait Default {}
+        pub trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let check = std::process::Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "local Default shadow fixture must be Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_maps_assoc_binding_in_param_scope() {
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Head { type Item; fn head(&self) -> Self::Item; }
+        impl<T> Head for Vec<T> {
+            type Item = T;
+            fn head(&self) -> T { loop {} }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("template <typename T>\nclass HeadAdapter<T, rusty::Vec<T>> final : public Head<T>"),
+        "generic parameter or associated binding was not mapped in scope:\n{out}"
+    );
+    assert!(
+        out.contains("template <class Item>\nclass Head;"),
+        "associated-type interface forward declaration must match its template definition:\n{out}"
+    );
+    assert!(
+        out.contains("template <typename T>\nstruct HeadTraits<rusty::Vec<T>>"),
+        "associated-type helper partial specialization was not emitted:\n{out}"
+    );
+
+    let mixed_generics = transpile_str_interface_traits(
+        r#"
+        trait Mixed<'a, T, const N: usize> {
+            type Item;
+            fn pick(&self, value: T) -> Self::Item;
+        }
+        "#,
+    );
+    assert_eq!(
+        mixed_generics
+            .matches("template <class T, class Item>\nclass Mixed")
+            .count(),
+        2,
+        "forward and definition must model exactly the same supported generic parameters:\n{mixed_generics}"
+    );
+    assert!(
+        !mixed_generics.contains("class N") && !mixed_generics.contains("size_t N"),
+        "unsupported const generic leaked into only one side of the interface declaration:\n{mixed_generics}"
+    );
+}
+
+#[test]
+fn test_interface_traits_generic_assoc_adapter_named_module_clang_runtime() {
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping generic associated Adapter module proof: no clang++ in PATH");
+        return;
+    };
+
+    let source: syn::File = syn::parse_str(
+        r#"
+        unsafe extern "C" {
+            pub fn public_hook(value: i32) -> i32;
+            fn private_hook(value: i32) -> i32;
+        }
+
+        pub trait Head {
+            type Item;
+            fn head(&self, value: Self::Item) -> Self::Item;
+        }
+
+        impl<T> Head for std::pair<T, T> {
+            type Item = T;
+            fn head(&self, value: T) -> T { value }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.emit_file(&source, Some("generic_assoc_review"));
+    let module = cg.into_output();
+    assert!(
+        module.contains("export template <class Item>\nclass Head;"),
+        "public associated-type interface forward declaration is malformed:\n{module}"
+    );
+    assert!(
+        module.contains("export template <class B> struct HeadTraits"),
+        "public associated-type helper primary is not exported:\n{module}"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let module_source = temp.path().join("generic_assoc_review.cppm");
+    let module_pcm = temp.path().join("generic_assoc_review.pcm");
+    let module_object = temp.path().join("generic_assoc_review.o");
+    let importer_source = temp.path().join("importer.cpp");
+    let importer_object = temp.path().join("importer.o");
+    let private_source = temp.path().join("private_importer.cpp");
+    let private_object = temp.path().join("private_importer.o");
+    let binary = temp.path().join("importer");
+    std::fs::write(&module_source, module).unwrap();
+    std::fs::write(
+        &importer_source,
+        r#"
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+import generic_assoc_review;
+
+using Pair = std::pair<int32_t, int32_t>;
+using Assoc = typename HeadTraits<Pair>::Item;
+using PublicHook = decltype(&public_hook);
+static_assert(std::is_same_v<Assoc, int32_t>);
+static_assert(std::is_same_v<PublicHook, int32_t (*)(int32_t)>);
+
+int main() {
+    HeadAdapter<int32_t, Pair> owned({20, 22});
+    return owned.head(42) == 42 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &private_source,
+        "import generic_assoc_review;\nauto* leaked = &private_hook;\n",
+    )
+    .unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+
+    let precompile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("--precompile")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_pcm)
+        .output()
+        .unwrap();
+    assert!(
+        precompile.status.success(),
+        "associated Adapter module precompile failed:\n{}",
+        String::from_utf8_lossy(&precompile.stderr)
+    );
+    let module_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=generic_assoc_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_object)
+        .output()
+        .unwrap();
+    assert!(
+        module_compile.status.success(),
+        "associated Adapter module object compile failed:\n{}",
+        String::from_utf8_lossy(&module_compile.stderr)
+    );
+    let importer_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=generic_assoc_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&importer_source)
+        .arg("-o")
+        .arg(&importer_object)
+        .output()
+        .unwrap();
+    assert!(
+        importer_compile.status.success(),
+        "associated Adapter importer compile failed:\n{}",
+        String::from_utf8_lossy(&importer_compile.stderr)
+    );
+    let private_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=generic_assoc_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&private_source)
+        .arg("-o")
+        .arg(&private_object)
+        .output()
+        .unwrap();
+    assert!(
+        !private_compile.status.success(),
+        "private extern-C declaration unexpectedly became importable"
+    );
+    let link = std::process::Command::new(compiler)
+        .arg("-stdlib=libc++")
+        .arg(&module_object)
+        .arg(&importer_object)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "associated Adapter importer link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(binary).output().unwrap();
+    assert!(run.status.success(), "associated Adapter runtime failed: {run:?}");
+}
+
+#[test]
+fn test_exact_inactive_trait_member_dispatch_suppresses_ufcs_helpers() {
+    let exact = transpile_str_interface_traits(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait SinkBase { fn deposit(&mut self, value: i32) -> i32; }
+        pub struct BufferSink { pub total: i32 }
+        impl SinkBase for BufferSink {
+            fn deposit(&mut self, value: i32) -> i32 {
+                self.total += value;
+                self.total
+            }
+        }
+        pub fn call(sink: &mut BufferSink) -> i32 { sink.deposit(2) }
+        "#,
+    );
+    assert!(!exact.contains("namespace SinkBase_"), "{exact}");
+    assert!(!exact.contains("using namespace SinkBase_"), "{exact}");
+    assert!(exact.contains("return value_.deposit(value);"), "{exact}");
+    assert!(!exact.contains("SinkBase_::deposit(value_"), "{exact}");
+    assert!(
+        exact.contains("sink.deposit(static_cast<int32_t>(2))"),
+        "{exact}"
+    );
+
+    for attribute in [
+        "#[cpp_trait_member_dispatch]",
+        "#[cfg_attr(all(), cpp_trait_member_dispatch)]",
+        "#[cfg_attr(any(), cpp_trait_member_dispatch(extra))]",
+        "#[cfg_attr(any(), maker::cpp_trait_member_dispatch)]",
+        "#[cfg_attr(any(), cpp_trait_member_dispatch, allow(dead_code))]",
+    ] {
+        let source = format!(
+            "{attribute}\ntrait Marked {{ fn act(&self); }}\nstruct Host;\nimpl Marked for Host {{ fn act(&self) {{}} }}"
+        );
+        let out = transpile_str_interface_traits(&source);
+        assert!(
+            out.contains("namespace Marked_"),
+            "non-exact marker unexpectedly changed dispatch: {attribute}\n{out}"
+        );
+    }
+}
+
+#[test]
+fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping lexical trait-dispatch module proof: no clang++ in PATH");
+        return;
+    };
+
+    let source: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait RootDispatch { fn root_value(&self) -> i32; }
+        pub struct RootHost;
+        impl RootDispatch for RootHost { fn root_value(&self) -> i32 { 10 } }
+        pub fn call_root(host: &RootHost) -> i32 { host.root_value() }
+
+        pub mod marked {
+            #[cfg_attr(any(), cpp_trait_member_dispatch)]
+            pub trait Clash { fn value(&self) -> i32; }
+            pub struct MarkedHost;
+            impl Clash for MarkedHost { fn value(&self) -> i32 { 20 } }
+            pub fn call(host: &MarkedHost) -> i32 { host.value() }
+
+            pub mod deep {
+                #[cfg_attr(any(), cpp_trait_member_dispatch)]
+                pub trait Layer { fn depth(&self) -> i32; }
+                pub struct MarkedDeepHost;
+                impl Layer for MarkedDeepHost { fn depth(&self) -> i32 { 30 } }
+                pub fn call(host: &MarkedDeepHost) -> i32 { host.depth() }
+            }
+        }
+
+        pub mod plain {
+            pub trait Clash { fn value(&self) -> i32; }
+            pub struct PlainHost;
+            impl Clash for PlainHost { fn value(&self) -> i32 { 40 } }
+            pub fn call(host: &PlainHost) -> i32 { host.value() }
+
+            pub mod deep {
+                pub trait Layer { fn depth(&self) -> i32; }
+                pub struct PlainDeepHost;
+                impl Layer for PlainDeepHost { fn depth(&self) -> i32 { 50 } }
+                pub fn call(host: &PlainDeepHost) -> i32 { host.depth() }
+            }
+        }
+
+        pub mod alias_case {
+            use crate::marked::Clash as Selected;
+            pub struct AliasHost;
+            impl Selected for AliasHost { fn value(&self) -> i32 { 60 } }
+            pub fn call(host: &AliasHost) -> i32 { host.value() }
+        }
+
+        pub mod facade { pub use crate::marked::Clash; }
+        pub mod reexport_case {
+            use crate::facade::Clash as Selected;
+            pub struct ReexportHost;
+            impl Selected for ReexportHost { fn value(&self) -> i32 { 70 } }
+            pub fn call(host: &ReexportHost) -> i32 { host.value() }
+        }
+
+        pub mod shadow_outer {
+            use crate::marked as selected;
+            pub mod inner {
+                pub mod selected {
+                    pub trait Clash { fn value(&self) -> i32; }
+                }
+                pub struct ChildHost;
+                impl selected::Clash for ChildHost { fn value(&self) -> i32 { 80 } }
+                pub fn call(host: &ChildHost) -> i32 { host.value() }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.emit_file(&source, Some("trait_dispatch_scope_review"));
+    let module = cg.into_output();
+
+    assert!(!module.contains("namespace RootDispatch_"), "{module}");
+    assert_eq!(module.matches("namespace Clash_ {").count(), 2, "{module}");
+    assert_eq!(module.matches("namespace Layer_ {").count(), 1, "{module}");
+    assert!(
+        !module.contains("using ::marked::__ufcs_Clash::value")
+            && !module.contains("using ::marked::deep::__ufcs_Layer::depth"),
+        "marked lexical owners leaked UFCS helpers:\n{module}"
+    );
+    assert_eq!(module.matches("return value_.root_value();").count(), 3, "{module}");
+    assert_eq!(module.matches("return value_.value();").count(), 9, "{module}");
+    assert_eq!(module.matches("return Clash_::value(value_);").count(), 6, "{module}");
+    assert_eq!(module.matches("return value_.depth();").count(), 3, "{module}");
+    assert_eq!(module.matches("return Layer_::depth(value_);").count(), 3, "{module}");
+
+    let temp = tempfile::tempdir().unwrap();
+    let module_source = temp.path().join("trait_dispatch_scope_review.cppm");
+    let module_pcm = temp.path().join("trait_dispatch_scope_review.pcm");
+    let module_object = temp.path().join("trait_dispatch_scope_review.o");
+    let importer_source = temp.path().join("importer.cpp");
+    let importer_object = temp.path().join("importer.o");
+    let binary = temp.path().join("importer");
+    std::fs::write(&module_source, module).unwrap();
+    std::fs::write(
+        &importer_source,
+        r#"
+#include <cstdint>
+import trait_dispatch_scope_review;
+
+int main() {
+    RootHost root;
+    marked::MarkedHost marked_host;
+    marked::deep::MarkedDeepHost marked_deep;
+    plain::PlainHost plain_host;
+    plain::deep::PlainDeepHost plain_deep;
+    alias_case::AliasHost alias_host;
+    reexport_case::ReexportHost reexport_host;
+    shadow_outer::inner::ChildHost child_host;
+    RootDispatchAdapter<RootHost> root_adapter(RootHost{});
+    marked::ClashAdapter<marked::MarkedHost> marked_adapter(marked::MarkedHost{});
+    marked::deep::LayerAdapter<marked::deep::MarkedDeepHost> marked_deep_adapter(
+        marked::deep::MarkedDeepHost{});
+    plain::ClashAdapter<plain::PlainHost> plain_adapter(plain::PlainHost{});
+    plain::deep::LayerAdapter<plain::deep::PlainDeepHost> plain_deep_adapter(
+        plain::deep::PlainDeepHost{});
+    marked::ClashAdapter<alias_case::AliasHost> alias_adapter(alias_case::AliasHost{});
+    marked::ClashAdapter<reexport_case::ReexportHost> reexport_adapter(
+        reexport_case::ReexportHost{});
+    shadow_outer::inner::selected::ClashAdapter<shadow_outer::inner::ChildHost> child_adapter(
+        shadow_outer::inner::ChildHost{});
+    return call_root(root) == 10
+        && marked::call(marked_host) == 20
+        && marked::deep::call(marked_deep) == 30
+        && plain::call(plain_host) == 40
+        && plain::deep::call(plain_deep) == 50
+        && alias_case::call(alias_host) == 60
+        && reexport_case::call(reexport_host) == 70
+        && shadow_outer::inner::call(child_host) == 80
+        && root_adapter.root_value() == 10
+        && marked_adapter.value() == 20
+        && marked_deep_adapter.depth() == 30
+        && plain_adapter.value() == 40
+        && plain_deep_adapter.depth() == 50
+        && alias_adapter.value() == 60
+        && reexport_adapter.value() == 70
+        && child_adapter.value() == 80 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let precompile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("--precompile")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_pcm)
+        .output()
+        .unwrap();
+    assert!(
+        precompile.status.success(),
+        "lexical trait-dispatch module precompile failed:\n{}",
+        String::from_utf8_lossy(&precompile.stderr)
+    );
+    let module_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=trait_dispatch_scope_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_object)
+        .output()
+        .unwrap();
+    assert!(
+        module_compile.status.success(),
+        "lexical trait-dispatch module object compile failed:\n{}",
+        String::from_utf8_lossy(&module_compile.stderr)
+    );
+    let importer_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=trait_dispatch_scope_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&importer_source)
+        .arg("-o")
+        .arg(&importer_object)
+        .output()
+        .unwrap();
+    assert!(
+        importer_compile.status.success(),
+        "lexical trait-dispatch importer compile failed:\n{}",
+        String::from_utf8_lossy(&importer_compile.stderr)
+    );
+    let link = std::process::Command::new(compiler)
+        .arg("-stdlib=libc++")
+        .arg(&module_object)
+        .arg(&importer_object)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "lexical trait-dispatch importer link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(binary).output().unwrap();
+    assert!(run.status.success(), "lexical trait-dispatch runtime failed: {run:?}");
+}
+
+#[test]
+fn test_trait_dispatch_identity_resolves_local_alias_and_rejects_external_same_leaf() {
+    let temp = tempfile::tempdir().unwrap();
+    let evil = temp.path().join("evil_trait");
+    let consumer = temp.path().join("consumer");
+    std::fs::create_dir_all(evil.join("src")).unwrap();
+    std::fs::create_dir_all(consumer.join("src")).unwrap();
+    std::fs::write(
+        evil.join("Cargo.toml"),
+        "[package]\nname='evil_trait'\nversion='0.0.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        evil.join("src/lib.rs"),
+        "pub trait Clash { fn value(&self) -> i32; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        "[package]\nname='trait_identity'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nevil_trait={path='../evil_trait'}\n[workspace]\n",
+    )
+    .unwrap();
+    let source = r#"
+#[cfg_attr(any(), cpp_trait_member_dispatch)]
+pub trait Clash { fn value(&self) -> i32; }
+pub mod marked {
+    #[cfg_attr(any(), cpp_trait_member_dispatch)]
+    pub trait Clash { fn value(&self) -> i32; }
+}
+pub mod local_alias {
+    use crate::marked::Clash as Selected;
+    pub struct AliasHost;
+    impl Selected for AliasHost { fn value(&self) -> i32 { 7 } }
+}
+pub mod local_chain {
+    use crate::marked as marker_module;
+    use marker_module::Clash as Selected;
+    pub struct ChainHost;
+    impl Selected for ChainHost { fn value(&self) -> i32 { 8 } }
+}
+pub mod facade { pub use crate::marked::Clash; }
+pub mod local_reexport_chain {
+    use crate::facade::Clash as Selected;
+    pub struct ReexportHost;
+    impl Selected for ReexportHost { fn value(&self) -> i32 { 81 } }
+}
+pub mod nested_shadow {
+    use crate::marked as selected;
+    pub mod inner {
+        pub mod selected {
+            pub trait Clash { fn value(&self) -> i32; }
+        }
+        pub struct ChildHost;
+        impl selected::Clash for ChildHost { fn value(&self) -> i32 { 82 } }
+    }
+}
+pub mod external_case {
+    use evil_trait::Clash;
+    pub struct ExternalHost;
+    impl Clash for ExternalHost { fn value(&self) -> i32 { 9 } }
+}
+pub mod external_chain {
+    use evil_trait as foreign;
+    use foreign::Clash as Selected;
+    pub struct ExternalHost;
+    impl Selected for ExternalHost { fn value(&self) -> i32 { 10 } }
+}
+pub mod external_glob {
+    use evil_trait::*;
+    pub struct ExternalHost;
+    impl Clash for ExternalHost { fn value(&self) -> i32 { 11 } }
+}
+"#;
+    std::fs::write(consumer.join("src/lib.rs"), source).unwrap();
+    let check = std::process::Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "trait-identity fixture must be Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let out = transpile_str_interface_traits(source);
+    assert_eq!(
+        out.matches("namespace Clash_ {").count(),
+        1,
+        "only the nearer child-local unmarked trait may retain UFCS lowering:\n{out}"
+    );
+    assert!(
+        out.contains("class ClashAdapter<::local_alias::AliasHost>"),
+        "local alias did not resolve to marked::Clash:\n{out}"
+    );
+    assert!(
+        out.contains("class ClashAdapter<::local_chain::ChainHost>"),
+        "chained local alias did not resolve to marked::Clash:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "namespace marked {\ntemplate <>\nclass ClashAdapter<::local_reexport_chain::ReexportHost>"
+        ),
+        "intermediate local re-export lost the marked trait identity:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "namespace nested_shadow::inner::selected {\ntemplate <>\nclass ClashAdapter<::nested_shadow::inner::ChildHost>"
+        ),
+        "parent import beat a nearer child module:\n{out}"
+    );
+    assert!(
+        !out.contains("ClashAdapter<::external_case::ExternalHost>")
+            && !out.contains("ClashAdapter<::external_chain::ExternalHost>")
+            && !out.contains("ClashAdapter<::external_glob::ExternalHost>")
+            && !out.contains("SelectedAdapter"),
+        "external/import spelling acquired local trait behavior:\n{out}"
+    );
+    assert_eq!(out.matches("return value_.value();").count(), 9, "{out}");
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_partial_adapter_clang_runtime() {
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping generic Adapter runtime proof: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits(
+        r#"
+        pub trait Score { fn score(&self) -> i32; }
+        impl<T> Score for std::pair<T, T> {
+            fn score(&self) -> i32 { 42 }
+        }
+        "#,
+    );
+    cpp.push_str(
+        r#"
+int main() {
+    ScoreAdapter<std::pair<int32_t, int32_t>> owned({20, 22});
+    std::pair<int32_t, int32_t> pair{1, 2};
+    ScoreAdapterRef<std::pair<int32_t, int32_t>> borrowed(pair);
+    return owned.score() == 42 && borrowed.score() == 42 ? 0 : 1;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("generic_adapter.cpp");
+    let binary_path = temp.path().join("generic_adapter");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "generic Adapter C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(run.status.success(), "generic Adapter runtime failed: {run:?}");
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_does_not_emit_generic_virtual_override() {
+    // C++ virtual functions cannot be templates.  Supporting impl-level type
+    // parameters must not accidentally make a method-only generic look like
+    // an ordinary override.
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Visit { fn visit<U>(&self, value: U); }
+        impl<T> Visit for Vec<T> {
+            fn visit<U>(&self, value: U) {}
+        }
+        "#,
+    );
+    assert!(
+        !out.contains(" override"),
+        "generic method must not become a concrete override:\n{out}"
+    );
+    assert!(
+        !out.contains("class VisitAdapter<rusty::Vec<T>>"),
+        "a generic-method-only marker interface needs no adapter:\n{out}"
+    );
+}
+
+#[test]
+fn test_cpp_inherit_accepts_authenticated_unqualified_facade_marker() {
+    // Direct rustc resolves the compiler-owned attribute through the exact
+    // facade import. The import itself is Rust-only and must not become a
+    // nonexistent C++ runtime symbol.
+    let out = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+        use rusty::cpp_inherit;
+        trait Base { fn value(&self) -> i32; }
+        struct Derived { value: i32 }
+        #[cpp_inherit]
+        impl Base for Derived { fn value(&self) -> i32 { self.value } }
+        "#,
+    );
+    assert!(out.contains("struct Derived : public Base"), "{out}");
+    assert!(!out.contains("using rusty::cpp_inherit"), "{out}");
+}
+
+#[test]
+fn test_cpp_inherit_rejects_real_qualified_and_imported_proc_macro_lookalikes() {
+    let temp = tempfile::tempdir().unwrap();
+    let evil = temp.path().join("evil_macros");
+    let consumer = temp.path().join("consumer");
+    std::fs::create_dir_all(evil.join("src")).unwrap();
+    std::fs::create_dir_all(consumer.join("src")).unwrap();
+    std::fs::write(
+        evil.join("Cargo.toml"),
+        "[package]\nname='evil_macros'\nversion='0.0.0'\nedition='2024'\n[lib]\nproc-macro=true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        evil.join("src/lib.rs"),
+        r#"use proc_macro::TokenStream;
+#[proc_macro_attribute]
+pub fn cpp_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        "[package]\nname='qualified_inherit'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nevil={package='evil_macros',path='../evil_macros'}\n[workspace]\n",
+    )
+    .unwrap();
+    let source = r#"use evil::cpp_inherit;
+pub trait Base { fn value(&self) -> i32; }
+pub struct Derived { pub value: i32 }
+#[evil::cpp_inherit]
+impl Base for Derived { fn value(&self) -> i32 { self.value } }
+pub struct ImportedDerived { pub value: i32 }
+#[cpp_inherit]
+impl Base for ImportedDerived { fn value(&self) -> i32 { self.value } }
+pub mod local_shadow {
+    pub mod rusty { pub use evil::cpp_inherit; }
+    use rusty::cpp_inherit;
+    pub struct LocalDerived { pub value: i32 }
+    #[cpp_inherit]
+    impl crate::Base for LocalDerived { fn value(&self) -> i32 { self.value } }
+}
+pub mod alias_shadow {
+    use evil as rusty;
+    use rusty::cpp_inherit;
+    pub struct AliasDerived { pub value: i32 }
+    #[cpp_inherit]
+    impl crate::Base for AliasDerived { fn value(&self) -> i32 { self.value } }
+}
+pub mod glob_shadow {
+    use evil::*;
+    pub struct GlobDerived { pub value: i32 }
+    #[cpp_inherit]
+    impl crate::Base for GlobDerived { fn value(&self) -> i32 { self.value } }
+}
+"#;
+    std::fs::write(consumer.join("src/lib.rs"), source).unwrap();
+    let check = std::process::Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "qualified lookalike fixture must be Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    // Even when the driver has authenticated the real `rusty` facade root,
+    // local modules, aliases, globs, and foreign qualified paths must not
+    // acquire the compiler-owned behavior.
+    let out = transpile_str_interface_traits_with_authenticated_cpp_inherit(source);
+    assert!(!out.contains("struct Derived : public Base"), "{out}");
+    assert!(
+        !out.contains("struct ImportedDerived : public Base"),
+        "{out}"
+    );
+    assert!(out.contains("class BaseAdapter<Derived>"), "{out}");
+    assert!(
+        out.contains("class BaseAdapter<ImportedDerived>"),
+        "{out}"
+    );
+    for (module, derived) in [
+        ("local_shadow", "LocalDerived"),
+        ("alias_shadow", "AliasDerived"),
+        ("glob_shadow", "GlobDerived"),
+    ] {
+        assert!(
+            !out.contains(&format!("struct {derived} : public")),
+            "lookalike marker changed {derived} inheritance:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("BaseAdapter<::{module}::{derived}>")),
+            "lookalike marker suppressed {derived}'s ordinary adapter:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -16621,6 +17979,72 @@ fn test_crate_module_import_as_underscore_is_private_and_alias_free() {
     assert!(!out.contains("namespace provider ="), "{out}");
     assert!(!out.contains("namespace _ ="), "{out}");
     assert!(!out.contains("using _ ="), "{out}");
+}
+
+#[test]
+fn exact_qualified_flat_type_path_imports_and_rewrites_its_proven_provider() {
+    let file: syn::File = syn::parse_str(
+        r#"
+            pub mod nested {
+                pub fn callback() {
+                    let _ = crate::channel::OnFrameCallback::from_callable();
+                }
+            }
+        "#,
+    )
+    .unwrap();
+    let authorization = crate::cpp_abi::FlatImportTypeAuthorization {
+        consumer_source: std::path::PathBuf::from("src/fiber_channel.rs"),
+        consumer_physical_module: crate::cpp_abi::ModulePath(vec![
+            "fiber_channel".to_string(),
+        ]),
+        consumer_lexical_module: crate::cpp_abi::ModulePath(vec!["nested".to_string()]),
+        marked_rust_child: "channel".to_string(),
+        marked_leaves: vec!["OnFrameCallback".to_string()],
+        leaf: "OnFrameCallback".to_string(),
+        cpp_namespace: "rrr".to_string(),
+        provider_physical_module: crate::cpp_abi::ModulePath(vec!["channel".to_string()]),
+        provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::Struct,
+        reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath,
+    };
+
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("rrr");
+    cg.set_crate_module_names(
+        ["rrr.channel", "rrr.fiber_channel"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.set_flat_import_type_authorizations(BTreeSet::from([authorization.clone()]));
+    cg.emit_file(&file, Some("rrr.fiber_channel"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+
+    let module = out.find("export module rrr.fiber_channel;").unwrap();
+    let import = out.find("import rrr.channel;").unwrap();
+    let namespace = out.find("namespace rrr {").unwrap();
+    assert!(module < import && import < namespace, "{out}");
+    assert_eq!(out.matches("import rrr.channel;").count(), 1, "{out}");
+    assert!(
+        out.contains("::rrr::OnFrameCallback::from_callable()"),
+        "{out}"
+    );
+    assert!(!out.contains("::channel::OnFrameCallback"), "{out}");
+    assert!(!out.contains("using ::rrr::OnFrameCallback;"), "{out}");
+
+    let mut missing = CodeGen::new();
+    missing.set_crate_name("rrr");
+    missing.set_crate_module_names(vec!["rrr.fiber_channel".to_string()]);
+    missing.set_cxx_namespace(Some("rrr".to_string()));
+    missing.set_flat_import_type_authorizations(BTreeSet::from([authorization]));
+    missing.emit_file(&file, Some("rrr.fiber_channel"));
+    let error = missing
+        .take_codegen_error()
+        .expect("a proven provider must resolve to its exact named module");
+    assert!(error.contains("`channel`"), "{error}");
+    assert!(error.contains("generated sibling module"), "{error}");
 }
 
 #[test]
@@ -40642,6 +42066,63 @@ fn thread_local_attribute_survives_as_thread_local_storage() {
 }
 
 #[test]
+fn exact_inert_thread_local_marker_survives_on_namespace_and_function_statics() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), thread_local)]
+        static mut GLOBAL_SLOT: u64 = 0;
+
+        pub fn bump() -> u64 {
+            #[cfg_attr(any(), thread_local)]
+            static mut LOCAL_SLOT: u64 = 0;
+            GLOBAL_SLOT = GLOBAL_SLOT + 1u64;
+            LOCAL_SLOT = LOCAL_SLOT + GLOBAL_SLOT;
+            LOCAL_SLOT
+        }
+        "#,
+    );
+    assert!(
+        out.contains("extern thread_local uint64_t GLOBAL_SLOT;"),
+        "inert marker was dropped from namespace forward declaration:\n{out}"
+    );
+    assert!(
+        out.contains("inline thread_local uint64_t GLOBAL_SLOT"),
+        "inert marker was dropped from namespace definition:\n{out}"
+    );
+    assert!(
+        out.contains("static thread_local uint64_t LOCAL_SLOT"),
+        "inert marker was dropped from function-local static:\n{out}"
+    );
+}
+
+#[test]
+fn only_exact_inactive_unqualified_thread_local_marker_changes_storage() {
+    for (label, attribute) in [
+        ("active predicate", "#[cfg_attr(all(), thread_local)]"),
+        (
+            "qualified payload",
+            "#[cfg_attr(any(), compiler::thread_local)]",
+        ),
+        (
+            "multiple payloads",
+            "#[cfg_attr(any(), thread_local, allow(dead_code))]",
+        ),
+        (
+            "nested payload",
+            "#[cfg_attr(any(), cfg_attr(any(), thread_local))]",
+        ),
+    ] {
+        let out = transpile_str(&format!(
+            "{attribute}\nstatic mut SLOT: u64 = 0;\npub fn read() -> u64 {{ SLOT }}"
+        ));
+        assert!(
+            !out.contains("thread_local"),
+            "{label} acquired thread-local storage:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn a_plain_static_is_not_made_thread_local() {
     let out = transpile_str("pub static SHARED: u64 = 0;");
     assert!(
@@ -41054,8 +42535,9 @@ fn test_box_new_struct_literal_of_cpp_inherit_uses_fieldwise_ctor() {
     // class), so a struct literal must lower to the synthesized
     // fieldwise ctor, never a designated-initializer list (mako tcp
     // proxy factories: Box::new(TcpChannelShim { conn_: conn })).
-    let out = transpile_str(
+    let out = transpile_str_with_authenticated_cpp_inherit(
         r#"
+        use rusty::cpp_inherit;
         pub trait ChannelBase {
             fn close(&mut self);
         }

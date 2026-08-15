@@ -1166,10 +1166,24 @@ impl CodeGen {
         self.indent += 1;
         for item in &fm.items {
             if let syn::ForeignItem::Fn(f) = item {
-                let name = &f.sig.ident;
+                let name_str = f.sig.ident.to_string();
+                let name = escape_cpp_keyword(&name_str);
                 let return_type = self.map_return_type(&f.sig.output);
                 let params = self.map_fn_params(&f.sig.inputs);
-                self.writeln(&format!("{} {}({});", return_type, name, params));
+                // Linkage-specification braces do not create a namespace
+                // scope, so an export-declaration is valid here. Export each
+                // Rust-public foreign declaration independently; keeping the
+                // block itself unexported leaves private siblings attached to
+                // the module but unreachable to importers.
+                let export_prefix = if self.should_export_item(&f.vis, &name_str) {
+                    "export "
+                } else {
+                    ""
+                };
+                self.writeln(&format!(
+                    "{}{} {}({});",
+                    export_prefix, return_type, name, params
+                ));
             }
         }
         self.indent -= 1;
@@ -4418,12 +4432,7 @@ impl CodeGen {
         // turns it into one process-wide object shared by every thread —
         // which compiles, runs, and is silently wrong: threads see each
         // other's writes. C++ spells it the same way, so carry it over.
-        let is_thread_local = s.attrs.iter().any(|a| {
-            a.path()
-                .segments
-                .last()
-                .is_some_and(|seg| seg.ident == "thread_local")
-        });
+        let is_thread_local = has_exact_thread_local_storage_attr(&s.attrs);
         let storage = match (self.block_depth > 0, is_thread_local) {
             (true, true) => "static thread_local ",
             (true, false) => "static ",
@@ -5145,17 +5154,24 @@ impl CodeGen {
             )
         };
         self.newline();
+        // The Adapter family is part of a public trait's C++ surface.  The
+        // primary declaration is what makes both the template name and its
+        // later explicit/partial specializations reachable to an importer;
+        // exporting only the abstract base leaves downstream code unable to
+        // name `TraitAdapter<Concrete>` even though that is the concrete type
+        // used to implement Rust's dyn coercion.  Keep private-trait adapters
+        // module-local, matching the trait itself.
         self.writeln(&format!(
-            "template <{}> class {}Adapter;",
-            adapter_template_args, trait_name
+            "{}template <{}> class {}Adapter;",
+            cls_export, adapter_template_args, trait_name
         ));
         self.writeln(&format!(
-            "template <{}> class {}AdapterRef;",
-            adapter_template_args, trait_name
+            "{}template <{}> class {}AdapterRef;",
+            cls_export, adapter_template_args, trait_name
         ));
         self.writeln(&format!(
-            "template <{}> class {}AdapterRefMut;",
-            adapter_template_args, trait_name
+            "{}template <{}> class {}AdapterRefMut;",
+            cls_export, adapter_template_args, trait_name
         ));
 
         // Phase 3b.1: helper traits class forward decl. For each trait
@@ -5184,7 +5200,10 @@ impl CodeGen {
             // an undefined forward-decl, so any unspecced `<Trait>Traits<B>` was
             // a hard error — currently-passing code therefore never reached it,
             // making this strictly additive.)
-            let mut primary = format!("template <class B> struct {}Traits {{ ", trait_name);
+            let mut primary = format!(
+                "{}template <class B> struct {}Traits {{ ",
+                cls_export, trait_name
+            );
             for name in &trait_assoc_type_names {
                 primary.push_str(&format!("using {0} = typename B::{0}; ", name));
             }
@@ -5200,8 +5219,8 @@ impl CodeGen {
             // pointer/reference-bound param does).
             for ptr_or_ref in ["S*", "S&"] {
                 let mut spec = format!(
-                    "template <class S> struct {}Traits<{}> {{ ",
-                    trait_name, ptr_or_ref
+                    "{}template <class S> struct {}Traits<{}> {{ ",
+                    cls_export, trait_name, ptr_or_ref
                 );
                 for name in &trait_assoc_type_names {
                     spec.push_str(&format!(
@@ -5547,7 +5566,14 @@ impl CodeGen {
         // Group methods by implementing self type.
         let mut by_self: Vec<(String, Vec<&ExtensionImplMethod>)> = Vec::new();
         for m in methods {
+            if !m.impl_generic_names.is_empty() {
+                self.type_param_scopes
+                    .push(m.impl_generic_names.iter().cloned().collect());
+            }
             let self_cpp = self.map_type(&m.self_ty);
+            if !m.impl_generic_names.is_empty() {
+                self.type_param_scopes.pop();
+            }
             if let Some(group) = by_self.iter_mut().find(|(k, _)| k == &self_cpp) {
                 group.1.push(m);
             } else {
@@ -5564,29 +5590,59 @@ impl CodeGen {
                 ));
                 continue;
             }
-            // Skip generic impls (self type contains free type parameters
-            // like `Option<T>`, `RangeInclusive<Idx>`). Full + partial
-            // specializations of the Adapter primary template require
-            // `template <T>` headers and inheritance/storage forms not
-            // yet implemented. Detection: the impl had any type params
-            // OR the self type's textual rendering still references one
-            // of those param idents.
-            if let Some(first_method) = group.first() {
-                let has_impl_generics = !first_method.impl_generic_names.is_empty();
-                let mentions_impl_generic = first_method
-                    .impl_generic_names
-                    .iter()
-                    .any(|name| self_cpp.contains(name));
-                if has_impl_generics && mentions_impl_generic {
-                    self.writeln(&format!(
-                        "// TODO(interface_traits): skipped generic impl `{}Adapter<{}>`",
-                        trait_name, self_cpp
-                    ));
-                    continue;
-                }
-                if self.type_contains_unbound_single_letter_generic(&first_method.self_ty) {
-                    continue;
-                }
+            // A generic impl whose Self type contains its impl parameters is a
+            // C++ partial specialization of the Adapter primary template. The
+            // class body/storage shape is otherwise identical to a concrete
+            // specialization, so carry the exact impl parameter names into
+            // the shared emitter. Generic *trait methods* remain unsupported
+            // and are rejected separately by the method emitter.
+            let impl_generic_names = group
+                .first()
+                .map(|method| method.impl_generic_names.clone())
+                .unwrap_or_default();
+            let referenced_impl_generics: Vec<String> = impl_generic_names
+                .iter()
+                .filter(|name| {
+                    group.first().is_some_and(|method| {
+                        self.type_mentions_named_type_param(&method.self_ty, name)
+                    })
+                })
+                .cloned()
+                .collect();
+            let mapped_impl_generics: Vec<String> = referenced_impl_generics
+                .iter()
+                .filter(|name| {
+                    Self::cpp_type_expr_mentions_identifier(
+                        self_cpp,
+                        &escape_cpp_keyword(name),
+                    )
+                })
+                .cloned()
+                .collect();
+            let partial_spec_params = group
+                .first()
+                .filter(|method| method.foreign_adapter_partial_spec_compatible)
+                .map(|_| referenced_impl_generics.clone())
+                .unwrap_or_default();
+            if group.first().is_some_and(|method| {
+                method.foreign_adapter_has_non_lifetime_generics
+                    && (!method.foreign_adapter_partial_spec_compatible
+                        || partial_spec_params.len() != impl_generic_names.len()
+                        || mapped_impl_generics.len() != referenced_impl_generics.len())
+            })
+            {
+                self.writeln(&format!(
+                    "// TODO(interface_traits): skipped generic impl `{}Adapter<{}>` — constrained/const generic partial specializations are unsupported",
+                    trait_name, self_cpp
+                ));
+                continue;
+            }
+            if partial_spec_params.is_empty()
+                && group.first().is_some_and(|method| {
+                    self.type_contains_unbound_single_letter_generic(&method.self_ty)
+                })
+            {
+                continue;
             }
             // Dedup: skip if we've already emitted Adapter trio for this
             // (trait, self) pair. Foreign-impl pipelines may iterate the
@@ -5614,7 +5670,14 @@ impl CodeGen {
                 .first()
                 .map(|m| m.associated_type_bindings.clone())
                 .unwrap_or_default();
+            if !partial_spec_params.is_empty() {
+                self.type_param_scopes
+                    .push(partial_spec_params.iter().cloned().collect());
+            }
             let bindings_cpp = self.extension_assoc_cpp_bindings(&assoc_bindings);
+            if !partial_spec_params.is_empty() {
+                self.type_param_scopes.pop();
+            }
             let trait_args: Vec<String> = self
                 .trait_associated_type_names
                 .get(trait_name)
@@ -5631,6 +5694,7 @@ impl CodeGen {
             self.emit_one_foreign_adapter(
                 trait_name,
                 &trait_args,
+                &partial_spec_params,
                 "Adapter",
                 self_cpp,
                 AdapterStorageKind::Owning,
@@ -5639,6 +5703,7 @@ impl CodeGen {
             self.emit_one_foreign_adapter(
                 trait_name,
                 &trait_args,
+                &partial_spec_params,
                 "AdapterRef",
                 self_cpp,
                 AdapterStorageKind::ConstRef,
@@ -5647,6 +5712,7 @@ impl CodeGen {
             self.emit_one_foreign_adapter(
                 trait_name,
                 &trait_args,
+                &partial_spec_params,
                 "AdapterRefMut",
                 self_cpp,
                 AdapterStorageKind::MutRef,
@@ -5671,7 +5737,12 @@ impl CodeGen {
                         .map(|ty| (assoc_name.clone(), ty))
                 })
                 .collect();
-            self.emit_assoc_type_helper_spec(trait_name, self_cpp, &assoc_pairs);
+            self.emit_assoc_type_helper_spec(
+                trait_name,
+                self_cpp,
+                &assoc_pairs,
+                &partial_spec_params,
+            );
         }
     }
 
@@ -6118,12 +6189,14 @@ impl CodeGen {
             }
             let marked_leaves = leaves.clone();
             for leaf in leaves {
-                if self
+                if let Some(authorization) = self
                     .flat_import_type_authorizations
                     .iter()
-                    .any(|authorization| {
+                    .find(|authorization| {
                         authorization.consumer_physical_module
                             == self.current_physical_module
+                            && authorization.reference_kind
+                                == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                             && authorization.consumer_lexical_module.0 == self.module_stack
                             && authorization.marked_rust_child == child
                             && authorization.marked_leaves == marked_leaves
@@ -6133,7 +6206,16 @@ impl CodeGen {
                                 == [child.clone()]
                     })
                 {
-                    self.writeln(&format!("using ::{namespace}::{leaf};"));
+                    // C++ using-declarations cannot name a namespace. Exact
+                    // namespace carriers are resolved through the recorded
+                    // Rust binding to `::{namespace}::{leaf}` at every use
+                    // site; emitting an alias here would broaden or duplicate
+                    // that binding.
+                    if authorization.provider_kind
+                        != crate::cpp_abi::FlatImportTypeProviderKind::Namespace
+                    {
+                        self.writeln(&format!("using ::{namespace}::{leaf};"));
+                    }
                 }
             }
             return;
@@ -6337,6 +6419,10 @@ impl CodeGen {
             // type alias (`using C = rusty::a::b::C;`): the declaration form
             // binds functions as well as types, and the alias form is
             // ill-formed for a function.
+            if resolved_path.trim_start_matches("::") == "rusty::cpp_inherit" {
+                self.writeln("// Rust-only compiler marker import: rusty::cpp_inherit");
+                continue;
+            }
             if resolved_path.trim_start_matches("::").starts_with("rusty::") {
                 self.writeln(&format!("using {};", resolved_path.trim_start_matches("::")));
                 continue;
@@ -7264,9 +7350,24 @@ impl CodeGen {
         // (with a proper `self_` parameter) — the member-style orphan
         // stub below would be a dead `#if 0` duplicate whose
         // `(*this)` bodies read as live bugs to anyone grepping. Skip it.
-        if let Some((trait_name, _)) = Self::ufcs_trait_impl_specs(i)
-            && self.ufcs_declared_trait_names.contains(&trait_name)
+        if let Some((written_trait_name, _)) = Self::ufcs_trait_impl_specs(i)
+            && let Some((_, trait_path, _)) = i.trait_.as_ref()
+            && {
+                let trait_key = self.resolve_trait_scoped_key_for_impl(
+                    trait_path,
+                    &self.module_stack,
+                );
+                self.trait_declared_paths.contains(&trait_key)
+            }
         {
+            let trait_name = i
+                .trait_
+                .as_ref()
+                .map(|(_, trait_path, _)| {
+                    self.resolve_trait_scoped_key_for_impl(trait_path, &self.module_stack)
+                })
+                .and_then(|key| key.rsplit("::").next().map(str::to_string))
+                .unwrap_or(written_trait_name);
             self.writeln(&format!(
                 "// trait impl for `{}` lowered via the {}_ free functions above",
                 Self::impl_self_type_path(i.self_ty.as_ref())

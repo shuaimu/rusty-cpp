@@ -3821,3 +3821,470 @@ pub fn renamed(value: i32) -> i32 { value + 1 }
         }
     }
 }
+
+#[test]
+fn durable_serializable_nested_cpp_inherit_uses_authenticated_facade_preflight() {
+    let temp = tempfile::tempdir().expect("durable Serializable provenance tempdir");
+    let markers = temp.path().join("markers");
+    let runtime = temp.path().join("runtime");
+    let app = temp.path().join("app");
+    for package in [&markers, &runtime, &app] {
+        std::fs::create_dir_all(package.join("src")).unwrap();
+    }
+
+    std::fs::write(
+        markers.join("Cargo.toml"),
+        "[package]\nname='rusty-cpp-markers'\nversion='0.0.0'\nedition='2021'\n[lib]\nproc-macro=true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        markers.join("src/lib.rs"),
+        r#"//! Rustc-visible inert attributes consumed by rusty-cpp code generation.
+use proc_macro::TokenStream;
+/// Request direct C++ inheritance.
+#[proc_macro_attribute]
+pub fn cpp_inherit(_attribute: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        runtime.join("Cargo.toml"),
+        "[package]\nname='rusty'\nversion='0.0.0'\nedition='2021'\n[dependencies]\nrusty-cpp-markers={path='../markers'}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        runtime.join("src/lib.rs"),
+        "pub use rusty_cpp_markers::cpp_inherit;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("Cargo.toml"),
+        "[package]\nname='durable_serializable'\nversion='0.0.0'\nedition='2021'\n[dependencies]\nrusty={path='../runtime'}\n[workspace]\nresolver='2'\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("src/lib.rs"), "pub mod serializable;\n").unwrap();
+    std::fs::write(
+        app.join("src/serializable.rs"),
+        r#"#[cfg_attr(any(), cpp_name(make_sink_proxy))]
+pub fn make_sink_proxy_value(value: i32) -> i32 { value }
+#[cfg_attr(any(), cpp_name(make_sink_proxy))]
+pub fn make_sink_proxy_flag(value: bool) -> i32 { if value { 1 } else { 0 } }
+
+pub mod details {
+    use rusty::cpp_inherit;
+    pub trait SerializableBase {}
+    pub struct SerializableSharedPtrHolder;
+    #[cpp_inherit]
+    impl SerializableBase for SerializableSharedPtrHolder {}
+}
+"#,
+    )
+    .unwrap();
+
+    let manifest = app.join("Cargo.toml");
+    let cargo_check = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(temp.path().join("cargo-target"))
+        .output()
+        .expect("cargo-check durable Serializable provenance fixture");
+    assert!(
+        cargo_check.status.success(),
+        "durable Serializable provenance fixture is not Cargo-valid:\n{}",
+        String::from_utf8_lossy(&cargo_check.stderr)
+    );
+
+    let output_dir = temp.path().join("cpp-output");
+    let result = run_crate_transpiler(&manifest, &output_dir);
+    assert!(
+        result.status.success(),
+        "authenticated nested cpp_inherit was rejected before Serializable output:\n{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let generated =
+        std::fs::read_to_string(output_dir.join("durable_serializable.serializable.cppm"))
+            .expect("read durable Serializable module");
+    assert!(generated.contains("make_sink_proxy("), "{generated}");
+    assert!(
+        generated.contains("SerializableSharedPtrHolder")
+            && generated.contains("SerializableBase"),
+        "{generated}"
+    );
+}
+
+#[test]
+fn cpp_name_root_feature_graph_stays_exact_with_fake_std_provenance() {
+    let temp = tempfile::tempdir().expect("root feature-graph tempdir");
+    let fake_std = temp.path().join("fake-std");
+    let bad = temp.path().join("bad");
+    let root = temp.path().join("root");
+    for package in [&fake_std, &bad, &root] {
+        std::fs::create_dir_all(package.join("src")).unwrap();
+    }
+
+    std::fs::write(
+        fake_std.join("Cargo.toml"),
+        "[package]\nname='innocent_package'\nversion='0.1.0'\nedition='2024'\n[lib]\nname='std'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fake_std.join("src/lib.rs"),
+        "#![no_std]\npub fn lookalike() -> i32 { 7 }\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        bad.join("Cargo.toml"),
+        "[package]\nname='bad_dep'\nversion='0.1.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bad.join("src/lib.rs"),
+        r#"#![no_std]
+#[cfg_attr(any(), cpp_name(cross_feature_overload))]
+pub fn first(value: i32) -> i32 { value }
+#[cfg_attr(any(), cpp_name(cross_feature_overload))]
+pub fn second(value: i32) -> i32 { value + 1 }
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='cross_feature_root'\nversion='0.1.0'\nedition='2024'\n\
+         [features]\ndefault=[]\nfake-std=['dep:innocent_package']\ncpp-name=['dep:bad_dep']\n\
+         [dependencies]\ninnocent_package={path='../fake-std',optional=true}\nbad_dep={path='../bad',optional=true}\n\
+         [workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        r#"#![no_std]
+#[cfg(feature = "fake-std")]
+extern crate std;
+
+#[cfg(feature = "cpp-name")]
+pub fn root() -> i32 { bad_dep::first(1) }
+#[cfg(not(feature = "cpp-name"))]
+pub fn root() -> i32 { 0 }
+"#,
+    )
+    .unwrap();
+
+    let manifest = root.join("Cargo.toml");
+    for (label, features, should_pass) in [
+        ("neither", None, true),
+        ("fake-std", Some("fake-std"), true),
+        ("cpp-name", Some("cpp-name"), false),
+        (
+            "qualified-cpp-name",
+            Some("cross_feature_root/cpp-name"),
+            false,
+        ),
+        ("both", Some("fake-std,cpp-name"), false),
+    ] {
+        let cargo_target = temp.path().join(format!("cargo-target-{label}"));
+        let mut cargo_check = Command::new("cargo");
+        cargo_check
+            .args(["check", "--offline", "--manifest-path"])
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&cargo_target)
+            .arg("--no-default-features");
+        if let Some(features) = features {
+            cargo_check.arg("--features").arg(features);
+        }
+        let check = cargo_check.output().expect("cargo-check feature fixture");
+        assert!(
+            check.status.success(),
+            "{label} feature fixture is not Cargo-valid:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+
+        let output_dir = temp.path().join(format!("cpp-output-{label}"));
+        let mut transpiler = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"));
+        transpiler
+            .arg("--crate")
+            .arg(&manifest)
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .arg("--offline")
+            .arg("--no-default-features");
+        if let Some(features) = features {
+            transpiler.arg("--features").arg(features);
+        }
+        let result = transpiler.output().expect("run feature-context transpiler");
+        assert_eq!(
+            result.status.success(),
+            should_pass,
+            "unexpected {label} feature result:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if should_pass {
+            assert!(output_dir.join("cross_feature_root.cppm").is_file());
+            assert!(
+                !output_dir.join("bad_dep").exists(),
+                "inactive cpp_name dependency was recursively generated in {label} lane"
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                stderr.contains(
+                    "cpp_name whole local-dependency closure preflight failed before output"
+                ) && stderr.contains("cpp_name overload collision")
+                    && stderr.contains("bad"),
+                "{label} failed for the wrong reason:\n{stderr}"
+            );
+            assert!(
+                !output_dir.exists(),
+                "{label} collision created partial crate output"
+            );
+        }
+    }
+}
+
+#[test]
+fn cpp_name_dependency_features_drive_exact_child_sysroot_provenance() {
+    let temp = tempfile::tempdir().expect("dependency provenance feature tempdir");
+    let fake_std = temp.path().join("fake-std");
+    let poison = temp.path().join("poison");
+    let bridge = temp.path().join("bridge");
+    let root = temp.path().join("root");
+    for package in [&fake_std, &poison, &bridge, &root] {
+        std::fs::create_dir_all(package.join("src")).unwrap();
+    }
+
+    std::fs::write(
+        fake_std.join("Cargo.toml"),
+        "[package]\nname='innocent_package'\nversion='0.1.0'\nedition='2024'\n\
+         [lib]\nname='std'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fake_std.join("src/lib.rs"),
+        "#![no_std]\npub mod sync { pub struct Arc<T>(pub T); impl<T> Arc<T> { pub fn new(value: T) -> Self { Self(value) } } }\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        poison.join("Cargo.toml"),
+        "[package]\nname='cpp_name_poison'\nversion='0.1.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        poison.join("src/lib.rs"),
+        r#"
+#[cfg_attr(any(), cpp_name(child_feature_collision))]
+pub fn first(value: i32) -> i32 { value }
+#[cfg_attr(any(), cpp_name(child_feature_collision))]
+pub fn second(value: i32) -> i32 { value + 1 }
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        bridge.join("Cargo.toml"),
+        "[package]\nname='feature_bridge'\nversion='0.1.0'\nedition='2024'\n\
+         [features]\ndefault=[]\nfake-sysroot=['dep:innocent_package']\nname-contract=['dep:cpp_name_poison']\n\
+         [dependencies]\ninnocent_package={path='../fake-std',optional=true}\ncpp_name_poison={path='../poison',optional=true}\n\
+         [workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bridge.join("src/lib.rs"),
+        r#"#![no_std]
+extern crate std;
+use std::sync::Arc;
+
+pub struct Owner { pub value: i32 }
+impl Owner {
+    #[cfg_attr(any(), cpp_ctor)]
+    pub unsafe fn new(value: i32) -> Owner { Owner { value } }
+}
+pub fn make_owner(value: i32) -> Arc<Owner> {
+    Arc::new(unsafe { Owner::new(value) })
+}
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='dependency_context_root'\nversion='0.1.0'\nedition='2024'\n\
+         [features]\ndefault=[]\nroot-fake=['feature_bridge/fake-sysroot']\nroot-name=['feature_bridge/name-contract']\n\
+         [dependencies]\nfeature_bridge={path='../bridge',default-features=false}\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        r#"
+#[cfg_attr(any(), cpp_name(dependency_context_root_value))]
+pub fn root_value() -> i32 { 7 }
+"#,
+    )
+    .unwrap();
+
+    let manifest = root.join("Cargo.toml");
+    for (label, features, should_pass, should_fuse) in [
+        ("baseline", None, true, true),
+        ("fake", Some("root-fake"), true, false),
+        ("name", Some("root-name"), false, false),
+        ("both", Some("root-fake,root-name"), false, false),
+    ] {
+        let mut cargo_check = Command::new("cargo");
+        cargo_check
+            .args(["check", "--offline", "--manifest-path"])
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(temp.path().join(format!("cargo-target-{label}")))
+            .arg("--no-default-features");
+        if let Some(features) = features {
+            cargo_check.arg("--features").arg(features);
+        }
+        let check = cargo_check.output().expect("cargo-check child feature fixture");
+        assert!(
+            check.status.success(),
+            "{label} child feature fixture is not Cargo-valid:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+
+        let output_dir = temp.path().join(format!("cpp-output-{label}"));
+        let mut transpiler = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"));
+        transpiler
+            .arg("--crate")
+            .arg(&manifest)
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .arg("--offline")
+            .arg("--no-default-features");
+        if let Some(features) = features {
+            transpiler.arg("--features").arg(features);
+        }
+        let result = transpiler.output().expect("run child feature transpiler");
+        assert_eq!(
+            result.status.success(),
+            should_pass,
+            "unexpected {label} child feature result:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if should_pass {
+            let bridge_cpp =
+                std::fs::read_to_string(output_dir.join("feature_bridge/feature_bridge.cppm"))
+                    .unwrap();
+            assert_eq!(
+                bridge_cpp.contains("rusty::Arc<Owner>::make("),
+                should_fuse,
+                "{label} used the wrong child sysroot provenance:\n{bridge_cpp}"
+            );
+            assert!(!output_dir.join("feature_bridge/cpp_name_poison").exists());
+        } else {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                stderr.contains("cpp_name whole local-dependency closure preflight failed before output")
+                    && stderr.contains("child_feature_collision")
+                    && stderr.contains("poison"),
+                "{label} failed for the wrong reason:\n{stderr}"
+            );
+            assert!(!output_dir.exists(), "{label} created partial output");
+        }
+    }
+}
+
+#[test]
+fn cpp_name_dependency_feature_selector_fails_closed_before_output() {
+    let temp = tempfile::tempdir().expect("dependency feature-selector tempdir");
+    let poison = temp.path().join("poison");
+    let chooser = temp.path().join("chooser");
+    let root = temp.path().join("root");
+    for package in [&poison, &chooser, &root] {
+        std::fs::create_dir_all(package.join("src")).unwrap();
+    }
+
+    std::fs::write(
+        poison.join("Cargo.toml"),
+        "[package]\nname='feature_poison'\nversion='0.1.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        poison.join("src/lib.rs"),
+        r#"#[cfg_attr(any(), cpp_name(dependency_feature_collision))]
+pub fn first(value: i32) -> i32 { value }
+#[cfg_attr(any(), cpp_name(dependency_feature_collision))]
+pub fn second(value: i32) -> i32 { value + 1 }
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        chooser.join("Cargo.toml"),
+        "[package]\nname='feature_chooser'\nversion='0.1.0'\nedition='2024'\n\
+         [features]\ndefault=[]\nactivate=['dep:feature_poison']\n\
+         [dependencies]\nfeature_poison={path='../poison',optional=true}\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        chooser.join("src/lib.rs"),
+        "#[cfg(feature=\"activate\")] pub fn value() -> i32 { feature_poison::first(1) }\n\
+         #[cfg(not(feature=\"activate\"))] pub fn value() -> i32 { 0 }\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='dependency_feature_root'\nversion='0.1.0'\nedition='2024'\n\
+         [dependencies]\nfeature_chooser={path='../chooser',default-features=false}\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn root() -> i32 { feature_chooser::value() }\n",
+    )
+    .unwrap();
+
+    let manifest = root.join("Cargo.toml");
+    let selector = "feature_chooser/activate";
+    let check = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--features")
+        .arg(selector)
+        .arg("--target-dir")
+        .arg(temp.path().join("cargo-target"))
+        .output()
+        .expect("cargo-check dependency feature-selector fixture");
+    assert!(
+        check.status.success(),
+        "dependency feature selector is not Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let output_dir = temp.path().join("cpp-output");
+    let result = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .arg("--crate")
+        .arg(&manifest)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--offline")
+        .arg("--features")
+        .arg(selector)
+        .output()
+        .expect("run dependency feature-selector transpiler");
+    assert!(!result.status.success(), "dependency feature selector was guessed");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("source-owned C++ contract requires an exact Cargo target-selected normal local-dependency graph before output")
+            && stderr.contains("unsupported Cargo dependency feature selector")
+            && stderr.contains(selector)
+            && stderr.contains("cannot exactly project"),
+        "dependency feature selector failed for the wrong reason:\n{stderr}"
+    );
+    assert!(
+        !output_dir.exists(),
+        "unsupported dependency feature selector created partial output"
+    );
+}

@@ -167,6 +167,29 @@ fn attribute_is_exact_inactive_cpp_trait_member_dispatch(attr: &Attribute) -> bo
     })
 }
 
+/// Compiler-owned markers that are hidden from rustc with the exact
+/// `cfg_attr(any(), marker)` spelling cannot run an attribute macro or add
+/// hidden Rust items.  Their C++ effects are still validated by each marker's
+/// ordinary lowering path.
+fn attribute_is_exact_inactive_transpiler_marker(attr: &Attribute) -> bool {
+    let Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    if !is_simple_path(&list.path, "cfg_attr") {
+        return false;
+    }
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    parser.parse2(list.tokens.clone()).is_ok_and(|nested| {
+        let Some(Meta::List(predicate)) = nested.first() else {
+            return false;
+        };
+        nested.len() >= 2
+            && is_simple_path(&predicate.path, "any")
+            && predicate.tokens.is_empty()
+            && nested.iter().skip(1).all(audited_transpiler_marker_meta)
+    })
+}
+
 fn audited_builtin_macro_name(name: &str) -> bool {
     matches!(
         name,
@@ -188,7 +211,17 @@ fn audited_builtin_or_attribute_name(name: &str) -> bool {
         || is_cpp_trait_member_dispatch_name(name)
         || matches!(
             name,
-            "allow" | "cfg" | "cfg_attr" | "deny" | "doc" | "forbid" | "no_std" | "repr" | "warn"
+            "allow"
+                | "cfg"
+                | "cfg_attr"
+                | "deny"
+                | "doc"
+                | "forbid"
+                | "format"
+                | "no_mangle"
+                | "no_std"
+                | "repr"
+                | "warn"
         )
 }
 
@@ -224,9 +257,15 @@ fn audited_transpiler_marker_meta(meta: &Meta) -> bool {
                     | "cpp_abi"
                     | "cpp_abi_alias"
                     | "cpp_ctor"
+                    | "cpp_default_argument"
+                    | "cpp_explicit"
                     | "cpp_import_namespace"
+                    | "cpp_marker_impl"
                     | "cpp_marker_trait"
                     | "cpp_no_auto_traits"
+                    | "cpp_no_fieldwise_ctor"
+                    | "cpp_noexcept"
+                    | "thread_local"
             )
         })
 }
@@ -299,11 +338,35 @@ fn attribute_is_audited_crate_wide(attr: &Attribute, allow_cpp_inherit: bool) ->
         .map(|segment| semantic_ident(&segment.ident));
     match name.as_deref() {
         Some("repr" | "cfg") => true,
+        Some("no_mangle") => matches!(attr.meta, Meta::Path(_)),
         Some("derive") => audited_builtin_derive(&attr.meta),
         Some("cfg_attr") => cfg_attr_payload_is_audited(&attr.meta, allow_cpp_inherit, false),
         Some("cpp_inherit") => allow_cpp_inherit,
         _ => false,
     }
+}
+
+fn attribute_is_authenticated_cpp_inherit(attr: &Attribute) -> bool {
+    fn meta_contains_cpp_inherit(meta: &Meta) -> bool {
+        if is_simple_path(meta.path(), "cpp_inherit") {
+            return true;
+        }
+        let Meta::List(list) = meta else {
+            return false;
+        };
+        if !is_simple_path(&list.path, "cfg_attr") {
+            return false;
+        }
+        let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+        parser.parse2(list.tokens.clone()).is_ok_and(|nested| {
+            nested
+                .iter()
+                .skip(1)
+                .any(meta_contains_cpp_inherit)
+        })
+    }
+
+    meta_contains_cpp_inherit(&attr.meta) && attribute_is_audited_crate_wide(attr, true)
 }
 
 fn is_simple_path(path: &syn::Path, expected: &str) -> bool {
@@ -702,12 +765,14 @@ impl<'ast> Visit<'ast> for ShadowCollector<'_> {
         }
         let audited = attribute_is_audited_inert(attr)
             || attribute_is_exact_inactive_cpp_trait_member_dispatch(attr)
+            || attribute_is_exact_inactive_transpiler_marker(attr)
+            || (self.allow_cpp_inherit && attribute_is_authenticated_cpp_inherit(attr))
             || (self.allow_crate_wide_builtins
                 && attribute_is_audited_crate_wide(attr, self.allow_cpp_inherit));
         if self.error.is_none() && !audited {
             self.error = Some(format!(
                 "unaudited attribute `{}` is not supported in a file containing cpp_name because attribute or derive macro expansion can add hidden root items",
-                attr.path().to_token_stream()
+                attr.meta.to_token_stream()
             ));
         }
         visit::visit_attribute(self, attr);
@@ -976,13 +1041,16 @@ impl<'ast> Visit<'ast> for ShadowCollector<'_> {
         // mentioning either identity in its source tokens. A local wrapper is
         // no safer because it can invoke that external macro transitively.
         // The owning file rejects every invocation. Marker-free siblings keep
-        // only the explicitly shadow-checked `assert!` lowering already
-        // implemented by this transpiler, and its arguments cannot nest an
+        // only explicitly shadow-checked compiler builtins whose lowerings are
+        // implemented by this transpiler, and their arguments cannot nest an
         // unaudited macro.
-        let audited_assert = self.allow_crate_wide_builtins
-            && is_simple_path(&mac.path, "assert")
+        let audited_compiler_builtin = self.allow_crate_wide_builtins
+            && (is_simple_path(&mac.path, "assert") || is_simple_path(&mac.path, "format"))
             && !token_stream_contains_unaudited_nested_macro(mac.tokens.clone());
-        if self.error.is_none() && !mac.path.is_ident("macro_rules") && !audited_assert {
+        if self.error.is_none()
+            && !mac.path.is_ident("macro_rules")
+            && !audited_compiler_builtin
+        {
             self.error = Some(format!(
                 "unexpanded macro invocation `{}` is not supported in a file containing cpp_name because it can synthesize hidden calls, items, or types",
                 mac.path.to_token_stream()
@@ -1032,34 +1100,124 @@ fn audit_source_unit(
 }
 
 fn source_imports_audited_cpp_inherit(file: &syn::File) -> bool {
-    let mut origins = BTreeMap::<String, BTreeSet<Vec<String>>>::new();
-    let mut local_rusty_module = false;
-    for item in &file.items {
-        match item {
-            Item::Use(item) => {
-                collect_use_binding_origins(&item.tree, &mut Vec::new(), &mut origins);
+    fn meta_is_or_contains_cpp_inherit(meta: &Meta) -> bool {
+        if is_simple_path(meta.path(), "cpp_inherit") {
+            return true;
+        }
+        let Meta::List(list) = meta else {
+            return false;
+        };
+        if !is_simple_path(&list.path, "cfg_attr") {
+            return false;
+        }
+        let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+        parser.parse2(list.tokens.clone()).is_ok_and(|nested| {
+            nested
+                .iter()
+                .skip(1)
+                .any(meta_is_or_contains_cpp_inherit)
+        })
+    }
+
+    fn attribute_is_or_contains_cpp_inherit(attribute: &Attribute) -> bool {
+        meta_is_or_contains_cpp_inherit(&attribute.meta)
+    }
+
+    fn direct_item_cpp_inherit_count(item: &Item) -> usize {
+        let attrs: &[Attribute] = match item {
+            Item::Const(item) => &item.attrs,
+            Item::Enum(item) => &item.attrs,
+            Item::ExternCrate(item) => &item.attrs,
+            Item::Fn(item) => &item.attrs,
+            Item::ForeignMod(item) => &item.attrs,
+            Item::Impl(item) => &item.attrs,
+            Item::Macro(item) => &item.attrs,
+            Item::Mod(item) => &item.attrs,
+            Item::Static(item) => &item.attrs,
+            Item::Struct(item) => &item.attrs,
+            Item::Trait(item) => &item.attrs,
+            Item::TraitAlias(item) => &item.attrs,
+            Item::Type(item) => &item.attrs,
+            Item::Union(item) => &item.attrs,
+            Item::Use(item) => &item.attrs,
+            Item::Verbatim(_) => &[],
+            _ => &[],
+        };
+        attrs
+            .iter()
+            .filter(|attribute| attribute_is_or_contains_cpp_inherit(attribute))
+            .count()
+    }
+
+    fn scope_has_exact_cpp_inherit_import(items: &[Item]) -> bool {
+        let mut origins = BTreeMap::<String, BTreeSet<Vec<String>>>::new();
+        let mut competing_declaration = false;
+        for item in items {
+            match item {
+                Item::Use(item) => {
+                    collect_use_binding_origins(&item.tree, &mut Vec::new(), &mut origins);
+                }
+                Item::ExternCrate(item) => {
+                    let source = semantic_ident(&item.ident);
+                    let local = item
+                        .rename
+                        .as_ref()
+                        .map(|(_, ident)| semantic_ident(ident))
+                        .unwrap_or_else(|| source.clone());
+                    origins.entry(local).or_default().insert(vec![source]);
+                }
+                _ => {}
             }
-            Item::ExternCrate(item) => {
-                let source = semantic_ident(&item.ident);
-                let local = item
-                    .rename
-                    .as_ref()
-                    .map(|(_, ident)| semantic_ident(ident))
-                    .unwrap_or_else(|| source.clone());
-                origins.entry(local).or_default().insert(vec![source]);
+            competing_declaration |= item_decl_name(item)
+                .is_some_and(|name| matches!(name.as_str(), "rusty" | "cpp_inherit"));
+        }
+        !competing_declaration
+            && !origins.contains_key("rusty")
+            && origins.get("cpp_inherit").is_some_and(|bindings| {
+                bindings.len() == 1
+                    && bindings.contains(&vec![
+                        "rusty".to_string(),
+                        "cpp_inherit".to_string(),
+                    ])
+            })
+    }
+
+    fn audit_module_scope(items: &[Item], scoped_count: &mut usize) -> bool {
+        let exact_import = scope_has_exact_cpp_inherit_import(items);
+        for item in items {
+            let direct_count = direct_item_cpp_inherit_count(item);
+            if direct_count != 0 && !exact_import {
+                return false;
             }
-            Item::Mod(item) if semantic_ident(&item.ident) == "rusty" => {
-                local_rusty_module = true;
+            *scoped_count += direct_count;
+            if let Item::Mod(module) = item
+                && let Some((_, nested_items)) = &module.content
+                && !audit_module_scope(nested_items, scoped_count)
+            {
+                return false;
             }
-            _ => {}
+        }
+        true
+    }
+
+    #[derive(Default)]
+    struct AllCppInheritAttributes {
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for AllCppInheritAttributes {
+        fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+            if attribute_is_or_contains_cpp_inherit(attribute) {
+                self.count += 1;
+            }
+            visit::visit_attribute(self, attribute);
         }
     }
-    !local_rusty_module
-        && !origins.contains_key("rusty")
-        && origins.get("cpp_inherit").is_some_and(|bindings| {
-            bindings.len() == 1
-                && bindings.contains(&vec!["rusty".to_string(), "cpp_inherit".to_string()])
-        })
+
+    let mut all = AllCppInheritAttributes::default();
+    all.visit_file(file);
+    let mut scoped_count = 0usize;
+    let scopes_are_exact = audit_module_scope(&file.items, &mut scoped_count);
+    all.count != 0 && scopes_are_exact && scoped_count == all.count
 }
 
 /// Fail closed around source-level aliases that the deliberately small
@@ -1285,7 +1443,12 @@ fn validate_parameter_type_provenance(file: &syn::File, plan: &CppNamePlan) -> R
     Ok(())
 }
 
-fn validate_shadowing(file: &syn::File, plan: &CppNamePlan) -> Result<(), String> {
+fn validate_shadowing(
+    file: &syn::File,
+    plan: &CppNamePlan,
+    allow_crate_wide_builtins: bool,
+    allow_cpp_inherit: bool,
+) -> Result<(), String> {
     let targets = plan.target_names();
     let rust_names = plan.rust_names();
     let forbidden: BTreeSet<String> = targets.union(&rust_names).cloned().collect();
@@ -1349,7 +1512,12 @@ fn validate_shadowing(file: &syn::File, plan: &CppNamePlan) -> Result<(), String
     }
 
     check_item_names(&file.items, 0, &targets, &rust_names, &forbidden)?;
-    audit_source_unit(file, &forbidden, false, false)?;
+    audit_source_unit(
+        file,
+        &forbidden,
+        allow_crate_wide_builtins,
+        allow_cpp_inherit,
+    )?;
 
     // A target that is another marked function's Rust identity makes a call
     // spelling depend on rename order.  Refuse chains and cycles outright.
@@ -1365,6 +1533,21 @@ fn validate_shadowing(file: &syn::File, plan: &CppNamePlan) -> Result<(), String
 
 /// Collect the marker plan and perform all syntax/provenance/shadow checks.
 pub(crate) fn collect(file: &syn::File) -> Result<CppNamePlan, String> {
+    collect_with_provenance(file, false, false)
+}
+
+pub(crate) fn collect_with_crate_provenance(
+    file: &syn::File,
+    allow_cpp_inherit: bool,
+) -> Result<CppNamePlan, String> {
+    collect_with_provenance(file, true, allow_cpp_inherit)
+}
+
+fn collect_with_provenance(
+    file: &syn::File,
+    allow_crate_wide_builtins: bool,
+    allow_cpp_inherit: bool,
+) -> Result<CppNamePlan, String> {
     reject_descendant_marker(&file.attrs, "crate-level attributes", |collector, attrs| {
         for attr in attrs {
             collector.visit_attribute(attr);
@@ -1413,7 +1596,12 @@ pub(crate) fn collect(file: &syn::File) -> Result<CppNamePlan, String> {
         }
     }
     if !plan.is_empty() {
-        validate_shadowing(file, &plan)?;
+        validate_shadowing(
+            file,
+            &plan,
+            allow_crate_wide_builtins,
+            allow_cpp_inherit,
+        )?;
         validate_parameter_type_provenance(file, &plan)?;
     }
     Ok(plan)
@@ -1461,7 +1649,10 @@ pub(crate) fn preflight_crate_sources_with_cpp_inherit_provenance(
         }
         let file = syn::parse_file(source)
             .map_err(|error| format!("{}: cpp_name parse error: {error}", path.display()))?;
-        let plan = collect(&file).map_err(|error| format!("{}: {error}", path.display()))?;
+        let allow_cpp_inherit = trusted_cpp_inherit_provenance
+            && source_imports_audited_cpp_inherit(&file);
+        let plan = collect_with_crate_provenance(&file, allow_cpp_inherit)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         if plan.is_empty() {
             continue;
         }
@@ -2020,7 +2211,12 @@ mod tests {
                     trait Marker {}
                     #[cpp_inherit]
                     impl Marker for Value {}
-                    fn check(value: Value) { assert!(value == value); }
+                    fn check(value: Value) {
+                        assert!(value == value);
+                        let _message = format!("{}", 1);
+                    }
+                    #[no_mangle]
+                    pub unsafe extern "C" fn fiber_task_entry_thunk() {}
                 "#
                 .to_string(),
             ),
@@ -2030,6 +2226,118 @@ mod tests {
             Ok(true)
         );
         assert!(preflight_crate_sources(&audited_builtins).is_err());
+
+        let nested_serializable_shape = vec![
+            owner.clone(),
+            (
+                std::path::PathBuf::from("serializable.rs"),
+                r#"
+                    trait SerializableBase {}
+                    struct Holder<T>(T);
+                    mod details {
+                        use super::{Holder, SerializableBase};
+                        use rusty::cpp_inherit;
+                        #[cpp_inherit]
+                        impl<T: SerializableBase> SerializableBase for Holder<T> {}
+                    }
+                "#
+                .to_string(),
+            ),
+        ];
+        assert_eq!(
+            preflight_crate_sources_with_cpp_inherit_provenance(
+                &nested_serializable_shape,
+                true,
+            ),
+            Ok(true)
+        );
+        assert!(
+            preflight_crate_sources_with_cpp_inherit_provenance(
+                &nested_serializable_shape,
+                false,
+            )
+            .is_err()
+        );
+
+        let same_file_serializable_shape = vec![(
+            std::path::PathBuf::from("serializable.rs"),
+            r#"
+                #[cfg_attr(any(), cpp_name(make_sink_proxy))]
+                pub fn make_value(value: i32) -> i32 { value }
+                #[cfg_attr(any(), cpp_name(make_sink_proxy))]
+                pub fn make_flag(value: bool) -> i32 { value as i32 }
+                mod details {
+                    use rusty::cpp_inherit;
+                    trait SerializableBase {}
+                    struct SerializableSharedPtrHolder;
+                    #[cfg_attr(any(), thread_local)]
+                    static LAST_REPORT_US: u64 = 0;
+                    #[cpp_inherit]
+                    impl SerializableBase for SerializableSharedPtrHolder {}
+                }
+            "#
+            .to_string(),
+        )];
+        assert_eq!(
+            preflight_crate_sources_with_cpp_inherit_provenance(
+                &same_file_serializable_shape,
+                true,
+            ),
+            Ok(true)
+        );
+
+        for unsafe_thread_local in [
+            "#[thread_local] static VALUE: u64 = 0;",
+            "#[cfg_attr(all(), thread_local)] static VALUE: u64 = 0;",
+            "#[cfg_attr(any(), maker::thread_local)] static VALUE: u64 = 0;",
+        ] {
+            let sources = vec![
+                owner.clone(),
+                (
+                    std::path::PathBuf::from("reactor.rs"),
+                    unsafe_thread_local.to_string(),
+                ),
+            ];
+            assert!(
+                preflight_crate_sources_with_cpp_inherit_provenance(&sources, true).is_err(),
+                "accepted non-inert thread_local spelling: {unsafe_thread_local}"
+            );
+        }
+
+        for unaudited_no_mangle in [
+            "#[no_mangle(extra)] pub unsafe extern \"C\" fn thunk() {}",
+            "#[maker::no_mangle] pub unsafe extern \"C\" fn thunk() {}",
+        ] {
+            let sources = vec![
+                owner.clone(),
+                (
+                    std::path::PathBuf::from("reactor.rs"),
+                    unaudited_no_mangle.to_string(),
+                ),
+            ];
+            assert!(
+                preflight_crate_sources_with_cpp_inherit_provenance(&sources, true).is_err(),
+                "accepted inexact no_mangle spelling: {unaudited_no_mangle}"
+            );
+        }
+
+        for nested_spoof in [
+            "mod details { use maker::cpp_inherit; trait T {} struct S; #[cpp_inherit] impl T for S {} }",
+            "mod details { mod rusty { pub use maker::cpp_inherit; } use rusty::cpp_inherit; trait T {} struct S; #[cpp_inherit] impl T for S {} }",
+            "use rusty::cpp_inherit; mod details { use maker::cpp_inherit; trait T {} struct S; #[cpp_inherit] impl T for S {} }",
+        ] {
+            let sources = vec![
+                owner.clone(),
+                (
+                    std::path::PathBuf::from("serializable.rs"),
+                    nested_spoof.to_string(),
+                ),
+            ];
+            assert!(
+                preflight_crate_sources_with_cpp_inherit_provenance(&sources, true).is_err(),
+                "accepted nested cpp_inherit spoof: {nested_spoof}"
+            );
+        }
 
         for sibling in [
             "use maker::Clone; #[derive(Clone)] struct Value;",

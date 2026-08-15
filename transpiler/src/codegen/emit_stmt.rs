@@ -10,11 +10,14 @@ impl CodeGen {
     /// This complements `emit_trait_adapter_specializations`, which handles
     /// the foreign-type case (impls collected via the rusty_ext pipeline).
     pub(super) fn emit_local_trait_adapter_specializations(&mut self, items: &[syn::Item]) {
-        // Tuple shape: (trait_name, trait_args, self_cpp, methods, module_path)
+        // Tuple shape: (trait_name, trait_key, trait_args, self_cpp, methods,
+        // module_path). `trait_key` is the full lexical owner path and keeps
+        // same-leaf traits in sibling modules independent.
         // where trait_args is the C++ form of the impl's trait generic args
         // (e.g., "int32_t" for `impl Container<i32> for Foo`), empty when the
         // trait is non-generic.
         let mut grouped: Vec<(
+            String,
             String,
             Vec<String>,
             String,
@@ -23,7 +26,7 @@ impl CodeGen {
         )> = Vec::new();
         self.collect_local_trait_impls_for_adapter(items, &[], &mut grouped);
 
-        for (trait_name, trait_args, self_cpp, methods, module_path) in &grouped {
+        for (trait_name, trait_key, trait_args, self_cpp, methods, module_path) in &grouped {
             // Skip Adapter emission when the trait was itself skipped.
             // Generic traits ARE emitted: their primary template is
             // declared `template <T..., U> class TraitAdapter;`, and
@@ -40,7 +43,7 @@ impl CodeGen {
             // (trait, U). This shares one set with the foreign-impl
             // path because they emit into the same C++ namespace and
             // would collide on `template <> class TraitAdapter<U>`.
-            let dedup_key = (trait_name.clone(), self_cpp.clone());
+            let dedup_key = (trait_key.clone(), self_cpp.clone());
             if !self.emitted_foreign_adapter_specs.insert(dedup_key) {
                 continue;
             }
@@ -53,11 +56,8 @@ impl CodeGen {
             // (matches the prior behavior for traits declared in the
             // same module as the impl).
             let mut trait_ns_path: Vec<String> = Vec::new();
-            let found_in_paths = if let Some(full) = self
-                .trait_declared_path_by_short_name
-                .get(trait_name)
-            {
-                let segments: Vec<&str> = full.split("::").collect();
+            let found_in_paths = if self.trait_declared_paths.contains(trait_key) {
+                let segments: Vec<&str> = trait_key.split("::").collect();
                 if segments.len() > 1 {
                     trait_ns_path = segments[..segments.len() - 1]
                         .iter()
@@ -91,6 +91,7 @@ impl CodeGen {
             // Owning: holds U by value.
             self.emit_one_local_adapter(
                 trait_name,
+                trait_key,
                 trait_args,
                 "Adapter",
                 &qualified_self_cpp,
@@ -100,6 +101,7 @@ impl CodeGen {
             // Borrowing const ref: holds const U&.
             self.emit_one_local_adapter(
                 trait_name,
+                trait_key,
                 trait_args,
                 "AdapterRef",
                 &qualified_self_cpp,
@@ -109,6 +111,7 @@ impl CodeGen {
             // Borrowing mut ref: holds U&.
             self.emit_one_local_adapter(
                 trait_name,
+                trait_key,
                 trait_args,
                 "AdapterRefMut",
                 &qualified_self_cpp,
@@ -137,6 +140,7 @@ impl CodeGen {
                     trait_name,
                     &qualified_self_cpp,
                     &assoc_pairs,
+                    &[],
                 );
             }
             if needs_ns {

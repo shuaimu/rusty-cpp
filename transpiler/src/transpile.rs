@@ -558,6 +558,25 @@ pub struct TranspileOptions {
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
+    /// External crate roots whose selected Cargo package identity is trusted
+    /// to provide compiler-owned attributes. Empty for source-only/direct
+    /// transpilation, which therefore fails closed on lookalike proc macros.
+    pub authenticated_cpp_inherit_roots: std::collections::HashSet<String>,
+    /// Crate-mode preflight proved that the selected `rusty` facade re-exports
+    /// the exact inert `rusty-cpp-markers::cpp_inherit` implementation.  Keep
+    /// this separate from package-root authentication: an exact package name
+    /// alone does not prove that an attribute macro cannot synthesize hidden
+    /// items beside a cpp_name overload contract.
+    pub cpp_name_trusted_cpp_inherit_provenance: bool,
+    /// Compiler sysroot crate roots that Cargo has proved are not occupied by
+    /// an extern-prelude dependency of the current package. Source-only calls
+    /// use the ordinary `std`/`core` assumption; Cargo-backed lanes replace it
+    /// with manifest-specific provenance before lowering erased `Default`.
+    pub authenticated_sysroot_roots: std::collections::HashSet<String>,
+    /// Exact Rust item bindings harvested from sibling inline blocks. Inline
+    /// payloads form one logical Rust module even though each block is lowered
+    /// separately, so compiler-owned markers must see imports in any block.
+    pub cross_file_rust_item_import_bindings: RustItemImportBindings,
     /// C++ `using X = Y;` aliases from the translation unit an inline-rust
     /// block is spliced into. Lets type predicates see through a C++ alias
     /// to the underlying rusty type (`WeakClientConnection` ->
@@ -699,6 +718,18 @@ pub enum MethodNameClass {
 /// trait uses. Recurses into inline modules.
 #[allow(dead_code)]
 pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameClass> {
+    classify_method_names_excluding_traits(items, &std::collections::HashSet::new())
+}
+
+/// The ordinary UFCS classifier with an explicit set of local traits that
+/// must preserve member dispatch. The compiler-owned
+/// `cpp_trait_member_dispatch` marker feeds this set from codegen; keeping the
+/// filtering here means a same-named inherent method or an unmarked trait still
+/// contributes its normal classification.
+pub fn classify_method_names_excluding_traits(
+    items: &[syn::Item],
+    excluded_traits: &std::collections::HashSet<String>,
+) -> HashMap<String, MethodNameClass> {
     // UFCS lowering applies ONLY to traits this crate DECLARES. Prelude/std
     // traits a crate merely *implements* (`Clone`, `Display`, `Debug`,
     // `PartialOrd`, `Iterator`, `Deref`, …) already have working dedicated
@@ -710,10 +741,19 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
     // (Phase-7 fallout category A). So `impl Tr for U` contributes a *trait*
     // use only when `Tr` is crate-declared; otherwise it contributes nothing
     // (the call stays whatever the non-UFCS path makes it).
-    let declared_traits = collect_declared_trait_names(items);
+    let declared_trait_paths = collect_declared_trait_paths(items);
+    let import_bindings = collect_rust_item_import_bindings(items);
     let mut inherent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut trait_named: std::collections::HashSet<String> = std::collections::HashSet::new();
-    collect_method_name_uses(items, &declared_traits, &mut inherent, &mut trait_named);
+    collect_method_name_uses(
+        items,
+        &declared_trait_paths,
+        &import_bindings,
+        excluded_traits,
+        &[],
+        &mut inherent,
+        &mut trait_named,
+    );
 
     let mut out = HashMap::new();
     for name in inherent.union(&trait_named) {
@@ -826,6 +866,649 @@ fn collect_declared_trait_names_into(
     }
 }
 
+/// Fully-qualified lexical paths of every crate-declared trait.  Unlike the
+/// legacy short-name registry, these keys distinguish `a::Clash` from
+/// `b::Clash` and are therefore safe for compiler-owned, per-trait behavior.
+pub(crate) fn collect_declared_trait_paths(
+    items: &[syn::Item],
+) -> std::collections::HashSet<String> {
+    fn walk(
+        items: &[syn::Item],
+        module_path: &mut Vec<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(trait_item) => {
+                    let trait_name = trait_item.ident.to_string();
+                    let key = if module_path.is_empty() {
+                        trait_name
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    };
+                    out.insert(key);
+                }
+                syn::Item::Mod(module) => {
+                    if module_is_cfg_disabled(module) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        walk(nested, module_path, out);
+                        module_path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = std::collections::HashSet::new();
+    walk(items, &mut Vec::new(), &mut out);
+    out
+}
+
+/// Exact Rust item-import bindings, keyed by `(lexical module, local name)`.
+///
+/// These bindings intentionally retain Rust paths rather than their emitted
+/// C++ spelling.  Compiler-owned attributes and per-trait lowering decisions
+/// must be based on the declaration that rustc resolves, not on an equal leaf
+/// name or on a C++ namespace alias.
+pub type RustItemImportBindings = std::collections::HashMap<
+    (String, String),
+    std::collections::HashSet<String>,
+>;
+
+fn rust_local_module_shadow_key(local_name: &str) -> String {
+    // `@` cannot occur in a Rust identifier, so this cannot collide with a
+    // source import binding stored in the same compact resolution table.
+    format!("@local-module:{local_name}")
+}
+
+fn rust_local_trait_shadow_key(local_name: &str) -> String {
+    // Traits and modules both live in Rust's type namespace. Keep a distinct
+    // sentinel only so the resolver can tell whether a remaining path tail is
+    // legal after selecting the declaration.
+    format!("@local-trait:{local_name}")
+}
+
+fn rust_glob_import_key() -> String {
+    // Like the local-module sentinel above, this key cannot collide with a
+    // source identifier. A glob can introduce any public leaf, so identity-
+    // sensitive resolution must fail closed when one is lexically visible.
+    "@glob-import".to_string()
+}
+
+pub(crate) fn collect_rust_item_import_bindings(
+    items: &[syn::Item],
+) -> RustItemImportBindings {
+    fn normalized_target(module_path: &[String], segments: &[String]) -> String {
+        let mut prefix = Vec::new();
+        let mut index = 0usize;
+        let mut explicitly_local = false;
+        if segments.first().is_some_and(|segment| segment == "crate") {
+            index = 1;
+            explicitly_local = true;
+        } else if segments
+            .first()
+            .is_some_and(|segment| segment == "self" || segment == "super")
+        {
+            prefix = module_path.to_vec();
+            explicitly_local = true;
+            while index < segments.len() {
+                match segments[index].as_str() {
+                    "self" => index += 1,
+                    "super" => {
+                        prefix.pop();
+                        index += 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let normalized = prefix
+            .iter()
+            .chain(segments[index..].iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("::");
+        if explicitly_local {
+            format!("@crate:{normalized}")
+        } else {
+            normalized
+        }
+    }
+
+    fn flatten(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        module_path: &[String],
+        scope: &str,
+        leading_colon: bool,
+        out: &mut RustItemImportBindings,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                flatten(
+                    &path.tree,
+                    prefix,
+                    module_path,
+                    scope,
+                    leading_colon,
+                    out,
+                );
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                let mut target = prefix.clone();
+                if name.ident != "self" {
+                    target.push(name.ident.to_string());
+                }
+                let Some(local_name) = target.last().cloned() else {
+                    return;
+                };
+                let mut target = normalized_target(module_path, &target);
+                if leading_colon {
+                    target.insert_str(0, "::");
+                }
+                if !target.is_empty() {
+                    out.entry((scope.to_string(), local_name))
+                        .or_default()
+                        .insert(target);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut target = prefix.clone();
+                if rename.ident != "self" {
+                    target.push(rename.ident.to_string());
+                }
+                let mut target = normalized_target(module_path, &target);
+                if leading_colon {
+                    target.insert_str(0, "::");
+                }
+                let local_name = rename.rename.to_string();
+                if local_name != "_" && !target.is_empty() {
+                    out.entry((scope.to_string(), local_name))
+                        .or_default()
+                        .insert(target);
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for nested in &group.items {
+                    flatten(
+                        nested,
+                        prefix,
+                        module_path,
+                        scope,
+                        leading_colon,
+                        out,
+                    );
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                let mut target = normalized_target(module_path, prefix);
+                if leading_colon {
+                    target.insert_str(0, "::");
+                }
+                out.entry((scope.to_string(), rust_glob_import_key()))
+                    .or_default()
+                    .insert(target);
+            }
+        }
+    }
+
+    fn walk(
+        items: &[syn::Item],
+        module_path: &mut Vec<String>,
+        out: &mut RustItemImportBindings,
+    ) {
+        let scope = module_path.join("::");
+        for item in items {
+            match item {
+                syn::Item::Use(item_use) => {
+                    flatten(
+                        &item_use.tree,
+                        &mut Vec::new(),
+                        module_path,
+                        &scope,
+                        item_use.leading_colon.is_some(),
+                        out,
+                    );
+                }
+                syn::Item::Mod(module) if !module_is_cfg_disabled(module) => {
+                    out.entry((
+                        scope.clone(),
+                        rust_local_module_shadow_key(&module.ident.to_string()),
+                    ))
+                    .or_default()
+                    .insert(if scope.is_empty() {
+                        module.ident.to_string()
+                    } else {
+                        format!("{}::{}", scope, module.ident)
+                    });
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        walk(nested, module_path, out);
+                        module_path.pop();
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    out.entry((
+                        scope.clone(),
+                        rust_local_trait_shadow_key(&item_trait.ident.to_string()),
+                    ))
+                    .or_default()
+                    .insert(if scope.is_empty() {
+                        item_trait.ident.to_string()
+                    } else {
+                        format!("{}::{}", scope, item_trait.ident)
+                    });
+                }
+                syn::Item::ExternCrate(item_extern_crate) => {
+                    let local_name = item_extern_crate
+                        .rename
+                        .as_ref()
+                        .map(|(_, rename)| rename.to_string())
+                        .unwrap_or_else(|| item_extern_crate.ident.to_string());
+                    out.entry((scope.clone(), local_name))
+                        .or_default()
+                        .insert(format!("::{}", item_extern_crate.ident));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = RustItemImportBindings::new();
+    walk(items, &mut Vec::new(), &mut out);
+    out
+}
+
+fn nearest_rust_item_import_targets<'a>(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &'a RustItemImportBindings,
+) -> Option<(Vec<String>, &'a std::collections::HashSet<String>)> {
+    for depth in (0..=module_path.len()).rev() {
+        let scope = module_path[..depth].join("::");
+        if let Some(targets) = bindings.get(&(scope, local_name.to_string())) {
+            return Some((module_path[..depth].to_vec(), targets));
+        }
+    }
+    None
+}
+
+fn exact_rust_item_targets<'a>(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &'a RustItemImportBindings,
+) -> Option<&'a std::collections::HashSet<String>> {
+    bindings.get(&(module_path.join("::"), local_name.to_string()))
+}
+
+fn nearest_rust_item_binding_depth(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+) -> Option<usize> {
+    nearest_rust_item_import_targets(local_name, module_path, bindings)
+        .map(|(scope, _)| scope.len())
+}
+
+pub(crate) fn rust_glob_import_is_visible(
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+) -> bool {
+    nearest_rust_item_import_targets(&rust_glob_import_key(), module_path, bindings).is_some()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResolvedRustItemPath {
+    LocalModule(Vec<String>),
+    LocalTrait(String),
+    External(Vec<String>),
+}
+
+fn append_resolved_rust_path(
+    resolved: ResolvedRustItemPath,
+    tail: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    if tail.is_empty() {
+        return Some(resolved);
+    }
+    match resolved {
+        ResolvedRustItemPath::LocalModule(scope) => resolve_local_rust_path(
+            &scope,
+            tail,
+            declared_trait_paths,
+            bindings,
+            visiting,
+        ),
+        ResolvedRustItemPath::External(mut path) => {
+            path.extend(tail.iter().cloned());
+            Some(ResolvedRustItemPath::External(path))
+        }
+        ResolvedRustItemPath::LocalTrait(_) => None,
+    }
+}
+
+fn resolve_rust_import_target(
+    target: &str,
+    binding_scope: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    if let Some(local) = target.strip_prefix("@crate:") {
+        let segments = local
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        return resolve_local_rust_path(
+            &[],
+            &segments,
+            declared_trait_paths,
+            bindings,
+            visiting,
+        );
+    }
+    if let Some(external) = target.strip_prefix("::") {
+        return Some(ResolvedRustItemPath::External(
+            external
+                .split("::")
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ));
+    }
+    let segments = target
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    resolve_relative_rust_path(
+        &segments,
+        binding_scope,
+        declared_trait_paths,
+        bindings,
+        visiting,
+    )
+}
+
+fn resolve_local_rust_path(
+    scope: &[String],
+    segments: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    let head = segments.first()?;
+    let tail = &segments[1..];
+    let imports = exact_rust_item_targets(head, scope, bindings);
+    let module_targets = exact_rust_item_targets(
+        &rust_local_module_shadow_key(head),
+        scope,
+        bindings,
+    );
+    let trait_targets = exact_rust_item_targets(
+        &rust_local_trait_shadow_key(head),
+        scope,
+        bindings,
+    );
+    let present = usize::from(imports.is_some())
+        + usize::from(module_targets.is_some())
+        + usize::from(trait_targets.is_some());
+    if present != 1 {
+        return None;
+    }
+    let resolved = if let Some(targets) = imports {
+        if targets.len() != 1 {
+            return None;
+        }
+        let visit_key = (scope.join("::"), head.clone());
+        if !visiting.insert(visit_key.clone()) {
+            return None;
+        }
+        let resolved = resolve_rust_import_target(
+            targets.iter().next()?,
+            scope,
+            declared_trait_paths,
+            bindings,
+            visiting,
+        );
+        visiting.remove(&visit_key);
+        resolved?
+    } else if let Some(targets) = module_targets {
+        if targets.len() != 1 {
+            return None;
+        }
+        ResolvedRustItemPath::LocalModule(
+            targets
+                .iter()
+                .next()?
+                .split("::")
+                .map(str::to_string)
+                .collect(),
+        )
+    } else {
+        let target = trait_targets?.iter().next()?.clone();
+        if !declared_trait_paths.contains(&target) {
+            return None;
+        }
+        ResolvedRustItemPath::LocalTrait(target)
+    };
+    append_resolved_rust_path(resolved, tail, declared_trait_paths, bindings, visiting)
+}
+
+fn resolve_relative_rust_path(
+    segments: &[String],
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    let head = segments.first()?;
+    let tail = &segments[1..];
+    let candidates = [
+        nearest_rust_item_import_targets(head, module_path, bindings)
+            .map(|(scope, targets)| (scope, targets, 0u8)),
+        nearest_rust_item_import_targets(
+            &rust_local_module_shadow_key(head),
+            module_path,
+            bindings,
+        )
+        .map(|(scope, targets)| (scope, targets, 1u8)),
+        nearest_rust_item_import_targets(
+            &rust_local_trait_shadow_key(head),
+            module_path,
+            bindings,
+        )
+        .map(|(scope, targets)| (scope, targets, 2u8)),
+    ];
+    let best_depth = candidates
+        .iter()
+        .flatten()
+        .map(|(scope, _, _)| scope.len())
+        .max();
+    let glob_depth = nearest_rust_item_binding_depth(
+        &rust_glob_import_key(),
+        module_path,
+        bindings,
+    );
+    let Some(best_depth) = best_depth else {
+        if glob_depth.is_some() {
+            return None;
+        }
+        return Some(ResolvedRustItemPath::External(segments.to_vec()));
+    };
+    // A nearer glob can supply the same name. At the same scope an explicit
+    // item or import wins over a glob, matching rustc's lexical precedence.
+    if glob_depth.is_some_and(|depth| depth > best_depth) {
+        return None;
+    }
+    let mut best = candidates
+        .into_iter()
+        .flatten()
+        .filter(|(scope, _, _)| scope.len() == best_depth);
+    let selected = best.next()?;
+    if best.next().is_some() || selected.1.len() != 1 {
+        return None;
+    }
+    let (scope, targets, kind) = selected;
+    let resolved = match kind {
+        0 => {
+            let visit_key = (scope.join("::"), head.clone());
+            if !visiting.insert(visit_key.clone()) {
+                return None;
+            }
+            let resolved = resolve_rust_import_target(
+                targets.iter().next()?,
+                &scope,
+                declared_trait_paths,
+                bindings,
+                visiting,
+            );
+            visiting.remove(&visit_key);
+            resolved?
+        }
+        1 => ResolvedRustItemPath::LocalModule(
+            targets
+                .iter()
+                .next()?
+                .split("::")
+                .map(str::to_string)
+                .collect(),
+        ),
+        2 => {
+            let target = targets.iter().next()?.clone();
+            if !declared_trait_paths.contains(&target) {
+                return None;
+            }
+            ResolvedRustItemPath::LocalTrait(target)
+        }
+        _ => unreachable!(),
+    };
+    append_resolved_rust_path(resolved, tail, declared_trait_paths, bindings, visiting)
+}
+
+fn resolve_rust_item_path(
+    path: &syn::Path,
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+) -> Option<ResolvedRustItemPath> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    let mut visiting = std::collections::HashSet::new();
+    if path.leading_colon.is_some() {
+        return Some(ResolvedRustItemPath::External(segments));
+    }
+    match segments.first().map(String::as_str) {
+        Some("crate") => resolve_local_rust_path(
+            &[],
+            &segments[1..],
+            declared_trait_paths,
+            bindings,
+            &mut visiting,
+        ),
+        Some("self" | "super") => {
+            let mut scope = module_path.to_vec();
+            let mut index = 0usize;
+            while index < segments.len() {
+                match segments[index].as_str() {
+                    "self" => index += 1,
+                    "super" => {
+                        scope.pop();
+                        index += 1;
+                    }
+                    _ => break,
+                }
+            }
+            resolve_local_rust_path(
+                &scope,
+                &segments[index..],
+                declared_trait_paths,
+                bindings,
+                &mut visiting,
+            )
+        }
+        _ => resolve_relative_rust_path(
+            &segments,
+            module_path,
+            declared_trait_paths,
+            bindings,
+            &mut visiting,
+        ),
+    }
+}
+
+pub(crate) fn resolve_external_rust_item_path(
+    path: &syn::Path,
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+) -> Option<String> {
+    match resolve_rust_item_path(path, module_path, declared_trait_paths, bindings)? {
+        ResolvedRustItemPath::External(segments) => Some(segments.join("::")),
+        ResolvedRustItemPath::LocalModule(_) | ResolvedRustItemPath::LocalTrait(_) => None,
+    }
+}
+
+pub(crate) fn has_authenticated_cpp_inherit_attr(
+    attrs: &[syn::Attribute],
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+    authenticated_roots: &std::collections::HashSet<String>,
+) -> bool {
+    attrs.iter().any(|attribute| {
+        attribute.path().is_ident("cpp_inherit")
+            && authenticated_roots.contains("rusty")
+            && resolve_external_rust_item_path(
+                attribute.path(),
+                module_path,
+                &std::collections::HashSet::new(),
+                bindings,
+            )
+            .is_some_and(|path| path == "rusty::cpp_inherit")
+    })
+}
+
+pub(crate) fn rust_item_import_name_is_bound(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+) -> bool {
+    nearest_rust_item_import_targets(local_name, module_path, bindings).is_some()
+}
+
+/// Resolve an impl's trait path to a crate-local lexical trait key.  Resolution
+/// is intentionally fail-closed: explicit `crate`/`self`/`super` paths must
+/// name a declared trait, and bare imports are resolved through their exact
+/// binding rather than guessed from a same-leaf declaration.
+pub(crate) fn resolve_declared_trait_path_key(
+    path: &syn::Path,
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    import_bindings: &RustItemImportBindings,
+) -> Option<String> {
+    match resolve_rust_item_path(path, module_path, declared_trait_paths, import_bindings)? {
+        ResolvedRustItemPath::LocalTrait(key) if declared_trait_paths.contains(&key) => Some(key),
+        ResolvedRustItemPath::LocalModule(_) | ResolvedRustItemPath::External(_)
+        | ResolvedRustItemPath::LocalTrait(_) => None,
+    }
+}
+
 /// Trait name → the method names it DECLARES (required + default), across all
 /// modules. Feeds the per-crate UFCS manifest so a downstream crate's dedup can
 /// be METHOD-AWARE — a dependency declaring a same-NAMED but unrelated trait
@@ -888,6 +1571,18 @@ pub fn collect_concrete_trait_impl_method_owners(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
 ) -> HashMap<String, std::collections::BTreeSet<String>> {
+    collect_concrete_trait_impl_method_owners_excluding_traits(
+        items,
+        declared_traits,
+        &std::collections::HashSet::new(),
+    )
+}
+
+pub fn collect_concrete_trait_impl_method_owners_excluding_traits(
+    items: &[syn::Item],
+    declared_traits: &std::collections::HashSet<String>,
+    excluded_traits: &std::collections::HashSet<String>,
+) -> HashMap<String, std::collections::BTreeSet<String>> {
     // Traits that declare an associated CONSTANT are emitted via the runtime-
     // helper path (`emit_trait_interface_pattern` skips them, `has_assoc_const`),
     // so their methods live in `<Tr>RuntimeHelper`, NOT `namespace <Tr>_`.
@@ -897,13 +1592,19 @@ pub fn collect_concrete_trait_impl_method_owners(
     // `Flags` trait (`const FLAGS`, `type Bits`): `complement`/`contains`/`bits`
     // are NOT in `Flags_`. (Assoc-TYPE-only traits like ToOwned DO use the
     // interface + free-function path, so they are NOT excluded.)
+    let declared_trait_paths = collect_declared_trait_paths(items);
+    let import_bindings = collect_rust_item_import_bindings(items);
     let mut assoc_const_traits = std::collections::HashSet::new();
-    collect_assoc_const_trait_names_into(items, &mut assoc_const_traits);
+    collect_assoc_const_trait_names_into(items, &[], &mut assoc_const_traits);
     let mut out: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     collect_concrete_trait_impl_method_owners_into(
         items,
         declared_traits,
+        &declared_trait_paths,
+        &import_bindings,
         &assoc_const_traits,
+        excluded_traits,
+        &[],
         &mut out,
     );
     out
@@ -911,16 +1612,19 @@ pub fn collect_concrete_trait_impl_method_owners(
 
 fn collect_assoc_const_trait_names_into(
     items: &[syn::Item],
+    module_path: &[String],
     out: &mut std::collections::HashSet<String>,
 ) {
     for item in items {
         match item {
             syn::Item::Trait(t) => {
-                if t.items
-                    .iter()
-                    .any(|ti| matches!(ti, syn::TraitItem::Const(_)))
-                {
-                    out.insert(t.ident.to_string());
+                if t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Const(_))) {
+                    let trait_name = t.ident.to_string();
+                    out.insert(if module_path.is_empty() {
+                        trait_name
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    });
                 }
             }
             syn::Item::Mod(m) => {
@@ -928,7 +1632,9 @@ fn collect_assoc_const_trait_names_into(
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
-                    collect_assoc_const_trait_names_into(nested, out);
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(m.ident.to_string());
+                    collect_assoc_const_trait_names_into(nested, &nested_path, out);
                 }
             }
             _ => {}
@@ -939,7 +1645,11 @@ fn collect_assoc_const_trait_names_into(
 fn collect_concrete_trait_impl_method_owners_into(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
+    declared_trait_paths: &std::collections::HashSet<String>,
+    import_bindings: &RustItemImportBindings,
     assoc_const_traits: &std::collections::HashSet<String>,
+    excluded_traits: &std::collections::HashSet<String>,
+    module_path: &[String],
     out: &mut HashMap<String, std::collections::BTreeSet<String>>,
 ) {
     for item in items {
@@ -948,16 +1658,31 @@ fn collect_concrete_trait_impl_method_owners_into(
                 let Some((_, trait_path, _)) = &impl_block.trait_ else {
                     continue;
                 };
-                let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string())
+                let Some(written_trait_name) =
+                    trait_path.segments.last().map(|s| s.ident.to_string())
                 else {
                     continue;
                 };
+                let Some(trait_key) = resolve_declared_trait_path_key(
+                    trait_path,
+                    module_path,
+                    declared_trait_paths,
+                    import_bindings,
+                ) else {
+                    continue;
+                };
+                let trait_name = trait_key
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&written_trait_name)
+                    .to_string();
                 // Only crate-declared traits (foreign-trait impls aren't UFCS-
                 // lowered), skip assoc-const (runtime-helper) traits, and only
                 // concrete impls (no type-param generics) — generic/blanket
                 // impls don't reliably emit an early-declared `<Tr>_`.
                 if !declared_traits.contains(&trait_name)
-                    || assoc_const_traits.contains(&trait_name)
+                    || assoc_const_traits.contains(&trait_key)
+                    || excluded_traits.contains(&trait_key)
                 {
                     continue;
                 }
@@ -985,7 +1710,14 @@ fn collect_concrete_trait_impl_method_owners_into(
                 // name too. Skip assoc-const (runtime-helper) traits, matching
                 // the impl branch and the default-method emitter.
                 let trait_name = t.ident.to_string();
-                if !assoc_const_traits.contains(&trait_name) {
+                let trait_key = if module_path.is_empty() {
+                    trait_name.clone()
+                } else {
+                    format!("{}::{}", module_path.join("::"), trait_name)
+                };
+                if !assoc_const_traits.contains(&trait_key)
+                    && !excluded_traits.contains(&trait_key)
+                {
                     for ti in &t.items {
                         if let syn::TraitItem::Fn(m) = ti
                             && m.default.is_some()
@@ -1003,10 +1735,16 @@ fn collect_concrete_trait_impl_method_owners_into(
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(m.ident.to_string());
                     collect_concrete_trait_impl_method_owners_into(
                         nested,
                         declared_traits,
+                        declared_trait_paths,
+                        import_bindings,
                         assoc_const_traits,
+                        excluded_traits,
+                        &nested_path,
                         out,
                     );
                 }
@@ -1018,7 +1756,10 @@ fn collect_concrete_trait_impl_method_owners_into(
 
 fn collect_method_name_uses(
     items: &[syn::Item],
-    declared_traits: &std::collections::HashSet<String>,
+    declared_trait_paths: &std::collections::HashSet<String>,
+    import_bindings: &RustItemImportBindings,
+    excluded_traits: &std::collections::HashSet<String>,
+    module_path: &[String],
     inherent: &mut std::collections::HashSet<String>,
     trait_named: &mut std::collections::HashSet<String>,
 ) {
@@ -1027,13 +1768,17 @@ fn collect_method_name_uses(
             syn::Item::Impl(impl_block) => {
                 // A trait impl counts as a *trait* use only when the implemented
                 // trait is crate-declared (see `classify_method_names`).
-                let impl_trait_name = impl_block
-                    .trait_
+                let impl_trait_key = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
+                    resolve_declared_trait_path_key(
+                        path,
+                        module_path,
+                        declared_trait_paths,
+                        import_bindings,
+                    )
+                });
+                let is_crate_trait_impl = impl_trait_key
                     .as_ref()
-                    .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
-                let is_crate_trait_impl = impl_trait_name
-                    .as_ref()
-                    .is_some_and(|n| declared_traits.contains(n));
+                    .is_some_and(|key| !excluded_traits.contains(key));
                 for impl_item in &impl_block.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         let name = method.sig.ident.to_string();
@@ -1049,6 +1794,15 @@ fn collect_method_name_uses(
                 }
             }
             syn::Item::Trait(t) => {
+                let trait_name = t.ident.to_string();
+                let trait_key = if module_path.is_empty() {
+                    trait_name
+                } else {
+                    format!("{}::{}", module_path.join("::"), trait_name)
+                };
+                if excluded_traits.contains(&trait_key) {
+                    continue;
+                }
                 for trait_item in &t.items {
                     if let syn::TraitItem::Fn(method) = trait_item {
                         trait_named.insert(method.sig.ident.to_string());
@@ -1060,7 +1814,17 @@ fn collect_method_name_uses(
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
-                    collect_method_name_uses(nested, declared_traits, inherent, trait_named);
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(m.ident.to_string());
+                    collect_method_name_uses(
+                        nested,
+                        declared_trait_paths,
+                        import_bindings,
+                        excluded_traits,
+                        &nested_path,
+                        inherent,
+                        trait_named,
+                    );
                 }
             }
             _ => {}
@@ -1076,6 +1840,13 @@ impl Default for TranspileOptions {
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             external_crate_module_aliases: HashMap::new(),
+            authenticated_cpp_inherit_roots: std::collections::HashSet::new(),
+            cpp_name_trusted_cpp_inherit_provenance: false,
+            authenticated_sysroot_roots: std::collections::HashSet::from([
+                "std".to_string(),
+                "core".to_string(),
+            ]),
+            cross_file_rust_item_import_bindings: RustItemImportBindings::new(),
             cpp_type_aliases: HashMap::new(),
             emit_ufcs_trait_manifest_path: None,
             dependency_ufcs_trait_manifests: Vec::new(),
@@ -1653,7 +2424,14 @@ fn transpile_full_with_options_impl(
             &options.explicit_gmf_includes,
         )?;
     }
-    let cpp_name_plan = crate::cpp_name::collect(&file)?;
+    let cpp_name_plan = if options.crate_module_names.is_empty() {
+        crate::cpp_name::collect(&file)?
+    } else {
+        crate::cpp_name::collect_with_crate_provenance(
+            &file,
+            options.cpp_name_trusted_cpp_inherit_provenance,
+        )?
+    };
     if !cpp_name_plan.is_empty()
         && (module_name.is_none() || is_prepared_inline || options.inline_rust_block)
     {
@@ -1741,6 +2519,13 @@ fn transpile_full_with_options_impl(
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
+    codegen.set_authenticated_cpp_inherit_roots(
+        options.authenticated_cpp_inherit_roots.clone(),
+    );
+    codegen.set_authenticated_sysroot_roots(options.authenticated_sysroot_roots.clone());
+    codegen.set_cross_file_rust_item_import_bindings(
+        options.cross_file_rust_item_import_bindings.clone(),
+    );
     codegen.set_cpp_type_aliases(options.cpp_type_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_explicit_module_gmf_includes(

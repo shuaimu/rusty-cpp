@@ -31,9 +31,21 @@ pub(crate) struct ExtensionImplMethod {
     callable_param_metadata: HashMap<String, CallableParamBoundMetadata>,
     associated_type_bindings: HashMap<String, syn::Type>,
     /// Impl-level generic type parameter names from the surrounding
-    /// `impl<Idx, T, ...>`. Used by the Adapter spec emitter to detect
-    /// generic impls (which need partial specializations) and skip them.
+    /// `impl<Idx, T, ...>`. Used by the Adapter spec emitter to form a
+    /// fail-closed C++ partial specialization when every parameter is
+    /// structurally recoverable from the implementing Self type.
     impl_generic_names: Vec<String>,
+    /// Whether an impl's generic surface belongs to the deliberately narrow
+    /// foreign-Adapter lane: lifetimes (erased as before) plus default-free
+    /// type parameters that are either unconstrained or carry only the legacy
+    /// `Default` bound, with no where-clause. Const generics and every other
+    /// constrained type parameter require C++ constraint lowering and remain a
+    /// hand slot instead of producing an over-broad partial specialization.
+    foreign_adapter_partial_spec_compatible: bool,
+    /// True when the impl declares at least one type or const parameter. This
+    /// is separate from `impl_generic_names`: const parameters are purposely
+    /// excluded from that vector because this lane cannot emit them yet.
+    foreign_adapter_has_non_lifetime_generics: bool,
     /// UFCS Fix A part 2 (§ 3.2.4): an extra `requires`-clause to inject after
     /// the template parameter list — used to CONSTRAIN a multi-owner default
     /// method's template (`requires requires(const Self_& s){ Tr_::__ufcs_impls(s); }`)
@@ -71,6 +83,42 @@ enum RuntimeMatchEnumKind {
     Option,
     Result,
     Entry,
+}
+
+/// Recognize the storage marker surface exactly. The ordinary direct
+/// `#[thread_local]` form remains supported for source that can use the Rust
+/// attribute, while production facade crates carry the compiler-owned marker
+/// inertly as `#[cfg_attr(any(), thread_local)]` so rustc never enables the
+/// unstable attribute. No active, qualified, nested, or multi-payload
+/// `cfg_attr` spelling is allowed to acquire C++ thread-local semantics.
+fn has_exact_thread_local_storage_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        if attribute.path().is_ident("thread_local") {
+            return matches!(attribute.meta, syn::Meta::Path(_));
+        }
+        let syn::Meta::List(cfg_attr) = &attribute.meta else {
+            return false;
+        };
+        if !cfg_attr.path.is_ident("cfg_attr") {
+            return false;
+        }
+        let Ok(nested) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+            .parse2(cfg_attr.tokens.clone())
+        else {
+            return false;
+        };
+        if nested.len() != 2 {
+            return false;
+        }
+        let predicate_is_exact_inactive = nested.first().is_some_and(|predicate| {
+            matches!(predicate, syn::Meta::List(any) if any.path.is_ident("any") && any.tokens.is_empty())
+        });
+        let payload_is_exact_thread_local = nested
+            .iter()
+            .nth(1)
+            .is_some_and(|payload| matches!(payload, syn::Meta::Path(path) if path.is_ident("thread_local")));
+        predicate_is_exact_inactive && payload_is_exact_thread_local
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1592,6 +1640,12 @@ pub struct CodeGen {
     /// (`Clone`, `Display`, …) keeps the non-UFCS lowering for it. Populated in
     /// `emit_file`.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
+    /// Fully-qualified lexical keys of crate-local traits carrying the
+    /// compiler-owned, deliberately inactive
+    /// `#[cfg_attr(any(), cpp_trait_member_dispatch)]` marker. These retain
+    /// their interface/Adapter surface but stay on concrete member dispatch;
+    /// no additive `<Trait>_` UFCS helpers are emitted for them.
+    pub(crate) cpp_trait_member_dispatch_traits: std::collections::HashSet<String>,
     pub(crate) ufcs_declared_trait_modules: std::collections::BTreeMap<String, String>,
     /// Traits whose RuntimeHelper struct was actually EMITTED (generic
     /// traits and non-module builds skip it) — gates the manifest's
@@ -2558,6 +2612,22 @@ pub struct CodeGen {
     /// Enables order-independent path lowering for names introduced by `use` items
     /// that may appear later in source order than their first use.
     pub(crate) scope_import_bindings: HashMap<(String, String), HashSet<String>>,
+    /// Exact Rust item-import bindings used to authenticate compiler-owned
+    /// attributes and resolve crate-local trait identity. Unlike
+    /// `scope_import_bindings`, these retain Rust source paths and are never
+    /// rewritten into C++ namespaces or runtime facade spellings.
+    pub(crate) rust_item_import_bindings: crate::transpile::RustItemImportBindings,
+    /// External crate roots whose Cargo package identity has been authenticated
+    /// by the crate driver. Source-only callers leave this empty, so
+    /// compiler-owned attributes fail closed instead of trusting a spelling.
+    pub(crate) authenticated_cpp_inherit_roots: HashSet<String>,
+    /// Cargo-authenticated compiler sysroot roots used for the narrow erased
+    /// `Default` bound. A dependency occupying `std` or `core` removes that
+    /// root before codegen.
+    pub(crate) authenticated_sysroot_roots: HashSet<String>,
+    /// Imports harvested from sibling inline blocks in the same carrier.
+    pub(crate) cross_file_rust_item_import_bindings:
+        crate::transpile::RustItemImportBindings,
     /// Unified alias/path resolution engine. Absorbs `extern crate X as Y`
     /// (`stdalloc -> alloc`) and `use <mod> as <alias>` (`control::group::imp ->
     /// control::group::sse2`) as alias EDGES, resolved transitively to a
@@ -2910,6 +2980,7 @@ impl CodeGen {
             is_dependency_module: false,
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
+            cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
             emitted_runtime_helper_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
@@ -3128,6 +3199,14 @@ impl CodeGen {
             import_alias_names: HashSet::new(),
             module_scope_namespace_aliases: HashSet::new(),
             scope_import_bindings: HashMap::new(),
+            rust_item_import_bindings: crate::transpile::RustItemImportBindings::new(),
+            authenticated_cpp_inherit_roots: HashSet::new(),
+            authenticated_sysroot_roots: HashSet::from([
+                "std".to_string(),
+                "core".to_string(),
+            ]),
+            cross_file_rust_item_import_bindings:
+                crate::transpile::RustItemImportBindings::new(),
             name_resolver: name_resolver::NameResolver::default(),
             nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
             expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
@@ -5029,6 +5108,27 @@ impl CodeGen {
             .set_external_crate_aliases(external_crate_module_aliases);
     }
 
+    pub fn set_authenticated_cpp_inherit_roots(
+        &mut self,
+        authenticated_cpp_inherit_roots: HashSet<String>,
+    ) {
+        self.authenticated_cpp_inherit_roots = authenticated_cpp_inherit_roots;
+    }
+
+    pub fn set_authenticated_sysroot_roots(
+        &mut self,
+        authenticated_sysroot_roots: HashSet<String>,
+    ) {
+        self.authenticated_sysroot_roots = authenticated_sysroot_roots;
+    }
+
+    pub fn set_cross_file_rust_item_import_bindings(
+        &mut self,
+        bindings: crate::transpile::RustItemImportBindings,
+    ) {
+        self.cross_file_rust_item_import_bindings = bindings;
+    }
+
     /// C++ `using X = Y;` aliases from the TU an inline-rust block is
     /// spliced into (see `TranspileOptions::cpp_type_aliases`).
     pub fn set_cpp_type_aliases(&mut self, cpp_type_aliases: HashMap<String, String>) {
@@ -6383,9 +6483,11 @@ impl CodeGen {
         self.import_alias_names.clear();
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
+        self.rust_item_import_bindings.clear();
         self.name_resolver.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
+        self.sibling_modules_imported.clear();
         self.in_forward_decl_signature = false;
         self.declared_item_names.clear();
         self.item_const_types.clear();
@@ -6414,6 +6516,27 @@ impl CodeGen {
         self.method_emission_out_of_line_owner = None;
         self.method_emission_skip_conflict_registration = false;
         self.codegen_error = None;
+        // Every preflight-proven flat type identity requires the exact named
+        // module that owns its declaration. Record those imports before item
+        // emission so both source-marked bindings and exact qualified
+        // provider paths land once in the legal C++ module prologue. A
+        // missing module is a violated provenance tuple, never permission to
+        // emit an unbacked namespace spelling.
+        let flat_type_provider_children = self
+            .flat_import_type_authorizations
+            .iter()
+            .map(|authorization| authorization.marked_rust_child.clone())
+            .collect::<BTreeSet<_>>();
+        for child in flat_type_provider_children {
+            let Some(sibling_module) = self.resolve_crate_root_child_module_path(&child) else {
+                self.codegen_error = Some(format!(
+                    "cpp_import_namespace crate child `{child}` does not resolve to a generated sibling module"
+                ));
+                return;
+            };
+            self.record_cpp_module_import_path(&sibling_module);
+            self.sibling_modules_imported.insert(sibling_module);
+        }
         self.trait_static_default_methods.clear();
         self.trait_declared_paths.clear();
         self.cpp_marker_trait_paths.clear();
@@ -6616,12 +6739,30 @@ impl CodeGen {
         log_emit("seed_cross_file_deref_targets");
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
+        // Exact Rust identity data must precede every trait/attribute collect
+        // pass. In particular, an external import with the same leaf as a
+        // marked local trait must block local behavior, while an alias of the
+        // actual local declaration must preserve it.
+        self.rust_item_import_bindings =
+            crate::transpile::collect_rust_item_import_bindings(&file.items);
+        for (key, targets) in &self.cross_file_rust_item_import_bindings {
+            self.rust_item_import_bindings
+                .entry(key.clone())
+                .or_default()
+                .extend(targets.iter().cloned());
+        }
+        self.trait_declared_paths = crate::transpile::collect_declared_trait_paths(&file.items);
         // Opt-in non-inheriting marker registries affect generic-bound
         // lowering, including early declarations, so collect them before any
         // emission pass begins.
         self.collect_cpp_marker_traits(&file.items, &[]);
         // UFCS Phase 3: classify method names for call-site lowering.
-        self.ufcs_method_classes = crate::transpile::classify_method_names(&file.items);
+        self.cpp_trait_member_dispatch_traits =
+            Self::collect_cpp_trait_member_dispatch_traits(&file.items);
+        self.ufcs_method_classes = crate::transpile::classify_method_names_excluding_traits(
+            &file.items,
+            &self.cpp_trait_member_dispatch_traits,
+        );
         // UFCS Phase 7: scope emission to crate-declared traits.
         self.ufcs_declared_trait_names =
             crate::transpile::collect_declared_trait_names(&file.items);
@@ -6631,10 +6772,12 @@ impl CodeGen {
             crate::transpile::collect_declared_trait_methods(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
         // emit a `<Tr>_::m` free function, for shim qualification.
-        self.ufcs_method_trait_owners = crate::transpile::collect_concrete_trait_impl_method_owners(
-            &file.items,
-            &self.ufcs_declared_trait_names,
-        );
+        self.ufcs_method_trait_owners =
+            crate::transpile::collect_concrete_trait_impl_method_owners_excluding_traits(
+                &file.items,
+                &self.ufcs_declared_trait_names,
+                &self.cpp_trait_member_dispatch_traits,
+            );
         // UFCS cross-crate (book § 3.2.7): fold dependency trait manifests
         // into the classifier so calls to a dependency's trait methods
         // classify + module-qualify.
@@ -7010,7 +7153,7 @@ impl CodeGen {
         self.emit_ufcs_trait_impl_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_function_decls");
         // § 3.2.13: default-method templates (early declarations + `using`).
-        self.emit_ufcs_trait_default_free_function_decls(&file.items);
+        self.emit_ufcs_trait_default_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_default_free_function_decls");
         // The declaration emitters above recorded which `<Tr>_::m` free
         // functions were ACTUALLY emitted (some specs are skipped — unsupported
@@ -7157,7 +7300,7 @@ impl CodeGen {
         self.emit_ufcs_trait_impl_free_functions(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_functions");
         // § 3.2.13: default-method template DEFINITIONS in `namespace <Tr>_`.
-        self.emit_ufcs_trait_default_free_functions(&file.items);
+        self.emit_ufcs_trait_default_free_functions(&file.items, &[]);
         log_emit("emit_ufcs_trait_default_free_functions");
 
         // Interface+adapter (§ 3.2.9): emit any synthesized combined
@@ -11732,6 +11875,45 @@ impl CodeGen {
         out
     }
 
+    fn emit_interface_trait_forward_decl(
+        &mut self,
+        t: &syn::ItemTrait,
+        export_prefix: &str,
+        name: &str,
+    ) {
+        // Keep this structurally identical to emit_trait_interface_pattern:
+        // that definition models only Rust type parameters, then appends one
+        // C++ type parameter per associated type. Lifetimes and const generics
+        // are deliberately absent from both declarations.
+        let mut params: Vec<String> = t
+            .generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(param) => Some(param.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        params.extend(t.items.iter().filter_map(|item| match item {
+            syn::TraitItem::Type(associated) => Some(associated.ident.to_string()),
+            _ => None,
+        }));
+        if params.is_empty() {
+            self.writeln(&format!("{}class {};", export_prefix, name));
+        } else {
+            self.writeln(&format!(
+                "{}template <{}>",
+                export_prefix,
+                params
+                    .iter()
+                    .map(|param| format!("class {}", param))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            self.writeln(&format!("class {};", name));
+        }
+    }
+
     fn emit_concrete_type_forward_decls_only(
         &mut self,
         items: &[syn::Item],
@@ -11839,11 +12021,7 @@ impl CodeGen {
                         }
                         self.writeln(&format!("struct {};", name));
                     } else {
-                        self.emit_template_declaration_without_type_defaults(
-                            &t.generics,
-                            export_prefix,
-                            &format!("class {};", name),
-                        );
+                        self.emit_interface_trait_forward_decl(t, export_prefix, &name);
                     }
                     emitted_any = true;
                 }
@@ -12202,11 +12380,7 @@ impl CodeGen {
                         }
                         self.writeln(&format!("struct {};", name));
                     } else {
-                        self.emit_template_declaration_without_type_defaults(
-                            &t.generics,
-                            export_prefix,
-                            &format!("class {};", name),
-                        );
+                        self.emit_interface_trait_forward_decl(t, export_prefix, &name);
                     }
                     emitted_any = true;
                 }
@@ -12408,12 +12582,7 @@ impl CodeGen {
             // declaration", which made every namespace-scope thread_local
             // slot unreachable from the DSL even though reads and assignments
             // already lowered correctly.
-            let is_thread_local = s.attrs.iter().any(|a| {
-                a.path()
-                    .segments
-                    .last()
-                    .is_some_and(|seg| seg.ident == "thread_local")
-            });
+            let is_thread_local = has_exact_thread_local_storage_attr(&s.attrs);
             let storage = if is_thread_local {
                 "extern thread_local"
             } else {
@@ -18220,6 +18389,8 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: associated_type_bindings.clone(),
                 impl_generic_names: impl_generic_names.clone(),
+                foreign_adapter_partial_spec_compatible: false,
+                foreign_adapter_has_non_lifetime_generics: false,
                 self_is_template_param: false,
                 extra_template_requires: None,
             });
@@ -18291,12 +18462,25 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
-        let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
+        let Some((written_trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
         };
-        // Phase 7: only crate-declared traits get UFCS free functions; a
-        // prelude/std-trait impl (Clone/Display/…) keeps the non-UFCS path.
-        if !self.ufcs_declared_trait_names.contains(&trait_name) {
+        let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
+            return;
+        };
+        let trait_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        // Phase 7: only an exactly resolved crate-declared trait gets UFCS free
+        // functions. A foreign import sharing the leaf with a local trait must
+        // not acquire that local trait's helper surface.
+        if !self.trait_declared_paths.contains(&trait_key) {
+            return;
+        }
+        let trait_name = trait_key
+            .rsplit("::")
+            .next()
+            .unwrap_or(&written_trait_name)
+            .to_string();
+        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
             return;
         }
         // Cross-crate dedup: drop methods an imported dependency already provides
@@ -18400,12 +18584,24 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
-        let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
+        let Some((written_trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
         };
-        // Phase 7: only crate-declared traits get UFCS decls (mirrors the
-        // definition emitter, so a foreign-trait impl emits neither).
-        if !self.ufcs_declared_trait_names.contains(&trait_name) {
+        let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
+            return;
+        };
+        let trait_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        // Phase 7: only an exactly resolved crate-declared trait gets UFCS
+        // declarations (mirrors the definition emitter).
+        if !self.trait_declared_paths.contains(&trait_key) {
+            return;
+        }
+        let trait_name = trait_key
+            .rsplit("::")
+            .next()
+            .unwrap_or(&written_trait_name)
+            .to_string();
+        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
             return;
         }
         // Cross-crate dedup (mirrors the definition emitter): drop methods an
@@ -18631,6 +18827,8 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: HashMap::new(),
                 impl_generic_names: impl_generic_names.clone(),
+                foreign_adapter_partial_spec_compatible: false,
+                foreign_adapter_has_non_lifetime_generics: false,
                 self_is_template_param: true,
                 extra_template_requires: None,
             });
@@ -18668,13 +18866,28 @@ impl CodeGen {
 
     /// Phase / § 3.2.13 (late): emit each trait's default methods as
     /// `Self`-templated free-function DEFINITIONS in `namespace <Tr>_`.
-    fn emit_ufcs_trait_default_free_functions(&mut self, items: &[syn::Item]) {
+    fn emit_ufcs_trait_default_free_functions(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
                     let Some((trait_name, mut specs)) = Self::ufcs_trait_default_specs(t) else {
                         continue;
                     };
+                    let trait_key = if module_path.is_empty() {
+                        trait_name.clone()
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    };
+                    if self
+                        .cpp_trait_member_dispatch_traits
+                        .contains(&trait_key)
+                    {
+                        continue;
+                    }
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
                     // Suppress methods an imported dependency already provides — the
                     // shared `<Trait>_` namespace would otherwise declare the same
@@ -18709,7 +18922,9 @@ impl CodeGen {
                         continue;
                     }
                     if let Some((_, nested)) = &m.content {
-                        self.emit_ufcs_trait_default_free_functions(nested);
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.emit_ufcs_trait_default_free_functions(nested, &nested_path);
                     }
                 }
                 _ => {}
@@ -18719,13 +18934,28 @@ impl CodeGen {
 
     /// § 3.2.13 (early): forward-declare each trait's default-method templates +
     /// a `using namespace <Tr>_;`, before function bodies, so call sites resolve.
-    fn emit_ufcs_trait_default_free_function_decls(&mut self, items: &[syn::Item]) {
+    fn emit_ufcs_trait_default_free_function_decls(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
                     let Some((trait_name, mut specs)) = Self::ufcs_trait_default_specs(t) else {
                         continue;
                     };
+                    let trait_key = if module_path.is_empty() {
+                        trait_name.clone()
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    };
+                    if self
+                        .cpp_trait_member_dispatch_traits
+                        .contains(&trait_key)
+                    {
+                        continue;
+                    }
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
                     // Suppress methods an imported dependency already provides (see
                     // extension_trait_method_provided_by_dependency): avoids the
@@ -18769,7 +18999,9 @@ impl CodeGen {
                         continue;
                     }
                     if let Some((_, nested)) = &m.content {
-                        self.emit_ufcs_trait_default_free_function_decls(nested);
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.emit_ufcs_trait_default_free_function_decls(nested, &nested_path);
                     }
                 }
                 _ => {}
@@ -19053,11 +19285,23 @@ impl CodeGen {
         trait_name: &str,
         self_cpp: &str,
         assoc_pairs: &[(String, String)],
+        impl_generic_names: &[String],
     ) {
         if assoc_pairs.is_empty() {
             return;
         }
-        self.writeln("template <>");
+        if impl_generic_names.is_empty() {
+            self.writeln("template <>");
+        } else {
+            self.writeln(&format!(
+                "template <{}>",
+                impl_generic_names
+                    .iter()
+                    .map(|name| format!("typename {}", escape_cpp_keyword(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         self.writeln(&format!(
             "struct {}Traits<{}> {{",
             trait_name, self_cpp
@@ -19086,6 +19330,7 @@ impl CodeGen {
         &mut self,
         trait_name: &str,
         trait_args: &[String],
+        impl_generic_names: &[String],
         suffix: &str,
         self_cpp: &str,
         kind: AdapterStorageKind,
@@ -19135,7 +19380,22 @@ impl CodeGen {
             format!("{}<{}>", trait_name, trait_args.join(", "))
         };
 
-        self.writeln("template <>");
+        let cpp_impl_generic_names: Vec<String> = impl_generic_names
+            .iter()
+            .map(|name| escape_cpp_keyword(name))
+            .collect();
+        if cpp_impl_generic_names.is_empty() {
+            self.writeln("template <>");
+        } else {
+            self.writeln(&format!(
+                "template <{}>",
+                cpp_impl_generic_names
+                    .iter()
+                    .map(|name| format!("typename {}", name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         self.writeln(&format!(
             "class {}{}<{}> final : public {} {{",
             trait_name, suffix, adapter_spec_args, base_cpp
@@ -19175,7 +19435,7 @@ impl CodeGen {
                 ));
                 continue;
             }
-            self.emit_one_foreign_adapter_method(method, kind);
+            self.emit_one_foreign_adapter_method(method, kind, impl_generic_names);
         }
 
         self.indent -= 1;
@@ -19190,6 +19450,7 @@ impl CodeGen {
         &mut self,
         method: &syn::ImplItemFn,
         kind: AdapterStorageKind,
+        impl_generic_names: &[String],
     ) {
         let method_name = method.sig.ident.to_string();
         let escaped = escape_cpp_keyword_in_member_position(&method_name);
@@ -19208,12 +19469,24 @@ impl CodeGen {
             ));
             return;
         }
-        if !method.sig.generics.params.is_empty() {
+        let has_method_only_generics = method.sig.generics.params.iter().any(|param| match param {
+            syn::GenericParam::Type(type_param) => !impl_generic_names
+                .iter()
+                .any(|name| name == &type_param.ident.to_string()),
+            syn::GenericParam::Const(_) => true,
+            syn::GenericParam::Lifetime(_) => false,
+        });
+        if has_method_only_generics {
             self.writeln(&format!(
                 "// TODO(interface_traits): skipped generic method `{}`",
                 method_name
             ));
             return;
+        }
+
+        if !impl_generic_names.is_empty() {
+            self.type_param_scopes
+                .push(impl_generic_names.iter().cloned().collect());
         }
 
         let is_const = receiver.mutability.is_none();
@@ -19260,6 +19533,9 @@ impl CodeGen {
 
         self.indent -= 1;
         self.writeln("}");
+        if !impl_generic_names.is_empty() {
+            self.type_param_scopes.pop();
+        }
     }
 
 
@@ -19272,6 +19548,7 @@ impl CodeGen {
     fn emit_one_local_adapter(
         &mut self,
         trait_name: &str,
+        trait_key: &str,
         trait_args: &[String],
         suffix: &str,
         self_cpp: &str,
@@ -19356,7 +19633,7 @@ impl CodeGen {
                 ));
                 continue;
             }
-            self.emit_one_local_adapter_method(trait_name, method, kind);
+            self.emit_one_local_adapter_method(trait_name, trait_key, method, kind);
         }
 
         self.indent -= 1;
@@ -19372,6 +19649,7 @@ impl CodeGen {
     fn emit_one_local_adapter_method(
         &mut self,
         trait_name: &str,
+        trait_key: &str,
         method: &syn::ImplItemFn,
         kind: AdapterStorageKind,
     ) {
@@ -19442,7 +19720,11 @@ impl CodeGen {
             // emitted — i.e. the trait is crate-declared (Phase 7). For a
             // prelude/std-trait adapter (e.g. DisplayAdapter), `Display_::m`
             // does not exist, so keep the member call.
-            if self.ufcs_declared_trait_names.contains(trait_name) {
+            if self.ufcs_declared_trait_names.contains(trait_name)
+                && !self
+                    .cpp_trait_member_dispatch_traits
+                    .contains(trait_key)
+            {
                 // UFCS Phase 6 (book § 3.2.10): forward the vtable slot to the
                 // static free-function impl `<Tr>_::m(value_, args)` rather
                 // than the member `value_.m(args)`, so static and dynamic
@@ -55888,6 +56170,13 @@ fn classify_use_import(path: &str) -> UseImportAction {
         };
     }
 
+    // This compiler-owned facade proc macro has no C++ value/type surface.
+    // Check before generic `rusty::...` facade rewriting can turn it into a
+    // using-declaration. The exact full path keeps unrelated lookalikes out.
+    if normalized.trim_start_matches("::") == "rusty::cpp_inherit" {
+        return UseImportAction::RustOnly;
+    }
+
     if let Some(action) = rewrite_lib_core_facade_import(normalized) {
         return action;
     }
@@ -57044,6 +57333,14 @@ fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
 /// These are silently skipped (commented out) since they have no meaning in C++.
 fn is_rust_only_import(path: &str) -> bool {
     let normalized = path.trim_start_matches("::");
+    // Compiler-owned proc-macro marker: Rust source imports the authenticated
+    // facade attribute so rustc can resolve `#[cpp_inherit]`, but there is no
+    // C++ value/type named `rusty::cpp_inherit` to expose with a using-decl.
+    // Keep this exact; an arbitrary package's `cpp_inherit` tail must not gain
+    // either marker semantics or a special import exemption.
+    if normalized == "rusty::cpp_inherit" {
+        return true;
+    }
     // Parser sink traits are lowered to generic `auto&` error receivers in C++;
     // importing the Rust trait name directly is not meaningful in emitted C++.
     if normalized == "ErrorSink" {

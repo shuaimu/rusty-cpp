@@ -1101,6 +1101,53 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // A complete `crate::<root-child>::<leaf>` identity may name a flat
+        // type without borrowing the marked `use` binding from another
+        // source unit. Crate preflight records this authorization only after
+        // proving the exact provider item and exact source path; never recover
+        // it from a tail spelling or a self/super/alias path.
+        if path.leading_colon.is_none()
+            && segments.len() >= 3
+            && segments.first().is_some_and(|segment| segment == "crate")
+            && path
+                .segments
+                .iter()
+                .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+        {
+            let mut targets = self
+                .flat_import_type_authorizations
+                .iter()
+                .filter(|authorization| {
+                    authorization.consumer_physical_module == self.current_physical_module
+                        && authorization.reference_kind
+                            == crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath
+                        && authorization.consumer_lexical_module.0 == self.module_stack
+                        && authorization.provider_physical_module.0
+                            == [segments[1].clone()]
+                        && authorization.leaf == segments[2]
+                })
+                .map(|authorization| {
+                    let mut target = vec![
+                        authorization.cpp_namespace.clone(),
+                        authorization.leaf.clone(),
+                    ];
+                    target.extend(segments[3..].iter().cloned());
+                    format!(
+                        "::{}",
+                        target
+                            .iter()
+                            .map(|segment| escape_cpp_keyword(segment))
+                            .collect::<Vec<_>>()
+                            .join("::")
+                    )
+                })
+                .collect::<Vec<_>>();
+            targets.sort();
+            targets.dedup();
+            if targets.len() == 1 {
+                return targets.remove(0);
+            }
+        }
         // Rust child modules do not inherit a parent's `use`, but they may
         // explicitly reach it with `self::` / `super::`. Resolve only the
         // exact lexical source identity proven by crate preflight. A bare
@@ -1128,6 +1175,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     .iter()
                     .filter(|authorization| {
                         authorization.consumer_physical_module == self.current_physical_module
+                            && authorization.reference_kind
+                                == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                             && authorization.consumer_lexical_module.0 == lexical
                             && authorization.leaf == *leaf
                     })
@@ -1160,6 +1209,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 .iter()
                 .filter(|authorization| {
                     authorization.consumer_physical_module == self.current_physical_module
+                        && authorization.reference_kind
+                            == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                         && relative
                             .iter()
                             .any(|segment| segment == &authorization.leaf)

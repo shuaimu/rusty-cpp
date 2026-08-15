@@ -35,6 +35,96 @@ impl AutoTrait {
 }
 
 impl CodeGen {
+    /// Recognize only the compiler-owned inactive trait-dispatch marker.
+    /// Keeping the entire shape exact prevents an active, qualified,
+    /// argument-bearing, or multi-attribute `cfg_attr` from silently changing
+    /// code generation semantics.
+    pub(super) fn has_exact_inactive_cpp_trait_member_dispatch_attr(
+        attrs: &[syn::Attribute],
+    ) -> bool {
+        attrs.iter().any(|attr| {
+            let syn::Meta::List(list) = &attr.meta else {
+                return false;
+            };
+            if !list.path.is_ident("cfg_attr") {
+                return false;
+            }
+            let parser =
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+            parser.parse2(list.tokens.clone()).is_ok_and(|nested| {
+                if nested.len() != 2 {
+                    return false;
+                }
+                let Some(syn::Meta::List(predicate)) = nested.first() else {
+                    return false;
+                };
+                let Some(syn::Meta::Path(marker)) = nested.iter().nth(1) else {
+                    return false;
+                };
+                predicate.path.is_ident("any")
+                    && predicate.tokens.is_empty()
+                    && marker.is_ident("cpp_trait_member_dispatch")
+            })
+        })
+    }
+
+    /// Collect the exact lexical owner key of every marked trait.  A bare
+    /// trait name is not sufficient: Rust permits unrelated traits with the
+    /// same leaf name in sibling modules, and marking `a::Clash` must not
+    /// change the UFCS surface or Adapter lowering of `b::Clash`.
+    pub(super) fn collect_cpp_trait_member_dispatch_traits(items: &[syn::Item]) -> HashSet<String> {
+        fn walk(items: &[syn::Item], module_path: &mut Vec<String>, out: &mut HashSet<String>) {
+            for item in items {
+                match item {
+                    syn::Item::Trait(trait_item)
+                        if CodeGen::has_exact_inactive_cpp_trait_member_dispatch_attr(
+                            &trait_item.attrs,
+                        ) =>
+                    {
+                        let trait_name = trait_item.ident.to_string();
+                        let key = if module_path.is_empty() {
+                            trait_name
+                        } else {
+                            format!("{}::{}", module_path.join("::"), trait_name)
+                        };
+                        out.insert(key);
+                    }
+                    syn::Item::Mod(module) => {
+                        if CodeGen::should_skip_cfg_attrs(&module.attrs) {
+                            continue;
+                        }
+                        if let Some((_, nested)) = &module.content {
+                            module_path.push(module.ident.to_string());
+                            walk(nested, module_path, out);
+                            module_path.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut out = HashSet::new();
+        walk(items, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Resolve a trait impl to the same lexical owner-key form used by
+    /// `collect_cpp_trait_member_dispatch_traits` and test whether that exact
+    /// trait is marked.  `resolve_trait_scoped_key_for_impl` understands bare,
+    /// `self`, `super`, and `crate` paths in the current inline-module scope.
+    pub(super) fn impl_uses_cpp_trait_member_dispatch(
+        &self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) -> bool {
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return false;
+        };
+        let trait_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        self.cpp_trait_member_dispatch_traits.contains(&trait_key)
+    }
+
     pub(super) fn should_rewrite_by_value_cycle_field_declaration(
         &self,
         owner_type: &str,
@@ -527,6 +617,40 @@ impl CodeGen {
         Self::has_cpp_only_marker_attr(attrs, "cpp_ctor")
     }
 
+    /// The source-level Arc/cpp_ctor fusion is used on rustc-compiled canonical
+    /// Rust, so it accepts only the exact inert marker spelling. A live direct
+    /// attribute may be a proc macro and is not authenticated by syntax alone.
+    pub(super) fn has_inert_cpp_ctor_attr(attrs: &[syn::Attribute]) -> bool {
+        let mut exact_markers = 0usize;
+        for attr in attrs {
+            if !Self::token_stream_mentions_ident(attr.meta.to_token_stream(), "cpp_ctor") {
+                continue;
+            }
+            if !attr.path().is_ident("cfg_attr") {
+                return false;
+            }
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            if args.len() != 2 {
+                return false;
+            }
+            let Some(syn::Meta::List(predicate)) = args.first() else {
+                return false;
+            };
+            if !predicate.path.is_ident("any")
+                || !predicate.tokens.is_empty()
+                || !matches!(args.get(1), Some(syn::Meta::Path(path)) if path.is_ident("cpp_ctor"))
+            {
+                return false;
+            }
+            exact_markers += 1;
+        }
+        exact_markers == 1
+    }
+
     /// Recognize a C++-only marker either directly, or hidden from rustc in
     /// the permanently-disabled `#[cfg_attr(any(), marker)]` spelling.
     fn has_cpp_only_marker_attr(attrs: &[syn::Attribute], marker: &str) -> bool {
@@ -602,8 +726,66 @@ impl CodeGen {
     /// fieldwise + move ctor) instead of the default `TraitAdapter<Type>`
     /// wrapper, so existing call sites that upcast `Arc<Type>` /
     /// `shared_ptr<Type>` to the trait base keep compiling. Opt-in only.
-    pub(super) fn has_cpp_inherit_attr(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| a.path().is_ident("cpp_inherit"))
+    pub(super) fn has_cpp_inherit_attr(
+        &self,
+        attrs: &[syn::Attribute],
+        module_path: &[String],
+    ) -> bool {
+        crate::transpile::has_authenticated_cpp_inherit_attr(
+            attrs,
+            module_path,
+            &self.rust_item_import_bindings,
+            &self.authenticated_cpp_inherit_roots,
+        )
+    }
+
+    /// Authenticate the one erased bound admitted by generic foreign Adapter
+    /// partial specializations. A bare `Default` is the standard prelude trait
+    /// only when no lexical declaration or named import shadows it; explicit
+    /// and aliased spellings must resolve exactly to `std`/`core` Default.
+    pub(super) fn is_authenticated_std_default_bound(
+        &self,
+        trait_bound: &syn::TraitBound,
+        module_path: &[String],
+    ) -> bool {
+        if trait_bound.modifier != syn::TraitBoundModifier::None
+            || trait_bound.lifetimes.is_some()
+            || trait_bound
+                .path
+                .segments
+                .iter()
+                .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return false;
+        }
+        let written = trait_bound
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let Some(resolved) = crate::transpile::resolve_external_rust_item_path(
+            &trait_bound.path,
+            module_path,
+            &self.trait_declared_paths,
+            &self.rust_item_import_bindings,
+        ) else {
+            return false;
+        };
+        if resolved == "Default" && written == "Default" {
+            // The prelude spelling is provided by `std` in an ordinary crate
+            // and by `core` under `#![no_std]`; either authenticated sysroot is
+            // sufficient because both paths name the same compiler trait.
+            return self.authenticated_sysroot_roots.contains("std")
+                || self.authenticated_sysroot_roots.contains("core");
+        }
+        for root in ["std", "core"] {
+            if resolved == format!("{root}::default::Default") {
+                return self.authenticated_sysroot_roots.contains(root);
+            }
+        }
+        false
     }
 
     /// True when `type_name`'s simple name was recorded (via a

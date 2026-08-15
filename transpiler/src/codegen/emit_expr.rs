@@ -16561,11 +16561,176 @@ impl CodeGen {
         }
     }
 
+    /// Prove the only Arc/cpp_ctor fusion shape currently needed by canonical
+    /// carriers. The proof is intentionally narrower than ordinary Rust name
+    /// resolution: a bare root-local owner, one inherent associated function,
+    /// an exact lowerable cpp_ctor body, and matching non-generic parameters.
+    /// Anything imported, nested, overloaded, generic, or otherwise ambiguous
+    /// falls back to the historical Arc::new lowering.
+    fn proven_cpp_ctor_arc_make_target<'a>(
+        &self,
+        expr: &'a syn::Expr,
+    ) -> Option<(String, &'a syn::ExprCall, Vec<syn::Type>)> {
+        let mut inner = self.peel_paren_group_expr(expr);
+        if let syn::Expr::Unsafe(unsafe_expr) = inner {
+            if unsafe_expr.block.stmts.len() != 1 {
+                return None;
+            }
+            inner = match &unsafe_expr.block.stmts[0] {
+                syn::Stmt::Expr(expr, _) => self.peel_paren_group_expr(expr),
+                _ => return None,
+            };
+        }
+        let syn::Expr::Call(ctor_call) = inner else {
+            return None;
+        };
+        let syn::Expr::Path(func_path) = ctor_call.func.as_ref() else {
+            return None;
+        };
+        if func_path.qself.is_some()
+            || func_path.path.leading_colon.is_some()
+            || func_path.path.segments.len() != 2
+            || !self.module_stack.is_empty()
+        {
+            return None;
+        }
+        let mut segments = func_path.path.segments.iter();
+        let owner_segment = segments.next()?;
+        let method_segment = segments.next()?;
+        if !matches!(owner_segment.arguments, syn::PathArguments::None)
+            || !matches!(method_segment.arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+        let owner = owner_segment.ident.to_string();
+        let method_name = method_segment.ident.to_string();
+        if !self.local_declared_types.contains(&owner)
+            || !self.struct_field_order.contains_key(&owner)
+        {
+            return None;
+        }
+
+        let mut matched: Option<&syn::ImplItemFn> = None;
+        for items in [
+            self.impl_blocks.get(&owner),
+            self.consumed_impl_blocks.get(&owner),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for item in items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                if method.sig.ident != method_name {
+                    continue;
+                }
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(method);
+            }
+        }
+        let method = matched?;
+        if !Self::has_inert_cpp_ctor_attr(&method.attrs)
+            || method.sig.generics.params.len() != 0
+            || method.sig.generics.where_clause.is_some()
+            || method.sig.constness.is_some()
+            || method.sig.asyncness.is_some()
+            || method.sig.abi.is_some()
+            || method.sig.variadic.is_some()
+            || Self::extract_cpp_ctor_struct_literal(&method.block, &owner).is_none()
+        {
+            return None;
+        }
+        let param_types = method
+            .sig
+            .inputs
+            .iter()
+            .map(|input| match input {
+                syn::FnArg::Typed(param) => Some((*param.ty).clone()),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if param_types.len() != ctor_call.args.len() {
+            return None;
+        }
+
+        let owner_type = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path::from(owner_segment.ident.clone()),
+        });
+        let owner_cpp = self.map_type(&owner_type);
+        if owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+        {
+            return None;
+        }
+        Some((owner_cpp, ctor_call, param_types))
+    }
+
+    fn try_emit_cpp_ctor_arc_make(&self, call: &syn::ExprCall) -> Option<String> {
+        if call.args.len() != 1
+            || self.struct_field_order.contains_key("Arc")
+            || self.declared_type_params.contains_key("Arc")
+        {
+            return None;
+        }
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        if func_path.qself.is_some()
+            || func_path.path.segments.last()?.ident != "new"
+            || !func_path
+                .path
+                .segments
+                .iter()
+                .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return None;
+        }
+        // Resolve the source path through the exact Rust import graph, then
+        // require Cargo to have authenticated the compiler sysroot root. A
+        // local module or ordinary dependency may legally occupy `std`, so
+        // neither source spelling nor the emitted `rusty::Arc` mapping is
+        // authority for this allocation-elision seam.
+        let canonical_arc_new = crate::transpile::resolve_external_rust_item_path(
+            &func_path.path,
+            &self.module_stack,
+            &self.trait_declared_paths,
+            &self.rust_item_import_bindings,
+        )
+        .is_some_and(|resolved| resolved == "std::sync::Arc::new")
+            && self.authenticated_sysroot_roots.contains("std");
+        if !canonical_arc_new {
+            return None;
+        }
+        let (owner, ctor_call, param_types) =
+            self.proven_cpp_ctor_arc_make_target(&call.args[0])?;
+        let args = ctor_call
+            .args
+            .iter()
+            .zip(param_types.iter())
+            .map(|(arg, expected)| {
+                self.emit_expr_to_string_with_expected_and_move_if_needed(arg, Some(expected))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("rusty::Arc<{}>::make({})", owner, args))
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // This must precede expected-type call rewriting: that path can turn
+        // Arc::new into an already-specialized `Arc<Owner>::new_` and return
+        // before the generic smart-pointer lowering below sees the source AST.
+        if let Some(fused) = self.try_emit_cpp_ctor_arc_make(call) {
+            return fused;
+        }
         // Rust's exact runtime type identity has no associated-function surface
         // on std::type_index. Lower the two canonical paths, plus a `use`-bound
         // TypeId alias, directly to C++ RTTI. Keep bare local `TypeId` owners out

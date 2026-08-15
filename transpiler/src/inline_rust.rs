@@ -38,6 +38,111 @@ struct LoadedCarrier {
     cpp_abi: Option<crate::cpp_abi::CppAbiInlineCarrierPlan>,
 }
 
+#[derive(Clone, Debug)]
+struct InlineRustContext {
+    authenticated_cpp_inherit_roots: HashSet<String>,
+    authenticated_sysroot_roots: HashSet<String>,
+    import_bindings: transpile::RustItemImportBindings,
+}
+
+impl Default for InlineRustContext {
+    fn default() -> Self {
+        Self {
+            authenticated_cpp_inherit_roots: HashSet::new(),
+            authenticated_sysroot_roots: HashSet::from([
+                "std".to_string(),
+                "core".to_string(),
+            ]),
+            import_bindings: transpile::RustItemImportBindings::new(),
+        }
+    }
+}
+
+fn inline_rust_context(path: &Path, blocks: &[ParsedBlock]) -> Result<InlineRustContext, String> {
+    fn items_request_cpp_inherit(items: &[syn::Item]) -> bool {
+        items.iter().any(|item| match item {
+            syn::Item::Impl(item_impl) => item_impl.attrs.iter().any(|attribute| {
+                attribute
+                    .path()
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "cpp_inherit")
+            }),
+            syn::Item::Mod(item_mod) => item_mod
+                .content
+                .as_ref()
+                .is_some_and(|(_, nested)| items_request_cpp_inherit(nested)),
+            _ => false,
+        })
+    }
+
+    let mut import_bindings = transpile::RustItemImportBindings::new();
+    let mut requests_cpp_inherit = false;
+    for block in blocks {
+        let file = syn::parse_file(&block.rust_payload_normalized).map_err(|error| {
+            format!(
+                "{}:{}: failed to parse inline block id={}: {}",
+                path.display(), block.if_line, block.id, error
+            )
+        })?;
+        requests_cpp_inherit |= items_request_cpp_inherit(&file.items);
+        for (key, targets) in transpile::collect_rust_item_import_bindings(&file.items) {
+            import_bindings.entry(key).or_default().extend(targets);
+        }
+    }
+    let Some(manifest) = crate::nearest_cargo_manifest(path) else {
+        if requests_cpp_inherit {
+            return Err(format!(
+                "{}: inline `cpp_inherit` requires a Cargo manifest so the `rusty` provider can be authenticated",
+                path.display()
+            ));
+        }
+        return Ok(InlineRustContext {
+            import_bindings,
+            ..InlineRustContext::default()
+        });
+    };
+    // Inline carriers are source-only: there is no Cargo build invocation
+    // whose feature set can be inferred.  Authenticate against the
+    // conservative all-feature graph so optional reserved-name providers fail
+    // closed rather than inheriting Cargo's unrelated default graph. A C++
+    // carrier is not a Cargo target root, so dependency-kind provenance is
+    // also deliberately conservative (normal + dev + build).
+    let conservative_cargo_flags = ["--all-features".to_string()];
+    let compilation = crate::metadata::CargoCompilationContext::conservative();
+    Ok(InlineRustContext {
+        authenticated_cpp_inherit_roots: if requests_cpp_inherit {
+            crate::authenticated_cpp_inherit_roots_for_compilation(
+                &manifest,
+                None,
+                &conservative_cargo_flags,
+                &compilation,
+            )
+            .map_err(|error| {
+                format!(
+                    "{}: could not authenticate inline compiler markers from {}: {error}",
+                    path.display(), manifest.display()
+                )
+            })?
+        } else {
+            HashSet::new()
+        },
+        authenticated_sysroot_roots: crate::authenticated_sysroot_roots_for_compilation(
+            &manifest,
+            None,
+            &conservative_cargo_flags,
+            &compilation,
+        )
+        .map_err(|error| {
+                format!(
+                    "{}: could not authenticate inline sysroot crates from {}: {error}",
+                    path.display(), manifest.display()
+                )
+            })?,
+        import_bindings,
+    })
+}
+
 pub fn run_inline_rust(options: &InlineRustOptions) -> Result<(), String> {
     if options.files.is_empty() {
         return Err("inline-rust: at least one path is required".to_string());
@@ -57,6 +162,9 @@ pub fn run_inline_rust(options: &InlineRustOptions) -> Result<(), String> {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("{}: failed to read file: {}", path.display(), e))?;
         let blocks = parse_blocks(path, &content)?;
+        // Authenticate before any carrier is prepared or written so the
+        // multi-file operation remains all-or-nothing.
+        let _ = inline_rust_context(path, &blocks)?;
         carriers.push(LoadedCarrier {
             path: path.clone(),
             content,
@@ -1436,11 +1544,13 @@ fn check_carriers(carriers: &[LoadedCarrier]) -> Result<(), String> {
             );
             continue;
         }
-        let _ = rewrite_content_with_plan(
+        let rust_context = inline_rust_context(&carrier.path, &carrier.blocks)?;
+        let _ = rewrite_content_with_plan_and_context(
             &carrier.path,
             &carrier.content,
             &carrier.blocks,
             carrier.cpp_abi.as_ref(),
+            &rust_context,
         )?;
         for block in &carrier.blocks {
             validate_generated_block(&carrier.path, block)?;
@@ -1461,11 +1571,13 @@ fn rewrite_carriers(carriers: &[LoadedCarrier]) -> Result<(), String> {
         if carrier.blocks.is_empty() {
             continue;
         }
-        let rewritten = rewrite_content_with_plan(
+        let rust_context = inline_rust_context(&carrier.path, &carrier.blocks)?;
+        let rewritten = rewrite_content_with_plan_and_context(
             &carrier.path,
             &carrier.content,
             &carrier.blocks,
             carrier.cpp_abi.as_ref(),
+            &rust_context,
         )?;
         if rewritten != carrier.content {
             writes.push((carrier.path.clone(), rewritten.into_bytes()));
@@ -2003,7 +2115,10 @@ fn collect_cpp_type_aliases(content: &str) -> std::collections::HashMap<String, 
     out
 }
 
-fn collect_file_cpp_inherit(blocks: &[ParsedBlock]) -> Vec<(syn::ItemStruct, String)> {
+fn collect_file_cpp_inherit(
+    blocks: &[ParsedBlock],
+    rust_context: &InlineRustContext,
+) -> Vec<(syn::ItemStruct, String)> {
     // (struct def, trait) for every `#[cpp_inherit] impl Trait for Type`
     // in any block — a sibling block constructing such a type must use
     // its fieldwise ctor (the emitted C++ struct has a base class, so
@@ -2021,12 +2136,12 @@ fn collect_file_cpp_inherit(blocks: &[ParsedBlock]) -> Vec<(syn::ItemStruct, Str
                     structs.insert(item_struct.ident.to_string(), item_struct);
                 }
                 syn::Item::Impl(item_impl) => {
-                    let has_attr = item_impl.attrs.iter().any(|a| {
-                        a.path()
-                            .segments
-                            .last()
-                            .is_some_and(|s| s.ident == "cpp_inherit")
-                    });
+                    let has_attr = crate::transpile::has_authenticated_cpp_inherit_attr(
+                        &item_impl.attrs,
+                        &[],
+                        &rust_context.import_bindings,
+                        &rust_context.authenticated_cpp_inherit_roots,
+                    );
                     if has_attr {
                         impls.push(item_impl);
                     }
@@ -2076,9 +2191,16 @@ fn render_generated_region(
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
     file_cpp_inherit: &[(syn::ItemStruct, String)],
+    rust_context: &InlineRustContext,
 ) -> Result<String, String> {
-    let generated_cpp =
-        transpile_payload_to_cpp(block, file_enums, cpp_aliases, file_cpp_inherit, None)?;
+    let generated_cpp = transpile_payload_to_cpp(
+        block,
+        file_enums,
+        cpp_aliases,
+        file_cpp_inherit,
+        rust_context,
+        None,
+    )?;
     Ok(render_generated_region_with_cpp(block, &generated_cpp))
 }
 
@@ -2087,6 +2209,7 @@ fn render_generated_region_prepared(
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
     file_cpp_inherit: &[(syn::ItemStruct, String)],
+    rust_context: &InlineRustContext,
     prepared: &crate::cpp_abi::CppAbiInlineBlockPlan,
 ) -> Result<String, String> {
     let generated_cpp = transpile_payload_to_cpp(
@@ -2094,6 +2217,7 @@ fn render_generated_region_prepared(
         file_enums,
         cpp_aliases,
         file_cpp_inherit,
+        rust_context,
         Some(prepared),
     )?;
     Ok(render_generated_region_with_cpp(block, &generated_cpp))
@@ -2104,12 +2228,17 @@ fn transpile_payload_to_cpp(
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
     file_cpp_inherit: &[(syn::ItemStruct, String)],
+    rust_context: &InlineRustContext,
     prepared: Option<&crate::cpp_abi::CppAbiInlineBlockPlan>,
 ) -> Result<String, String> {
     let options = transpile::TranspileOptions {
         // Sibling blocks in the same file are this block's module scope.
         cross_file_enums: file_enums.to_vec(),
         cross_file_cpp_inherit: file_cpp_inherit.to_vec(),
+        cross_file_rust_item_import_bindings: rust_context.import_bindings.clone(),
+        authenticated_cpp_inherit_roots:
+            rust_context.authenticated_cpp_inherit_roots.clone(),
+        authenticated_sysroot_roots: rust_context.authenticated_sysroot_roots.clone(),
         // Surrounding-TU `using` aliases, so pointer-like detection can see
         // through `WeakClientConnection` to `rusty::sync::Weak<..>`.
         cpp_type_aliases: cpp_aliases.clone(),
@@ -2223,10 +2352,17 @@ fn render_block_rewrite(
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
     file_cpp_inherit: &[(syn::ItemStruct, String)],
+    rust_context: &InlineRustContext,
 ) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(&render_rust_block(block));
-    out.push_str(&render_generated_region(block, file_enums, cpp_aliases, file_cpp_inherit)?);
+    out.push_str(&render_generated_region(
+        block,
+        file_enums,
+        cpp_aliases,
+        file_cpp_inherit,
+        rust_context,
+    )?);
     Ok(out)
 }
 
@@ -2235,6 +2371,7 @@ fn render_block_rewrite_prepared(
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
     file_cpp_inherit: &[(syn::ItemStruct, String)],
+    rust_context: &InlineRustContext,
     prepared: &crate::cpp_abi::CppAbiInlineBlockPlan,
 ) -> Result<String, String> {
     let mut out = String::new();
@@ -2244,6 +2381,7 @@ fn render_block_rewrite_prepared(
         file_enums,
         cpp_aliases,
         file_cpp_inherit,
+        rust_context,
         prepared,
     )?);
     Ok(out)
@@ -2395,6 +2533,22 @@ fn rewrite_content_with_plan(
     blocks: &[ParsedBlock],
     cpp_abi: Option<&crate::cpp_abi::CppAbiInlineCarrierPlan>,
 ) -> Result<String, String> {
+    rewrite_content_with_plan_and_context(
+        path,
+        content,
+        blocks,
+        cpp_abi,
+        &InlineRustContext::default(),
+    )
+}
+
+fn rewrite_content_with_plan_and_context(
+    path: &Path,
+    content: &str,
+    blocks: &[ParsedBlock],
+    cpp_abi: Option<&crate::cpp_abi::CppAbiInlineCarrierPlan>,
+    rust_context: &InlineRustContext,
+) -> Result<String, String> {
     if blocks.is_empty() {
         return Ok(content.to_string());
     }
@@ -2411,7 +2565,7 @@ fn rewrite_content_with_plan(
 
     let file_enums = collect_file_enums(blocks);
     let cpp_aliases = collect_cpp_type_aliases(content);
-    let file_cpp_inherit = collect_file_cpp_inherit(blocks);
+    let file_cpp_inherit = collect_file_cpp_inherit(blocks, rust_context);
 
     let mut out = String::with_capacity(content.len() + blocks.len() * 128);
     let mut cursor = 0usize;
@@ -2425,6 +2579,7 @@ fn rewrite_content_with_plan(
                 &file_enums,
                 &cpp_aliases,
                 &file_cpp_inherit,
+                rust_context,
                 &plan.blocks[index],
             ),
             None => render_block_rewrite(
@@ -2432,6 +2587,7 @@ fn rewrite_content_with_plan(
                 &file_enums,
                 &cpp_aliases,
                 &file_cpp_inherit,
+                rust_context,
             ),
         }
         .map_err(|e| {
@@ -3630,6 +3786,158 @@ fn push_bound(h: &Holder) {
             "`*g` must stay tolerant -- dropping it calls the method on the \
              guard:\n{out}"
         );
+    }
+
+    #[test]
+    fn test_inline_cpp_inherit_uses_cargo_identity_across_blocks_and_rejects_lookalike() {
+        fn write(path: &Path, contents: &str) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let macros = fixture.path().join("rusty_macros");
+        let runtime = fixture.path().join("rusty");
+        let genuine = fixture.path().join("genuine");
+        write(
+            &macros.join("Cargo.toml"),
+            "[package]\nname='rusty_macros'\nversion='0.0.0'\nedition='2024'\n[lib]\nproc-macro=true\n[workspace]\n",
+        );
+        write(
+            &macros.join("src/lib.rs"),
+            r#"use proc_macro::TokenStream;
+#[proc_macro_attribute]
+pub fn cpp_inherit(_: TokenStream, item: TokenStream) -> TokenStream { item }
+"#,
+        );
+        write(
+            &runtime.join("Cargo.toml"),
+            "[package]\nname='rusty'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nrusty_macros={path='../rusty_macros'}\n[workspace]\n",
+        );
+        write(
+            &runtime.join("src/lib.rs"),
+            "pub use rusty_macros::cpp_inherit;\n",
+        );
+        write(
+            &genuine.join("Cargo.toml"),
+            "[package]\nname='genuine_inline'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nrusty={path='../rusty'}\n[workspace]\n",
+        );
+        let rust_source = r#"use rusty::cpp_inherit;
+pub trait Base { fn value(&self) -> i32; }
+pub struct Derived { pub value: i32 }
+#[cpp_inherit]
+impl Base for Derived { fn value(&self) -> i32 { self.value } }
+"#;
+        write(&genuine.join("src/lib.rs"), rust_source);
+        let cargo_check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(genuine.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", fixture.path().join("target-genuine"))
+            .output()
+            .unwrap();
+        assert!(
+            cargo_check.status.success(),
+            "genuine inline fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&cargo_check.stderr)
+        );
+
+        let carrier = genuine.join("carrier.cpp");
+        write(
+            &carrier,
+            r#"#if RUSTYCPP_RUST
+use rusty::cpp_inherit;
+#endif
+#if RUSTYCPP_RUST
+trait Base { fn value(&self) -> i32; }
+struct Derived { value: i32 }
+#[cpp_inherit]
+impl Base for Derived { fn value(&self) -> i32 { self.value } }
+#endif
+"#,
+        );
+        run_inline_rust(&InlineRustOptions {
+            mode: InlineRustMode::Rewrite,
+            files: vec![carrier.clone()],
+        })
+        .unwrap();
+        let rewritten = std::fs::read_to_string(&carrier).unwrap();
+        assert!(
+            rewritten.contains("struct Derived : public Base"),
+            "a genuine marker imported in a sibling block lost direct inheritance:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("class BaseAdapter<Derived>"),
+            "genuine inline marker fell back to an Adapter:\n{rewritten}"
+        );
+        run_inline_rust(&InlineRustOptions {
+            mode: InlineRustMode::Check,
+            files: vec![carrier],
+        })
+        .unwrap();
+
+        let lookalike = fixture.path().join("lookalike");
+        write(
+            &lookalike.join("Cargo.toml"),
+            "[package]\nname='lookalike_inline'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nevil={package='rusty_macros',path='../rusty_macros'}\n[workspace]\n",
+        );
+        let lookalike_rust = r#"mod rusty { pub use evil::cpp_inherit; }
+use rusty::cpp_inherit;
+pub trait Base { fn value(&self) -> i32; }
+pub struct Derived { pub value: i32 }
+#[cpp_inherit]
+impl Base for Derived { fn value(&self) -> i32 { self.value } }
+"#;
+        write(&lookalike.join("src/lib.rs"), lookalike_rust);
+        let cargo_check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(lookalike.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", fixture.path().join("target-lookalike"))
+            .output()
+            .unwrap();
+        assert!(
+            cargo_check.status.success(),
+            "lookalike inline fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&cargo_check.stderr)
+        );
+        let lookalike_carrier = lookalike.join("carrier.cpp");
+        write(
+            &lookalike_carrier,
+            &format!("#if RUSTYCPP_RUST\n{lookalike_rust}#endif\n"),
+        );
+        run_inline_rust(&InlineRustOptions {
+            mode: InlineRustMode::Rewrite,
+            files: vec![lookalike_carrier.clone()],
+        })
+        .unwrap();
+        let rewritten = std::fs::read_to_string(lookalike_carrier).unwrap();
+        assert!(
+            !rewritten.contains("struct Derived : public Base")
+                && rewritten.contains("class BaseAdapter<Derived>"),
+            "a local lookalike acquired compiler-owned inheritance:\n{rewritten}"
+        );
+
+        let unowned = fixture.path().join("unowned.cpp");
+        write(
+            &unowned,
+            r#"#if RUSTYCPP_RUST
+use rusty::cpp_inherit;
+trait Base { fn value(&self) -> i32; }
+struct Derived { value: i32 }
+#[cpp_inherit]
+impl Base for Derived { fn value(&self) -> i32 { self.value } }
+#endif
+"#,
+        );
+        let original = std::fs::read_to_string(&unowned).unwrap();
+        let error = run_inline_rust(&InlineRustOptions {
+            mode: InlineRustMode::Rewrite,
+            files: vec![unowned.clone()],
+        })
+        .expect_err("a compiler marker without Cargo provenance must fail loudly");
+        assert!(error.contains("requires a Cargo manifest"), "{error}");
+        assert_eq!(std::fs::read_to_string(unowned).unwrap(), original);
     }
 
     #[test]

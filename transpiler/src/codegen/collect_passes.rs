@@ -2903,7 +2903,7 @@ impl CodeGen {
                     // uses direct-inheritance emission (see cpp_inherit_trait
                     // doc in mod.rs). Keyed by the simple type name (matches
                     // `emit_struct`'s `s.ident`) and the module-scoped key.
-                    if Self::has_cpp_inherit_attr(&impl_block.attrs) {
+                    if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) {
                         if let Some(trait_short) = &trait_name {
                             let simple_type_name = tp
                                 .path
@@ -3950,6 +3950,8 @@ impl CodeGen {
                                 .any(|authorization| {
                                     authorization.consumer_physical_module
                                         == self.current_physical_module
+                                        && authorization.reference_kind
+                                            == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                                         && authorization.consumer_lexical_module.0 == module_path
                                         && authorization.marked_rust_child == child
                                         && authorization.marked_leaves == marked_leaves
@@ -5675,10 +5677,6 @@ impl CodeGen {
 
                     let trait_scoped_key =
                         self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
-                    let entry = self
-                        .extension_trait_impl_methods
-                        .entry(trait_scoped_key)
-                        .or_default();
                     let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
                     for impl_item in &impl_block.items {
                         if let syn::ImplItem::Type(assoc) = impl_item {
@@ -5686,6 +5684,56 @@ impl CodeGen {
                                 .insert(assoc.ident.to_string(), assoc.ty.clone());
                         }
                     }
+                    let impl_generic_names: Vec<String> = impl_block
+                        .generics
+                        .params
+                        .iter()
+                        .filter_map(|param| match param {
+                            syn::GenericParam::Type(type_param) => {
+                                Some(type_param.ident.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let foreign_adapter_partial_spec_compatible = impl_block
+                        .generics
+                        .params
+                        .iter()
+                        .all(|param| match param {
+                            syn::GenericParam::Lifetime(_) => true,
+                            syn::GenericParam::Type(type_param) => {
+                                type_param.attrs.is_empty()
+                                    // `Default` is the one erased Rust bound
+                                    // needed by SRPC's legacy container
+                                    // deserializers.  Their historical C++
+                                    // templates were likewise structurally
+                                    // available for every element spelling and
+                                    // failed only when a body requiring default
+                                    // construction was instantiated.  Preserve
+                                    // that surface while keeping every other
+                                    // trait/lifetime bound fail-closed.
+                                    && type_param.bounds.iter().all(|bound| {
+                                        matches!(bound, syn::TypeParamBound::Trait(trait_bound)
+                                            if self.is_authenticated_std_default_bound(
+                                                trait_bound,
+                                                module_path,
+                                            ))
+                                    })
+                                    && type_param.default.is_none()
+                            }
+                            syn::GenericParam::Const(_) => false,
+                        })
+                        && (impl_generic_names.is_empty()
+                            || impl_block.generics.where_clause.is_none());
+                    let foreign_adapter_has_non_lifetime_generics = impl_block
+                        .generics
+                        .params
+                        .iter()
+                        .any(|param| !matches!(param, syn::GenericParam::Lifetime(_)));
+                    let entry = self
+                        .extension_trait_impl_methods
+                        .entry(trait_scoped_key)
+                        .or_default();
 
                     for impl_item in &impl_block.items {
                         let syn::ImplItem::Fn(method) = impl_item else {
@@ -5705,21 +5753,14 @@ impl CodeGen {
                         let method_name = merged.sig.ident.to_string();
                         self.extension_method_names.insert(method_name.clone());
                         self.local_extension_method_names.insert(method_name);
-                        let impl_generic_names: Vec<String> = impl_block
-                            .generics
-                            .params
-                            .iter()
-                            .filter_map(|p| match p {
-                                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
-                                _ => None,
-                            })
-                            .collect();
                         entry.push(ExtensionImplMethod {
                             self_ty: (*impl_block.self_ty).clone(),
                             method: merged,
                             callable_param_metadata,
                             associated_type_bindings: associated_type_bindings.clone(),
-                            impl_generic_names,
+                            impl_generic_names: impl_generic_names.clone(),
+                            foreign_adapter_partial_spec_compatible,
+                            foreign_adapter_has_non_lifetime_generics,
                             self_is_template_param: false,
                             extra_template_requires: None,
                         });
@@ -6143,6 +6184,7 @@ impl CodeGen {
         module_path: &[String],
         out: &mut Vec<(
             String,
+            String,
             Vec<String>,
             String,
             Vec<syn::ImplItemFn>,
@@ -6158,7 +6200,14 @@ impl CodeGen {
                     let Some(trait_seg) = trait_path.segments.last() else {
                         continue;
                     };
-                    let trait_name = trait_seg.ident.to_string();
+                    let written_trait_name = trait_seg.ident.to_string();
+                    let trait_key =
+                        self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+                    let trait_name = trait_key
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or(&written_trait_name)
+                        .to_string();
                     // Extract the impl's trait generic args (e.g.,
                     // `["int32_t"]` for `impl Container<i32> for Foo`).
                     let mut trait_args: Vec<String> = match &trait_seg.arguments {
@@ -6267,7 +6316,7 @@ impl CodeGen {
                     // direct `struct Self : public Trait` subclass (handled in
                     // emit_struct), so suppress the TraitAdapter<Self> spec that
                     // would otherwise wrap it.
-                    if Self::has_cpp_inherit_attr(&impl_block.attrs) {
+                    if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) {
                         continue;
                     }
                     // We need the trait's Interface class name to inherit
@@ -6288,10 +6337,7 @@ impl CodeGen {
                     // Adapter for it produces a broken `IteratorAdapter<…>`
                     // (undeclared primary template + unresolved `Self::Item`).
                     // Skip those (restores pre-1a4f2a8 behavior for real crates).
-                    let trait_locally_declared = self
-                        .trait_declared_paths
-                        .iter()
-                        .any(|p| p.ends_with(&trait_name));
+                    let trait_locally_declared = self.trait_declared_paths.contains(&trait_key);
                     let accept_cross_block =
                         self.inline_rust_block && trait_path.segments.len() == 1;
                     if !trait_locally_declared && !accept_cross_block {
@@ -6325,6 +6371,7 @@ impl CodeGen {
                     }
                     out.push((
                         trait_name,
+                        trait_key,
                         trait_args,
                         self_cpp,
                         methods,

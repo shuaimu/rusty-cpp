@@ -1851,6 +1851,8 @@ impl CodeGen {
                         .any(|authorization| {
                             authorization.consumer_physical_module
                                 == self.current_physical_module
+                                && authorization.reference_kind
+                                    == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                                 && authorization.leaf == local_name
                         });
                     if is_flat_type_leaf {

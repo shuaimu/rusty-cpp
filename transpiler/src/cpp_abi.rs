@@ -87,6 +87,19 @@ pub(crate) enum FlatImportTypeProviderKind {
     Enum,
     Trait,
     TypeAlias,
+    Namespace,
+}
+
+/// The exact Rust identity that was proven to name a flat C++ type.
+///
+/// A marked `use` authorizes its one lexical binding.  A qualified provider
+/// path is a separate, narrower proof: only the complete
+/// `crate::<root-child>::<leaf>` spelling is authorized, never a same-tailed
+/// bare name.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum FlatImportTypeReferenceKind {
+    MarkedUse,
+    QualifiedProviderPath,
 }
 
 /// One crate-preflight-proven type binding.  This deliberately retains the
@@ -103,6 +116,7 @@ pub(crate) struct FlatImportTypeAuthorization {
     pub(crate) cpp_namespace: String,
     pub(crate) provider_physical_module: ModulePath,
     pub(crate) provider_kind: FlatImportTypeProviderKind,
+    pub(crate) reference_kind: FlatImportTypeReferenceKind,
 }
 
 /// Out-of-band instructions consumed by code generation after the semantic
@@ -1911,12 +1925,17 @@ fn use_tree_contains_glob(tree: &syn::UseTree) -> bool {
     }
 }
 
-fn use_tree_introduces_assert(tree: &syn::UseTree) -> bool {
+fn audited_compiler_macro_name(name: &str) -> bool {
+    matches!(canonical_name(name).as_str(), "assert" | "format")
+}
+
+fn use_tree_introduces_audited_compiler_macro(tree: &syn::UseTree) -> Option<String> {
     let mut leaves = Vec::new();
     collect_use_leaf_paths(tree, &mut Vec::new(), &mut leaves);
     leaves
         .into_iter()
-        .any(|(_, introduced)| canonical_name(&introduced) == "assert")
+        .map(|(_, introduced)| canonical_name(&introduced))
+        .find(|introduced| audited_compiler_macro_name(introduced))
 }
 
 fn use_tree_aliases_relative_module_root(tree: &syn::UseTree) -> bool {
@@ -1958,13 +1977,15 @@ fn is_macro_use_attribute(attr: &Attribute) -> bool {
         .is_some_and(|segment| ident_key(&segment.ident) == "macro_use")
 }
 
-fn token_stream_declares_assert_macro(tokens: proc_macro2::TokenStream) -> bool {
+fn token_stream_declares_audited_compiler_macro(
+    tokens: proc_macro2::TokenStream,
+) -> Option<String> {
     let trees = tokens.into_iter().collect::<Vec<_>>();
     for (index, tree) in trees.iter().enumerate() {
         if let proc_macro2::TokenTree::Group(group) = tree
-            && token_stream_declares_assert_macro(group.stream())
+            && let Some(name) = token_stream_declares_audited_compiler_macro(group.stream())
         {
-            return true;
+            return Some(name);
         }
         let proc_macro2::TokenTree::Ident(keyword) = tree else {
             continue;
@@ -1972,34 +1993,42 @@ fn token_stream_declares_assert_macro(tokens: proc_macro2::TokenStream) -> bool 
         let keyword = ident_key(keyword);
         if keyword == "macro_rules"
             && matches!(trees.get(index + 1), Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == '!')
-            && matches!(trees.get(index + 2), Some(proc_macro2::TokenTree::Ident(name)) if ident_key(name) == "assert")
+            && let Some(proc_macro2::TokenTree::Ident(name)) = trees.get(index + 2)
+            && audited_compiler_macro_name(&ident_key(name))
         {
-            return true;
+            return Some(ident_key(name));
         }
         if keyword == "macro"
-            && matches!(trees.get(index + 1), Some(proc_macro2::TokenTree::Ident(name)) if ident_key(name) == "assert")
+            && let Some(proc_macro2::TokenTree::Ident(name)) = trees.get(index + 1)
+            && audited_compiler_macro_name(&ident_key(name))
         {
-            return true;
+            return Some(ident_key(name));
         }
     }
-    false
+    None
 }
 
-fn token_stream_mentions_assert_identifier(tokens: proc_macro2::TokenStream) -> bool {
-    tokens.into_iter().any(|tree| match tree {
-        proc_macro2::TokenTree::Ident(ident) => ident_key(&ident) == "assert",
-        proc_macro2::TokenTree::Group(group) => {
-            token_stream_mentions_assert_identifier(group.stream())
+fn token_stream_mentions_audited_compiler_macro(
+    tokens: proc_macro2::TokenStream,
+) -> Option<String> {
+    tokens.into_iter().find_map(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => {
+            let name = ident_key(&ident);
+            audited_compiler_macro_name(&name).then_some(name)
         }
-        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+        proc_macro2::TokenTree::Group(group) => {
+            token_stream_mentions_audited_compiler_macro(group.stream())
+        }
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => None,
     })
 }
 
-fn item_macro_introduces_assert(item: &syn::ItemMacro) -> bool {
+fn item_macro_introduces_audited_compiler_macro(item: &syn::ItemMacro) -> Option<String> {
     item.ident
         .as_ref()
-        .is_some_and(|ident| ident_key(ident) == "assert")
-        || token_stream_declares_assert_macro(item.mac.tokens.clone())
+        .map(ident_key)
+        .filter(|name| audited_compiler_macro_name(name))
+        .or_else(|| token_stream_declares_audited_compiler_macro(item.mac.tokens.clone()))
 }
 
 /// The only macro surface admitted while crate-mode ABI contracts are active.
@@ -2043,6 +2072,85 @@ fn parse_admitted_assert_expression(mac: &syn::Macro) -> Option<Expr> {
     parser.parse2(mac.tokens.clone()).ok()
 }
 
+/// Parse the exact compiler-owned `format!("literal"[, EXPR ...])` surface
+/// used by adapter crates.  Only explicit positional replacement fields are
+/// admitted: implicit captures and named/dynamic width arguments can create
+/// identifier references from inside the otherwise opaque format literal.
+/// Every explicit argument is returned for ordinary scoped reference audit.
+fn parse_admitted_format_expressions(mac: &syn::Macro) -> Option<Vec<Expr>> {
+    fn literal_has_only_explicit_positional_fields(literal: &str) -> bool {
+        let chars = literal.chars().collect::<Vec<_>>();
+        let mut index = 0;
+        while index < chars.len() {
+            match chars[index] {
+                '{' if chars.get(index + 1) == Some(&'{') => index += 2,
+                '}' if chars.get(index + 1) == Some(&'}') => index += 2,
+                '{' => {
+                    let Some(relative_end) = chars[index + 1..]
+                        .iter()
+                        .position(|character| *character == '}')
+                    else {
+                        return false;
+                    };
+                    let end = index + 1 + relative_end;
+                    let field = chars[index + 1..end].iter().collect::<String>();
+                    let mut pieces = field.splitn(2, ':');
+                    let position = pieces.next().unwrap_or_default();
+                    if !position.is_empty()
+                        && !position.chars().all(|character| character.is_ascii_digit())
+                    {
+                        return false;
+                    }
+                    if pieces.next().is_some_and(|format_spec| {
+                        format_spec.chars().any(|character| {
+                            (character.is_ascii_alphabetic()
+                                && !matches!(character, 'b' | 'e' | 'E' | 'o' | 'p' | 'x' | 'X'))
+                                || matches!(character, '_' | '$' | '{' | '}')
+                        })
+                    }) {
+                        return false;
+                    }
+                    index = end + 1;
+                }
+                '}' => return false,
+                _ => index += 1,
+            }
+        }
+        true
+    }
+
+    if mac.path.leading_colon.is_some()
+        || mac.path.segments.len() != 1
+        || mac.path.segments[0].ident != "format"
+        || !matches!(mac.path.segments[0].arguments, syn::PathArguments::None)
+        || !matches!(mac.delimiter, syn::MacroDelimiter::Paren(_))
+    {
+        return None;
+    }
+    let parser = |input: syn::parse::ParseStream<'_>| {
+        let literal: syn::LitStr = input.parse()?;
+        if !literal_has_only_explicit_positional_fields(&literal.value()) {
+            return Err(input.error(
+                "format literal must use only explicit positional replacement fields",
+            ));
+        }
+        let mut expressions = Vec::new();
+        while !input.is_empty() {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
+            let expression: Expr = input.parse()?;
+            if matches!(expression, Expr::Assign(_)) {
+                return Err(input.error("named format arguments are not supported"));
+            }
+            expressions.push(expression);
+        }
+        Ok(expressions)
+    };
+    parser.parse2(mac.tokens.clone()).ok()
+}
+
 #[derive(Default)]
 struct CrateOpaqueSurfaceAudit {
     error: Option<String>,
@@ -2052,21 +2160,23 @@ struct CrateOpaqueSurfaceAudit {
 impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
     fn visit_item(&mut self, item: &'ast Item) {
         if let Item::Verbatim(tokens) = item
-            && token_stream_declares_assert_macro(tokens.clone())
+            && let Some(name) = token_stream_declares_audited_compiler_macro(tokens.clone())
         {
-            self.error = Some(
-                "cpp_abi crate preflight reserves the macro definition name `assert`".to_string(),
-            );
+            self.error = Some(format!(
+                "cpp_abi crate preflight reserves the macro definition name `{name}`"
+            ));
             return;
         }
         syn::visit::visit_item(self, item);
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
-        if self.error.is_none() && item_macro_introduces_assert(item) {
-            self.error = Some(
-                "cpp_abi crate preflight reserves the macro definition name `assert`".to_string(),
-            );
+        if self.error.is_none()
+            && let Some(name) = item_macro_introduces_audited_compiler_macro(item)
+        {
+            self.error = Some(format!(
+                "cpp_abi crate preflight reserves the macro definition name `{name}`"
+            ));
             return;
         }
         syn::visit::visit_item_macro(self, item);
@@ -2110,9 +2220,11 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
                 "cpp_abi crate preflight rejects aliases of `crate`, `self`, or `super` while adapters are present: `{}`",
                 item_use.to_token_stream()
             ));
-        } else if use_tree_introduces_assert(&item_use.tree) {
+        } else if let Some(name) =
+            use_tree_introduces_audited_compiler_macro(&item_use.tree)
+        {
             self.error = Some(format!(
-                "cpp_abi crate preflight reserves the imported macro binding `assert`: `{}`",
+                "cpp_abi crate preflight reserves the imported macro binding `{name}`: `{}`",
                 item_use.to_token_stream()
             ));
         }
@@ -2127,6 +2239,16 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
         {
             self.inside_assert_expression = true;
             self.visit_expr(&expression);
+            self.inside_assert_expression = false;
+            return;
+        }
+        if !self.inside_assert_expression
+            && let Some(expressions) = parse_admitted_format_expressions(mac)
+        {
+            self.inside_assert_expression = true;
+            for expression in &expressions {
+                self.visit_expr(expression);
+            }
             self.inside_assert_expression = false;
             return;
         }
@@ -2679,17 +2801,23 @@ impl<'a> ScopedCrossFileAudit<'a> {
 impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
     fn visit_item(&mut self, item: &'ast Item) {
         if let Item::Verbatim(tokens) = item
-            && token_stream_declares_assert_macro(tokens.clone())
+            && let Some(name) = token_stream_declares_audited_compiler_macro(tokens.clone())
         {
-            self.fail("the macro definition name `assert` is reserved while adapters exist");
+            self.fail(format!(
+                "the macro definition name `{name}` is reserved while adapters exist"
+            ));
             return;
         }
         syn::visit::visit_item(self, item);
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
-        if self.error.is_none() && item_macro_introduces_assert(item) {
-            self.fail("the macro definition name `assert` is reserved while adapters exist");
+        if self.error.is_none()
+            && let Some(name) = item_macro_introduces_audited_compiler_macro(item)
+        {
+            self.fail(format!(
+                "the macro definition name `{name}` is reserved while adapters exist"
+            ));
             return;
         }
         syn::visit::visit_item_macro(self, item);
@@ -2736,6 +2864,16 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
             self.inside_assert_expression = false;
             return;
         }
+        if !self.inside_assert_expression
+            && let Some(expressions) = parse_admitted_format_expressions(mac)
+        {
+            self.inside_assert_expression = true;
+            for expression in &expressions {
+                self.visit_expr(expression);
+            }
+            self.inside_assert_expression = false;
+            return;
+        }
         self.fail(format!(
             "opaque macro `{}` is unsupported while sibling adapters exist",
             mac.path.to_token_stream()
@@ -2775,9 +2913,9 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
             ));
             return;
         }
-        if use_tree_introduces_assert(&item.tree) {
+        if let Some(name) = use_tree_introduces_audited_compiler_macro(&item.tree) {
             self.fail(format!(
-                "the imported macro binding `assert` is reserved while adapters exist: `{}`",
+                "the imported macro binding `{name}` is reserved while adapters exist: `{}`",
                 item.to_token_stream()
             ));
             return;
@@ -3005,7 +3143,29 @@ fn flat_import_builtin_derive_supported(meta: &Meta) -> bool {
         })
 }
 
-fn flat_import_type_attr_supported(attr: &Attribute) -> bool {
+fn flat_import_exact_inert_no_fieldwise_ctor(attr: &Attribute) -> bool {
+    if !is_simple_path(attr.path(), "cfg_attr") {
+        return false;
+    }
+    let Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    let Ok(parts) = parser.parse2(list.tokens.clone()) else {
+        return false;
+    };
+    if parts.len() != 2 {
+        return false;
+    }
+    let Some(Meta::List(predicate)) = parts.first() else {
+        return false;
+    };
+    is_simple_path(&predicate.path, "any")
+        && predicate.tokens.is_empty()
+        && matches!(parts.iter().nth(1), Some(Meta::Path(path)) if is_simple_path(path, "cpp_no_fieldwise_ctor"))
+}
+
+fn flat_import_type_attr_supported(attr: &Attribute, allow_no_fieldwise_ctor: bool) -> bool {
     if is_cpp_abi_doc_or_lint_attr(attr) || attr.path().is_ident("repr") {
         return true;
     }
@@ -3014,6 +3174,9 @@ fn flat_import_type_attr_supported(attr: &Attribute) -> bool {
     }
     if !attr.path().is_ident("cfg_attr") {
         return false;
+    }
+    if allow_no_fieldwise_ctor && flat_import_exact_inert_no_fieldwise_ctor(attr) {
+        return true;
     }
     let Meta::List(list) = &attr.meta else {
         return false;
@@ -3044,10 +3207,79 @@ fn flat_import_trait_members_supported(item: &syn::ItemTrait) -> bool {
             && method.sig.generics.where_clause.is_none()
             && method.sig.constness.is_none()
             && method.sig.asyncness.is_none()
-            && method.sig.unsafety.is_none()
             && method.sig.abi.is_none()
             && method.sig.variadic.is_none()
     })
+}
+
+fn flat_import_trait_safety_contract_supported(item: &syn::ItemTrait) -> bool {
+    if item.supertraits.is_empty() {
+        return item.unsafety.is_none();
+    }
+    let expected = if item.unsafety.is_some() {
+        BTreeSet::from(["Send".to_string(), "Sync".to_string()])
+    } else {
+        BTreeSet::from(["Send".to_string()])
+    };
+    if item.supertraits.len() != expected.len() {
+        return false;
+    }
+    let mut markers = BTreeSet::new();
+    for bound in &item.supertraits {
+        let syn::TypeParamBound::Trait(bound) = bound else {
+            return false;
+        };
+        if !matches!(bound.modifier, syn::TraitBoundModifier::None)
+            || bound.lifetimes.is_some()
+            || bound.path.leading_colon.is_some()
+            || bound.path.segments.len() != 1
+        {
+            return false;
+        }
+        let marker = bound.path.segments[0].ident.to_string();
+        if !matches!(marker.as_str(), "Send" | "Sync") || !markers.insert(marker) {
+            return false;
+        }
+    }
+    markers == expected
+}
+
+fn flat_import_namespace_i32_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(value),
+            ..
+        }) => matches!(value.suffix(), "" | "i32"),
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr,
+            ..
+        }) => flat_import_namespace_i32_literal(expr),
+        _ => false,
+    }
+}
+
+fn flat_import_namespace_module_supported(item: &syn::ItemMod) -> bool {
+    if item.unsafety.is_some() || !item.attrs.iter().all(is_cpp_abi_doc_or_lint_attr) {
+        return false;
+    }
+    let Some((_, members)) = &item.content else {
+        return false;
+    };
+    !members.is_empty()
+        && members.iter().all(|member| {
+            let Item::Const(constant) = member else {
+                return false;
+            };
+            matches!(constant.vis, syn::Visibility::Public(_))
+                && constant.attrs.iter().all(is_cpp_abi_doc_or_lint_attr)
+                && matches!(constant.ty.as_ref(), Type::Path(path)
+                    if path.qself.is_none()
+                        && path.path.leading_colon.is_none()
+                        && path.path.segments.len() == 1
+                        && path.path.is_ident("i32"))
+                && flat_import_namespace_i32_literal(&constant.expr)
+        })
 }
 
 fn validate_flat_import_type_provider(
@@ -3055,6 +3287,7 @@ fn validate_flat_import_type_provider(
     rust_child: &str,
     leaf: &str,
 ) -> Result<(), String> {
+    let allow_no_fieldwise_ctor = matches!(item, Item::Struct(_));
     let (visibility, attrs, ordinary, kind) = match item {
         Item::Struct(item) => (
             &item.vis,
@@ -3073,9 +3306,8 @@ fn validate_flat_import_type_provider(
             &item.attrs,
             item.generics.params.is_empty()
                 && item.generics.where_clause.is_none()
-                && item.unsafety.is_none()
                 && item.auto_token.is_none()
-                && item.supertraits.is_empty()
+                && flat_import_trait_safety_contract_supported(item)
                 && flat_import_trait_members_supported(item),
             "trait",
         ),
@@ -3084,6 +3316,12 @@ fn validate_flat_import_type_provider(
             &item.attrs,
             item.generics.params.is_empty() && item.generics.where_clause.is_none(),
             "type alias",
+        ),
+        Item::Mod(item) => (
+            &item.vis,
+            &item.attrs,
+            flat_import_namespace_module_supported(item),
+            "namespace module",
         ),
         _ => unreachable!("caller selected one supported type-provider item"),
     };
@@ -3094,7 +3332,7 @@ fn validate_flat_import_type_provider(
     }
     let unsupported_attrs = attrs
         .iter()
-        .filter(|attr| !flat_import_type_attr_supported(attr))
+        .filter(|attr| !flat_import_type_attr_supported(attr, allow_no_fieldwise_ctor))
         .map(|attr| attr.path().to_token_stream().to_string())
         .collect::<Vec<_>>();
     if !ordinary || !unsupported_attrs.is_empty() {
@@ -3115,9 +3353,10 @@ fn validate_flat_import_type_provider(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CppAbiCratePreflight {
     pub(crate) has_contracts: bool,
-    /// Exact marked bindings whose providers passed the complete crate-wide
-    /// ownership audit.  Codegen receives only records for its physical
-    /// source unit and must additionally match the exact marked use.
+    /// Exact marked bindings and complete qualified provider paths whose
+    /// providers passed the complete crate-wide ownership audit. Codegen
+    /// receives only records for its physical source unit and must match the
+    /// recorded reference kind as well as the complete provenance tuple.
     pub(crate) flat_import_type_authorizations: BTreeSet<FlatImportTypeAuthorization>,
 }
 
@@ -3304,8 +3543,9 @@ fn preflight_crate_sources_impl(
     // re-exports do not have an independently importable C++ named module.
     // The leaf itself must be either the direct public, ordinary,
     // non-generic free function from the original slice or one direct public,
-    // non-generic nominal type/trait/type alias.  Re-exports and nested items
-    // are intentionally not C++ named-module providers.
+    // non-generic nominal type/trait/type alias, or a narrowly audited direct
+    // inline module containing only public i32 literal constants. Re-exports
+    // and other nested items are intentionally not C++ named-module providers.
     let mut flat_import_type_authorizations = BTreeSet::new();
     for consumer in &units {
         for contract in consumer.contracts.flat_imports.values() {
@@ -3338,7 +3578,7 @@ fn preflight_crate_sources_impl(
                     .collect::<Vec<_>>();
                 if direct.len() != 1 {
                     return Err(format!(
-                        "cpp_import_namespace leaf `crate::{}::{leaf}` must be exactly one direct root-level free function or supported type declaration in {}; found {}",
+                        "cpp_import_namespace leaf `crate::{}::{leaf}` must be exactly one direct root-level free function or supported type declaration (or supported namespace module) in {}; found {}",
                         contract.key.rust_child,
                         provider.path.display(),
                         direct.len()
@@ -3390,7 +3630,8 @@ fn preflight_crate_sources_impl(
                     type_item @ (Item::Struct(_)
                     | Item::Enum(_)
                     | Item::Trait(_)
-                    | Item::Type(_)) => {
+                    | Item::Type(_)
+                    | Item::Mod(_)) => {
                         validate_flat_import_type_provider(
                             type_item,
                             &contract.key.rust_child,
@@ -3401,6 +3642,7 @@ fn preflight_crate_sources_impl(
                             Item::Enum(_) => FlatImportTypeProviderKind::Enum,
                             Item::Trait(_) => FlatImportTypeProviderKind::Trait,
                             Item::Type(_) => FlatImportTypeProviderKind::TypeAlias,
+                            Item::Mod(_) => FlatImportTypeProviderKind::Namespace,
                             _ => unreachable!("type-provider match is exhaustive"),
                         };
                         flat_import_type_authorizations.insert(
@@ -3414,12 +3656,13 @@ fn preflight_crate_sources_impl(
                                 cpp_namespace: contract.cpp_namespace.clone(),
                                 provider_physical_module: provider_module.clone(),
                                 provider_kind,
+                                reference_kind: FlatImportTypeReferenceKind::MarkedUse,
                             },
                         );
                     }
                     _ => {
                         return Err(format!(
-                            "cpp_import_namespace leaf `crate::{}::{leaf}` has an unsupported direct root-level {}; expected a free function, struct, enum, trait, or type alias",
+                            "cpp_import_namespace leaf `crate::{}::{leaf}` has an unsupported direct root-level {}; expected a free function, struct, enum, trait, type alias, or supported namespace module",
                             contract.key.rust_child, direct[0].1
                         ));
                     }
@@ -3475,6 +3718,33 @@ fn preflight_crate_sources_impl(
             (consumer, authorization.leaf.clone())
         })
         .collect::<FlatImportTypeBindings>();
+    let mut qualified_type_provider_templates = BTreeMap::<
+        (Vec<String>, String),
+        (String, FlatImportTypeProviderKind),
+    >::new();
+    for authorization in &flat_import_type_authorizations {
+        let key = (
+            authorization.provider_physical_module.0.clone(),
+            authorization.leaf.clone(),
+        );
+        let value = (
+            authorization.cpp_namespace.clone(),
+            authorization.provider_kind.clone(),
+        );
+        if let Some(previous) = qualified_type_provider_templates.insert(key.clone(), value.clone())
+            && previous != value
+        {
+            return Err(format!(
+                "cpp_import_namespace provider `crate::{}::{}` has divergent C++ type identities",
+                key.0.join("::"),
+                key.1
+            ));
+        }
+    }
+    let qualified_type_providers = qualified_type_provider_templates
+        .keys()
+        .cloned()
+        .collect::<FlatImportQualifiedTypeProviders>();
     let flat_import_rust_namespaces = FlatImportRustNamespaceIndex::build(
         units.iter().map(|unit| (&unit.base, &unit.file)),
     );
@@ -3508,14 +3778,37 @@ fn preflight_crate_sources_impl(
     }
 
     for (index, unit) in units.iter().enumerate() {
-        validate_flat_import_crate_references(
+        let qualified_type_references = validate_flat_import_crate_references(
             &unit.file,
             &unit.base,
             &flat_import_rules,
             &flat_import_type_bindings,
+            &qualified_type_providers,
             &flat_import_rust_namespaces,
         )
         .map_err(|error| format!("{error} in {}", unit.path.display()))?;
+        for (provider, leaf, consumer_lexical_module) in qualified_type_references {
+            let (cpp_namespace, provider_kind) = qualified_type_provider_templates
+                .get(&(provider.clone(), leaf.clone()))
+                .expect("qualified flat type reference has an audited provider template")
+                .clone();
+            let marked_rust_child = provider
+                .first()
+                .expect("flat type provider is one exact root child")
+                .clone();
+            flat_import_type_authorizations.insert(FlatImportTypeAuthorization {
+                consumer_source: unit.path.clone(),
+                consumer_physical_module: unit.base.clone(),
+                consumer_lexical_module,
+                marked_rust_child,
+                marked_leaves: vec![leaf.clone()],
+                leaf,
+                cpp_namespace,
+                provider_physical_module: ModulePath(provider),
+                provider_kind,
+                reference_kind: FlatImportTypeReferenceKind::QualifiedProviderPath,
+            });
+        }
         let external = global_contracts.external_for(index);
         if !external.values.is_empty() || !external.types.is_empty() {
             let mut audit =
@@ -3696,6 +3989,13 @@ type FlatImportCrateRules =
 /// providers are types. Callable flat imports intentionally retain the older,
 /// stricter rule: only their marked module may name them.
 type FlatImportTypeBindings = BTreeSet<(Vec<String>, String)>;
+
+/// Direct root-child type providers whose complete Rust path has already
+/// passed the flat-provider shape audit.  This is deliberately keyed by the
+/// full provider module plus leaf, not by the leaf spelling alone.
+type FlatImportQualifiedTypeProviders = BTreeSet<(Vec<String>, String)>;
+type FlatImportQualifiedTypeReferences =
+    BTreeSet<(Vec<String>, String, ModulePath)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FlatImportPathNamespace {
@@ -4451,7 +4751,9 @@ fn collect_use_source_paths(
 struct FlatImportCrateReferenceAudit<'a> {
     rules: &'a FlatImportCrateRules,
     type_bindings: &'a FlatImportTypeBindings,
+    qualified_type_providers: &'a FlatImportQualifiedTypeProviders,
     rust_namespaces: &'a FlatImportRustNamespaceIndex,
+    physical_module: Vec<String>,
     current_module: Vec<String>,
     namespace_depth: usize,
     block_depth: usize,
@@ -4460,6 +4762,7 @@ struct FlatImportCrateReferenceAudit<'a> {
     lexical_values: Vec<BTreeSet<String>>,
     lexical_types: Vec<BTreeSet<String>>,
     path_namespace: FlatImportPathNamespace,
+    qualified_type_references: FlatImportQualifiedTypeReferences,
     error: Option<String>,
 }
 
@@ -4854,6 +5157,32 @@ impl FlatImportCrateReferenceAudit<'_> {
         })
     }
 
+    fn exact_qualified_type_provider_path(
+        &self,
+        path: &syn::Path,
+        semantic: &[String],
+        leading_colon: bool,
+    ) -> Option<(Vec<String>, String)> {
+        if leading_colon
+            || semantic.len() < 3
+            || semantic.first().map(String::as_str) != Some("crate")
+            || (semantic.len() == 3 && self.path_namespace != FlatImportPathNamespace::Type)
+            || path
+                .segments
+                .iter()
+                .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return None;
+        }
+        let provider = vec![semantic[1].clone()];
+        let leaf = semantic[2].clone();
+        (!Self::provider_scope(&provider, &self.current_module)
+            && self
+                .qualified_type_providers
+                .contains(&(provider.clone(), leaf.clone())))
+        .then_some((provider, leaf))
+    }
+
     fn path_is_forbidden(
         &self,
         canonical: &[String],
@@ -4865,7 +5194,7 @@ impl FlatImportCrateReferenceAudit<'_> {
             }
             let mut provider_item = provider.clone();
             provider_item.push(leaf.clone());
-            if canonical == provider_item {
+            if canonical.starts_with(&provider_item) {
                 return true;
             }
             consumers.iter().any(|consumer| {
@@ -4924,6 +5253,7 @@ impl FlatImportCrateReferenceAudit<'_> {
             Item::Enum(item) => ident_key(&item.ident),
             Item::Trait(item) => ident_key(&item.ident),
             Item::Type(item) => ident_key(&item.ident),
+            Item::Mod(item) => ident_key(&item.ident),
             _ => return false,
         };
         self.rules
@@ -5456,7 +5786,20 @@ impl<'ast> Visit<'ast> for FlatImportCrateReferenceAudit<'_> {
             &semantic,
             path.leading_colon.is_some(),
         );
-        if self.path_is_forbidden(&canonical, unqualified) {
+        if let Some(reference) = self.exact_qualified_type_provider_path(
+            path,
+            &semantic,
+            path.leading_colon.is_some(),
+        ) {
+            let lexical_module = ModulePath(
+                self.current_module
+                    .strip_prefix(self.physical_module.as_slice())
+                    .expect("flat reference audit remains below its physical module")
+                    .to_vec(),
+            );
+            self.qualified_type_references
+                .insert((reference.0, reference.1, lexical_module));
+        } else if self.path_is_forbidden(&canonical, unqualified) {
             self.fail(format!(
                 "a qualified reference to a flat sibling provider leaf: `{}`",
                 path.to_token_stream()
@@ -5647,15 +5990,18 @@ fn validate_flat_import_crate_references(
     base: &ModulePath,
     rules: &FlatImportCrateRules,
     type_bindings: &FlatImportTypeBindings,
+    qualified_type_providers: &FlatImportQualifiedTypeProviders,
     rust_namespaces: &FlatImportRustNamespaceIndex,
-) -> Result<(), String> {
+) -> Result<FlatImportQualifiedTypeReferences, String> {
     if rules.is_empty() {
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
     let mut audit = FlatImportCrateReferenceAudit {
         rules,
         type_bindings,
+        qualified_type_providers,
         rust_namespaces,
+        physical_module: base.0.clone(),
         current_module: base.0.clone(),
         namespace_depth: 0,
         block_depth: 0,
@@ -5664,12 +6010,13 @@ fn validate_flat_import_crate_references(
         lexical_values: Vec::new(),
         lexical_types: Vec::new(),
         path_namespace: FlatImportPathNamespace::Type,
+        qualified_type_references: BTreeSet::new(),
         error: None,
     };
     audit.audit_module_items(&file.items);
     match audit.error {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => Ok(audit.qualified_type_references),
     }
 }
 
@@ -6733,23 +7080,23 @@ struct ReservedImportMacroAudit<'a> {
 impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
     fn visit_item(&mut self, item: &'ast Item) {
         if let Item::Verbatim(tokens) = item
-            && token_stream_declares_assert_macro(tokens.clone())
+            && let Some(name) = token_stream_declares_audited_compiler_macro(tokens.clone())
         {
-            self.error = Some(
-                "the macro definition name `assert` is reserved while cpp_abi contracts are present"
-                    .to_string(),
-            );
+            self.error = Some(format!(
+                "the macro definition name `{name}` is reserved while cpp_abi contracts are present"
+            ));
             return;
         }
         syn::visit::visit_item(self, item);
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
-        if self.error.is_none() && item_macro_introduces_assert(item) {
-            self.error = Some(
-                "the macro definition name `assert` is reserved while cpp_abi contracts are present"
-                    .to_string(),
-            );
+        if self.error.is_none()
+            && let Some(name) = item_macro_introduces_audited_compiler_macro(item)
+        {
+            self.error = Some(format!(
+                "the macro definition name `{name}` is reserved while cpp_abi contracts are present"
+            ));
             return;
         }
         syn::visit::visit_item_macro(self, item);
@@ -6792,9 +7139,9 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
         if self.error.is_some() {
             return;
         }
-        if use_tree_introduces_assert(&item_use.tree) {
+        if let Some(name) = use_tree_introduces_audited_compiler_macro(&item_use.tree) {
             self.error = Some(format!(
-                "the imported macro binding `assert` is reserved while cpp_abi contracts are present; found `{}`",
+                "the imported macro binding `{name}` is reserved while cpp_abi contracts are present; found `{}`",
                 item_use.to_token_stream()
             ));
         } else if use_tree_aliases_relative_module_root(&item_use.tree) {
@@ -6830,18 +7177,28 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
             self.inside_assert_expression = false;
             return;
         }
+        if !self.inside_assert_expression
+            && let Some(expressions) = parse_admitted_format_expressions(mac)
+        {
+            self.inside_assert_expression = true;
+            for expression in &expressions {
+                self.visit_expr(expression);
+            }
+            self.inside_assert_expression = false;
+            return;
+        }
         if self.inside_assert_expression {
             self.error = Some(format!(
-                "nested opaque macro `{}` is unsupported inside the admitted `assert!(EXPR[, \"literal\"])`",
+                "nested opaque macro `{}` is unsupported inside an admitted compiler-owned macro such as `assert!(EXPR[, \"literal\"])` or exact builtin `format!`",
                 mac.path.to_token_stream()
             ));
             return;
         }
-        if token_stream_declares_assert_macro(mac.tokens.clone())
-            || token_stream_mentions_assert_identifier(mac.tokens.clone())
+        if let Some(name) = token_stream_declares_audited_compiler_macro(mac.tokens.clone())
+            .or_else(|| token_stream_mentions_audited_compiler_macro(mac.tokens.clone()))
         {
             self.error = Some(format!(
-                "opaque macro tokens cannot introduce or forward the reserved `assert` binding; found `{}`",
+                "opaque macro tokens cannot introduce or forward the reserved `{name}` binding; found `{}`",
                 mac.path.to_token_stream()
             ));
         } else if token_stream_mentions_names(mac.tokens.clone(), self.names) {
@@ -9255,7 +9612,11 @@ mod tests {
                     pub enum ChannelError { None = 0 }
                     #[repr(C)]
                     pub struct ChannelFrame { pub value: i32 }
-                    pub trait ChannelBase { fn code(&self) -> i32; }
+                    pub trait ChannelBase {
+                        fn code(&self) -> i32;
+                        #[allow(unsafe_code)]
+                        unsafe fn send(&mut self, frame: &ChannelFrame) -> ChannelError;
+                    }
                     pub type ChannelProxy = Box<dyn ChannelBase>;
                     pub fn helper() -> i32 { 0 }
                 "#,
@@ -9323,6 +9684,91 @@ mod tests {
             ))
             .collect()
         );
+
+        let inert_no_fieldwise_ctor = crate_units(&[
+            ("src/lib.rs", "pub mod epoll_wrapper; pub mod consumer;"),
+            (
+                "src/epoll_wrapper.rs",
+                r#"
+                    pub mod PollMode {
+                        pub const READ: i32 = 0x1_i32;
+                        pub const WRITE: i32 = 0x2_i32;
+                        pub const NO_CHANGE: i32 = -1_i32;
+                    }
+                    pub mod PollReady {
+                        pub const READABLE: i32 = 0x1_i32;
+                        pub const WRITABLE: i32 = 0x2_i32;
+                        pub const ERROR: i32 = 0x4_i32;
+                    }
+                    #[cfg_attr(any(), cpp_no_fieldwise_ctor)]
+                    pub struct Epoll { pub fd: i32 }
+                    impl Epoll {
+                        #[cfg_attr(any(), cpp_ctor)]
+                        pub fn new(fd: i32) -> Epoll { Epoll { fd } }
+                    }
+                "#,
+            ),
+            (
+                "src/consumer.rs",
+                r#"
+                    #[cfg_attr(any(), cpp_import_namespace(rrr))]
+                    use crate::epoll_wrapper::{Epoll, PollMode, PollReady};
+                    pub fn inspect(_: Epoll) -> i32 {
+                        PollMode::READ | PollReady::WRITABLE
+                    }
+                "#,
+            ),
+        ]);
+        let inert_plan =
+            preflight_crate_plan_with_cxx_namespace(&inert_no_fieldwise_ctor, Some("rrr"))
+                .expect("exact inert Reactor Epoll marker must remain an importable struct");
+        assert!(inert_plan.flat_import_type_authorizations.iter().any(
+            |authorization| authorization.leaf == "Epoll"
+                && authorization.provider_kind == FlatImportTypeProviderKind::Struct
+        ));
+        for namespace in ["PollMode", "PollReady"] {
+            assert!(inert_plan.flat_import_type_authorizations.iter().any(
+                |authorization| authorization.leaf == namespace
+                    && authorization.provider_kind == FlatImportTypeProviderKind::Namespace
+            ));
+        }
+
+        let unsafe_job = crate_units(&[
+            ("src/lib.rs", "pub mod misc; pub mod consumer;"),
+            (
+                "src/misc.rs",
+                r#"
+                    #[allow(unsafe_code)]
+                    pub unsafe trait Job: Send + Sync {
+                        fn Ready(&mut self) -> bool;
+                        fn Work(&mut self);
+                        fn Done(&mut self) -> bool;
+                    }
+                    pub trait PollableBase: Send {
+                        fn poll(&mut self);
+                    }
+                "#,
+            ),
+            (
+                "src/consumer.rs",
+                r#"
+                    #[cfg_attr(any(), cpp_import_namespace(rrr))]
+                    use crate::misc::{Job, PollableBase};
+                    pub fn inspect(_: &dyn Job, _: &dyn PollableBase) {}
+                "#,
+            ),
+        ]);
+        let unsafe_job_plan =
+            preflight_crate_plan_with_cxx_namespace(&unsafe_job, Some("rrr"))
+                .expect("exact Reactor unsafe Send + Sync job contract");
+        assert!(unsafe_job_plan.flat_import_type_authorizations.iter().any(
+            |authorization| authorization.leaf == "Job"
+                && authorization.provider_kind == FlatImportTypeProviderKind::Trait
+        ));
+        assert!(unsafe_job_plan.flat_import_type_authorizations.iter().any(
+            |authorization| authorization.leaf == "PollableBase"
+                && authorization.provider_kind == FlatImportTypeProviderKind::Trait
+        ));
 
         let adapted_owner = crate_units(&[
             ("src/lib.rs", "pub mod rand; pub mod consumer;"),
@@ -9489,6 +9935,31 @@ mod tests {
                 "unsupported attributes: cfg_attr",
             ),
             (
+                "active no-fieldwise marker provider",
+                "#[cfg_attr(all(), cpp_no_fieldwise_ctor)] pub struct Target;",
+                "unsupported attributes: cfg_attr",
+            ),
+            (
+                "qualified no-fieldwise marker provider",
+                "#[cfg_attr(any(), spoof::cpp_no_fieldwise_ctor)] pub struct Target;",
+                "unsupported attributes: cfg_attr",
+            ),
+            (
+                "argument-bearing no-fieldwise marker provider",
+                "#[cfg_attr(any(), cpp_no_fieldwise_ctor(extra))] pub struct Target;",
+                "unsupported attributes: cfg_attr",
+            ),
+            (
+                "multi-effect no-fieldwise marker provider",
+                "#[cfg_attr(any(), cpp_no_fieldwise_ctor, allow(dead_code))] pub struct Target;",
+                "unsupported attributes: cfg_attr",
+            ),
+            (
+                "inert no-fieldwise marker on enum",
+                "#[cfg_attr(any(), cpp_no_fieldwise_ctor)] pub enum Target { Value }",
+                "unsupported attributes: cfg_attr",
+            ),
+            (
                 "custom attribute provider",
                 "#[arbitrary] pub struct Target;",
                 "unsupported attributes: arbitrary",
@@ -9509,13 +9980,43 @@ mod tests {
                 "non-generic supported trait",
             ),
             (
-                "trait supertrait",
-                "pub trait Target: Send {}",
+                "safe Sync-only trait",
+                "pub trait Target: Sync {}",
+                "non-generic supported trait",
+            ),
+            (
+                "safe qualified Send trait",
+                "pub trait Target: core::marker::Send {}",
+                "non-generic supported trait",
+            ),
+            (
+                "safe extra supertrait",
+                "pub trait Target: Send + Clone {}",
                 "non-generic supported trait",
             ),
             (
                 "unsafe trait",
                 "pub unsafe trait Target {}",
+                "non-generic supported trait",
+            ),
+            (
+                "unsafe Send-only trait",
+                "pub unsafe trait Target: Send {}",
+                "non-generic supported trait",
+            ),
+            (
+                "unsafe qualified marker trait",
+                "pub unsafe trait Target: core::marker::Send + Sync {}",
+                "non-generic supported trait",
+            ),
+            (
+                "unsafe extra supertrait",
+                "pub unsafe trait Target: Send + Sync + Clone {}",
+                "non-generic supported trait",
+            ),
+            (
+                "safe Send Sync trait",
+                "pub trait Target: Send + Sync {}",
                 "non-generic supported trait",
             ),
             (
@@ -9589,6 +10090,192 @@ mod tests {
             preflight_crate_plan_with_cxx_namespace(&external_same_tail, Some("rrr"))
                 .expect_err("external same-tail binding");
         assert!(error.contains("another use binding"), "{error}");
+    }
+
+    #[test]
+    fn flat_import_namespace_module_provider_shape_is_exact() {
+        let positive: Item = syn::parse_quote! {
+            pub mod PollMode {
+                pub const READ: i32 = 0x1_i32;
+                pub const WRITE: i32 = 0x2_i32;
+                pub const NO_CHANGE: i32 = -1_i32;
+            }
+        };
+        validate_flat_import_type_provider(&positive, "epoll_wrapper", "PollMode")
+            .expect("exact constant namespace carrier");
+
+        for (label, item) in [
+            ("empty", syn::parse_quote!(pub mod PollMode {})),
+            (
+                "private constant",
+                syn::parse_quote!(pub mod PollMode { const READ: i32 = 1; }),
+            ),
+            (
+                "non-i32 constant",
+                syn::parse_quote!(pub mod PollMode { pub const READ: u32 = 1; }),
+            ),
+            (
+                "computed constant",
+                syn::parse_quote!(pub mod PollMode { pub const READ: i32 = 1 + 1; }),
+            ),
+            (
+                "function member",
+                syn::parse_quote!(pub mod PollMode { pub fn read() -> i32 { 1 } }),
+            ),
+            (
+                "nested namespace",
+                syn::parse_quote!(pub mod PollMode { pub mod nested { pub const READ: i32 = 1; } }),
+            ),
+            (
+                "dynamic module attribute",
+                syn::parse_quote!(#[cfg(target_os = "linux")] pub mod PollMode { pub const READ: i32 = 1; }),
+            ),
+        ] {
+            let error = validate_flat_import_type_provider(&item, "epoll_wrapper", "PollMode")
+                .expect_err(label);
+            assert!(
+                error.contains("unconditional, non-generic supported namespace module"),
+                "{label}: {error}"
+            );
+        }
+
+        let enum_carrier: Item = syn::parse_quote! {
+            pub enum PollMode { READ, WRITE }
+        };
+        validate_flat_import_type_provider(&enum_carrier, "epoll_wrapper", "PollMode")
+            .expect("ordinary enum remains an independently supported provider kind");
+    }
+
+    #[test]
+    fn flat_type_complete_provider_paths_receive_exact_provenance() {
+        let units = crate_units(&[
+            (
+                "src/lib.rs",
+                "pub mod channel; pub mod marked; pub mod fiber_channel;",
+            ),
+            (
+                "src/channel.rs",
+                r#"
+                    pub trait ChannelConnectionBase { fn close(&mut self); }
+                    pub struct OnFrameCallback;
+                    impl OnFrameCallback {
+                        pub fn from_callable() -> OnFrameCallback { OnFrameCallback }
+                    }
+                "#,
+            ),
+            (
+                "src/marked.rs",
+                r#"
+                    #[cfg_attr(any(), cpp_import_namespace(rrr))]
+                    use crate::channel::{ChannelConnectionBase, OnFrameCallback};
+                    pub fn inspect(_: &dyn ChannelConnectionBase) -> OnFrameCallback {
+                        OnFrameCallback::from_callable()
+                    }
+                "#,
+            ),
+            (
+                "src/fiber_channel.rs",
+                r#"
+                    type LegacyChannelConnectionBase =
+                        dyn crate::channel::ChannelConnectionBase;
+                    pub mod nested {
+                        pub fn callback() {
+                            let _ = crate::channel::OnFrameCallback::from_callable();
+                        }
+                    }
+                "#,
+            ),
+        ]);
+        let plan = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+            .expect("exact qualified flat type provider paths");
+        let qualified = plan
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.reference_kind
+                    == FlatImportTypeReferenceKind::QualifiedProviderPath
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(qualified.len(), 2);
+        assert!(qualified.iter().all(|authorization| {
+            authorization.consumer_source == PathBuf::from("src/fiber_channel.rs")
+                && authorization.consumer_physical_module.0 == ["fiber_channel"]
+                && authorization.provider_physical_module.0 == ["channel"]
+                && authorization.cpp_namespace == "rrr"
+        }));
+        assert!(qualified.iter().any(|authorization| {
+            authorization.leaf == "ChannelConnectionBase"
+                && authorization.consumer_lexical_module.0.is_empty()
+        }));
+        assert!(qualified.iter().any(|authorization| {
+            authorization.leaf == "OnFrameCallback"
+                && authorization.consumer_lexical_module.0 == ["nested"]
+        }));
+        assert_eq!(
+            qualified
+                .iter()
+                .map(|authorization| authorization.leaf.as_str())
+                .collect::<BTreeSet<_>>(),
+            ["ChannelConnectionBase", "OnFrameCallback"]
+                .into_iter()
+                .collect()
+        );
+
+        let qualified_callable = crate_units(&[
+            ("src/lib.rs", "pub mod channel; pub mod marked; pub mod other;"),
+            ("src/channel.rs", "pub fn target() -> i32 { 1 }"),
+            (
+                "src/marked.rs",
+                "#[cfg_attr(any(), cpp_import_namespace(rrr))] use crate::channel::target;",
+            ),
+            (
+                "src/other.rs",
+                "pub fn call() -> i32 { crate::channel::target() }",
+            ),
+        ]);
+        let error = preflight_crate_plan_with_cxx_namespace(&qualified_callable, Some("rrr"))
+            .expect_err("qualified callable must not borrow the type-only proof");
+        assert!(error.contains("qualified reference"), "{error}");
+
+        let aliased_provider = crate_units(&[
+            ("src/lib.rs", "pub mod channel; pub mod marked; pub mod other;"),
+            ("src/channel.rs", "pub trait Target {}"),
+            (
+                "src/marked.rs",
+                "#[cfg_attr(any(), cpp_import_namespace(rrr))] use crate::channel::Target;",
+            ),
+            (
+                "src/other.rs",
+                "use crate::channel as provider; pub type Alias = dyn provider::Target;",
+            ),
+        ]);
+        let error = preflight_crate_plan_with_cxx_namespace(&aliased_provider, Some("rrr"))
+            .expect_err("a provider alias must not become full-path provenance");
+        assert!(error.contains("unmarked import"), "{error}");
+
+        for (label, other_source) in [
+            (
+                "terminal value occurrence",
+                "pub fn make() -> crate::channel::Target { crate::channel::Target }",
+            ),
+            (
+                "generic argument on provider leaf",
+                "pub type Alias = crate::channel::Target::<usize>;",
+            ),
+        ] {
+            let invalid = crate_units(&[
+                ("src/lib.rs", "pub mod channel; pub mod marked; pub mod other;"),
+                ("src/channel.rs", "pub struct Target;"),
+                (
+                    "src/marked.rs",
+                    "#[cfg_attr(any(), cpp_import_namespace(rrr))] use crate::channel::Target;",
+                ),
+                ("src/other.rs", other_source),
+            ]);
+            let error = preflight_crate_plan_with_cxx_namespace(&invalid, Some("rrr"))
+                .expect_err(label);
+            assert!(error.contains("qualified reference"), "{label}: {error}");
+        }
     }
 
     #[test]
@@ -11256,6 +11943,107 @@ mod tests {
         ]);
         let error = preflight_crate_sources(&external).unwrap_err();
         assert!(error.contains("sibling-file reference"), "{error}");
+    }
+
+    #[test]
+    fn crate_preflight_allows_only_exact_shadow_proved_format_forms() {
+        let provider = r#"
+            #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes)))]
+            pub fn adapted(v: Vec<u8>) -> bool { !v.is_empty() }
+        "#;
+        let valid_sibling = r#"
+            pub fn message(file: &str, line: u32, average: f64) -> String {
+                format!("{}:{} avg={:.2} escaped={{}}", file, line, average)
+            }
+        "#;
+        let valid_monolith = format!(
+            "mod api {{ {provider} }} mod sibling {{ {valid_sibling} }}"
+        );
+        assert_rustc_valid(
+            &valid_monolith,
+            "exact positional compiler-owned format with adapter sibling",
+        );
+        let valid = crate_units(&[
+            ("src/lib.rs", "pub mod api; pub mod sibling;"),
+            ("src/api.rs", provider),
+            ("src/sibling.rs", valid_sibling),
+        ]);
+        assert!(preflight_crate_sources(&valid).unwrap());
+
+        for (label, sibling) in [
+            (
+                "local format macro shadow",
+                r#"
+                    macro_rules! format { ($($token:tt)*) => { String::new() } }
+                    pub fn message() -> String { format!("ignored") }
+                "#,
+            ),
+            (
+                "imported format macro binding",
+                r#"
+                    use std::format;
+                    pub fn message() -> String { format!("message") }
+                "#,
+            ),
+            (
+                "qualified format macro",
+                r#"pub fn message() -> String { std::format!("message") }"#,
+            ),
+            (
+                "brace-delimited format macro",
+                r#"pub fn message() -> String { format! { "message" } }"#,
+            ),
+            (
+                "implicit format capture",
+                r#"
+                    pub fn message(value: i32) -> String { format!("{value}") }
+                "#,
+            ),
+            (
+                "named format argument",
+                r#"
+                    pub fn message(value: i32) -> String {
+                        format!("{shown}", shown = value)
+                    }
+                "#,
+            ),
+            (
+                "nested macro in format argument",
+                r#"
+                    pub fn message() -> String { format!("{}", stringify!(value)) }
+                "#,
+            ),
+        ] {
+            let monolith = format!("mod api {{ {provider} }} mod sibling {{ {sibling} }}");
+            assert_rustc_valid(&monolith, label);
+            let units = crate_units(&[
+                ("src/lib.rs", "pub mod api; pub mod sibling;"),
+                ("src/api.rs", provider),
+                ("src/sibling.rs", sibling),
+            ]);
+            let error = preflight_crate_sources(&units).expect_err(label);
+            assert!(
+                error.contains("format") || error.contains("opaque macro"),
+                "{label}: {error}"
+            );
+        }
+
+        let hidden_sibling_call = crate_units(&[
+            ("src/lib.rs", "pub mod api; pub mod sibling;"),
+            ("src/api.rs", provider),
+            (
+                "src/sibling.rs",
+                r#"
+                    pub fn message() -> String {
+                        format!("{}", crate::api::adapted(Vec::new()))
+                    }
+                "#,
+            ),
+        ]);
+        let error = preflight_crate_sources(&hidden_sibling_call)
+            .expect_err("format argument cannot hide an adapted sibling call");
+        assert!(error.contains("sibling-file reference"), "{error}");
+        assert!(error.contains("adapted"), "{error}");
     }
 
     #[test]

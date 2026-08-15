@@ -4,6 +4,20 @@ fn transpiler_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
 }
 
+fn assert_no_crate_output_transaction_artifacts(parent: &std::path::Path) {
+    assert!(
+        std::fs::read_dir(parent).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rusty-cpp-")
+        }),
+        "crate output transaction leaked a staging, backup, or lock beside {}",
+        parent.display()
+    );
+}
+
 #[test]
 fn test_cli_build_info_reports_embedded_revision_before_file_validation() {
     let output = transpiler_bin()
@@ -578,6 +592,787 @@ fn test_crate_mode_basic() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Transpiling crate 'my_math'"));
     assert!(stdout.contains("2 files transpiled"));
+}
+
+#[test]
+fn crate_expand_uses_exact_conventional_lib_target_and_cargo_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+    let manifest = dir.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        "[package]\nname='crate_expand_probe'\nversion='0.0.0'\nedition='2024'\n\
+         [features]\ndefault=[]\nexpanded-api=[]\n\
+         [workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+#[cfg(feature = "expanded-api")]
+macro_rules! emit_expanded_only {
+    () => { pub fn expanded_only() -> i32 { 7 } };
+}
+
+#[cfg(feature = "expanded-api")]
+emit_expanded_only!();
+"#,
+    )
+    .unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--features")
+        .arg("expanded-api")
+        .env("CARGO_TARGET_DIR", dir.path().join("cargo-target"))
+        .output()
+        .unwrap();
+    assert!(
+        cargo_check.status.success(),
+        "macro-only crate-expand fixture is not Cargo-valid:\n{}",
+        String::from_utf8_lossy(&cargo_check.stderr)
+    );
+
+    let output_dir = dir.path().join("cpp-out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(&manifest)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--expand")
+        .arg("--package")
+        .arg("crate_expand_probe")
+        .arg("--features")
+        .arg("expanded-api")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "exact crate expansion failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated =
+        std::fs::read_to_string(output_dir.join("crate_expand_probe.cppm")).unwrap();
+    assert!(
+        generated.contains("expanded_only("),
+        "macro-generated API was omitted:\n{generated}"
+    );
+    assert!(
+        !generated.contains("TODO") && !generated.contains("emit_expanded_only!("),
+        "explicit expansion silently used raw source:\n{generated}"
+    );
+    assert!(output_dir.join("CMakeLists.txt").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("falling back"), "stderr: {stderr}");
+}
+
+#[test]
+fn crate_expand_preserves_target_normal_dependency_features_and_clang_imports() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let dependency = fixture.path().join("selected_dep");
+    let poison = fixture.path().join("build_poison");
+    for package in [&root, &dependency, &poison] {
+        std::fs::create_dir_all(package.join("src")).unwrap();
+    }
+
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='feature_root'\nversion='0.0.0'\nedition='2024'\nbuild='build.rs'\n\
+         [dependencies]\nselected_dep={path='../selected_dep',default-features=false,features=['expanded-api']}\n\
+         [build-dependencies]\nselected_dep={path='../selected_dep',default-features=false,features=['build-only']}\n\
+         [workspace]\nresolver='2'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn root_value() -> i32 { selected_dep::expanded_only() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.rs"),
+        "fn main() { assert_eq!(selected_dep::build_only(), 11); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname='selected_dep'\nversion='0.0.0'\nedition='2024'\n\
+         [features]\ndefault=[]\nexpanded-api=[]\nbuild-only=['dep:build_poison']\n\
+         [dependencies]\nbuild_poison={path='../build_poison',optional=true}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("src/lib.rs"),
+        r#"
+#[cfg(feature = "expanded-api")]
+macro_rules! emit_expanded_only {
+    () => { pub fn expanded_only() -> i32 { 7 } };
+}
+#[cfg(feature = "expanded-api")]
+emit_expanded_only!();
+
+#[cfg(feature = "build-only")]
+pub fn build_only() -> i32 { build_poison::poison() }
+
+#[cfg(not(any(feature = "expanded-api", feature = "build-only")))]
+pub fn baseline_only() -> i32 { 3 }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        poison.join("Cargo.toml"),
+        "[package]\nname='build_poison'\nversion='0.0.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    std::fs::write(poison.join("src/lib.rs"), "pub fn poison() -> i32 { 11 }\n").unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+        .output()
+        .unwrap();
+    assert!(
+        cargo_check.status.success(),
+        "feature-context fixture is not Cargo-valid:\n{}",
+        String::from_utf8_lossy(&cargo_check.stderr)
+    );
+
+    let output_dir = fixture.path().join("cpp-out");
+    assert!(!output_dir.exists());
+    let generated = transpiler_bin()
+        .arg("--crate")
+        .arg(root.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--expand")
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "feature-exact expansion failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&generated.stdout),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert_no_crate_output_transaction_artifacts(fixture.path());
+
+    let dependency_cpp =
+        std::fs::read_to_string(output_dir.join("selected_dep/selected_dep.cppm")).unwrap();
+    let root_cpp = std::fs::read_to_string(output_dir.join("feature_root.cppm")).unwrap();
+    assert!(dependency_cpp.contains("namespace selected_dep"), "{dependency_cpp}");
+    assert!(dependency_cpp.contains("expanded_only("), "{dependency_cpp}");
+    assert!(!dependency_cpp.contains("build_only("), "{dependency_cpp}");
+    assert!(!dependency_cpp.contains("baseline_only("), "{dependency_cpp}");
+    assert!(root_cpp.contains("export import selected_dep;"), "{root_cpp}");
+    assert!(
+        root_cpp.contains("selected_dep::expanded_only()"),
+        "{root_cpp}"
+    );
+    assert!(!output_dir.join("build_poison").exists());
+
+    let existing_output = fixture.path().join("existing-out");
+    std::fs::create_dir_all(existing_output.join("selected_dep")).unwrap();
+    std::fs::write(existing_output.join("sentinel.txt"), b"old tree\n").unwrap();
+    std::fs::write(
+        existing_output.join("selected_dep/stale.cppm"),
+        b"stale dependency\n",
+    )
+    .unwrap();
+    let replacement = transpiler_bin()
+        .arg("--crate")
+        .arg(root.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&existing_output)
+        .arg("--expand")
+        .output()
+        .unwrap();
+    assert!(
+        replacement.status.success(),
+        "existing feature-exact expansion failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&replacement.stdout),
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing_output.join("selected_dep/selected_dep.cppm")).unwrap(),
+        dependency_cpp
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing_output.join("feature_root.cppm")).unwrap(),
+        root_cpp
+    );
+    assert!(!existing_output.join("sentinel.txt").exists());
+    assert!(!existing_output.join("selected_dep/stale.cppm").exists());
+    assert_no_crate_output_transaction_artifacts(fixture.path());
+
+    let clang = std::env::var_os("RUSTY_CPP_TEST_CLANG").unwrap_or_else(|| "clang++".into());
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("include");
+    let clang_dir = fixture.path().join("clang");
+    std::fs::create_dir(&clang_dir).unwrap();
+    let dependency_pcm = clang_dir.join("selected_dep.pcm");
+    let dependency_object = clang_dir.join("selected_dep.o");
+    let root_pcm = clang_dir.join("feature_root.pcm");
+    let root_object = clang_dir.join("feature_root.o");
+    let importer_source = clang_dir.join("importer.cpp");
+    let importer_object = clang_dir.join("importer.o");
+    let importer = clang_dir.join("importer");
+    std::fs::write(
+        &importer_source,
+        "import feature_root;\nint main() { return root_value() == 7 ? 0 : 1; }\n",
+    )
+    .unwrap();
+    let common = ["-std=c++23", "-march=native", "-w", "-I"];
+    let run_clang = |label: &str, arguments: &[std::ffi::OsString]| {
+        let mut command = Command::new(&clang);
+        command.args(common).arg(&include_dir).args(arguments);
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("failed to execute Clang for {label}: {error}"));
+        assert!(
+            output.status.success(),
+            "Clang {label} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_clang(
+        "dependency precompile",
+        &[
+            "-x".into(),
+            "c++-module".into(),
+            "--precompile".into(),
+            output_dir
+                .join("selected_dep/selected_dep.cppm")
+                .into_os_string(),
+            "-o".into(),
+            dependency_pcm.clone().into_os_string(),
+        ],
+    );
+    run_clang(
+        "dependency object",
+        &[
+            "-c".into(),
+            dependency_pcm.clone().into_os_string(),
+            "-o".into(),
+            dependency_object.clone().into_os_string(),
+        ],
+    );
+    let dependency_module_arg = format!(
+        "-fmodule-file=selected_dep={}",
+        dependency_pcm.display()
+    );
+    run_clang(
+        "root precompile",
+        &[
+            dependency_module_arg.clone().into(),
+            "-x".into(),
+            "c++-module".into(),
+            "--precompile".into(),
+            output_dir.join("feature_root.cppm").into_os_string(),
+            "-o".into(),
+            root_pcm.clone().into_os_string(),
+        ],
+    );
+    run_clang(
+        "root object",
+        &[
+            dependency_module_arg.clone().into(),
+            "-c".into(),
+            root_pcm.clone().into_os_string(),
+            "-o".into(),
+            root_object.clone().into_os_string(),
+        ],
+    );
+    let root_module_arg = format!("-fmodule-file=feature_root={}", root_pcm.display());
+    run_clang(
+        "importer object",
+        &[
+            dependency_module_arg.into(),
+            root_module_arg.into(),
+            "-c".into(),
+            importer_source.into_os_string(),
+            "-o".into(),
+            importer_object.clone().into_os_string(),
+        ],
+    );
+    run_clang(
+        "link",
+        &[
+            dependency_object.into_os_string(),
+            root_object.into_os_string(),
+            importer_object.into_os_string(),
+            "-o".into(),
+            importer.clone().into_os_string(),
+        ],
+    );
+    assert!(
+        Command::new(importer).status().unwrap().success(),
+        "generated module runtime failed"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn crate_expand_rejects_ambiguity_and_failures_without_touching_output() {
+    let failure = tempfile::tempdir().unwrap();
+    std::fs::create_dir(failure.path().join("src")).unwrap();
+    let failure_manifest = failure.path().join("Cargo.toml");
+    std::fs::write(
+        &failure_manifest,
+        "[package]\nname='crate_expand_failure'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        failure.path().join("src/lib.rs"),
+        "pub fn ordinary() -> i32 { 7 }\n",
+    )
+    .unwrap();
+    let cargo_shim_dir = failure.path().join("cargo-shim");
+    std::fs::create_dir(&cargo_shim_dir).unwrap();
+    let real_cargo = Command::new("which").arg("cargo").output().unwrap();
+    assert!(real_cargo.status.success());
+    let real_cargo = String::from_utf8(real_cargo.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let cargo_shim = cargo_shim_dir.join("cargo");
+    std::fs::write(
+        &cargo_shim,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"expand\" ]; then\n  echo forced crate expansion failure >&2\n  exit 86\nfi\nexec '{real_cargo}' \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&cargo_shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo_shim, permissions).unwrap();
+    }
+    let shim_path = format!(
+        "{}:{}",
+        cargo_shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let absent_output = failure.path().join("absent-out");
+    let absent_failure = transpiler_bin()
+        .arg("--crate")
+        .arg(&failure_manifest)
+        .arg("--output-dir")
+        .arg(&absent_output)
+        .arg("--expand")
+        .env("PATH", &shim_path)
+        .output()
+        .unwrap();
+    assert!(!absent_failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&absent_failure.stderr).contains("cargo expand failed"),
+        "unexpected expansion diagnostic:\n{}",
+        String::from_utf8_lossy(&absent_failure.stderr)
+    );
+    assert!(
+        !absent_output.exists(),
+        "failed expansion created {}",
+        absent_output.display()
+    );
+
+    let existing_output = failure.path().join("existing-out");
+    std::fs::create_dir(&existing_output).unwrap();
+    let sentinel_path = existing_output.join("sentinel.txt");
+    let generated_path = existing_output.join("crate_expand_failure.cppm");
+    std::fs::write(&sentinel_path, b"preserve-sentinel\n").unwrap();
+    std::fs::write(&generated_path, b"preserve-generated\n").unwrap();
+    let existing_failure = transpiler_bin()
+        .arg("--crate")
+        .arg(&failure_manifest)
+        .arg("--output-dir")
+        .arg(&existing_output)
+        .arg("--expand")
+        .env("PATH", &shim_path)
+        .output()
+        .unwrap();
+    assert!(!existing_failure.status.success());
+    assert_eq!(
+        std::fs::read(&sentinel_path).unwrap(),
+        b"preserve-sentinel\n"
+    );
+    assert_eq!(
+        std::fs::read(&generated_path).unwrap(),
+        b"preserve-generated\n"
+    );
+    assert!(!existing_output.join("CMakeLists.txt").exists());
+    assert!(
+        std::fs::read_dir(failure.path())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rusty-cpp-")),
+        "failed expansion leaked a staging directory"
+    );
+
+    let ambiguous = tempfile::tempdir().unwrap();
+    std::fs::create_dir(ambiguous.path().join("src")).unwrap();
+    let ambiguous_manifest = ambiguous.path().join("Cargo.toml");
+    std::fs::write(
+        &ambiguous_manifest,
+        "[package]\nname='crate_expand_ambiguous'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(ambiguous.path().join("src/lib.rs"), "pub fn library() {}\n").unwrap();
+    std::fs::write(ambiguous.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--all-targets")
+        .arg("--manifest-path")
+        .arg(&ambiguous_manifest)
+        .env("CARGO_TARGET_DIR", ambiguous.path().join("cargo-target"))
+        .output()
+        .unwrap();
+    assert!(
+        cargo_check.status.success(),
+        "multi-target fixture is not Cargo-valid:\n{}",
+        String::from_utf8_lossy(&cargo_check.stderr)
+    );
+    let ambiguous_output = ambiguous.path().join("cpp-out");
+    let ambiguous_failure = transpiler_bin()
+        .arg("--crate")
+        .arg(&ambiguous_manifest)
+        .arg("--output-dir")
+        .arg(&ambiguous_output)
+        .arg("--expand")
+        .output()
+        .unwrap();
+    assert!(!ambiguous_failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&ambiguous_failure.stderr)
+            .contains("exactly one unambiguous conventional library target"),
+        "ambiguous crate selected a target silently:\n{}",
+        String::from_utf8_lossy(&ambiguous_failure.stderr)
+    );
+    assert!(
+        !ambiguous_output.exists(),
+        "ambiguous target selection created {}",
+        ambiguous_output.display()
+    );
+}
+
+#[test]
+fn crate_expand_publishes_an_exact_complete_local_dependency_tree() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let dependency = root.join("local_dep");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(dependency.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='publish_root'\nversion='0.0.0'\nedition='2021'\n\
+         [dependencies]\nlocal_dep={path='local_dep'}\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn root_value() -> i32 { local_dep::dep_value() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname='local_dep'\nversion='0.0.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("src/lib.rs"),
+        "pub fn dep_value() -> i32 { 7 }\n",
+    )
+    .unwrap();
+
+    let output_dir = fixture.path().join("cpp-out");
+    // These deliberately collide in both directions with the newly generated
+    // tree. They also reproduce the V8 review's late recursive-publish shape.
+    std::fs::create_dir_all(output_dir.join("CMakeLists.txt")).unwrap();
+    std::fs::write(output_dir.join("CMakeLists.txt/old-child"), b"old\n").unwrap();
+    std::fs::write(output_dir.join("local_dep"), b"old dependency file\n").unwrap();
+    std::fs::write(output_dir.join("stale.cppm"), b"stale generated bytes\n").unwrap();
+    std::fs::write(output_dir.join("sentinel.txt"), b"old unrelated bytes\n").unwrap();
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(root.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--expand")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "exact-tree expanded publication failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(output_dir.join("publish_root.cppm").is_file());
+    assert!(output_dir.join("CMakeLists.txt").is_file());
+    assert!(output_dir.join("local_dep/local_dep.cppm").is_file());
+    assert!(output_dir.join("local_dep/CMakeLists.txt").is_file());
+    assert!(!output_dir.join("stale.cppm").exists());
+    assert!(!output_dir.join("sentinel.txt").exists());
+    assert_no_crate_output_transaction_artifacts(fixture.path());
+}
+
+#[test]
+#[cfg(unix)]
+fn crate_expand_nested_late_failures_leave_absent_and_existing_outputs_untouched() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let dependency = root.join("local_dep");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(dependency.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='late_failure_root'\nversion='0.0.0'\nedition='2021'\n\
+         [dependencies]\nlocal_dep={path='local_dep'}\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn root_value() -> i32 { 9 }\n").unwrap();
+    std::fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname='local_dep'\nversion='0.0.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("src/lib.rs"),
+        "pub fn dep_value() -> i32 { 7 }\n",
+    )
+    .unwrap();
+
+    let real_cargo = Command::new("which").arg("cargo").output().unwrap();
+    assert!(real_cargo.status.success());
+    let real_cargo = String::from_utf8(real_cargo.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let cargo_shim_dir = fixture.path().join("cargo-shim");
+    std::fs::create_dir(&cargo_shim_dir).unwrap();
+    let cargo_shim = cargo_shim_dir.join("cargo");
+    std::fs::write(
+        &cargo_shim,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"expand\" ] && [ \"$PWD\" = '{}' ]; then\n  echo forced late root expansion failure >&2\n  exit 86\nfi\nexec '{}' \"$@\"\n",
+            root.display(), real_cargo
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&cargo_shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo_shim, permissions).unwrap();
+    }
+    let shim_path = format!(
+        "{}:{}",
+        cargo_shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let run = |output_dir: &std::path::Path| {
+        transpiler_bin()
+            .arg("--crate")
+            .arg(root.join("Cargo.toml"))
+            .arg("--output-dir")
+            .arg(output_dir)
+            .arg("--expand")
+            .env("PATH", &shim_path)
+            .output()
+            .unwrap()
+    };
+
+    let absent_output = fixture.path().join("absent-out");
+    let absent_failure = run(&absent_output);
+    assert!(!absent_failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&absent_failure.stderr)
+            .contains("forced late root expansion failure")
+    );
+    assert!(!absent_output.exists());
+    assert_no_crate_output_transaction_artifacts(fixture.path());
+
+    let existing_output = fixture.path().join("existing-out");
+    std::fs::create_dir_all(existing_output.join("local_dep")).unwrap();
+    std::fs::write(existing_output.join("root.cppm"), b"old root\n").unwrap();
+    std::fs::write(
+        existing_output.join("local_dep/local_dep.cppm"),
+        b"old dependency\n",
+    )
+    .unwrap();
+    std::fs::write(existing_output.join("sentinel.txt"), b"preserve exactly\n").unwrap();
+    let existing_failure = run(&existing_output);
+    assert!(!existing_failure.status.success());
+    assert_eq!(
+        std::fs::read(existing_output.join("root.cppm")).unwrap(),
+        b"old root\n"
+    );
+    assert_eq!(
+        std::fs::read(existing_output.join("local_dep/local_dep.cppm")).unwrap(),
+        b"old dependency\n"
+    );
+    assert_eq!(
+        std::fs::read(existing_output.join("sentinel.txt")).unwrap(),
+        b"preserve exactly\n"
+    );
+    assert!(!existing_output.join("CMakeLists.txt").exists());
+    assert_no_crate_output_transaction_artifacts(fixture.path());
+}
+
+#[test]
+#[cfg(unix)]
+fn crate_expand_post_expansion_transpile_failure_preserves_existing_output() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='transpile_failure_root'\nversion='0.0.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn rustc_valid() {}\n").unwrap();
+
+    let real_cargo = Command::new("which").arg("cargo").output().unwrap();
+    assert!(real_cargo.status.success());
+    let real_cargo = String::from_utf8(real_cargo.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let cargo_shim_dir = fixture.path().join("cargo-shim");
+    std::fs::create_dir(&cargo_shim_dir).unwrap();
+    let cargo_shim = cargo_shim_dir.join("cargo");
+    std::fs::write(
+        &cargo_shim,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"expand\" ] && [ \"$PWD\" = '{}' ]; then\n  printf '%s\\n' 'extern \"Rust\" {{ fn bridge(); }}'\n  exit 0\nfi\nexec '{}' \"$@\"\n",
+            root.display(), real_cargo
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&cargo_shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo_shim, permissions).unwrap();
+    }
+    let shim_path = format!(
+        "{}:{}",
+        cargo_shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output_dir = fixture.path().join("existing-out");
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::write(output_dir.join("root.cppm"), b"old root\n").unwrap();
+    std::fs::write(output_dir.join("sentinel.txt"), b"preserve exactly\n").unwrap();
+    let failure = transpiler_bin()
+        .arg("--crate")
+        .arg(root.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--expand")
+        .env("PATH", shim_path)
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&failure.stderr)
+            .contains("Transpilation of expanded source failed"),
+        "unexpected post-expansion failure:\n{}",
+        String::from_utf8_lossy(&failure.stderr)
+    );
+    assert_eq!(std::fs::read(output_dir.join("root.cppm")).unwrap(), b"old root\n");
+    assert_eq!(
+        std::fs::read(output_dir.join("sentinel.txt")).unwrap(),
+        b"preserve exactly\n"
+    );
+    assert!(!output_dir.join("CMakeLists.txt").exists());
+    assert_no_crate_output_transaction_artifacts(fixture.path());
+}
+
+#[test]
+fn crate_expand_rejects_dot_output_before_touching_the_source_tree() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("dot-output-root");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let manifest_bytes = b"[package]\nname='dot_output_root'\nversion='0.0.0'\nedition='2021'\n[workspace]\n";
+    let source_bytes = b"pub fn value() -> i32 { 7 }\n";
+    std::fs::write(root.join("Cargo.toml"), manifest_bytes).unwrap();
+    std::fs::write(root.join("src/lib.rs"), source_bytes).unwrap();
+
+    let before = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let failure = transpiler_bin()
+        .current_dir(&root)
+        .arg("--crate")
+        .arg("./Cargo.toml")
+        .arg("--output-dir")
+        .arg(".")
+        .arg("--expand")
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&failure.stderr).contains("generator-owned child"),
+        "unexpected unsafe-output diagnostic:\n{}",
+        String::from_utf8_lossy(&failure.stderr)
+    );
+    let after = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(after, before, "dot-output failure touched the source tree");
+    assert_eq!(std::fs::read(root.join("Cargo.toml")).unwrap(), manifest_bytes);
+    assert_eq!(std::fs::read(root.join("src/lib.rs")).unwrap(), source_bytes);
+    assert_no_crate_output_transaction_artifacts(&root);
+}
+
+#[test]
+fn crate_expand_accepts_a_bare_manifest_path_with_a_dedicated_output_child() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("bare-manifest-root");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='bare_manifest_root'\nversion='0.0.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn value() -> i32 { 11 }\n").unwrap();
+
+    let output = transpiler_bin()
+        .current_dir(&root)
+        .arg("--crate")
+        .arg("Cargo.toml")
+        .arg("--output-dir")
+        .arg("cpp-out")
+        .arg("--expand")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bare manifest expansion failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join("cpp-out/bare_manifest_root.cppm").is_file());
+    assert!(root.join("cpp-out/CMakeLists.txt").is_file());
+    assert_no_crate_output_transaction_artifacts(&root);
 }
 
 #[test]
@@ -2171,5 +2966,727 @@ pub fn caller(x: i64) -> usize { callee(x) }
     assert!(
         cpp.contains("callee("),
         "caller lost its call entirely:\n{cpp}"
+    );
+}
+
+#[test]
+fn cargo_feature_context_authentication_is_identical_in_direct_and_parity_lanes() {
+    fn write_fixture(root: &std::path::Path, package_rename: bool) -> std::path::PathBuf {
+        let provider = root.join("provider");
+        let consumer = root.join("consumer");
+        std::fs::create_dir_all(provider.join("src")).unwrap();
+        std::fs::create_dir_all(consumer.join("src")).unwrap();
+        let (provider_name, lib_section, dependency) = if package_rename {
+            (
+                "renamed_provider",
+                "",
+                "std={package='renamed_provider',path='../provider',optional=true}",
+            )
+        } else {
+            (
+                "innocent_package",
+                "[lib]\nname='std'\n",
+                "innocent_package={path='../provider',optional=true}",
+            )
+        };
+        std::fs::write(
+            provider.join("Cargo.toml"),
+            format!(
+                "[package]\nname='{provider_name}'\nversion='0.0.0'\nedition='2024'\n{lib_section}[workspace]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            provider.join("src/lib.rs"),
+            "#![no_std]\npub mod default { pub trait Default {} }\n",
+        )
+        .unwrap();
+        let feature_dep = if package_rename {
+            "dep:std"
+        } else {
+            "dep:innocent_package"
+        };
+        std::fs::write(
+            consumer.join("Cargo.toml"),
+            format!(
+                "[package]\nname='cargo_context_consumer'\nversion='0.0.0'\nedition='2024'\n[features]\ndefault=[]\nfake-std=['{feature_dep}']\nunrelated=[]\n[dependencies]\n{dependency}\n[workspace]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("src/lib.rs"),
+            r#"#![no_std]
+extern crate std;
+pub trait Decode { fn decode(&mut self); }
+impl<T: std::default::Default> Decode for core::option::Option<T> {
+    fn decode(&mut self) {}
+}
+"#,
+        )
+        .unwrap();
+        consumer
+    }
+
+    fn cargo_check(manifest: &std::path::Path, target: &std::path::Path, flags: &[&str]) {
+        let output = Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(manifest)
+            .args(flags)
+            .env("CARGO_TARGET_DIR", target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Cargo-invalid regression fixture for {flags:?}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_hand_slot(cpp: &str, label: &str) {
+        assert!(
+            cpp.contains("constrained/const generic partial specializations are unsupported"),
+            "{label}: missing hand slot:\n{cpp}"
+        );
+        for forbidden in [
+            "class DecodeAdapter<rusty::Option<T>>",
+            "class DecodeAdapterRef<rusty::Option<T>>",
+            "class DecodeAdapterRefMut<rusty::Option<T>>",
+        ] {
+            assert!(!cpp.contains(forbidden), "{label}: emitted {forbidden}:\n{cpp}");
+        }
+    }
+
+    fn assert_adapter(cpp: &str, label: &str) {
+        for expected in [
+            "class DecodeAdapter<rusty::Option<T>>",
+            "class DecodeAdapterRef<rusty::Option<T>>",
+            "class DecodeAdapterRefMut<rusty::Option<T>>",
+        ] {
+            assert!(cpp.contains(expected), "{label}: missing {expected}:\n{cpp}");
+        }
+    }
+
+    fn direct(
+        consumer: &std::path::Path,
+        output_name: &str,
+        flags: &[&str],
+    ) -> String {
+        let output_path = consumer.join(output_name);
+        let output = transpiler_bin()
+            .arg(consumer.join("src/lib.rs"))
+            .args(flags)
+            .arg("--module-name")
+            .arg("cargo_context_consumer")
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "direct lane failed for {flags:?}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(output_path).unwrap()
+    }
+
+    fn direct_expanded(
+        consumer: &std::path::Path,
+        output_name: &str,
+        flags: &[&str],
+    ) -> String {
+        let output_path = consumer.join(output_name);
+        let output = transpiler_bin()
+            .arg(consumer.join("src/lib.rs"))
+            .arg("--expand")
+            .args(flags)
+            .arg("--module-name")
+            .arg("cargo_context_consumer")
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "expanded direct lane failed for {flags:?}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(output_path).unwrap()
+    }
+
+    fn parity(
+        consumer: &std::path::Path,
+        work_name: &str,
+        flags: &[&str],
+    ) -> String {
+        let work_dir = consumer.join(work_name);
+        let output = transpiler_bin()
+            .arg("parity-test")
+            .arg("--manifest-path")
+            .arg(consumer.join("Cargo.toml"))
+            .arg("--work-dir")
+            .arg(&work_dir)
+            .arg("--keep-work-dir")
+            .args(flags)
+            .arg("--stop-after")
+            .arg("transpile")
+            .arg("--allow-empty-tests")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "parity lane failed for {flags:?}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(
+            work_dir
+                .join("targets/cargo_context_consumer/cargo_context_consumer.cppm"),
+        )
+        .unwrap()
+    }
+
+    let fixture = tempfile::tempdir().unwrap();
+    let lib_name_consumer = write_fixture(&fixture.path().join("lib_name"), false);
+    let lib_manifest = lib_name_consumer.join("Cargo.toml");
+    cargo_check(
+        &lib_manifest,
+        &fixture.path().join("cargo-target"),
+        &["--features", "fake-std"],
+    );
+    cargo_check(
+        &lib_manifest,
+        &fixture.path().join("cargo-target"),
+        &["--all-features"],
+    );
+    cargo_check(
+        &lib_manifest,
+        &fixture.path().join("cargo-target"),
+        &["--no-default-features"],
+    );
+
+    assert_hand_slot(
+        &direct(&lib_name_consumer, "direct-conservative.cppm", &[]),
+        "direct conservative source context",
+    );
+    assert_hand_slot(
+        &direct(
+            &lib_name_consumer,
+            "direct-feature.cppm",
+            &["--features", "fake-std"],
+        ),
+        "direct explicit feature",
+    );
+    assert_hand_slot(
+        &direct(
+            &lib_name_consumer,
+            "direct-all.cppm",
+            &["--all-features"],
+        ),
+        "direct all-features",
+    );
+    assert_adapter(
+        &direct(
+            &lib_name_consumer,
+            "direct-no-default.cppm",
+            &["--no-default-features"],
+        ),
+        "direct no-default inactive optional",
+    );
+    assert_adapter(
+        &direct(
+            &lib_name_consumer,
+            "direct-unrelated.cppm",
+            &["--features", "unrelated"],
+        ),
+        "direct explicit unrelated feature",
+    );
+    assert_hand_slot(
+        &direct(
+            &lib_name_consumer,
+            "direct-target-config.cppm",
+            &[
+                "--features",
+                "fake-std",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--config",
+                "net.offline=true",
+            ],
+        ),
+        "direct target/config context",
+    );
+    assert_adapter(
+        &direct_expanded(&lib_name_consumer, "direct-expanded-default.cppm", &[]),
+        "direct expanded default Cargo context",
+    );
+    assert_hand_slot(
+        &direct_expanded(
+            &lib_name_consumer,
+            "direct-expanded-feature.cppm",
+            &["--features", "fake-std"],
+        ),
+        "direct expanded explicit feature",
+    );
+
+    assert_hand_slot(
+        &parity(
+            &lib_name_consumer,
+            "parity-feature",
+            &["--features", "fake-std"],
+        ),
+        "parity explicit feature",
+    );
+    assert_hand_slot(
+        &parity(
+            &lib_name_consumer,
+            "parity-all",
+            &["--all-features"],
+        ),
+        "parity all-features",
+    );
+    assert_adapter(
+        &parity(
+            &lib_name_consumer,
+            "parity-no-default",
+            &["--no-default-features"],
+        ),
+        "parity no-default inactive optional",
+    );
+    assert_adapter(
+        &parity(&lib_name_consumer, "parity-default", &[]),
+        "parity default inactive optional",
+    );
+    assert_hand_slot(
+        &parity(
+            &lib_name_consumer,
+            "parity-target-config",
+            &[
+                "--features",
+                "fake-std",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--config",
+                "net.offline=true",
+            ],
+        ),
+        "parity target/config context",
+    );
+
+    let reusable_cppm = lib_name_consumer
+        .join("parity-feature/targets/cargo_context_consumer/cargo_context_consumer.cppm");
+    let reusable_before = std::fs::read(&reusable_cppm).unwrap();
+    let same_context_reuse = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&lib_manifest)
+        .arg("--work-dir")
+        .arg(lib_name_consumer.join("parity-feature"))
+        .arg("--incremental-transpile")
+        .arg("--features")
+        .arg("fake-std")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--allow-empty-tests")
+        .output()
+        .unwrap();
+    assert!(
+        same_context_reuse.status.success(),
+        "same-context reuse failed:\n{}",
+        String::from_utf8_lossy(&same_context_reuse.stderr)
+    );
+    let mismatched_reuse = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&lib_manifest)
+        .arg("--work-dir")
+        .arg(lib_name_consumer.join("parity-feature"))
+        .arg("--incremental-transpile")
+        .arg("--no-default-features")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--allow-empty-tests")
+        .output()
+        .unwrap();
+    assert!(!mismatched_reuse.status.success());
+    assert!(
+        String::from_utf8_lossy(&mismatched_reuse.stderr)
+            .contains("different Cargo resolution context"),
+        "unexpected mismatch diagnostic:\n{}",
+        String::from_utf8_lossy(&mismatched_reuse.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&reusable_cppm).unwrap(),
+        reusable_before,
+        "mismatched context modified the reusable artifact"
+    );
+
+    // The command-line context alone is insufficient evidence: the same
+    // feature flags can resolve a different extern identity after a manifest
+    // edit.  Reuse must compare the complete context-matched metadata graph
+    // and fail before touching the previously authenticated artifact.
+    std::fs::write(
+        lib_name_consumer.join("../provider/Cargo.toml"),
+        "[package]\nname='innocent_package'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='ordinary_provider'\n[workspace]\n",
+    )
+    .unwrap();
+    let changed_graph_reuse = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&lib_manifest)
+        .arg("--work-dir")
+        .arg(lib_name_consumer.join("parity-feature"))
+        .arg("--incremental-transpile")
+        .arg("--features")
+        .arg("fake-std")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--allow-empty-tests")
+        .output()
+        .unwrap();
+    assert!(!changed_graph_reuse.status.success());
+    assert!(
+        String::from_utf8_lossy(&changed_graph_reuse.stderr)
+            .contains("different Cargo resolution context"),
+        "unexpected changed-graph diagnostic:\n{}",
+        String::from_utf8_lossy(&changed_graph_reuse.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&reusable_cppm).unwrap(),
+        reusable_before,
+        "changed Cargo graph modified the reusable artifact"
+    );
+
+    let renamed_consumer = write_fixture(&fixture.path().join("package_rename"), true);
+    let renamed_manifest = renamed_consumer.join("Cargo.toml");
+    cargo_check(
+        &renamed_manifest,
+        &fixture.path().join("cargo-target-renamed"),
+        &["--features", "fake-std"],
+    );
+    assert_hand_slot(
+        &direct(
+            &renamed_consumer,
+            "direct-renamed.cppm",
+            &["--features", "fake-std"],
+        ),
+        "direct package rename",
+    );
+    assert_hand_slot(
+        &parity(
+            &renamed_consumer,
+            "parity-renamed",
+            &["--features", "fake-std"],
+        ),
+        "parity package rename",
+    );
+}
+
+#[test]
+fn dev_dependency_lib_name_std_is_target_scoped_and_parity_authentication_is_atomic() {
+    fn assert_hand_slot(cpp: &str, label: &str) {
+        assert!(
+            cpp.contains("constrained/const generic partial specializations are unsupported"),
+            "{label}: missing constrained-generic hand slot:\n{cpp}"
+        );
+        for forbidden in [
+            "class DecodeAdapter<rusty::Option<T>>",
+            "class DecodeAdapterRef<rusty::Option<T>>",
+            "class DecodeAdapterRefMut<rusty::Option<T>>",
+        ] {
+            assert!(!cpp.contains(forbidden), "{label}: emitted {forbidden}:\n{cpp}");
+        }
+    }
+
+    fn assert_adapter(cpp: &str, label: &str) {
+        for expected in [
+            "class DecodeAdapter<rusty::Option<T>>",
+            "class DecodeAdapterRef<rusty::Option<T>>",
+            "class DecodeAdapterRefMut<rusty::Option<T>>",
+        ] {
+            assert!(cpp.contains(expected), "{label}: missing {expected}:\n{cpp}");
+        }
+    }
+
+    let fixture = tempfile::tempdir().unwrap();
+    let provider = fixture.path().join("provider");
+    let build_provider = fixture.path().join("build-provider");
+    let consumer = fixture.path().join("consumer");
+    std::fs::create_dir_all(provider.join("src")).unwrap();
+    std::fs::create_dir_all(build_provider.join("src")).unwrap();
+    std::fs::create_dir_all(consumer.join("src")).unwrap();
+    std::fs::create_dir_all(consumer.join("tests")).unwrap();
+    std::fs::write(
+        provider.join("Cargo.toml"),
+        "[package]\nname='innocent_package'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='std'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        provider.join("src/lib.rs"),
+        "#![no_std]\npub mod default { pub trait Default {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        build_provider.join("Cargo.toml"),
+        "[package]\nname='build_package'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='core'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        build_provider.join("src/lib.rs"),
+        "#![no_std]\nextern crate core as real_core;\npub use real_core::*;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        "[package]\nname='dev_context_consumer'\nversion='0.0.0'\nedition='2024'\n\
+         [lib]\ntest=false\ndoctest=false\n\
+         [dev-dependencies]\ninnocent_package={path='../provider'}\n\
+         [build-dependencies]\nbuild_package={path='../build-provider'}\n\
+         [[test]]\nname='fake_std_test'\npath='tests/fake_std.rs'\nharness=false\n\
+         [workspace]\n",
+    )
+    .unwrap();
+    let generic_impl = r#"
+pub trait Decode { fn decode(&mut self); }
+impl<T: std::default::Default> Decode for core::option::Option<T> {
+    fn decode(&mut self) {}
+}
+"#;
+    std::fs::write(consumer.join("src/lib.rs"), generic_impl).unwrap();
+    let test_source = format!(
+        r#"#![no_std]
+#![no_main]
+extern crate std;
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_info: &PanicInfo<'_>) -> ! {{ loop {{}} }}
+#[unsafe(no_mangle)]
+pub extern "C" fn main() -> i32 {{ 0 }}
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {{
+    unsafe {{ core::arch::asm!("mov rax, 60", "xor rdi, rdi", "syscall", options(noreturn)); }}
+}}
+{generic_impl}
+"#
+    );
+    let test_path = consumer.join("tests/fake_std.rs");
+    std::fs::write(&test_path, &test_source).unwrap();
+    let build_source = r#"extern crate core;
+pub trait Decode { fn decode(&mut self); }
+impl<T: core::default::Default> Decode for core::option::Option<T> {
+    fn decode(&mut self) {}
+}
+fn main() {}
+"#;
+    let build_path = consumer.join("build.rs");
+    std::fs::write(&build_path, build_source).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--tests")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+        .env("RUSTFLAGS", "-C panic=abort")
+        .output()
+        .unwrap();
+    assert!(
+        cargo_check.status.success(),
+        "dev-dependency lib-name fixture is not Cargo-valid:\n{}",
+        String::from_utf8_lossy(&cargo_check.stderr)
+    );
+
+    let direct_lib = consumer.join("direct-lib.cppm");
+    let direct_lib_output = transpiler_bin()
+        .arg(consumer.join("src/lib.rs"))
+        .arg("--module-name")
+        .arg("dev_context_consumer")
+        .arg("--output")
+        .arg(&direct_lib)
+        .output()
+        .unwrap();
+    assert!(
+        direct_lib_output.status.success(),
+        "direct normal-target lane failed:\n{}",
+        String::from_utf8_lossy(&direct_lib_output.stderr)
+    );
+    assert_adapter(
+        &std::fs::read_to_string(&direct_lib).unwrap(),
+        "direct library target must not inherit dev dependencies",
+    );
+
+    let direct_test = consumer.join("direct-test.cppm");
+    let direct_test_output = transpiler_bin()
+        .arg(&test_path)
+        .arg("--module-name")
+        .arg("fake_std_test")
+        .arg("--output")
+        .arg(&direct_test)
+        .output()
+        .unwrap();
+    assert!(
+        direct_test_output.status.success(),
+        "direct test-target lane failed:\n{}",
+        String::from_utf8_lossy(&direct_test_output.stderr)
+    );
+    assert_hand_slot(
+        &std::fs::read_to_string(&direct_test).unwrap(),
+        "direct test target must include dev dependency extern names",
+    );
+
+    let direct_build = consumer.join("direct-build.cppm");
+    let direct_build_output = transpiler_bin()
+        .arg(&build_path)
+        .arg("--module-name")
+        .arg("build_script")
+        .arg("--output")
+        .arg(&direct_build)
+        .output()
+        .unwrap();
+    assert!(
+        direct_build_output.status.success(),
+        "direct build-target lane failed:\n{}",
+        String::from_utf8_lossy(&direct_build_output.stderr)
+    );
+    assert_hand_slot(
+        &std::fs::read_to_string(&direct_build).unwrap(),
+        "direct build target must use build-only dependency provenance",
+    );
+
+    let expanded_build = consumer.join("expanded-build.cppm");
+    let expanded_build_output = transpiler_bin()
+        .arg(&build_path)
+        .arg("--expand")
+        .arg("--module-name")
+        .arg("build_script")
+        .arg("--output")
+        .arg(&expanded_build)
+        .output()
+        .unwrap();
+    assert!(!expanded_build_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&expanded_build_output.stderr)
+            .contains("has no faithful target selector"),
+        "build-script expansion selected another target:\n{}",
+        String::from_utf8_lossy(&expanded_build_output.stderr)
+    );
+    assert!(
+        !expanded_build.exists(),
+        "build-script expansion failure created {}",
+        expanded_build.display()
+    );
+
+    let direct_expanded_test = consumer.join("direct-expanded-test.cppm");
+    let direct_expanded_output = transpiler_bin()
+        .arg(&test_path)
+        .arg("--expand")
+        .arg("--module-name")
+        .arg("fake_std_test")
+        .arg("--output")
+        .arg(&direct_expanded_test)
+        .output()
+        .unwrap();
+    assert!(
+        direct_expanded_output.status.success(),
+        "direct expanded test-target lane failed:\n{}",
+        String::from_utf8_lossy(&direct_expanded_output.stderr)
+    );
+    assert_hand_slot(
+        &std::fs::read_to_string(&direct_expanded_test).unwrap(),
+        "direct expanded test target must preserve target/dev provenance",
+    );
+
+    let nested_source = consumer.join("src/nested.rs");
+    std::fs::write(&nested_source, generic_impl).unwrap();
+    let nested_output_path = consumer.join("nested-expanded.cppm");
+    let nested_output = transpiler_bin()
+        .arg(&nested_source)
+        .arg("--expand")
+        .arg("--module-name")
+        .arg("nested")
+        .arg("--output")
+        .arg(&nested_output_path)
+        .output()
+        .unwrap();
+    assert!(!nested_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&nested_output.stderr)
+            .contains("not one exact Cargo target root"),
+        "unknown-source expansion did not fail closed:\n{}",
+        String::from_utf8_lossy(&nested_output.stderr)
+    );
+    assert!(
+        !nested_output_path.exists(),
+        "unknown-source expansion created {}",
+        nested_output_path.display()
+    );
+
+    let work_dir = consumer.join("parity");
+    let parity = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .arg("--work-dir")
+        .arg(&work_dir)
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .output()
+        .unwrap();
+    assert!(
+        parity.status.success(),
+        "parity dev-target lane failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&parity.stdout),
+        String::from_utf8_lossy(&parity.stderr)
+    );
+    let parity_test_cppm = work_dir.join("targets/fake_std_test/fake_std_test.cppm");
+    assert_hand_slot(
+        &std::fs::read_to_string(&parity_test_cppm).unwrap(),
+        "parity test target must include dev dependency extern names",
+    );
+
+    let preserved = std::fs::read(&parity_test_cppm).unwrap();
+    std::fs::write(&test_path, "#![no_std]\nthis is not valid Rust\n").unwrap();
+    let preexisting_failure = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .arg("--work-dir")
+        .arg(&work_dir)
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .output()
+        .unwrap();
+    assert!(!preexisting_failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&preexisting_failure.stderr)
+            .contains("while authenticating sysroot crates"),
+        "unexpected target-provenance failure:\n{}",
+        String::from_utf8_lossy(&preexisting_failure.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&parity_test_cppm).unwrap(),
+        preserved,
+        "failed pre-output authentication mutated an existing parity artifact"
+    );
+
+    let absent_work_dir = consumer.join("parity-absent");
+    let absent_failure = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .arg("--work-dir")
+        .arg(&absent_work_dir)
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .output()
+        .unwrap();
+    assert!(!absent_failure.status.success());
+    assert!(
+        !absent_work_dir.exists(),
+        "failed pre-output authentication created {}",
+        absent_work_dir.display()
     );
 }

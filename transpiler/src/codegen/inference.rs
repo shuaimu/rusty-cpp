@@ -395,6 +395,8 @@ impl CodeGen {
             .iter()
             .filter(|authorization| {
                 authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.reference_kind
+                        == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                     && scope_variants.iter().any(|scope| {
                         scope == &authorization.consumer_lexical_module.0.join("::")
                     })
@@ -468,6 +470,8 @@ impl CodeGen {
             .iter()
             .filter(|authorization| {
                 authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.reference_kind
+                        == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
             })
             .filter(|authorization| {
                 let mut lexical_identity = authorization.consumer_lexical_module.0.clone();
@@ -1223,12 +1227,48 @@ impl CodeGen {
         trait_path: &syn::Path,
         module_path: &[String],
     ) -> String {
+        // Trait ownership must use the declaration's exact lexical key.  In
+        // particular, `a::Clash` and `b::Clash` are distinct even though the
+        // older type-oriented qualifier below sees only a shared leaf name.
+        // Keep the legacy qualifier only for an unbound bare name (foreign
+        // prelude traits and inline-rust cross-block declarations). An import,
+        // glob, absolute path, or unresolved qualified path carries identity
+        // information that must not collapse back onto a local same-leaf
+        // declaration.
+        if let Some(key) = crate::transpile::resolve_declared_trait_path_key(
+            trait_path,
+            module_path,
+            &self.trait_declared_paths,
+            &self.rust_item_import_bindings,
+        ) {
+            return key;
+        }
         let raw = trait_path
             .segments
             .iter()
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
+        let first = trait_path
+            .segments
+            .first()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_default();
+        if trait_path.leading_colon.is_some()
+            || trait_path.segments.len() != 1
+            || matches!(first.as_str(), "crate" | "self" | "super")
+            || crate::transpile::rust_item_import_name_is_bound(
+                &first,
+                module_path,
+                &self.rust_item_import_bindings,
+            )
+            || crate::transpile::rust_glob_import_is_visible(
+                module_path,
+                &self.rust_item_import_bindings,
+            )
+        {
+            return format!("@unresolved-trait::{raw}");
+        }
         qualify_impl_type_name(
             &raw,
             module_path,
@@ -1423,6 +1463,8 @@ impl CodeGen {
             .iter()
             .any(|authorization| {
                 authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.reference_kind
+                        == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
                     && authorization.leaf == local_name
             });
         if is_flat_type_leaf {

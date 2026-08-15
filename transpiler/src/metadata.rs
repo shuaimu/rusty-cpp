@@ -1,8 +1,118 @@
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Apply the graph-shaping portion of a Cargo build/test invocation to
+/// `cargo metadata`.
+///
+/// Cargo spells the target selector differently for metadata
+/// (`--filter-platform`) than it does for build commands (`--target`).  Keeping
+/// this translation in one checked helper prevents provenance/authentication
+/// queries from silently resolving a different feature or target graph.
+fn apply_resolution_flags_to_metadata(
+    command: &mut std::process::Command,
+    cargo_flags: &[String],
+) -> Result<(), String> {
+    let mut index = 0usize;
+    while index < cargo_flags.len() {
+        let flag = cargo_flags[index].as_str();
+        match flag {
+            "--features" | "-F" | "--config" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    format!("Cargo resolution flag '{flag}' requires a value")
+                })?;
+                command.arg(flag).arg(value);
+                index += 2;
+            }
+            "--target" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    "Cargo resolution flag '--target' requires a value".to_string()
+                })?;
+                command.arg("--filter-platform").arg(value);
+                index += 2;
+            }
+            "--filter-platform" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    "Cargo resolution flag '--filter-platform' requires a value".to_string()
+                })?;
+                command.arg("--filter-platform").arg(value);
+                index += 2;
+            }
+            "--all-features" | "--no-default-features" | "--locked" | "--offline"
+            | "--frozen" => {
+                command.arg(flag);
+                index += 1;
+            }
+            _ if flag.starts_with("--features=")
+                || flag.starts_with("--config=")
+                || flag.starts_with("--filter-platform=") =>
+            {
+                command.arg(flag);
+                index += 1;
+            }
+            _ if flag.starts_with("--target=") => {
+                command.arg(format!(
+                    "--filter-platform={}",
+                    flag.trim_start_matches("--target=")
+                ));
+                index += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported Cargo resolution flag '{flag}'; refusing to authenticate with a potentially different Cargo graph"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stable fingerprint of Cargo's complete resolved metadata graph under the
+/// supplied invocation context.  Parity reuse records this so changing a
+/// manifest, lockfile, patch/config resolution, or selected feature graph
+/// cannot reuse expanded/transpiled artifacts authenticated under another
+/// graph.
+pub fn cargo_resolution_graph_fingerprint(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<String, String> {
+    let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let mut command = std::process::Command::new("cargo");
+    command
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest_path);
+    apply_resolution_flags_to_metadata(&mut command, cargo_flags)?;
+    let output = command
+        .current_dir(project_dir)
+        .output()
+        .map_err(|error| format!("Failed to run cargo metadata: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let metadata: CargoMetadataResolved = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Failed to parse cargo metadata: {error}"))?;
+    let selected = select_resolved_package(&metadata, manifest_path, package_filter)?;
+    let canonical = serde_json::to_vec(&serde_json::from_slice::<serde_json::Value>(
+        &output.stdout,
+    )
+    .map_err(|error| format!("Failed to canonicalize cargo metadata: {error}"))?)
+    .map_err(|error| format!("Failed to canonicalize cargo metadata: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(selected.id.as_bytes());
+    digest.update([0]);
+    digest.update(canonical);
+    Ok(format!("{:x}", digest.finalize()))
+}
 
 /// A discovered crate target from `cargo metadata`.
 #[derive(Debug, Clone)]
@@ -58,6 +168,7 @@ pub struct ManifestIdentity {
     pub edition: String,
     pub rust_version: Option<String>,
     pub workspace_root: PathBuf,
+    pub feature_names: Vec<String>,
     pub dependencies: Vec<ManifestDependency>,
     pub targets: Vec<ManifestTarget>,
 }
@@ -72,6 +183,7 @@ pub struct EffectiveLocalNormalDependency {
     pub dependency_key: String,
     pub package_name: String,
     pub manifest_path: PathBuf,
+    pub resolved_features: Vec<String>,
 }
 
 /// Cargo's effective normal local-dependency graph for one concrete target.
@@ -99,9 +211,151 @@ impl EffectiveLocalNormalDependencyGraph {
             .get(&canonicalized_path(manifest_path))
             .map(Vec::as_slice)
     }
+
+    /// Return Cargo's exact normal-unit feature set for a selected local
+    /// package. Feature sets are attached to incoming edges because Cargo's
+    /// metadata node feature list is a build/dev/proc-macro union. The graph
+    /// resolver rejects divergent incoming normal-unit feature witnesses, so
+    /// any matching edge is authoritative here.
+    pub fn resolved_features_for_manifest(&self, manifest_path: &Path) -> Option<&[String]> {
+        let manifest_path = canonicalized_path(manifest_path);
+        self.direct_dependencies
+            .values()
+            .flat_map(|dependencies| dependencies.iter())
+            .find(|dependency| dependency.manifest_path == manifest_path)
+            .map(|dependency| dependency.resolved_features.as_slice())
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// One direct dependency as Cargo exposes it to rustc's extern prelude.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ResolvedExternDependency {
+    pub extern_crate_root: String,
+    pub package_name: String,
+}
+
+/// Dependency-kind provenance for the Rust compilation unit being
+/// transpiled. Cargo's resolved package node contains normal, development,
+/// and build edges at the same time; which edges can occupy an extern-prelude
+/// name depends on the selected target invocation.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CargoDependencyContext {
+    /// Library/binary compilation: ordinary dependencies only.
+    Normal,
+    /// Test/example/bench (and `--tests`) compilation: ordinary plus
+    /// development dependencies.
+    Development,
+    /// Build-script compilation: build dependencies only.
+    Build,
+    /// The caller cannot prove which Cargo target produced the source. Every
+    /// dependency kind is considered occupied so compiler-owned identities
+    /// fail closed.
+    Unknown,
+}
+
+impl CargoDependencyContext {
+    fn includes(self, kind: Option<&str>) -> bool {
+        match self {
+            Self::Normal => kind.is_none(),
+            Self::Development => kind.is_none() || kind == Some("dev"),
+            Self::Build => kind == Some("build"),
+            Self::Unknown => true,
+        }
+    }
+}
+
+/// Exact Cargo target provenance when available, plus the dependency kinds
+/// made visible by the actual Cargo invocation. A missing target is deliberate
+/// conservative provenance, not an implicit library/default-target guess.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CargoCompilationContext {
+    target_name: Option<String>,
+    target_kind: Option<TargetKind>,
+    target_src_path: Option<PathBuf>,
+    dependency_context: CargoDependencyContext,
+}
+
+impl CargoCompilationContext {
+    pub fn exact(target: &CrateTarget, include_dev_dependencies: bool) -> Self {
+        let dependency_context = match target.kind {
+            TargetKind::Test | TargetKind::Example | TargetKind::Bench => {
+                CargoDependencyContext::Development
+            }
+            TargetKind::Other(ref kind) if kind == "custom-build" => {
+                CargoDependencyContext::Build
+            }
+            _ if include_dev_dependencies => CargoDependencyContext::Development,
+            _ => CargoDependencyContext::Normal,
+        };
+        Self {
+            target_name: Some(target.name.clone()),
+            target_kind: Some(target.kind.clone()),
+            target_src_path: Some(canonicalized_path(&target.src_path)),
+            dependency_context,
+        }
+    }
+
+    pub fn normal_package() -> Self {
+        Self {
+            target_name: None,
+            target_kind: None,
+            target_src_path: None,
+            dependency_context: CargoDependencyContext::Normal,
+        }
+    }
+
+    pub fn conservative() -> Self {
+        Self {
+            target_name: None,
+            target_kind: None,
+            target_src_path: None,
+            dependency_context: CargoDependencyContext::Unknown,
+        }
+    }
+
+    pub fn dependency_context(&self) -> CargoDependencyContext {
+        self.dependency_context
+    }
+
+    pub fn target_src_path(&self) -> Option<&Path> {
+        self.target_src_path.as_deref()
+    }
+
+    /// Cargo target selector matching this exact compilation root. Unknown
+    /// source ownership must fail before invoking Cargo: omitting a selector
+    /// would silently expand Cargo's default target instead of the supplied
+    /// source.
+    pub fn cargo_target_args(&self) -> Result<Vec<String>, String> {
+        let (Some(name), Some(kind)) = (&self.target_name, &self.target_kind) else {
+            return Err(
+                "cannot faithfully cargo expand a source that is not one exact Cargo target root"
+                    .to_string(),
+            );
+        };
+        Ok(match kind {
+            TargetKind::Lib => vec!["--lib".to_string()],
+            TargetKind::Bin => vec!["--bin".to_string(), name.clone()],
+            TargetKind::Test => vec!["--test".to_string(), name.clone()],
+            TargetKind::Example => vec!["--example".to_string(), name.clone()],
+            TargetKind::Bench => vec!["--bench".to_string(), name.clone()],
+            TargetKind::Other(kind) => {
+                return Err(format!(
+                    "cargo expand target '{}' ({kind}) has no faithful target selector; refusing to expand a different Cargo target",
+                    name
+                ));
+            }
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        match (&self.target_name, &self.target_kind) {
+            (Some(name), Some(kind)) => format!("target '{name}' ({kind:?})"),
+            _ => "unknown Cargo target (all dependency kinds)".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TargetKind {
     Lib,
     Bin,
@@ -183,6 +437,8 @@ struct Package {
     manifest_path: PathBuf,
     #[serde(default)]
     dependencies: Vec<PackageDependency>,
+    #[serde(default)]
+    features: HashMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -418,19 +674,32 @@ fn assign_module_names(mut raw_targets: Vec<RawTarget>) -> Vec<CrateTarget> {
 
 /// Discover crate targets by running `cargo metadata`.
 /// Returns the package name and a list of discovered targets.
+#[cfg(test)]
 pub fn discover_targets(
     manifest_path: &Path,
     package_filter: Option<&str>,
 ) -> Result<(String, Vec<CrateTarget>), String> {
+    discover_targets_with_context(manifest_path, package_filter, &[])
+}
+
+/// Context-preserving form of [`discover_targets`].
+pub fn discover_targets_with_context(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<(String, Vec<CrateTarget>), String> {
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
 
-    let output = std::process::Command::new("cargo")
+    let mut command = std::process::Command::new("cargo");
+    command
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
         .arg("--no-deps")
         .arg("--manifest-path")
-        .arg(manifest_path)
+        .arg(manifest_path);
+    apply_resolution_flags_to_metadata(&mut command, cargo_flags)?;
+    let output = command
         .current_dir(project_dir)
         .output()
         .map_err(|e| format!("Failed to run cargo metadata: {}", e))?;
@@ -497,15 +766,23 @@ pub fn discover_targets(
 /// `--no-deps` is sufficient here: Cargo still expands workspace-inherited
 /// dependency declarations and reports the package's own targets, while the
 /// command remains independent of registry availability.
-pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentity, String> {
+/// Inspect manifest identity under an explicit Cargo resolution context.
+pub fn inspect_manifest_identity_with_context(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<ManifestIdentity, String> {
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
-    let output = std::process::Command::new("cargo")
+    let mut command = std::process::Command::new("cargo");
+    command
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
         .arg("--no-deps")
         .arg("--manifest-path")
-        .arg(manifest_path)
+        .arg(manifest_path);
+    apply_resolution_flags_to_metadata(&mut command, cargo_flags)?;
+    let output = command
         .current_dir(project_dir)
         .output()
         .map_err(|error| format!("Failed to run cargo metadata: {error}"))?;
@@ -519,17 +796,7 @@ pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentit
 
     let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("Failed to parse cargo metadata: {error}"))?;
-    let requested_manifest = canonicalized_path(manifest_path);
-    let package = metadata
-        .packages
-        .iter()
-        .find(|package| canonicalized_path(&package.manifest_path) == requested_manifest)
-        .ok_or_else(|| {
-            format!(
-                "cargo metadata did not report the requested package manifest {}",
-                manifest_path.display()
-            )
-        })?;
+    let package = select_target_package(&metadata, manifest_path, package_filter)?;
     let dependencies = package
         .dependencies
         .iter()
@@ -562,9 +829,180 @@ pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentit
         edition: package.edition.clone(),
         rust_version: package.rust_version.clone(),
         workspace_root: canonicalized_path(&metadata.workspace_root),
+        feature_names: {
+            let mut names = package.features.keys().cloned().collect::<Vec<_>>();
+            names.sort();
+            names
+        },
         dependencies,
         targets,
     })
+}
+
+/// Inspect the package which owns `manifest_path` under Cargo's default
+/// resolution context.
+pub fn inspect_manifest_identity(manifest_path: &Path) -> Result<ManifestIdentity, String> {
+    inspect_manifest_identity_with_context(manifest_path, None, &[])
+}
+
+/// Ask Cargo's resolved graph for the direct `--extern` names of a package.
+/// This is intentionally not reconstructed from dependency-table spelling:
+/// a package may expose a library target with a different crate name, while a
+/// renamed dependency may choose yet another extern-prelude root.
+#[cfg(test)]
+pub fn inspect_resolved_extern_dependencies(
+    manifest_path: &Path,
+) -> Result<Vec<ResolvedExternDependency>, String> {
+    inspect_resolved_extern_dependencies_with_context(manifest_path, None, &[])
+}
+
+/// Context-preserving form of [`inspect_resolved_extern_dependencies`].
+pub fn inspect_resolved_extern_dependencies_with_context(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<Vec<ResolvedExternDependency>, String> {
+    inspect_resolved_extern_dependencies_for_compilation(
+        manifest_path,
+        package_filter,
+        cargo_flags,
+        &CargoCompilationContext::normal_package(),
+    )
+}
+
+/// Context-preserving direct-extern inspection for one actual compilation
+/// target. Cargo metadata deliberately reports all dependency kinds on the
+/// package node, so authentication must filter those edges using the same
+/// target class as the Cargo command that produced the Rust source.
+pub fn inspect_resolved_extern_dependencies_for_compilation(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    compilation: &CargoCompilationContext,
+) -> Result<Vec<ResolvedExternDependency>, String> {
+    let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let mut command = std::process::Command::new("cargo");
+    command
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest_path);
+    apply_resolution_flags_to_metadata(&mut command, cargo_flags)?;
+    let output = command
+        .current_dir(project_dir)
+        .output()
+        .map_err(|error| format!("Failed to run cargo metadata: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let metadata: CargoMetadataResolved = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Failed to parse cargo metadata: {error}"))?;
+    let selected = select_resolved_package(&metadata, manifest_path, package_filter)?;
+    let resolve = metadata
+        .resolve
+        .as_ref()
+        .ok_or_else(|| "cargo metadata did not return a resolved dependency graph".to_string())?;
+    let node = resolve
+        .nodes
+        .iter()
+        .find(|node| node.id == selected.id)
+        .ok_or_else(|| {
+            format!(
+                "cargo metadata did not return the resolved node for {}",
+                manifest_path.display()
+            )
+        })?;
+    let packages = metadata
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package.name.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut dependencies = node
+        .deps
+        .iter()
+        .filter(|dependency| {
+            dependency.dep_kinds.is_empty()
+                || dependency.dep_kinds.iter().any(|kind| {
+                    compilation
+                        .dependency_context()
+                        .includes(kind.kind.as_deref())
+                })
+        })
+        .filter_map(|dependency| {
+            let package_name = packages.get(dependency.pkg.as_str())?;
+            Some(ResolvedExternDependency {
+                extern_crate_root: dependency.name.replace('-', "_"),
+                package_name: (*package_name).to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|left, right| {
+        left.extern_crate_root
+            .cmp(&right.extern_crate_root)
+            .then_with(|| left.package_name.cmp(&right.package_name))
+    });
+    dependencies.dedup();
+    Ok(dependencies)
+}
+
+/// Resolve the exact Cargo target root represented by a direct source path.
+/// Nested module files are not independently selected Cargo targets; callers
+/// receive conservative provenance for those paths instead of guessing which
+/// target/module graph owns them.
+pub fn compilation_context_for_source(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    source_path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<CargoCompilationContext, String> {
+    let (_, targets) =
+        discover_targets_with_context(manifest_path, package_filter, cargo_flags)?;
+    let source_path = canonicalized_path(source_path);
+    let mut matches = targets
+        .iter()
+        .filter(|target| canonicalized_path(&target.src_path) == source_path);
+    if let Some(target) = matches.next() {
+        if matches.next().is_some() {
+            return Ok(CargoCompilationContext::conservative());
+        }
+        return Ok(CargoCompilationContext::exact(
+            target,
+            include_dev_dependencies,
+        ));
+    }
+
+    // Target discovery intentionally omits build scripts and other targets the
+    // parity transpiler does not process. Direct source authentication still
+    // has to recognize those exact roots so `build.rs` receives build-only
+    // dependency provenance instead of the unknown-source union.
+    let identity =
+        inspect_manifest_identity_with_context(manifest_path, package_filter, cargo_flags)?;
+    let mut raw_matches = identity
+        .targets
+        .iter()
+        .filter(|target| canonicalized_path(&target.src_path) == source_path);
+    let Some(target) = raw_matches.next() else {
+        return Ok(CargoCompilationContext::conservative());
+    };
+    if raw_matches.next().is_some() {
+        return Ok(CargoCompilationContext::conservative());
+    }
+    let target = CrateTarget {
+        name: target.name.clone(),
+        kind: TargetKind::from_cargo(&target.kind),
+        src_path: target.src_path.clone(),
+        module_name: normalize_module_base(&target.name),
+    };
+    Ok(CargoCompilationContext::exact(
+        &target,
+        include_dev_dependencies,
+    ))
 }
 
 /// Cargo's global configuration directory for a command launched from
@@ -947,9 +1385,209 @@ fn absolutize_manifest_path_values(value: &mut toml::Value, base: &Path) {
     }
 }
 
+#[derive(Debug, Clone)]
+struct EffectiveGraphCargoContext {
+    dependency_features: Vec<String>,
+    default_features: bool,
+    non_feature_flags: Vec<String>,
+    explicit_target: Option<String>,
+}
+
+fn normalize_requested_feature(
+    selector: &str,
+    package_name: &str,
+) -> Result<Option<String>, String> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Ok(None);
+    }
+    if let Some((package, feature)) = selector.split_once('/') {
+        if package != package_name {
+            return Err(format!(
+                "unsupported Cargo dependency feature selector '{selector}' while selecting cpp_name's effective dependency graph; the isolated package probe cannot exactly project direct or weak dependency feature selectors"
+            ));
+        }
+        if feature.is_empty() {
+            return Err(format!("Cargo feature selector '{package}/' has no feature name"));
+        }
+        return Ok(Some(feature.to_string()));
+    }
+    Ok(Some(selector.to_string()))
+}
+
+fn effective_graph_cargo_context(
+    cargo_flags: &[String],
+    identity: &ManifestIdentity,
+) -> Result<EffectiveGraphCargoContext, String> {
+    let mut requested_features = Vec::new();
+    let mut all_features = false;
+    let mut default_features = true;
+    let mut non_feature_flags = Vec::new();
+    let mut explicit_target: Option<String> = None;
+    let mut index = 0usize;
+    while index < cargo_flags.len() {
+        let flag = cargo_flags[index].as_str();
+        match flag {
+            "--features" | "-F" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    format!("Cargo feature flag '{flag}' requires a value")
+                })?;
+                for feature in value.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+                    if let Some(feature) =
+                        normalize_requested_feature(feature, &identity.package_name)?
+                    {
+                        requested_features.push(feature);
+                    }
+                }
+                index += 2;
+            }
+            "--all-features" => {
+                all_features = true;
+                index += 1;
+            }
+            "--no-default-features" => {
+                default_features = false;
+                index += 1;
+            }
+            "--target" | "--filter-platform" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    format!("Cargo resolution flag '{flag}' requires a value")
+                })?;
+                if let Some(previous) = &explicit_target
+                    && previous != value
+                {
+                    return Err(format!(
+                        "conflicting Cargo target selectors '{previous}' and '{value}'"
+                    ));
+                }
+                explicit_target = Some(value.clone());
+                non_feature_flags.push("--target".to_string());
+                non_feature_flags.push(value.clone());
+                index += 2;
+            }
+            "--config" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    "Cargo resolution flag '--config' requires a value".to_string()
+                })?;
+                non_feature_flags.push(flag.to_string());
+                non_feature_flags.push(value.clone());
+                index += 2;
+            }
+            "--locked" | "--offline" | "--frozen" => {
+                non_feature_flags.push(flag.to_string());
+                index += 1;
+            }
+            _ if flag.starts_with("--features=") => {
+                let value = flag.trim_start_matches("--features=");
+                for feature in value.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+                    if let Some(feature) =
+                        normalize_requested_feature(feature, &identity.package_name)?
+                    {
+                        requested_features.push(feature);
+                    }
+                }
+                index += 1;
+            }
+            _ if flag.starts_with("--target=") || flag.starts_with("--filter-platform=") => {
+                let value = flag.split_once('=').map(|(_, value)| value).unwrap_or_default();
+                if value.is_empty() {
+                    return Err(format!("Cargo resolution flag '{flag}' has an empty target"));
+                }
+                if let Some(previous) = &explicit_target
+                    && previous != value
+                {
+                    return Err(format!(
+                        "conflicting Cargo target selectors '{previous}' and '{value}'"
+                    ));
+                }
+                explicit_target = Some(value.to_string());
+                non_feature_flags.push(format!("--target={value}"));
+                index += 1;
+            }
+            _ if flag.starts_with("--config=") => {
+                non_feature_flags.push(flag.to_string());
+                index += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported Cargo resolution flag '{flag}' while selecting cpp_name's effective dependency graph"
+                ));
+            }
+        }
+    }
+    if all_features {
+        requested_features.extend(identity.feature_names.iter().cloned());
+    }
+    requested_features.sort();
+    requested_features.dedup();
+    Ok(EffectiveGraphCargoContext {
+        dependency_features: requested_features,
+        default_features,
+        non_feature_flags,
+        explicit_target,
+    })
+}
+
+/// The isolated probe is a new synthetic root package, so Cargo must add that
+/// one package to the copied lockfile even when the caller's real workspace is
+/// already exactly locked. Validate `--locked`/`--frozen` against the real
+/// manifest first, then permit only that temporary lockfile rewrite. Frozen
+/// still projects its offline half into the probe; all other graph-shaping
+/// flags remain byte-for-byte identical.
+fn effective_graph_probe_non_feature_flags(flags: &[String]) -> Vec<String> {
+    let mut projected = Vec::new();
+    let mut has_offline = false;
+    for flag in flags {
+        match flag.as_str() {
+            "--locked" => {}
+            "--frozen" | "--offline" => {
+                if !has_offline {
+                    projected.push("--offline".to_string());
+                    has_offline = true;
+                }
+            }
+            _ => projected.push(flag.clone()),
+        }
+    }
+    projected
+}
+
+fn validate_real_manifest_lock_context(
+    manifest_path: &Path,
+    project_dir: &Path,
+    cargo_flags: &[String],
+) -> Result<(), String> {
+    if !cargo_flags
+        .iter()
+        .any(|flag| matches!(flag.as_str(), "--locked" | "--frozen"))
+    {
+        return Ok(());
+    }
+    let mut command = std::process::Command::new("cargo");
+    command
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest_path);
+    apply_resolution_flags_to_metadata(&mut command, cargo_flags)?;
+    let output = command
+        .current_dir(project_dir)
+        .output()
+        .map_err(|error| format!("Failed to validate Cargo lock context: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "real Cargo manifest failed the requested locked/frozen resolution context before effective-graph probing:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 fn write_effective_graph_probe_manifest(
     requested_manifest: &Path,
     identity: &ManifestIdentity,
+    cargo_context: &EffectiveGraphCargoContext,
 ) -> Result<EffectiveGraphProbeDir, String> {
     let probe = EffectiveGraphProbeDir::create()?;
     let requested_package_dir = requested_manifest.parent().ok_or_else(|| {
@@ -995,6 +1633,22 @@ fn write_effective_graph_probe_manifest(
         "path".to_string(),
         toml::Value::String(requested_package_dir.to_string_lossy().into_owned()),
     );
+    if !cargo_context.default_features {
+        requested_dependency.insert("default-features".to_string(), toml::Value::Boolean(false));
+    }
+    if !cargo_context.dependency_features.is_empty() {
+        requested_dependency.insert(
+            "features".to_string(),
+            toml::Value::Array(
+                cargo_context
+                    .dependency_features
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+    }
     let mut dependencies = toml::map::Map::new();
     dependencies.insert(
         "__rusty_cpp_requested_root".to_string(),
@@ -1066,14 +1720,21 @@ fn write_effective_graph_probe_manifest(
 /// prunes every host-only procedural-macro subtree. We use its tree only as an
 /// edge-selection witness, while retaining package identities and dependency
 /// aliases from metadata.
+struct NormalTargetPackageSelection {
+    edges: HashSet<(String, String)>,
+    selected_features_by_id: HashMap<String, Vec<String>>,
+}
+
 fn resolve_normal_target_package_edges(
     probe_manifest: &Path,
     project_dir: &Path,
     target_triple: &str,
+    cargo_flags: &[String],
     metadata: &CargoMetadataResolved,
     expected_root_package_id: &str,
-) -> Result<HashSet<(String, String)>, String> {
-    let output = std::process::Command::new("cargo")
+) -> Result<NormalTargetPackageSelection, String> {
+    let mut command = std::process::Command::new("cargo");
+    command
         .arg("tree")
         .arg("--manifest-path")
         .arg(probe_manifest)
@@ -1087,10 +1748,47 @@ fn resolve_normal_target_package_edges(
         .arg("--charset")
         .arg("ascii")
         .arg("--format")
-        .arg("{p}")
+        .arg("{p}|{f}")
         .arg("--color")
         .arg("never")
-        .arg("--quiet")
+        .arg("--quiet");
+    let mut index = 0usize;
+    while index < cargo_flags.len() {
+        let flag = cargo_flags[index].as_str();
+        match flag {
+            // `--target` is already supplied from the exact selected context.
+            "--target" | "--filter-platform" => {
+                if cargo_flags.get(index + 1).is_none() {
+                    return Err(format!("Cargo resolution flag '{flag}' requires a value"));
+                }
+                index += 2;
+            }
+            "--config" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    "Cargo resolution flag '--config' requires a value".to_string()
+                })?;
+                command.arg(flag).arg(value);
+                index += 2;
+            }
+            "--locked" | "--offline" | "--frozen" => {
+                command.arg(flag);
+                index += 1;
+            }
+            _ if flag.starts_with("--target=") || flag.starts_with("--filter-platform=") => {
+                index += 1;
+            }
+            _ if flag.starts_with("--config=") => {
+                command.arg(flag);
+                index += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "feature or unsupported Cargo flag '{flag}' reached the isolated effective-graph tree"
+                ));
+            }
+        }
+    }
+    let output = command
         .current_dir(project_dir)
         .output()
         .map_err(|error| format!("Failed to run cargo tree: {error}"))?;
@@ -1122,17 +1820,19 @@ fn resolve_normal_target_package_edges(
             )
         })?;
         let prefix = format!("{} v{} ", package.name, package.version);
-        let proc_macro_annotation = if package.targets.iter().any(target_is_proc_macro) {
-            "(proc-macro) "
-        } else {
-            ""
-        };
-        let rendered = format!("{prefix}{proc_macro_annotation}({})", package_dir.display());
-        if let Some(previous) = local_by_render.insert(rendered.clone(), package.id.clone()) {
-            return Err(format!(
-                "Cargo normal-tree rendering is ambiguous for package ids '{previous}' and '{}': {rendered}",
-                package.id
-            ));
+        let renderings = [
+            format!("{prefix}({})", package_dir.display()),
+            format!("{prefix}(proc-macro) ({})", package_dir.display()),
+        ];
+        for rendered in renderings {
+            if let Some(previous) = local_by_render.insert(rendered.clone(), package.id.clone())
+                && previous != package.id
+            {
+                return Err(format!(
+                    "Cargo normal-tree rendering is ambiguous for package ids '{previous}' and '{}': {rendered}",
+                    package.id
+                ));
+            }
         }
         local_prefixes.push(prefix);
     }
@@ -1141,6 +1841,7 @@ fn resolve_normal_target_package_edges(
 
     let mut stack = Vec::<Option<String>>::new();
     let mut edges = HashSet::new();
+    let mut selected_features_by_id = HashMap::<String, Vec<String>>::new();
     let mut roots = Vec::new();
     for (line_index, line) in stdout.lines().enumerate() {
         if line.is_empty() {
@@ -1166,17 +1867,51 @@ fn resolve_normal_target_package_edges(
                 line_index + 1
             ));
         }
-        let rendered = &line[depth_end..];
-        let package_id = local_by_render.get(rendered).cloned();
+        let rendered_and_features = &line[depth_end..];
+        let mut local_match: Option<(&str, &str)> = None;
+        for (rendered, package_id) in &local_by_render {
+            if let Some(features) = rendered_and_features
+                .strip_prefix(rendered)
+                .and_then(|suffix| suffix.strip_prefix('|'))
+            {
+                if local_match.is_some() {
+                    return Err(format!(
+                        "Cargo normal-tree line {} matched more than one local package identity: {rendered_and_features}",
+                        line_index + 1
+                    ));
+                }
+                local_match = Some((package_id.as_str(), features));
+            }
+        }
+        let package_id = local_match.map(|(package_id, _)| package_id.to_string());
         if package_id.is_none()
             && local_prefixes
                 .iter()
-                .any(|prefix| rendered.starts_with(prefix))
+                .any(|prefix| rendered_and_features.starts_with(prefix))
         {
             return Err(format!(
-                "Cargo normal tree reported an inexact local package identity on line {}: {rendered}",
+                "Cargo normal tree reported an inexact local package identity on line {}: {rendered_and_features}",
                 line_index + 1
             ));
+        }
+
+        if let Some((package_id, feature_text)) = local_match {
+            let mut features = feature_text
+                .split(',')
+                .map(str::trim)
+                .filter(|feature| !feature.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            features.sort();
+            features.dedup();
+            if let Some(previous) = selected_features_by_id.get(package_id)
+                && previous != &features
+            {
+                return Err(format!(
+                    "Cargo normal tree reported divergent target feature contexts for package '{package_id}': {previous:?} versus {features:?}"
+                ));
+            }
+            selected_features_by_id.insert(package_id.to_string(), features);
         }
 
         stack.truncate(depth);
@@ -1192,7 +1927,10 @@ fn resolve_normal_target_package_edges(
             "cargo tree normal-graph root did not match probe package '{expected_root_package_id}': {roots:?}"
         ));
     }
-    Ok(edges)
+    Ok(NormalTargetPackageSelection {
+        edges,
+        selected_features_by_id,
+    })
 }
 
 fn reject_ambiguous_selected_local_aliases(
@@ -1253,20 +1991,47 @@ fn reject_ambiguous_selected_local_aliases(
 pub fn resolve_effective_local_normal_dependency_graph(
     manifest_path: &Path,
 ) -> Result<EffectiveLocalNormalDependencyGraph, String> {
+    resolve_effective_local_normal_dependency_graph_with_context(manifest_path, None, &[])
+}
+
+pub fn resolve_effective_local_normal_dependency_graph_with_context(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<EffectiveLocalNormalDependencyGraph, String> {
     // Normalize before deriving the Cargo working directory. A one-component
     // relative spelling such as `Cargo.toml` has an empty parent, which cannot
     // be passed to `Command::current_dir` even though the manifest is valid.
     let requested_manifest = canonicalized_path(manifest_path);
     let project_dir = requested_manifest.parent().unwrap_or(Path::new("."));
-    let target_triple = effective_target_triple(project_dir)?;
-    let requested_identity = inspect_manifest_identity(&requested_manifest)?;
-    let probe = write_effective_graph_probe_manifest(&requested_manifest, &requested_identity)?;
-    let output = std::process::Command::new("cargo")
+    let requested_identity = inspect_manifest_identity_with_context(
+        &requested_manifest,
+        package_filter,
+        cargo_flags,
+    )?;
+    validate_real_manifest_lock_context(&requested_manifest, project_dir, cargo_flags)?;
+    let cargo_context = effective_graph_cargo_context(cargo_flags, &requested_identity)?;
+    let probe_non_feature_flags =
+        effective_graph_probe_non_feature_flags(&cargo_context.non_feature_flags);
+    let target_triple = cargo_context
+        .explicit_target
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| effective_target_triple(project_dir))?;
+    let probe = write_effective_graph_probe_manifest(
+        &requested_manifest,
+        &requested_identity,
+        &cargo_context,
+    )?;
+    let mut command = std::process::Command::new("cargo");
+    command
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
         .arg("--manifest-path")
-        .arg(probe.path.join("Cargo.toml"))
+        .arg(probe.path.join("Cargo.toml"));
+    apply_resolution_flags_to_metadata(&mut command, &probe_non_feature_flags)?;
+    let output = command
         .current_dir(project_dir)
         .output()
         .map_err(|error| format!("Failed to run cargo metadata: {error}"))?;
@@ -1290,14 +2055,15 @@ pub fn resolve_effective_local_normal_dependency_graph(
                 probe_manifest.display()
             )
         })?;
-    let normal_package_edges = resolve_normal_target_package_edges(
+    let normal_selection = resolve_normal_target_package_edges(
         &probe.path.join("Cargo.toml"),
         project_dir,
         &target_triple,
+        &probe_non_feature_flags,
         &metadata,
         &probe_package.id,
     )?;
-    let selected = select_resolved_package(&metadata, &requested_manifest, None)?;
+    let selected = select_resolved_package(&metadata, &requested_manifest, package_filter)?;
     let root_manifest = canonicalized_path(&selected.manifest_path);
     let resolve = metadata.resolve.as_ref().ok_or_else(|| {
         "effective-graph cargo metadata did not report a resolved dependency graph".to_string()
@@ -1344,7 +2110,7 @@ pub fn resolve_effective_local_normal_dependency_graph(
             package,
             node,
             &packages_by_id,
-            &normal_package_edges,
+            &normal_selection.edges,
         )?;
 
         let mut edges = Vec::new();
@@ -1354,7 +2120,10 @@ pub fn resolve_effective_local_normal_dependency_graph(
             if !has_normal_kind {
                 continue;
             }
-            if !normal_package_edges.contains(&(package.id.clone(), dependency.pkg.clone())) {
+            if !normal_selection
+                .edges
+                .contains(&(package.id.clone(), dependency.pkg.clone()))
+            {
                 continue;
             }
             let dependency_package =
@@ -1374,10 +2143,21 @@ pub fn resolve_effective_local_normal_dependency_graph(
                 ));
             }
             let dependency_manifest = canonicalized_path(&dependency_package.manifest_path);
+            let resolved_features = normal_selection
+                .selected_features_by_id
+                .get(&dependency.pkg)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Cargo normal tree omitted the target feature set for local dependency '{}'",
+                        dependency_package.name
+                    )
+                })?;
             edges.push(EffectiveLocalNormalDependency {
                 dependency_key: dependency.name.clone(),
                 package_name: dependency_package.name.clone(),
                 manifest_path: dependency_manifest,
+                resolved_features,
             });
             pending.push(dependency_package.id.as_str());
         }
@@ -1401,9 +2181,10 @@ pub fn resolve_effective_local_normal_dependency_graph(
 /// Discover resolved dependency packages for the selected package.
 ///
 /// Returns dependency packages in deterministic dependency order
-/// (dependencies first), filtered to unconditional normal dependencies
-/// (`kind = null`, `target = null`; optionally `kind = dev`) from the
-/// resolved graph.
+/// (dependencies first), filtered to normal dependencies (optionally dev).
+/// Target-qualified edges are accepted only when this query carries an exact
+/// `--target`/`--filter-platform` context and Cargo has already pruned the
+/// resolve graph; otherwise they remain excluded fail-closed.
 ///
 /// When `include_registry_packages` is `false`, this preserves legacy behavior
 /// and returns only local path dependencies (`source = null`).
@@ -1421,9 +2202,7 @@ pub fn discover_library_dependencies(
         .arg("1")
         .arg("--manifest-path")
         .arg(manifest_path);
-    for flag in cargo_flags {
-        cmd.arg(flag);
-    }
+    apply_resolution_flags_to_metadata(&mut cmd, cargo_flags)?;
     let output = cmd
         .current_dir(project_dir)
         .output()
@@ -1447,6 +2226,12 @@ pub fn discover_library_dependencies(
     let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut resolved_features_by_id: HashMap<&str, Vec<String>> = HashMap::new();
     let mut dependency_roots_by_id: HashMap<&str, HashSet<String>> = HashMap::new();
+    let platform_filtered = cargo_flags.iter().any(|flag| {
+        flag == "--target"
+            || flag == "--filter-platform"
+            || flag.starts_with("--target=")
+            || flag.starts_with("--filter-platform=")
+    });
     if let Some(resolve) = &metadata.resolve {
         for node in &resolve.nodes {
             let mut deps = Vec::new();
@@ -1455,7 +2240,11 @@ pub fn discover_library_dependencies(
                 // target-qualified edges we cannot soundly evaluate here.
                 let include = dep.dep_kinds.is_empty()
                     || dep.dep_kinds.iter().any(|kind| {
-                        if kind.target.is_some() {
+                        // With `--filter-platform`, Cargo has already pruned
+                        // non-matching target-qualified edges from the resolve
+                        // graph.  Without it, retaining any such edge would
+                        // guess a target context, so continue to fail closed.
+                        if kind.target.is_some() && !platform_filtered {
                             return false;
                         }
                         kind.kind.is_none()
@@ -1755,6 +2544,7 @@ mod tests {
                     rust_version: None,
                     targets: vec![],
                     manifest_path: xtask_manifest,
+                    features: HashMap::new(),
                     dependencies: vec![],
                 },
                 Package {
@@ -1764,6 +2554,7 @@ mod tests {
                     rust_version: None,
                     targets: vec![],
                     manifest_path: root_manifest.clone(),
+                    features: HashMap::new(),
                     dependencies: vec![],
                 },
             ],
@@ -1800,6 +2591,7 @@ mod tests {
                     rust_version: None,
                     targets: vec![],
                     manifest_path: root_manifest.clone(),
+                    features: HashMap::new(),
                     dependencies: vec![],
                 },
                 Package {
@@ -1809,6 +2601,7 @@ mod tests {
                     rust_version: None,
                     targets: vec![],
                     manifest_path: member_manifest,
+                    features: HashMap::new(),
                     dependencies: vec![],
                 },
             ],
@@ -1886,11 +2679,14 @@ mod tests {
             edition: "2021".to_string(),
             rust_version: Some("1.85".to_string()),
             workspace_root: workspace.clone(),
+            feature_names: Vec::new(),
             dependencies: Vec::new(),
             targets: Vec::new(),
         };
-        let probe = write_effective_graph_probe_manifest(&member.join("Cargo.toml"), &identity)
-            .expect("write effective-graph probe");
+        let context = effective_graph_cargo_context(&[], &identity).unwrap();
+        let probe =
+            write_effective_graph_probe_manifest(&member.join("Cargo.toml"), &identity, &context)
+                .expect("write effective-graph probe");
         let source = std::fs::read_to_string(probe.path.join("Cargo.toml")).unwrap();
         let manifest = toml::from_str::<toml::Value>(&source).unwrap();
         assert_eq!(manifest["package"]["edition"].as_str(), Some("2021"));
@@ -1908,6 +2704,91 @@ mod tests {
         let path = probe.path.clone();
         drop(probe);
         assert!(!path.exists(), "effective-graph probe was not removed");
+    }
+
+    #[test]
+    fn test_effective_graph_context_projects_only_selected_root_features() {
+        let identity = ManifestIdentity {
+            package_name: "root_pkg".to_string(),
+            edition: "2024".to_string(),
+            rust_version: None,
+            workspace_root: PathBuf::from("/workspace"),
+            feature_names: vec![
+                "alpha".to_string(),
+                "beta".to_string(),
+                "default".to_string(),
+            ],
+            dependencies: Vec::new(),
+            targets: Vec::new(),
+        };
+
+        let context = effective_graph_cargo_context(
+            &[
+                "--features".to_string(),
+                "root_pkg/alpha,beta".to_string(),
+                "--no-default-features".to_string(),
+                "--target".to_string(),
+                "aarch64-unknown-linux-gnu".to_string(),
+                "--config=net.offline=true".to_string(),
+            ],
+            &identity,
+        )
+        .unwrap();
+        assert_eq!(context.dependency_features, vec!["alpha", "beta"]);
+        assert!(!context.default_features);
+        assert_eq!(
+            context.explicit_target.as_deref(),
+            Some("aarch64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            context.non_feature_flags,
+            vec![
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--config=net.offline=true",
+            ]
+        );
+
+        let all_features =
+            effective_graph_cargo_context(&["--all-features".to_string()], &identity).unwrap();
+        assert_eq!(
+            all_features.dependency_features,
+            vec!["alpha", "beta", "default"]
+        );
+        assert!(all_features.default_features);
+        assert!(all_features.explicit_target.is_none());
+        assert!(all_features.non_feature_flags.is_empty());
+
+        assert_eq!(
+            effective_graph_probe_non_feature_flags(&[
+                "--target".to_string(),
+                "aarch64-unknown-linux-gnu".to_string(),
+                "--locked".to_string(),
+                "--frozen".to_string(),
+                "--offline".to_string(),
+                "--config=net.retry=0".to_string(),
+            ]),
+            vec![
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--offline",
+                "--config=net.retry=0",
+            ]
+        );
+
+        for selector in ["dependency/activate", "dependency?/activate"] {
+            let error = effective_graph_cargo_context(
+                &["--features".to_string(), selector.to_string()],
+                &identity,
+            )
+            .expect_err("dependency-qualified features must fail closed");
+            assert!(
+                error.contains("unsupported Cargo dependency feature selector")
+                    && error.contains(selector)
+                    && error.contains("cannot exactly project"),
+                "unexpected diagnostic for {selector}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -2007,5 +2888,439 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].name, "manifest_owned_fixture");
         assert_eq!(targets[0].kind, TargetKind::Lib);
+    }
+
+    #[test]
+    fn test_resolved_extern_dependency_uses_cargo_crate_name_not_package_key() {
+        let fixture = tempfile::tempdir().unwrap();
+        let provider = fixture.path().join("provider");
+        let consumer = fixture.path().join("consumer");
+        std::fs::create_dir_all(provider.join("src")).unwrap();
+        std::fs::create_dir_all(consumer.join("src")).unwrap();
+        std::fs::write(
+            provider.join("Cargo.toml"),
+            "[package]\nname='innocent_package'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='std'\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            provider.join("src/lib.rs"),
+            "#![no_std]\npub mod default { pub trait Default {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("Cargo.toml"),
+            "[package]\nname='consumer'\nversion='0.0.0'\nedition='2024'\n[dependencies]\ninnocent_package={path='../provider'}\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("src/lib.rs"),
+            "#![no_std]\npub fn value<T: std::default::Default>() {}\n",
+        )
+        .unwrap();
+        let check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(consumer.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", fixture.path().join("target"))
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "resolved extern-name fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let dependencies =
+            inspect_resolved_extern_dependencies(&consumer.join("Cargo.toml")).unwrap();
+        assert_eq!(
+            dependencies,
+            vec![ResolvedExternDependency {
+                extern_crate_root: "std".to_string(),
+                package_name: "innocent_package".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_resolved_extern_dependency_uses_exact_feature_context() {
+        let fixture = tempfile::tempdir().unwrap();
+        let provider = fixture.path().join("provider");
+        let consumer = fixture.path().join("consumer");
+        std::fs::create_dir_all(provider.join("src")).unwrap();
+        std::fs::create_dir_all(consumer.join("src")).unwrap();
+        std::fs::write(
+            provider.join("Cargo.toml"),
+            "[package]\nname='innocent_package'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='std'\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            provider.join("src/lib.rs"),
+            "#![no_std]\npub mod default { pub trait Default {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("Cargo.toml"),
+            "[package]\nname='feature_consumer'\nversion='0.0.0'\nedition='2024'\n[features]\ndefault=[]\nfake-std=['dep:innocent_package']\n[dependencies]\ninnocent_package={path='../provider',optional=true}\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("src/lib.rs"),
+            "#![no_std]\nextern crate std;\npub fn value<T: std::default::Default>() {}\n",
+        )
+        .unwrap();
+        let manifest = consumer.join("Cargo.toml");
+
+        let inactive = inspect_resolved_extern_dependencies_with_context(
+            &manifest,
+            Some("feature_consumer"),
+            &["--no-default-features".to_string()],
+        )
+        .unwrap();
+        assert!(inactive.is_empty(), "inactive optional leaked: {inactive:?}");
+
+        for flags in [
+            vec!["--features".to_string(), "fake-std".to_string()],
+            vec!["--all-features".to_string()],
+        ] {
+            let active = inspect_resolved_extern_dependencies_with_context(
+                &manifest,
+                Some("feature_consumer"),
+                &flags,
+            )
+            .unwrap();
+            assert_eq!(
+                active,
+                vec![ResolvedExternDependency {
+                    extern_crate_root: "std".to_string(),
+                    package_name: "innocent_package".to_string(),
+                }],
+                "wrong graph for flags {flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolved_extern_dependency_honors_package_rename_and_target_filter() {
+        let fixture = tempfile::tempdir().unwrap();
+        let provider = fixture.path().join("provider");
+        let consumer = fixture.path().join("consumer");
+        std::fs::create_dir_all(provider.join("src")).unwrap();
+        std::fs::create_dir_all(consumer.join("src")).unwrap();
+        std::fs::write(
+            provider.join("Cargo.toml"),
+            "[package]\nname='renamed_provider'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(provider.join("src/lib.rs"), "#![no_std]\n").unwrap();
+        std::fs::write(
+            consumer.join("Cargo.toml"),
+            "[package]\nname='target_consumer'\nversion='0.0.0'\nedition='2024'\n[target.'cfg(target_pointer_width = \"64\")'.dependencies]\nstd={package='renamed_provider',path='../provider'}\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(consumer.join("src/lib.rs"), "#![no_std]\n").unwrap();
+        let manifest = consumer.join("Cargo.toml");
+
+        let host = inspect_resolved_extern_dependencies_with_context(
+            &manifest,
+            Some("target_consumer"),
+            &[
+                "--target".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            host,
+            vec![ResolvedExternDependency {
+                extern_crate_root: "std".to_string(),
+                package_name: "renamed_provider".to_string(),
+            }]
+        );
+
+        let other = inspect_resolved_extern_dependencies_with_context(
+            &manifest,
+            Some("target_consumer"),
+            &[
+                "--target".to_string(),
+                "wasm32-unknown-unknown".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(other.is_empty(), "non-matching target edge leaked: {other:?}");
+    }
+
+    #[test]
+    fn compilation_context_separates_normal_dev_build_features_and_unknown_sources() {
+        let fixture = tempfile::tempdir().unwrap();
+        for (directory, package, lib_name) in [
+            ("normal", "normal_package", "normal_root"),
+            ("dev", "dev_package", "std"),
+            ("build", "build_package", "core"),
+            ("optional", "optional_package", "alloc"),
+            ("rusty", "innocent_rusty_package", "rusty"),
+        ] {
+            let provider = fixture.path().join(directory);
+            std::fs::create_dir_all(provider.join("src")).unwrap();
+            std::fs::write(
+                provider.join("Cargo.toml"),
+                format!(
+                    "[package]\nname='{package}'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='{lib_name}'\n[workspace]\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(provider.join("src/lib.rs"), "#![no_std]\n").unwrap();
+        }
+
+        let consumer = fixture.path().join("consumer");
+        std::fs::create_dir_all(consumer.join("src/nested")).unwrap();
+        std::fs::create_dir_all(consumer.join("tests")).unwrap();
+        std::fs::write(
+            consumer.join("Cargo.toml"),
+            "[package]\nname='context_consumer'\nversion='0.0.0'\nedition='2024'\n\
+             [features]\ndefault=[]\nfake-alloc=['dep:optional_package']\n\
+             [dependencies]\nnormal_package={path='../normal'}\noptional_package={path='../optional',optional=true}\n\
+             [dev-dependencies]\ndev_package={path='../dev'}\ninnocent_rusty_package={path='../rusty'}\n\
+             [build-dependencies]\nbuild_package={path='../build'}\n\
+             [[test]]\nname='integration'\npath='tests/integration.rs'\n\
+             [workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("src/lib.rs"),
+            "pub mod nested; pub fn value() {}\n",
+        )
+        .unwrap();
+        std::fs::write(consumer.join("src/nested/mod.rs"), "pub fn nested() {}\n").unwrap();
+        std::fs::write(consumer.join("tests/integration.rs"), "#[test] fn works() {}\n")
+            .unwrap();
+        std::fs::write(consumer.join("build.rs"), "fn main() {}\n").unwrap();
+        let manifest = consumer.join("Cargo.toml");
+        let (_, targets) = discover_targets_with_context(&manifest, None, &[]).unwrap();
+        let lib = targets
+            .iter()
+            .find(|target| target.kind == TargetKind::Lib)
+            .unwrap();
+        let test = targets
+            .iter()
+            .find(|target| target.kind == TargetKind::Test)
+            .unwrap();
+
+        let dependency_roots = |context: CargoCompilationContext, flags: &[String]| {
+            inspect_resolved_extern_dependencies_for_compilation(
+                &manifest,
+                None,
+                flags,
+                &context,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|dependency| dependency.extern_crate_root)
+            .collect::<HashSet<_>>()
+        };
+        assert_eq!(
+            dependency_roots(CargoCompilationContext::exact(lib, false), &[]),
+            HashSet::from(["normal_root".to_string()])
+        );
+        assert_eq!(
+            dependency_roots(CargoCompilationContext::exact(test, false), &[]),
+            HashSet::from([
+                "normal_root".to_string(),
+                "rusty".to_string(),
+                "std".to_string(),
+            ])
+        );
+        let build = CargoCompilationContext {
+            target_name: Some("build-script-build".to_string()),
+            target_kind: Some(TargetKind::Other("custom-build".to_string())),
+            target_src_path: None,
+            dependency_context: CargoDependencyContext::Build,
+        };
+        assert_eq!(
+            dependency_roots(build, &[]),
+            HashSet::from(["core".to_string()])
+        );
+        assert_eq!(
+            dependency_roots(CargoCompilationContext::conservative(), &[]),
+            HashSet::from([
+                "core".to_string(),
+                "normal_root".to_string(),
+                "rusty".to_string(),
+                "std".to_string(),
+            ])
+        );
+        assert_eq!(
+            dependency_roots(
+                CargoCompilationContext::conservative(),
+                &["--features".to_string(), "fake-alloc".to_string()],
+            ),
+            HashSet::from([
+                "alloc".to_string(),
+                "core".to_string(),
+                "normal_root".to_string(),
+                "rusty".to_string(),
+                "std".to_string(),
+            ])
+        );
+
+        assert_eq!(
+            compilation_context_for_source(
+                &manifest,
+                None,
+                &[],
+                &consumer.join("src/lib.rs"),
+                false,
+            )
+            .unwrap()
+            .dependency_context(),
+            CargoDependencyContext::Normal
+        );
+        assert_eq!(
+            compilation_context_for_source(
+                &manifest,
+                None,
+                &[],
+                &consumer.join("tests/integration.rs"),
+                false,
+            )
+            .unwrap()
+            .dependency_context(),
+            CargoDependencyContext::Development
+        );
+        let build_context = compilation_context_for_source(
+            &manifest,
+            None,
+            &[],
+            &consumer.join("build.rs"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            build_context.dependency_context(),
+            CargoDependencyContext::Build
+        );
+        assert!(
+            build_context.cargo_target_args().is_err(),
+            "build-script expansion silently selected another Cargo target"
+        );
+        assert_eq!(
+            compilation_context_for_source(
+                &manifest,
+                None,
+                &[],
+                &consumer.join("src/nested/mod.rs"),
+                false,
+            )
+            .unwrap()
+            .dependency_context(),
+            CargoDependencyContext::Unknown
+        );
+        assert!(
+            compilation_context_for_source(
+                &manifest,
+                None,
+                &[],
+                &consumer.join("src/nested/mod.rs"),
+                false,
+            )
+            .unwrap()
+            .cargo_target_args()
+            .is_err(),
+            "nested module expansion silently selected Cargo's default target"
+        );
+    }
+
+    #[test]
+    fn effective_normal_graph_keeps_target_features_separate_from_build_union() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        let chooser = fixture.path().join("chooser");
+        let poison = fixture.path().join("poison");
+        for package in [&root, &chooser, &poison] {
+            std::fs::create_dir_all(package.join("src")).unwrap();
+        }
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='context_root'\nversion='0.0.0'\nedition='2024'\nbuild='build.rs'\n\
+             [dependencies]\ncontext_chooser={path='../chooser',default-features=false}\n\
+             [build-dependencies]\ncontext_chooser={path='../chooser',default-features=false,features=['activate']}\n\
+             [workspace]\nresolver='2'\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+        std::fs::write(root.join("build.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            chooser.join("Cargo.toml"),
+            "[package]\nname='context_chooser'\nversion='0.0.0'\nedition='2024'\n\
+             [features]\ndefault=[]\nactivate=['dep:context_poison']\n\
+             [dependencies]\ncontext_poison={path='../poison',optional=true}\n",
+        )
+        .unwrap();
+        std::fs::write(chooser.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+        std::fs::write(
+            poison.join("Cargo.toml"),
+            "[package]\nname='context_poison'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        std::fs::write(poison.join("src/lib.rs"), "pub fn poison() {}\n").unwrap();
+
+        let graph = resolve_effective_local_normal_dependency_graph_with_context(
+            &root.join("Cargo.toml"),
+            None,
+            &[],
+        )
+        .unwrap();
+        let root_dependencies = graph
+            .direct_dependencies(&root.join("Cargo.toml"))
+            .unwrap();
+        assert_eq!(root_dependencies.len(), 1);
+        assert_eq!(root_dependencies[0].dependency_key, "context_chooser");
+        assert!(
+            root_dependencies[0].resolved_features.is_empty(),
+            "build-only metadata feature union leaked into target context: {:?}",
+            root_dependencies[0].resolved_features
+        );
+        assert!(
+            graph
+                .direct_dependencies(&chooser.join("Cargo.toml"))
+                .unwrap()
+                .is_empty(),
+            "build-only optional dependency leaked into target-normal graph"
+        );
+
+        let lock = std::process::Command::new("cargo")
+            .arg("generate-lockfile")
+            .arg("--manifest-path")
+            .arg(root.join("Cargo.toml"))
+            .arg("--offline")
+            .output()
+            .unwrap();
+        assert!(
+            lock.status.success(),
+            "could not establish locked fixture:\n{}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        for (label, flags) in [
+            (
+                "locked offline",
+                vec!["--locked".to_string(), "--offline".to_string()],
+            ),
+            ("frozen", vec!["--frozen".to_string()]),
+        ] {
+            let locked_graph = resolve_effective_local_normal_dependency_graph_with_context(
+                &root.join("Cargo.toml"),
+                None,
+                &flags,
+            )
+            .unwrap_or_else(|error| panic!("{label} effective graph failed: {error}"));
+            assert_eq!(
+                locked_graph
+                    .direct_dependencies(&root.join("Cargo.toml"))
+                    .unwrap()
+                    .iter()
+                    .map(|dependency| dependency.dependency_key.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["context_chooser"],
+                "{label} changed the selected normal graph"
+            );
+        }
     }
 }
