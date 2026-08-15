@@ -749,9 +749,13 @@ def _alloc_specific(cpp_out: Path):
         # ByRefSized` is a non-dependent name that fails at parse. ByRefSized is
         # just a zero-cost re-borrow; `iter.take(…)` is dependent (unchecked
         # unless instantiated) and the correct intent.
-        t = t.replace(
-            "size_t::ByRefSized(&iter).take(",
+        # The qualifier the emitter picks for ByRefSized has varied
+        # (`size_t::`, `rusty::iter::`); none of them names a real entity, so
+        # match whatever prefix appears rather than one spelling.
+        t = re.sub(
+            r"[\w:]*::ByRefSized\(&iter\)\.take\(",
             "iter.take(",
+            t,
         )
         # VecDeque::resize used core::iter::repeat_n (no rusty::iter analog).
         # Emit a real loop so resize actually works (vendored abort-stubs it).
@@ -1004,7 +1008,10 @@ def _alloc_specific(cpp_out: Path):
         t = re.sub(
             r"return \[&\]\(\) -> void \{ auto&& _m = e\.kind\(\);.*?"
             r"rusty::collections::TryReserveErrorKind::CapacityOverflow = _m;.*?"
-            r"rusty::intrinsics::unreachable\(\); \}\(\); \}\(\);",
+            # The emitter's diverging-tail spelling varies (`unreachable()` vs
+            # `unreachable_panic()`); anchor on either so a spelling change
+            # cannot silently leave this arm unpatched.
+            r"rusty::intrinsics::unreachable(?:_panic)?\(\); \}\(\); \}\(\);",
             "if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) "
             "{ rusty::panicking::panic(\"capacity overflow\"); } std::abort();",
             t,

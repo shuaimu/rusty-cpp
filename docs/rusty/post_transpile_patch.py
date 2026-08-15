@@ -227,15 +227,23 @@ def patch_rusty(path: Path) -> None:
     # HashMap::new_/HashSet::new_ route through rusty::default_value, whose
     # protocol doesn't cover these types. Rust's Default here IS
     # with_hasher(RandomState::default()) — spell that directly.
-    t = t.replace(
-        f"return rusty::default_value<HashMap<K, V, {ns}::hash::random::RandomState>>();",
+    # The emitter's spelling for the Default dispatcher has varied
+    # (`default_value` -> `default_like`); match either, since neither
+    # protocol covers these types and an unmatched anchor leaves the
+    # unbuildable `V{}` value-init tier in place.
+    t = re.sub(
+        r"return rusty::default_(?:value|like)<HashMap<K, V, "
+        + re.escape(f"{ns}::hash::random::RandomState") + r">>\(\);",
         f"return HashMap<K, V, {ns}::hash::random::RandomState>::with_hasher("
         f"{ns}::hash::random::RandomState::new_());",
+        t,
     )
-    t = t.replace(
-        f"return rusty::default_value<HashSet<T, {ns}::hash::random::RandomState>>();",
+    t = re.sub(
+        r"return rusty::default_(?:value|like)<HashSet<T, "
+        + re.escape(f"{ns}::hash::random::RandomState") + r">>\(\);",
         f"return HashSet<T, {ns}::hash::random::RandomState>::with_capacity_and_hasher("
         f"0, {ns}::hash::random::RandomState::new_());",
+        t,
     )
     # (d) AllocError carries a Layout payload in Rust; the runtime ctor takes
     # (Kind, size, align).
