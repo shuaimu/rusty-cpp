@@ -27,6 +27,79 @@ impl CodeGen {
         }
     }
 
+    /// H5 / checkpoint contract 5 — resolve which `Weak` a reference means.
+    ///
+    /// Rust's `std::rc::Weak` and `std::sync::Weak` share the bare leaf name,
+    /// and the rusty umbrella deliberately declares no ambiguous top-level
+    /// `rusty::Weak` alias (see `types::map_std_type`). `map_std_type` only
+    /// ever sees the leaf, so it must guess — it documents the rc default.
+    /// The provenance is knowable, though: an explicit `rc`/`sync` module
+    /// segment, the `RcWeak`/`ArcWeak` import aliases (precedent: the alias
+    /// rewrites in `map_type`), or the scope import binding for the bare
+    /// name. `None` means "unresolved" — the caller keeps the documented
+    /// default rather than inventing provenance.
+    pub(super) fn resolve_weak_family_cpp_base(&self, path: &syn::Path) -> Option<&'static str> {
+        let leaf = path.segments.last()?.ident.to_string();
+        match leaf.as_str() {
+            "ArcWeak" => return Some("rusty::sync::Weak"),
+            "RcWeak" => return Some("rusty::rc::Weak"),
+            "Weak" => {}
+            _ => return None,
+        }
+        if path.segments.len() >= 2 {
+            return Self::weak_cpp_base_for_owner_module(
+                &path.segments[path.segments.len() - 2].ident.to_string(),
+            );
+        }
+        let bound = self.resolve_scope_import_binding_path("Weak")?;
+        Self::weak_cpp_base_for_bound_target(&bound)
+    }
+
+    /// The same resolution, falling back to `map_std_type`'s documented
+    /// default for an unimported bare `Weak` so that callers which have
+    /// already established the reference IS a Weak (a trait-object target,
+    /// say) always get a spelling. Returns `None` for non-Weak paths.
+    pub(super) fn weak_family_cpp_base_or_default(&self, path: &syn::Path) -> Option<String> {
+        let leaf = path.segments.last()?.ident.to_string();
+        if !matches!(leaf.as_str(), "Weak" | "RcWeak" | "ArcWeak") {
+            return None;
+        }
+        Some(
+            self.resolve_weak_family_cpp_base(path)
+                .map(|base| base.to_string())
+                .unwrap_or_else(|| {
+                    types::map_std_type(&leaf)
+                        .map(|(cpp, _)| cpp.to_string())
+                        .unwrap_or_else(|| "rusty::rc::Weak".to_string())
+                }),
+        )
+    }
+
+    fn weak_cpp_base_for_owner_module(owner_module: &str) -> Option<&'static str> {
+        match owner_module {
+            "sync" => Some("rusty::sync::Weak"),
+            "rc" => Some("rusty::rc::Weak"),
+            _ => None,
+        }
+    }
+
+    fn weak_cpp_base_for_bound_target(bound: &str) -> Option<&'static str> {
+        let parts: Vec<&str> = bound
+            .trim_start_matches("::")
+            .split("::")
+            .filter(|seg| !seg.is_empty())
+            .collect();
+        if parts.last() != Some(&"Weak") {
+            return None;
+        }
+        parts
+            .iter()
+            .rev()
+            .nth(1)
+            .copied()
+            .and_then(Self::weak_cpp_base_for_owner_module)
+    }
+
     pub(super) fn type_tokens_contain_import_alias(&self, ty: &syn::Type) -> bool {
         if self.import_alias_names.is_empty() {
             return false;
@@ -2333,6 +2406,19 @@ impl CodeGen {
                 if path_str == "ArcWeak" || path_str.ends_with("::ArcWeak") {
                     path_str = "rusty::sync::Weak".to_string();
                 }
+                // A BARE `Weak` is ambiguous in Rust and `map_std_type` — which
+                // only ever sees the leaf — defaults it to the rc form. The
+                // scope import decides (`use std::sync::{Arc, Weak}` means the
+                // sync one), and the reference must resolve the SAME way on
+                // every surface, not only in forward-decl signatures (the one
+                // path that already resolved imports, which is precisely how
+                // one source type acquired two C++ spellings — H5).
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "Weak"
+                    && let Some(weak_base) = self.resolve_weak_family_cpp_base(&tp.path)
+                {
+                    path_str = weak_base.to_string();
+                }
                 if let Some(mapped_into_iter) =
                     self.rewrite_mapped_assoc_into_iter_cpp_type(&path_str)
                 {
@@ -2491,11 +2577,25 @@ impl CodeGen {
                     // a shared pointer is as ordinary as one behind a
                     // unique pointer — srpc's poll thread holds its
                     // pollables as Arc<dyn Pollable>.
-                    if seg_name == "Arc" || seg_name == "Rc" {
+                    // `Weak<dyn T>` is the same shape one indirection out and
+                    // gets the same treatment (H5 / checkpoint contract 5):
+                    // without it the trait-object target fell to the
+                    // module-mode `void*` blanket, so the ONE source type
+                    // `Weak<dyn EventPollable>` was emitted with an erased
+                    // target that no `upgrade()` could dispatch through. The
+                    // base spelling carries `Weak`'s PROVENANCE (the bare leaf
+                    // is ambiguous in Rust — see resolve_weak_family_cpp_base).
+                    let weak_family_base = (!matches!(seg_name.as_str(), "Arc" | "Rc"))
+                        .then(|| self.weak_family_cpp_base_or_default(&tp.path))
+                        .flatten();
+                    if seg_name == "Arc" || seg_name == "Rc" || weak_family_base.is_some() {
                         if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
                             && let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
                                 args.args.first()
                         {
+                            let smart_ptr_base = weak_family_base
+                                .clone()
+                                .unwrap_or_else(|| format!("rusty::{}", seg_name));
                             let trait_paths: Vec<&syn::Path> = to
                                 .bounds
                                 .iter()
@@ -2511,12 +2611,12 @@ impl CodeGen {
                             if !trait_paths.is_empty() && trait_names.len() == trait_paths.len() {
                                 if trait_names.len() == 1 {
                                     let trait_cpp = self.interface_trait_cpp_name(trait_paths[0]);
-                                    return format!("rusty::{}<{}>", seg_name, trait_cpp);
+                                    return format!("{}<{}>", smart_ptr_base, trait_cpp);
                                 }
                                 let mut sorted = trait_names.clone();
                                 sorted.sort();
                                 let combined = self.register_and_synthesize_dyn_multi_name(sorted);
-                                return format!("rusty::{}<{}>", seg_name, combined);
+                                return format!("{}<{}>", smart_ptr_base, combined);
                             }
                         }
                     }

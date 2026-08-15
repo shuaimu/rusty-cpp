@@ -13265,6 +13265,11 @@ impl CodeGen {
         candidates.into_iter().any(|name| {
             if self.is_type_param_in_scope(&name)
                 || self.current_module_declares_type_name_exact(&name)
+                || self.forward_decl_weak_target_interface_trait_class(
+                    &name,
+                    return_type,
+                    params,
+                )
                 || (allow_imported_names && imported_local_names.contains(&name))
             {
                 return false;
@@ -13272,6 +13277,78 @@ impl CodeGen {
             Self::cpp_spelling_mentions_identifier_unqualified(return_type, &name)
                 || Self::cpp_spelling_mentions_identifier_unqualified(params, &name)
         })
+    }
+
+    /// An interface trait this file declares is emitted as a class AND
+    /// forward-declared ahead of the function forward-decl block, so its bare
+    /// name DOES resolve there — it is not an "unknown type tail".
+    ///
+    /// Surfaced by H5: once `Weak<dyn EventPollable>` stopped erasing its
+    /// target to `void*`, the interface class name entered a free function's
+    /// signature and this check silently dropped the whole forward
+    /// declaration, leaving the call sites emitted earlier in the TU with
+    /// nothing to bind to.
+    ///
+    /// Deliberately scoped to H5's blast radius — the name must appear ONLY
+    /// as a `rusty::{sync,rc}::Weak<…>` target. The general case (an
+    /// interface class named anywhere in a forward-declared signature, e.g.
+    /// serializable's `Arc<SerializableBase>` factories) has the same defect
+    /// and the same repair, but widening the policy changes frozen provider
+    /// output, so it belongs to its own contract with its own re-oracle.
+    fn forward_decl_weak_target_interface_trait_class(
+        &self,
+        name: &str,
+        return_type: &str,
+        params: &str,
+    ) -> bool {
+        if name.is_empty()
+            || self.skipped_interface_traits.contains(name)
+            || !self.trait_declared_path_by_short_name.contains_key(name)
+        {
+            return false;
+        }
+        let mut found_any = false;
+        for spelling in [return_type, params] {
+            match Self::cpp_spelling_names_identifier_only_as_weak_target(spelling, name) {
+                None => {}
+                Some(true) => found_any = true,
+                Some(false) => return false,
+            }
+        }
+        found_any
+    }
+
+    /// `None` — the spelling never names `name` unqualified. `Some(true)` —
+    /// every unqualified occurrence is a rusty weak-pointer target.
+    /// `Some(false)` — at least one occurrence is somewhere else.
+    fn cpp_spelling_names_identifier_only_as_weak_target(
+        spelling: &str,
+        name: &str,
+    ) -> Option<bool> {
+        let is_ident_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+        let mut found_any = false;
+        let mut search_from = 0usize;
+        while let Some(offset) = spelling[search_from..].find(name) {
+            let start = search_from + offset;
+            let end = start + name.len();
+            search_from = end;
+            if spelling[..start].chars().next_back().is_some_and(is_ident_char)
+                || spelling[end..].chars().next().is_some_and(is_ident_char)
+            {
+                continue;
+            }
+            let prefix = &spelling[..start];
+            if prefix.ends_with("::") {
+                // Already qualified — not a candidate for the unqualified check.
+                continue;
+            }
+            found_any = true;
+            let trimmed = prefix.trim_end();
+            if !(trimmed.ends_with("rusty::sync::Weak<") || trimmed.ends_with("rusty::rc::Weak<")) {
+                return Some(false);
+            }
+        }
+        found_any.then_some(true)
     }
 
 
@@ -39863,6 +39940,116 @@ impl CodeGen {
         Some((owner_base, arg_strs))
     }
 
+    /// H5(c) / checkpoint contract 5 — omitted owner generics on a
+    /// smart-pointer associated call are recovered from the ARGUMENT.
+    ///
+    /// `Arc::downgrade(&base)` names no owner generics, and the enclosing
+    /// function's type parameters are the wrong place to look: the carrier
+    /// writes `let base: Arc<dyn EventPollable> = ev.clone();` precisely to
+    /// COERCE the concrete `Ev` away, and the ordered-scope fallback then
+    /// reinstated it (`Arc<Ev>::downgrade(base)`) — an instantiation the
+    /// argument does not have. The argument's declared type IS the exact
+    /// instantiation, so prefer it.
+    ///
+    /// Scoped hard — smart-pointer family, owner generics omitted, an
+    /// owner-typed first argument of that same family. In particular the
+    /// Either/EitherOrBoth known-arity recovery that shares the ordered-scope
+    /// fallback is left alone.
+    fn smart_pointer_assoc_owner_args_from_argument(
+        &self,
+        call: &syn::ExprCall,
+        owner_name: &str,
+        method_name: &str,
+        owner_args_omitted: bool,
+    ) -> Option<Vec<String>> {
+        if !owner_args_omitted {
+            return None;
+        }
+        let owner_family = Self::smart_pointer_owner_family(owner_name)?;
+        if !matches!(
+            method_name,
+            "downgrade"
+                | "upgrade"
+                | "as_ptr"
+                | "get_mut"
+                | "strong_count"
+                | "weak_count"
+                | "try_unwrap"
+                | "into_inner"
+                | "ptr_eq"
+        ) {
+            return None;
+        }
+        let mut arg = self.peel_paren_group_expr(call.args.first()?);
+        while let syn::Expr::Reference(reference) = arg {
+            arg = self.peel_paren_group_expr(&reference.expr);
+        }
+        let arg_ty = self.infer_simple_expr_type(arg)?;
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&arg_ty) else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if Self::smart_pointer_owner_family(&last.ident.to_string()) != Some(owner_family) {
+            return None;
+        }
+        if !matches!(last.arguments, syn::PathArguments::AngleBracketed(_)) {
+            return None;
+        }
+        // Map the WHOLE argument type, so the smart-pointer trait-object
+        // special cases decide the target (`Arc<dyn EventPollable>` →
+        // `rusty::Arc<EventPollable>`), then take its template arguments.
+        let mapped = self.map_type(&syn::Type::Path(tp.clone()));
+        let args = Self::cpp_type_template_args(&mapped)?;
+        (!args.is_empty()).then_some(args)
+    }
+
+    fn smart_pointer_owner_family(name: &str) -> Option<&'static str> {
+        match name {
+            "Arc" => Some("Arc"),
+            "Rc" => Some("Rc"),
+            "Weak" | "RcWeak" | "ArcWeak" => Some("Weak"),
+            _ => None,
+        }
+    }
+
+    /// Split the top-level template arguments out of an already-mapped C++
+    /// type spelling (`rusty::Arc<Foo<A, B>>` → `["Foo<A, B>"]`).
+    fn cpp_type_template_args(mapped: &str) -> Option<Vec<String>> {
+        let open = mapped.find('<')?;
+        if !mapped.ends_with('>') {
+            return None;
+        }
+        let inner = &mapped[open + 1..mapped.len() - 1];
+        let mut args: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        let mut current = String::new();
+        for ch in inner.chars() {
+            match ch {
+                '<' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                '>' => {
+                    depth = depth.checked_sub(1)?;
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    args.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        if depth != 0 {
+            return None;
+        }
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            args.push(trimmed.to_string());
+        }
+        args.iter().all(|arg| !arg.is_empty()).then_some(args)
+    }
+
     /// Formatting wrapper over [`Self::recover_auto_owner_args_from_arg_signature`].
     fn recover_auto_owner_from_arg_signature(
         &self,
@@ -40486,6 +40673,14 @@ impl CodeGen {
             &method_name,
             call,
         );
+        // H5(c): the owner-typed argument of a smart-pointer assoc call
+        // carries the exact instantiation; it outranks every guess below.
+        let argument_owner_args = self.smart_pointer_assoc_owner_args_from_argument(
+            call,
+            &owner_name,
+            &method_name,
+            owner_args_omitted,
+        );
         let scoped_owner_args = (!owner_is_runtime_mapped_bare)
             .then(|| {
                 self.recover_omitted_owner_generic_args_from_scope(&owner_path)
@@ -40971,10 +41166,28 @@ impl CodeGen {
                                             .flatten()
                                     })
                                     .and_then(|arg| owner_arg_is_usable(&arg).then_some(arg));
+                                // H5(c): the argument's own declared type is
+                                // knowledge, not inference — it wins.
+                                let from_argument = argument_owner_args
+                                    .as_ref()
+                                    .and_then(|args| args.get(arg_idx))
+                                    .and_then(|arg| {
+                                        owner_arg_is_usable(arg).then_some(arg.clone())
+                                    });
                                 let selected = if prefer_inferred_owner_args {
-                                    from_impl.or(inferred).or(expected).or(scoped).or(fallback)
+                                    from_argument
+                                        .or(from_impl)
+                                        .or(inferred)
+                                        .or(expected)
+                                        .or(scoped)
+                                        .or(fallback)
                                 } else {
-                                    from_impl.or(expected).or(scoped).or(inferred).or(fallback)
+                                    from_argument
+                                        .or(from_impl)
+                                        .or(expected)
+                                        .or(scoped)
+                                        .or(inferred)
+                                        .or(fallback)
                                 };
                                 if let Some(arg) = selected {
                                     recovered.push(arg);
@@ -41330,7 +41543,13 @@ impl CodeGen {
         }
         let mut emitted = Self::strip_crate_root_cpp_path(&emitted);
         emitted = self.rewrite_runtime_helper_trait_path_string(&emitted);
+        // H5(c): an owner recovered from the argument's declared type is a
+        // fully resolved runtime type (`rusty::Arc<EventPollable>`), not a
+        // name whose lookup has to survive to instantiation — wrapping it in
+        // the dependent `std::conditional_t<true, …>` shim would only bind it
+        // needlessly to an unrelated in-scope type parameter.
         if should_defer_static_owner_lookup
+            && argument_owner_args.is_none()
             && let Some((owner_cpp, method_cpp)) = emitted.rsplit_once("::")
         {
             let owner_cpp = self

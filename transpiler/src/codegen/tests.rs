@@ -42952,3 +42952,155 @@ fn test_extern_c_foreign_variadic_fn_pointer_param() {
         "fn-pointer's own variadic must survive in the raw spelling: {out}"
     );
 }
+
+
+/// H5 / checkpoint contract 5 (a)+(b) — `Weak` provenance and trait-object
+/// target identity.
+///
+/// One source type (`Weak<dyn Pollable>` under `use std::sync::{Arc, Weak}`)
+/// must have ONE C++ spelling on every surface it appears on. Before the
+/// fix the emitter produced three: the UFCS free-function declarations said
+/// `rusty::sync::Weak<void*>` (only the forward-decl-signature path resolves
+/// scope imports), while the anon-namespace interface base, the struct
+/// fields and the inherent/adapter impls said `rusty::rc::Weak<void*>`
+/// (`map_std_type` sees the bare leaf and defaults to the `rc` form) — and
+/// the trait-object target was erased to `void*` by the module-mode blanket
+/// because the smart-pointer trait-object special case covered only Arc/Rc.
+#[test]
+fn test_module_mode_sync_imported_weak_dyn_agrees_across_surfaces() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::sync::{Arc, Weak};
+        trait Pollable { fn poll(&self); }
+        trait EvCore: Pollable {
+            fn core_self(&self) -> &Weak<dyn Pollable>;
+            fn core_self_mut(&mut self) -> &mut Weak<dyn Pollable>;
+        }
+        pub struct Ev { pub self_: Weak<dyn Pollable>, pub v: i32 }
+        impl Pollable for Ev { fn poll(&self) {} }
+        impl EvCore for Ev {
+            fn core_self(&self) -> &Weak<dyn Pollable> { &self.self_ }
+            fn core_self_mut(&mut self) -> &mut Weak<dyn Pollable> { &mut self.self_ }
+        }
+        fn set_self<W: EvCore>(ev: &mut W, p: Weak<dyn Pollable>) {
+            *ev.core_self_mut() = p;
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // (a) provenance: the sync import governs every surface …
+    assert!(
+        !out.contains("rusty::rc::Weak"),
+        "sync-imported `Weak` must never lower to the rc form: {out}"
+    );
+    // (b) target identity: the trait object keeps its interface class …
+    assert!(
+        !out.contains("Weak<void*>"),
+        "`Weak<dyn Trait>` must not erase its target to void*: {out}"
+    );
+    // … on the interface base (anon namespace), the field, the inherent
+    // impl, the adapter override and the UFCS free functions alike.
+    assert!(
+        out.contains("virtual const rusty::sync::Weak<Pollable>& core_self() const = 0;"),
+        "interface base surface: {out}"
+    );
+    assert!(
+        out.contains("rusty::sync::Weak<Pollable> self_;"),
+        "field surface: {out}"
+    );
+    assert!(
+        out.contains("const rusty::sync::Weak<Pollable>& Ev::core_self() const"),
+        "inherent impl surface: {out}"
+    );
+    assert!(
+        out.contains("export const rusty::sync::Weak<Pollable>& core_self(const Ev& self_)"),
+        "UFCS surface: {out}"
+    );
+    assert!(
+        out.contains("void set_self(W& ev, rusty::sync::Weak<Pollable> p) {"),
+        "generic free-function definition surface: {out}"
+    );
+    // … and the FORWARD DECLARATION of that same free function, which the
+    // call sites emitted earlier in the TU depend on. (An interface-trait
+    // class name in the signature must not read as an "unknown type" and
+    // silently drop the declaration.)
+    assert!(
+        out.contains("void set_self(W& ev, rusty::sync::Weak<Pollable> p);"),
+        "generic free-function forward declaration: {out}"
+    );
+}
+
+/// H5 negative — provenance is READ, never assumed. An rc-imported bare
+/// `Weak` still lowers to the rc form (and an unimported bare `Weak` keeps
+/// `map_std_type`'s documented rc default, see `test_weak_type`).
+#[test]
+fn test_module_mode_rc_imported_weak_dyn_stays_rc() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::rc::{Rc, Weak};
+        trait Pollable { fn poll(&self); }
+        pub struct Ev { pub self_: Weak<dyn Pollable>, pub v: i32 }
+        impl Pollable for Ev { fn poll(&self) {} }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("rusty::rc::Weak<Pollable> self_;"),
+        "rc-imported `Weak` must stay rc: {out}"
+    );
+    assert!(
+        !out.contains("rusty::sync::Weak"),
+        "rc-imported `Weak` must never lower to the sync form: {out}"
+    );
+}
+
+/// H5 (c) — omitted owner generics on a smart-pointer associated call are
+/// recovered from the ARGUMENT's declared type, not from the enclosing
+/// function's type parameters.
+///
+/// `let base: Arc<dyn Pollable> = ev.clone(); Arc::downgrade(&base)` used to
+/// emit `Arc<E>::downgrade(base)` — the ordered-scope fallback filled the
+/// owner from the enclosing `E`, which is the type BEFORE the coercion to
+/// the trait object, so the call did not typecheck against `base`.
+#[test]
+fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::sync::{Arc, Weak};
+        trait Pollable { fn poll(&self); }
+        fn setup<E: Pollable + 'static>(ev0: Arc<E>) -> Arc<E> {
+            let ev = ev0;
+            let base: Arc<dyn Pollable> = ev.clone();
+            let self_weak = Arc::downgrade(&base);
+            ev
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("Arc<Pollable>::downgrade(base)"),
+        "owner must come from the argument's declared type: {out}"
+    );
+    assert!(
+        !out.contains("Arc<E>::downgrade"),
+        "stale pre-coercion owner generic: {out}"
+    );
+}
