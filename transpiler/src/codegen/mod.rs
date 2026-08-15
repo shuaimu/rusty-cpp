@@ -15602,7 +15602,16 @@ impl CodeGen {
         let body_tokens = f.block.to_token_stream();
         let has_explicit_only_type_param = nested_type_params.iter().any(|n| {
             let single: HashSet<String> = std::iter::once(n.clone()).collect();
-            !derived_type_params.contains(n)
+            // A nested param that SHADOWS an enclosing one is never a
+            // template-lambda param. `[]<typename T>()` inside a method
+            // already templated on T is ill-formed ("declaration of 'T'
+            // shadows template parameter"), and the shape it appears in
+            // wants the enclosing T anyway: take_mut's
+            // `fn take<T>(..) { fn panic<T>() -> T {..}  ..take_or_recover(_, panic) }`
+            // coerces panic to `fn() -> T` at the OUTER T, which is exactly
+            // what the `rusty::SafeFn<T()>` lambda form binds.
+            !self.is_type_param_in_scope(n)
+                && !derived_type_params.contains(n)
                 && !f.sig.inputs.iter().any(|arg| match arg {
                     syn::FnArg::Typed(pt) => {
                         self.type_contains_named_type_params(&pt.ty, &single)

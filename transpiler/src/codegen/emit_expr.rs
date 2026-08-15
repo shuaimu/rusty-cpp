@@ -17164,6 +17164,14 @@ impl CodeGen {
             return None;
         }
         let mut view_ty: Option<String> = None;
+        // The INNERMOST slice-typed cast in the chain. Peeling every cast
+        // blindly drops the container-to-slice coercion the pun is built on:
+        // serde_bytes' `&mut *(&mut self.bytes as &mut [u8] as *mut [u8] as
+        // *mut Bytes)` bottoms out at `&mut self.bytes`, whose address is a
+        // `rusty::Vec<uint8_t>*` — not the `std::span` despan_const takes.
+        // Emitting the cast itself keeps the coercion the source asked for
+        // (and matches the sibling `borrow()` path, which compiles).
+        let mut slice_cast: Option<&syn::Expr> = None;
         while let syn::Expr::Cast(c) = cur {
             if view_ty.is_none()
                 && let syn::Type::Ptr(p) = self.peel_paren_group_type(&c.ty)
@@ -17179,11 +17187,13 @@ impl CodeGen {
                 })
             {
                 view_ty = Some(self.map_type(&p.elem));
+            } else if Self::cast_target_is_slice_coercion(self.peel_paren_group_type(&c.ty)) {
+                slice_cast = Some(cur);
             }
             cur = self.peel_paren_group_expr(&c.expr);
         }
         let view = view_ty?;
-        let base = self.emit_expr_to_string(cur);
+        let base = self.emit_expr_to_string(slice_cast.unwrap_or(cur));
         // The shared-view path receives span<const B>; the wrapper's member
         // is span<B> — despan_const bridges (Rust's &Slice guarantees no
         // mutation through the shared view).
@@ -17191,6 +17201,18 @@ impl CodeGen {
             "{}{{rusty::detail::despan_const({})}}",
             view, base
         ))
+    }
+
+    /// `&[T]` / `&mut [T]` — a cast that genuinely COERCES a container to a
+    /// slice view, and so carries meaning the emission must keep.
+    ///
+    /// Deliberately NOT `*const [T]` / `*mut [T]`: those reinterpret an
+    /// address rather than build a view, and their operand is already a slice
+    /// (`Bytes::new`'s `bytes as *const [u8] as *const Bytes`, where `bytes`
+    /// is a `&[u8]` that has already lowered to a span). Treating them as
+    /// coercions emits a pointer-to-span where a span is wanted.
+    fn cast_target_is_slice_coercion(ty: &syn::Type) -> bool {
+        matches!(ty, syn::Type::Reference(r) if matches!(r.elem.as_ref(), syn::Type::Slice(_)))
     }
 
     /// The LAST `std::function<SIG>` template slot in a mapped type

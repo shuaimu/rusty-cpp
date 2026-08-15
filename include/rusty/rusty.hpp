@@ -686,10 +686,18 @@ namespace rusty {
         // Two's-complement bits for Rust radix specs on signed ints: Rust
         // {:x}/{:o}/{:b} reinterpret the bits as the same-width unsigned
         // (i32 -255 → ffffff01); C++ std::format prints a minus sign (-ff).
+        //
+        // Constrained on rusty's 128-bit-aware pair, NOT std::is_integral
+        // /std::make_unsigned: libstdc++ hides the 128-bit specializations of
+        // both outside GNU mode, so under strict -std=c++23 a `__int128`
+        // argument fails the constraint outright — even though std::format
+        // itself DOES accept it (__is_formattable_integer<__int128> is true).
+        // That asymmetry is what took bitflags' write_hex out.
         template<typename T>
-        requires std::is_integral_v<std::remove_cvref_t<T>>
+        requires rusty::wrapping_integral_v<std::remove_cvref_t<T>>
         inline auto to_unsigned_bits(T v) {
-            return static_cast<std::make_unsigned_t<std::remove_cvref_t<T>>>(v);
+            return static_cast<
+                rusty::wrapping_unsigned_t<std::remove_cvref_t<T>>>(v);
         }
 
         // Rust `{:#o}` / `{:#X}` alternate forms: '0o' prefix (C++ emits a
@@ -697,11 +705,12 @@ namespace rusty {
         // '0x' prefix with UPPERCASE digits for {:#X} (C++ uppercases the
         // prefix too). Zero-pad width ({:#06X}) inserts BETWEEN prefix and
         // digits, as in Rust.
+        // Same 128-bit-aware constraint as to_unsigned_bits above.
         template<typename T>
-        requires std::is_integral_v<std::remove_cvref_t<T>>
+        requires rusty::wrapping_integral_v<std::remove_cvref_t<T>>
         inline std::string alt_radix_string(
             T v, unsigned base, bool upper, std::size_t zero_pad_width) {
-            using U = std::make_unsigned_t<std::remove_cvref_t<T>>;
+            using U = rusty::wrapping_unsigned_t<std::remove_cvref_t<T>>;
             U u = static_cast<U>(v);
             const char* prefix = base == 8 ? "0o" : base == 2 ? "0b" : "0x";
             std::string digits;

@@ -43267,3 +43267,91 @@ fn auto_trait_specializations_land_outside_the_crate_namespace_wrap() {
         "outside the wrap the self type needs its crate qualification:\n{out}"
     );
 }
+
+#[test]
+fn nested_fn_type_param_shadowing_an_enclosing_one_keeps_the_safe_fn_form() {
+    // take_mut. `fn take<T>(..)` contains `fn panic<T>() -> T {..}`, and 9aa9420c
+    // widened the explicit-only test to count params named in the RETURN type —
+    // so the nested T started forcing the C++20 template-lambda form
+    // (`[]<typename T>()`). That re-declares the enclosing method's T
+    // ("declaration of 'T' shadows template parameter") and loses the SafeFn
+    // wrapping that made it match the declared `Hole<T, SafeFn<T()>>` return.
+    //
+    // Rust coerces `panic` to `fn() -> T` at the OUTER T, which is precisely
+    // what binding the enclosing param expresses. A nested param that shadows
+    // an in-scope one is therefore never a template-lambda param.
+    let out = transpile_str(
+        "pub struct Hole<T, F> { pub t: T, pub f: F }\
+         pub struct Scope;\
+         impl Scope {\
+           pub fn take_or_recover<T, F: FnOnce() -> T>(&self, r: &mut T, rec: F) -> (T, Hole<T, F>) \
+             { let v = rec(); (v, Hole { t: v, f: rec }) }\
+           pub fn take<T>(&self, r: &mut T) -> (T, Hole<T, fn() -> T>) {\
+             fn panic<T>() -> T { unreachable!() }\
+             self.take_or_recover(r, panic)\
+           }\
+         }",
+    );
+    assert!(
+        !out.contains("[]<typename T>()"),
+        "a nested type param that shadows the enclosing one must not become a \
+         template-lambda param — the redeclaration is ill-formed:\n{out}"
+    );
+    assert!(
+        out.contains("rusty::SafeFn<T()> panic"),
+        "it must keep the SafeFn form that binds the ENCLOSING T:\n{out}"
+    );
+}
+
+#[test]
+fn slice_tail_view_pun_keeps_the_container_to_slice_coercion() {
+    // serde_bytes. `&mut *(&mut self.bytes as &mut [u8] as *mut [u8] as *mut
+    // Bytes)` — the pun walk peeled EVERY cast, silently dropping the
+    // `as &mut [u8]` coercion and handing despan_const the container's
+    // address (`rusty::Vec<uint8_t>*`) where it wants a std::span.
+    //
+    // Only the REFERENCE cast is a coercion; `as *mut [u8]` reinterprets an
+    // address and must still be peeled (Bytes::new's operand is already a
+    // slice, and emitting that cast yields a pointer-to-span).
+    let out = transpile_str(
+        "pub struct Bytes { bytes: [u8] }\
+         pub struct ByteBuf { bytes: Vec<u8> }\
+         impl ByteBuf {\
+           pub fn borrow_mut(&mut self) -> &mut Bytes {\
+             unsafe { &mut *(&mut self.bytes as &mut [u8] as *mut [u8] as *mut Bytes) }\
+           }\
+         }",
+    );
+    assert!(
+        out.contains("despan_const(rusty::as_mut_slice(this->bytes))"),
+        "the pun must coerce the container to a slice before despan_const:\n{out}"
+    );
+    assert!(
+        !out.contains("despan_const(&this->bytes)"),
+        "handing despan_const the container ADDRESS is the defect:\n{out}"
+    );
+}
+
+#[test]
+fn slice_tail_view_pun_still_peels_a_pointer_cast_over_a_slice_operand() {
+    // The companion shape: `bytes` is ALREADY a `&[u8]`, so every cast in
+    // `bytes as *const [u8] as *const Bytes` is a reinterpretation. Emitting
+    // the pointer cast here produced `reinterpret_cast<const std::span<...>*>`
+    // — a pointer where despan_const wants the span itself.
+    let out = transpile_str(
+        "pub struct Bytes { bytes: [u8] }\
+         impl Bytes {\
+           pub fn new(bytes: &[u8]) -> &Bytes {\
+             unsafe { &*(bytes as *const [u8] as *const Bytes) }\
+           }\
+         }",
+    );
+    assert!(
+        out.contains("despan_const(bytes)"),
+        "an already-slice operand must be passed through unwrapped:\n{out}"
+    );
+    assert!(
+        !out.contains("reinterpret_cast<const std::span"),
+        "a pointer cast must not be emitted as the despan_const argument:\n{out}"
+    );
+}
