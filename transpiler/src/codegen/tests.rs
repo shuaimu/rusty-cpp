@@ -43125,3 +43125,44 @@ pub fn external(value: Ext) -> Ext {
     assert!(!out.contains("::rrr::PollMode"), "{out}");
 }
 
+
+#[test]
+fn foreign_unit_variant_arm_is_tested_not_bound() {
+    // A unit variant of an enum the crate does NOT declare (reached through
+    // `use …::Kind::*`) has no registry entry, so every tier missed it and the
+    // arm fell through to the binder — `const auto& CapacityOverflow = _m;`
+    // under a `true` condition. That arm matched EVERY value, every later arm
+    // was dead code, and the match silently answered with its first body.
+    //
+    // The refutation cannot be picked here: an enum class exposes the
+    // enumerator, a data enum lowered to std::variant does not, and nothing at
+    // this point knows which lowering the foreign enum used. So the emitted
+    // condition asks the C++ compiler and keeps the old always-match behaviour
+    // for the shape it cannot test.
+    let out = transpile_str(
+        r#"
+        use rusty::collections::TryReserveErrorKind::*;
+
+        pub fn handle(k: rusty::collections::TryReserveErrorKind) -> usize {
+            match k {
+                CapacityOverflow => 1,
+                AllocError => 2,
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto& CapacityOverflow = _m"),
+        "the unit variant must not become a catch-all binding:\n{out}"
+    );
+    for variant in ["CapacityOverflow", "AllocError"] {
+        assert!(
+            out.contains(&format!("requires {{ _RustyArmTy::{}; }}", variant)),
+            "arm `{variant}` must probe for the enumerator before comparing:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("_RustyArmTy::{}; }}", variant)),
+            "arm `{variant}` must compare against the enumerator when it exists:\n{out}"
+        );
+    }
+}

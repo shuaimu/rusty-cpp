@@ -30021,6 +30021,36 @@ impl CodeGen {
     /// `==` at all — its bare name resolves to the variant's ctor free fn, not
     /// a comparable constant — so mirror the sibling payload arms' lowering
     /// (`deref(_m).index() == N`) via the same variant-condition machinery.
+    /// Refutation for a bare unit variant of an enum this crate does NOT
+    /// declare, where no registry entry says how that enum was lowered.
+    ///
+    /// The two lowerings need different tests — a C++ `enum class` exposes the
+    /// enumerator (`E::Variant`), a data enum lowered to `std::variant` does
+    /// not — and nothing at this point can tell them apart. So ask the C++
+    /// compiler: `requires { E::Variant; }` holds only for the enum-class
+    /// shape, where the equality is the right test. Everything else keeps the
+    /// historical always-match behaviour, which is what the binder produced
+    /// and what arms in final position rely on.
+    ///
+    /// This turns the silent-wrong into a real test wherever it CAN be tested,
+    /// and never changes a case it cannot decide.
+    pub(super) fn foreign_unit_variant_arm_condition(
+        &self,
+        ident: &syn::Ident,
+        source_expr: &str,
+    ) -> String {
+        let name = escape_cpp_keyword(&ident.to_string());
+        format!(
+            "([&]() -> bool {{ using _RustyArmTy = std::remove_cvref_t<decltype(\
+             rusty::detail::deref_if_pointer({src}))>; \
+             if constexpr (requires {{ _RustyArmTy::{name}; }}) {{ \
+             return rusty::detail::deref_if_pointer({src}) == _RustyArmTy::{name}; }} \
+             else {{ return true; }} }}())",
+            src = source_expr,
+            name = name
+        )
+    }
+
     pub(super) fn const_value_ident_pattern_condition(
         &self,
         ident: &syn::Ident,

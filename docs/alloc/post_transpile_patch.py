@@ -1001,16 +1001,20 @@ def _alloc_specific(cpp_out: Path):
             "raw_vec::RawVec<Src, A>::from_nonnull_in",
             "raw_vec::RawVec<Src, rusty::alloc::Global>::from_nonnull_in",
         )
-        # handle_error: the TryReserveErrorKind match mis-emitted a unit-variant
-        # arm as a `const auto& Enum::Variant = _m;` binding. Rust's arms differ:
+        # handle_error: `e.kind()` is a METHOD call in Rust but a FIELD on the
+        # runtime TryReserveError, and Rust's two arms differ in kind:
         # CapacityOverflow -> capacity_overflow() PANICS (unwinds, catchable);
         # only AllocError -> handle_alloc_error aborts the process.
+        #
+        # Anchor on the arm's STABLE shape — the `_m = e.kind()` head and the
+        # diverging tail — never on how the emitter spells the arm's condition
+        # in between. That spelling has already changed twice (a
+        # `TryReserveErrorKind::CapacityOverflow = _m;` binding, then a
+        # requires-probe), and each time a literal anchor silently stopped
+        # matching and left this site unpatched.
         t = re.sub(
             r"return \[&\]\(\) -> void \{ auto&& _m = e\.kind\(\);.*?"
-            r"rusty::collections::TryReserveErrorKind::CapacityOverflow = _m;.*?"
-            # The emitter's diverging-tail spelling varies (`unreachable()` vs
-            # `unreachable_panic()`); anchor on either so a spelling change
-            # cannot silently leave this arm unpatched.
+            r"CapacityOverflow.*?"
             r"rusty::intrinsics::unreachable(?:_panic)?\(\); \}\(\); \}\(\);",
             "if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) "
             "{ rusty::panicking::panic(\"capacity overflow\"); } std::abort();",

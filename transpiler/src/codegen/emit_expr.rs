@@ -1585,6 +1585,15 @@ impl CodeGen {
                     {
                         // Const-named patterns are VALUE tests, not bindings.
                         self.const_value_ident_pattern_condition(&pi.ident, "_m", variant_ctx)
+                    } else if pi.ident != "_"
+                        && pi.by_ref.is_none()
+                        && pi.mutability.is_none()
+                        && Self::pattern_ident_is_bare_unit_variant_name(&pi.ident.to_string())
+                    {
+                        // Unit variant of an enum this crate does not declare —
+                        // see foreign_unit_variant_arm_condition. Without this
+                        // the arm binds and therefore always matches.
+                        self.foreign_unit_variant_arm_condition(&pi.ident, "_m")
                     } else {
                         if pi.ident != "_" {
                             let rust_name = pi.ident.to_string();
@@ -3670,6 +3679,18 @@ impl CodeGen {
                         out.push_str(&format!(
                             "if (!_m_matched && ({})) {{ {} }} ",
                             cond, arm_body_stmt
+                        ));
+                    } else if pi.by_ref.is_none()
+                        && pi.mutability.is_none()
+                        && Self::pattern_ident_is_bare_unit_variant_name(&pi.ident.to_string())
+                    {
+                        // Unit variant of an enum this crate does not declare —
+                        // see foreign_unit_variant_arm_condition. Without this
+                        // the arm binds and therefore always matches.
+                        out.push_str(&format!(
+                            "if (!_m_matched && ({})) {{ {} }} ",
+                            self.foreign_unit_variant_arm_condition(&pi.ident, "_m"),
+                            arm_body_stmt
                         ));
                     } else {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());

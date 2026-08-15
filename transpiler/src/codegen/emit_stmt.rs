@@ -1768,6 +1768,19 @@ impl CodeGen {
                                 )
                             ));
                         }
+                    } else if pi.by_ref.is_none()
+                        && pi.mutability.is_none()
+                        && Self::pattern_ident_is_bare_unit_variant_name(&pi.ident.to_string())
+                    {
+                        // Unit variant of an enum this crate does not declare:
+                        // no registry entry, so the tiers above cannot see it
+                        // and it fell through to the binder — an arm that
+                        // ALWAYS matches, leaving every later arm dead.
+                        saw_runtime_pattern = true;
+                        out.push_str(&format!(
+                            "if ({}) {{ ",
+                            self.foreign_unit_variant_arm_condition(&pi.ident, "_m")
+                        ));
                     } else {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                         binding_map.insert(pi.ident.to_string(), cpp_name.clone());
