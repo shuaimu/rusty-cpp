@@ -2822,7 +2822,18 @@ impl CodeGen {
                     }
                 }
                 path_str = Self::strip_crate_root_cpp_path(&path_str);
-                path_str = self.rewrite_cpp_import_bound_type_spelling(&path_str);
+                // The rewrite substitutes `alias::` -> the bound module's C++
+                // namespace, which is what a cpp-import binding needs. It is a
+                // TEXTUAL substitution, though, so applying it to every mapped
+                // type also retargets the crate's OWN modules onto same-named
+                // runtime facades: alloc's `iter::ByRefSized` became
+                // `rusty::iter::ByRefSized` (rusty::iter is a FUNCTION, not a
+                // namespace) and rusty's `io::` types were pulled onto the
+                // runtime io facade. A crate that declares the module owns the
+                // name — same keystone rule the std-named-type suppression uses.
+                if !self.type_path_root_names_a_declared_module(&path_str) {
+                    path_str = self.rewrite_cpp_import_bound_type_spelling(&path_str);
+                }
                 if path_str == "private" {
                     path_str = "private_".to_string();
                 } else if path_str == "::private" {

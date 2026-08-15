@@ -207,6 +207,38 @@ impl CodeGen {
         })
     }
 
+    /// Whether an already-mapped C++ type path is rooted at a module THIS
+    /// crate declares (`iter::Chain`, `io::Error`).
+    ///
+    /// Such a path must not be run through the cpp-import alias rewrite: that
+    /// rewrite is a textual `alias::` -> namespace substitution, so a crate
+    /// module sharing a name with a runtime facade would be silently retargeted
+    /// onto the facade. Already-absolute (`::`-rooted) and runtime-rooted
+    /// spellings are left alone — they are not crate-module references.
+    pub(super) fn type_path_root_names_a_declared_module(&self, cpp_ty: &str) -> bool {
+        let trimmed = cpp_ty.trim();
+        if trimmed.starts_with("::") {
+            return false;
+        }
+        let root = trimmed
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .find(|seg| !seg.is_empty())
+            .unwrap_or_default();
+        if root.is_empty() || !trimmed.contains("::") {
+            return false;
+        }
+        // A genuine C++ import binding still wins — resolving those in type
+        // position is exactly what the rewrite exists for.
+        if self.name_resolver.cpp_binding(root).is_some() {
+            return false;
+        }
+        self.declared_module_names.contains(root)
+            || self
+                .declared_module_paths
+                .iter()
+                .any(|m| m == root || m.starts_with(&format!("{}::", root)))
+    }
+
     pub(super) fn should_strip_forced_global_for_private_alias_root(
         &self,
         scope_key: &str,
