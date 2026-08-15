@@ -2865,6 +2865,11 @@ pub struct CodeGen {
     /// resolve when the enum lives in another file. Empty for single-file
     /// transpilation.
     pub(crate) cross_file_enums: Vec<syn::ItemEnum>,
+    /// C9 (checkpoint contract 9): tails of every trait declared anywhere in
+    /// the crate. A crate trait IMPORTED into this module has a real C++
+    /// interface class in the sibling module's purview, so an owning
+    /// `Box<dyn Trait>` keeps its target instead of erasing to `void*`.
+    pub(crate) cross_file_trait_tails: HashSet<String>,
     /// Every C++ module name produced in the current crate-mode run
     /// (e.g. `{"btree_port.btree.node", "btree_port.btree.map", …}`).
     /// Populated from `TranspileOptions::crate_module_names` before
@@ -3292,6 +3297,7 @@ impl CodeGen {
             by_value_cycle_breaking_rewrite_fields: HashSet::new(),
             auto_cross_module_by_value_rewrite_fields: HashSet::new(),
             cross_file_enums: Vec::new(),
+            cross_file_trait_tails: HashSet::new(),
             crate_module_names: HashSet::new(),
             sibling_modules_imported: HashSet::new(),
             glob_imported_enum_tails: HashSet::new(),
@@ -5237,6 +5243,14 @@ impl CodeGen {
     /// runtime variant checks when `Foo` is declared in another file.
     pub fn set_cross_file_enums(&mut self, enums: Vec<syn::ItemEnum>) {
         self.cross_file_enums = enums;
+    }
+
+    /// Record the tails of every trait declared anywhere in the crate (C9).
+    /// Only the names are kept: the interface class itself is emitted by the
+    /// declaring module, and this module reaches it through the
+    /// using-declaration its own `use` already produces.
+    pub fn set_cross_file_traits(&mut self, traits: &[syn::ItemTrait]) {
+        self.cross_file_trait_tails = traits.iter().map(|t| t.ident.to_string()).collect();
     }
 
     /// Seed `#[cpp_inherit]` knowledge harvested from sibling inline-rust
@@ -15809,6 +15823,45 @@ impl CodeGen {
     /// `Container<i32>` in Rust). Used by the dyn type mapping so
     /// `&dyn Container<i32>` lowers to `const Container<int32_t>&`
     /// rather than the unparameterized `const Container&`.
+    /// C9 (checkpoint contract 9): can this module spell the trait-object
+    /// target of an OWNING smart pointer, or must the target erase to `void*`?
+    ///
+    /// A trait declared by the emitted file has its interface class right
+    /// here. A trait declared by ANOTHER FILE OF THE SAME CRATE has one too —
+    /// in that module's purview, reached through the using-declaration this
+    /// module's own `use` already emits (`using ::rrr::PollableBase;`), which
+    /// is exactly how the alias form `PollableProxy = Box<dyn PollableBase>`
+    /// already lowers to `rusty::Box<PollableBase>` today. Only a trait from
+    /// outside the crate has no C++ interface to name, so `void*` stays the
+    /// fallback for it — and for a multi-segment path this module has not
+    /// bound to a crate trait, which cannot be spelled unqualified.
+    ///
+    /// Without this, one source type had two lowerings depending on whether
+    /// it was spelled through the alias or directly: the `PollCommand`
+    /// variant field and its factory took `void*`, losing the ownership,
+    /// destructor, type identity and calling ABI of `rusty::Box`.
+    fn trait_object_target_is_expressible(&self, path: &syn::Path) -> bool {
+        let Some(tail) = path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        if path.segments.len() == 1 && self.ufcs_declared_trait_names.contains(&tail) {
+            return true;
+        }
+        // A crate trait imported into this module: the name is in scope here
+        // (its `use` emits the using-declaration) and the interface class is
+        // emitted by the declaring module.
+        if self.cross_file_trait_tails.contains(&tail)
+            && (path.segments.len() == 1
+                || matches!(
+                    path.segments.first().map(|s| s.ident.to_string()).as_deref(),
+                    Some("crate") | Some("self") | Some("super")
+                ))
+        {
+            return true;
+        }
+        false
+    }
+
     fn interface_trait_cpp_name(&self, path: &syn::Path) -> String {
         let Some(last) = path.segments.last() else {
             return String::new();

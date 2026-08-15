@@ -43401,3 +43401,84 @@ fn test_rc_provenance_weak_keeps_its_static_factory() {
         "rc_port's Weak keeps its static factory: {out}"
     );
 }
+
+/// C9 (checkpoint contract 9) — an OWNING `Box<dyn Trait>` in an ADT variant
+/// field (and its factory) keeps `rusty::Box<Trait>`. Module mode used to
+/// erase every trait object whose trait was not declared in the emitted FILE,
+/// so `PollCommand::AddPollable { pollable: Box<dyn PollableBase> }` became
+/// `void*` — same size, but no ownership, no destructor, no type identity and
+/// a different calling ABI. A crate trait imported into this module has a
+/// real interface class in its sibling module's purview (which is why the
+/// alias spelling `PollableProxy = Box<dyn PollableBase>` already lowered
+/// correctly).
+#[test]
+fn test_owning_trait_object_in_adt_keeps_its_crate_trait_target() {
+    let declaring: syn::File = syn::parse_str(
+        r#"
+        pub trait PollableBase {
+            fn fd(&self) -> i32;
+        }
+        "#,
+    )
+    .unwrap();
+    let traits: Vec<syn::ItemTrait> = declaring
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let file: syn::File = syn::parse_str(
+        r#"
+        use crate::pollable_proxy::PollableBase;
+        pub enum PollCommand {
+            AddPollable { pollable: Box<dyn PollableBase> },
+            RemovePollable { fd: i32 },
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.set_cross_file_traits(&traits);
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("rusty::Box<PollableBase> pollable;"),
+        "the variant field keeps the owning boxed trait object: {out}"
+    );
+    assert!(
+        out.contains("AddPollable(rusty::Box<PollableBase> pollable)"),
+        "the factory keeps it too: {out}"
+    );
+    assert!(
+        !out.contains("void* pollable"),
+        "raw void* erasure is forbidden even when size/alignment match: {out}"
+    );
+}
+
+/// C9 negative — a trait from OUTSIDE the crate has no C++ interface class to
+/// name in this module, so the module-mode `void*` fallback stands.
+#[test]
+fn test_owning_trait_object_of_a_foreign_trait_still_erases() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub enum Cmd {
+            Add { thing: Box<dyn some_dep::Widget> },
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("void* thing;"),
+        "a foreign trait object keeps the documented void* fallback: {out}"
+    );
+}

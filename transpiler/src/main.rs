@@ -2769,12 +2769,14 @@ fn prepare_crate_codegen(
     let mut extension_method_hints = HashSet::new();
     let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
     let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
+    let mut cross_file_traits: Vec<syn::ItemTrait> = Vec::new();
     let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
     let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
     for (_, source) in source_units {
         extension_method_hints.extend(transpile::collect_extension_method_hints(source));
         cross_file_enums.extend(transpile::collect_crate_enum_decls(source));
         cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(source));
+        cross_file_traits.extend(transpile::collect_crate_trait_decls(source));
         cross_file_structs.extend(transpile::collect_crate_struct_decls(source));
         cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(source));
     }
@@ -2791,6 +2793,7 @@ fn prepare_crate_codegen(
     let mut options = transpile_options.clone();
     options.cross_file_enums = cross_file_enums;
     options.cross_file_impl_blocks = cross_file_impl_blocks;
+    options.cross_file_traits = cross_file_traits;
     options.cross_file_structs = cross_file_structs;
     options.cross_file_type_aliases = cross_file_type_aliases;
     options.crate_module_names = crate_module_names;
@@ -10601,6 +10604,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         inline_rust_block: false,
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
+        cross_file_traits: Vec::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
@@ -11287,6 +11291,7 @@ fn main() {
         inline_rust_block: false,
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
+        cross_file_traits: Vec::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),

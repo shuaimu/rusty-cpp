@@ -627,6 +627,10 @@ pub struct TranspileOptions {
     /// (`use Foo::*; match { Variant(...) => ... }`) resolve when `Foo` is
     /// declared in a sibling file. Empty for single-file mode.
     pub cross_file_enums: Vec<syn::ItemEnum>,
+    /// Trait declarations harvested from every file of the crate (C9): a
+    /// module that imports a crate trait still needs to know its interface
+    /// class exists.
+    pub cross_file_traits: Vec<syn::ItemTrait>,
     /// Cross-file impl blocks collected during a crate-mode pre-pass —
     /// every `Item::Impl` across the crate. Used by the per-file codegen
     /// to (a) inject forward declarations for cross-module orphan impl
@@ -1865,6 +1869,7 @@ impl Default for TranspileOptions {
             interface_traits: false,
             inline_rust_block: false,
             cross_file_enums: Vec::new(),
+            cross_file_traits: Vec::new(),
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
@@ -2542,6 +2547,7 @@ fn transpile_full_with_options_impl(
     codegen.set_interface_traits(options.interface_traits);
     codegen.inline_rust_block = options.inline_rust_block;
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
+    codegen.set_cross_file_traits(&options.cross_file_traits);
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
@@ -3433,6 +3439,37 @@ fn collect_enum_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemEnum
                 }
                 if let Some((_, nested)) = &m.content {
                     collect_enum_decls_recursive(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a Rust source file and collect every top-level / nested `Item::Trait`
+/// declaration. Threaded across files in crate-mode transpilation so a module
+/// that only IMPORTS a crate trait still knows the trait has a real C++
+/// interface class in a sibling module (C9 / checkpoint contract 9: an owning
+/// `Box<dyn CrateTrait>` must not erase to `void*`).
+pub fn collect_crate_trait_decls(rust_source: &str) -> Vec<syn::ItemTrait> {
+    let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_trait_decls_recursive(&file.items, &mut out);
+    out
+}
+
+fn collect_trait_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemTrait>) {
+    for item in items {
+        match item {
+            syn::Item::Trait(t) => out.push(t.clone()),
+            syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
+                if let Some((_, nested)) = &m.content {
+                    collect_trait_decls_recursive(nested, out);
                 }
             }
             _ => {}

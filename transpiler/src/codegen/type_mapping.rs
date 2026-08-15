@@ -2678,12 +2678,7 @@ impl CodeGen {
                                 // their established ABI.
                                 if self.module_name.is_some()
                                     && trait_paths.iter().any(|path| {
-                                        path.segments.len() != 1
-                                            || path.segments.last().is_none_or(|segment| {
-                                                !self
-                                                    .ufcs_declared_trait_names
-                                                    .contains(&segment.ident.to_string())
-                                            })
+                                        !self.trait_object_target_is_expressible(path)
                                     })
                                 {
                                     return "void*".to_string();
