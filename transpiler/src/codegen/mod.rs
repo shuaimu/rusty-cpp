@@ -75,6 +75,15 @@ pub(crate) enum AssocProjectionReceiver {
 /// (P a type param bound by the trait): the assoc IS (part of) the method's
 /// return type, so `decltype(call)` names it. See
 /// `trait_assoc_method_projections`.
+
+/// Name prefix for the emitted member-first dispatcher of a Ref-receiver
+/// assoc projection (`Flags_::__rusty_proj_bits`). Must be a NAMED entity —
+/// see `ufcs_bridge_tail_pos` for why an inline lambda cannot be used.
+pub(crate) const ASSOC_PROJECTION_DISPATCH_PREFIX: &str = "__rusty_proj_";
+
+/// Marker comment written after each `<Tr>_` bridge block. The LAST one for a
+/// trait is where its dispatcher goes; all of them are stripped afterwards.
+pub(crate) const ASSOC_PROJECTION_TAIL_MARKER: &str = "__rusty_bridge_tail__";
 #[derive(Debug, Clone)]
 pub(crate) struct AssocMethodProjection {
     pub(crate) method: String,
@@ -725,6 +734,26 @@ pub struct CodeGen {
     /// (matching the owner-map keys / call-site lookup).
     pub(crate) ufcs_emitted_trait_methods:
         std::collections::HashSet<(String, String)>,
+    /// Traits whose `<Tr>_` bridge block was emitted in THIS translation unit.
+    ///
+    /// The assoc-method projection needs a member-first dispatcher, and that
+    /// dispatcher must be a NAMED entity: spelled inline as a lambda, every
+    /// textual occurrence is a distinct closure type, so a forward declaration
+    /// and its definition become two different function templates and every
+    /// call goes ambiguous (bitflags `case_`).
+    ///
+    /// It also cannot be emitted just anywhere. Its fallback `<Tr>_::method`
+    /// is a QUALIFIED call, so its overload set is frozen at the dispatcher's
+    /// definition point — a `using` added by a later impl's bridge block is
+    /// invisible to it (verified against clang). Hence: record where each
+    /// trait's bridge coverage ends, and splice the dispatcher in there once
+    /// every impl has contributed.
+    ///
+    /// The insertion point is carried as a MARKER COMMENT in the output, not
+    /// as a byte offset: later passes (hoists, forward-decl injection, the
+    /// crate wrap) insert text ahead of it, and a recorded offset silently
+    /// goes stale — it spliced mid-token and produced `strnamespace`.
+    pub(crate) ufcs_bridge_emitted_traits: std::collections::HashSet<String>,
     /// `<Trait>::<method>` → how many leading template params of the emitted
     /// `<Tr>_::m` head precede `Self_`. Those are the BARE undeducible params
     /// (return-position-only, no default); a call site may spell ONLY these,
@@ -2199,6 +2228,7 @@ impl CodeGen {
             ufcs_trait_assoc_type_names: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
+            ufcs_bridge_emitted_traits: std::collections::HashSet::new(),
             ufcs_default_method_bare_prefix_len: std::collections::HashMap::new(),
             ufcs_def_dedupe_seen: std::collections::HashSet::new(),
             ufcs_template_self_body: false,
@@ -3534,6 +3564,12 @@ impl CodeGen {
         // wrap engulfs the bridge block (→ `<crate>::<module>::rusty_ext`) while an unwrapped
         // consumer keeps it at global scope (where its own `<module>::rusty_ext` lives).
         self.emit_cross_crate_rusty_ext_bridge();
+
+        // Splice the Ref-receiver assoc-projection dispatchers into each
+        // trait's bridge tail. Before the crate wrap and before any textual
+        // requalification, so the emitted `<Tr>_::…` spellings are rewritten
+        // by the same rules as every other bridge reference.
+        self.splice_assoc_projection_dispatchers();
 
         // An import emitted at its item's source position can land below other
         // declarations, which clang rejects. Put them back in the preamble
@@ -17546,7 +17582,79 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.writeln(&format!("using namespace {}_;", trait_name));
+        // Every impl re-opens `<Tr>_` to add its own using-declaration, so the
+        // LAST marker is where the overload set is complete.
+        // `splice_assoc_projection_dispatchers` fills that one and drops the rest.
+        self.writeln(&format!("// {}{}", ASSOC_PROJECTION_TAIL_MARKER, trait_name));
+        self.ufcs_bridge_emitted_traits.insert(trait_name.clone());
         self.ufcs_impl_module_path.clear();
+    }
+
+    /// Emit the member-first dispatchers the Ref-receiver assoc projections
+    /// refer to, each just past its trait's last bridge block.
+    ///
+    /// Spliced rather than appended for a reason established by probe: the
+    /// dispatcher's `<Tr>_::method` fallback is a qualified call, so its
+    /// candidate set is fixed where the dispatcher is DEFINED. Emitted at the
+    /// end of the file it would still see every using — but it has to precede
+    /// the signatures that name it, and those come earlier. Just past the last
+    /// bridge block satisfies both.
+    fn splice_assoc_projection_dispatchers(&mut self) {
+        // One dispatcher per (trait, method) — several assoc names can project
+        // through the same method, and the emitted entity is keyed on the
+        // method, not the assoc.
+        let mut wanted: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
+        for ((trait_name, _assoc), proj) in &self.trait_assoc_method_projections {
+            if proj.receiver != AssocProjectionReceiver::Ref {
+                continue;
+            }
+            // No bridge in this TU (the impls live in a dependency) — the
+            // projection keeps its inline form, which is fine there because
+            // nothing locally redeclares the signature.
+            if !self.ufcs_bridge_emitted_traits.contains(trait_name) {
+                continue;
+            }
+            wanted.insert((trait_name.clone(), escape_cpp_keyword(&proj.method)));
+        }
+
+        for (trait_name, method) in wanted {
+            let marker = format!("// {}{}", ASSOC_PROJECTION_TAIL_MARKER, trait_name);
+            let Some(last) = self.output.rfind(&marker) else {
+                continue;
+            };
+            let ns = self.ufcs_trait_namespace(&trait_name);
+            // A variable TEMPLATE, so the bound's type arguments live in the
+            // NAME: `__rusty_proj_m<A,B>` denotes one entity at every use site,
+            // where a plain variable could only bake in a single arg list.
+            let dispatcher = format!(
+                "namespace {ns} {{\ntemplate<typename... TArgs>\n\
+                 inline constexpr auto {DISPATCH}{method} = \
+                 [](auto& __self, auto&&... __args) -> decltype(auto) {{ \
+                 if constexpr (requires {{ __self.template {method}<TArgs...>(\
+                 std::forward<decltype(__args)>(__args)...); }}) {{ \
+                 return __self.template {method}<TArgs...>(\
+                 std::forward<decltype(__args)>(__args)...); }} \
+                 else {{ return {ns}::{method}(__self, \
+                 std::forward<decltype(__args)>(__args)...); }} }};\n}}",
+                ns = ns,
+                method = method,
+                DISPATCH = ASSOC_PROJECTION_DISPATCH_PREFIX,
+            );
+            let end = last + marker.len();
+            self.output.replace_range(last..end, &dispatcher);
+        }
+
+        // Drop every marker left over (the non-final ones, and any trait that
+        // never needed a dispatcher).
+        let mut cleaned = String::with_capacity(self.output.len());
+        for line in self.output.split_inclusive('\n') {
+            if line.trim_start().starts_with(&format!("// {}", ASSOC_PROJECTION_TAIL_MARKER)) {
+                continue;
+            }
+            cleaned.push_str(line);
+        }
+        self.output = cleaned;
     }
 
     /// The per-module helper sub-namespace name that holds a nested-module trait
@@ -47906,19 +48014,40 @@ impl CodeGen {
             // the impl type alone, and a bare-closure receiver (no member)
             // degrades to the UFCS branch where only the blanket matches.
             let method = escape_cpp_keyword(&proj.method);
-            format!(
-                "([](auto& __self, auto&&... __args) -> decltype(auto) {{ \
-                 if constexpr (requires {{ __self.template {}<{}>(std::forward<decltype(__args)>(__args)...); }}) {{ \
-                 return __self.template {}<{}>(std::forward<decltype(__args)>(__args)...); }} \
-                 else {{ return {}::{}(__self, std::forward<decltype(__args)>(__args)...); }} }})({})",
-                method,
-                template_args.join(", "),
-                method,
-                template_args.join(", "),
-                self.ufcs_trait_namespace(bound_trait),
-                method,
-                declvals.join(", ")
-            )
+            let ns = self.ufcs_trait_namespace(bound_trait);
+            if self.ufcs_bridge_emitted_traits.contains(bound_trait) {
+                // Named dispatcher (spliced past the trait's last bridge block
+                // by `splice_assoc_projection_dispatchers`). It MUST be named:
+                // this spelling lands in function PARAMETER types, and an
+                // inline lambda gives every occurrence a distinct closure type
+                // — so a forward declaration and its definition stop being the
+                // same entity and every call is ambiguous (bitflags `case_`).
+                format!(
+                    "{}::{}{}<{}>({})",
+                    ns,
+                    ASSOC_PROJECTION_DISPATCH_PREFIX,
+                    method,
+                    template_args.join(", "),
+                    declvals.join(", ")
+                )
+            } else {
+                // No bridge in this TU (the impls are a dependency's), so no
+                // dispatcher was spliced. The inline form is still correct
+                // here — nothing locally redeclares this signature.
+                format!(
+                    "([](auto& __self, auto&&... __args) -> decltype(auto) {{ \
+                     if constexpr (requires {{ __self.template {}<{}>(std::forward<decltype(__args)>(__args)...); }}) {{ \
+                     return __self.template {}<{}>(std::forward<decltype(__args)>(__args)...); }} \
+                     else {{ return {}::{}(__self, std::forward<decltype(__args)>(__args)...); }} }})({})",
+                    method,
+                    template_args.join(", "),
+                    method,
+                    template_args.join(", "),
+                    ns,
+                    method,
+                    declvals.join(", ")
+                )
+            }
         } else {
             format!(
                 "{}::{}({})",

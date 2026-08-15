@@ -43355,3 +43355,44 @@ fn slice_tail_view_pun_still_peels_a_pointer_cast_over_a_slice_operand() {
         "a pointer cast must not be emitted as the despan_const argument:\n{out}"
     );
 }
+
+#[test]
+fn assoc_projection_placement_markers_never_leak_into_the_output() {
+    // The Ref-receiver assoc projection needs a NAMED dispatcher: spelled as an
+    // inline lambda it lands in function PARAMETER types, where every textual
+    // occurrence is a distinct closure type — so a forward declaration and its
+    // definition stop being the same entity and every call is ambiguous
+    // (bitflags emitted 19 of those for one `case_`).
+    //
+    // Placement is carried by marker comments rather than byte offsets, because
+    // later passes insert text ahead of a recorded offset and it silently goes
+    // stale (it spliced mid-token once, producing `strnamespace`). Whatever the
+    // splice does, no marker may survive into the emitted C++.
+    //
+    // The dispatcher ITSELF is exercised by the bitflags parity crate: reaching
+    // that emit path needs an associated type whose direct `typename T::Assoc`
+    // spelling is a hard substitution failure, which a small synthetic program
+    // does not reproduce (the direct spelling simply resolves).
+    let out = transpile_str(
+        "pub trait Flags { type Bits; fn bits(&self) -> Self::Bits; }\
+         pub struct F { b: u32 }\
+         impl Flags for F { type Bits = u32; fn bits(&self) -> u32 { self.b } }\
+         pub fn case_<T: Flags>(expected: T::Bits) -> T::Bits { expected }",
+    );
+    assert!(
+        !out.contains("__rusty_bridge_tail__"),
+        "placement markers must all be stripped from the emitted C++:\n{out}"
+    );
+    // If a dispatcher was emitted, it must FOLLOW the bridge using-declarations
+    // it falls back on — its `<Tr>_::m` fallback is a qualified call, so the
+    // overload set freezes where the dispatcher is defined (clang-verified).
+    if let (Some(bridge), Some(disp)) = (
+        out.rfind("using ::"),
+        out.find("inline constexpr auto __rusty_proj_"),
+    ) {
+        assert!(
+            disp > bridge,
+            "the dispatcher must follow the bridge using-declarations:\n{out}"
+        );
+    }
+}
