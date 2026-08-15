@@ -31,8 +31,16 @@ sed -i 's|#include <rusty/try.hpp>|#include <rusty/try.hpp>\n#include <rusty/os_
 # Global-fragment namespace aliases so the transpiler's `::ffi::` / `::sys::`
 # crate-path references resolve to the rusty runtime namespaces.
 sed -i 's|#include <rusty/os_str.hpp>|#include <rusty/os_str.hpp>\nnamespace ffi = rusty::ffi;\nnamespace sys = rusty::sys;|' "$CPPM"
-[[ -f "$REPO/docs/path/post_transpile_patch.py" ]] && \
-  python3 "$REPO/docs/path/post_transpile_patch.py" "$CPPM" >/dev/null 2>&1
+# Keep the patcher's stderr: it reports anchors that matched NOTHING, which is
+# how this port silently went red for weeks (the emitter respelled OsStr and
+# unreachable(), killing ~7 rewrites at once with no diagnostic). A non-zero
+# exit means a required rewrite was skipped — say so loudly rather than handing
+# clang half-patched source and blaming the resulting cascade on codegen.
+if [[ -f "$REPO/docs/path/post_transpile_patch.py" ]]; then
+  if ! python3 "$REPO/docs/path/post_transpile_patch.py" "$CPPM" >/dev/null; then
+    echo "post_transpile_patch: STALE ANCHORS (see above) — the errors below are likely a cascade"
+  fi
+fi
 FLAGS="-std=c++23 -DRUSTY_PORTABLE_INTRINSICS=1 -march=native -I$REPO/include -x c++-module"
 clang++ $FLAGS --precompile -o "$W/path.pcm" "$CPPM" -ferror-limit=0 2> "$W/compile.err"
 echo "compile: $(grep -c 'error:' "$W/compile.err") errors"
