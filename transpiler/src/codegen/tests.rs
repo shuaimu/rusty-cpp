@@ -42846,3 +42846,109 @@ fn test_absolute_type_map_target_survives_crate_purview_wrap() {
         "self-referential alias produced by the purview-wrap requalify: {out}"
     );
 }
+
+/// H3 / checkpoint contract 3 — extern-C fn-pointer / varargs lowering.
+///
+/// Inside an `extern "C" { … }` foreign block the authoritative C header
+/// spells callable parameters as raw C function pointers
+/// (`void (*entry_fn)(void*)`, srpc_fiber.h) and preserves `...` on
+/// variadic declarations (`long syscall(long, ...)`, unistd.h). The
+/// class-type `rusty::UnsafeFn<…>`/`rusty::SafeFn<…>` wrappers conflict
+/// with the real C prototypes, and dropping `...` truncates the
+/// declaration.
+#[test]
+fn test_extern_c_foreign_fn_pointer_and_varargs_lower_raw() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map
+        .mappings
+        .insert("LegacyCLong".to_string(), "long".to_string());
+    let file: syn::File = syn::parse_str(
+        r#"
+        type LegacyCLong = i64;
+        unsafe extern "C" {
+            fn fiber_init(
+                entry_fn: unsafe extern "C" fn(*mut core::ffi::c_void),
+                entry_arg: *mut core::ffi::c_void,
+            );
+            fn on_tick(cb: extern "C" fn(i32) -> i32);
+            fn syscall(number: LegacyCLong, ...) -> LegacyCLong;
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // (a) callable params are raw C fn pointers, named in the declarator …
+    assert!(
+        out.contains("void fiber_init(void (*entry_fn)(rusty::ffi::c_void*), rusty::ffi::c_void* entry_arg);"),
+        "extern-C callable param must lower to a raw C fn pointer: {out}"
+    );
+    assert!(
+        out.contains("void on_tick(int32_t (*cb)(int32_t));"),
+        "safe extern-C callable param must lower to a raw C fn pointer too: {out}"
+    );
+    // … never the class-type wrappers, which conflict with the C header.
+    assert!(
+        !out.contains("UnsafeFn") && !out.contains("SafeFn"),
+        "class-type callable wrapper leaked into an extern-C declaration: {out}"
+    );
+    // (b) the declaration-level varargs survive.
+    assert!(
+        out.contains("long syscall(long number, ...);"),
+        "variadic extern-C declaration must keep its `...`: {out}"
+    );
+}
+
+/// H3 fail-closed — a foreign-C declaration whose callable parameter the
+/// raw C spelling cannot express (a Rust-ABI fn pointer) must reject with
+/// a diagnostic BEFORE any output (precedent: variadic extern-Rust fns
+/// reject in the transpile preflight).
+#[test]
+fn test_extern_c_foreign_rust_abi_fn_pointer_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        unsafe extern "C" {
+            fn bad(cb: fn(i32) -> i32);
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("non-C-ABI callable in a foreign C declaration must reject");
+    assert!(error.contains("bad"), "{error}");
+    let out = cg.into_output();
+    assert!(
+        !out.contains("bad("),
+        "rejected foreign declaration must not reach the output: {out}"
+    );
+}
+
+/// H3 scope guard — a variadic fn-POINTER param keeps its own `...`
+/// inside the raw spelling.
+#[test]
+fn test_extern_c_foreign_variadic_fn_pointer_param() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        unsafe extern "C" {
+            fn set_printer(printer: unsafe extern "C" fn(*const i8, ...) -> i32);
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("void set_printer(int32_t (*printer)(const int8_t*, ...));"),
+        "fn-pointer's own variadic must survive in the raw spelling: {out}"
+    );
+}

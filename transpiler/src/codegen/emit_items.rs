@@ -1162,6 +1162,33 @@ impl CodeGen {
         } else {
             "\"C\"".to_string()
         };
+        // H3 fail-closed (checkpoint contract 3): a foreign-C declaration
+        // whose callable parameter the raw C spelling cannot express (a
+        // Rust-ABI fn pointer) must reject with a diagnostic BEFORE any
+        // output — precedent: the transpile preflight rejects variadic
+        // extern-Rust fns. Emitting the class-type wrapper instead would
+        // silently conflict with the authoritative C header's prototype.
+        for item in &fm.items {
+            if let syn::ForeignItem::Fn(f) = item {
+                for arg in &f.sig.inputs {
+                    let syn::FnArg::Typed(pat_type) = arg else {
+                        continue;
+                    };
+                    if Self::type_contains_non_c_abi_bare_fn(&pat_type.ty) {
+                        if self.codegen_error.is_none() {
+                            self.codegen_error = Some(format!(
+                                "foreign C declaration `{}` has a callable parameter \
+                                 with no raw C spelling (non-C-ABI fn pointer); \
+                                 extern {} declarations must match the authoritative \
+                                 C header",
+                                f.sig.ident, abi
+                            ));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         self.writeln(&format!("extern {} {{", abi));
         self.indent += 1;
         for item in &fm.items {
@@ -1169,7 +1196,23 @@ impl CodeGen {
                 let name_str = f.sig.ident.to_string();
                 let name = escape_cpp_keyword(&name_str);
                 let return_type = self.map_return_type(&f.sig.output);
-                let params = self.map_fn_params(&f.sig.inputs);
+                // H3: map the params in foreign-C-declaration context — a
+                // C-ABI BareFn param lowers to a raw C function pointer with
+                // its name inside the declarator (`void (*entry_fn)(void*)`),
+                // matching the authoritative C header.
+                let prev_foreign_c = self.in_foreign_c_declaration;
+                self.in_foreign_c_declaration = true;
+                let mut params = self.map_fn_params(&f.sig.inputs);
+                self.in_foreign_c_declaration = prev_foreign_c;
+                // H3: the declaration-level varargs survive
+                // (`long syscall(long number, ...);`).
+                if f.sig.variadic.is_some() {
+                    if params.is_empty() {
+                        params.push_str("...");
+                    } else {
+                        params.push_str(", ...");
+                    }
+                }
                 // Linkage-specification braces do not create a namespace
                 // scope, so an export-declaration is valid here. Export each
                 // Rust-public foreign declaration independently; keeping the
@@ -1188,6 +1231,26 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+    }
+
+    /// True when a foreign-C parameter type contains a bare-fn form the raw
+    /// C spelling cannot express — a Rust-ABI `fn(…)` pointer at any depth.
+    /// (H3; C-ABI bare fns lower to raw C fn pointers instead.)
+    fn type_contains_non_c_abi_bare_fn(ty: &syn::Type) -> bool {
+        struct Finder {
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Finder {
+            fn visit_type_bare_fn(&mut self, bf: &'ast syn::TypeBareFn) {
+                if !CodeGen::bare_fn_has_c_abi(bf) {
+                    self.found = true;
+                }
+                syn::visit::visit_type_bare_fn(self, bf);
+            }
+        }
+        let mut finder = Finder { found: false };
+        syn::visit::Visit::visit_type(&mut finder, ty);
+        finder.found
     }
 
     /// Emit a Rust `union` (pervasive in c2rust C ports, e.g.

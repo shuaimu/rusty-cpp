@@ -3291,6 +3291,27 @@ impl CodeGen {
                 }
             }
             syn::Type::BareFn(bf) => {
+                // Foreign-C declaration context (H3, checkpoint contract 3):
+                // inside an `extern "C" { … }` block the authoritative C
+                // header spells a C-ABI callable parameter as a raw C
+                // function pointer — `void (*)(void*)` — honoring the
+                // pointer's own variadic. The class-type wrappers below
+                // conflict with the real C prototype. Non-C-ABI callables in
+                // this context are rejected fail-closed by
+                // `emit_foreign_mod` before output, so they never take the
+                // wrapper path either.
+                if self.in_foreign_c_declaration && Self::bare_fn_has_c_abi(bf) {
+                    let mut param_types: Vec<String> =
+                        bf.inputs.iter().map(|arg| self.map_type(&arg.ty)).collect();
+                    if bf.variadic.is_some() {
+                        param_types.push("...".to_string());
+                    }
+                    let return_type = match &bf.output {
+                        syn::ReturnType::Default => "void".to_string(),
+                        syn::ReturnType::Type(_, ty) => self.map_type(ty),
+                    };
+                    return format!("{} (*)({})", return_type, param_types.join(", "));
+                }
                 // fn(A, B) -> C → rusty::SafeFn<C(A, B)>
                 // unsafe fn(A, B) -> C → rusty::UnsafeFn<C(A, B)>
                 let param_types: Vec<String> =
@@ -4101,6 +4122,15 @@ impl CodeGen {
         }
     }
 
+    /// True when a bare-fn type carries the C ABI (`extern "C" fn(…)` or the
+    /// bare `extern fn(…)`, which defaults to "C"). A plain `fn(…)` is
+    /// Rust-ABI and has no raw C spelling.
+    pub(super) fn bare_fn_has_c_abi(bf: &syn::TypeBareFn) -> bool {
+        bf.abi
+            .as_ref()
+            .is_some_and(|abi| abi.name.as_ref().map(|n| n.value() == "C").unwrap_or(true))
+    }
+
     pub(super) fn map_fn_params(
         &self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
@@ -4114,12 +4144,33 @@ impl CodeGen {
                         syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => "_".to_string(),
                     };
+                    // Foreign-C declaration context (H3): a top-level
+                    // C-ABI callable param lowered to a raw C fn pointer
+                    // carries its name INSIDE the declarator —
+                    // `void (*entry_fn)(void*)`, never
+                    // `void (*)(void*) entry_fn` (ill-formed).
+                    if self.in_foreign_c_declaration
+                        && Self::param_type_is_bare_fn(&pat_type.ty)
+                        && ty.contains("(*)")
+                    {
+                        return ty.replacen("(*)", &format!("(*{})", name), 1);
+                    }
                     format!("{} {}", ty, name)
                 }
                 syn::FnArg::Receiver(_) => "/* self */".to_string(),
             })
             .collect();
         params.join(", ")
+    }
+
+    /// The param type IS a bare-fn (through parens) — the only shape whose
+    /// raw-C-pointer lowering needs the declarator-name interpolation above.
+    fn param_type_is_bare_fn(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::BareFn(_) => true,
+            syn::Type::Paren(p) => Self::param_type_is_bare_fn(&p.elem),
+            _ => false,
+        }
     }
 
     pub(super) fn map_fn_params_with_cpp_defaults(

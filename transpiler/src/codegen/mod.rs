@@ -2661,6 +2661,15 @@ pub struct CodeGen {
     /// Used to qualify single-segment type paths that depend on `use` aliases
     /// emitted later in the namespace body.
     pub(crate) in_forward_decl_signature: bool,
+    /// True while mapping the parameter types of a foreign declaration
+    /// inside a non-Rust-ABI `extern "…" { … }` block (H3, checkpoint
+    /// contract 3). In that context a C-ABI `BareFn` parameter must lower
+    /// to a raw C function pointer (`Ret (*)(Args[, ...])`) matching the
+    /// authoritative C header, never the class-type
+    /// `rusty::SafeFn`/`rusty::UnsafeFn` wrappers; callable forms the raw
+    /// spelling cannot express are rejected fail-closed by
+    /// `emit_foreign_mod` before output.
+    pub(crate) in_foreign_c_declaration: bool,
     /// True while emitting a `requires (...)` constraint expression.
     /// Suppresses the trait-helper qualification rewrite at the emit
     /// site so both forward-decl and final-pass emissions produce the
@@ -3215,6 +3224,7 @@ impl CodeGen {
             cpp_module_member_symbols: HashMap::new(),
             cpp_module_export_namespaces: HashMap::new(),
             in_forward_decl_signature: false,
+            in_foreign_c_declaration: false,
             in_constraint_emit: std::cell::Cell::new(false),
             suppress_dependent_assoc_traits_routing: std::cell::Cell::new(false),
             declared_item_names: HashSet::new(),
