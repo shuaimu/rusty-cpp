@@ -7792,6 +7792,26 @@ impl CodeGen {
                     self.output =
                         Self::requalify_crate_root_symbol(&self.output, &ns, item);
                 }
+                // C2 (H2's rule on the IMPORT side): an authenticated
+                // `cpp_import_namespace(<ns>)` contract states where a crate
+                // child module's items LIVE in C++ — flat in `<ns>`, never in
+                // a nested `<ns>::<child>` and never in a global namespace
+                // named after the Rust module. The emitters conservatively
+                // global-qualify such a reference as `::<child>::<item>`, and
+                // the requalifier above cannot fix it (the head is a module,
+                // not a declared item), so it leaked as `::errors::RpcError`
+                // — a namespace that does not exist. Rewrite the contracted
+                // child head to its authenticated namespace; a leading `::`
+                // stays semantic, exactly as in H2.
+                for (child, ns_target) in self.cpp_abi_plan.flat_import_child_namespaces() {
+                    let escaped_child = escape_cpp_keyword(&child);
+                    if escaped_child == ns_target {
+                        continue;
+                    }
+                    self.output = self
+                        .output
+                        .replace(&format!("::{}::", escaped_child), &format!("::{}::", ns_target));
+                }
                 let mut placed_items: Vec<(String, String)> = placement_contracts
                     .iter()
                     .map(|(name, target)| (escape_cpp_keyword(name), target.clone()))

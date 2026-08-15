@@ -221,6 +221,26 @@ impl CppAbiEmissionPlan {
         ))
     }
 
+    /// C2: the authenticated (crate child module → C++ namespace) pairs this
+    /// plan carries. A `#[cfg_attr(any(), cpp_import_namespace(rrr))]
+    /// use crate::errors::…;` contract states that `crate::errors`' items are
+    /// emitted into namespace `rrr` — flat, not as a nested `rrr::errors`.
+    pub(crate) fn flat_import_child_namespaces(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .flat_imports
+            .values()
+            .map(|contract| {
+                (
+                    contract.key.rust_child.clone(),
+                    contract.cpp_namespace.clone(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        pairs.dedup();
+        pairs
+    }
+
     pub(crate) fn validate_flat_import_namespace(
         &self,
         expected: Option<&str>,

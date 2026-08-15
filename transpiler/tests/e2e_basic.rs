@@ -3690,3 +3690,76 @@ fn main() {}
         absent_work_dir.display()
     );
 }
+
+/// C2 — an authenticated `cpp_import_namespace(<ns>)` contract states WHERE a
+/// crate child module's items live in C++: flat in `<ns>`. The emitters
+/// conservatively global-qualify a cross-module reference as
+/// `::<child>::<item>`, and the crate-root requalifier cannot repair it (the
+/// head is a module, not a declared item), so it leaked as `::errors::…` — a
+/// namespace that does not exist. Same root cause as H2: a leading `::` is
+/// semantic, and only relative targets take the configured namespace prefix.
+#[test]
+fn test_flat_import_child_paths_resolve_to_the_contracted_namespace() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='flat_import_paths'\nversion='0.0.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub mod errors;\npub mod callbacks;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/errors.rs"),
+        r#"
+pub struct RpcError { pub code: i32 }
+pub fn make_error(code: i32) -> RpcError { RpcError { code } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/callbacks.rs"),
+        r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::errors::RpcError;
+
+pub fn report(e: &RpcError) -> i32 { e.code }
+
+pub fn make() -> RpcError { crate::errors::make_error(7i32) }
+"#,
+    )
+    .unwrap();
+
+    let out_dir = root.join("out");
+    let output = transpiler_bin()
+        .args(["--crate", root.join("Cargo.toml").to_str().unwrap()])
+        .args(["--output-dir", out_dir.to_str().unwrap()])
+        .args(["--cxx-namespace", "rrr"])
+        .output()
+        .expect("failed to run crate-mode flat-import probe");
+    assert!(
+        output.status.success(),
+        "crate transpile failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let consumer =
+        std::fs::read_to_string(out_dir.join("flat_import_paths.callbacks.cppm")).unwrap();
+    assert!(
+        consumer.contains("::rrr::make_error("),
+        "a contracted child's item resolves in its authenticated namespace: {consumer}"
+    );
+    assert!(
+        !consumer.contains("::errors::"),
+        "no global namespace named after the Rust module may be emitted: {consumer}"
+    );
+    assert!(
+        !consumer.contains("::rrr::errors::"),
+        "the contract is FLAT: items do not nest under the child module: {consumer}"
+    );
+}
