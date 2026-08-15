@@ -1008,9 +1008,17 @@ pub struct CodeGen {
     pub(crate) pending_template_args_specializations: HashSet<String>,
     /// Concrete positive `Send` / `Sync` impls lower to specializations of
     /// `rusty::is_send` / `rusty::is_sync`. They must be emitted at global
-    /// scope, after any C++ namespace wrapper has closed.
+    /// scope, after any C++ namespace wrapper has closed — a specialization
+    /// inside `namespace <crate> { … }` is ill-formed ("not in a namespace
+    /// enclosing 'rusty'").
+    ///
+    /// Held as `(marker, self_type)` rather than a finished line because the
+    /// self type's qualification depends on WHERE it is finally flushed: the
+    /// `cxx_namespace` wrap closes before this set is drained, but the textual
+    /// crate wrap (`wrap_module_purview_in_crate_namespace`) closes AFTER, so
+    /// that path has to prepend the crate namespace itself.
     pub(crate) pending_explicit_auto_trait_specializations:
-        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<(String, String)>,
     /// Declared generic parameter kinds keyed by local type name (scoped and unscoped).
     /// Mirrors `declared_type_params` indexing (Type vs Const) so omitted-arg
     /// recovery does not substitute mismatched kind positions.
@@ -2800,6 +2808,31 @@ impl CodeGen {
         }
         self.output
             .push_str(&format!("}} // namespace {}\n", crate_name));
+
+        // Send/Sync specializations, held back by `emit_file` precisely so they
+        // land HERE — outside the wrap. `template<> struct rusty::is_send<…>`
+        // has to sit in a namespace enclosing `rusty` (global scope), so the
+        // brace above must already have closed. The self type was qualified at
+        // push time with the module path only (`identifier::Identifier`); now
+        // that everything moved under `namespace <crate>`, prepend the crate.
+        if !self.pending_explicit_auto_trait_specializations.is_empty() {
+            let specializations =
+                std::mem::take(&mut self.pending_explicit_auto_trait_specializations);
+            self.output.push('\n');
+            for (marker, self_ty) in specializations {
+                // An already-global-qualified type (`::foo::Bar`) names an
+                // entity outside the wrap and must not be re-rooted.
+                let qualified = if self_ty.starts_with("::") {
+                    self_ty
+                } else {
+                    format!("{}::{}", crate_name, self_ty)
+                };
+                self.output.push_str(&format!(
+                    "template<> struct rusty::{}<{}> : std::true_type {{}};\n",
+                    marker, qualified
+                ));
+            }
+        }
 
         // Re-qualify same-crate path references inside the wrap. Before
         // wrapping, the transpiler emits a crate-own top namespace as a global
@@ -5967,15 +6000,34 @@ impl CodeGen {
                 self.writeln(&format!("}} // namespace {}", ns));
             }
         }
-        if !self.pending_explicit_auto_trait_specializations.is_empty() {
+        // Flush the Send/Sync specializations HERE only when nothing will wrap
+        // the output after us. A crate-namespace wrap runs later and appends
+        // its `}` to the very end, which would engulf these — so in that case
+        // leave them pending and let the wrap emit them past its own close.
+        if !self.pending_explicit_auto_trait_specializations.is_empty()
+            && !self.will_wrap_purview_in_crate_namespace()
+        {
             self.newline();
             let specializations = std::mem::take(
                 &mut self.pending_explicit_auto_trait_specializations,
             );
-            for specialization in specializations {
-                self.writeln(&specialization);
+            for (marker, self_ty) in specializations {
+                self.writeln(&format!(
+                    "template<> struct rusty::{}<{}> : std::true_type {{}};",
+                    marker, self_ty
+                ));
             }
         }
+    }
+
+    /// Whether `wrap_module_purview_in_crate_namespace` will run for this
+    /// output. Mirrors the guard at its call site; anything that appends to
+    /// the very end of `output` must consult this, because the wrap's closing
+    /// brace goes after everything already emitted.
+    pub(crate) fn will_wrap_purview_in_crate_namespace(&self) -> bool {
+        self.crate_name
+            .as_ref()
+            .is_some_and(|n| crate::transpile::crate_is_namespace_wrapped(n))
     }
 
     /// Cluster A completion: emit the partial specializations for each
@@ -10814,6 +10866,12 @@ impl CodeGen {
         let ordered_items = self.order_items_for_emission(items, false, false);
         let mut emitted_names = HashSet::new();
         let mut emitted_consts = HashSet::new();
+        // Consts this pass emitted as an actual `constexpr` DEFINITION — a
+        // strict subset of `emitted_consts`, which also holds the ones that
+        // fell back to `extern const` (a declaration, NOT usable in a constant
+        // expression). Only the constexpr ones may seed a derived const's
+        // forward `constexpr`; see the use site below.
+        let mut forward_constexpr_consts = HashSet::new();
         let mut emitted_statics = HashSet::new();
         let mut emitted_aliases = HashSet::new();
         let mut emitted_modules = HashSet::new();
@@ -11054,13 +11112,25 @@ impl CodeGen {
                     // COLS) must also define constexpr here — an `extern
                     // const` is not a constant expression, so a static
                     // array sized by CELLS failed its own forward decl.
-                    || Self::const_expr_combines_forward_consts(&c.expr, &emitted_consts))
+                    //
+                    // Ask ONLY about consts already emitted as constexpr, not
+                    // every const seen: a name in `emitted_consts` may have
+                    // taken the `extern const` branch below, and forward-
+                    // emitting `constexpr TAIL = f(PTR)` over such a PTR is
+                    // ill-formed AND suppresses TAIL's real body-order
+                    // definition, where PTR *is* usable (semver's
+                    // `PTR_BYTES = size_of::<NonNull<u8>>()`).
+                    || Self::const_expr_combines_forward_consts(
+                        &c.expr,
+                        &forward_constexpr_consts,
+                    ))
             {
                 self.writeln(&format!(
                     "{}constexpr {} {} = {};",
                     export_prefix, ty, name, expr
                 ));
                 self.forward_emitted_consts.insert(scoped_name);
+                forward_constexpr_consts.insert(name.clone());
             } else if ty.contains('*') {
                 // Preserve pointer mutability in forward declarations for const items.
                 // `extern const T* name;` changes pointee constness; emit `T* const`

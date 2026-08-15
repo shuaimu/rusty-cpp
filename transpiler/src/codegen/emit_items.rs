@@ -821,7 +821,16 @@ impl CodeGen {
         // infers A through I's IntoIterator bound), absent from every input,
         // the return type, AND the body. C++ can never deduce such a param
         // ("couldn't infer template argument 'A'"), so drop it from the head.
-        {
+        //
+        // Only when there is something to deduce FROM. A function with no
+        // value parameters (`fn assert_send_sync<T: Send + Sync>() {}`) can
+        // never hit that deduction failure: Rust itself cannot infer T there
+        // either, so every call site spells it — and we emit the turbofish
+        // (`assert_send_sync<uint32_t>()`). Dropping the head then leaves the
+        // DEFINITION non-template while its forward declaration stays
+        // templated, so the template is declared, called, and never defined
+        // (semver's test_autotrait: "undefined reference", link failure).
+        if !f.sig.inputs.is_empty() {
             use quote::ToTokens;
             let body_text = f.block.to_token_stream().to_string();
             // Token scan, not syn traversal: `-> impl Fn(&T, &T) -> Ordering`
@@ -7971,10 +7980,8 @@ impl CodeGen {
                     self_cpp = format!("{}::{}", scopes.join("::"), self_cpp);
                 }
             }
-            self.pending_explicit_auto_trait_specializations.insert(format!(
-                "template<> struct rusty::{}<{}> : std::true_type {{}};",
-                marker, self_cpp
-            ));
+            self.pending_explicit_auto_trait_specializations
+                .insert((marker.to_string(), self_cpp));
             return;
         }
         if self.emit_type_alias_impl_block(i) {

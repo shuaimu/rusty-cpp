@@ -43179,3 +43179,91 @@ fn foreign_unit_variant_arm_is_tested_not_bound() {
         "the arm probe must take its scrutinee as auto&& so the branches are dependent:\n{out}"
     );
 }
+
+#[test]
+fn const_derived_from_non_constexpr_const_is_not_forward_constexpr() {
+    // semver went red for a month here. The const-forward pass asked "is this
+    // const built from consts already emitted in this pass?" but was handed the
+    // set of every const SEEN, not the ones actually emitted as `constexpr`.
+    // `PTR_BYTES = size_of::<..>()` takes the `extern const` branch (its
+    // initializer is a call), so forward-emitting `constexpr TAIL_BYTES =
+    // f(PTR_BYTES)` referenced a declaration that is not a constant
+    // expression — AND suppressed TAIL_BYTES's real body-order definition,
+    // leaving every `std::array<.., TAIL_BYTES>` ill-formed.
+    let out = transpile_str(
+        "pub const PTR_BYTES: usize = std::mem::size_of::<u8>();\
+         pub const TAIL_BYTES: usize = PTR_BYTES - 1;\
+         pub struct S { pub a: [u8; TAIL_BYTES] }",
+    );
+    assert!(
+        out.contains("extern const size_t TAIL_BYTES;"),
+        "a const derived from a NON-constexpr const must forward-declare as \
+         `extern const`, not define constexpr over a non-constant:\n{out}"
+    );
+    let ptr_def = out.find("constexpr size_t PTR_BYTES =");
+    let tail_def = out.find("constexpr size_t TAIL_BYTES =");
+    assert!(
+        matches!((ptr_def, tail_def), (Some(p), Some(t)) if p < t),
+        "TAIL_BYTES's constexpr definition must follow PTR_BYTES's:\n{out}"
+    );
+}
+
+#[test]
+fn zero_arg_generic_fn_keeps_its_template_head() {
+    // `fn assert_send_sync<T: Send + Sync>() {}` — T is named in no parameter,
+    // no return type, and an empty body, so the pure-phantom filter dropped it
+    // from the DEFINITION while the forward declaration kept it. The template
+    // was then declared and called (`assert_send_sync<uint32_t>()`) but never
+    // defined: semver's test_autotrait died at LINK, not compile.
+    //
+    // With no value parameters there is nothing to deduce from, so the filter's
+    // premise ("C++ can never deduce this") cannot apply — Rust cannot infer it
+    // either, and every call site spells it.
+    let out = transpile_str(
+        "fn assert_send_sync<T: Send + Sync>() {} pub fn go() { assert_send_sync::<u32>(); }",
+    );
+    assert!(
+        out.contains("template<typename T>\nvoid assert_send_sync() {"),
+        "the DEFINITION must carry the template head, not just the forward \
+         declaration — otherwise the template is declared, called, and never \
+         defined:\n{out}"
+    );
+    assert_eq!(
+        out.matches("template<typename T>").count(),
+        2,
+        "declaration and definition must both carry the template head:\n{out}"
+    );
+}
+
+#[test]
+fn auto_trait_specializations_land_outside_the_crate_namespace_wrap() {
+    // `template<> struct rusty::is_send<X>` must sit in a namespace enclosing
+    // `rusty` — i.e. global scope. They were flushed at the end of emit_file,
+    // but the crate-namespace wrap runs LATER and appends its closing brace to
+    // the very end, swallowing them: "class template specialization of
+    // 'is_send' not in a namespace enclosing 'rusty'".
+    let file: syn::File = syn::parse_str(
+        "pub mod identifier { pub struct Identifier { pub n: u32 } \
+         unsafe impl Send for Identifier {} }",
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("semverish");
+    cg.emit_file(&file, Some("semverish"));
+    let out = cg.into_output();
+
+    let close = out
+        .find("} // namespace semverish")
+        .expect("the crate wrap must close:\n{out}");
+    let spec = out
+        .find("struct rusty::is_send<")
+        .unwrap_or_else(|| panic!("the Send specialization must still be emitted:\n{out}"));
+    assert!(
+        spec > close,
+        "the specialization must follow the wrap's closing brace:\n{out}"
+    );
+    assert!(
+        out.contains("struct rusty::is_send<semverish::identifier::Identifier>"),
+        "outside the wrap the self type needs its crate qualification:\n{out}"
+    );
+}
