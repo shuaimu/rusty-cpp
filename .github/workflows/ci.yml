@@ -69,6 +69,59 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # Full 22-crate parity matrix. PULL REQUESTS ONLY — it is the expensive job,
+  # and running it on every push to main would serialise the self-hosted
+  # runner. a0ebd26d removed this job because the runner lacked cargo-expand;
+  # that blocker is solved by the same Ensure step the sibling jobs use.
+  #
+  # Why it is back: the 7-crate gate had been standing in for the matrix, and
+  # five regressions (path, semver, take_mut, serde_bytes, bitflags) each
+  # shipped on a commit reporting that gate green. The matrix is the only
+  # check that would have caught them.
+  parity-matrix:
+    runs-on: self-hosted
+    needs: build-and-test
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure cargo-expand
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          command -v cargo-expand >/dev/null 2>&1 || cargo install cargo-expand --locked
+
+      # Fails when any crate outside KNOWN_FAIL_CRATES regresses. A crate that
+      # has never passed stays known-fail and does not gate; a crate that used
+      # to pass and stops does.
+      - name: Run parity matrix
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          bash tests/transpile_tests/run_parity_matrix.sh 2>&1 | tee "${RUNNER_TEMP}/matrix.log"
+          summary=$(grep -E '^Summary:' "${RUNNER_TEMP}/matrix.log" | tail -1)
+          echo "$summary"
+          # `known-fail=N` also ends in `fail=N`; a greedy `.*` backtracks to the
+          # last match. Require whitespace before `fail=` so only the real field wins.
+          fails=$(printf '%s\n' "$summary" | sed -nE 's/.*[[:space:]]fail=([0-9]+).*/\1/p')
+          if [ "${fails:-1}" != "0" ]; then
+            echo "::error::parity matrix has ${fails} failing crate(s) — see the summary above"
+            exit 1
+          fi
+
+      - name: Upload parity matrix artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-matrix-artifacts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/matrix.log
+            .rusty-parity-matrix/*/matrix.log
+            .rusty-parity-matrix/*/build.log
+            .rusty-parity-matrix/*/baseline.txt
+          if-no-files-found: warn
+          retention-days: 14
+
   cpp-std-complex-compile:
     runs-on: self-hosted
     needs: build-and-test

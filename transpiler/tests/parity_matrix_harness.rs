@@ -272,14 +272,31 @@ fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
 }
 
 #[test]
-fn test_ci_workflow_parity_matrix_job_stays_dropped() {
-    // The parity-matrix CI job was deliberately removed (it is run
-    // locally via run_parity_matrix.sh as the gate instead); the
-    // transpile jobs that remain need cargo-expand installed. Guard
-    // both halves of that decision against accidental resurrection
-    // or loss.
+fn test_ci_workflow_parity_matrix_job_is_pull_request_only() {
+    // SUPERSEDES `..._parity_matrix_job_stays_dropped`. a0ebd26d removed the
+    // job because the self-hosted runner lacked cargo-expand, leaving the
+    // matrix a purely local gate — and this test guarded that.
+    //
+    // It is deliberately back, because the local-only arrangement failed in
+    // practice: a 7-crate subset became the de-facto gate, and five
+    // regressions (path, semver, take_mut, serde_bytes, bitflags) each
+    // shipped on a commit reporting that subset green. The original blocker
+    // is gone — the Ensure cargo-expand step the sibling jobs use covers it.
+    //
+    // What still must hold: the job is PULL-REQUEST ONLY. It is the expensive
+    // job, and running it on every push to main would serialise the
+    // self-hosted runner — which is the cost that motivated dropping it.
     let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
-    assert!(!workflow.contains("parity-matrix:"));
+    assert!(
+        workflow.contains("parity-matrix:"),
+        "the parity-matrix job must exist — it is the only check that catches \
+         a crate regressing from PASS"
+    );
+    assert!(
+        workflow.contains("if: github.event_name == 'pull_request'"),
+        "the parity-matrix job must stay pull-request only, or it serialises \
+         the self-hosted runner on every push"
+    );
     assert!(workflow.contains("cargo install cargo-expand"));
 }
 
@@ -301,9 +318,10 @@ fn test_ci_workflow_defines_cpp_std_complex_compile_job() {
 
 #[test]
 fn test_ci_workflow_uploads_artifacts_on_failure() {
-    // The per-crate parity-matrix upload went away with the
-    // parity-matrix job; the remaining compile jobs still upload
-    // their work dirs on failure.
+    // Every job that can fail uploads its work dir — the compile jobs, and
+    // (since the job came back, pull-request only) the parity matrix, whose
+    // per-crate matrix.log / build.log / baseline.txt are what a failure
+    // triage actually needs.
     let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
     assert!(workflow.contains("if: failure()"));
     assert!(workflow.contains("actions/upload-artifact@v4"));
