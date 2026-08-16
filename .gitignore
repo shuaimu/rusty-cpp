@@ -36,3 +36,6 @@ tests/transpile_tests/serde_yaml/
 tests/transpile_tests/toml/
 Testing/
 .DS_Store
+
+# Test-run artifact: module build cache created by harness invocations
+.rusty-modules-cache/

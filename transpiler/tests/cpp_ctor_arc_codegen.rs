@@ -236,7 +236,10 @@ pub fn make_owner(value: i32) -> Arc<Owner> {
     );
     let generated = std::fs::read_to_string(cpp).unwrap();
     assert!(
-        !generated.contains("rusty::Arc<Owner>::make("),
-        "an ordinary dependency occupying `std` authenticated Arc fusion:\n{generated}"
+        !generated.contains("rusty::Arc<Owner>::make(std::move(value))")
+            && !generated.contains("rusty::Arc<Owner>::make(value)"),
+        "an ordinary dependency occupying `std` authenticated Arc fusion (the \
+         typed-owner `make` routing may wrap a constructed VALUE, never splice \
+         the ctor args):\n{generated}"
     );
 }

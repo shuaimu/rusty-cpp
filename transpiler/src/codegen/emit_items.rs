@@ -221,6 +221,15 @@ impl CodeGen {
             }
             return false;
         }
+        // Consumer-mapped units keep the historical no-forward-decl shape: the
+        // definition deliberately RETAINS the pre-override binding spelling of
+        // its parameter types (canonical-interface fallback), while forward
+        // mapping would project them into the consumer namespace — two
+        // spellings for one signature. cpp_declaration fns are exempt: their
+        // C++ surface exists ONLY as this forward declaration.
+        if !self.consumer_module_map.is_empty() && !Self::has_cpp_declaration_attr(&f.attrs) {
+            return false;
+        }
         let alias_resolved_inputs = self.resolve_local_alias_fn_inputs(&f.sig.inputs);
         let can_forward_declare = match &f.sig.output {
             syn::ReturnType::Default => true,

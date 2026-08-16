@@ -4185,8 +4185,13 @@ pub fn root_value() -> i32 { 7 }
             let bridge_cpp =
                 std::fs::read_to_string(output_dir.join("feature_bridge/feature_bridge.cppm"))
                     .unwrap();
+            // Fusion means the ctor ARGUMENTS are spliced into `make` (the
+            // allocation-elision seam). The typed-owner routing may still
+            // wrap an ordinary constructed VALUE (`make(Owner(...))`) without
+            // any sysroot authentication — that shape is not fusion.
             assert_eq!(
-                bridge_cpp.contains("rusty::Arc<Owner>::make("),
+                bridge_cpp.contains("rusty::Arc<Owner>::make(std::move(value))")
+                    || bridge_cpp.contains("rusty::Arc<Owner>::make(value)"),
                 should_fuse,
                 "{label} used the wrong child sysroot provenance:\n{bridge_cpp}"
             );

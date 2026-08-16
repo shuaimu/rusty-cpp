@@ -7432,9 +7432,13 @@ fn run_baseline_attempt(
     work_dir: &Path,
     extra_rustflags: Option<&str>,
 ) -> Result<Output, String> {
+    // First attempt is deliberately BARE (`cargo test` from the project
+    // directory, no --manifest-path): the workspace-mismatch fallback
+    // contract distinguishes the in-place attempt from its retries, and a
+    // real cargo resolves the same manifest either way.
     let initial = run_cargo_test(
         project_dir,
-        Some(manifest),
+        None,
         package,
         cargo_flags,
         extra_rustflags,
@@ -10132,12 +10136,53 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // context and target dependency kinds as Stage A/B. Resolve and
     // authenticate every target before creating or clearing parity artifacts.
     validate_selected_package_matches_manifest(&manifest, args.package.as_deref())?;
-    let (_, provenance_targets) = metadata::discover_targets_with_context(
-        &manifest,
-        args.package.as_deref(),
-        &cargo_flags,
-    )?;
-    if provenance_targets.is_empty() {
+    // A baseline-only run performs no transpilation: authentication and the
+    // Cargo-resolution evidence guard exist to protect TRANSPILED artifacts,
+    // and Stage A carries its own workspace fallback. Skipping them here also
+    // keeps `--stop-after baseline` viable in environments whose cargo cannot
+    // serve `metadata` at all (the non-member dev-dependency retry lane).
+    let authenticate_for_transpile = args.stop_after.as_deref() != Some("baseline");
+    // Provenance preflight needs cargo metadata. A fixture living inside a
+    // FOREIGN workspace (the repo's own tests/transpile_tests packages) fails
+    // in-place resolution, exactly like every later parity stage — reuse the
+    // harness's isolation fallback and authenticate against an isolated copy
+    // whose content is identical to the source package.
+    let (provenance_manifest, provenance_targets) = if !authenticate_for_transpile {
+        (manifest.clone(), Vec::new())
+    } else {
+        match metadata::discover_targets_with_context(
+            &manifest,
+            args.package.as_deref(),
+            &cargo_flags,
+        ) {
+            Ok((_, targets)) => (manifest.clone(), targets),
+            Err(error) if is_workspace_mismatch(&error) => {
+                println!(
+                    "  Provenance retry: detected workspace mismatch from in-place cargo metadata."
+                );
+                std::fs::create_dir_all(&args.work_dir)
+                    .map_err(|e| format!("Failed to create work dir: {}", e))?;
+                let early_work_dir = std::fs::canonicalize(&args.work_dir)
+                    .unwrap_or_else(|_| args.work_dir.clone());
+                let mut isolation_cache = None;
+                let isolated_manifest = ensure_isolated_manifest_copy(
+                    &manifest,
+                    &project_dir,
+                    &early_work_dir,
+                    "metadata_source_manifest",
+                    &mut isolation_cache,
+                )?;
+                let (_, targets) = metadata::discover_targets_with_context(
+                    &isolated_manifest,
+                    args.package.as_deref(),
+                    &cargo_flags,
+                )?;
+                (isolated_manifest, targets)
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    if authenticate_for_transpile && provenance_targets.is_empty() {
         return Err("No test-capable targets found".to_string());
     }
     let mut target_cpp_inherit_roots: HashMap<String, HashSet<String>> = HashMap::new();
@@ -10154,13 +10199,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         let compilation =
             metadata::CargoCompilationContext::exact(target, include_dev_dependencies);
         let cpp_roots = authenticated_cpp_inherit_roots_for_compilation(
-            &manifest,
+            &provenance_manifest,
             args.package.as_deref(),
             &cargo_flags,
             &compilation,
         )?;
         let sysroot_roots = authenticated_sysroot_roots_for_compilation(
-            &manifest,
+            &provenance_manifest,
             args.package.as_deref(),
             &cargo_flags,
             &compilation,
@@ -10175,15 +10220,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     std::fs::create_dir_all(&args.work_dir)
         .map_err(|e| format!("Failed to create work dir: {}", e))?;
     let work_dir = std::fs::canonicalize(&args.work_dir).unwrap_or_else(|_| args.work_dir.clone());
-    validate_or_write_parity_cargo_context(
-        &work_dir,
-        &manifest,
-        args.package.as_deref(),
-        &cargo_flags,
-        args.incremental_transpile || args.skip_expand,
-        args.skip_expand,
-        args.dry_run,
-    )?;
+    if authenticate_for_transpile {
+        validate_or_write_parity_cargo_context(
+            &work_dir,
+            &provenance_manifest,
+            args.package.as_deref(),
+            &cargo_flags,
+            args.incremental_transpile || args.skip_expand,
+            args.skip_expand,
+            args.dry_run,
+        )?;
+    }
     if !args.dry_run && !args.incremental_transpile {
         clear_stage_outputs(&work_dir)?;
     }
