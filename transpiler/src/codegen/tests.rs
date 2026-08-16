@@ -10858,16 +10858,105 @@ fn test_nullable_callback_none_some_replace_and_if_let_lowering() {
 }
 
 #[test]
-#[should_panic(expected = "unsupported Option operation `is_some`")]
+fn test_nullable_callback_take_unwrap_is_none_and_by_value_if_let() {
+    // Regression: the srpc DeferredReply shape that slipped through BOTH
+    // parents' suites — `Option<Box<dyn Fn*>>` consumed via `.take()`:
+    // standalone, chained through `.is_none()`, `unwrap()`-ed, and as a
+    // by-value `if let Some(...)` scrutinee (prvalue and moved place).
+    let out = transpile_str(
+        r#"
+        type ReplyFn = Box<dyn FnMut(i32)>;
+
+        struct Holder {
+            reply_cb: Option<ReplyFn>,
+            cleanup_cb: Option<Box<dyn FnMut()>>,
+        }
+
+        impl Holder {
+            fn reply(&mut self, value: i32) {
+                let cb_opt = self.reply_cb.take();
+                if cb_opt.is_none() {
+                    return;
+                }
+                let mut cb = cb_opt.unwrap();
+                cb(value);
+            }
+
+            fn reply_error(&mut self) -> bool {
+                self.reply_cb.take().is_none()
+            }
+
+            fn has_reply(&self) -> bool {
+                self.reply_cb.is_some()
+            }
+
+            fn finish(&mut self) {
+                if let Some(mut cleanup) = self.cleanup_cb.take() {
+                    cleanup();
+                }
+            }
+
+            fn consume(&mut self) {
+                let taken = self.cleanup_cb.take();
+                if let Some(mut f) = taken {
+                    f();
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::mem::take(this->reply_cb)"),
+        "take() must move the callback out and leave the empty state:\n{out}"
+    );
+    assert!(
+        out.contains("!static_cast<bool>(cb_opt)"),
+        "is_none() on the taken local must test the nullable carrier:\n{out}"
+    );
+    assert!(
+        out.contains("!static_cast<bool>(rusty::mem::take(this->reply_cb))"),
+        "chained take().is_none() must stay one expression:\n{out}"
+    );
+    assert!(
+        out.contains("static_cast<bool>(this->reply_cb)"),
+        "is_some() must test the carrier in place:\n{out}"
+    );
+    assert!(
+        out.contains("called `Option::unwrap()` on a `None` value")
+            && out.contains("return std::move(__cb);"),
+        "unwrap() must keep the None panic and move the callback out:\n{out}"
+    );
+    assert!(
+        out.contains("auto _iflet_callback_slot = rusty::mem::take(this->cleanup_cb)"),
+        "a by-value if-let over take() must materialize the prvalue:\n{out}"
+    );
+    assert!(
+        out.contains("auto _iflet_callback_slot = std::move(taken)"),
+        "a by-value if-let over an owned place must move it:\n{out}"
+    );
+    assert!(
+        out.contains("static_cast<bool>(_iflet_callback_slot)"),
+        "the by-value slot must drive the Some check:\n{out}"
+    );
+    assert!(
+        !out.contains(".take()"),
+        "no Option member call may survive on the transparent carrier:\n{out}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "unsupported Option operation `and_then`")]
 fn test_nullable_callback_fails_closed_on_unsupported_option_methods() {
+    // `is_some`/`is_none`/`take`/`unwrap` are now SUPPORTED lowerings; probe
+    // with a combinator that remains unsupported so fail-closed stays pinned.
     let _ = transpile_str(
         r#"
         struct Holder {
             callback: Option<Box<dyn Fn()>>,
         }
         impl Holder {
-            fn has_callback(&self) -> bool {
-                self.callback.is_some()
+            fn chain(&mut self) {
+                let _r = self.callback.and_then(|f| Some(f));
             }
         }
         "#,

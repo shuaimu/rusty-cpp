@@ -2406,14 +2406,31 @@ impl CodeGen {
                     let inferred = self
                         .infer_simple_expr_type(other)
                         .or_else(|| self.infer_local_binding_type_from_initializer(other));
-                    if inferred.as_ref().is_some_and(|ty| {
+                    let Some(inferred) = inferred.filter(|ty| {
                         self.try_map_transparent_nullable_callback_type(ty).is_some()
-                    }) {
-                        panic!(
-                            "unsupported by-value if-let on transparent Option<Box<dyn Fn*>>; borrow the slot explicitly"
-                        );
-                    }
-                    return false;
+                    }) else {
+                        return false;
+                    };
+                    // A by-value scrutinee consumes its expression (Rust moves
+                    // the whole Option into the pattern), so materialize it in
+                    // the slot local. A non-place expression (`slot.take()`)
+                    // is already a prvalue; a place expression must be moved
+                    // explicitly or the move-only carrier would be copied —
+                    // sound because Rust proved the place dead afterwards.
+                    let raw_init = self.emit_expr_to_string(other);
+                    let by_value_init = if Self::struct_update_base_is_place_expr(other) {
+                        format!("std::move({})", raw_init)
+                    } else {
+                        raw_init
+                    };
+                    (
+                        inferred,
+                        "auto",
+                        "_iflet_callback_slot",
+                        by_value_init,
+                        "_iflet_callback_slot".to_string(),
+                        true,
+                    )
                 }
             };
 

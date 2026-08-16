@@ -9190,10 +9190,40 @@ impl CodeGen {
         if transparent_callback_receiver_ty.as_ref().is_some_and(|ty| {
             self.try_map_transparent_nullable_callback_type(ty).is_some()
         }) {
-            panic!(
-                "unsupported Option operation `{}` on transparent Option<Box<dyn Fn*>>",
-                mc.method
-            );
+            // The transparent carrier folds `Option<Box<dyn Fn*>>` into
+            // rusty::Function's own nullable state, so the Option surface
+            // must be lowered by hand. Each supported operation mirrors the
+            // Rust semantics exactly; everything else stays fail-closed.
+            match (mc.method.to_string().as_str(), mc.args.len()) {
+                // `take()` moves the callback out and leaves the empty (None)
+                // state behind — exactly rusty::mem::take on the carrier.
+                ("take", 0) => {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!("rusty::mem::take({})", receiver);
+                }
+                ("is_some", 0) => {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!("static_cast<bool>({})", receiver);
+                }
+                ("is_none", 0) => {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!("!static_cast<bool>({})", receiver);
+                }
+                // `unwrap()` consumes the Option by value; the None arm must
+                // keep Rust's panic. Moving out of the bound reference is
+                // sound: Rust already proved the receiver is dead after this.
+                ("unwrap", 0) => {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!(
+                        "([](auto&& __cb) {{ if (!static_cast<bool>(__cb)) {{ rusty::panic::do_panic(\"called `Option::unwrap()` on a `None` value\"); }} return std::move(__cb); }})({})",
+                        receiver
+                    );
+                }
+                _ => panic!(
+                    "unsupported Option operation `{}` on transparent Option<Box<dyn Fn*>>",
+                    mc.method
+                ),
+            }
         }
 
         let method_name = mc.method.to_string();

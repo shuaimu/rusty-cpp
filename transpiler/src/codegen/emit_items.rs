@@ -10972,7 +10972,9 @@ impl CodeGen {
     /// True when a struct-update base (`..base`) is a place expression whose
     /// per-field re-emission cannot duplicate side effects (paths, field
     /// chains, derefs). Calls/method calls/etc. must be materialized once.
-    fn struct_update_base_is_place_expr(expr: &syn::Expr) -> bool {
+    /// Also used by the transparent-callback by-value if-let lowering to
+    /// decide whether the scrutinee needs an explicit std::move.
+    pub(super) fn struct_update_base_is_place_expr(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Path(_) => true,
             syn::Expr::Field(f) => Self::struct_update_base_is_place_expr(&f.base),
