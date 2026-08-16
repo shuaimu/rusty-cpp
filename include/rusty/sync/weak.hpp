@@ -27,6 +27,11 @@ public:
     // @safe - Default ctor; sets the raw control-block pointer to null.
     Weak() : ptr(nullptr) {}
 
+    // @safe - Rust parity: `Weak::new()` yields an empty handle whose
+    // `upgrade()` always returns None. Present so canonical Rust can spell
+    // the associated function rather than value-initialization.
+    static Weak new_() { return Weak(); }
+
     // @safe - Borrow control block from a strong Arc and bump weak_count.
     // The raw ControlBlock* deref + atomic increment are quarantined in
     // the inner @unsafe block.

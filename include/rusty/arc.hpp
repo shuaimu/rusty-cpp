@@ -50,6 +50,12 @@ private:
     friend class ::rusty::sync::Weak;
 
     struct ControlBlock {
+        // Tag for the two-phase allocation `new_cyclic` needs: the payload
+        // cannot be built until the callback has been handed a Weak, and the
+        // Weak cannot exist until the control block does. Selected over the
+        // variadic constructor below by the non-template tiebreaker.
+        struct DeferredInit {};
+
         T* value;
         std::atomic<size_t> strong_count;
         std::atomic<size_t> weak_count;
@@ -58,6 +64,14 @@ private:
         ControlBlock(Args&&... args)
             : value(new T(std::forward<Args>(args)...)),
               strong_count(1),
+              weak_count(1) {}
+
+        // Starts with NO strong reference and the one weak reference that
+        // Rust's `Arc` keeps on behalf of the strong set, exactly as
+        // `Arc::new_cyclic` does before it initializes the data.
+        explicit ControlBlock(DeferredInit)
+            : value(nullptr),
+              strong_count(0),
               weak_count(1) {}
 
         ~ControlBlock() {
@@ -146,6 +160,35 @@ public:
     template<typename U>
     static Arc<T> from(U&& value) {
         return Arc<T>::new_(T(std::forward<U>(value)));
+    }
+
+    // Rust parity: `Arc::new_cyclic(|weak| -> T)`. The callback receives a
+    // `Weak<T>` that already points at the (still uninitialized) allocation,
+    // so the payload can store a handle back to its own Arc.
+    //
+    // Counts follow Rust exactly: the block starts strong=0/weak=1 (the one
+    // weak reference the strong set owns collectively), the callback's
+    // borrowed `Weak` adds a second that is released on return, and strong
+    // becomes 1 only once the payload is in place.
+    //
+    // `rusty::sync::Weak<T>` is only forward-declared above; this body is a
+    // template and is instantiated at the call site, where <rusty/sync/weak.hpp>
+    // is complete. `Weak<T>` names `Arc<T>` a friend, so the control-block
+    // constructor below is reachable.
+    // @unsafe - two-phase allocation; raw ControlBlock ownership until the
+    // returned Arc adopts it
+    // @lifetime: owned
+    template<typename F>
+    static Arc<T> new_cyclic(F&& data_fn) {
+        // @unsafe {
+        ControlBlock* cb = new ControlBlock(typename ControlBlock::DeferredInit{});
+        {
+            ::rusty::sync::Weak<T> weak(cb, true);
+            cb->value = new T(data_fn(weak));
+            cb->strong_count.store(1, std::memory_order_release);
+        }
+        return Arc<T>(cb);
+        // }
     }
 
     // Private constructor from control block
