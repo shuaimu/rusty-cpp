@@ -4,7 +4,14 @@ module;
 
 export module interop.host;
 
-export namespace interop::host {
+// The named-module identity is `interop.host`, while its exported symbols
+// intentionally live in a different namespace. This distinction is covered
+// by the Rust -> C++ runtime call below.
+export namespace interop::api {
+
+std::int32_t apply_bias(std::int32_t value) {
+    return value + 4;
+}
 
 class Counter {
 public:
@@ -23,4 +30,4 @@ private:
     std::int32_t value_;
 };
 
-} // namespace interop::host
+} // namespace interop::api

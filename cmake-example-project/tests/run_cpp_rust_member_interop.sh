@@ -72,6 +72,7 @@ CPP_MODULE_INDEX="${EXAMPLE_ROOT}/src/cpp_module_index.toml"
 CPP_HOST_MODULE="${EXAMPLE_ROOT}/src/interop.host.cppm"
 CPP_MAIN_SOURCE="${EXAMPLE_ROOT}/src/interop_main.cpp"
 RUSTY_RUNTIME_MODULE="${RUSTYCPP_DIR}/include/rusty/rusty.cppm"
+MINIMAL_RUSTY_MODULE="${WORK_DIR}/rusty.cppm"
 TRANSPILED_CPPM="${WORK_DIR}/interop.bridge.cppm"
 PROGRAM_PATH="${WORK_DIR}/interop_member_demo"
 TRANSPILE_LOG="${WORK_DIR}/transpile.log"
@@ -105,16 +106,27 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
     else
         echo "[dry-run] transpile stage skipped (using pre-transpiled ${TRANSPILED_CPPM})"
     fi
-    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include -x c++ -c ${RUSTY_RUNTIME_MODULE} -o ${WORK_DIR}/rusty.runtime.o"
-    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include -x c++ -c ${CPP_HOST_MODULE} -o ${WORK_DIR}/interop.host.o"
-    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include -x c++ -c ${TRANSPILED_CPPM} -o ${WORK_DIR}/interop.bridge.o"
-    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include ${CPP_MAIN_SOURCE} ${WORK_DIR}/interop.host.o ${WORK_DIR}/interop.bridge.o ${WORK_DIR}/rusty.runtime.o -o ${PROGRAM_PATH}"
+    echo "[dry-run] write focused header-owned module ${MINIMAL_RUSTY_MODULE}"
+    echo "[dry-run] clang++ -std=c++23 --precompile -I ${RUSTYCPP_DIR}/include ${MINIMAL_RUSTY_MODULE} -o ${WORK_DIR}/rusty.pcm"
+    echo "[dry-run] clang++ -std=c++23 --precompile -I ${RUSTYCPP_DIR}/include ${CPP_HOST_MODULE} -o ${WORK_DIR}/interop.host.pcm"
+    echo "[dry-run] clang++ -std=c++23 --precompile -fprebuilt-module-path=${WORK_DIR} -I ${RUSTYCPP_DIR}/include ${TRANSPILED_CPPM} -o ${WORK_DIR}/interop.bridge.pcm"
+    echo "[dry-run] clang++ -std=c++23 -fprebuilt-module-path=${WORK_DIR} -I ${RUSTYCPP_DIR}/include ${CPP_MAIN_SOURCE} ${WORK_DIR}/interop.host.o ${WORK_DIR}/interop.bridge.o ${WORK_DIR}/rusty.runtime.o -o ${PROGRAM_PATH}"
     echo "[dry-run] ${PROGRAM_PATH}"
     exit 0
 fi
 
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
+
+# This focused interop fixture only needs the header-owned rusty runtime
+# surface emitted into the generated bridge. The repository umbrella module
+# re-exports every transpiled std port and therefore requires its complete BMI
+# graph; using a minimal module here keeps this regression self-contained.
+cat >"${MINIMAL_RUSTY_MODULE}" <<'EOF'
+module;
+#include <rusty/rusty.hpp>
+export module rusty;
+EOF
 
 : >"${TRANSPILE_LOG}"
 : >"${BUILD_LOG}"
@@ -191,7 +203,7 @@ try_probe() {
 
 try_probe_clang() {
     local compiler="clang++"
-    local flags=("-std=c++20")
+    local flags=("-std=c++23")
     if ! command -v "${compiler}" >/dev/null 2>&1; then
         return 2
     fi
@@ -202,8 +214,8 @@ try_probe_clang() {
         "${compiler}" "${flags[@]}" -fprebuilt-module-path="${WORK_DIR}" -c "${PROBE_MAIN_SOURCE}" -o module_probe_main.o &&
         "${compiler}" "${flags[@]}" module_probe.o module_probe_main.o -o module_probe &&
         ./module_probe &&
-        "${compiler}" "${flags[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.probe.pcm &&
-        "${compiler}" "${flags[@]}" -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" -c "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.probe.o
+        "${compiler}" "${flags[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${MINIMAL_RUSTY_MODULE}" -o rusty.pcm &&
+        "${compiler}" "${flags[@]}" -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" -c "${MINIMAL_RUSTY_MODULE}" -o rusty.probe.o
     ) >>"${BUILD_LOG}" 2>&1; then
         SUPPORTED_COMPILER="${compiler}"
         SUPPORTED_FLAGS="${flags[*]}"
@@ -236,7 +248,7 @@ echo "using compiler: ${SUPPORTED_COMPILER} ${SUPPORTED_FLAGS} (${SUPPORTED_MODE
 if [[ "${SUPPORTED_MODE}" == "clang-precompile" ]]; then
     if ! (
         cd "${WORK_DIR}" &&
-        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${RUSTY_RUNTIME_MODULE}" -o rusty.pcm
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${MINIMAL_RUSTY_MODULE}" -o rusty.pcm
     ) >>"${BUILD_LOG}" 2>&1; then
         report_failure "precompile-rusty-runtime-module"
         tail -n 80 "${BUILD_LOG}" >&2 || true
@@ -263,7 +275,7 @@ if [[ "${SUPPORTED_MODE}" == "clang-precompile" ]]; then
 
     if ! (
         cd "${WORK_DIR}" &&
-        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" -c "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.o
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" -c "${MINIMAL_RUSTY_MODULE}" -o rusty.runtime.o
     ) >>"${BUILD_LOG}" 2>&1; then
         report_failure "compile-rusty-runtime-module"
         tail -n 80 "${BUILD_LOG}" >&2 || true

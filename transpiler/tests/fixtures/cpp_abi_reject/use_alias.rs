@@ -1,0 +1,14 @@
+#[cfg_attr(any(), cpp_abi(param(bytes, std_string_bytes), returns(std_string_bytes)))]
+pub fn adapted(bytes: Vec<u8>) -> Vec<u8> {
+    bytes
+}
+
+use self::adapted as semantic_alias;
+
+pub fn invoke() -> Vec<u8> {
+    semantic_alias(vec![1, 2, 3])
+}
+
+pub fn value() -> fn(Vec<u8>) -> Vec<u8> {
+    semantic_alias
+}

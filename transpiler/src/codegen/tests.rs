@@ -7,6 +7,14 @@ fn transpile_str(rust_code: &str) -> String {
     cg.into_output()
 }
 
+fn transpile_str_with_authenticated_cpp_inherit(rust_code: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
+    cg.emit_file(&file, None);
+    cg.into_output()
+}
+
 fn transpile_str_module(rust_code: &str, module_name: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
     let mut cg = CodeGen::new();
@@ -51,6 +59,20 @@ fn transpile_str_module_with_sibling_modules(
     cg.into_output()
 }
 
+/// Module mode WITH a C++ namespace wrap — the shape crate-mode
+/// `--auto-namespace` output takes.
+fn transpile_str_module_with_cxx_namespace(
+    rust_code: &str,
+    module_name: &str,
+    cxx_namespace: &str,
+) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some(cxx_namespace.to_string()));
+    cg.emit_file(&file, Some(module_name));
+    cg.into_output()
+}
+
 fn transpile_str_module_with_cpp_members(
     rust_code: &str,
     module_name: &str,
@@ -69,6 +91,46 @@ fn transpile_str_with_by_value_cycle_breaking_prototype(rust_code: &str) -> Stri
     cg.set_by_value_cycle_breaking_prototype(true);
     cg.emit_file(&file, None);
     cg.into_output()
+}
+
+#[test]
+fn cpp_abi_method_facade_scheduling_mismatch_is_a_fatal_diagnostic() {
+    let file: syn::File = syn::parse_str(
+        r#"
+            pub struct Codec;
+            impl Codec {
+                #[cfg_attr(any(), cpp_abi(returns(std_string_bytes)))]
+                pub fn encode() -> Vec<u8> { vec![1] }
+            }
+        "#,
+    )
+    .unwrap();
+    let (lowered, plan) = crate::cpp_abi::lower(&file)
+        .unwrap()
+        .expect("adapter contract must lower");
+    let method = lowered
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Impl(item_impl) => item_impl.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) => Some(method.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("lowered facade method");
+
+    let mut cg = CodeGen::new();
+    cg.set_cpp_abi_plan(plan);
+    cg.current_struct = Some("Codec".to_string());
+    cg.emit_method(&method);
+
+    assert!(!cg.output.contains("unreachable"));
+    let diagnostic = cg
+        .take_codegen_error()
+        .expect("missing out-of-line scheduling must be fatal");
+    assert!(diagnostic.contains("Codec::encode"), "{diagnostic}");
+    assert!(cg.take_codegen_error().is_none());
 }
 
 /// §13.14 Phase-4: transpile with the constraint-solver engine flag on
@@ -367,6 +429,52 @@ fn test_c_like_enum_preserves_discriminants() {
     assert!(out.contains("A = 10"));
     assert!(out.contains("B = 20"));
     assert!(out.contains("C"));
+}
+
+#[test]
+fn test_module_c_like_enum_function_parameter_stays_nominal() {
+    let out = transpile_str_module(
+        "#[repr(i32)] pub enum Code { A = 10, B = 20 } pub fn code(v: Code) -> i32 { v as i32 }",
+        "probe.errors",
+    );
+    assert!(out.contains("export int32_t code(Code v);"), "{out}");
+    assert!(out.contains("export int32_t code(Code v) {"), "{out}");
+    assert!(out.contains("export enum class Code : int32_t;"), "{out}");
+    assert!(out.contains("export enum class Code : int32_t {"), "{out}");
+    assert!(!out.contains("code(auto v)"), "{out}");
+}
+
+#[test]
+fn test_module_c_like_enum_preserves_explicit_integer_repr() {
+    for (rust_repr, cpp_repr) in [
+        ("i8", "int8_t"),
+        ("u8", "uint8_t"),
+        ("i16", "int16_t"),
+        ("u16", "uint16_t"),
+        ("i32", "int32_t"),
+        ("u32", "uint32_t"),
+        ("i64", "int64_t"),
+        ("u64", "uint64_t"),
+        ("i128", "__int128"),
+        ("u128", "unsigned __int128"),
+        ("isize", "intptr_t"),
+        ("usize", "uintptr_t"),
+    ] {
+        let source = format!("#[repr({rust_repr})] pub enum Code {{ Zero = 0, One = 1 }}");
+        let out = transpile_str_module(&source, "rrr.enums");
+        assert!(
+            out.contains(&format!("export enum class Code : {cpp_repr};")),
+            "repr({rust_repr}) forward declaration was not preserved:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("export enum class Code : {cpp_repr} {{")),
+            "repr({rust_repr}) definition was not preserved:\n{out}"
+        );
+    }
+
+    let unrepresented = transpile_str_module("pub enum Code { Zero, One }", "rrr.enums");
+    assert!(unrepresented.contains("export enum class Code;"), "{unrepresented}");
+    assert!(unrepresented.contains("export enum class Code {"), "{unrepresented}");
 }
 
 #[test]
@@ -2576,6 +2684,121 @@ fn hidden_cpp_ctor_on_generic_default_impl_emits_ctor_and_default_like_call() {
     assert!(
         out.contains("rusty::default_like<Envelope<T>>()"),
         "Default::default() must route through direct default construction:\n{out}"
+    );
+}
+
+#[test]
+fn cpp_ctor_arc_new_fuses_only_proven_root_local_constructor() {
+    let out = transpile_str(
+        r#"
+        use std::sync::Arc;
+
+        struct Owner {
+            value: i32,
+        }
+
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            unsafe fn new(value: i32) -> Owner {
+                Owner { value }
+            }
+        }
+
+        fn make_owner(value: i32) -> Arc<Owner> {
+            Arc::new(unsafe { Owner::new(value) })
+        }
+
+        struct Ordinary {
+            value: i32,
+        }
+
+        impl Ordinary {
+            fn new(value: i32) -> Ordinary {
+                Ordinary { value }
+            }
+        }
+
+        fn make_ordinary(value: i32) -> Arc<Ordinary> {
+            Arc::new(Ordinary::new(value))
+        }
+        "#,
+    );
+    assert!(out.contains("Owner(int32_t value)"), "{out}");
+    assert!(
+        out.contains("rusty::Arc<Owner>::make(") && !out.contains("Owner::new_("),
+        "a proven cpp_ctor must construct the Arc payload in place:\n{out}"
+    );
+    assert!(
+        out.contains("Ordinary::new_(")
+            && !out.contains("rusty::Arc<Ordinary>::make("),
+        "an ordinary Rust factory must retain the historical Arc::new path:\n{out}"
+    );
+
+    let lookalike = transpile_str(
+        r#"
+        mod fake {
+            pub struct Arc;
+            impl Arc {
+                pub fn new<T>(value: T) -> T { value }
+            }
+        }
+        use fake::Arc;
+
+        struct Owner { value: i32 }
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            fn new(value: i32) -> Owner { Owner { value } }
+        }
+        fn make(value: i32) -> Owner { Arc::new(Owner::new(value)) }
+        "#,
+    );
+    assert!(
+        !lookalike.contains("rusty::Arc<Owner>::make("),
+        "a same-spelled local/imported Arc must never enter the fusion lane:\n{lookalike}"
+    );
+
+    let local_std_root = transpile_str(
+        r#"
+        mod std {
+            pub mod sync {
+                pub struct Arc;
+                impl Arc {
+                    pub fn new<T>(value: T) -> T { value }
+                }
+            }
+        }
+        use std::sync::Arc;
+
+        struct Owner { value: i32 }
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            fn new(value: i32) -> Owner { Owner { value } }
+        }
+        fn make(value: i32) -> Owner {
+            Arc::new(Owner::new(value))
+        }
+        "#,
+    );
+    assert!(
+        !local_std_root.contains("rusty::Arc<Owner>::make("),
+        "a local module named std must not authenticate Arc fusion:\n{local_std_root}"
+    );
+
+    let extra_live_marker = transpile_str(
+        r#"
+        use std::sync::Arc;
+        struct Owner { value: i32 }
+        impl Owner {
+            #[cfg_attr(any(), cpp_ctor)]
+            #[cpp_ctor]
+            fn new(value: i32) -> Owner { Owner { value } }
+        }
+        fn make(value: i32) -> Arc<Owner> { Arc::new(Owner::new(value)) }
+        "#,
+    );
+    assert!(
+        !extra_live_marker.contains("rusty::Arc<Owner>::make("),
+        "an extra live cpp_ctor marker must not authenticate fusion:\n{extra_live_marker}"
     );
 }
 
@@ -6110,6 +6333,31 @@ fn test_extern_c_block() {
 }
 
 #[test]
+fn test_extern_c_foreign_declarations_follow_module_visibility() {
+    let out = transpile_str_module(
+        r#"
+        unsafe extern "C" {
+            pub fn public_hook(value: i32) -> i32;
+            fn private_hook(value: i32) -> i32;
+        }
+        "#,
+        "foreign_visibility",
+    );
+    assert!(
+        out.contains("export int32_t public_hook(int32_t value);"),
+        "public foreign declaration must be exported from a named module:\n{out}"
+    );
+    assert!(
+        out.contains("int32_t private_hook(int32_t value);"),
+        "private foreign declaration must still be emitted:\n{out}"
+    );
+    assert!(
+        !out.contains("export int32_t private_hook(int32_t value);"),
+        "private foreign declaration leaked through the module API:\n{out}"
+    );
+}
+
+#[test]
 fn test_unsafe_block() {
     let out = transpile_str("fn f() { unsafe { let x = 1; } }");
     assert!(out.contains("// @unsafe"));
@@ -7394,6 +7642,15 @@ fn transpile_str_interface_traits(rust_code: &str) -> String {
     cg.into_output()
 }
 
+fn transpile_str_interface_traits_with_authenticated_cpp_inherit(rust_code: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
+    cg.emit_file(&file, None);
+    cg.into_output()
+}
+
 // Note: Microsoft Proxy (pro::*) facade emission was removed in commit
 // 90520f8. Tests asserting that old shape were deleted; the corresponding
 // behaviour now flows through the interface+adapter path (§ 3.2.9) tested
@@ -7404,6 +7661,140 @@ fn test_unresolved_dyn_trait_param_falls_back_to_void_ptr() {
     let out = transpile_str("fn f(x: &dyn std::error::Error) {}");
     assert!(out.contains("void f(const void* x)"));
     assert!(!out.contains("pro::proxy_view<ErrorFacade>"));
+}
+
+#[test]
+fn test_cpp_internal_marker_gives_private_helpers_internal_linkage() {
+    // Checkpoint contract 7 — the AUTHENTICATED internal-linkage marker.
+    // Rust visibility cannot decide this: srpc's reactor has non-`pub` items
+    // the incumbent object never owned AND non-`pub` items the incumbent
+    // manifest REQUIRES to be strong, in the same file. A blanket
+    // "private means internal" rule turns 3 missing symbols into 23.
+    let out = transpile_str_module(
+        r#"
+        #[cfg_attr(any(), cpp_internal)]
+        fn marked_helper(v: bool) -> bool { !v }
+        fn unmarked_helper(v: bool) -> bool { !v }
+        #[cfg_attr(any(), cpp_internal)]
+        const MARKED_SLOT: usize = 7;
+        pub fn use_them(v: bool) -> usize {
+            if marked_helper(v) && unmarked_helper(v) { MARKED_SLOT } else { 0 }
+        }
+        "#,
+        "mycrate",
+    );
+    assert!(
+        out.contains("static bool marked_helper(bool v)"),
+        "marked fn must be internal-linkage: {out}"
+    );
+    assert!(
+        !out.contains("static bool unmarked_helper"),
+        "an UNMARKED private fn is ordinary surface the incumbent owns: {out}"
+    );
+    // A namespace-scope const is NOT implicitly internal in a module purview,
+    // so the keyword is load-bearing here.
+    assert!(
+        out.contains("static constexpr size_t MARKED_SLOT"),
+        "marked const must be internal-linkage: {out}"
+    );
+}
+
+#[test]
+fn test_ufcs_layer_linkage_is_narrow_and_source_authenticated() {
+    // Contract 10, NARROWED. Making every `<Trait>_` UFCS free function
+    // `inline` repo-wide removes 50 symbols that rrr.serializable's INCUMBENT
+    // object genuinely owns (measured with nm: 25 Serialize_/Deserialize_ plus
+    // 25 rusty_ext, all present). So a `pub` trait keeps ordinary strong UFCS
+    // symbols; a non-`pub` trait (whose machinery is internal anyway) and a
+    // trait the SOURCE marks `cpp_internal` do not.
+    let out = transpile_str_module(
+        r#"
+        pub trait Surface { fn m(&self) -> i32; }
+        #[cfg_attr(any(), cpp_internal)]
+        pub trait MarkedSurface { fn n(&self) -> i32; }
+        trait Plumbing { fn q(&self) -> i32; }
+        pub struct S { pub x: i32 }
+        impl Surface for S { fn m(&self) -> i32 { self.x } }
+        impl MarkedSurface for S { fn n(&self) -> i32 { self.x } }
+        impl Plumbing for S { fn q(&self) -> i32 { self.x } }
+        "#,
+        "mycrate",
+    );
+    assert!(
+        out.contains("int32_t m(const S& self_)") && !out.contains("inline int32_t m(const S& self_)"),
+        "a `pub` trait's UFCS layer is ported surface and stays strong: {out}"
+    );
+    assert!(
+        out.contains("inline int32_t n(const S& self_)"),
+        "a cpp_internal-marked trait's UFCS layer must take vague linkage: {out}"
+    );
+    assert!(
+        out.contains("inline int32_t q(const S& self_)"),
+        "a non-`pub` trait's UFCS layer must take vague linkage: {out}"
+    );
+}
+
+#[test]
+fn test_module_dyn_trait_ref_param_is_an_interface_reference_not_an_abbreviated_template() {
+    // C21b (contracts 8 + 9). srpc's reactor declares three functions taking
+    // `&mut dyn Pollable`:
+    //   PollThread::remove(&self, poll: &mut dyn Pollable)
+    //   PollThreadWorker::update_mode(&mut self, poll: &mut dyn Pollable, i32)
+    //   pollworker_update_mode(&mut PollThreadWorker, &mut dyn Pollable, i32)
+    // Module mode erased the parameter to `void*`, the parameter softener
+    // then rewrote that to `auto&`, and the three ordinary functions became
+    // UNINSTANTIATED abbreviated function templates. Callers still compiled
+    // (the template instantiates in the caller's TU), so the failure was
+    // silent — but the module emitted no symbol at all for any of them, and
+    // a consumer linking against the library's real ABI could not find them.
+    //
+    // The parameter must be the interface class reference, which is also the
+    // receiver shape the body needs: `poll.fd()`, not `poll->fd()`.
+    let out = transpile_str_module(
+        r#"
+        pub trait Pollable {
+            fn fd(&self) -> i32;
+        }
+        pub fn pollworker_update_mode(poll: &mut dyn Pollable, new_mode: i32) -> i32 {
+            poll.fd() + new_mode
+        }
+        pub fn inspect(poll: &dyn Pollable) -> i32 {
+            poll.fd()
+        }
+        "#,
+        "rrr",
+    );
+    assert!(
+        out.contains("pollworker_update_mode(Pollable& poll, int32_t new_mode)"),
+        "&mut dyn param must be an interface reference: {out}"
+    );
+    assert!(
+        out.contains("inspect(const Pollable& poll)"),
+        "&dyn param must be a const interface reference: {out}"
+    );
+    assert!(
+        !out.contains("auto& poll"),
+        "dyn param softened to an abbreviated template — emits no symbol: {out}"
+    );
+    assert!(
+        !out.contains("void* poll"),
+        "dyn param erased to void* (contract 9): {out}"
+    );
+    assert!(
+        out.contains("poll.fd()") && !out.contains("poll->fd()"),
+        "interface reference receiver must use `.`, not `->`: {out}"
+    );
+}
+
+#[test]
+fn test_module_unresolved_dyn_trait_ref_param_keeps_the_void_ptr_fallback() {
+    // The C21b interface-reference lowering is AUTHENTICATED: only a trait
+    // this source declares or imports has an interface class the module can
+    // name. An external trait keeps the erased fallback, which is at least a
+    // real, emitted signature rather than an uninstantiated template.
+    let out = transpile_str_module("fn f(x: &dyn std::error::Error) {}", "my_crate");
+    assert!(out.contains("const void* x"), "{out}");
+    assert!(!out.contains("const ErrorFacade& x"), "{out}");
 }
 
 #[test]
@@ -7499,6 +7890,35 @@ fn test_interface_traits_basic_class_and_methods() {
         out.contains("template <class U> class AnimalAdapterRef;"),
         "{out}"
     );
+}
+
+#[test]
+fn test_interface_traits_public_adapter_primaries_follow_module_visibility() {
+    let out = transpile_str_module(
+        r#"
+        pub trait Public { fn value(&self) -> i32; }
+        trait Private { fn value(&self) -> i32; }
+        "#,
+        "adapter_visibility",
+    );
+    for suffix in ["Adapter", "AdapterRef", "AdapterRefMut"] {
+        assert!(
+            out.contains(&format!(
+                "export template <class U> class Public{suffix};"
+            )),
+            "public Adapter primary must be reachable to module importers:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("template <class U> class Private{suffix};")),
+            "private Adapter primary must still be declared:\n{out}"
+        );
+        assert!(
+            !out.contains(&format!(
+                "export template <class U> class Private{suffix};"
+            )),
+            "private Adapter primary must not be exported:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -7661,6 +8081,1178 @@ fn test_interface_traits_foreign_impl_assoc_type_emits_specialization_with_assoc
         out.contains("MyToOwnedAdapter<rusty::String, rusty::String>"),
         "{out}"
     );
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_emits_partial_adapter_specializations() {
+    // A local interface trait implemented for a foreign generic container is
+    // the shape used by SRPC's Serialize/Deserialize carrier.  The adapter
+    // primary takes the implementing type as its final argument, so a generic
+    // Rust impl must lower to a C++ partial specialization, not a full
+    // `template <>` specialization containing an unbound `T`/`K`/`V`.
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self, archive: &mut Archive); }
+        struct Archive;
+        impl<T> Encode for Vec<T> {
+            fn encode(&self, archive: &mut Archive) {}
+        }
+        impl<K, V> Encode for std::collections::BTreeMap<K, V> {
+            fn encode(&self, archive: &mut Archive) {}
+        }
+        "#,
+    );
+
+    for expected in [
+        "template <typename T>\nclass EncodeAdapter<rusty::Vec<T>> final : public Encode",
+        "template <typename T>\nclass EncodeAdapterRef<rusty::Vec<T>> final : public Encode",
+        "template <typename T>\nclass EncodeAdapterRefMut<rusty::Vec<T>> final : public Encode",
+        "template <typename K, typename V>\nclass EncodeAdapter<rusty::BTreeMap<K, V>> final : public Encode",
+        "template <typename K, typename V>\nclass EncodeAdapterRef<rusty::BTreeMap<K, V>> final : public Encode",
+        "template <typename K, typename V>\nclass EncodeAdapterRefMut<rusty::BTreeMap<K, V>> final : public Encode",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`:\n{out}");
+    }
+    assert!(
+        !out.contains("skipped EncodeAdapter<rusty::Vec<T>>"),
+        "generic foreign impl regressed to a hand slot:\n{out}"
+    );
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_is_fail_closed_outside_narrow_lane() {
+    let bounded = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self); }
+        impl<T: Clone> Encode for Vec<T> { fn encode(&self) {} }
+        "#,
+    );
+    assert!(
+        bounded.contains("constrained/const generic partial specializations are unsupported"),
+        "bounded generic impl must remain a hand slot:\n{bounded}"
+    );
+    assert!(!bounded.contains("class EncodeAdapter<rusty::Vec<T>>"));
+
+    let where_bounded = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self); }
+        impl<T> Encode for Vec<T> where T: Clone { fn encode(&self) {} }
+        "#,
+    );
+    assert!(
+        where_bounded.contains("constrained/const generic partial specializations are unsupported"),
+        "where-bounded generic impl must remain a hand slot:\n{where_bounded}"
+    );
+
+    let const_generic = transpile_str_interface_traits(
+        r#"
+        trait Encode { fn encode(&self); }
+        impl<const N: usize> Encode for std::array<i32, N> { fn encode(&self) {} }
+        "#,
+    );
+    assert!(
+        const_generic
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "const-generic impl must remain a hand slot:\n{const_generic}"
+    );
+
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_allows_legacy_default_bound() {
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    for expected in [
+        "template <typename T>\nclass DecodeAdapter<rusty::Vec<T>> final : public Decode",
+        "template <typename T>\nclass DecodeAdapterRef<rusty::Vec<T>> final : public Decode",
+        "template <typename T>\nclass DecodeAdapterRefMut<rusty::Vec<T>> final : public Decode",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`:\n{out}");
+    }
+    assert!(
+        !out.contains("constrained/const generic partial specializations are unsupported"),
+        "legacy Default-only impl unexpectedly became a hand slot:\n{out}"
+    );
+
+    let clone_bound = transpile_str_interface_traits(
+        r#"
+        trait Decode { fn decode(&mut self); }
+        impl<T: Clone> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        clone_bound.contains("constrained/const generic partial specializations are unsupported"),
+        "non-Default constraints must stay fail-closed:\n{clone_bound}"
+    );
+
+    let local_shadow = transpile_str_interface_traits(
+        r#"
+        trait Default {}
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        local_shadow.contains("constrained/const generic partial specializations are unsupported"),
+        "a local same-leaf trait must not authenticate the erased std Default lane:\n{local_shadow}"
+    );
+    assert!(!local_shadow.contains("class DecodeAdapter<rusty::Vec<T>>"));
+
+    let imported_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub trait Default {} }
+        use evil::Default;
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        imported_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "an imported same-leaf trait must not authenticate the erased std Default lane:\n{imported_shadow}"
+    );
+
+    let glob_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub trait Default {} }
+        use evil::*;
+        trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        glob_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "a glob-provided same-leaf trait must fail closed:\n{glob_shadow}"
+    );
+
+    let explicit_std = transpile_str_interface_traits(
+        r#"
+        trait Decode { fn decode(&mut self); }
+        impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        explicit_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
+        "explicit std Default must retain the narrow legacy lane:\n{explicit_std}"
+    );
+
+    let aliased_std = transpile_str_interface_traits(
+        r#"
+        use std::default::Default as StdDefault;
+        trait Decode { fn decode(&mut self); }
+        impl<T: StdDefault> Decode for Vec<T> { fn decode(&mut self) {} }
+        "#,
+    );
+    assert!(
+        aliased_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
+        "an exact alias of std Default must retain the narrow legacy lane:\n{aliased_std}"
+    );
+
+    let qualified_local_std_shadow = transpile_str_interface_traits(
+        r#"
+        mod scope {
+            mod std { pub mod default { pub trait Default {} } }
+            trait Decode { fn decode(&mut self); }
+            impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        qualified_local_std_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "a local `std` module must not authenticate a qualified lookalike:\n{qualified_local_std_shadow}"
+    );
+
+    let qualified_import_std_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub mod default { pub trait Default {} } }
+        mod scope {
+            use crate::evil as std;
+            trait Decode { fn decode(&mut self); }
+            impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        qualified_import_std_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "an imported `std` alias must not authenticate a qualified lookalike:\n{qualified_import_std_shadow}"
+    );
+
+    let qualified_glob_std_shadow = transpile_str_interface_traits(
+        r#"
+        mod evil { pub mod std { pub mod default { pub trait Default {} } } }
+        mod scope {
+            use crate::evil::*;
+            trait Decode { fn decode(&mut self); }
+            impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        qualified_glob_std_shadow
+            .contains("constrained/const generic partial specializations are unsupported"),
+        "a glob-provided `std` root must fail closed:\n{qualified_glob_std_shadow}"
+    );
+
+    let nested_parent_import_shadows = transpile_str_interface_traits(
+        r#"
+        mod outer {
+            use std as chosen;
+            mod inner {
+                mod chosen { pub mod default { pub trait Default {} } }
+                trait Decode { fn decode(&mut self); }
+                impl<T: chosen::default::Default> Decode for Vec<T> {
+                    fn decode(&mut self) {}
+                }
+            }
+        }
+        mod bare_outer {
+            use std::default::Default;
+            mod inner {
+                trait Default {}
+                trait DecodeBare { fn decode_bare(&mut self); }
+                impl<T: Default> DecodeBare for Vec<T> {
+                    fn decode_bare(&mut self) {}
+                }
+            }
+        }
+        "#,
+    );
+    assert_eq!(
+        nested_parent_import_shadows
+            .matches("constrained/const generic partial specializations are unsupported")
+            .count(),
+        2,
+        "nearer local modules and traits must beat parent imports:\n{nested_parent_import_shadows}"
+    );
+    assert!(
+        !nested_parent_import_shadows.contains("class DecodeAdapter<rusty::Vec<T>>")
+            && !nested_parent_import_shadows
+                .contains("class DecodeBareAdapter<rusty::Vec<T>>"),
+        "a parent std import authenticated a child-local Default:\n{nested_parent_import_shadows}"
+    );
+
+    let absolute_std = transpile_str_interface_traits(
+        r#"
+        mod scope {
+            mod std { pub mod default { pub trait Default {} } }
+            trait Decode { fn decode(&mut self); }
+            impl<T: ::std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+        }
+        "#,
+    );
+    assert!(
+        absolute_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
+        "an absolute std path must retain the narrow legacy lane:\n{absolute_std}"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='default_shadow'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        r#"pub trait Default {}
+pub trait Decode { fn decode(&mut self); }
+impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+pub mod qualified_local {
+    pub mod std { pub mod default { pub trait Default {} } }
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod qualified_import {
+    pub mod evil { pub mod default { pub trait Default {} } }
+    use evil as std;
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod glob_shadow {
+    pub mod evil { pub trait Default {} }
+    use evil::*;
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod qualified_glob {
+    pub mod evil { pub mod std { pub mod default { pub trait Default {} } } }
+    use evil::*;
+    pub trait Decode { fn decode(&mut self); }
+    impl<T: std::default::Default> Decode for Vec<T> { fn decode(&mut self) {} }
+}
+pub mod nested_outer {
+    use std as chosen;
+    pub mod inner {
+        pub mod chosen { pub mod default { pub trait Default {} } }
+        pub trait Decode { fn decode(&mut self); }
+        impl<T: chosen::default::Default> Decode for Vec<T> {
+            fn decode(&mut self) {}
+        }
+    }
+}
+pub mod nested_bare_outer {
+    use std::default::Default;
+    pub mod inner {
+        pub trait Default {}
+        pub trait Decode { fn decode(&mut self); }
+        impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let check = std::process::Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "local Default shadow fixture must be Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_maps_assoc_binding_in_param_scope() {
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Head { type Item; fn head(&self) -> Self::Item; }
+        impl<T> Head for Vec<T> {
+            type Item = T;
+            fn head(&self) -> T { loop {} }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("template <typename T>\nclass HeadAdapter<T, rusty::Vec<T>> final : public Head<T>"),
+        "generic parameter or associated binding was not mapped in scope:\n{out}"
+    );
+    assert!(
+        out.contains("template <class Item>\nclass Head;"),
+        "associated-type interface forward declaration must match its template definition:\n{out}"
+    );
+    assert!(
+        out.contains("template <typename T>\nstruct HeadTraits<rusty::Vec<T>>"),
+        "associated-type helper partial specialization was not emitted:\n{out}"
+    );
+
+    let mixed_generics = transpile_str_interface_traits(
+        r#"
+        trait Mixed<'a, T, const N: usize> {
+            type Item;
+            fn pick(&self, value: T) -> Self::Item;
+        }
+        "#,
+    );
+    assert_eq!(
+        mixed_generics
+            .matches("template <class T, class Item>\nclass Mixed")
+            .count(),
+        2,
+        "forward and definition must model exactly the same supported generic parameters:\n{mixed_generics}"
+    );
+    assert!(
+        !mixed_generics.contains("class N") && !mixed_generics.contains("size_t N"),
+        "unsupported const generic leaked into only one side of the interface declaration:\n{mixed_generics}"
+    );
+}
+
+#[test]
+fn test_interface_traits_generic_assoc_adapter_named_module_clang_runtime() {
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping generic associated Adapter module proof: no clang++ in PATH");
+        return;
+    };
+
+    let source: syn::File = syn::parse_str(
+        r#"
+        unsafe extern "C" {
+            pub fn public_hook(value: i32) -> i32;
+            fn private_hook(value: i32) -> i32;
+        }
+
+        pub trait Head {
+            type Item;
+            fn head(&self, value: Self::Item) -> Self::Item;
+        }
+
+        impl<T> Head for std::pair<T, T> {
+            type Item = T;
+            fn head(&self, value: T) -> T { value }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.emit_file(&source, Some("generic_assoc_review"));
+    let module = cg.into_output();
+    assert!(
+        module.contains("export template <class Item>\nclass Head;"),
+        "public associated-type interface forward declaration is malformed:\n{module}"
+    );
+    assert!(
+        module.contains("export template <class B> struct HeadTraits"),
+        "public associated-type helper primary is not exported:\n{module}"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let module_source = temp.path().join("generic_assoc_review.cppm");
+    let module_pcm = temp.path().join("generic_assoc_review.pcm");
+    let module_object = temp.path().join("generic_assoc_review.o");
+    let importer_source = temp.path().join("importer.cpp");
+    let importer_object = temp.path().join("importer.o");
+    let private_source = temp.path().join("private_importer.cpp");
+    let private_object = temp.path().join("private_importer.o");
+    let binary = temp.path().join("importer");
+    std::fs::write(&module_source, module).unwrap();
+    std::fs::write(
+        &importer_source,
+        r#"
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+import generic_assoc_review;
+
+using Pair = std::pair<int32_t, int32_t>;
+using Assoc = typename HeadTraits<Pair>::Item;
+using PublicHook = decltype(&public_hook);
+static_assert(std::is_same_v<Assoc, int32_t>);
+static_assert(std::is_same_v<PublicHook, int32_t (*)(int32_t)>);
+
+int main() {
+    HeadAdapter<int32_t, Pair> owned({20, 22});
+    return owned.head(42) == 42 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &private_source,
+        "import generic_assoc_review;\nauto* leaked = &private_hook;\n",
+    )
+    .unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+
+    let precompile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("--precompile")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_pcm)
+        .output()
+        .unwrap();
+    assert!(
+        precompile.status.success(),
+        "associated Adapter module precompile failed:\n{}",
+        String::from_utf8_lossy(&precompile.stderr)
+    );
+    let module_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=generic_assoc_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_object)
+        .output()
+        .unwrap();
+    assert!(
+        module_compile.status.success(),
+        "associated Adapter module object compile failed:\n{}",
+        String::from_utf8_lossy(&module_compile.stderr)
+    );
+    let importer_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=generic_assoc_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&importer_source)
+        .arg("-o")
+        .arg(&importer_object)
+        .output()
+        .unwrap();
+    assert!(
+        importer_compile.status.success(),
+        "associated Adapter importer compile failed:\n{}",
+        String::from_utf8_lossy(&importer_compile.stderr)
+    );
+    let private_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=generic_assoc_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&private_source)
+        .arg("-o")
+        .arg(&private_object)
+        .output()
+        .unwrap();
+    assert!(
+        !private_compile.status.success(),
+        "private extern-C declaration unexpectedly became importable"
+    );
+    let link = std::process::Command::new(compiler)
+        .arg("-stdlib=libc++")
+        .arg(&module_object)
+        .arg(&importer_object)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "associated Adapter importer link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(binary).output().unwrap();
+    assert!(run.status.success(), "associated Adapter runtime failed: {run:?}");
+}
+
+#[test]
+fn test_exact_inactive_trait_member_dispatch_suppresses_ufcs_helpers() {
+    let exact = transpile_str_interface_traits(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait SinkBase { fn deposit(&mut self, value: i32) -> i32; }
+        pub struct BufferSink { pub total: i32 }
+        impl SinkBase for BufferSink {
+            fn deposit(&mut self, value: i32) -> i32 {
+                self.total += value;
+                self.total
+            }
+        }
+        pub fn call(sink: &mut BufferSink) -> i32 { sink.deposit(2) }
+        "#,
+    );
+    assert!(!exact.contains("namespace SinkBase_"), "{exact}");
+    assert!(!exact.contains("using namespace SinkBase_"), "{exact}");
+    assert!(exact.contains("return value_.deposit(value);"), "{exact}");
+    assert!(!exact.contains("SinkBase_::deposit(value_"), "{exact}");
+    assert!(
+        exact.contains("sink.deposit(static_cast<int32_t>(2))"),
+        "{exact}"
+    );
+
+    for attribute in [
+        "#[cpp_trait_member_dispatch]",
+        "#[cfg_attr(all(), cpp_trait_member_dispatch)]",
+        "#[cfg_attr(any(), cpp_trait_member_dispatch(extra))]",
+        "#[cfg_attr(any(), maker::cpp_trait_member_dispatch)]",
+        "#[cfg_attr(any(), cpp_trait_member_dispatch, allow(dead_code))]",
+    ] {
+        let source = format!(
+            "{attribute}\ntrait Marked {{ fn act(&self); }}\nstruct Host;\nimpl Marked for Host {{ fn act(&self) {{}} }}"
+        );
+        let out = transpile_str_interface_traits(&source);
+        assert!(
+            out.contains("namespace Marked_"),
+            "non-exact marker unexpectedly changed dispatch: {attribute}\n{out}"
+        );
+    }
+}
+
+#[test]
+fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping lexical trait-dispatch module proof: no clang++ in PATH");
+        return;
+    };
+
+    let source: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait RootDispatch { fn root_value(&self) -> i32; }
+        pub struct RootHost;
+        impl RootDispatch for RootHost { fn root_value(&self) -> i32 { 10 } }
+        pub fn call_root(host: &RootHost) -> i32 { host.root_value() }
+
+        pub mod marked {
+            #[cfg_attr(any(), cpp_trait_member_dispatch)]
+            pub trait Clash { fn value(&self) -> i32; }
+            pub struct MarkedHost;
+            impl Clash for MarkedHost { fn value(&self) -> i32 { 20 } }
+            pub fn call(host: &MarkedHost) -> i32 { host.value() }
+
+            pub mod deep {
+                #[cfg_attr(any(), cpp_trait_member_dispatch)]
+                pub trait Layer { fn depth(&self) -> i32; }
+                pub struct MarkedDeepHost;
+                impl Layer for MarkedDeepHost { fn depth(&self) -> i32 { 30 } }
+                pub fn call(host: &MarkedDeepHost) -> i32 { host.depth() }
+            }
+        }
+
+        pub mod plain {
+            pub trait Clash { fn value(&self) -> i32; }
+            pub struct PlainHost;
+            impl Clash for PlainHost { fn value(&self) -> i32 { 40 } }
+            pub fn call(host: &PlainHost) -> i32 { host.value() }
+
+            pub mod deep {
+                pub trait Layer { fn depth(&self) -> i32; }
+                pub struct PlainDeepHost;
+                impl Layer for PlainDeepHost { fn depth(&self) -> i32 { 50 } }
+                pub fn call(host: &PlainDeepHost) -> i32 { host.depth() }
+            }
+        }
+
+        pub mod alias_case {
+            use crate::marked::Clash as Selected;
+            pub struct AliasHost;
+            impl Selected for AliasHost { fn value(&self) -> i32 { 60 } }
+            pub fn call(host: &AliasHost) -> i32 { host.value() }
+        }
+
+        pub mod facade { pub use crate::marked::Clash; }
+        pub mod reexport_case {
+            use crate::facade::Clash as Selected;
+            pub struct ReexportHost;
+            impl Selected for ReexportHost { fn value(&self) -> i32 { 70 } }
+            pub fn call(host: &ReexportHost) -> i32 { host.value() }
+        }
+
+        pub mod shadow_outer {
+            use crate::marked as selected;
+            pub mod inner {
+                pub mod selected {
+                    pub trait Clash { fn value(&self) -> i32; }
+                }
+                pub struct ChildHost;
+                impl selected::Clash for ChildHost { fn value(&self) -> i32 { 80 } }
+                pub fn call(host: &ChildHost) -> i32 { host.value() }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.emit_file(&source, Some("trait_dispatch_scope_review"));
+    let module = cg.into_output();
+
+    assert!(!module.contains("namespace RootDispatch_"), "{module}");
+    assert_eq!(module.matches("namespace Clash_ {").count(), 2, "{module}");
+    assert_eq!(module.matches("namespace Layer_ {").count(), 1, "{module}");
+    assert!(
+        !module.contains("using ::marked::__ufcs_Clash::value")
+            && !module.contains("using ::marked::deep::__ufcs_Layer::depth"),
+        "marked lexical owners leaked UFCS helpers:\n{module}"
+    );
+    assert_eq!(module.matches("return value_.root_value();").count(), 3, "{module}");
+    assert_eq!(module.matches("return value_.value();").count(), 9, "{module}");
+    assert_eq!(module.matches("return Clash_::value(value_);").count(), 6, "{module}");
+    assert_eq!(module.matches("return value_.depth();").count(), 3, "{module}");
+    assert_eq!(module.matches("return Layer_::depth(value_);").count(), 3, "{module}");
+
+    let temp = tempfile::tempdir().unwrap();
+    let module_source = temp.path().join("trait_dispatch_scope_review.cppm");
+    let module_pcm = temp.path().join("trait_dispatch_scope_review.pcm");
+    let module_object = temp.path().join("trait_dispatch_scope_review.o");
+    let importer_source = temp.path().join("importer.cpp");
+    let importer_object = temp.path().join("importer.o");
+    let binary = temp.path().join("importer");
+    std::fs::write(&module_source, module).unwrap();
+    std::fs::write(
+        &importer_source,
+        r#"
+#include <cstdint>
+import trait_dispatch_scope_review;
+
+int main() {
+    RootHost root;
+    marked::MarkedHost marked_host;
+    marked::deep::MarkedDeepHost marked_deep;
+    plain::PlainHost plain_host;
+    plain::deep::PlainDeepHost plain_deep;
+    alias_case::AliasHost alias_host;
+    reexport_case::ReexportHost reexport_host;
+    shadow_outer::inner::ChildHost child_host;
+    RootDispatchAdapter<RootHost> root_adapter(RootHost{});
+    marked::ClashAdapter<marked::MarkedHost> marked_adapter(marked::MarkedHost{});
+    marked::deep::LayerAdapter<marked::deep::MarkedDeepHost> marked_deep_adapter(
+        marked::deep::MarkedDeepHost{});
+    plain::ClashAdapter<plain::PlainHost> plain_adapter(plain::PlainHost{});
+    plain::deep::LayerAdapter<plain::deep::PlainDeepHost> plain_deep_adapter(
+        plain::deep::PlainDeepHost{});
+    marked::ClashAdapter<alias_case::AliasHost> alias_adapter(alias_case::AliasHost{});
+    marked::ClashAdapter<reexport_case::ReexportHost> reexport_adapter(
+        reexport_case::ReexportHost{});
+    shadow_outer::inner::selected::ClashAdapter<shadow_outer::inner::ChildHost> child_adapter(
+        shadow_outer::inner::ChildHost{});
+    return call_root(root) == 10
+        && marked::call(marked_host) == 20
+        && marked::deep::call(marked_deep) == 30
+        && plain::call(plain_host) == 40
+        && plain::deep::call(plain_deep) == 50
+        && alias_case::call(alias_host) == 60
+        && reexport_case::call(reexport_host) == 70
+        && shadow_outer::inner::call(child_host) == 80
+        && root_adapter.root_value() == 10
+        && marked_adapter.value() == 20
+        && marked_deep_adapter.depth() == 30
+        && plain_adapter.value() == 40
+        && plain_deep_adapter.depth() == 50
+        && alias_adapter.value() == 60
+        && reexport_adapter.value() == 70
+        && child_adapter.value() == 80 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let precompile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("--precompile")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_pcm)
+        .output()
+        .unwrap();
+    assert!(
+        precompile.status.success(),
+        "lexical trait-dispatch module precompile failed:\n{}",
+        String::from_utf8_lossy(&precompile.stderr)
+    );
+    let module_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=trait_dispatch_scope_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_object)
+        .output()
+        .unwrap();
+    assert!(
+        module_compile.status.success(),
+        "lexical trait-dispatch module object compile failed:\n{}",
+        String::from_utf8_lossy(&module_compile.stderr)
+    );
+    let importer_compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(format!(
+            "-fmodule-file=trait_dispatch_scope_review={}",
+            module_pcm.display()
+        ))
+        .arg("-c")
+        .arg(&importer_source)
+        .arg("-o")
+        .arg(&importer_object)
+        .output()
+        .unwrap();
+    assert!(
+        importer_compile.status.success(),
+        "lexical trait-dispatch importer compile failed:\n{}",
+        String::from_utf8_lossy(&importer_compile.stderr)
+    );
+    let link = std::process::Command::new(compiler)
+        .arg("-stdlib=libc++")
+        .arg(&module_object)
+        .arg(&importer_object)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "lexical trait-dispatch importer link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(binary).output().unwrap();
+    assert!(run.status.success(), "lexical trait-dispatch runtime failed: {run:?}");
+}
+
+#[test]
+fn test_trait_dispatch_identity_resolves_local_alias_and_rejects_external_same_leaf() {
+    let temp = tempfile::tempdir().unwrap();
+    let evil = temp.path().join("evil_trait");
+    let consumer = temp.path().join("consumer");
+    std::fs::create_dir_all(evil.join("src")).unwrap();
+    std::fs::create_dir_all(consumer.join("src")).unwrap();
+    std::fs::write(
+        evil.join("Cargo.toml"),
+        "[package]\nname='evil_trait'\nversion='0.0.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        evil.join("src/lib.rs"),
+        "pub trait Clash { fn value(&self) -> i32; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        "[package]\nname='trait_identity'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nevil_trait={path='../evil_trait'}\n[workspace]\n",
+    )
+    .unwrap();
+    let source = r#"
+#[cfg_attr(any(), cpp_trait_member_dispatch)]
+pub trait Clash { fn value(&self) -> i32; }
+pub mod marked {
+    #[cfg_attr(any(), cpp_trait_member_dispatch)]
+    pub trait Clash { fn value(&self) -> i32; }
+}
+pub mod local_alias {
+    use crate::marked::Clash as Selected;
+    pub struct AliasHost;
+    impl Selected for AliasHost { fn value(&self) -> i32 { 7 } }
+}
+pub mod local_chain {
+    use crate::marked as marker_module;
+    use marker_module::Clash as Selected;
+    pub struct ChainHost;
+    impl Selected for ChainHost { fn value(&self) -> i32 { 8 } }
+}
+pub mod facade { pub use crate::marked::Clash; }
+pub mod local_reexport_chain {
+    use crate::facade::Clash as Selected;
+    pub struct ReexportHost;
+    impl Selected for ReexportHost { fn value(&self) -> i32 { 81 } }
+}
+pub mod nested_shadow {
+    use crate::marked as selected;
+    pub mod inner {
+        pub mod selected {
+            pub trait Clash { fn value(&self) -> i32; }
+        }
+        pub struct ChildHost;
+        impl selected::Clash for ChildHost { fn value(&self) -> i32 { 82 } }
+    }
+}
+pub mod external_case {
+    use evil_trait::Clash;
+    pub struct ExternalHost;
+    impl Clash for ExternalHost { fn value(&self) -> i32 { 9 } }
+}
+pub mod external_chain {
+    use evil_trait as foreign;
+    use foreign::Clash as Selected;
+    pub struct ExternalHost;
+    impl Selected for ExternalHost { fn value(&self) -> i32 { 10 } }
+}
+pub mod external_glob {
+    use evil_trait::*;
+    pub struct ExternalHost;
+    impl Clash for ExternalHost { fn value(&self) -> i32 { 11 } }
+}
+"#;
+    std::fs::write(consumer.join("src/lib.rs"), source).unwrap();
+    let check = std::process::Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "trait-identity fixture must be Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let out = transpile_str_interface_traits(source);
+    assert_eq!(
+        out.matches("namespace Clash_ {").count(),
+        1,
+        "only the nearer child-local unmarked trait may retain UFCS lowering:\n{out}"
+    );
+    assert!(
+        out.contains("class ClashAdapter<::local_alias::AliasHost>"),
+        "local alias did not resolve to marked::Clash:\n{out}"
+    );
+    assert!(
+        out.contains("class ClashAdapter<::local_chain::ChainHost>"),
+        "chained local alias did not resolve to marked::Clash:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "namespace marked {\ntemplate <>\nclass ClashAdapter<::local_reexport_chain::ReexportHost>"
+        ),
+        "intermediate local re-export lost the marked trait identity:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "namespace nested_shadow::inner::selected {\ntemplate <>\nclass ClashAdapter<::nested_shadow::inner::ChildHost>"
+        ),
+        "parent import beat a nearer child module:\n{out}"
+    );
+    assert!(
+        !out.contains("ClashAdapter<::external_case::ExternalHost>")
+            && !out.contains("ClashAdapter<::external_chain::ExternalHost>")
+            && !out.contains("ClashAdapter<::external_glob::ExternalHost>")
+            && !out.contains("SelectedAdapter"),
+        "external/import spelling acquired local trait behavior:\n{out}"
+    );
+    assert_eq!(out.matches("return value_.value();").count(), 9, "{out}");
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_partial_adapter_clang_runtime() {
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping generic Adapter runtime proof: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits(
+        r#"
+        pub trait Score { fn score(&self) -> i32; }
+        impl<T> Score for std::pair<T, T> {
+            fn score(&self) -> i32 { 42 }
+        }
+        "#,
+    );
+    cpp.push_str(
+        r#"
+int main() {
+    ScoreAdapter<std::pair<int32_t, int32_t>> owned({20, 22});
+    std::pair<int32_t, int32_t> pair{1, 2};
+    ScoreAdapterRef<std::pair<int32_t, int32_t>> borrowed(pair);
+    return owned.score() == 42 && borrowed.score() == 42 ? 0 : 1;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("generic_adapter.cpp");
+    let binary_path = temp.path().join("generic_adapter");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "generic Adapter C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(run.status.success(), "generic Adapter runtime failed: {run:?}");
+}
+
+#[test]
+fn test_interface_traits_foreign_generic_impl_does_not_emit_generic_virtual_override() {
+    // C++ virtual functions cannot be templates.  Supporting impl-level type
+    // parameters must not accidentally make a method-only generic look like
+    // an ordinary override.
+    let out = transpile_str_interface_traits(
+        r#"
+        trait Visit { fn visit<U>(&self, value: U); }
+        impl<T> Visit for Vec<T> {
+            fn visit<U>(&self, value: U) {}
+        }
+        "#,
+    );
+    assert!(
+        !out.contains(" override"),
+        "generic method must not become a concrete override:\n{out}"
+    );
+    assert!(
+        !out.contains("class VisitAdapter<rusty::Vec<T>>"),
+        "a generic-method-only marker interface needs no adapter:\n{out}"
+    );
+}
+
+#[test]
+fn test_cpp_inherit_accepts_authenticated_unqualified_facade_marker() {
+    // Direct rustc resolves the compiler-owned attribute through the exact
+    // facade import. The import itself is Rust-only and must not become a
+    // nonexistent C++ runtime symbol.
+    let out = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+        use rusty::cpp_inherit;
+        trait Base { fn value(&self) -> i32; }
+        struct Derived { value: i32 }
+        #[cpp_inherit]
+        impl Base for Derived { fn value(&self) -> i32 { self.value } }
+        "#,
+    );
+    assert!(out.contains("struct Derived : public Base"), "{out}");
+    assert!(!out.contains("using rusty::cpp_inherit"), "{out}");
+}
+
+#[test]
+fn test_cpp_inherit_rejects_real_qualified_and_imported_proc_macro_lookalikes() {
+    let temp = tempfile::tempdir().unwrap();
+    let evil = temp.path().join("evil_macros");
+    let consumer = temp.path().join("consumer");
+    std::fs::create_dir_all(evil.join("src")).unwrap();
+    std::fs::create_dir_all(consumer.join("src")).unwrap();
+    std::fs::write(
+        evil.join("Cargo.toml"),
+        "[package]\nname='evil_macros'\nversion='0.0.0'\nedition='2024'\n[lib]\nproc-macro=true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        evil.join("src/lib.rs"),
+        r#"use proc_macro::TokenStream;
+#[proc_macro_attribute]
+pub fn cpp_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        "[package]\nname='qualified_inherit'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nevil={package='evil_macros',path='../evil_macros'}\n[workspace]\n",
+    )
+    .unwrap();
+    let source = r#"use evil::cpp_inherit;
+pub trait Base { fn value(&self) -> i32; }
+pub struct Derived { pub value: i32 }
+#[evil::cpp_inherit]
+impl Base for Derived { fn value(&self) -> i32 { self.value } }
+pub struct ImportedDerived { pub value: i32 }
+#[cpp_inherit]
+impl Base for ImportedDerived { fn value(&self) -> i32 { self.value } }
+pub mod local_shadow {
+    pub mod rusty { pub use evil::cpp_inherit; }
+    use rusty::cpp_inherit;
+    pub struct LocalDerived { pub value: i32 }
+    #[cpp_inherit]
+    impl crate::Base for LocalDerived { fn value(&self) -> i32 { self.value } }
+}
+pub mod alias_shadow {
+    use evil as rusty;
+    use rusty::cpp_inherit;
+    pub struct AliasDerived { pub value: i32 }
+    #[cpp_inherit]
+    impl crate::Base for AliasDerived { fn value(&self) -> i32 { self.value } }
+}
+pub mod glob_shadow {
+    use evil::*;
+    pub struct GlobDerived { pub value: i32 }
+    #[cpp_inherit]
+    impl crate::Base for GlobDerived { fn value(&self) -> i32 { self.value } }
+}
+"#;
+    std::fs::write(consumer.join("src/lib.rs"), source).unwrap();
+    let check = std::process::Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "qualified lookalike fixture must be Cargo-valid:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    // Even when the driver has authenticated the real `rusty` facade root,
+    // local modules, aliases, globs, and foreign qualified paths must not
+    // acquire the compiler-owned behavior.
+    let out = transpile_str_interface_traits_with_authenticated_cpp_inherit(source);
+    assert!(!out.contains("struct Derived : public Base"), "{out}");
+    assert!(
+        !out.contains("struct ImportedDerived : public Base"),
+        "{out}"
+    );
+    assert!(out.contains("class BaseAdapter<Derived>"), "{out}");
+    assert!(
+        out.contains("class BaseAdapter<ImportedDerived>"),
+        "{out}"
+    );
+    for (module, derived) in [
+        ("local_shadow", "LocalDerived"),
+        ("alias_shadow", "AliasDerived"),
+        ("glob_shadow", "GlobDerived"),
+    ] {
+        assert!(
+            !out.contains(&format!("struct {derived} : public")),
+            "lookalike marker changed {derived} inheritance:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("BaseAdapter<::{module}::{derived}>")),
+            "lookalike marker suppressed {derived}'s ordinary adapter:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -7832,6 +9424,35 @@ fn test_interface_traits_box_dyn_maps_to_rusty_box_of_interface() {
     );
     assert!(out.contains("void f(rusty::Box<Animal> a)"), "{out}");
     assert!(!out.contains("pro::proxy<"), "{out}");
+}
+
+#[test]
+fn test_named_module_box_dyn_local_interface_keeps_typed_owner() {
+    let out = transpile_str_module(
+        "pub trait Connection { fn close(&mut self); } pub type Proxy = Box<dyn Connection>;",
+        "rrr.channel",
+    );
+    assert!(out.contains("using Proxy = rusty::Box<Connection>;"), "{out}");
+    assert!(!out.contains("using Proxy = void*;"), "{out}");
+}
+
+#[test]
+fn test_named_module_box_dyn_unknown_interface_remains_fail_closed() {
+    let out = transpile_str_module(
+        "pub type Proxy = Box<dyn external::Connection>;",
+        "rrr.channel",
+    );
+    assert!(out.contains("using Proxy = void*;"), "{out}");
+}
+
+#[test]
+fn test_named_module_box_dyn_external_same_tail_remains_fail_closed() {
+    let out = transpile_str_module(
+        "pub trait Connection { fn close(&mut self); } pub type Proxy = Box<dyn external::Connection>;",
+        "rrr.channel",
+    );
+    assert!(out.contains("using Proxy = void*;"), "{out}");
+    assert!(!out.contains("using Proxy = rusty::Box<Connection>;"), "{out}");
 }
 
 #[test]
@@ -8828,6 +10449,25 @@ fn test_phantom_pinned_drop_struct_deletes_moves_instead_of_forgotten_flag_move(
 }
 
 #[test]
+fn test_ufcs_serde_mut_ref_out_arg_collapses() {
+    // Cross-file UFCS serde dispatch: every param of the Serialize_/
+    // Deserialize_ overload family is a reference, but the definitions
+    // live in another file, so no signature is collected here. The
+    // synthesized reference expected type must collapse a `&mut v`
+    // out-arg to the bare lvalue (a leaked `&v` cannot bind `T&`).
+    let out = transpile_str(
+        r#"
+        fn f(ar: &mut BinaryReadArchive) {
+            let mut v_xid = v64::new(0);
+            Deserialize_::deserialize(&mut v_xid, ar);
+        }
+        "#,
+    );
+    assert!(!out.contains("deserialize(&v_xid"), "{out}");
+    assert!(out.contains("deserialize(v_xid"), "{out}");
+}
+
+#[test]
 fn test_move_closure_invoking_captured_function_keeps_mutable() {
     // Direct invocation of a captured callable is a method call on it in
     // C++: rusty::Function's operator() is non-const (unless the
@@ -9047,9 +10687,19 @@ fn test_box_dyn_fn_once() {
 }
 
 #[test]
+fn test_box_dyn_fn_is_const_callable() {
+    let out = transpile_str("fn apply(f: Box<dyn Fn(i32) -> i32>) {}");
+    assert!(
+        out.contains("rusty::Function<int32_t(int32_t) const> f"),
+        "{out}"
+    );
+}
+
+#[test]
 fn test_box_dyn_fn_mut_uses_rusty_function() {
     let out = transpile_str("fn apply(f: Box<dyn FnMut(i32) -> i32>) {}");
     assert!(out.contains("rusty::Function<int32_t(int32_t)> f"));
+    assert!(!out.contains("int32_t(int32_t) const"), "{out}");
 }
 
 #[test]
@@ -17272,6 +18922,35 @@ fn test_by_value_self_method_in_macro_args_binds_non_const() {
 }
 
 #[test]
+fn test_maybe_uninit_write_value_arg_binds_non_const() {
+    // The emitter's dedicated `write` lowering always move-wraps the value
+    // argument, but `MaybeUninit::write`'s signature is cross-crate and
+    // invisible to the signature lookups — the binding pass must not emit
+    // `const` for a local consumed through `.write(x)`, or the forced move
+    // decays to a copy (deleted for move-only payloads; stdlib-btree merge
+    // paths hit this with BTreeMap<K, move-only V>).
+    let out = transpile_str(
+        r#"
+        struct Payload { data: Vec<u8> }
+        fn stash(slot: &mut std::mem::MaybeUninit<Payload>, seed: Vec<u8>) {
+            let value = Payload { data: seed };
+            slot.write(value);
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("const auto value ="),
+        "a local consumed by MaybeUninit::write must not bind const:\n{}",
+        out
+    );
+    assert!(
+        out.contains("std::move(value)"),
+        "the write value arg stays move-wrapped:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_tuple_impl_self_index_lowers_to_std_get() {
     // `impl Trait for (A, B)` lowers self to a std::tuple parameter —
     // `self.0` must emit std::get<0>(self_), never `self_._0` (std::tuple
@@ -17302,6 +18981,838 @@ fn test_tuple_impl_self_index_lowers_to_std_get() {
     assert!(
         !out.contains("self_._0") && !out.contains("self_._1"),
         "std::tuple has no _N members:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_hint_spin_loop_lowers_to_rusty_hint() {
+    // The other std::hint entries take an operand and lower to an
+    // identity expression; spin_loop takes none, so it needs a real
+    // callee (a Rust path leaked into C++ as `std::hint::spin_loop()`
+    // before — `std::hint` is not a C++ namespace).
+    let out = transpile_str(
+        r#"
+        pub fn spin(n: u32) {
+            let mut i = 0u32;
+            while i < n {
+                std::hint::spin_loop();
+                i += 1;
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::hint::spin_loop()"),
+        "spin_loop must lower to the runtime helper:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("std::hint::"),
+        "no Rust hint path may survive into C++:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_c_like_enum_method_call_is_namespace_qualified() {
+    // A C-like enum's inherent methods lower to FREE functions (C++
+    // enums cannot have members). Calling one unqualified lets a local
+    // of the same name capture it: `let code = self.code();` is
+    // unambiguous Rust (methods and variables are separate namespaces)
+    // but became `const auto code = code(self_);` — a variable in its
+    // own initializer.
+    let out = transpile_str_module_with_cxx_namespace(
+        r#"
+        #[repr(i32)]
+        pub enum E { A = 1, B = 2 }
+        impl E {
+            pub fn code(self) -> i32 { self as i32 }
+            pub fn doubled(self) -> i32 {
+                let code = self.code();
+                code * 2
+            }
+        }
+        "#,
+        "probe.e",
+        "probe::e",
+    );
+    assert!(
+        out.contains("::probe::e::code(self_)"),
+        "the free-fn call must be namespace-qualified:\n{out}"
+    );
+    assert!(
+        !out.contains("= code(self_)"),
+        "an unqualified call is captured by the local:\n{out}"
+    );
+}
+
+#[test]
+fn test_use_naming_sibling_module_emits_import() {
+    // `use super::a;` / `use crate::a;` name a MODULE, not an item in
+    // one. Both previously emitted NOTHING (the bare lowercase name was
+    // dismissed as an unresolved import), so a call site saying
+    // `a::f()` had no declaration for `a`.
+    for path in ["super::a", "crate::a"] {
+        let out = transpile_str_module_with_sibling_modules(
+            &format!("use {path};\npub fn g() -> i32 {{ a::f() }}\n"),
+            "probe.b",
+            &["probe.a", "probe.b"],
+        );
+        assert!(
+            out.contains("import probe.a;"),
+            "`use {path};` must import the sibling module:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn test_crate_module_import_as_underscore_is_private_and_alias_free() {
+    let file: syn::File = syn::parse_str(
+        "#[allow(unused_imports)] use crate::provider as _;\npub fn value() -> i32 { 7 }",
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("probe");
+    cg.set_crate_module_names(
+        ["probe.provider", "probe.consumer"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    cg.set_cxx_namespace(Some("probe".to_string()));
+    cg.emit_file(&file, Some("probe.consumer"));
+    let out = cg.into_output();
+
+    let module = out.find("export module probe.consumer;").unwrap();
+    let import = out.find("import probe.provider;").unwrap();
+    let namespace = out.find("namespace probe {").unwrap();
+    assert!(module < import && import < namespace, "{out}");
+    assert_eq!(out.matches("import probe.provider;").count(), 1, "{out}");
+    assert!(!out.contains("export import probe.provider;"), "{out}");
+    assert!(!out.contains("namespace provider ="), "{out}");
+    assert!(!out.contains("namespace _ ="), "{out}");
+    assert!(!out.contains("using _ ="), "{out}");
+}
+
+#[test]
+fn exact_qualified_flat_type_path_imports_and_rewrites_its_proven_provider() {
+    let file: syn::File = syn::parse_str(
+        r#"
+            pub mod nested {
+                pub fn callback() {
+                    let _ = crate::channel::OnFrameCallback::from_callable();
+                }
+            }
+        "#,
+    )
+    .unwrap();
+    let authorization = crate::cpp_abi::FlatImportTypeAuthorization {
+        consumer_source: std::path::PathBuf::from("src/fiber_channel.rs"),
+        consumer_physical_module: crate::cpp_abi::ModulePath(vec![
+            "fiber_channel".to_string(),
+        ]),
+        consumer_lexical_module: crate::cpp_abi::ModulePath(vec!["nested".to_string()]),
+        marked_rust_child: "channel".to_string(),
+        marked_leaves: vec!["OnFrameCallback".to_string()],
+        leaf: "OnFrameCallback".to_string(),
+        cpp_namespace: "rrr".to_string(),
+        provider_physical_module: crate::cpp_abi::ModulePath(vec!["channel".to_string()]),
+        provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::Struct,
+        reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath,
+    };
+
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("rrr");
+    cg.set_crate_module_names(
+        ["rrr.channel", "rrr.fiber_channel"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.set_flat_import_type_authorizations(BTreeSet::from([authorization.clone()]));
+    cg.emit_file(&file, Some("rrr.fiber_channel"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+
+    let module = out.find("export module rrr.fiber_channel;").unwrap();
+    let import = out.find("import rrr.channel;").unwrap();
+    let namespace = out.find("namespace rrr {").unwrap();
+    assert!(module < import && import < namespace, "{out}");
+    assert_eq!(out.matches("import rrr.channel;").count(), 1, "{out}");
+    assert!(
+        out.contains("::rrr::OnFrameCallback::from_callable()"),
+        "{out}"
+    );
+    assert!(!out.contains("::channel::OnFrameCallback"), "{out}");
+    assert!(!out.contains("using ::rrr::OnFrameCallback;"), "{out}");
+
+    let mut missing = CodeGen::new();
+    missing.set_crate_name("rrr");
+    missing.set_crate_module_names(vec!["rrr.fiber_channel".to_string()]);
+    missing.set_cxx_namespace(Some("rrr".to_string()));
+    missing.set_flat_import_type_authorizations(BTreeSet::from([authorization]));
+    missing.emit_file(&file, Some("rrr.fiber_channel"));
+    let error = missing
+        .take_codegen_error()
+        .expect("a proven provider must resolve to its exact named module");
+    assert!(error.contains("`channel`"), "{error}");
+    assert!(error.contains("generated sibling module"), "{error}");
+}
+
+#[test]
+fn test_crate_item_import_as_underscore_imports_exact_owner_only() {
+    let out = transpile_str_module_with_sibling_modules(
+        "#[allow(unused_imports)] use crate::provider::Extension as _;",
+        "probe.consumer",
+        &["probe.provider", "probe.consumer"],
+    );
+    assert_eq!(out.matches("import probe.provider;").count(), 1, "{out}");
+    assert!(!out.contains("using _ ="), "{out}");
+    assert!(!out.contains("namespace _ ="), "{out}");
+}
+
+#[test]
+fn test_external_same_tail_underscore_import_cannot_select_local_sibling() {
+    let out = transpile_str_module_with_sibling_modules(
+        "#[allow(unused_imports)] use external::provider as _;",
+        "probe.consumer",
+        &["probe.external.provider", "probe.consumer"],
+    );
+    assert!(!out.contains("import probe.external.provider;"), "{out}");
+    assert!(!out.contains("using _ ="), "{out}");
+    assert!(!out.contains("namespace _ ="), "{out}");
+}
+
+#[test]
+fn test_item_import_names_the_declaring_module() {
+    // `use crate::base::rand::Rng;` — the item is declared by
+    // `probe.base.rand`. Resolving from the path's FIRST segment
+    // imported `probe.base` and emitted `using ::probe::base::Rng;`.
+    // Importing a parent re-exports the child MODULE, but C++
+    // namespaces do not merge across modules, so that using-declaration
+    // named nothing.
+    let out = transpile_str_module_with_sibling_modules(
+        "use crate::base::rand::Rng;\npub fn f(r: &Rng) -> u64 { r.next_u64() }\n",
+        "probe.rpc.reconnect",
+        &["probe.base", "probe.base.rand", "probe.rpc.reconnect"],
+    );
+    assert!(
+        out.contains("import probe.base.rand;"),
+        "must import the DECLARING module:\n{out}"
+    );
+    assert!(
+        !out.contains("using ::probe::base::Rng;"),
+        "the parent namespace does not contain the item:\n{out}"
+    );
+}
+
+#[test]
+fn test_use_nested_module_path_prefers_longest_match() {
+    // `use crate::base::time;` names `probe.base.time`. Resolving it to
+    // the PARENT `probe.base` is not merely imprecise — the parent
+    // re-exports its children, so importing it from a child is an
+    // illegal C++20 import CYCLE.
+    let out = transpile_str_module_with_sibling_modules(
+        "use crate::base::time;\npub fn stamp() -> u64 { time::now() }\n",
+        "probe.base.log",
+        &["probe.base", "probe.base.time", "probe.base.log"],
+    );
+    assert!(
+        out.contains("import probe.base.time;"),
+        "must import the named module:\n{out}"
+    );
+    assert!(
+        !out.contains("import probe.base;"),
+        "must NOT import the parent (import cycle):\n{out}"
+    );
+}
+
+#[test]
+fn test_item_import_through_sibling_module_is_not_a_module_import() {
+    // `use super::varint::VARINT_BUF_LEN;` is an ITEM import that
+    // happens to travel THROUGH a module. Treating a path whose prefix
+    // names a module as a module import aliased the item's own name to
+    // the namespace (`namespace VARINT_BUF_LEN = ::probe::wire::varint;`),
+    // which is not even a valid expression at the use site.
+    let out = transpile_str_module_with_sibling_modules(
+        "use super::varint::VARINT_BUF_LEN;\npub fn n() -> usize { VARINT_BUF_LEN }\n",
+        "probe.wire.serde",
+        &["probe.wire.varint", "probe.wire.serde"],
+    );
+    assert!(
+        !out.contains("namespace VARINT_BUF_LEN"),
+        "an item must not be aliased as a namespace:\n{out}"
+    );
+    assert!(
+        out.contains("import probe.wire.varint;"),
+        "the owning module is still imported:\n{out}"
+    );
+}
+
+#[test]
+fn test_trait_interface_is_forward_declared() {
+    // A trait lowers to an interface class. A struct holding
+    // Arc<dyn T> can be emitted BEFORE it — srpc's Command::Add held
+    // Arc<dyn Pollable> and the Pollable class landed 70 lines later,
+    // giving 'use of undeclared identifier'. A smart pointer needs only
+    // an incomplete type, so a forward declaration is enough.
+    let out = transpile_str_module(
+        r#"
+        use std::sync::Arc;
+        pub enum Command {
+            Add(Arc<dyn Worker>),
+            Stop,
+        }
+        pub trait Worker: Send + Sync {
+            fn work(&self) -> i32;
+        }
+        "#,
+        "probe",
+    );
+    let fwd = out.find("class Worker;").expect("forward declaration emitted");
+    let holder = out.find("Arc<Worker>").expect("holder names the interface");
+    assert!(
+        fwd < holder,
+        "the forward declaration must precede the first use:\n{out}"
+    );
+}
+
+#[test]
+fn test_user_defined_readable_is_not_elided() {
+    // A name-matched identity rule (added for serde_test's Configure
+    // adapters) silently DELETED any zero-arg call named `readable` or
+    // `compact`, whatever the receiver. srpc's Readiness::readable()
+    // vanished, leaving `if (r)` — code that still compiles and means
+    // something else, which is the worst way for this to fail.
+    let out = transpile_str(
+        r#"
+        #[derive(Clone, Copy)]
+        pub struct Readiness(pub i32);
+        impl Readiness {
+            pub fn readable(self) -> bool { self.0 & 1 != 0 }
+            pub fn compact(self) -> i32 { self.0 }
+        }
+        pub fn check(r: Readiness) -> bool {
+            if r.readable() { true } else { false }
+        }
+        pub fn size(r: Readiness) -> i32 { r.compact() }
+        "#,
+    );
+    assert!(
+        out.contains("r.readable()"),
+        "a crate-defined readable() must survive:\n{out}"
+    );
+    assert!(
+        out.contains("r.compact()"),
+        "a crate-defined compact() must survive:\n{out}"
+    );
+}
+
+#[test]
+fn test_vec_repeat_form_lowers_to_from_elem() {
+    // vec![elem; n] fell through to raw token pass-through, which
+    // emitted the semicolon verbatim (`rusty::Vec{elem ; n}`) — not
+    // valid C++. Rust implements this as alloc::vec::from_elem.
+    let out = transpile_str(
+        r#"
+        pub fn zeros(n: usize) -> Vec<u8> {
+            vec![0u8; n]
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::vec_from_elem("),
+        "vec![x; n] must lower to from_elem:\n{out}"
+    );
+    assert!(
+        !out.contains(" ; "),
+        "no stray macro semicolon may survive:\n{out}"
+    );
+}
+
+#[test]
+fn test_vec_list_form_still_lowers_to_a_braced_list() {
+    let out = transpile_str("pub fn xs() -> Vec<i32> { vec![1, 2, 3] }");
+    assert!(out.contains("rusty::Vec{"), "list form unchanged:\n{out}");
+}
+
+#[test]
+fn test_libc_macro_names_are_escaped() {
+    // errno/stdin/stdout/stderr are MACROS, so an identifier of that
+    // name is textually replaced rather than shadowed: `fn errno()`
+    // emitted verbatim becomes `int (*__errno_location())()`, whose
+    // diagnostic mentions neither errno nor a macro.
+    let out = transpile_str(
+        r#"
+        pub fn errno() -> i32 { 0 }
+        pub fn caller() -> i32 { errno() }
+        "#,
+    );
+    assert!(
+        out.contains("errno_"),
+        "a fn named errno must be escaped:\n{out}"
+    );
+    assert!(
+        !out.contains(" errno()"),
+        "the bare macro name must not survive:\n{out}"
+    );
+}
+
+#[test]
+fn test_libc_macro_reference_the_dsl_does_not_declare_stays_bare() {
+    // The counterpart to test_libc_macro_names_are_escaped. There, `errno`
+    // is DECLARED by the DSL, so both the declaration and its call site
+    // must be renamed. Here nothing declares it, so the bare identifier can
+    // only mean libc's macro — which is exactly what a syscall kernel
+    // reading errno intends. Renaming it emitted `errno_`, which names
+    // nothing and does not compile.
+    let out = transpile_str(
+        r#"
+        pub fn last_error() -> i32 { errno }
+        "#,
+    );
+    // Assert the RENAME, not the surrounding codegen: the return value is
+    // independently wrapped in std::move, which is orthogonal to escaping.
+    assert!(
+        !out.contains("errno_"),
+        "nothing declares errno, so it must not be renamed:\n{out}"
+    );
+    assert!(
+        out.contains("errno"),
+        "the errno read must survive:\n{out}"
+    );
+}
+
+#[test]
+fn test_libc_macro_name_bound_as_a_local_is_still_escaped() {
+    // Scope-driven, not position-driven: a LOCAL named errno is a
+    // declaration, so it and its uses are renamed together. Left bare, the
+    // macro would textually replace the declaration.
+    let out = transpile_str(
+        r#"
+        pub fn f() -> i32 { let errno: i32 = 7; errno }
+        "#,
+    );
+    assert!(
+        out.contains("errno_"),
+        "a local named errno is a declaration and must be escaped:\n{out}"
+    );
+}
+
+#[test]
+fn test_use_of_a_rusty_runtime_path_emits_a_real_using_declaration() {
+    // `rusty` is the runtime this transpiler emits INTO, not an external
+    // crate awaiting a type mapping. Classifying it as external dropped the
+    // import and left only a comment, so anything naming the symbol failed
+    // to compile with no hint why.
+    let out = transpile_str(
+        r#"
+        use rusty::sync::atomic::Ordering;
+        pub fn f() -> i32 { 0 }
+        "#,
+    );
+    assert!(
+        out.contains("using rusty::sync::atomic::Ordering;"),
+        "the using-declaration must be emitted as code:\n{out}"
+    );
+    assert!(
+        !out.contains("// Rust-only unresolved import: using rusty::"),
+        "a rusty:: path must not be treated as an unresolved import:\n{out}"
+    );
+    assert!(
+        !out.contains("// TODO: external crate 'rusty'"),
+        "rusty is the runtime, not an external crate:\n{out}"
+    );
+}
+
+#[test]
+fn test_rusty_function_takes_a_bare_signature_not_a_nested_wrapper() {
+    // rusty::Function is parameterised by a SIGNATURE. Mapping its argument
+    // with the ordinary rules produced rusty::Function<std::function<void()>>
+    // -- a different type that still COMPILES, so the error was invisible in
+    // the GEN block. Rust's Fn/FnMut split carries const-callability.
+    let out = transpile_str(
+        r#"
+        type Cb = rusty::Function<dyn FnMut()>;
+        type ConstCb = rusty::Function<dyn Fn(i32, i32)>;
+        "#,
+    );
+    assert!(
+        out.contains("using Cb = rusty::Function<void()>;"),
+        "FnMut lowers to a non-const bare signature:\n{out}"
+    );
+    assert!(
+        out.contains("using ConstCb = rusty::Function<void(int32_t, int32_t) const>;"),
+        "Fn is callable through &self, so it lowers const-qualified:\n{out}"
+    );
+    assert!(
+        !out.contains("std::function"),
+        "no wrapper may be nested inside rusty::Function:\n{out}"
+    );
+}
+
+#[test]
+fn test_cfg_target_os_lowers_to_an_if_guard() {
+    // `#[cfg]` used to be dropped: the item was emitted UNGUARDED on every
+    // platform, with no diagnostic. That is wrong code that compiles.
+    let out = transpile_str(
+        r#"
+        #[cfg(target_os = "linux")]
+        pub fn plat() -> i32 { 1 }
+        "#,
+    );
+    assert!(
+        out.contains("#if defined(__linux__)"),
+        "the predicate must lower to a preprocessor guard:\n{out}"
+    );
+    assert!(
+        out.contains("#endif"),
+        "the guard must be closed:\n{out}"
+    );
+    let opens = out.matches("#if defined(__linux__)").count();
+    let closes = out.matches("#endif  // defined(__linux__)").count();
+    assert_eq!(opens, closes, "guard must balance:\n{out}");
+}
+
+#[test]
+fn test_cfg_target_os_preserves_const_and_static_variants() {
+    let source =
+        r#"
+        const fn mac_value() -> i32 { 35 }
+        const fn other_value() -> i32 { 11 }
+
+        #[cfg(target_os = "macos")]
+        pub const CODE: i32 = 60;
+        #[cfg(not(target_os = "macos"))]
+        pub const CODE: i32 = 110;
+
+        #[cfg(target_os = "macos")]
+        pub const COMPUTED: i32 = mac_value();
+        #[cfg(not(target_os = "macos"))]
+        pub const COMPUTED: i32 = other_value();
+
+        #[cfg(target_os = "macos")]
+        pub static SLOT: i32 = 1;
+        #[cfg(not(target_os = "macos"))]
+        pub static SLOT: i32 = 2;
+        "#;
+    let out = transpile_str(source);
+
+    let mac = "defined(__APPLE__)";
+    let other = "!(defined(__APPLE__))";
+    assert_eq!(out.matches(&format!("#if {mac}")).count(), 5, "{out}");
+    assert_eq!(out.matches(&format!("#if {other}")).count(), 5, "{out}");
+    assert!(
+        out.contains("constexpr int32_t CODE = static_cast<int32_t>(60);")
+            && out.contains("constexpr int32_t CODE = static_cast<int32_t>(110);"),
+        "mutually exclusive literal consts must both survive:\n{out}"
+    );
+    assert_eq!(
+        out.matches("extern const int32_t COMPUTED;").count(),
+        2,
+        "both guarded declarations must survive:\n{out}"
+    );
+    assert!(
+        out.contains("constexpr int32_t COMPUTED = ::mac_value();")
+            && out.contains("constexpr int32_t COMPUTED = ::other_value();"),
+        "both guarded definitions must survive:\n{out}"
+    );
+    assert_eq!(
+        out.matches("extern int32_t SLOT;").count(),
+        2,
+        "both guarded static declarations must survive:\n{out}"
+    );
+    assert!(
+        out.contains("inline int32_t SLOT = static_cast<int32_t>(1);")
+            && out.contains("inline int32_t SLOT = static_cast<int32_t>(2);"),
+        "both guarded static definitions must survive:\n{out}"
+    );
+    assert_eq!(out.matches(&format!("#endif  // {mac}")).count(), 5, "{out}");
+    assert_eq!(
+        out.matches(&format!("#endif  // {other}")).count(),
+        5,
+        "{out}"
+    );
+
+    let module_out = transpile_str_module(source, "cfg_items");
+    assert!(
+        module_out.contains("export constexpr int32_t CODE = static_cast<int32_t>(60);")
+            && module_out
+                .contains("export constexpr int32_t CODE = static_cast<int32_t>(110);"),
+        "both guarded literal variants must stay exported:\n{module_out}"
+    );
+    assert_eq!(
+        module_out
+            .matches("export extern const int32_t COMPUTED;")
+            .count(),
+        2,
+        "both guarded computed declarations must stay exported:\n{module_out}"
+    );
+    assert_eq!(
+        module_out.matches("export extern int32_t SLOT;").count(),
+        2,
+        "both guarded static declarations must stay exported:\n{module_out}"
+    );
+    assert!(
+        module_out.contains("export constexpr int32_t COMPUTED = ::mac_value();")
+            && module_out.contains("export constexpr int32_t COMPUTED = ::other_value();"),
+        "both guarded computed definitions must stay exported:\n{module_out}"
+    );
+}
+
+#[test]
+fn test_cfg_target_os_guards_local_const_static_and_factory_variants() {
+    let out = transpile_str(
+        r#"
+        fn f() -> i32 {
+            #[cfg(target_os = "macos")]
+            const CODE: i32 = 60;
+            #[cfg(not(target_os = "macos"))]
+            const CODE: i32 = 110;
+
+            #[cfg(target_os = "macos")]
+            static SLOT: i32 = 1;
+            #[cfg(not(target_os = "macos"))]
+            static SLOT: i32 = 2;
+
+            #[cfg(target_os = "linux")]
+            const FACTORY: ArrayVec<Vec<u8>, 10> = ArrayVec::new_const();
+
+            CODE + SLOT
+        }
+        "#,
+    );
+
+    let mac = "defined(__APPLE__)";
+    let other = "!(defined(__APPLE__))";
+    assert_eq!(out.matches(&format!("#if {mac}")).count(), 2, "{out}");
+    assert_eq!(out.matches(&format!("#if {other}")).count(), 2, "{out}");
+    assert_eq!(out.matches("#if defined(__linux__)").count(), 1, "{out}");
+    assert_eq!(out.matches("constexpr int32_t CODE").count(), 2, "{out}");
+    assert_eq!(out.matches("static int32_t SLOT").count(), 2, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.contains("CODE") && line.contains("SLOT") && line.contains(';')),
+        "the post-declaration use must resolve to both selected variants:\n{out}"
+    );
+    assert!(
+        !out.contains("CODE_shadow") && !out.contains("SLOT_shadow"),
+        "cfg variants must retain their shared source binding:\n{out}"
+    );
+    assert_eq!(
+        out.matches("const auto FACTORY = []() -> ArrayVec").count(),
+        1,
+        "{out}"
+    );
+    assert_eq!(out.matches(&format!("#endif  // {mac}")).count(), 2, "{out}");
+    assert_eq!(
+        out.matches(&format!("#endif  // {other}")).count(),
+        2,
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("#endif  // defined(__linux__)").count(),
+        1,
+        "{out}"
+    );
+}
+
+#[test]
+fn test_cfg_target_os_guards_wildcard_const_assertions() {
+    let out = transpile_str(
+        r#"
+        #[cfg(target_os = "macos")]
+        const _: () = assert!(false);
+        #[cfg(not(target_os = "macos"))]
+        const _: () = assert!(true);
+        "#,
+    );
+
+    assert!(
+        out.contains("#if defined(__APPLE__)\nstatic_assert(false"),
+        "the Apple assertion must remain guarded:\n{out}"
+    );
+    assert!(
+        out.contains("#if !(defined(__APPLE__))\nstatic_assert(true"),
+        "the non-Apple assertion must remain guarded:\n{out}"
+    );
+}
+
+#[test]
+fn test_cfg_const_and_static_reject_unsupported_predicates() {
+    for (kind, source) in [
+        (
+            "const",
+            r#"#[cfg(feature = "optional")] pub const CODE: i32 = 1;"#,
+        ),
+        (
+            "mixed const",
+            r#"
+            #[cfg(target_os = "linux")]
+            #[cfg(feature = "optional")]
+            pub const CODE: i32 = 1;
+            "#,
+        ),
+        (
+            "static",
+            r#"#[cfg(feature = "optional")] pub static SLOT: i32 = 1;"#,
+        ),
+        (
+            "cfg_attr const",
+            r#"
+            #[cfg_attr(target_os = "linux", cfg(target_arch = "aarch64"))]
+            pub const CODE: i32 = 1;
+            "#,
+        ),
+        (
+            "nested cfg_attr const",
+            r#"
+            #[cfg_attr(
+                target_os = "linux",
+                cfg_attr(target_arch = "x86_64", cfg(target_arch = "aarch64"))
+            )]
+            pub const CODE: i32 = 1;
+            "#,
+        ),
+    ] {
+        let file: syn::File = syn::parse_str(source).unwrap();
+        let mut cg = CodeGen::new();
+        cg.emit_file(&file, None);
+        let error = cg
+            .take_codegen_error()
+            .unwrap_or_else(|| panic!("{kind} must fail closed"));
+        assert!(
+            error.contains("unsupported #[cfg] predicate"),
+            "{kind}: {error}"
+        );
+    }
+}
+
+#[test]
+fn test_known_false_cfg_const_and_static_skip_before_unsupported_check() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg(test)]
+        #[cfg(feature = "optional")]
+        pub const TEST_CODE: i32 = 1;
+
+        #[cfg(any())]
+        #[cfg(feature = "optional")]
+        pub static TEST_SLOT: i32 = 1;
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.emit_file(&file, None);
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(!out.contains("TEST_CODE") && !out.contains("TEST_SLOT"), "{out}");
+}
+
+#[test]
+fn test_cfg_not_and_any_lower_to_boolean_conditions() {
+    let out = transpile_str(
+        r#"
+        #[cfg(not(target_os = "windows"))]
+        pub fn posix_only() -> i32 { 1 }
+        "#,
+    );
+    assert!(
+        out.contains("#if !(defined(_WIN32))"),
+        "`not` must negate:\n{out}"
+    );
+}
+
+#[test]
+fn test_unmappable_cfg_leaves_emission_unchanged() {
+    // `cfg_cpp_guard` returns None for predicates it cannot map, so those
+    // items emit exactly as before rather than getting a guessed guard —
+    // a partial condition would silently change which platforms compile it.
+    let out = transpile_str(
+        r#"
+        #[cfg(feature = "something")]
+        pub fn feat() -> i32 { 1 }
+        "#,
+    );
+    // Assert on the guard's own close marker, not on `#if defined(` in
+    // general: the generated preamble already contains
+    // `#if defined(__GNUC__)` for a pragma block, so the broad form can
+    // never pass and says nothing about cfg handling.
+    assert!(
+        !out.contains("#endif  // "),
+        "an unmappable predicate must not produce a guard:\n{out}"
+    );
+}
+
+#[test]
+fn test_runtime_path_keeps_libc_collision_names() {
+    // escape_cpp_keyword renames a handful of libc-colliding names
+    // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function
+    // of that name loses overload resolution to the C library. A path
+    // resolving into the rusty:: runtime is fully QUALIFIED, so that
+    // capture cannot happen — and the runtime defines
+    // rusty::thread::sleep, so the rename emitted a call to a function
+    // that does not exist.
+    let out = transpile_str(
+        r#"
+        pub fn nap(ms: u64) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::thread::sleep("),
+        "runtime path must keep the runtime's own spelling:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("rusty::thread::sleep_("),
+        "the libc-collision rename must not apply to a qualified runtime path:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_user_fn_still_escapes_libc_collision() {
+    // The rename still applies where it was introduced for: a
+    // user-defined, unqualified function named after a libc symbol.
+    let out = transpile_str(
+        r#"
+        pub fn sleep(n: u32) -> u32 { n }
+        pub fn call_it() -> u32 { sleep(3) }
+        "#,
+    );
+    assert!(
+        out.contains("sleep_"),
+        "a user fn named sleep must still be renamed:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_std_time_reference_emits_runtime_helper_block() {
+    // The helper preamble DEFINES rusty::time (Duration/Instant/...);
+    // its emission is gated on a marker scan of the output, and
+    // `rusty::time::` was missing from that list — so a crate whose
+    // only runtime-block reference was a time type emitted
+    // `rusty::time::Instant` with nothing defining it.
+    let out = transpile_str(
+        r#"
+        pub fn later(ms: u64) -> std::time::Duration {
+            std::time::Duration::from_millis(ms)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::time::Duration"),
+        "std::time maps onto rusty::time:\n{}",
+        out
+    );
+    assert!(
+        out.contains("namespace time {"),
+        "the helper block defining rusty::time must be emitted:\n{}",
         out
     );
 }
@@ -24121,6 +26632,41 @@ fn test_bare_glob_variant_remains_unresolved_when_owner_is_ambiguous() {
         out.contains("TODO transpiler: unresolved bare-glob variant `Foo`"),
         "ambiguous bare-glob Foo must keep the TODO marker (no silent guess)\nGot: {out}"
     );
+}
+
+#[test]
+fn test_bare_option_none_is_not_hijacked_by_known_c_like_enum_variant() {
+    let out = transpile_str(
+        r#"
+        #[repr(i32)]
+        enum ChannelError { None = 0, Closed = 1 }
+
+        struct State { pending: Option<i32> }
+
+        fn clear(state: &mut State) {
+            state.pending = None;
+        }
+        "#,
+    );
+    assert!(out.contains("state_shadow1).pending = rusty::Option<int32_t>{rusty::None};"), "{out}");
+    assert!(!out.contains("state.pending = ChannelError::None;"), "{out}");
+}
+
+#[test]
+fn test_explicit_glob_imported_c_like_enum_none_keeps_enum_owner() {
+    let out = transpile_str(
+        r#"
+        #[repr(i32)]
+        enum Status { None = 0, Active = 1 }
+
+        fn status() -> Status {
+            use Status::*;
+            None
+        }
+        "#,
+    );
+    assert!(out.contains("return Status::None;"), "{out}");
+    assert!(!out.contains("return rusty::None;"), "{out}");
 }
 
 #[test]
@@ -41452,324 +43998,12 @@ fn test_one_tuple_literal_infers_as_tuple() {
         "must not collapse the 1-tuple to its element, got:\n{out}"
     );
 }
-#[test]
-fn test_hint_spin_loop_lowers_to_rusty_hint() {
-    // The other std::hint entries take an operand and lower to an
-    // identity expression; spin_loop takes none, so it needs a real
-    // callee (a Rust path leaked into C++ as `std::hint::spin_loop()`
-    // before — `std::hint` is not a C++ namespace).
-    let out = transpile_str(
-        r#"
-        pub fn spin(n: u32) {
-            let mut i = 0u32;
-            while i < n {
-                std::hint::spin_loop();
-                i += 1;
-            }
-        }
-        "#,
-    );
-    assert!(
-        out.contains("rusty::hint::spin_loop()"),
-        "spin_loop must lower to the runtime helper:\n{}",
-        out
-    );
-    assert!(
-        !out.contains("std::hint::"),
-        "no Rust hint path may survive into C++:\n{}",
-        out
-    );
-}
-
-#[test]
-fn test_std_time_reference_emits_runtime_helper_block() {
-    // The helper preamble DEFINES rusty::time (Duration/Instant/...);
-    // its emission is gated on a marker scan of the output, and
-    // `rusty::time::` was missing from that list — so a crate whose
-    // only runtime-block reference was a time type emitted
-    // `rusty::time::Instant` with nothing defining it.
-    let out = transpile_str(
-        r#"
-        pub fn later(ms: u64) -> std::time::Duration {
-            std::time::Duration::from_millis(ms)
-        }
-        "#,
-    );
-    assert!(
-        out.contains("rusty::time::Duration"),
-        "std::time maps onto rusty::time:\n{}",
-        out
-    );
-    assert!(
-        out.contains("namespace time {"),
-        "the helper block defining rusty::time must be emitted:\n{}",
-        out
-    );
-}
-
-#[test]
-fn test_runtime_path_keeps_libc_collision_names() {
-    // escape_cpp_keyword renames a handful of libc-colliding names
-    // (sleep/dup/raise/kill/pause) because an UNQUALIFIED user function
-    // of that name loses overload resolution to the C library. A path
-    // resolving into the rusty:: runtime is fully QUALIFIED, so that
-    // capture cannot happen — and the runtime defines
-    // rusty::thread::sleep, so the rename emitted a call to a function
-    // that does not exist.
-    let out = transpile_str(
-        r#"
-        pub fn nap(ms: u64) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-        "#,
-    );
-    assert!(
-        out.contains("rusty::thread::sleep("),
-        "runtime path must keep the runtime's own spelling:\n{}",
-        out
-    );
-    assert!(
-        !out.contains("rusty::thread::sleep_("),
-        "the libc-collision rename must not apply to a qualified runtime path:\n{}",
-        out
-    );
-}
-
-#[test]
-fn test_user_fn_still_escapes_libc_collision() {
-    // The rename still applies where it was introduced for: a
-    // user-defined, unqualified function named after a libc symbol.
-    let out = transpile_str(
-        r#"
-        pub fn sleep(n: u32) -> u32 { n }
-        pub fn call_it() -> u32 { sleep(3) }
-        "#,
-    );
-    assert!(
-        out.contains("sleep_"),
-        "a user fn named sleep must still be renamed:\n{}",
-        out
-    );
-}
 
 
-#[test]
-fn test_use_naming_sibling_module_emits_import() {
-    // `use super::a;` / `use crate::a;` name a MODULE, not an item in
-    // one. Both previously emitted NOTHING (the bare lowercase name was
-    // dismissed as an unresolved import), so a call site saying
-    // `a::f()` had no declaration for `a`.
-    for path in ["super::a", "crate::a"] {
-        let out = transpile_str_module_with_sibling_modules(
-            &format!("use {path};\npub fn g() -> i32 {{ a::f() }}\n"),
-            "probe.b",
-            &["probe.a", "probe.b"],
-        );
-        assert!(
-            out.contains("import probe.a;"),
-            "`use {path};` must import the sibling module:\n{out}"
-        );
-    }
-}
-
-#[test]
-fn test_use_nested_module_path_prefers_longest_match() {
-    // `use crate::base::time;` names `probe.base.time`. Resolving it to
-    // the PARENT `probe.base` is not merely imprecise — the parent
-    // re-exports its children, so importing it from a child is an
-    // illegal C++20 import CYCLE.
-    let out = transpile_str_module_with_sibling_modules(
-        "use crate::base::time;\npub fn stamp() -> u64 { time::now() }\n",
-        "probe.base.log",
-        &["probe.base", "probe.base.time", "probe.base.log"],
-    );
-    assert!(
-        out.contains("import probe.base.time;"),
-        "must import the named module:\n{out}"
-    );
-    assert!(
-        !out.contains("import probe.base;"),
-        "must NOT import the parent (import cycle):\n{out}"
-    );
-}
 
 
-#[test]
-fn test_item_import_through_sibling_module_is_not_a_module_import() {
-    // `use super::varint::VARINT_BUF_LEN;` is an ITEM import that
-    // happens to travel THROUGH a module. Treating a path whose prefix
-    // names a module as a module import aliased the item's own name to
-    // the namespace (`namespace VARINT_BUF_LEN = ::probe::wire::varint;`),
-    // which is not even a valid expression at the use site.
-    let out = transpile_str_module_with_sibling_modules(
-        "use super::varint::VARINT_BUF_LEN;\npub fn n() -> usize { VARINT_BUF_LEN }\n",
-        "probe.wire.serde",
-        &["probe.wire.varint", "probe.wire.serde"],
-    );
-    assert!(
-        !out.contains("namespace VARINT_BUF_LEN"),
-        "an item must not be aliased as a namespace:\n{out}"
-    );
-    assert!(
-        out.contains("import probe.wire.varint;"),
-        "the owning module is still imported:\n{out}"
-    );
-}
 
 
-/// Module mode WITH a C++ namespace wrap — the shape crate-mode
-/// `--auto-namespace` output takes.
-fn transpile_str_module_with_cxx_namespace(
-    rust_code: &str,
-    module_name: &str,
-    cxx_namespace: &str,
-) -> String {
-    let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
-    cg.set_cxx_namespace(Some(cxx_namespace.to_string()));
-    cg.emit_file(&file, Some(module_name));
-    cg.into_output()
-}
-
-#[test]
-fn test_c_like_enum_method_call_is_namespace_qualified() {
-    // A C-like enum's inherent methods lower to FREE functions (C++
-    // enums cannot have members). Calling one unqualified lets a local
-    // of the same name capture it: `let code = self.code();` is
-    // unambiguous Rust (methods and variables are separate namespaces)
-    // but became `const auto code = code(self_);` — a variable in its
-    // own initializer.
-    let out = transpile_str_module_with_cxx_namespace(
-        r#"
-        #[repr(i32)]
-        pub enum E { A = 1, B = 2 }
-        impl E {
-            pub fn code(self) -> i32 { self as i32 }
-            pub fn doubled(self) -> i32 {
-                let code = self.code();
-                code * 2
-            }
-        }
-        "#,
-        "probe.e",
-        "probe::e",
-    );
-    assert!(
-        out.contains("::probe::e::code(self_)"),
-        "the free-fn call must be namespace-qualified:\n{out}"
-    );
-    assert!(
-        !out.contains("= code(self_)"),
-        "an unqualified call is captured by the local:\n{out}"
-    );
-}
-
-
-#[test]
-fn test_item_import_names_the_declaring_module() {
-    // `use crate::base::rand::Rng;` — the item is declared by
-    // `probe.base.rand`. Resolving from the path's FIRST segment
-    // imported `probe.base` and emitted `using ::probe::base::Rng;`.
-    // Importing a parent re-exports the child MODULE, but C++
-    // namespaces do not merge across modules, so that using-declaration
-    // named nothing.
-    let out = transpile_str_module_with_sibling_modules(
-        "use crate::base::rand::Rng;\npub fn f(r: &Rng) -> u64 { r.next_u64() }\n",
-        "probe.rpc.reconnect",
-        &["probe.base", "probe.base.rand", "probe.rpc.reconnect"],
-    );
-    assert!(
-        out.contains("import probe.base.rand;"),
-        "must import the DECLARING module:\n{out}"
-    );
-    assert!(
-        !out.contains("using ::probe::base::Rng;"),
-        "the parent namespace does not contain the item:\n{out}"
-    );
-}
-
-
-#[test]
-fn test_libc_macro_names_are_escaped() {
-    // errno/stdin/stdout/stderr are MACROS, so an identifier of that
-    // name is textually replaced rather than shadowed: `fn errno()`
-    // emitted verbatim becomes `int (*__errno_location())()`, whose
-    // diagnostic mentions neither errno nor a macro.
-    let out = transpile_str(
-        r#"
-        pub fn errno() -> i32 { 0 }
-        pub fn caller() -> i32 { errno() }
-        "#,
-    );
-    assert!(
-        out.contains("errno_"),
-        "a fn named errno must be escaped:\n{out}"
-    );
-    assert!(
-        !out.contains(" errno()"),
-        "the bare macro name must not survive:\n{out}"
-    );
-}
-
-
-#[test]
-fn test_trait_interface_is_forward_declared() {
-    // A trait lowers to an interface class. A struct holding
-    // Arc<dyn T> can be emitted BEFORE it — srpc's Command::Add held
-    // Arc<dyn Pollable> and the Pollable class landed 70 lines later,
-    // giving 'use of undeclared identifier'. A smart pointer needs only
-    // an incomplete type, so a forward declaration is enough.
-    let out = transpile_str_module(
-        r#"
-        use std::sync::Arc;
-        pub enum Command {
-            Add(Arc<dyn Worker>),
-            Stop,
-        }
-        pub trait Worker: Send + Sync {
-            fn work(&self) -> i32;
-        }
-        "#,
-        "probe",
-    );
-    let fwd = out.find("class Worker;").expect("forward declaration emitted");
-    let holder = out.find("Arc<Worker>").expect("holder names the interface");
-    assert!(
-        fwd < holder,
-        "the forward declaration must precede the first use:\n{out}"
-    );
-}
-
-#[test]
-fn test_user_defined_readable_is_not_elided() {
-    // A name-matched identity rule (added for serde_test's Configure
-    // adapters) silently DELETED any zero-arg call named `readable` or
-    // `compact`, whatever the receiver. srpc's Readiness::readable()
-    // vanished, leaving `if (r)` — code that still compiles and means
-    // something else, which is the worst way for this to fail.
-    let out = transpile_str(
-        r#"
-        #[derive(Clone, Copy)]
-        pub struct Readiness(pub i32);
-        impl Readiness {
-            pub fn readable(self) -> bool { self.0 & 1 != 0 }
-            pub fn compact(self) -> i32 { self.0 }
-        }
-        pub fn check(r: Readiness) -> bool {
-            if r.readable() { true } else { false }
-        }
-        pub fn size(r: Readiness) -> i32 { r.compact() }
-        "#,
-    );
-    assert!(
-        out.contains("r.readable()"),
-        "a crate-defined readable() must survive:\n{out}"
-    );
-    assert!(
-        out.contains("r.compact()"),
-        "a crate-defined compact() must survive:\n{out}"
-    );
-}
 
 
 
@@ -41971,6 +44205,63 @@ fn thread_local_attribute_survives_as_thread_local_storage() {
         out.contains("thread_local") && out.contains("COUNTER"),
         "#[thread_local] must carry over to C++ thread_local:\n{out}"
     );
+}
+
+#[test]
+fn exact_inert_thread_local_marker_survives_on_namespace_and_function_statics() {
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), thread_local)]
+        static mut GLOBAL_SLOT: u64 = 0;
+
+        pub fn bump() -> u64 {
+            #[cfg_attr(any(), thread_local)]
+            static mut LOCAL_SLOT: u64 = 0;
+            GLOBAL_SLOT = GLOBAL_SLOT + 1u64;
+            LOCAL_SLOT = LOCAL_SLOT + GLOBAL_SLOT;
+            LOCAL_SLOT
+        }
+        "#,
+    );
+    assert!(
+        out.contains("extern thread_local uint64_t GLOBAL_SLOT;"),
+        "inert marker was dropped from namespace forward declaration:\n{out}"
+    );
+    assert!(
+        out.contains("inline thread_local uint64_t GLOBAL_SLOT"),
+        "inert marker was dropped from namespace definition:\n{out}"
+    );
+    assert!(
+        out.contains("static thread_local uint64_t LOCAL_SLOT"),
+        "inert marker was dropped from function-local static:\n{out}"
+    );
+}
+
+#[test]
+fn only_exact_inactive_unqualified_thread_local_marker_changes_storage() {
+    for (label, attribute) in [
+        ("active predicate", "#[cfg_attr(all(), thread_local)]"),
+        (
+            "qualified payload",
+            "#[cfg_attr(any(), compiler::thread_local)]",
+        ),
+        (
+            "multiple payloads",
+            "#[cfg_attr(any(), thread_local, allow(dead_code))]",
+        ),
+        (
+            "nested payload",
+            "#[cfg_attr(any(), cfg_attr(any(), thread_local))]",
+        ),
+    ] {
+        let out = transpile_str(&format!(
+            "{attribute}\nstatic mut SLOT: u64 = 0;\npub fn read() -> u64 {{ SLOT }}"
+        ));
+        assert!(
+            !out.contains("thread_local"),
+            "{label} acquired thread-local storage:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -42303,8 +44594,11 @@ fn an_argument_that_is_already_a_pointer_is_not_referenced_again() {
 fn an_extern_fn_signature_reaches_the_call_site() {
     // Foreign fns were emitted but never collected, so a call to one
     // had no declared parameter types and every expected-type rule
-    // silently did nothing there. This is the FFI-seam case the
-    // &mut -> *mut coercion was written for.
+    // silently did nothing there.
+    //
+    // Verified end to end through the CLI as well, not just this
+    // helper: `rusty-cpp-transpiler t.rs -o t.cppm` emits
+    // `::swap_ctx(&a, &b)`.
     let out = transpile_str(
         r#"
         #[repr(C)]
@@ -42323,159 +44617,8 @@ fn an_extern_fn_signature_reaches_the_call_site() {
     );
 }
 
-#[test]
-fn test_libc_macro_reference_the_dsl_does_not_declare_stays_bare() {
-    // The counterpart to test_libc_macro_names_are_escaped. There, `errno`
-    // is DECLARED by the DSL, so both the declaration and its call site
-    // must be renamed. Here nothing declares it, so the bare identifier can
-    // only mean libc's macro — which is exactly what a syscall kernel
-    // reading errno intends. Renaming it emitted `errno_`, which names
-    // nothing and does not compile.
-    let out = transpile_str(
-        r#"
-        pub fn last_error() -> i32 { errno }
-        "#,
-    );
-    // Assert the RENAME, not the surrounding codegen: the return value is
-    // independently wrapped in std::move, which is orthogonal to escaping.
-    assert!(
-        !out.contains("errno_"),
-        "nothing declares errno, so it must not be renamed:\n{out}"
-    );
-    assert!(
-        out.contains("errno"),
-        "the errno read must survive:\n{out}"
-    );
-}
-
-#[test]
-fn test_libc_macro_name_bound_as_a_local_is_still_escaped() {
-    // Scope-driven, not position-driven: a LOCAL named errno is a
-    // declaration, so it and its uses are renamed together. Left bare, the
-    // macro would textually replace the declaration.
-    let out = transpile_str(
-        r#"
-        pub fn f() -> i32 { let errno: i32 = 7; errno }
-        "#,
-    );
-    assert!(
-        out.contains("errno_"),
-        "a local named errno is a declaration and must be escaped:\n{out}"
-    );
-}
 
 
-#[test]
-fn test_use_of_a_rusty_runtime_path_emits_a_real_using_declaration() {
-    // `rusty` is the runtime this transpiler emits INTO, not an external
-    // crate awaiting a type mapping. Classifying it as external dropped the
-    // import and left only a comment, so anything naming the symbol failed
-    // to compile with no hint why.
-    let out = transpile_str(
-        r#"
-        use rusty::sync::atomic::Ordering;
-        pub fn f() -> i32 { 0 }
-        "#,
-    );
-    assert!(
-        out.contains("using rusty::sync::atomic::Ordering;"),
-        "the using-declaration must be emitted as code:\n{out}"
-    );
-    assert!(
-        !out.contains("// Rust-only unresolved import: using rusty::"),
-        "a rusty:: path must not be treated as an unresolved import:\n{out}"
-    );
-    assert!(
-        !out.contains("// TODO: external crate 'rusty'"),
-        "rusty is the runtime, not an external crate:\n{out}"
-    );
-}
-
-
-#[test]
-fn test_rusty_function_takes_a_bare_signature_not_a_nested_wrapper() {
-    // rusty::Function is parameterised by a SIGNATURE. Mapping its argument
-    // with the ordinary rules produced rusty::Function<std::function<void()>>
-    // -- a different type that still COMPILES, so the error was invisible in
-    // the GEN block. Rust's Fn/FnMut split carries const-callability.
-    let out = transpile_str(
-        r#"
-        type Cb = rusty::Function<dyn FnMut()>;
-        type ConstCb = rusty::Function<dyn Fn(i32, i32)>;
-        "#,
-    );
-    assert!(
-        out.contains("using Cb = rusty::Function<void()>;"),
-        "FnMut lowers to a non-const bare signature:\n{out}"
-    );
-    assert!(
-        out.contains("using ConstCb = rusty::Function<void(int32_t, int32_t) const>;"),
-        "Fn is callable through &self, so it lowers const-qualified:\n{out}"
-    );
-    assert!(
-        !out.contains("std::function"),
-        "no wrapper may be nested inside rusty::Function:\n{out}"
-    );
-}
-
-
-#[test]
-fn test_cfg_target_os_lowers_to_an_if_guard() {
-    // `#[cfg]` used to be dropped: the item was emitted UNGUARDED on every
-    // platform, with no diagnostic. That is wrong code that compiles.
-    let out = transpile_str(
-        r#"
-        #[cfg(target_os = "linux")]
-        pub fn plat() -> i32 { 1 }
-        "#,
-    );
-    assert!(
-        out.contains("#if defined(__linux__)"),
-        "the predicate must lower to a preprocessor guard:\n{out}"
-    );
-    assert!(
-        out.contains("#endif"),
-        "the guard must be closed:\n{out}"
-    );
-    let opens = out.matches("#if defined(__linux__)").count();
-    let closes = out.matches("#endif  // defined(__linux__)").count();
-    assert_eq!(opens, closes, "guard must balance:\n{out}");
-}
-
-#[test]
-fn test_cfg_not_and_any_lower_to_boolean_conditions() {
-    let out = transpile_str(
-        r#"
-        #[cfg(not(target_os = "windows"))]
-        pub fn posix_only() -> i32 { 1 }
-        "#,
-    );
-    assert!(
-        out.contains("#if !(defined(_WIN32))"),
-        "`not` must negate:\n{out}"
-    );
-}
-
-#[test]
-fn test_unmappable_cfg_leaves_emission_unchanged() {
-    // `cfg_cpp_guard` returns None for predicates it cannot map, so those
-    // items emit exactly as before rather than getting a guessed guard —
-    // a partial condition would silently change which platforms compile it.
-    let out = transpile_str(
-        r#"
-        #[cfg(feature = "something")]
-        pub fn feat() -> i32 { 1 }
-        "#,
-    );
-    // Assert on the guard's own close marker, not on `#if defined(` in
-    // general: the generated preamble already contains
-    // `#if defined(__GNUC__)` for a pragma block, so the broad form can
-    // never pass and says nothing about cfg handling.
-    assert!(
-        !out.contains("#endif  // "),
-        "an unmappable predicate must not produce a guard:\n{out}"
-    );
-}
 
 
 
@@ -42539,8 +44682,9 @@ fn test_box_new_struct_literal_of_cpp_inherit_uses_fieldwise_ctor() {
     // class), so a struct literal must lower to the synthesized
     // fieldwise ctor, never a designated-initializer list (mako tcp
     // proxy factories: Box::new(TcpChannelShim { conn_: conn })).
-    let out = transpile_str(
+    let out = transpile_str_with_authenticated_cpp_inherit(
         r#"
+        use rusty::cpp_inherit;
         pub trait ChannelBase {
             fn close(&mut self);
         }
@@ -42928,6 +45072,7 @@ fn test_explicit_associated_call_does_not_borrow_unrelated_owner_arg_types() {
         "unrelated owner's parameter type leaked into the field init: {out}"
     );
 }
+
 
 fn transpile_str_module_with_consumer_map(rust_code: &str, module_name: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
@@ -43393,6 +45538,1068 @@ fn assoc_projection_placement_markers_never_leak_into_the_output() {
         assert!(
             disp > bridge,
             "the dispatcher must follow the bridge using-declarations:\n{out}"
+        );
+    }
+}
+
+/// H2 / checkpoint contract 2 — absolute type-map qualification.
+///
+/// A crate-declared type alias whose user-type-map target is an ABSOLUTE
+/// single-segment global name (`ReactorFiberContext = "::srpc_fiber_ctx"`)
+/// collides with its own alias name (`type srpc_fiber_ctx = …`). The
+/// cxx-namespace close requalifies every declared item's `::<item>`
+/// references to `::<ns>::<item>` — which used to hit the alias's own RHS
+/// and produce the self-referential `using srpc_fiber_ctx =
+/// ::rrr::srpc_fiber_ctx;`, making the real global C struct unreachable.
+/// The absolute target must survive verbatim (threading.cpp precedent:
+/// `::pthread_spinlock_t` survives because it is not also a declared item).
+#[test]
+fn test_absolute_type_map_target_survives_cxx_namespace_requalify() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert(
+        "rusty::ReactorFiberContext".to_string(),
+        "::srpc_fiber_ctx".to_string(),
+    );
+    type_map.mappings.insert(
+        "rusty::ReactorFiberState".to_string(),
+        "::srpc_fiber".to_string(),
+    );
+    let file: syn::File = syn::parse_str(
+        r#"
+        type srpc_fiber_ctx = rusty::ReactorFiberContext;
+        type srpc_fiber = rusty::ReactorFiberState;
+        "#,
+    )
+    .unwrap();
+    // Production crate-mode shape: module name + --cxx-namespace, no
+    // crate-name purview wrap (main.rs passes crate_name=None per-file).
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using srpc_fiber_ctx = ::srpc_fiber_ctx;"),
+        "absolute type-map target must survive the requalify verbatim: {out}"
+    );
+    assert!(
+        out.contains("using srpc_fiber = ::srpc_fiber;"),
+        "absolute type-map target must survive the requalify verbatim: {out}"
+    );
+    assert!(
+        !out.contains("::rrr::srpc_fiber"),
+        "self-referential alias produced by requalifying the absolute target: {out}"
+    );
+}
+
+/// H2 negative control — a genuine crate-root self-reference of a
+/// NON-colliding name must still be requalified into the cxx namespace.
+/// Only names that are BOTH crate-declared items AND absolute-target
+/// leaves are exempted.
+#[test]
+fn test_non_colliding_crate_root_refs_still_requalify_under_cxx_namespace() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert(
+        "rusty::ReactorFiberContext".to_string(),
+        "::srpc_fiber_ctx".to_string(),
+    );
+    let file: syn::File = syn::parse_str(
+        r#"
+        type srpc_fiber_ctx = rusty::ReactorFiberContext;
+        pub fn helper() -> i32 {
+            42
+        }
+        pub fn caller() -> i32 {
+            helper()
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    // The colliding alias keeps its absolute target …
+    assert!(
+        out.contains("using srpc_fiber_ctx = ::srpc_fiber_ctx;"),
+        "{out}"
+    );
+    // … while a global-qualified self-reference to the crate's own free fn
+    // is still pulled into the namespace.
+    assert!(
+        !out.contains("return ::helper()"),
+        "non-colliding crate-root ref must requalify to ::rrr::helper: {out}"
+    );
+}
+
+/// H2 twin surface — the crate-name purview wrap
+/// (`wrap_module_purview_in_crate_namespace`, Rules 3/4) runs the same
+/// textual requalify over declared item names when a crate is
+/// universally namespace-wrapped. A crate-declared alias whose type-map
+/// target is an absolute single-segment global name must be exempted
+/// there too.
+#[test]
+fn test_absolute_type_map_target_survives_crate_purview_wrap() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert(
+        "rusty::ReactorFiberContext".to_string(),
+        "::srpc_fiber_ctx".to_string(),
+    );
+    let file: syn::File = syn::parse_str(
+        r#"
+        type srpc_fiber_ctx = rusty::ReactorFiberContext;
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_crate_name("rrr");
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using srpc_fiber_ctx = ::srpc_fiber_ctx;"),
+        "absolute type-map target must survive the purview-wrap requalify: {out}"
+    );
+    assert!(
+        !out.contains("::rrr::srpc_fiber_ctx"),
+        "self-referential alias produced by the purview-wrap requalify: {out}"
+    );
+}
+
+/// H3 / checkpoint contract 3 — extern-C fn-pointer / varargs lowering.
+///
+/// Inside an `extern "C" { … }` foreign block the authoritative C header
+/// spells callable parameters as raw C function pointers
+/// (`void (*entry_fn)(void*)`, srpc_fiber.h) and preserves `...` on
+/// variadic declarations (`long syscall(long, ...)`, unistd.h). The
+/// class-type `rusty::UnsafeFn<…>`/`rusty::SafeFn<…>` wrappers conflict
+/// with the real C prototypes, and dropping `...` truncates the
+/// declaration.
+#[test]
+fn test_extern_c_foreign_fn_pointer_and_varargs_lower_raw() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map
+        .mappings
+        .insert("LegacyCLong".to_string(), "long".to_string());
+    let file: syn::File = syn::parse_str(
+        r#"
+        type LegacyCLong = i64;
+        unsafe extern "C" {
+            fn fiber_init(
+                entry_fn: unsafe extern "C" fn(*mut core::ffi::c_void),
+                entry_arg: *mut core::ffi::c_void,
+            );
+            fn on_tick(cb: extern "C" fn(i32) -> i32);
+            fn syscall(number: LegacyCLong, ...) -> LegacyCLong;
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // (a) callable params are raw C fn pointers, named in the declarator …
+    assert!(
+        out.contains("void fiber_init(void (*entry_fn)(rusty::ffi::c_void*), rusty::ffi::c_void* entry_arg);"),
+        "extern-C callable param must lower to a raw C fn pointer: {out}"
+    );
+    assert!(
+        out.contains("void on_tick(int32_t (*cb)(int32_t));"),
+        "safe extern-C callable param must lower to a raw C fn pointer too: {out}"
+    );
+    // … never the class-type wrappers, which conflict with the C header.
+    assert!(
+        !out.contains("UnsafeFn") && !out.contains("SafeFn"),
+        "class-type callable wrapper leaked into an extern-C declaration: {out}"
+    );
+    // (b) the declaration-level varargs survive.
+    assert!(
+        out.contains("long syscall(long number, ...);"),
+        "variadic extern-C declaration must keep its `...`: {out}"
+    );
+}
+
+/// H3 fail-closed — a foreign-C declaration whose callable parameter the
+/// raw C spelling cannot express (a Rust-ABI fn pointer) must reject with
+/// a diagnostic BEFORE any output (precedent: variadic extern-Rust fns
+/// reject in the transpile preflight).
+#[test]
+fn test_extern_c_foreign_rust_abi_fn_pointer_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        unsafe extern "C" {
+            fn bad(cb: fn(i32) -> i32);
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("non-C-ABI callable in a foreign C declaration must reject");
+    assert!(error.contains("bad"), "{error}");
+    let out = cg.into_output();
+    assert!(
+        !out.contains("bad("),
+        "rejected foreign declaration must not reach the output: {out}"
+    );
+}
+
+/// H3 scope guard — a variadic fn-POINTER param keeps its own `...`
+/// inside the raw spelling.
+#[test]
+fn test_extern_c_foreign_variadic_fn_pointer_param() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        unsafe extern "C" {
+            fn set_printer(printer: unsafe extern "C" fn(*const i8, ...) -> i32);
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("void set_printer(int32_t (*printer)(const int8_t*, ...));"),
+        "fn-pointer's own variadic must survive in the raw spelling: {out}"
+    );
+}
+
+
+/// H5 / checkpoint contract 5 (a)+(b) — `Weak` provenance and trait-object
+/// target identity.
+///
+/// One source type (`Weak<dyn Pollable>` under `use std::sync::{Arc, Weak}`)
+/// must have ONE C++ spelling on every surface it appears on. Before the
+/// fix the emitter produced three: the UFCS free-function declarations said
+/// `rusty::sync::Weak<void*>` (only the forward-decl-signature path resolves
+/// scope imports), while the anon-namespace interface base, the struct
+/// fields and the inherent/adapter impls said `rusty::rc::Weak<void*>`
+/// (`map_std_type` sees the bare leaf and defaults to the `rc` form) — and
+/// the trait-object target was erased to `void*` by the module-mode blanket
+/// because the smart-pointer trait-object special case covered only Arc/Rc.
+#[test]
+fn test_module_mode_sync_imported_weak_dyn_agrees_across_surfaces() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::sync::{Arc, Weak};
+        trait Pollable { fn poll(&self); }
+        trait EvCore: Pollable {
+            fn core_self(&self) -> &Weak<dyn Pollable>;
+            fn core_self_mut(&mut self) -> &mut Weak<dyn Pollable>;
+        }
+        pub struct Ev { pub self_: Weak<dyn Pollable>, pub v: i32 }
+        impl Pollable for Ev { fn poll(&self) {} }
+        impl EvCore for Ev {
+            fn core_self(&self) -> &Weak<dyn Pollable> { &self.self_ }
+            fn core_self_mut(&mut self) -> &mut Weak<dyn Pollable> { &mut self.self_ }
+        }
+        fn set_self<W: EvCore>(ev: &mut W, p: Weak<dyn Pollable>) {
+            *ev.core_self_mut() = p;
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // (a) provenance: the sync import governs every surface …
+    assert!(
+        !out.contains("rusty::rc::Weak"),
+        "sync-imported `Weak` must never lower to the rc form: {out}"
+    );
+    // (b) target identity: the trait object keeps its interface class …
+    assert!(
+        !out.contains("Weak<void*>"),
+        "`Weak<dyn Trait>` must not erase its target to void*: {out}"
+    );
+    // … on the interface base (anon namespace), the field, the inherent
+    // impl, the adapter override and the UFCS free functions alike.
+    assert!(
+        out.contains("virtual const rusty::sync::Weak<Pollable>& core_self() const = 0;"),
+        "interface base surface: {out}"
+    );
+    assert!(
+        out.contains("rusty::sync::Weak<Pollable> self_;"),
+        "field surface: {out}"
+    );
+    assert!(
+        out.contains("const rusty::sync::Weak<Pollable>& Ev::core_self() const"),
+        "inherent impl surface: {out}"
+    );
+    assert!(
+        // C21 / checkpoint contract 10: the generated UFCS layer is `inline`,
+        // so the module does not own an ordinary strong symbol for it. The
+        // TYPE surface this test exists to pin — `rusty::sync::Weak<Pollable>`
+        // rather than `void*` — is unchanged.
+        out.contains("export inline const rusty::sync::Weak<Pollable>& core_self(const Ev& self_)"),
+        "UFCS surface: {out}"
+    );
+    assert!(
+        out.contains("void set_self(W& ev, rusty::sync::Weak<Pollable> p) {"),
+        "generic free-function definition surface: {out}"
+    );
+    // … and the FORWARD DECLARATION of that same free function, which the
+    // call sites emitted earlier in the TU depend on. (An interface-trait
+    // class name in the signature must not read as an "unknown type" and
+    // silently drop the declaration.)
+    assert!(
+        out.contains("void set_self(W& ev, rusty::sync::Weak<Pollable> p);"),
+        "generic free-function forward declaration: {out}"
+    );
+}
+
+/// H5 negative — provenance is READ, never assumed. An rc-imported bare
+/// `Weak` still lowers to the rc form (and an unimported bare `Weak` keeps
+/// `map_std_type`'s documented rc default, see `test_weak_type`).
+#[test]
+fn test_module_mode_rc_imported_weak_dyn_stays_rc() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::rc::{Rc, Weak};
+        trait Pollable { fn poll(&self); }
+        pub struct Ev { pub self_: Weak<dyn Pollable>, pub v: i32 }
+        impl Pollable for Ev { fn poll(&self) {} }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("rusty::rc::Weak<Pollable> self_;"),
+        "rc-imported `Weak` must stay rc: {out}"
+    );
+    assert!(
+        !out.contains("rusty::sync::Weak"),
+        "rc-imported `Weak` must never lower to the sync form: {out}"
+    );
+}
+
+/// H5 (c) — omitted owner generics on a smart-pointer associated call are
+/// recovered from the ARGUMENT's declared type, not from the enclosing
+/// function's type parameters.
+///
+/// `let base: Arc<dyn Pollable> = ev.clone(); Arc::downgrade(&base)` used to
+/// emit `Arc<E>::downgrade(base)` — the ordered-scope fallback filled the
+/// owner from the enclosing `E`, which is the type BEFORE the coercion to
+/// the trait object, so the call did not typecheck against `base`.
+#[test]
+fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::sync::{Arc, Weak};
+        trait Pollable { fn poll(&self); }
+        fn setup<E: Pollable + 'static>(ev0: Arc<E>) -> Arc<E> {
+            let ev = ev0;
+            let base: Arc<dyn Pollable> = ev.clone();
+            let self_weak = Arc::downgrade(&base);
+            let live = Arc::strong_count(&base);
+            ev
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // The recovered owner is observable on every argument-typed smart-pointer
+    // assoc call. `downgrade` itself no longer SHOWS an owner: C11 lowers it
+    // to the runtime's free `rusty::downgrade` (rusty::Arc declares no such
+    // static), so `strong_count` — same recovery, same argument — is what
+    // pins the resolved instantiation here.
+    assert!(
+        out.contains("Arc<Pollable>::strong_count(base)"),
+        "owner must come from the argument's declared type: {out}"
+    );
+    assert!(
+        out.contains("rusty::downgrade(base)"),
+        "downgrade lowers to the runtime free function (C11): {out}"
+    );
+    assert!(
+        !out.contains("Arc<E>::"),
+        "stale pre-coercion owner generic: {out}"
+    );
+}
+
+/// H4 / checkpoint contract 4 — the forward declaration of a non-pub
+/// interface trait must live in the SAME anonymous namespace as its
+/// definition.
+///
+/// Visibility gating was applied when the class was defined
+/// (`wrap_in_anon_ns = !visibility_is_any_pub(&t.vis)`) but not when it was
+/// forward-declared, so a private trait produced TWO entities: `class
+/// EventCore;` at namespace scope and `namespace { class EventCore { … }; }`
+/// further down. Root-scope adapters then inherited from the incomplete
+/// root-scope one. Anonymous namespaces in a single TU unify, so declaring
+/// the forward decl in `namespace { }` makes decl and definition one entity
+/// and the implicit using-directive keeps root-scope references working.
+#[test]
+fn test_non_pub_interface_trait_forward_decl_shares_the_anon_namespace() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub trait Exported { fn ping(&self); }
+        trait Private { fn poll(&self); }
+        pub struct Ev { pub v: i32 }
+        impl Private for Ev { fn poll(&self) {} }
+        impl Exported for Ev { fn ping(&self) {} }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    // (pos) the private trait's forward decl is anon-namespaced …
+    assert!(
+        out.contains("namespace {\nclass Private;\n}"),
+        "private interface trait forward decl must share the anon namespace: {out}"
+    );
+    // … and no root-scope declaration of it survives to compete with the
+    // definition (the only other `class Private` line is the definition's).
+    assert!(
+        !out.contains("\nclass Private;\n\n") && !out.contains("\nclass Private;\nexport"),
+        "root-scope forward decl of a private interface trait remains: {out}"
+    );
+    // (neg) a pub trait keeps its exported root-scope forward declaration.
+    assert!(
+        out.contains("export class Exported;"),
+        "pub interface trait forward decl must stay at namespace scope: {out}"
+    );
+    assert!(
+        !out.contains("namespace {\nexport class"),
+        "`export` is ill-formed inside an anonymous namespace: {out}"
+    );
+}
+
+/// C6 (checkpoint contract 6) — the EXPECTED owner/type of a boxed-callable
+/// initializer is the explicitly declared local type, not the closure the
+/// owner-recovery paths read. `Box<dyn Fn…>` IS the owning type-erased
+/// callable, so `Box::new(closure)` under that annotation lowers to the
+/// declared `rusty::Function<Sig>` — never to `rusty::Box<std::function<…>>`,
+/// a Box OF a callable, which is a different type from the declaration.
+#[test]
+fn test_boxed_callable_initializer_takes_its_declared_callable_contract() {
+    let out = transpile_str(
+        r#"
+        pub fn install() {
+            let cb: Box<dyn Fn(i32) + Send + Sync> = Box::new(move |x| {
+                let _y = x;
+            });
+            cb(3i32);
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Function<void(int32_t) const> cb = rusty::Function<void(int32_t) const>(["),
+        "the boxed callable initializer must construct the declared callable: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Box<std::function"),
+        "a Box OF a callable is not the declared boxed-callable type: {out}"
+    );
+}
+
+/// C6 — `rusty::Waker::wake_fn` is a COPYABLE `std::function<void()>` in the
+/// runtime (include/rusty/async.hpp:50-53). A local flowing into that field
+/// must lower to that contract; the ordinary boxed-callable rules give the
+/// MOVE-ONLY `rusty::Function<void() const>`, which `std::function` cannot be
+/// constructed from (deleted copy constructor) — the carrier-critical hold.
+#[test]
+fn test_waker_wake_fn_local_lowers_to_the_copyable_std_function_contract() {
+    let out = transpile_str(
+        r#"
+        pub struct Binding {
+            pub waker: rusty::Waker,
+        }
+        pub fn make_binding() -> Binding {
+            let wake_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                let _x = 1i32;
+            });
+            let waker = rusty::Waker { wake_fn };
+            Binding { waker }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::function<void()> wake_fn = ["),
+        "the waker field's copyable contract must drive the local: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Function<void() const> wake_fn"),
+        "the move-only boxed-callable spelling cannot initialize Waker::wake_fn: {out}"
+    );
+    assert!(
+        !out.contains("rusty::Box<std::function"),
+        "no Box OF a callable may survive in the initializer: {out}"
+    );
+    assert!(
+        out.contains("rusty::Waker{.wake_fn = std::move(wake_fn)}"),
+        "the facade field initialization itself is unchanged: {out}"
+    );
+}
+
+/// C6 fail-closed — an unsupported callable coercion (a declared callable
+/// whose signature is not the facade field's contract) rejects BEFORE output
+/// instead of emitting a `std::function` construction that cannot compile.
+#[test]
+fn test_waker_wake_fn_mismatched_callable_contract_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub struct Binding {
+            pub waker: rusty::Waker,
+        }
+        pub fn make_binding() -> Binding {
+            let wake_fn: Box<dyn Fn(i32) + Send + Sync> = Box::new(move |_x| {});
+            let waker = rusty::Waker { wake_fn };
+            Binding { waker }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("a callable coercion the contract cannot express must reject");
+    assert!(error.contains("wake_fn"), "{error}");
+    assert!(error.contains("std::function<void()>"), "{error}");
+    // The rejected declaration itself never reaches the buffer, and the
+    // transpile as a whole writes no file — the error is raised before
+    // output, exactly like the H3 foreign-declaration rejection.
+    let out = cg.into_output();
+    assert!(
+        !out.contains("> wake_fn ="),
+        "a rejected coercion must not emit the local declaration: {out}"
+    );
+}
+
+/// C11 (checkpoint contract 11) — an authenticated `cpp_ctor` associated fn
+/// IS the C++ constructor, so a call site invokes the constructor. The
+/// historical emission `Type::new_()` names a static that the generated class
+/// never declares ("no member named 'new_' in 'rrr::Reactor'").
+#[test]
+fn test_cpp_ctor_call_lowers_to_the_constructor_and_in_place_box() {
+    let out = transpile_str(
+        r#"
+        pub struct Thing {
+            pub v: i32,
+        }
+        impl Thing {
+            #[cfg_attr(any(), cpp_ctor)]
+            pub fn new(v: i32) -> Thing {
+                Thing { v }
+            }
+        }
+        pub fn make_plain() -> Thing {
+            Thing::new(4i32)
+        }
+        pub fn make_boxed() -> Box<Thing> {
+            Box::new(Thing::new(3i32))
+        }
+        "#,
+    );
+    assert!(
+        out.contains("return Thing(static_cast<int32_t>(4));"),
+        "an unwrapped cpp_ctor call is the constructor call: {out}"
+    );
+    assert!(
+        out.contains("rusty::Box<Thing>::emplace(static_cast<int32_t>(3))"),
+        "Box::new of a cpp_ctor value takes the in-place ctor path: {out}"
+    );
+    assert!(
+        !out.contains("Thing::new_("),
+        "no nonexistent `Type::new_` static may survive: {out}"
+    );
+}
+
+/// C11 negative — an ordinary (unmarked) associated constructor keeps the
+/// static `Type::new_` factory the generated class really declares.
+#[test]
+fn test_unmarked_associated_constructor_keeps_its_static_factory() {
+    let out = transpile_str(
+        r#"
+        pub struct Plain {
+            pub v: i32,
+        }
+        impl Plain {
+            pub fn new(v: i32) -> Plain {
+                Plain { v }
+            }
+        }
+        pub fn make_plain() -> Plain {
+            Plain::new(4i32)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("Plain::new_(static_cast<int32_t>(4))"),
+        "an unmarked factory is not a constructor: {out}"
+    );
+}
+
+/// C11 family — the hand-written runtime facades. `rusty::sync::Weak` is
+/// default-constructed and declares no `new_` (include/rusty/sync/weak.hpp:28);
+/// `downgrade` is the free `rusty::downgrade` (weak.hpp:174/184), not an `Arc`
+/// static. The transpiled rc_port types DO declare both statics and are left
+/// alone.
+#[test]
+fn test_runtime_facade_weak_default_ctor_and_arc_downgrade() {
+    let out = transpile_str(
+        r#"
+        use std::sync::{Arc, Weak};
+        pub trait Thing {
+            fn go(&self);
+        }
+        pub struct Holder {
+            pub self_: Weak<dyn Thing>,
+            pub v: i32,
+        }
+        pub fn holder_make() -> Arc<Holder> {
+            let sp = Arc::new(Holder {
+                self_: Weak::<Holder>::new(),
+                v: 1i32,
+            });
+            return sp;
+        }
+        pub fn holder_weak(strong: &Arc<Holder>) -> Weak<Holder> {
+            Arc::downgrade(strong)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::sync::Weak<Thing>()"),
+        "sync Weak is default-constructed: {out}"
+    );
+    assert!(
+        !out.contains("sync::Weak<Thing>::new_()"),
+        "rusty::sync::Weak declares no `new_` static: {out}"
+    );
+    assert!(
+        out.contains("rusty::downgrade(strong)"),
+        "downgrade is the free runtime function: {out}"
+    );
+    assert!(
+        !out.contains("::downgrade(strong)") || out.contains("rusty::downgrade(strong)"),
+        "no Arc static downgrade may survive: {out}"
+    );
+}
+
+/// C11 family negative — an rc-provenance `Weak` keeps `new_`: the transpiled
+/// rc_port DOES declare that static, so collapsing it would be wrong.
+#[test]
+fn test_rc_provenance_weak_keeps_its_static_factory() {
+    let out = transpile_str(
+        r#"
+        use std::rc::{Rc, Weak};
+        pub struct Node {
+            pub parent: Weak<Node>,
+        }
+        pub fn node_make() -> Node {
+            Node { parent: Weak::<Node>::new() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rc::Weak<Node>::new_()"),
+        "rc_port's Weak keeps its static factory: {out}"
+    );
+}
+
+/// C9 (checkpoint contract 9) — an OWNING `Box<dyn Trait>` in an ADT variant
+/// field (and its factory) keeps `rusty::Box<Trait>`. Module mode used to
+/// erase every trait object whose trait was not declared in the emitted FILE,
+/// so `PollCommand::AddPollable { pollable: Box<dyn PollableBase> }` became
+/// `void*` — same size, but no ownership, no destructor, no type identity and
+/// a different calling ABI. A crate trait imported into this module has a
+/// real interface class in its sibling module's purview (which is why the
+/// alias spelling `PollableProxy = Box<dyn PollableBase>` already lowered
+/// correctly).
+#[test]
+fn test_owning_trait_object_in_adt_keeps_its_crate_trait_target() {
+    let declaring: syn::File = syn::parse_str(
+        r#"
+        pub trait PollableBase {
+            fn fd(&self) -> i32;
+        }
+        "#,
+    )
+    .unwrap();
+    let traits: Vec<syn::ItemTrait> = declaring
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let file: syn::File = syn::parse_str(
+        r#"
+        use crate::pollable_proxy::PollableBase;
+        pub enum PollCommand {
+            AddPollable { pollable: Box<dyn PollableBase> },
+            RemovePollable { fd: i32 },
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.set_cross_file_traits(&traits);
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("rusty::Box<PollableBase> pollable;"),
+        "the variant field keeps the owning boxed trait object: {out}"
+    );
+    assert!(
+        out.contains("AddPollable(rusty::Box<PollableBase> pollable)"),
+        "the factory keeps it too: {out}"
+    );
+    assert!(
+        !out.contains("void* pollable"),
+        "raw void* erasure is forbidden even when size/alignment match: {out}"
+    );
+}
+
+/// C9 negative — a trait from OUTSIDE the crate has no C++ interface class to
+/// name in this module, so the module-mode `void*` fallback stands.
+#[test]
+fn test_owning_trait_object_of_a_foreign_trait_still_erases() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub enum Cmd {
+            Add { thing: Box<dyn some_dep::Widget> },
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("void* thing;"),
+        "a foreign trait object keeps the documented void* fallback: {out}"
+    );
+}
+
+/// C8 (checkpoint contract 8) — a resolved CONCRETE alias in a by-value
+/// signature stays that alias. Softening it to an abbreviated-template `auto`
+/// turns an ordinary function into a template (different mangling) and erases
+/// the authenticated alias identity; `auto` is only valid for an actual
+/// source generic. Also: the runtime's `void` specializations
+/// (`rusty::Task<void>`, async.hpp:145) are what Rust's `Task<()>` names.
+#[test]
+fn test_concrete_alias_parameters_keep_their_nominal_type() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub type EventTestFn = rusty::Function<dyn Fn(i32) -> bool>;
+        pub type TaskVoid = rusty::Task<()>;
+        pub type Count = i32;
+        pub fn takes_fn(f: EventTestFn) -> bool { f(1i32) }
+        pub fn takes_task(t: TaskVoid) -> TaskVoid { t }
+        pub fn takes_count(c: Count) -> Count { c }
+        pub fn takes_generic<T>(t: T) -> T { t }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using TaskVoid = rusty::Task<void>;"),
+        "Unit in the native Task position is the void specialization: {out}"
+    );
+    assert!(
+        out.contains("bool takes_fn(EventTestFn f)"),
+        "a concrete callable alias parameter keeps its nominal type: {out}"
+    );
+    assert!(
+        out.contains("TaskVoid takes_task(TaskVoid t)"),
+        "a concrete task alias parameter keeps its nominal type: {out}"
+    );
+    assert!(
+        out.contains("Count takes_count(Count c)"),
+        "a concrete scalar alias parameter keeps its nominal type: {out}"
+    );
+    assert!(
+        !out.contains("takes_fn(auto") && !out.contains("takes_task(auto"),
+        "no alias parameter may become an abbreviated template: {out}"
+    );
+    // (neg) an ACTUAL source generic is still a template.
+    assert!(
+        out.contains("template<typename T>"),
+        "a real generic keeps its template head: {out}"
+    );
+}
+
+/// C8 — an EXPORTED alias is part of the module's public C++ surface, so it
+/// honors its authenticated type-map target instead of re-mapping the Rust
+/// right-hand side. `SrcFileCStr` was `std::string_view` at its declaration
+/// while every parameter use lowered to the mapped `const char*` — one name,
+/// two C++ types. A PRIVATE alias is internal spelling the map does not
+/// govern and is left alone.
+#[test]
+fn test_exported_alias_honors_its_authenticated_type_map() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map
+        .mappings
+        .insert("SrcFileCStr".to_string(), "const char*".to_string());
+    type_map
+        .mappings
+        .insert("LegacyStdString".to_string(), "std::string".to_string());
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub type SrcFileCStr = &'static str;
+        type LegacyStdString = String;
+        pub fn note(file: SrcFileCStr) -> SrcFileCStr { file }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("export using SrcFileCStr = const char*;"),
+        "the exported alias declaration honors its map: {out}"
+    );
+    assert!(
+        out.contains("const char* note(const char* file)"),
+        "and its uses name the same one C++ type (an alias is \
+         mangling-transparent, so either spelling is the same type — what \
+         contract 8 forbids is the two DISAGREEING): {out}"
+    );
+    assert!(
+        out.contains("using LegacyStdString = rusty::String;"),
+        "a private alias keeps its right-hand-side lowering: {out}"
+    );
+}
+
+/// H1 (checkpoint contract 1) — global `::janus` namespace placement. The
+/// incumbent ABI roots the Quorum family in a module-global `janus`, still
+/// attached to the module (`janus::QuorumEvent@rrr.reactor::…`), while every
+/// ordinary crate item stays in the configured cxx namespace. Placement comes
+/// from an exact authenticated source contract, never from name inference.
+#[test]
+fn test_namespace_placement_contract_places_items_in_the_global_namespace() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        #[repr(C)]
+        pub struct QuorumEvent {
+            pub n_total_: i32,
+        }
+        impl QuorumEvent {
+            pub fn total(&self) -> i32 { self.n_total_ }
+        }
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        pub fn quorum_event_make(n_total: i32) -> QuorumEvent {
+            QuorumEvent { n_total_: n_total }
+        }
+        pub struct Wrapper {
+            pub inner: QuorumEvent,
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    assert!(cg.take_codegen_error().is_none());
+    let out = cg.into_output();
+    assert!(
+        out.contains("namespace janus {\nusing namespace rrr;\nexport struct QuorumEvent;"),
+        "the FORWARD DECLARATION is placed too — otherwise it and the \
+         definition are two entities: {out}"
+    );
+    assert!(
+        out.contains("namespace janus {\nusing namespace rrr;\nexport struct QuorumEvent {"),
+        "the definition is placed: {out}"
+    );
+    assert!(
+        out.contains("namespace janus {\nusing namespace rrr;\nexport QuorumEvent quorum_event_make("),
+        "a contracted free function is placed: {out}"
+    );
+    assert!(
+        out.contains("int32_t QuorumEvent::total() const"),
+        "members follow their enclosing type: {out}"
+    );
+    // The out-of-line member definition sits inside janus, not the cxx
+    // namespace (defining it from rrr would be ill-formed).
+    let member_at = out.find("int32_t QuorumEvent::total() const").unwrap();
+    let janus_open = out[..member_at].rfind("namespace janus {");
+    let janus_close = out[..member_at].rfind("} // namespace janus");
+    assert!(
+        janus_open.is_some() && janus_open > janus_close,
+        "the out-of-line member definition must be inside janus: {out}"
+    );
+    // Unqualified uses elsewhere still resolve, without giving the entity a
+    // second identity.
+    assert!(
+        out.contains("using ::janus::QuorumEvent;"),
+        "a lookup using-declaration keeps the rest of the module compiling: {out}"
+    );
+    assert!(
+        !out.contains("namespace rrr::janus") && !out.contains("namespace janus = "),
+        "`rrr::janus` and namespace aliases are invalid substitutes: {out}"
+    );
+}
+
+/// H1 — with NO placement contract in the source the emission path is
+/// untouched (this is what keeps every other module byte-identical).
+#[test]
+fn test_no_namespace_placement_contract_leaves_emission_untouched() {
+    let source = r#"
+        pub struct QuorumEvent { pub n_total_: i32 }
+        pub fn quorum_event_make(n_total: i32) -> QuorumEvent {
+            QuorumEvent { n_total_: n_total }
+        }
+        "#;
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("namespace janus"),
+        "no contract, no placement: {out}"
+    );
+}
+
+/// H1 fail-closed — members follow their enclosing type, so a contract on an
+/// `impl` block is an OVERLAPPING placement contract for the same entity and
+/// rejects atomically instead of picking a winner.
+#[test]
+fn test_overlapping_namespace_placement_contract_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        pub struct QuorumEvent { pub n_total_: i32 }
+        #[cfg_attr(any(), cpp_namespace(::janus))]
+        impl QuorumEvent {
+            pub fn total(&self) -> i32 { self.n_total_ }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("an overlapping placement contract must reject");
+    assert!(error.contains("QuorumEvent"), "{error}");
+    let out = cg.into_output();
+    assert!(
+        !out.contains("namespace janus"),
+        "a rejected contract must not place anything: {out}"
+    );
+}
+
+/// H1 fail-closed — a RELATIVE target is ambiguous about exactly the
+/// distinction the contract exists to make (`rrr::janus` mangles differently
+/// from `::janus`), so it rejects rather than being guessed.
+#[test]
+fn test_relative_namespace_placement_target_rejects() {
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_namespace(janus))]
+        pub struct QuorumEvent { pub n_total_: i32 }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cxx_namespace(Some("rrr".to_string()));
+    cg.emit_file(&file, Some("rrr.reactor"));
+    let error = cg
+        .take_codegen_error()
+        .expect("a relative placement target must reject");
+    assert!(error.contains("relative"), "{error}");
+    let out = cg.into_output();
+    assert!(
+        !out.contains("namespace janus"),
+        "a rejected contract must not place anything: {out}"
+    );
+}
+
+/// H1 fail-closed — ambiguous, overlapping, relative or non-namespace-scope
+/// placement contracts reject ATOMICALLY, before any output.
+#[test]
+fn test_ambiguous_or_relative_placement_contracts_reject() {
+    for (source, needle) in [
+        (
+            // relative target
+            r#"
+            #[cfg_attr(any(), cpp_namespace(janus))]
+            pub struct QuorumEvent { pub v: i32 }
+            "#,
+            "relative",
+        ),
+        (
+            // multi-segment target
+            r#"
+            #[cfg_attr(any(), cpp_namespace(::rrr::janus))]
+            pub struct QuorumEvent { pub v: i32 }
+            "#,
+            "exactly one",
+        ),
+        (
+            // members follow their type: a marked impl is an overlapping contract
+            r#"
+            #[cfg_attr(any(), cpp_namespace(::janus))]
+            pub struct QuorumEvent { pub v: i32 }
+            #[cfg_attr(any(), cpp_namespace(::janus))]
+            impl QuorumEvent { pub fn v(&self) -> i32 { self.v } }
+            "#,
+            "overlapping",
+        ),
+        (
+            // an alias carries no namespace identity
+            r#"
+            #[cfg_attr(any(), cpp_namespace(::janus))]
+            pub type QuorumDanglingVec = i32;
+            "#,
+            "alias",
+        ),
+    ] {
+        let file: syn::File = syn::parse_str(source).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_cxx_namespace(Some("rrr".to_string()));
+        cg.emit_file(&file, Some("rrr.reactor"));
+        let error = cg
+            .take_codegen_error()
+            .unwrap_or_else(|| panic!("must reject: {source}"));
+        assert!(
+            error.contains(needle),
+            "diagnostic must name the defect ({needle}): {error}"
+        );
+        let out = cg.into_output();
+        assert!(
+            !out.contains("namespace janus {"),
+            "a rejected contract must not place anything: {out}"
         );
     }
 }

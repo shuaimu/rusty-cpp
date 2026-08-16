@@ -1,0 +1,7 @@
+[package]
+name = "cppabi_custom_root_repro"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "rust/lib.rs"

@@ -472,7 +472,10 @@ impl CodeGen {
             // Invoking a CALLABLE PARAM (`f(&mut self.entries)` where
             // `f: F, F: FnOnce(&mut [Bucket<K, V>])`): the arg expected
             // types are the Fn bound's parenthesized inputs.
-            None => self.callable_param_invocation_arg_expected_type(call, arg_idx)?,
+            None => match self.callable_param_invocation_arg_expected_type(call, arg_idx) {
+                Some(expected) => expected,
+                None => self.ufcs_serde_reference_arg_expected_type(call, arg_idx)?,
+            },
         };
         match substitutions {
             Some(substitutions) if !substitutions.is_empty() => {
@@ -480,6 +483,44 @@ impl CodeGen {
             }
             _ => Some(expected),
         }
+    }
+
+    /// UFCS serde trait dispatch (`Serialize_::serialize(x, ar)`,
+    /// `Deserialize_::deserialize(&mut v, ar)`): every parameter of that
+    /// family is a REFERENCE by construction of the trait (`&self`-shaped
+    /// value + `&mut Archive`), but the overload definitions live in
+    /// another file (serializable.cpp), so no signature is collected in
+    /// the calling file. Without an expected type, a `&mut v` OUT-ARG
+    /// falls to the Reference arm's address-of default and emits `&v`
+    /// against a `T&` parameter. Synthesize a reference expected type for
+    /// reference-SHAPED args so the borrow collapses; non-reference args
+    /// are left untouched (their emission is already correct, and
+    /// threading types onto them would change pass-styles — the same
+    /// hazard the slice-only restriction below guards against).
+    fn ufcs_serde_reference_arg_expected_type(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        let segs = &path_expr.path.segments;
+        if segs.len() < 2 {
+            return None;
+        }
+        let owner = segs[segs.len() - 2].ident.to_string();
+        let method = segs[segs.len() - 1].ident.to_string();
+        let is_serde_dispatch = (owner == "Serialize_" && method == "serialize")
+            || (owner == "Deserialize_" && method == "deserialize");
+        if !is_serde_dispatch {
+            return None;
+        }
+        let arg = call.args.iter().nth(arg_idx)?;
+        if !matches!(self.peel_paren_group_expr(arg), syn::Expr::Reference(_)) {
+            return None;
+        }
+        syn::parse_str::<syn::Type>("&mut __rusty_serde_ref_param").ok()
     }
 
     /// Arg-expected type for invoking a local CALLABLE binding: the binding's
@@ -3145,6 +3186,30 @@ impl CodeGen {
         ];
         if owner_tail != owner {
             candidates.push(self.scoped_type_key(&owner_tail));
+        }
+        let scope = self.module_stack.join("::");
+        if let Some(imported_owner) =
+            self.resolve_scope_import_binding_target_in_scope_chain(&scope, &owner_tail)
+        {
+            let imported_segments = imported_owner
+                .trim()
+                .trim_start_matches("::")
+                .split("::")
+                .filter(|segment| {
+                    !segment.is_empty() && !matches!(*segment, "crate" | "self" | "super")
+                })
+                .collect::<Vec<_>>();
+            if !imported_segments.is_empty() {
+                let imported = imported_segments.join("::");
+                let imported_tail = imported_segments
+                    .last()
+                    .expect("non-empty imported owner")
+                    .to_string();
+                candidates.push(imported.clone());
+                candidates.push(imported_tail.clone());
+                candidates.push(self.scoped_type_key(&imported));
+                candidates.push(self.scoped_type_key(&imported_tail));
+            }
         }
         candidates.sort();
         candidates.dedup();

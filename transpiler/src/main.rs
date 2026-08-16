@@ -1,12 +1,16 @@
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
 
 mod cmake;
 mod codegen;
+mod cpp_abi;
+mod cpp_default_args;
+mod cpp_name;
 mod inline_rust;
 mod metadata;
 mod slots;
@@ -28,6 +32,10 @@ fn count_slot_files(s: &[slots::Slot]) -> usize {
 #[command(name = "rusty-cpp-transpiler")]
 #[command(about = "Transpile Rust source code to C++ using rusty-cpp types")]
 struct Cli {
+    /// Print the embedded source revision as one-line JSON and exit
+    #[arg(long)]
+    build_info: bool,
+
     /// Input Rust source file (.rs) — not needed with --crate or subcommands
     input: Option<PathBuf>,
 
@@ -42,6 +50,42 @@ struct Cli {
     /// Expand macros before transpilation (requires cargo-expand installed)
     #[arg(long)]
     expand: bool,
+
+    /// Cargo features for manifest-backed source/crate transpilation
+    #[arg(long)]
+    features: Option<String>,
+
+    /// Enable every Cargo feature for manifest-backed source/crate transpilation
+    #[arg(long)]
+    all_features: bool,
+
+    /// Disable Cargo default features for manifest-backed source/crate transpilation
+    #[arg(long)]
+    no_default_features: bool,
+
+    /// Cargo target triple used by expansion and dependency authentication
+    #[arg(long)]
+    target: Option<String>,
+
+    /// Cargo configuration override (repeatable)
+    #[arg(long = "config", value_name = "KEY=VALUE|PATH")]
+    cargo_config: Vec<String>,
+
+    /// Require Cargo.lock to remain unchanged
+    #[arg(long)]
+    locked: bool,
+
+    /// Run Cargo without network access
+    #[arg(long)]
+    offline: bool,
+
+    /// Equivalent to --locked plus --offline
+    #[arg(long)]
+    frozen: bool,
+
+    /// Package selected from a workspace manifest
+    #[arg(long, short)]
+    package: Option<String>,
 
     /// Generate CMakeLists.txt from Cargo.toml (provide path to Cargo.toml)
     #[arg(long)]
@@ -79,6 +123,14 @@ struct Cli {
         requires_all = ["consumer_module_map", "module_name"]
     )]
     consumer_rust_module: Option<String>,
+
+    /// Versioned TOML sidecar containing per-module global-fragment includes
+    #[arg(long, value_name = "PATH", conflicts_with = "cmake")]
+    module_preamble: Option<PathBuf>,
+
+    /// Explicit target_os used to evaluate module-preamble conditions
+    #[arg(long, value_name = "OS", requires = "module_preamble")]
+    preamble_target_os: Option<String>,
 
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
@@ -206,6 +258,26 @@ struct ParityTestArgs {
     #[arg(long)]
     no_default_features: bool,
 
+    /// Cargo target triple used by baseline, expansion, and metadata
+    #[arg(long)]
+    target: Option<String>,
+
+    /// Cargo configuration override (repeatable)
+    #[arg(long = "config", value_name = "KEY=VALUE|PATH")]
+    cargo_config: Vec<String>,
+
+    /// Require Cargo.lock to remain unchanged
+    #[arg(long)]
+    locked: bool,
+
+    /// Run Cargo without network access
+    #[arg(long)]
+    offline: bool,
+
+    /// Equivalent to --locked plus --offline
+    #[arg(long)]
+    frozen: bool,
+
     /// Stop after a specific stage: baseline, expand, transpile, build, run
     #[arg(long)]
     stop_after: Option<String>,
@@ -295,35 +367,2304 @@ struct InlineRustArgs {
 /// Transpile an entire Rust crate in one command.
 /// Walks all .rs files, transpiles each with the correct module name,
 /// and generates CMakeLists.txt.
-fn transpile_crate(
+fn validate_cpp_abi_conventional_lib_crate(
+    cargo: &cmake::CargoToml,
+    sources: &[PathBuf],
+) -> Result<(), String> {
+    let lib_path = cargo
+        .lib
+        .as_ref()
+        .and_then(|target| target.path.as_deref())
+        .unwrap_or("src/lib.rs")
+        .replace('\\', "/");
+    if lib_path != "src/lib.rs" || !sources.iter().any(|path| path == Path::new("src/lib.rs")) {
+        return Err(
+            "cpp_abi crate mode currently requires the conventional src/lib.rs library target"
+                .to_string(),
+        );
+    }
+    if cargo.bins.as_ref().is_some_and(|bins| !bins.is_empty())
+        || sources.iter().any(|path| {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            normalized == "src/main.rs" || normalized.starts_with("src/bin/")
+        })
+    {
+        return Err(
+            "cpp_abi crate mode currently supports one library target and no binary targets"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn source_mentions_cpp_source_contract(source: &str) -> bool {
+    cpp_abi::source_mentions_reserved_marker(source)
+        || cpp_default_args::source_mentions_marker(source)
+}
+
+fn reject_cpp_abi_in_nonconventional_target_roots(
+    cargo: &cmake::CargoToml,
+    project_dir: &Path,
+) -> Result<(), String> {
+    let mut declared_roots = Vec::<PathBuf>::new();
+    if let Some(path) = cargo
+        .lib
+        .as_ref()
+        .and_then(|target| target.path.as_deref())
+        && path.replace('\\', "/") != "src/lib.rs"
+    {
+        declared_roots.push(PathBuf::from(path));
+    }
+    if let Some(bins) = &cargo.bins {
+        declared_roots.extend(
+            bins.iter()
+                .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+        );
+    }
+    declared_roots.sort();
+    declared_roots.dedup();
+    for relative in declared_roots {
+        let full = project_dir.join(&relative);
+        let Ok(source) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        if source_mentions_cpp_source_contract(&source) {
+            return Err(format!(
+                "a source-owned C++ contract is present in declared target {} but crate mode currently supports only the conventional src/lib.rs library target",
+                relative.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn effective_local_dependencies_for_manifest(
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+    manifest_path: &Path,
+) -> Result<Vec<cmake::CrateDep>, String> {
+    let dependencies = graph.direct_dependencies(manifest_path).ok_or_else(|| {
+        format!(
+            "Cargo's target-filtered dependency graph for '{}' omitted local manifest {}",
+            graph.target_triple,
+            manifest_path.display()
+        )
+    })?;
+    dependencies
+        .iter()
+        .map(|dependency| {
+            let package_dir = dependency.manifest_path.parent().ok_or_else(|| {
+                format!(
+                    "Cargo reported a dependency manifest without a parent directory: {}",
+                    dependency.manifest_path.display()
+                )
+            })?;
+            Ok(cmake::CrateDep {
+                name: dependency.dependency_key.clone(),
+                package: (dependency.package_name != dependency.dependency_key)
+                    .then(|| dependency.package_name.clone()),
+                version: None,
+                path: Some(package_dir.to_string_lossy().into_owned()),
+                is_local: true,
+                workspace_inherited: false,
+                // This edge exists only when Cargo selected the optional
+                // dependency through the effective feature set.
+                optional: false,
+                // Cargo already evaluated the selector for target_triple.
+                target: None,
+            })
+        })
+        .collect()
+}
+
+fn effective_local_package_cargo_flags(
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+    manifest_path: &Path,
+    root_cargo_flags: &[String],
+) -> Result<Vec<String>, String> {
+    let features = graph
+        .resolved_features_for_manifest(manifest_path)
+        .ok_or_else(|| {
+            format!(
+                "Cargo's target-normal dependency graph omitted the selected feature context for local manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    dependency_cargo_resolution_flags(features, root_cargo_flags)
+}
+
+#[derive(Default)]
+struct CppAbiClosureReport {
+    any_source_contract: bool,
+    issues: BTreeSet<String>,
+    runtime_dependency_issues: BTreeSet<String>,
+}
+
+struct CppAbiClosurePreflight<'a> {
+    expand: bool,
+    effective_dependencies: Option<&'a metadata::EffectiveLocalNormalDependencyGraph>,
+    root_package_filter: Option<String>,
+    cargo_flags: Vec<String>,
+    report: CppAbiClosureReport,
+    root_manifest: Option<PathBuf>,
+    visited: BTreeSet<PathBuf>,
+    active: Vec<PathBuf>,
+}
+
+fn validate_cpp_abi_manifest_edition(manifest_source: &str) -> Result<(), String> {
+    let manifest = toml::from_str::<toml::Value>(manifest_source)
+        .map_err(|error| format!("could not inspect package.edition: {error}"))?;
+    let edition = manifest
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("edition"));
+    match edition.and_then(toml::Value::as_str) {
+        Some("2018" | "2021" | "2024") => Ok(()),
+        Some(unsupported) => Err(format!(
+            "source-owned C++ contracts require an explicit Rust 2018, 2021, or 2024 package.edition; found `{unsupported}`"
+        )),
+        None if edition.is_none() => Err(
+            "source-owned C++ contracts require an explicit Rust 2018, 2021, or 2024 package.edition; an omitted edition selects Rust 2015"
+                .to_string(),
+        ),
+        None => Err(
+            "source-owned C++ contracts require an explicitly resolved Rust 2018, 2021, or 2024 package.edition; workspace-inherited or non-string editions are unsupported"
+                .to_string(),
+        ),
+    }
+}
+
+impl<'a> CppAbiClosurePreflight<'a> {
+    fn new(expand: bool) -> Self {
+        Self {
+            expand,
+            effective_dependencies: None,
+            root_package_filter: None,
+            cargo_flags: Vec::new(),
+            report: CppAbiClosureReport::default(),
+            root_manifest: None,
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn with_effective_dependencies(
+        expand: bool,
+        effective_dependencies: &'a metadata::EffectiveLocalNormalDependencyGraph,
+        root_package_filter: Option<&str>,
+        cargo_flags: &[String],
+    ) -> Self {
+        Self {
+            expand,
+            effective_dependencies: Some(effective_dependencies),
+            root_package_filter: root_package_filter.map(ToString::to_string),
+            cargo_flags: cargo_flags.to_vec(),
+            report: CppAbiClosureReport::default(),
+            root_manifest: None,
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn with_context(
+        expand: bool,
+        root_package_filter: Option<&str>,
+        cargo_flags: &[String],
+    ) -> Self {
+        Self {
+            expand,
+            effective_dependencies: None,
+            root_package_filter: root_package_filter.map(ToString::to_string),
+            cargo_flags: cargo_flags.to_vec(),
+            report: CppAbiClosureReport::default(),
+            root_manifest: None,
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn manifest_key(path: &Path) -> PathBuf {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return canonical;
+        }
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        let mut cursor = absolute.as_path();
+        let mut missing = Vec::new();
+        loop {
+            if let Ok(mut canonical) = std::fs::canonicalize(cursor) {
+                for component in missing.into_iter().rev() {
+                    canonical.push(component);
+                }
+                return canonical;
+            }
+            let Some(component) = cursor.file_name() else {
+                return absolute;
+            };
+            missing.push(component.to_os_string());
+            let Some(parent) = cursor.parent() else {
+                return absolute;
+            };
+            cursor = parent;
+        }
+    }
+
+    fn issue(&mut self, message: impl Into<String>) {
+        self.report.issues.insert(message.into());
+    }
+
+    fn runtime_dependency_issue(&mut self, message: impl Into<String>) {
+        self.report.runtime_dependency_issues.insert(message.into());
+    }
+
+    fn note_source_contract(&mut self, cargo_toml_path: &Path) {
+        self.report.any_source_contract = true;
+        let manifest = Self::manifest_key(cargo_toml_path);
+        if self
+            .root_manifest
+            .as_ref()
+            .is_some_and(|root| root != &manifest)
+        {
+            self.issue(format!(
+                "local dependency {} contains source-owned C++ contracts; cross-crate adapter calls are unsupported",
+                cargo_toml_path.display()
+            ));
+        }
+    }
+
+    fn collect_rs_files(&mut self, project_dir: &Path) -> Vec<PathBuf> {
+        fn recurse(
+            this: &mut CppAbiClosurePreflight,
+            project_dir: &Path,
+            directory: &Path,
+            active_directories: &mut Vec<PathBuf>,
+            files: &mut Vec<PathBuf>,
+        ) {
+            let canonical_directory = match std::fs::canonicalize(directory) {
+                Ok(path) => path,
+                Err(error) => {
+                    this.issue(format!(
+                        "could not resolve source directory {}: {error}",
+                        directory.display()
+                    ));
+                    return;
+                }
+            };
+            if let Some(cycle_start) = active_directories
+                .iter()
+                .position(|active| active == &canonical_directory)
+            {
+                let mut cycle = active_directories[cycle_start..]
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>();
+                cycle.push(canonical_directory.display().to_string());
+                this.issue(format!(
+                    "source directory symlink cycle at {}: {}",
+                    directory.display(),
+                    cycle.join(" -> ")
+                ));
+                return;
+            }
+            active_directories.push(canonical_directory);
+
+            let entries = match std::fs::read_dir(directory) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    this.issue(format!(
+                        "could not read source directory {}: {error}",
+                        directory.display()
+                    ));
+                    active_directories.pop();
+                    return;
+                }
+            };
+            let mut entries = entries.collect::<Vec<_>>();
+            entries.sort_by(|left, right| match (left, right) {
+                (Ok(left), Ok(right)) => left.path().cmp(&right.path()),
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(left), Err(right)) => left.to_string().cmp(&right.to_string()),
+            });
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        this.issue(format!(
+                            "could not enumerate source directory {}: {error}",
+                            directory.display()
+                        ));
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                // Follow both file and directory symlinks, matching the
+                // legacy collector's effective path semantics. Keep the
+                // lexical path for module identity and diagnostics.
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        this.issue(format!(
+                            "could not inspect source path {}: {error}",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                };
+                if metadata.is_dir() {
+                    recurse(this, project_dir, &path, active_directories, files);
+                } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                    match path.strip_prefix(project_dir) {
+                        Ok(relative) => files.push(relative.to_path_buf()),
+                        Err(error) => this.issue(format!(
+                            "could not make source path {} project-relative: {error}",
+                            path.display()
+                        )),
+                    }
+                }
+            }
+            active_directories.pop();
+        }
+
+        let src = project_dir.join("src");
+        match std::fs::symlink_metadata(&src) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                self.issue(format!(
+                    "could not inspect source directory {}: {error}",
+                    src.display()
+                ));
+                return Vec::new();
+            }
+        }
+        let mut files = Vec::new();
+        recurse(self, project_dir, &src, &mut Vec::new(), &mut files);
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    fn read_source_units(
+        &mut self,
+        project_dir: &Path,
+        cargo_toml_path: &Path,
+    ) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+        let sources = self.collect_rs_files(project_dir);
+        let mut units = Vec::with_capacity(sources.len());
+        for relative in &sources {
+            let full = project_dir.join(relative);
+            match std::fs::read_to_string(&full) {
+                Ok(source) => {
+                    if source_mentions_cpp_source_contract(&source) {
+                        self.note_source_contract(cargo_toml_path);
+                    }
+                    units.push((relative.clone(), source));
+                }
+                Err(error) => self.issue(format!(
+                    "could not read Rust source {}: {error}",
+                    full.display()
+                )),
+            }
+        }
+        (sources, units)
+    }
+
+    fn scan_declared_target_roots(
+        &mut self,
+        cargo: &cmake::CargoToml,
+        project_dir: &Path,
+        cargo_toml_path: &Path,
+    ) -> bool {
+        let mut mentions_source_contract = false;
+        let mut declared = Vec::<PathBuf>::new();
+        if let Some(path) = cargo.lib.as_ref().and_then(|target| target.path.as_deref())
+            && path.replace('\\', "/") != "src/lib.rs"
+        {
+            declared.push(PathBuf::from(path));
+        }
+        if let Some(bins) = &cargo.bins {
+            declared.extend(
+                bins.iter()
+                    .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+            );
+        }
+        declared.sort();
+        declared.dedup();
+        for relative in declared {
+            let full = project_dir.join(&relative);
+            match std::fs::read_to_string(&full) {
+                Ok(source) => {
+                    if source_mentions_cpp_source_contract(&source) {
+                        mentions_source_contract = true;
+                        self.note_source_contract(cargo_toml_path);
+                    }
+                }
+                Err(error) => self.issue(format!(
+                    "could not read declared Rust target {}: {error}",
+                    full.display()
+                )),
+            }
+        }
+        mentions_source_contract
+    }
+
+    fn scan_sources_without_manifest(&mut self, project_dir: &Path, manifest: &Path) {
+        let (_, source_units) = self.read_source_units(project_dir, manifest);
+        if source_units
+            .iter()
+            .any(|(_, source)| source_mentions_cpp_source_contract(source))
+        {
+            if let Err(error) = cpp_abi::preflight_crate_sources(&source_units) {
+                self.issue(format!("{}: {error}", manifest.display()));
+            }
+            if let Err(error) = cpp_default_args::preflight_crate_sources_syntax(&source_units) {
+                self.issue(format!("{}: {error}", manifest.display()));
+            }
+        }
+    }
+
+    fn visit_manifest(&mut self, cargo_toml_path: &Path) {
+        let visit_key = Self::manifest_key(cargo_toml_path);
+        if let Some(cycle_start) = self.active.iter().position(|path| path == &visit_key) {
+            let mut cycle = self.active[cycle_start..]
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            cycle.push(visit_key.display().to_string());
+            self.issue(format!(
+                "local dependency cycle detected: {}",
+                cycle.join(" -> ")
+            ));
+            return;
+        }
+        if !self.visited.insert(visit_key.clone()) {
+            return;
+        }
+        self.active.push(visit_key.clone());
+
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+        let manifest_source = match std::fs::read_to_string(cargo_toml_path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.issue(format!(
+                    "could not read local dependency manifest {}: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.scan_sources_without_manifest(project_dir, cargo_toml_path);
+                self.active.pop();
+                return;
+            }
+        };
+        let cargo = match toml::from_str::<cmake::CargoToml>(&manifest_source) {
+            Ok(cargo) => cargo,
+            Err(error) => {
+                self.issue(format!(
+                    "could not parse local dependency manifest {}: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.scan_sources_without_manifest(project_dir, cargo_toml_path);
+                self.active.pop();
+                return;
+            }
+        };
+        let dependencies = cmake::extract_dependencies(&cargo);
+        let is_root = self
+            .root_manifest
+            .as_ref()
+            .is_some_and(|root| root == &visit_key);
+        let package_filter = is_root
+            .then(|| self.root_package_filter.clone())
+            .flatten();
+        let cargo_flags = if is_root {
+            self.cargo_flags.clone()
+        } else if let Some(graph) = self.effective_dependencies {
+            match effective_local_package_cargo_flags(graph, cargo_toml_path, &self.cargo_flags) {
+                Ok(flags) => flags,
+                Err(error) => {
+                    self.runtime_dependency_issue(error);
+                    Vec::new()
+                }
+            }
+        } else {
+            match cargo_non_feature_resolution_flags(&self.cargo_flags) {
+                Ok(flags) => flags,
+                Err(error) => {
+                    self.runtime_dependency_issue(format!(
+                        "{}: {error}",
+                        cargo_toml_path.display()
+                    ));
+                    Vec::new()
+                }
+            }
+        };
+        let runtime_validation = match validate_rustc_only_runtime_dependencies_with_context(
+            cargo_toml_path,
+            &dependencies,
+            package_filter.as_deref(),
+            &cargo_flags,
+        ) {
+                Ok(runtime_validation) => runtime_validation,
+                Err(error) => {
+                    self.runtime_dependency_issue(format!(
+                        "{}: {error}",
+                        cargo_toml_path.display()
+                    ));
+                    RustcRuntimeValidation::default()
+                }
+            };
+        let traversal_dependencies = if let Some(graph) = self.effective_dependencies {
+            match effective_local_dependencies_for_manifest(graph, cargo_toml_path) {
+                Ok(dependencies) => dependencies,
+                Err(error) => {
+                    self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    Vec::new()
+                }
+            }
+        } else {
+            dependencies
+        };
+
+        let (sources, source_units) = self.read_source_units(project_dir, cargo_toml_path);
+        let declared_target_mentions_source_contract =
+            self.scan_declared_target_roots(&cargo, project_dir, cargo_toml_path);
+        let crate_mentions_source_contract = declared_target_mentions_source_contract
+            || source_units
+                .iter()
+                .any(|(_, source)| source_mentions_cpp_source_contract(source));
+        if crate_mentions_source_contract {
+            if let Err(error) = validate_cpp_abi_manifest_edition(&manifest_source) {
+                self.issue(format!("{}: {error}", cargo_toml_path.display()));
+            }
+            match cpp_abi::preflight_crate_sources(&source_units) {
+                Ok(true) => {
+                    if let Err(error) = validate_cpp_abi_conventional_lib_crate(&cargo, &sources) {
+                        self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    }
+                    if self.expand {
+                        self.issue(format!(
+                            "{}: cpp_abi crate mode does not support --expand because expansion removes inert ABI markers",
+                            cargo_toml_path.display()
+                        ));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => self.issue(format!("{}: {error}", cargo_toml_path.display())),
+            }
+            match cpp_default_args::preflight_crate_sources_syntax(&source_units) {
+                Ok(true) => {
+                    if let Err(error) = validate_cpp_abi_conventional_lib_crate(&cargo, &sources) {
+                        self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    }
+                    if self.expand {
+                        self.issue(format!(
+                            "{}: cpp_default_argument crate mode does not support --expand because expansion removes inert source markers",
+                            cargo_toml_path.display()
+                        ));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => self.issue(format!("{}: {error}", cargo_toml_path.display())),
+            }
+        }
+        if let Err(error) = reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir) {
+            self.issue(format!("{}: {error}", cargo_toml_path.display()));
+        }
+
+        let mut dependencies = traversal_dependencies
+            .into_iter()
+            .filter(|dependency| dependency.is_local)
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for dependency in dependencies {
+            if dependency.target.is_some() {
+                continue;
+            }
+            if runtime_validation
+                .runtime_provided
+                .contains(&dependency.name)
+                || dependency.name == RUSTY_RUNTIME_CRATE_NAME
+                || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            self.visit_manifest(&project_dir.join(relative).join("Cargo.toml"));
+        }
+        self.active.pop();
+    }
+
+    fn finish(self) -> Result<bool, String> {
+        if !self.report.runtime_dependency_issues.is_empty() {
+            return Err(format!(
+                "rustc-only runtime dependency whole local-dependency closure preflight failed before output:\n- {}",
+                self.report
+                    .runtime_dependency_issues
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            ));
+        }
+        if self.report.any_source_contract && !self.report.issues.is_empty() {
+            return Err(format!(
+                "source-owned C++ contract whole local-dependency closure preflight failed before output:\n- {}",
+                self.report
+                    .issues
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            ));
+        }
+        Ok(self.report.any_source_contract)
+    }
+}
+
+fn preflight_cpp_abi_whole_dependency_closure(
+    cargo_toml_path: &Path,
+    expand: bool,
+) -> Result<bool, String> {
+    preflight_cpp_abi_whole_dependency_closure_with_context(cargo_toml_path, expand, None, &[])
+}
+
+fn preflight_cpp_abi_whole_dependency_closure_with_context(
+    cargo_toml_path: &Path,
+    expand: bool,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<bool, String> {
+    let mut preflight =
+        CppAbiClosurePreflight::with_context(expand, package_filter, cargo_flags);
+    preflight.root_manifest = Some(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+fn preflight_cpp_source_contract_effective_dependency_closure(
+    cargo_toml_path: &Path,
+    expand: bool,
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<bool, String> {
+    let requested = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    if requested != graph.root_manifest() {
+        return Err(format!(
+            "Cargo's target-filtered dependency graph root {} does not match requested manifest {}",
+            graph.root_manifest().display(),
+            requested.display()
+        ));
+    }
+    let mut preflight = CppAbiClosurePreflight::with_effective_dependencies(
+        expand,
+        graph,
+        package_filter,
+        cargo_flags,
+    );
+    preflight.root_manifest = Some(requested);
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+/// Cheap, output-free over-approximation used to decide whether Cargo's exact
+/// target-selected graph is required. It deliberately follows every declared
+/// local normal dependency, including optional and target-qualified entries;
+/// the subsequent target-filtered closure discards unselected edges.
+fn dependency_closure_may_have_source_contract(cargo_toml_path: &Path) -> bool {
+    fn visit(cargo_toml_path: &Path, visited: &mut BTreeSet<PathBuf>) -> bool {
+        let key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+        if !visited.insert(key) {
+            return false;
+        }
+        let Ok(manifest_source) = std::fs::read_to_string(cargo_toml_path) else {
+            return false;
+        };
+        let Ok(cargo) = toml::from_str::<cmake::CargoToml>(&manifest_source) else {
+            return false;
+        };
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+
+        // Reuse the symlink-aware collector, but ignore its diagnostics here:
+        // the authoritative closure preflight retains ownership of errors.
+        let mut collector = CppAbiClosurePreflight::new(false);
+        let source_paths = collector.collect_rs_files(project_dir);
+        for relative in source_paths {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| source_mentions_cpp_source_contract(&source))
+            {
+                return true;
+            }
+        }
+        let mut declared_roots = cargo
+            .lib
+            .as_ref()
+            .and_then(|target| target.path.as_deref())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(bins) = &cargo.bins {
+            declared_roots.extend(
+                bins.iter()
+                    .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+            );
+        }
+        for relative in declared_roots {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| source_mentions_cpp_source_contract(&source))
+            {
+                return true;
+            }
+        }
+
+        let declared = cmake::extract_dependencies(&cargo);
+        let dependencies = resolve_workspace_inherited_dependencies(cargo_toml_path, &declared)
+            .unwrap_or(declared);
+        for dependency in dependencies {
+            if !dependency.is_local
+                || dependency.name == RUSTY_RUNTIME_CRATE_NAME
+                || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            if visit(&project_dir.join(relative).join("Cargo.toml"), visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    visit(cargo_toml_path, &mut BTreeSet::new())
+}
+
+const RUSTY_RUNTIME_CRATE_NAME: &str = "rusty";
+const RUSTY_CPP_MARKERS_PACKAGE_NAME: &str = "rusty-cpp-markers";
+
+#[derive(Default)]
+struct RustcRuntimeValidation {
+    runtime_provided: HashSet<String>,
+    trusted_cpp_inherit_provenance: bool,
+}
+
+fn use_tree_binds_name(tree: &syn::UseTree, needle: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => use_tree_binds_name(&path.tree, needle),
+        syn::UseTree::Name(name) => name.ident == needle,
+        syn::UseTree::Rename(rename) => rename.rename == needle,
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_binds_name(item, needle)),
+        syn::UseTree::Glob(_) => true,
+    }
+}
+
+fn source_has_exact_cpp_inherit_facade_export(source: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    if file.attrs.iter().any(|attr| {
+        !matches!(
+            attr.path().get_ident().map(ToString::to_string).as_deref(),
+            Some("doc" | "allow" | "warn" | "deny" | "forbid")
+        )
+    }) {
+        return false;
+    }
+    let mut trusted_exports = 0usize;
+    let mut competing_bindings = 0usize;
+    let mut local_marker_roots = 0usize;
+    for item in &file.items {
+        match item {
+            syn::Item::Use(item) if use_tree_binds_name(&item.tree, "cpp_inherit") => {
+                competing_bindings += 1;
+                let exact_tree = matches!(
+                    &item.tree,
+                    syn::UseTree::Path(root)
+                        if root.ident == "rusty_cpp_markers"
+                            && matches!(root.tree.as_ref(), syn::UseTree::Name(name) if name.ident == "cpp_inherit")
+                );
+                let inert_attrs = item.attrs.iter().all(|attr| attr.path().is_ident("doc"));
+                if exact_tree && inert_attrs && matches!(item.vis, syn::Visibility::Public(_)) {
+                    trusted_exports += 1;
+                }
+            }
+            syn::Item::Use(item)
+                if use_tree_binds_name(&item.tree, "rusty_cpp_markers") =>
+            {
+                local_marker_roots += 1
+            }
+            syn::Item::Fn(item) if item.sig.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Struct(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Enum(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Union(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Trait(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Type(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Mod(item) if item.ident == "cpp_inherit" => competing_bindings += 1,
+            syn::Item::Mod(item) if item.ident == "rusty_cpp_markers" => {
+                local_marker_roots += 1
+            }
+            syn::Item::ExternCrate(item)
+                if item
+                    .rename
+                    .as_ref()
+                    .map(|(_, rename)| rename == "cpp_inherit")
+                    .unwrap_or(item.ident == "cpp_inherit") =>
+            {
+                competing_bindings += 1
+            }
+            syn::Item::ExternCrate(item)
+                if item
+                    .rename
+                    .as_ref()
+                    .map(|(_, rename)| rename == "rusty_cpp_markers")
+                    .unwrap_or(item.ident == "rusty_cpp_markers") =>
+            {
+                local_marker_roots += 1
+            }
+            syn::Item::Macro(item)
+                if item
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == "cpp_inherit") =>
+            {
+                competing_bindings += 1
+            }
+            _ => {}
+        }
+    }
+    trusted_exports == 1 && competing_bindings == 1 && local_marker_roots == 0
+}
+
+fn type_is_unqualified_token_stream(ty: &syn::Type) -> bool {
+    matches!(
+        ty,
+        syn::Type::Path(path)
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && path.path.is_ident("TokenStream")
+    )
+}
+
+fn source_is_exact_inert_cpp_inherit_marker(source: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    if file
+        .attrs
+        .iter()
+        .any(|attr| !attr.path().is_ident("doc"))
+    {
+        return false;
+    }
+    let mut saw_token_stream_import = false;
+    let mut saw_cpp_inherit = false;
+    for item in &file.items {
+        match item {
+            syn::Item::Use(item)
+                if item.attrs.iter().all(|attr| attr.path().is_ident("doc"))
+                    && matches!(item.vis, syn::Visibility::Inherited)
+                    && matches!(
+                        &item.tree,
+                        syn::UseTree::Path(root)
+                            if root.ident == "proc_macro"
+                                && matches!(root.tree.as_ref(), syn::UseTree::Name(name) if name.ident == "TokenStream")
+                    ) =>
+            {
+                if saw_token_stream_import {
+                    return false;
+                }
+                saw_token_stream_import = true;
+            }
+            syn::Item::Fn(function) if function.sig.ident == "cpp_inherit" => {
+                if saw_cpp_inherit
+                    || !matches!(function.vis, syn::Visibility::Public(_))
+                    || function.sig.constness.is_some()
+                    || function.sig.asyncness.is_some()
+                    || function.sig.unsafety.is_some()
+                    || function.sig.abi.is_some()
+                    || !function.sig.generics.params.is_empty()
+                    || function.sig.generics.where_clause.is_some()
+                {
+                    return false;
+                }
+                let proc_attrs = function
+                    .attrs
+                    .iter()
+                    .filter(|attr| attr.path().is_ident("proc_macro_attribute"))
+                    .count();
+                if proc_attrs != 1
+                    || function.attrs.iter().any(|attr| {
+                        !attr.path().is_ident("doc")
+                            && !attr.path().is_ident("proc_macro_attribute")
+                    })
+                {
+                    return false;
+                }
+                let parameters = function.sig.inputs.iter().collect::<Vec<_>>();
+                let exact_parameters = matches!(
+                    parameters.as_slice(),
+                    [syn::FnArg::Typed(attribute), syn::FnArg::Typed(item)]
+                        if type_is_unqualified_token_stream(&attribute.ty)
+                            && type_is_unqualified_token_stream(&item.ty)
+                            && matches!(item.pat.as_ref(), syn::Pat::Ident(ident) if ident.ident == "item" && ident.by_ref.is_none() && ident.subpat.is_none())
+                );
+                let exact_return = matches!(
+                    &function.sig.output,
+                    syn::ReturnType::Type(_, ty) if type_is_unqualified_token_stream(ty)
+                );
+                let exact_body = matches!(
+                    function.block.stmts.as_slice(),
+                    [syn::Stmt::Expr(syn::Expr::Path(path), None)]
+                        if path.attrs.is_empty()
+                            && path.qself.is_none()
+                            && path.path.leading_colon.is_none()
+                            && path.path.is_ident("item")
+                );
+                if !exact_parameters || !exact_return || !exact_body {
+                    return false;
+                }
+                saw_cpp_inherit = true;
+            }
+            // The trusted marker crate is intentionally two declarations. An
+            // extra item could shadow the imported token type or alter the
+            // proc-macro entry point through conditional compilation.
+            _ => return false,
+        }
+    }
+    saw_token_stream_import && saw_cpp_inherit
+}
+
+fn validate_cpp_inherit_runtime_provenance(
+    runtime_identity: &metadata::ManifestIdentity,
+    runtime_library_source: &Path,
+) -> bool {
+    let Some(marker_dependency) = runtime_identity.dependencies.iter().find(|dependency| {
+        dependency.dependency_key == RUSTY_CPP_MARKERS_PACKAGE_NAME
+            && dependency.package_name == RUSTY_CPP_MARKERS_PACKAGE_NAME
+            && dependency.source.is_none()
+            && dependency.path.is_some()
+            && dependency.kind.is_none()
+            && dependency.target.is_none()
+            && !dependency.optional
+    }) else {
+        return false;
+    };
+    if runtime_identity
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.dependency_key == RUSTY_CPP_MARKERS_PACKAGE_NAME
+                || dependency.package_name == RUSTY_CPP_MARKERS_PACKAGE_NAME
+        })
+        .count()
+        != 1
+    {
+        return false;
+    }
+    let Some(marker_dir) = marker_dependency.path.as_deref() else {
+        return false;
+    };
+    let marker_manifest = marker_dir.join("Cargo.toml");
+    let Ok(marker_identity) = metadata::inspect_manifest_identity(&marker_manifest) else {
+        return false;
+    };
+    if marker_identity.package_name != RUSTY_CPP_MARKERS_PACKAGE_NAME
+        || !marker_identity.dependencies.is_empty()
+    {
+        return false;
+    }
+    let mut targets = marker_identity.targets.iter().filter(|target| {
+        target.name == "rusty_cpp_markers"
+            && target.kind.iter().any(|kind| kind == "proc-macro")
+            && target
+                .crate_types
+                .iter()
+                .any(|crate_type| crate_type == "proc-macro")
+    });
+    let Some(marker_target) = targets.next() else {
+        return false;
+    };
+    if targets.next().is_some() || marker_identity.targets.len() != 1 {
+        return false;
+    }
+    let Ok(runtime_source) = std::fs::read_to_string(runtime_library_source) else {
+        return false;
+    };
+    let Ok(marker_source) = std::fs::read_to_string(&marker_target.src_path) else {
+        return false;
+    };
+    source_has_exact_cpp_inherit_facade_export(&runtime_source)
+        && source_is_exact_inert_cpp_inherit_marker(&marker_source)
+}
+
+fn validate_selected_package_matches_manifest(
+    cargo_toml_path: &Path,
+    package_filter: Option<&str>,
+) -> Result<(), String> {
+    let Some(package_filter) = package_filter else {
+        return Ok(());
+    };
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    if cargo.package.name != package_filter {
+        return Err(format!(
+            "selected package '{}' does not own manifest {} (owner is '{}'); pass that package's Cargo.toml so authentication and transpilation use one manifest context",
+            package_filter,
+            cargo_toml_path.display(),
+            cargo.package.name
+        ));
+    }
+    Ok(())
+}
+
+/// Identify the Rust-only facade for types supplied by the C++ runtime.
+///
+/// `rusty` is a reserved generated-code namespace, so silently treating a
+/// registry crate, renamed package, or mismatched local target as the runtime
+/// would make crate mode omit real code.  Only an exact local dependency and
+/// exact Cargo package/library identity may take the runtime-provided path.
+fn validate_rustc_only_runtime_dependencies_with_context(
+    cargo_toml_path: &Path,
+    dependencies: &[cmake::CrateDep],
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<RustcRuntimeValidation, String> {
+    validate_selected_package_matches_manifest(cargo_toml_path, package_filter)?;
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+    let mut validation = RustcRuntimeValidation::default();
+    let resolved_manifest = if dependencies
+        .iter()
+        .any(|dependency| dependency.workspace_inherited)
+    {
+        Some(
+            metadata::inspect_manifest_identity_with_context(
+                cargo_toml_path,
+                package_filter,
+                cargo_flags,
+            )
+            .map_err(|error| {
+                format!(
+                    "could not resolve workspace-inherited dependency identities for {} with Cargo: {error}",
+                    cargo_toml_path.display()
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    for dependency in dependencies {
+        let resolved_dependency;
+        let dependency = if dependency.workspace_inherited {
+            let resolved_manifest = resolved_manifest
+                .as_ref()
+                .expect("workspace dependency resolution was requested above");
+            let mut matches = resolved_manifest.dependencies.iter().filter(|candidate| {
+                candidate.dependency_key == dependency.name
+                    && candidate.kind.is_none()
+                    && cargo_target_selectors_match(
+                        candidate.target.as_deref(),
+                        dependency.target.as_deref(),
+                    )
+            });
+            let candidate = matches.next().ok_or_else(|| {
+                format!(
+                    "Cargo did not report an exact resolved identity for workspace-inherited dependency '{}'{}",
+                    dependency.name,
+                    dependency
+                        .target
+                        .as_deref()
+                        .map(|target| format!(" under target '{target}'"))
+                        .unwrap_or_default()
+                )
+            })?;
+            if matches.next().is_some() {
+                return Err(format!(
+                    "Cargo reported ambiguous resolved identities for workspace-inherited dependency '{}'",
+                    dependency.name
+                ));
+            }
+            resolved_dependency = cmake::CrateDep {
+                name: candidate.dependency_key.clone(),
+                package: (candidate.package_name != candidate.dependency_key)
+                    .then(|| candidate.package_name.clone()),
+                version: dependency.version.clone(),
+                path: candidate
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                is_local: candidate.source.is_none() && candidate.path.is_some(),
+                workspace_inherited: false,
+                optional: candidate.optional,
+                target: dependency.target.clone(),
+            };
+            &resolved_dependency
+        } else {
+            dependency
+        };
+        let declared_package = dependency.package.as_deref().unwrap_or(&dependency.name);
+        let is_reserved_identity = dependency.name == RUSTY_RUNTIME_CRATE_NAME
+            || declared_package == RUSTY_RUNTIME_CRATE_NAME;
+
+        if !is_reserved_identity {
+            continue;
+        }
+        if let Some(target) = dependency.target.as_deref() {
+            return Err(format!(
+                "target-qualified dependency '{}' under target '{}' uses reserved runtime identity '{}'; the rustc-only facade must be one exact unconditional local path dependency",
+                dependency.name, target, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+        if dependency.optional {
+            return Err(format!(
+                "dependency '{}' uses reserved runtime identity '{}' but is optional; the rustc-only facade must be one exact unconditional local path dependency",
+                dependency.name, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        if dependency.name != RUSTY_RUNTIME_CRATE_NAME {
+            return Err(format!(
+                "dependency '{}' renames reserved runtime package '{}'; use the exact local dependency key '{}'",
+                dependency.name, RUSTY_RUNTIME_CRATE_NAME, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        if declared_package != RUSTY_RUNTIME_CRATE_NAME {
+            return Err(format!(
+                "dependency '{}' selects package '{}', but that dependency name is reserved for the '{}' C++ runtime facade",
+                dependency.name, declared_package, RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+        if !dependency.is_local {
+            return Err(format!(
+                "dependency '{}' is reserved for an exact local path dependency that provides the rustc-only C++ runtime facade",
+                RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        let dependency_path = dependency.path.as_deref().ok_or_else(|| {
+            format!(
+                "local runtime dependency '{}' has no path",
+                RUSTY_RUNTIME_CRATE_NAME
+            )
+        })?;
+        let dependency_dir = project_dir.join(dependency_path);
+        let manifest_path = dependency_dir.join("Cargo.toml");
+        let provider_flags = cargo_non_feature_resolution_flags(cargo_flags)?;
+        let runtime_identity = metadata::inspect_manifest_identity_with_context(
+            &manifest_path,
+            None,
+            &provider_flags,
+        )
+        .map_err(|error| {
+            format!(
+                "could not validate rustc-only runtime dependency '{}' at {} with Cargo: {error}",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display()
+            )
+        })?;
+
+        if runtime_identity.package_name != RUSTY_RUNTIME_CRATE_NAME {
+            return Err(format!(
+                "dependency '{}' at {} declares Cargo package '{}'; refusing to omit a non-runtime crate",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                runtime_identity.package_name
+            ));
+        }
+
+        let mut ordinary_library_targets = runtime_identity.targets.iter().filter(|target| {
+            target.name == RUSTY_RUNTIME_CRATE_NAME
+                && !target.kind.iter().any(|kind| kind == "proc-macro")
+                && target
+                    .crate_types
+                    .iter()
+                    .any(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"))
+        });
+        let library_target = ordinary_library_targets.next().ok_or_else(|| {
+            let reported = runtime_identity
+                .targets
+                .iter()
+                .map(|target| format!("{} ({})", target.name, target.kind.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "runtime package '{}' at {} does not expose an ordinary Rust library target named exactly '{}'; Cargo reported: {}",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                RUSTY_RUNTIME_CRATE_NAME,
+                if reported.is_empty() { "no targets" } else { &reported }
+            )
+        })?;
+        if ordinary_library_targets.next().is_some() {
+            return Err(format!(
+                "runtime package '{}' at {} exposes more than one ordinary library target named '{}'; refusing ambiguous facade identity",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                RUSTY_RUNTIME_CRATE_NAME
+            ));
+        }
+
+        if !library_target.src_path.is_file() {
+            return Err(format!(
+                "runtime package '{}' at {} has no library source at {}",
+                RUSTY_RUNTIME_CRATE_NAME,
+                manifest_path.display(),
+                library_target.src_path.display()
+            ));
+        }
+
+        validation.trusted_cpp_inherit_provenance = validate_cpp_inherit_runtime_provenance(
+            &runtime_identity,
+            &library_target.src_path,
+        );
+        validation.runtime_provided.insert(dependency.name.clone());
+    }
+
+    Ok(validation)
+}
+
+fn validate_rustc_only_runtime_dependencies(
+    cargo_toml_path: &Path,
+    dependencies: &[cmake::CrateDep],
+) -> Result<RustcRuntimeValidation, String> {
+    validate_rustc_only_runtime_dependencies_with_context(
+        cargo_toml_path,
+        dependencies,
+        None,
+        &[],
+    )
+}
+
+/// Resolve compiler-owned attribute providers from Cargo package identity,
+/// never from a source-level crate-root spelling. The reserved `rusty`
+/// validator authenticates the exact local facade package/library target and
+/// rejects renamed or otherwise lookalike dependencies.
+#[cfg(test)]
+pub(crate) fn authenticated_cpp_inherit_roots_for_manifest(
+    cargo_toml_path: &Path,
+) -> Result<HashSet<String>, String> {
+    authenticated_cpp_inherit_roots_for_manifest_with_context(cargo_toml_path, None, &[])
+}
+
+pub(crate) fn authenticated_cpp_inherit_roots_for_manifest_with_context(
+    cargo_toml_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<HashSet<String>, String> {
+    authenticated_cpp_inherit_roots_for_compilation(
+        cargo_toml_path,
+        package_filter,
+        cargo_flags,
+        &metadata::CargoCompilationContext::normal_package(),
+    )
+}
+
+pub(crate) fn authenticated_cpp_inherit_roots_for_compilation(
+    cargo_toml_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    compilation: &metadata::CargoCompilationContext,
+) -> Result<HashSet<String>, String> {
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    let dependencies = cmake::extract_dependencies(&cargo);
+    let mut roots = validate_rustc_only_runtime_dependencies_with_context(
+        cargo_toml_path,
+        &dependencies,
+        package_filter,
+        cargo_flags,
+    )?
+    .runtime_provided;
+
+    // The facade validator above intentionally accepts only the exact normal
+    // dependency shape. Never let that package-wide declaration authenticate
+    // a build script. For normal/dev and unknown source ownership, additionally
+    // require one unique Cargo-resolved extern-prelude edge in the conservative
+    // visible dependency set; a dev/build lookalike collision with `rusty`
+    // therefore withholds compiler-marker authority.
+    if matches!(
+        compilation.dependency_context(),
+        metadata::CargoDependencyContext::Build
+    ) {
+        roots.clear();
+        return Ok(roots);
+    }
+    let visible = metadata::inspect_resolved_extern_dependencies_for_compilation(
+        cargo_toml_path,
+        package_filter,
+        cargo_flags,
+        compilation,
+    )?;
+    roots.retain(|root| {
+        let mut candidates = visible
+            .iter()
+            .filter(|dependency| dependency.extern_crate_root == *root);
+        matches!(candidates.next(), Some(dependency)
+            if dependency.package_name == RUSTY_RUNTIME_CRATE_NAME
+                && candidates.next().is_none())
+    });
+    Ok(roots)
+}
+
+/// Determine which conventional compiler sysroot roots are actually selected
+/// for this Cargo package. Cargo permits a `#![no_std]` package to depend on an
+/// ordinary crate whose extern-prelude name is `std`; spelling alone therefore
+/// cannot authenticate `std::default::Default`.
+#[cfg(test)]
+pub(crate) fn authenticated_sysroot_roots_for_manifest(
+    cargo_toml_path: &Path,
+) -> Result<HashSet<String>, String> {
+    authenticated_sysroot_roots_for_manifest_with_context(cargo_toml_path, None, &[])
+}
+
+pub(crate) fn authenticated_sysroot_roots_for_manifest_with_context(
+    cargo_toml_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<HashSet<String>, String> {
+    authenticated_sysroot_roots_for_compilation(
+        cargo_toml_path,
+        package_filter,
+        cargo_flags,
+        &metadata::CargoCompilationContext::normal_package(),
+    )
+}
+
+pub(crate) fn authenticated_sysroot_roots_for_compilation(
+    cargo_toml_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    compilation: &metadata::CargoCompilationContext,
+) -> Result<HashSet<String>, String> {
+    validate_selected_package_matches_manifest(cargo_toml_path, package_filter)?;
+    let identity = metadata::inspect_manifest_identity_with_context(
+        cargo_toml_path,
+        package_filter,
+        cargo_flags,
+    )?;
+    let occupied = metadata::inspect_resolved_extern_dependencies_for_compilation(
+        cargo_toml_path,
+        package_filter,
+        cargo_flags,
+        compilation,
+    )?
+        .iter()
+        .map(|dependency| dependency.extern_crate_root.clone())
+        .collect::<HashSet<_>>();
+    let mut roots = HashSet::from(["std".to_string(), "core".to_string()]);
+    roots.retain(|root| !occupied.contains(root));
+
+    // `#![no_std]` is a target-root property. Inspect only the target root that
+    // produced this compilation unit when it is known. Unknown source/module
+    // ownership deliberately intersects across every target root.
+    let selected_source = compilation.target_src_path();
+    let mut matched_selected_source = selected_source.is_none();
+    for target in identity.targets.iter().filter(|target| {
+        selected_source.is_none_or(|selected| {
+            let candidate = std::fs::canonicalize(&target.src_path)
+                .unwrap_or_else(|_| target.src_path.clone());
+            candidate == selected
+        })
+    }) {
+        matched_selected_source = true;
+        let source = fs::read_to_string(&target.src_path).map_err(|error| {
+            format!(
+                "could not read Cargo target source {} while authenticating sysroot crates: {error}",
+                target.src_path.display()
+            )
+        })?;
+        let file = syn::parse_file(&source).map_err(|error| {
+            format!(
+                "could not parse Cargo target source {} while authenticating sysroot crates: {error}",
+                target.src_path.display()
+            )
+        })?;
+        let no_std = file.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("no_std")
+                || (attribute.path().is_ident("cfg_attr")
+                    && match &attribute.meta {
+                        syn::Meta::List(list) => list.tokens.to_string().contains("no_std"),
+                        _ => false,
+                    })
+        });
+        if no_std && !occupied.contains("std") {
+            let explicitly_links_sysroot_std = file.items.iter().any(|item| {
+                matches!(item, syn::Item::ExternCrate(item_extern)
+                    if item_extern.ident == "std"
+                        && !item_extern.attrs.iter().any(|attribute| {
+                            attribute.path().is_ident("cfg")
+                                || attribute.path().is_ident("cfg_attr")
+                        }))
+            });
+            if !explicitly_links_sysroot_std {
+                roots.remove("std");
+            }
+        }
+    }
+    if !matched_selected_source {
+        return Err(format!(
+            "Cargo metadata no longer contains {} while authenticating compiler sysroot crates",
+            compilation.describe()
+        ));
+    }
+    Ok(roots)
+}
+
+pub(crate) fn nearest_cargo_manifest(input_path: &Path) -> Option<PathBuf> {
+    let mut directory = if input_path.is_dir() {
+        input_path.to_path_buf()
+    } else {
+        input_path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    loop {
+        let candidate = directory.join("Cargo.toml");
+        if candidate.is_file() {
+            return Some(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+        }
+        if !directory.pop() {
+            return None;
+        }
+    }
+}
+
+fn cargo_target_selectors_match(resolved: Option<&str>, declared: Option<&str>) -> bool {
+    match (resolved, declared) {
+        (None, None) => true,
+        (Some(resolved), Some(declared)) => resolved
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .eq(declared.chars().filter(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+fn resolve_workspace_inherited_dependencies(
+    cargo_toml_path: &Path,
+    dependencies: &[cmake::CrateDep],
+) -> Result<Vec<cmake::CrateDep>, String> {
+    let resolved_manifest = if dependencies
+        .iter()
+        .any(|dependency| dependency.workspace_inherited)
+    {
+        Some(metadata::inspect_manifest_identity(cargo_toml_path).map_err(|error| {
+            format!(
+                "could not resolve workspace-inherited dependency identities for {} with Cargo: {error}",
+                cargo_toml_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+    dependencies
+        .iter()
+        .map(|dependency| {
+            if !dependency.workspace_inherited {
+                return Ok(dependency.clone());
+            }
+            let resolved_manifest = resolved_manifest
+                .as_ref()
+                .expect("workspace dependency resolution was requested above");
+            let mut matches = resolved_manifest.dependencies.iter().filter(|candidate| {
+                candidate.dependency_key == dependency.name
+                    && candidate.kind.is_none()
+                    && cargo_target_selectors_match(
+                        candidate.target.as_deref(),
+                        dependency.target.as_deref(),
+                    )
+            });
+            let candidate = matches.next().ok_or_else(|| {
+                format!(
+                    "Cargo did not report an exact resolved identity for workspace-inherited dependency '{}'{}",
+                    dependency.name,
+                    dependency
+                        .target
+                        .as_deref()
+                        .map(|target| format!(" under target '{target}'"))
+                        .unwrap_or_default()
+                )
+            })?;
+            if matches.next().is_some() {
+                return Err(format!(
+                    "Cargo reported ambiguous resolved identities for workspace-inherited dependency '{}'",
+                    dependency.name
+                ));
+            }
+            Ok(cmake::CrateDep {
+                name: candidate.dependency_key.clone(),
+                package: (candidate.package_name != candidate.dependency_key)
+                    .then(|| candidate.package_name.clone()),
+                version: dependency.version.clone(),
+                path: candidate
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                is_local: candidate.source.is_none() && candidate.path.is_some(),
+                workspace_inherited: false,
+                optional: candidate.optional,
+                target: dependency.target.clone(),
+            })
+        })
+        .collect()
+}
+
+struct CrateOutputStaging {
+    path: PathBuf,
+    published: bool,
+}
+
+impl CrateOutputStaging {
+    fn create(output_dir: &Path) -> Result<Self, String> {
+        let parent = output_dir
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to prepare output parent {}: {error}",
+                parent.display()
+            )
+        })?;
+        let stem = output_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("cpp-out");
+        for attempt in 0..1024u32 {
+            let candidate = parent.join(format!(
+                ".rusty-cpp-{stem}-stage-{}-{attempt}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path: candidate,
+                        published: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "Failed to create crate output staging directory {}: {error}",
+                        candidate.display()
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "Could not allocate a unique crate output staging directory beside {}",
+            output_dir.display()
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn publish(mut self, output_dir: &Path) -> Result<(), String> {
+        publish_staged_output_tree(&self.path, output_dir)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for CrateOutputStaging {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn publish_staged_output_tree(staged: &Path, output: &Path) -> Result<(), String> {
+    publish_staged_output_tree_with_rename(staged, output, |source, destination| {
+        std::fs::rename(source, destination)
+    })
+}
+
+/// Publish a complete generated tree without ever merging entries into the
+/// live output. The staging directory is a sibling of `output`, so each rename
+/// is a same-filesystem top-level operation.
+///
+/// If an output already exists, first move the whole old tree aside. A failure
+/// to install the staged tree then restores that backup before reporting the
+/// error. Once the staged tree is installed, failure to delete the recoverable
+/// old backup is a cleanup warning rather than a false generation failure: a
+/// nonzero result must never describe a command that already replaced the live
+/// output.
+fn publish_staged_output_tree_with_rename<R>(
+    staged: &Path,
+    output: &Path,
+    mut rename: R,
+) -> Result<(), String>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    let _publish_lock = CrateOutputPublishLock::acquire(output)?;
+    let staged_metadata = std::fs::symlink_metadata(staged).map_err(|error| {
+        format!(
+            "Failed to inspect crate output staging directory {}: {error}",
+            staged.display()
+        )
+    })?;
+    if !staged_metadata.file_type().is_dir() || staged_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Crate output staging path {} is not a real directory",
+            staged.display()
+        ));
+    }
+
+    let output_metadata = match std::fs::symlink_metadata(output) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect existing crate output {}: {error}",
+                output.display()
+            ));
+        }
+    };
+
+    let Some(output_metadata) = output_metadata else {
+        rename(staged, output).map_err(|error| {
+            format!(
+                "Failed to publish expanded crate output {}: {error}",
+                output.display()
+            )
+        })?;
+        return Ok(());
+    };
+
+    if !output_metadata.file_type().is_dir() || output_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to replace crate output {} because it is not a real directory",
+            output.display()
+        ));
+    }
+
+    let backup = unused_crate_output_sibling(output, "backup")?;
+    rename(output, &backup).map_err(|error| {
+        format!(
+            "Failed to move existing crate output {} to transactional backup {}: {error}",
+            output.display(),
+            backup.display()
+        )
+    })?;
+
+    if let Err(publish_error) = rename(staged, output) {
+        return match rename(&backup, output) {
+            Ok(()) => Err(format!(
+                "Failed to publish staged crate output {} to {}; restored the previous output unchanged: {publish_error}",
+                staged.display(),
+                output.display()
+            )),
+            Err(rollback_error) => Err(format!(
+                "Failed to publish staged crate output {} to {}: {publish_error}; CRITICAL: failed to restore the previous output from {}: {rollback_error}",
+                staged.display(),
+                output.display(),
+                backup.display()
+            )),
+        };
+    }
+
+    if let Err(error) = std::fs::remove_dir_all(&backup) {
+        eprintln!(
+            "Warning: published complete crate output {}, but could not remove recoverable transactional backup {}: {error}",
+            output.display(),
+            backup.display()
+        );
+    }
+    Ok(())
+}
+
+struct CrateOutputPublishLock {
+    path: PathBuf,
+}
+
+impl CrateOutputPublishLock {
+    fn acquire(output: &Path) -> Result<Self, String> {
+        let path = crate_output_sibling(output, "publish-lock")?;
+        std::fs::create_dir(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "Refusing to publish crate output {} while another transaction owns or left the exclusive lock {}",
+                    output.display(),
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Failed to acquire exclusive crate output transaction lock {}: {error}",
+                    path.display()
+                )
+            }
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for CrateOutputPublishLock {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir(&self.path) {
+            eprintln!(
+                "Warning: could not remove crate output transaction lock {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+fn crate_output_sibling(output: &Path, role: &str) -> Result<PathBuf, String> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Crate output {} has no usable parent for a sibling {role}",
+                output.display()
+            )
+        })?;
+    let stem = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cpp-out");
+    Ok(parent.join(format!(".rusty-cpp-{stem}-{role}")))
+}
+
+fn unused_crate_output_sibling(output: &Path, role: &str) -> Result<PathBuf, String> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let stem = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cpp-out");
+    for attempt in 0..1024u32 {
+        let candidate = parent.join(format!(
+            ".rusty-cpp-{stem}-{role}-{}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect transactional crate output path {}: {error}",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "Could not allocate a unique transactional crate output {role} beside {}",
+        output.display()
+    ))
+}
+
+/// Resolve a user-supplied expanded-crate output to a stable physical parent
+/// before creating its sibling stage. The final component must name a child;
+/// `.`/`..`, a filesystem root, the current working directory, the crate
+/// source directory (the manifest's parent), the directory holding the
+/// running generator binary, and any of their ancestors are never valid
+/// generator-owned replacement trees.
+fn prepare_transactional_crate_output_path(
+    output: &Path,
+    manifest_path: &Path,
+) -> Result<PathBuf, String> {
+    let leaf = output.file_name().ok_or_else(|| {
+        format!(
+            "Expanded crate output {} must name a generator-owned child directory, not `.`/`..` or a filesystem root",
+            output.display()
+        )
+    })?;
+    if leaf == std::ffi::OsStr::new(".") || leaf == std::ffi::OsStr::new("..") {
+        return Err(format!(
+            "Expanded crate output {} must name a generator-owned child directory, not `.` or `..`",
+            output.display()
+        ));
+    }
+
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("Failed to resolve current directory: {error}"))?;
+    let absolute = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        current_dir.join(output)
+    };
+    let parent = absolute.parent().ok_or_else(|| {
+        format!(
+            "Expanded crate output {} has no parent for transactional publication",
+            output.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to prepare output parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    let physical_parent = std::fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "Failed to resolve physical output parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    let resolved = physical_parent.join(leaf);
+    let physical_current_dir = std::fs::canonicalize(&current_dir).map_err(|error| {
+        format!(
+            "Failed to resolve physical current directory {}: {error}",
+            current_dir.display()
+        )
+    })?;
+    if physical_current_dir.starts_with(&resolved) {
+        return Err(format!(
+            "Refusing expanded crate output {} because replacing it would replace the current working directory {} or one of its ancestors",
+            output.display(),
+            physical_current_dir.display()
+        ));
+    }
+    let manifest_parent = manifest_path.parent().ok_or_else(|| {
+        format!(
+            "Cargo manifest {} has no parent source directory",
+            manifest_path.display()
+        )
+    })?;
+    let physical_manifest_parent = std::fs::canonicalize(manifest_parent).map_err(|error| {
+        format!(
+            "Failed to resolve physical crate source directory {}: {error}",
+            manifest_parent.display()
+        )
+    })?;
+    if physical_manifest_parent.starts_with(&resolved) {
+        return Err(format!(
+            "Refusing expanded crate output {} because replacing it would replace the crate source directory {} or one of its ancestors",
+            output.display(),
+            physical_manifest_parent.display()
+        ));
+    }
+    let current_exe = std::env::current_exe()
+        .map_err(|error| format!("Failed to resolve current generator binary: {error}"))?;
+    let physical_current_exe = std::fs::canonicalize(&current_exe).map_err(|error| {
+        format!(
+            "Failed to resolve physical generator binary {}: {error}",
+            current_exe.display()
+        )
+    })?;
+    let physical_exe_dir = physical_current_exe.parent().ok_or_else(|| {
+        format!(
+            "Generator binary {} has no parent directory",
+            physical_current_exe.display()
+        )
+    })?;
+    if physical_exe_dir.starts_with(&resolved) {
+        return Err(format!(
+            "Refusing expanded crate output {} because replacing it would replace the generator binary directory {} or one of its ancestors",
+            output.display(),
+            physical_exe_dir.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+fn transpile_crate_with_context(
     cargo_toml_path: &Path,
     output_dir: &Path,
     type_map: &types::UserTypeMap,
     expand: bool,
     verify: bool,
     transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<(), String> {
+    // Normalize once at the crate-mode boundary.  A valid one-component
+    // spelling such as `Cargo.toml` has an empty lexical parent; passing that
+    // empty path to Cargo as a working directory would lose the caller's exact
+    // manifest/configuration context before graph authentication begins.
+    let canonical_cargo_toml_path = std::fs::canonicalize(cargo_toml_path).map_err(|error| {
+        format!(
+            "Failed to resolve Cargo manifest {}: {error}",
+            cargo_toml_path.display()
+        )
+    })?;
+    let cargo_toml_path = canonical_cargo_toml_path.as_path();
+    if !expand {
+        validate_selected_package_matches_manifest(cargo_toml_path, package_filter)?;
+        let (_, targets) = metadata::discover_targets_with_context(
+            cargo_toml_path,
+            package_filter,
+            cargo_flags,
+        )
+        .map_err(|error| {
+            format!(
+                "crate-mode provenance and source-owned C++ contracts require an exact Cargo target-selected normal local-dependency graph before output: {error}"
+            )
+        })?;
+        let compilation = if targets.len() == 1 {
+            metadata::CargoCompilationContext::exact(&targets[0], false)
+        } else {
+            metadata::CargoCompilationContext::normal_package()
+        };
+        let mut authenticated_options = transpile_options.clone();
+        // Root provenance authentication resolves Cargo's full dependency
+        // graph, so a broken transitive local closure (for example a `rusty`
+        // path dependency naming a non-runtime package) would otherwise
+        // surface here as a raw `cargo metadata` error. The whole-closure
+        // preflight owns that failure mode: replay it on the error path so
+        // identity mismatches keep failing closed with the closure
+        // diagnostic before any output path exists, while authentication
+        // failures unrelated to the closure keep their own error.
+        authenticated_options.authenticated_cpp_inherit_roots =
+            match authenticated_cpp_inherit_roots_for_compilation(
+                cargo_toml_path,
+                package_filter,
+                cargo_flags,
+                &compilation,
+            ) {
+                Ok(roots) => roots,
+                Err(error) => {
+                    preflight_cpp_abi_whole_dependency_closure_with_context(
+                        cargo_toml_path,
+                        false,
+                        package_filter,
+                        cargo_flags,
+                    )?;
+                    return Err(error);
+                }
+            };
+        authenticated_options.authenticated_sysroot_roots =
+            match authenticated_sysroot_roots_for_compilation(
+                cargo_toml_path,
+                package_filter,
+                cargo_flags,
+                &compilation,
+            ) {
+                Ok(roots) => roots,
+                Err(error) => {
+                    preflight_cpp_abi_whole_dependency_closure_with_context(
+                        cargo_toml_path,
+                        false,
+                        package_filter,
+                        cargo_flags,
+                    )?;
+                    return Err(error);
+                }
+            };
+        return transpile_crate_impl(
+            cargo_toml_path,
+            output_dir,
+            type_map,
+            false,
+            verify,
+            &authenticated_options,
+            module_preamble,
+            package_filter,
+            cargo_flags,
+            false,
+            None,
+        );
+    }
+
+    // Resolve the exact target-normal local graph, including each package's
+    // Cargo-selected feature set, before creating either staging or live
+    // output. `cargo metadata` alone exposes a build/dev/proc-macro feature
+    // union and is not a sound recursive expansion context.
+    let effective_dependencies =
+        metadata::resolve_effective_local_normal_dependency_graph_with_context(
+            cargo_toml_path,
+            package_filter,
+            cargo_flags,
+        )?;
+    if effective_dependencies.root_manifest() != cargo_toml_path {
+        return Err(format!(
+            "Cargo's effective normal dependency graph root {} does not match requested manifest {}",
+            effective_dependencies.root_manifest().display(),
+            cargo_toml_path.display()
+        ));
+    }
+
+    // Expansion is an explicit request that may fail during Cargo target
+    // selection, macro expansion, dependency expansion, or transpilation.
+    // Generate the complete tree out of sight and publish it only after every
+    // requested expansion succeeds, leaving absent and pre-existing outputs
+    // untouched on failure.
+    // Resolve output ownership before invoking Cargo. In particular an unsafe
+    // lexical spelling such as `--output-dir .` must fail without letting a
+    // metadata/tree query create a lockfile or target directory in the source
+    // tree that the caller accidentally asked us to replace. The canonicalized
+    // manifest anchors the source-directory ownership check independently of
+    // the process working directory.
+    let output_dir = prepare_transactional_crate_output_path(output_dir, cargo_toml_path)?;
+
+    let staging = CrateOutputStaging::create(&output_dir)?;
+    transpile_crate_to_output_with_context(
+        cargo_toml_path,
+        staging.path(),
+        type_map,
+        true,
+        verify,
+        transpile_options,
+        module_preamble,
+        package_filter,
+        cargo_flags,
+        Some(&effective_dependencies),
+    )?;
+    staging.publish(&output_dir)
+}
+
+fn exact_conventional_lib_expansion_target<'a>(
+    project_dir: &Path,
+    targets: &'a [metadata::CrateTarget],
+) -> Result<&'a metadata::CrateTarget, String> {
+    if targets.len() != 1 {
+        let discovered = if targets.is_empty() {
+            "none".to_string()
+        } else {
+            targets
+                .iter()
+                .map(|target| format!("'{}' ({:?})", target.name, target.kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(format!(
+            "crate --expand requires exactly one unambiguous conventional library target at src/lib.rs; Cargo discovered {} target(s): {discovered}",
+            targets.len()
+        ));
+    }
+
+    let target = &targets[0];
+    if !matches!(target.kind, metadata::TargetKind::Lib) {
+        return Err(format!(
+            "crate --expand requires a conventional library target at src/lib.rs; Cargo selected '{}' ({:?})",
+            target.name, target.kind
+        ));
+    }
+    let conventional_root = project_dir.join("src/lib.rs");
+    let conventional_root = std::fs::canonicalize(&conventional_root).map_err(|error| {
+        format!(
+            "crate --expand requires the conventional library root {}: {error}",
+            conventional_root.display()
+        )
+    })?;
+    let selected_root = std::fs::canonicalize(&target.src_path).map_err(|error| {
+        format!(
+            "Could not resolve selected Cargo target root {}: {error}",
+            target.src_path.display()
+        )
+    })?;
+    if selected_root != conventional_root {
+        return Err(format!(
+            "crate --expand requires the conventional library target at src/lib.rs; Cargo selected '{}' at {}",
+            target.name,
+            target.src_path.display()
+        ));
+    }
+    Ok(target)
+}
+
+fn transpile_crate_to_output_with_context(
+    cargo_toml_path: &Path,
+    output_dir: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    verify: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
 ) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let crate_name = &cargo.package.name;
+    let deps = cmake::extract_dependencies(&cargo);
+    let runtime_provided_dependencies = validate_rustc_only_runtime_dependencies_with_context(
+        cargo_toml_path,
+        &deps,
+        package_filter,
+        cargo_flags,
+    )?;
+    let mut authenticated_transpile_options = transpile_options.clone();
+
+    // The checked, symlink-aware closure walk must run before the legacy
+    // source collector: a source-directory symlink cycle would otherwise be
+    // followed indefinitely before cpp_abi gets a chance to fail closed.
+    // Marker-free closures still retain the legacy result and output path.
+    preflight_cpp_abi_whole_dependency_closure_with_context(
+        cargo_toml_path,
+        expand,
+        package_filter,
+        cargo_flags,
+    )?;
+    let (_, cargo_targets) =
+        metadata::discover_targets_with_context(cargo_toml_path, package_filter, cargo_flags)?;
+    let expansion_target = if expand {
+        Some(exact_conventional_lib_expansion_target(
+            project_dir,
+            &cargo_targets,
+        )?)
+    } else {
+        None
+    };
+    let compilation = if cargo_targets.len() == 1 {
+        metadata::CargoCompilationContext::exact(&cargo_targets[0], false)
+    } else {
+        // Crate mode applies one option set to every collected source. If more
+        // than one Cargo target could own those files, intersect their target
+        // roots while retaining crate mode's ordinary-dependency invocation.
+        metadata::CargoCompilationContext::normal_package()
+    };
+    authenticated_transpile_options.authenticated_cpp_inherit_roots =
+        authenticated_cpp_inherit_roots_for_compilation(
+            cargo_toml_path,
+            package_filter,
+            cargo_flags,
+            &compilation,
+        )?;
+    authenticated_transpile_options.authenticated_sysroot_roots =
+        authenticated_sysroot_roots_for_compilation(
+            cargo_toml_path,
+            package_filter,
+            cargo_flags,
+            &compilation,
+        )?;
+    let transpile_options = &authenticated_transpile_options;
     let sources = cmake::collect_source_files(project_dir);
 
     if sources.is_empty() {
         return Err("No .rs source files found in src/".to_string());
     }
 
+    // Source-owned ABI contracts need a crate-wide view before any output or
+    // dependency directory can be created. Read every source exactly once;
+    // marker-free crates continue through the ordinary per-file path below.
+    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
+    for rs_path in &sources {
+        let full_rs_path = project_dir.join(rs_path);
+        let source = std::fs::read_to_string(&full_rs_path)
+            .map_err(|error| format!("Error reading {}: {error}", full_rs_path.display()))?;
+        source_units.push((rs_path.clone(), source));
+    }
+    reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
+    let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
+        &source_units,
+        transpile_options.cxx_namespace.as_deref(),
+    )?;
+    if has_cpp_abi {
+        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
+        if expand {
+            return Err(
+                "cpp_abi crate mode does not support --expand because expansion removes inert ABI markers"
+                    .to_string(),
+            );
+        }
+    }
     // Create output directory
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
 
     // Detect and handle dependencies
-    let deps = cmake::extract_dependencies(&cargo);
     let mut local_dep_dirs: Vec<String> = Vec::new();
 
-    if !deps.is_empty() {
+    if expand {
+        let graph = effective_dependencies.ok_or_else(|| {
+            "expanded crate generation is missing its Cargo target-normal dependency graph"
+                .to_string()
+        })?;
+        let selected_dependencies = graph.direct_dependencies(cargo_toml_path).ok_or_else(|| {
+            format!(
+                "Cargo target-normal dependency graph omitted local manifest {}",
+                cargo_toml_path.display()
+            )
+        })?;
+        if !selected_dependencies.is_empty() {
+            println!("\nDependencies:");
+        }
+        for dep in selected_dependencies {
+            let dep_project_dir = dep.manifest_path.parent().ok_or_else(|| {
+                format!(
+                    "Cargo reported a local dependency manifest without a parent: {}",
+                    dep.manifest_path.display()
+                )
+            })?;
+            if runtime_provided_dependencies
+                .runtime_provided
+                .contains(&dep.dependency_key)
+                || runtime_provided_dependencies
+                    .runtime_provided
+                    .contains(&dep.package_name)
+            {
+                println!(
+                    "  {} (local: {}) — provided by the rusty C++ runtime; rustc facade is not generated",
+                    dep.dependency_key,
+                    dep_project_dir.display()
+                );
+                continue;
+            }
+
+            println!(
+                "  {} (local: {}, features: {:?}) — will transpile recursively",
+                dep.dependency_key,
+                dep_project_dir.display(),
+                dep.resolved_features
+            );
+            let dep_out_dir = output_dir.join(&dep.dependency_key);
+            let dependency_flags =
+                dependency_cargo_resolution_flags(&dep.resolved_features, cargo_flags)?;
+            let mut dependency_options = transpile_options.clone();
+            dependency_options.cxx_namespace = Some(dep.dependency_key.replace('-', "_"));
+            dependency_options.auto_namespace = false;
+            transpile_crate_to_output_with_context(
+                &dep.manifest_path,
+                &dep_out_dir,
+                type_map,
+                true,
+                verify,
+                &dependency_options,
+                None,
+                None,
+                &dependency_flags,
+                Some(graph),
+            )
+            .map_err(|error| {
+                format!(
+                    "requested expansion of dependency '{}' failed: {error}",
+                    dep.dependency_key
+                )
+            })?;
+            local_dep_dirs.push(dep.dependency_key.clone());
+        }
+        if !selected_dependencies.is_empty() {
+            println!();
+        }
+    }
+
+    let unconditional_dependencies = deps
+        .iter()
+        .filter(|dependency| dependency.target.is_none())
+        .collect::<Vec<_>>();
+    if !expand && !unconditional_dependencies.is_empty() {
         println!("\nDependencies:");
-        for dep in &deps {
+        for dep in unconditional_dependencies {
+            if runtime_provided_dependencies.runtime_provided.contains(&dep.name) {
+                let dep_path = dep.path.as_deref().unwrap_or("?");
+                println!(
+                    "  {} (local: {}) — provided by the rusty C++ runtime; rustc facade is not generated",
+                    dep.name, dep_path
+                );
+                continue;
+            }
             if dep.is_local {
                 let dep_path = dep.path.as_deref().unwrap_or("?");
                 println!(
@@ -335,16 +2676,32 @@ fn transpile_crate(
                 let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
                 if dep_cargo_toml.exists() {
                     let dep_out_dir = output_dir.join(&dep.name);
-                    match transpile_crate(
+                    let dependency_flags = cargo_non_feature_resolution_flags(cargo_flags)?;
+                    match transpile_crate_with_context(
                         &dep_cargo_toml,
                         &dep_out_dir,
                         type_map,
                         expand,
                         verify,
                         transpile_options,
+                        None,
+                        None,
+                        &dependency_flags,
                     ) {
                         Ok(()) => {
                             local_dep_dirs.push(dep.name.clone());
+                        }
+                        Err(e) if expand => {
+                            return Err(format!(
+                                "requested expansion of dependency '{}' failed: {}",
+                                dep.name, e
+                            ));
+                        }
+                        Err(e) if e.contains("cpp_abi") => {
+                            return Err(format!(
+                                "cpp_abi dependency preflight for '{}' failed: {}",
+                                dep.name, e
+                            ));
                         }
                         Err(e) => {
                             eprintln!(
@@ -374,17 +2731,1457 @@ fn transpile_crate(
     // If --expand, use cargo expand for the whole crate (macro expansion)
     if expand {
         println!("Running cargo expand on '{}'...", crate_name);
+        let target = expansion_target.expect("expanded crate target validated before output");
+        let expanded_source = run_cargo_expand_for_exact_target_with_context(
+            cargo_toml_path,
+            &target.src_path,
+            package_filter,
+            cargo_flags,
+        )?;
+        let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
+        let extension_method_hints = transpile::collect_extension_method_hints(&expanded_source);
+        let mut expanded_options = if let Some(manifest) = module_preamble {
+            let selected = manifest.select_for_modules([crate_name.as_str()])?;
+            let mut opts = transpile_options.clone();
+            opts.explicit_gmf_includes = selected.get(crate_name).cloned().unwrap_or_default();
+            opts
+        } else {
+            transpile_options.clone()
+        };
+        let graph = effective_dependencies.ok_or_else(|| {
+            "expanded crate generation is missing its Cargo target-normal dependency graph"
+                .to_string()
+        })?;
+        let selected_dependencies = graph.direct_dependencies(cargo_toml_path).ok_or_else(|| {
+            format!(
+                "Cargo target-normal dependency graph omitted local manifest {}",
+                cargo_toml_path.display()
+            )
+        })?;
+        let mut root_to_module_import = HashMap::new();
+        for dependency in selected_dependencies {
+            let dependency_root = dependency.dependency_key.replace('-', "_");
+            let dependency_module = dependency.package_name.replace('-', "_");
+            root_to_module_import.insert(dependency_root.clone(), dependency_module);
+            expanded_options
+                .external_crate_module_aliases
+                .insert(dependency_root.clone(), dependency_root);
+        }
+        let cpp_output = transpile::transpile_with_type_map_and_extension_hints_and_options(
+            &expanded_source,
+            Some(crate_name),
+            type_map,
+            &extension_method_hints,
+            &expanded_options,
+        )
+        .map_err(|e| format!("Transpilation of expanded source failed: {}", e))?;
+        let required_imports = collect_required_named_module_imports(
+            &expanded_source,
+            crate_name,
+            &root_to_module_import,
+        );
+        let cpp_output = inject_named_module_imports(&cpp_output, &required_imports);
+        std::fs::write(&cppm_path, &cpp_output)
+            .map_err(|e| format!("Failed to write: {}", e))?;
+        println!("  Expanded and transpiled → {}", cppm_path.display());
+
+        // Generate CMakeLists.txt
+        let cmake_content = cmake::generate_cmake(&cargo, &sources);
+        let cmake_path = output_dir.join("CMakeLists.txt");
+        std::fs::write(&cmake_path, &cmake_content)
+            .map_err(|e| format!("Failed to write CMakeLists.txt: {}", e))?;
+        println!("Generated {}", cmake_path.display());
+        return Ok(());
+    }
+
+    Err("internal crate expansion path did not produce output".to_string())
+}
+
+struct PreparedCrateCodegen {
+    extension_method_hints: HashSet<String>,
+    module_preambles: BTreeMap<String, Vec<transpile::GmfIncludeSpec>>,
+    options: transpile::TranspileOptions,
+}
+
+fn prepare_crate_codegen(
+    sources: &[PathBuf],
+    source_units: &[(PathBuf, String)],
+    crate_name: &str,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+) -> Result<PreparedCrateCodegen, String> {
+    let mut extension_method_hints = HashSet::new();
+    let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
+    let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
+    let mut cross_file_traits: Vec<syn::ItemTrait> = Vec::new();
+    let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
+    let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
+    for (_, source) in source_units {
+        extension_method_hints.extend(transpile::collect_extension_method_hints(source));
+        cross_file_enums.extend(transpile::collect_crate_enum_decls(source));
+        cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(source));
+        cross_file_traits.extend(transpile::collect_crate_trait_decls(source));
+        cross_file_structs.extend(transpile::collect_crate_struct_decls(source));
+        cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(source));
+    }
+
+    let crate_module_names: Vec<String> = sources
+        .iter()
+        .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
+        .collect();
+    let module_preambles = if let Some(manifest) = module_preamble {
+        manifest.select_for_modules(crate_module_names.iter().map(String::as_str))?
+    } else {
+        BTreeMap::new()
+    };
+    let mut options = transpile_options.clone();
+    options.cross_file_enums = cross_file_enums;
+    options.cross_file_impl_blocks = cross_file_impl_blocks;
+    options.cross_file_traits = cross_file_traits;
+    // B: the crate-wide audited-name map, so a caller in one file emits the
+    // owner's C++ identity for a renamed sibling item.
+    options.cross_file_cpp_name_targets = crate::cpp_name::crate_wide_function_targets(source_units);
+    options.cross_file_structs = cross_file_structs;
+    options.cross_file_type_aliases = cross_file_type_aliases;
+    options.crate_module_names = crate_module_names;
+    Ok(PreparedCrateCodegen {
+        extension_method_hints,
+        module_preambles,
+        options,
+    })
+}
+
+fn authenticated_crate_transpile_options_with_context(
+    cargo_toml_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    transpile_options: &transpile::TranspileOptions,
+) -> Result<transpile::TranspileOptions, String> {
+    let (_, targets) =
+        metadata::discover_targets_with_context(cargo_toml_path, package_filter, cargo_flags)?;
+    let compilation = if targets.len() == 1 {
+        metadata::CargoCompilationContext::exact(&targets[0], false)
+    } else {
+        metadata::CargoCompilationContext::normal_package()
+    };
+    let mut authenticated = transpile_options.clone();
+    authenticated.authenticated_cpp_inherit_roots =
+        authenticated_cpp_inherit_roots_for_compilation(
+            cargo_toml_path,
+            package_filter,
+            cargo_flags,
+            &compilation,
+        )?;
+    authenticated.authenticated_sysroot_roots = authenticated_sysroot_roots_for_compilation(
+        cargo_toml_path,
+        package_filter,
+        cargo_flags,
+        &compilation,
+    )?;
+    Ok(authenticated)
+}
+
+fn preflight_cpp_name_crate_sources_exact(
+    cargo: &cmake::CargoToml,
+    sources: &[PathBuf],
+    source_units: &[(PathBuf, String)],
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    trusted_cpp_inherit_provenance: bool,
+) -> Result<bool, String> {
+    let has_cpp_name = cpp_name::preflight_crate_sources_with_cpp_inherit_provenance(
+        source_units,
+        trusted_cpp_inherit_provenance,
+    )?;
+    if has_cpp_name && expand {
+        return Err(
+            "cpp_name crate mode does not support --expand because expansion removes inert name markers"
+                .to_string(),
+        );
+    }
+    if !has_cpp_name {
+        return Ok(false);
+    }
+
+    // The final cpp_name collision proof deliberately uses the same type
+    // mapper as declaration/definition emission. Keep this helper entirely
+    // in memory so it is safe to run over the whole local dependency graph
+    // before the caller creates or changes any output directory.
+    let crate_name = &cargo.package.name;
+    let prepared = prepare_crate_codegen(
+        sources,
+        source_units,
+        crate_name,
+        transpile_options,
+        module_preamble,
+    )?;
+    let mut crate_options = prepared.options;
+    // A preflight is observational. Even if a library caller supplied an
+    // emission path, proving cpp_name must never write a UFCS sidecar.
+    crate_options.emit_ufcs_trait_manifest_path = None;
+    crate_options.cpp_name_trusted_cpp_inherit_provenance =
+        trusted_cpp_inherit_provenance;
+
+    for (rs_path, source) in source_units {
+        if !cpp_name::source_mentions_reserved_marker(source) {
+            continue;
+        }
+        let (_, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
+        let mut module_options = crate_options.clone();
+        module_options.explicit_gmf_includes = prepared
+            .module_preambles
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_default();
+        transpile::transpile_with_type_map_and_extension_hints_and_options(
+            source,
+            Some(&module_name),
+            type_map,
+            &prepared.extension_method_hints,
+            &module_options,
+        )
+        .map_err(|error| {
+            format!(
+                "{}: cpp_name exact emission preflight failed: {error}",
+                rs_path.display()
+            )
+        })?;
+    }
+    Ok(true)
+}
+
+#[derive(Default)]
+struct CppNameClosureReport {
+    any_cpp_name: bool,
+    issues: BTreeSet<String>,
+}
+
+/// Read-only crate-mode cpp_name validation for every local crate that the
+/// ordinary recursive generator can visit. The graph is completed before the
+/// root output directory is touched, so a late dependency collision cannot
+/// leave a partial parent tree behind.
+struct CppNameClosurePreflight<'a> {
+    type_map: &'a types::UserTypeMap,
+    expand: bool,
+    transpile_options: &'a transpile::TranspileOptions,
+    effective_dependencies: Option<&'a metadata::EffectiveLocalNormalDependencyGraph>,
+    root_package_filter: Option<String>,
+    cargo_flags: Vec<String>,
+    root_manifest: PathBuf,
+    root_module_preamble: Option<&'a transpile::ModulePreambleManifest>,
+    report: CppNameClosureReport,
+    visited: BTreeSet<PathBuf>,
+    active: Vec<PathBuf>,
+}
+
+impl<'a> CppNameClosurePreflight<'a> {
+    fn new(
+        cargo_toml_path: &Path,
+        type_map: &'a types::UserTypeMap,
+        expand: bool,
+        transpile_options: &'a transpile::TranspileOptions,
+        root_module_preamble: Option<&'a transpile::ModulePreambleManifest>,
+        root_package_filter: Option<&str>,
+        cargo_flags: &[String],
+    ) -> Self {
+        Self {
+            type_map,
+            expand,
+            transpile_options,
+            effective_dependencies: None,
+            root_package_filter: root_package_filter.map(ToString::to_string),
+            cargo_flags: cargo_flags.to_vec(),
+            root_manifest: CppAbiClosurePreflight::manifest_key(cargo_toml_path),
+            root_module_preamble,
+            report: CppNameClosureReport::default(),
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn with_effective_dependencies(
+        cargo_toml_path: &Path,
+        type_map: &'a types::UserTypeMap,
+        expand: bool,
+        transpile_options: &'a transpile::TranspileOptions,
+        root_module_preamble: Option<&'a transpile::ModulePreambleManifest>,
+        effective_dependencies: &'a metadata::EffectiveLocalNormalDependencyGraph,
+        root_package_filter: Option<&str>,
+        cargo_flags: &[String],
+    ) -> Self {
+        Self {
+            type_map,
+            expand,
+            transpile_options,
+            effective_dependencies: Some(effective_dependencies),
+            root_package_filter: root_package_filter.map(ToString::to_string),
+            cargo_flags: cargo_flags.to_vec(),
+            root_manifest: CppAbiClosurePreflight::manifest_key(cargo_toml_path),
+            root_module_preamble,
+            report: CppNameClosureReport::default(),
+            visited: BTreeSet::new(),
+            active: Vec::new(),
+        }
+    }
+
+    fn issue(&mut self, message: impl Into<String>) {
+        self.report.issues.insert(message.into());
+    }
+
+    fn collect_sources(&mut self, project_dir: &Path) -> Vec<PathBuf> {
+        // Reuse the checked, symlink-aware walker already used by cpp_abi.
+        // Its report is local to this one scan; move all structural failures
+        // into the cpp_name closure report so a graph containing cpp_name
+        // fails closed rather than falling through to the legacy walker.
+        let mut collector = CppAbiClosurePreflight::new(false);
+        let sources = collector.collect_rs_files(project_dir);
+        for issue in collector.report.issues {
+            self.issue(issue);
+        }
+        sources
+    }
+
+    fn read_source_units(&mut self, project_dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+        let sources = self.collect_sources(project_dir);
+        let mut source_units = Vec::with_capacity(sources.len());
+        for relative in &sources {
+            let full = project_dir.join(relative);
+            match std::fs::read_to_string(&full) {
+                Ok(source) => source_units.push((relative.clone(), source)),
+                Err(error) => self.issue(format!(
+                    "could not read Rust source {}: {error}",
+                    full.display()
+                )),
+            }
+        }
+        (sources, source_units)
+    }
+
+    fn note_markers_without_manifest(&mut self, project_dir: &Path) {
+        let (_, source_units) = self.read_source_units(project_dir);
+        if source_units
+            .iter()
+            .any(|(_, source)| cpp_name::source_mentions_reserved_marker(source))
+        {
+            self.report.any_cpp_name = true;
+        }
+    }
+
+    fn visit_manifest(&mut self, cargo_toml_path: &Path) {
+        let visit_key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+        if let Some(cycle_start) = self.active.iter().position(|path| path == &visit_key) {
+            let mut cycle = self.active[cycle_start..]
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            cycle.push(visit_key.display().to_string());
+            self.issue(format!(
+                "local dependency cycle detected during cpp_name preflight: {}",
+                cycle.join(" -> ")
+            ));
+            return;
+        }
+        if !self.visited.insert(visit_key.clone()) {
+            return;
+        }
+        self.active.push(visit_key.clone());
+
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+        let manifest_source = match std::fs::read_to_string(cargo_toml_path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.issue(format!(
+                    "could not read local dependency manifest {} during cpp_name preflight: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.note_markers_without_manifest(project_dir);
+                self.active.pop();
+                return;
+            }
+        };
+        let cargo = match toml::from_str::<cmake::CargoToml>(&manifest_source) {
+            Ok(cargo) => cargo,
+            Err(error) => {
+                self.issue(format!(
+                    "could not parse local dependency manifest {} during cpp_name preflight: {error}",
+                    cargo_toml_path.display()
+                ));
+                self.note_markers_without_manifest(project_dir);
+                self.active.pop();
+                return;
+            }
+        };
+        let declared_dependencies = cmake::extract_dependencies(&cargo);
+        let is_root = visit_key == self.root_manifest;
+        let package_filter = is_root
+            .then(|| self.root_package_filter.clone())
+            .flatten();
+        let cargo_flags = if is_root {
+            self.cargo_flags.clone()
+        } else if let Some(graph) = self.effective_dependencies {
+            match effective_local_package_cargo_flags(graph, cargo_toml_path, &self.cargo_flags) {
+                Ok(flags) => flags,
+                Err(error) => {
+                    self.issue(error);
+                    Vec::new()
+                }
+            }
+        } else {
+            match cargo_non_feature_resolution_flags(&self.cargo_flags) {
+                Ok(flags) => flags,
+                Err(error) => {
+                    self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    Vec::new()
+                }
+            }
+        };
+        let runtime_validation = match validate_rustc_only_runtime_dependencies_with_context(
+            cargo_toml_path,
+            &declared_dependencies,
+            package_filter.as_deref(),
+            &cargo_flags,
+        ) {
+            Ok(validation) => validation,
+            Err(error) => {
+                self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                RustcRuntimeValidation::default()
+            }
+        };
+        let traversal_dependencies = if let Some(graph) = self.effective_dependencies {
+            match effective_local_dependencies_for_manifest(graph, cargo_toml_path) {
+                Ok(dependencies) => dependencies,
+                Err(error) => {
+                    self.issue(format!("{}: {error}", cargo_toml_path.display()));
+                    Vec::new()
+                }
+            }
+        } else {
+            declared_dependencies
+        };
+
+        let (sources, source_units) = self.read_source_units(project_dir);
+        let mentions_cpp_name = source_units
+            .iter()
+            .any(|(_, source)| cpp_name::source_mentions_reserved_marker(source));
+        if mentions_cpp_name {
+            self.report.any_cpp_name = true;
+            let module_preamble = (visit_key == self.root_manifest)
+                .then_some(self.root_module_preamble)
+                .flatten();
+            let authenticated_options =
+                authenticated_crate_transpile_options_with_context(
+                    cargo_toml_path,
+                    package_filter.as_deref(),
+                    &cargo_flags,
+                    self.transpile_options,
+                );
+            let authenticated_options = match authenticated_options {
+                Ok(options) => options,
+                Err(error) => {
+                    self.issue(format!(
+                        "{}: could not authenticate cpp_name Cargo provenance: {error}",
+                        cargo_toml_path.display()
+                    ));
+                    self.transpile_options.clone()
+                }
+            };
+            if let Err(error) = preflight_cpp_name_crate_sources_exact(
+                &cargo,
+                &sources,
+                &source_units,
+                self.type_map,
+                self.expand,
+                &authenticated_options,
+                module_preamble,
+                runtime_validation.trusted_cpp_inherit_provenance,
+            ) {
+                self.issue(format!("{}: {error}", cargo_toml_path.display()));
+            }
+        }
+
+        let mut dependencies = traversal_dependencies
+            .into_iter()
+            .filter(|dependency| dependency.is_local && dependency.target.is_none())
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for dependency in dependencies {
+            // Match generation exactly: the authenticated rustc-only facade
+            // is supplied by the C++ runtime and is never transpiled.
+            if runtime_validation
+                .runtime_provided
+                .contains(&dependency.name)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            self.visit_manifest(&project_dir.join(relative).join("Cargo.toml"));
+        }
+        self.active.pop();
+    }
+
+    fn finish(self) -> Result<bool, String> {
+        if self.report.any_cpp_name && !self.report.issues.is_empty() {
+            return Err(format!(
+                "cpp_name whole local-dependency closure preflight failed before output:\n- {}",
+                self.report
+                    .issues
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            ));
+        }
+        Ok(self.report.any_cpp_name)
+    }
+}
+
+fn preflight_cpp_name_whole_dependency_closure(
+    cargo_toml_path: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<bool, String> {
+    let mut preflight = CppNameClosurePreflight::new(
+        cargo_toml_path,
+        type_map,
+        expand,
+        transpile_options,
+        module_preamble,
+        package_filter,
+        cargo_flags,
+    );
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+fn preflight_cpp_name_effective_dependency_closure(
+    cargo_toml_path: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<bool, String> {
+    let requested = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    if requested != graph.root_manifest() {
+        return Err(format!(
+            "Cargo's target-filtered dependency graph root {} does not match requested manifest {}",
+            graph.root_manifest().display(),
+            requested.display()
+        ));
+    }
+    let mut preflight = CppNameClosurePreflight::with_effective_dependencies(
+        cargo_toml_path,
+        type_map,
+        expand,
+        transpile_options,
+        module_preamble,
+        graph,
+        package_filter,
+        cargo_flags,
+    );
+    preflight.visit_manifest(cargo_toml_path);
+    preflight.finish()
+}
+
+/// Cheap, output-free over-approximation used to decide whether Cargo's exact
+/// target-selected graph is required. It follows every declared local normal
+/// dependency, including optional and target-qualified entries; the later
+/// target-filtered closure discards unselected edges.
+fn dependency_closure_may_have_cpp_name(cargo_toml_path: &Path) -> bool {
+    fn cargo_config_may_select_local_path_override(project_dir: &Path) -> Result<bool, ()> {
+        fn value_mentions_path(value: &toml::Value) -> bool {
+            match value {
+                toml::Value::Table(table) => {
+                    table.contains_key("path") || table.values().any(value_mentions_path)
+                }
+                toml::Value::Array(values) => values.iter().any(value_mentions_path),
+                _ => false,
+            }
+        }
+
+        fn inspect_config(
+            path: &Path,
+            active: &mut BTreeSet<PathBuf>,
+            visited: &mut BTreeSet<PathBuf>,
+        ) -> Result<bool, ()> {
+            let key = CppAbiClosurePreflight::manifest_key(path);
+            if visited.contains(&key) {
+                return Ok(false);
+            }
+            if !active.insert(key.clone()) {
+                return Err(());
+            }
+            let source = std::fs::read_to_string(path).map_err(|_| ())?;
+            let config = toml::from_str::<toml::Value>(&source).map_err(|_| ())?;
+            let table = config.as_table().ok_or(())?;
+
+            if let Some(includes) = table.get("include") {
+                let includes = includes.as_array().ok_or(())?;
+                for include in includes {
+                    let (relative, optional) = match include {
+                        toml::Value::String(path) => (path.as_str(), false),
+                        toml::Value::Table(table) => {
+                            let path = table.get("path").and_then(toml::Value::as_str).ok_or(())?;
+                            let optional = table
+                                .get("optional")
+                                .map(|value| value.as_bool().ok_or(()))
+                                .transpose()?
+                                .unwrap_or(false);
+                            (path, optional)
+                        }
+                        _ => return Err(()),
+                    };
+                    let include_path = Path::new(relative);
+                    let include_path = if include_path.is_absolute() {
+                        include_path.to_path_buf()
+                    } else {
+                        path.parent().ok_or(())?.join(include_path)
+                    };
+                    if optional && !include_path.is_file() {
+                        continue;
+                    }
+                    if inspect_config(&include_path, active, visited)? {
+                        return Ok(true);
+                    }
+                }
+            }
+
+            // Both Cargo's legacy `paths` override and configuration-level
+            // `[patch]` can turn a declared registry/git dependency into a
+            // selected local package. `[replace]` is scanned conservatively
+            // as well, even though Cargo currently documents it for manifests.
+            let has_local_override = table.get("paths").is_some()
+                || ["patch", "replace"]
+                    .iter()
+                    .any(|name| table.get(*name).is_some_and(value_mentions_path));
+            active.remove(&key);
+            visited.insert(key);
+            Ok(has_local_override)
+        }
+
+        let mut cargo_directories = Vec::new();
+        if let Some(cargo_home) = metadata::effective_cargo_home(project_dir) {
+            cargo_directories.push(cargo_home);
+        }
+        cargo_directories.extend(
+            project_dir
+                .ancestors()
+                .map(|directory| directory.join(".cargo")),
+        );
+
+        let mut active = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        for cargo_directory in cargo_directories {
+            let legacy = cargo_directory.join("config");
+            let modern = cargo_directory.join("config.toml");
+            // Cargo prefers the extensionless legacy file when both exist.
+            let config = if legacy.is_file() {
+                Some(legacy)
+            } else if modern.is_file() {
+                Some(modern)
+            } else {
+                None
+            };
+            if let Some(config) = config
+                && inspect_config(&config, &mut active, &mut visited)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn workspace_may_have_local_path_overrides(cargo_toml_path: &Path) -> Result<bool, ()> {
+        fn override_value_mentions_path(value: &toml::Value) -> bool {
+            match value {
+                toml::Value::Table(table) => {
+                    table.contains_key("path") || table.values().any(override_value_mentions_path)
+                }
+                toml::Value::Array(values) => values.iter().any(override_value_mentions_path),
+                _ => false,
+            }
+        }
+
+        fn inspect_manifest(path: &Path) -> Result<(bool, bool, Option<PathBuf>), ()> {
+            let source = std::fs::read_to_string(path).map_err(|_| ())?;
+            let manifest = toml::from_str::<toml::Value>(&source).map_err(|_| ())?;
+            let has_local_override = ["patch", "replace"]
+                .iter()
+                .any(|name| manifest.get(name).is_some_and(override_value_mentions_path));
+            let declares_workspace = manifest.get("workspace").is_some();
+            let explicit_workspace = manifest
+                .get("package")
+                .and_then(toml::Value::as_table)
+                .and_then(|package| package.get("workspace"))
+                .and_then(toml::Value::as_str)
+                .map(PathBuf::from);
+            Ok((has_local_override, declares_workspace, explicit_workspace))
+        }
+
+        let (requested_override, requested_workspace, explicit_workspace) =
+            inspect_manifest(cargo_toml_path)?;
+        if requested_workspace {
+            return Ok(requested_override);
+        }
+        let package_dir = cargo_toml_path.parent().ok_or(())?;
+        if let Some(workspace) = explicit_workspace {
+            let workspace_manifest = if workspace.is_absolute() {
+                workspace.join("Cargo.toml")
+            } else {
+                package_dir.join(workspace).join("Cargo.toml")
+            };
+            return inspect_manifest(&workspace_manifest).map(|(overrides, _, _)| overrides);
+        }
+
+        // Cargo discovers an implicit workspace by walking ancestor manifests
+        // until the nearest `[workspace]`. Only overrides at that root apply.
+        for ancestor in package_dir.ancestors().skip(1) {
+            let candidate = ancestor.join("Cargo.toml");
+            if !candidate.is_file() {
+                continue;
+            }
+            let (overrides, declares_workspace, _) = inspect_manifest(&candidate)?;
+            if declares_workspace {
+                return Ok(overrides);
+            }
+        }
+        // A standalone package is its own workspace root, even without an
+        // explicit `[workspace]` table.
+        Ok(requested_override)
+    }
+
+    fn visit(cargo_toml_path: &Path, visited: &mut BTreeSet<PathBuf>) -> bool {
+        let key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+        if !visited.insert(key) {
+            return false;
+        }
+        let Ok(manifest_source) = std::fs::read_to_string(cargo_toml_path) else {
+            return false;
+        };
+        let Ok(cargo) = toml::from_str::<cmake::CargoToml>(&manifest_source) else {
+            return false;
+        };
+        let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+
+        // Cargo configuration participates in dependency selection but is not
+        // represented in a package's dependency tables. Its path overrides
+        // therefore need their own conservative witness before the manifest
+        // walk can decide that the exact graph is unnecessary.
+        match cargo_config_may_select_local_path_override(project_dir) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(_) => return true,
+        }
+
+        // Reuse the symlink-aware source walker. Its authoritative diagnostics
+        // are retained by the subsequent closure preflight.
+        let mut collector = CppAbiClosurePreflight::new(false);
+        let source_paths = collector.collect_rs_files(project_dir);
+        for relative in source_paths {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| cpp_name::source_mentions_reserved_marker(&source))
+            {
+                return true;
+            }
+        }
+        let mut declared_roots = cargo
+            .lib
+            .as_ref()
+            .and_then(|target| target.path.as_deref())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(bins) = &cargo.bins {
+            declared_roots.extend(
+                bins.iter()
+                    .filter_map(|target| target.path.as_deref().map(PathBuf::from)),
+            );
+        }
+        for relative in declared_roots {
+            if std::fs::read_to_string(project_dir.join(relative))
+                .is_ok_and(|source| cpp_name::source_mentions_reserved_marker(&source))
+            {
+                return true;
+            }
+        }
+
+        let declared = cmake::extract_dependencies(&cargo);
+        let dependencies =
+            match resolve_workspace_inherited_dependencies(cargo_toml_path, &declared) {
+                Ok(dependencies) => dependencies,
+                // This scan is an over-approximation only. On uncertainty, force
+                // the exact Cargo graph path; never let an unresolved inherited
+                // edge hide a selected dependency-owned cpp_name contract.
+                Err(_) => return true,
+            };
+        for dependency in dependencies {
+            if !dependency.is_local
+                || dependency.name == RUSTY_RUNTIME_CRATE_NAME
+                || dependency.package.as_deref() == Some(RUSTY_RUNTIME_CRATE_NAME)
+            {
+                continue;
+            }
+            let Some(relative) = dependency.path.as_deref() else {
+                continue;
+            };
+            if visit(&project_dir.join(relative).join("Cargo.toml"), visited) {
+                return true;
+            }
+        }
+        // Cargo may redirect a registry/git dependency to a local package via
+        // workspace `[patch]` or `[replace]`. Such an edge has no declared
+        // dependency `path`, so any local override forces the exact Cargo
+        // graph path. That graph remains authoritative and discards unused
+        // versions/sources before preflight or recursive generation.
+        match workspace_may_have_local_path_overrides(cargo_toml_path) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            // This scan chooses whether exact Cargo selection is needed. On
+            // uncertainty, force that safe path rather than hiding a selected
+            // dependency-owned cpp_name contract.
+            Err(_) => return true,
+        }
+        false
+    }
+
+    let cargo_toml_path = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    visit(&cargo_toml_path, &mut BTreeSet::new())
+}
+
+/// Run exact per-file lowering across selected local dependencies without
+/// touching the requested output tree. A cpp_name root uses this as its final
+/// atomic gate before the first `create_dir_all`.
+fn preflight_local_dependency_codegen_without_output(
+    dependencies: &[cmake::CrateDep],
+    project_dir: &Path,
+    runtime_provided_dependencies: &HashSet<String>,
+    type_map: &types::UserTypeMap,
+    transpile_options: &transpile::TranspileOptions,
+    cargo_flags: &[String],
+    effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let mut dependencies = dependencies
+        .iter()
+        .filter(|dependency| dependency.target.is_none() && dependency.is_local)
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for dependency in dependencies {
+        if runtime_provided_dependencies.contains(&dependency.name) {
+            continue;
+        }
+        let dependency_path = dependency.path.as_deref().ok_or_else(|| {
+            format!(
+                "local dependency '{}' has no path during atomic codegen preflight",
+                dependency.name
+            )
+        })?;
+        let manifest = project_dir.join(dependency_path).join("Cargo.toml");
+        if !manifest.is_file() {
+            return Err(format!(
+                "local dependency '{}' manifest does not exist at {}",
+                dependency.name,
+                manifest.display()
+            ));
+        }
+        let dependency_flags = if let Some(graph) = effective_dependencies {
+            effective_local_package_cargo_flags(graph, &manifest, cargo_flags)?
+        } else {
+            cargo_non_feature_resolution_flags(cargo_flags)?
+        };
+        preflight_crate_codegen_without_output(
+            &manifest,
+            type_map,
+            transpile_options,
+            &dependency_flags,
+            effective_dependencies,
+            visited,
+        )
+        .map_err(|error| {
+            format!(
+                "dependency '{}' codegen failed before output: {error}",
+                dependency.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn preflight_crate_codegen_without_output(
+    cargo_toml_path: &Path,
+    type_map: &types::UserTypeMap,
+    transpile_options: &transpile::TranspileOptions,
+    cargo_flags: &[String],
+    effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let manifest_key = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
+    if !visited.insert(manifest_key) {
+        return Ok(());
+    }
+
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+    let crate_name = &cargo.package.name;
+    let declared_dependencies = cmake::extract_dependencies(&cargo);
+    let resolved_declared_dependencies =
+        resolve_workspace_inherited_dependencies(cargo_toml_path, &declared_dependencies)?;
+    let runtime_validation = validate_rustc_only_runtime_dependencies_with_context(
+        cargo_toml_path,
+        &resolved_declared_dependencies,
+        None,
+        cargo_flags,
+    )?;
+    let dependencies = if let Some(graph) = effective_dependencies {
+        effective_local_dependencies_for_manifest(graph, cargo_toml_path)?
+    } else {
+        resolved_declared_dependencies
+    };
+    let authenticated_transpile_options = authenticated_crate_transpile_options_with_context(
+        cargo_toml_path,
+        None,
+        cargo_flags,
+        transpile_options,
+    )?;
+    let transpile_options = &authenticated_transpile_options;
+    let sources = cmake::collect_source_files(project_dir);
+    if sources.is_empty() {
+        return Err("No .rs source files found in src/".to_string());
+    }
+
+    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
+    for source_path in &sources {
+        let full_source_path = project_dir.join(source_path);
+        let source = std::fs::read_to_string(&full_source_path)
+            .map_err(|error| format!("Error reading {}: {error}", full_source_path.display()))?;
+        source_units.push((source_path.clone(), source));
+    }
+    reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
+    let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
+        &source_units,
+        transpile_options.cxx_namespace.as_deref(),
+    )?;
+    let has_cpp_abi = cpp_abi_preflight.has_contracts;
+    let has_cpp_defaults = cpp_default_args::preflight_crate_sources(&source_units, type_map)?;
+    let has_cpp_name = preflight_cpp_name_crate_sources_exact(
+        &cargo,
+        &sources,
+        &source_units,
+        type_map,
+        false,
+        transpile_options,
+        None,
+        runtime_validation.trusted_cpp_inherit_provenance,
+    )?;
+    if has_cpp_abi || has_cpp_defaults || has_cpp_name {
+        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
+    }
+
+    let prepared =
+        prepare_crate_codegen(&sources, &source_units, crate_name, transpile_options, None)?;
+    if has_cpp_defaults {
+        for (path, source) in &source_units {
+            if !cpp_default_args::source_mentions_marker(source) {
+                continue;
+            }
+            let file = syn::parse_file(source).map_err(|error| {
+                format!(
+                    "{}: could not parse cpp_default_argument source: {error}",
+                    path.display()
+                )
+            })?;
+            let module_name = cmake::map_rs_to_cppm(path, crate_name).1;
+            let includes = prepared
+                .module_preambles
+                .get(&module_name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            cpp_default_args::validate_required_gmf_includes(&file, includes)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+    let mut prepared_options = prepared.options;
+    // This pass is observational even when a library caller requested a UFCS
+    // manifest for final emission.
+    prepared_options.emit_ufcs_trait_manifest_path = None;
+    for (path, source) in &source_units {
+        let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
+        let mut module_options = prepared_options.clone();
+        module_options.flat_import_type_authorizations = cpp_abi_preflight
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_source.as_path() == path.as_path()
+            })
+            .cloned()
+            .collect();
+        module_options.explicit_gmf_includes = prepared
+            .module_preambles
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_default();
+        transpile::transpile_with_type_map_and_extension_hints_and_options(
+            source,
+            Some(&module_name),
+            type_map,
+            &prepared.extension_method_hints,
+            &module_options,
+        )
+        .map_err(|error| {
+            format!(
+                "codegen preflight for {} failed before output: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    preflight_local_dependency_codegen_without_output(
+        &dependencies,
+        project_dir,
+        &runtime_validation.runtime_provided,
+        type_map,
+        transpile_options,
+        cargo_flags,
+        effective_dependencies,
+        visited,
+    )
+}
+
+fn transpile_crate(
+    cargo_toml_path: &Path,
+    output_dir: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    verify: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+) -> Result<(), String> {
+    transpile_crate_with_context(
+        cargo_toml_path,
+        output_dir,
+        type_map,
+        expand,
+        verify,
+        transpile_options,
+        module_preamble,
+        None,
+        &[],
+    )
+}
+
+fn transpile_crate_impl(
+    cargo_toml_path: &Path,
+    output_dir: &Path,
+    type_map: &types::UserTypeMap,
+    expand: bool,
+    verify: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+    inherited_atomic_dependency_errors: bool,
+    inherited_effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
+) -> Result<(), String> {
+    // Step 1: Parse Cargo.toml and discover source files
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
+    let crate_name = &cargo.package.name;
+    let deps = cmake::extract_dependencies(&cargo);
+    let runtime_validation = validate_rustc_only_runtime_dependencies_with_context(
+        cargo_toml_path,
+        &deps,
+        package_filter,
+        cargo_flags,
+    )?;
+    let mut authenticated_transpile_options = transpile_options.clone();
+    authenticated_transpile_options.cpp_name_trusted_cpp_inherit_provenance =
+        runtime_validation.trusted_cpp_inherit_provenance;
+    let transpile_options = &authenticated_transpile_options;
+
+    // All source-owned C++ contracts share one Cargo-selected local normal
+    // dependency graph.  cpp_name has its own exact-emission proof while
+    // cpp_abi/cpp_default_argument share the syntax/type closure proof; both
+    // must finish before any output path is created.
+    let may_have_cpp_name = dependency_closure_may_have_cpp_name(cargo_toml_path);
+    let may_have_source_contract = dependency_closure_may_have_source_contract(cargo_toml_path);
+    let owned_effective_dependencies = if inherited_atomic_dependency_errors
+        || !(may_have_cpp_name || may_have_source_contract)
+    {
+        None
+    } else {
+        Some(
+            metadata::resolve_effective_local_normal_dependency_graph_with_context(
+                cargo_toml_path,
+                package_filter,
+                cargo_flags,
+            )
+            .map_err(|error| {
+                    format!(
+                        "source-owned C++ contract requires an exact Cargo target-selected normal local-dependency graph before output: {error}"
+                    )
+                })?,
+        )
+    };
+    let (closure_has_cpp_name, closure_has_source_contract, effective_dependencies) =
+        if inherited_atomic_dependency_errors {
+            (true, true, inherited_effective_dependencies)
+        } else if let Some(graph) = owned_effective_dependencies.as_ref() {
+            let selected_has_cpp_name = preflight_cpp_name_effective_dependency_closure(
+                cargo_toml_path,
+                type_map,
+                expand,
+                transpile_options,
+                module_preamble,
+                graph,
+                package_filter,
+                cargo_flags,
+            )?;
+            let selected_has_source_contract =
+                preflight_cpp_source_contract_effective_dependency_closure(
+                    cargo_toml_path,
+                    expand,
+                    graph,
+                    package_filter,
+                    cargo_flags,
+                )?;
+            // cpp_name's marker-free behavior deliberately retains Cargo's
+            // exact graph when its over-approximation found only an unselected
+            // marker edge.  The other contracts keep their historical path in
+            // that case unless cpp_name/config provenance already requires it.
+            let generation_graph = (selected_has_cpp_name
+                || selected_has_source_contract
+                || may_have_cpp_name)
+                .then_some(graph);
+            (
+                selected_has_cpp_name,
+                selected_has_source_contract,
+                generation_graph,
+            )
+        } else {
+            (
+                preflight_cpp_name_whole_dependency_closure(
+                    cargo_toml_path,
+                    type_map,
+                    expand,
+                    transpile_options,
+                    module_preamble,
+                    package_filter,
+                    cargo_flags,
+                )?,
+                preflight_cpp_abi_whole_dependency_closure_with_context(
+                    cargo_toml_path,
+                    expand,
+                    package_filter,
+                    cargo_flags,
+                )?,
+                None,
+            )
+        };
+    let closure_has_any_contract = closure_has_cpp_name || closure_has_source_contract;
+    let atomic_dependency_errors =
+        inherited_atomic_dependency_errors || closure_has_any_contract;
+    let exact_generation_dependencies = effective_dependencies
+        .map(|graph| effective_local_dependencies_for_manifest(graph, cargo_toml_path))
+        .transpose()?;
+    let resolved_atomic_dependencies =
+        if atomic_dependency_errors && exact_generation_dependencies.is_none() {
+            Some(resolve_workspace_inherited_dependencies(
+                cargo_toml_path,
+                &deps,
+            )?)
+        } else {
+            None
+        };
+    let generation_dependencies = exact_generation_dependencies
+        .as_deref()
+        .or(resolved_atomic_dependencies.as_deref())
+        .unwrap_or(&deps);
+    let sources = cmake::collect_source_files(project_dir);
+
+    if sources.is_empty() {
+        return Err("No .rs source files found in src/".to_string());
+    }
+
+    // Source-owned ABI contracts need a crate-wide view before any output or
+    // dependency directory can be created. Read every source exactly once;
+    // marker-free crates continue through the ordinary per-file path below.
+    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
+    for rs_path in &sources {
+        let full_rs_path = project_dir.join(rs_path);
+        let source = std::fs::read_to_string(&full_rs_path)
+            .map_err(|error| format!("Error reading {}: {error}", full_rs_path.display()))?;
+        source_units.push((rs_path.clone(), source));
+    }
+    reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
+    let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
+        &source_units,
+        transpile_options.cxx_namespace.as_deref(),
+    )?;
+    let has_cpp_abi = cpp_abi_preflight.has_contracts;
+    let has_cpp_name = preflight_cpp_name_crate_sources_exact(
+        &cargo,
+        &sources,
+        &source_units,
+        type_map,
+        expand,
+        transpile_options,
+        module_preamble,
+        runtime_validation.trusted_cpp_inherit_provenance,
+    )?;
+    let has_cpp_defaults = cpp_default_args::preflight_crate_sources(&source_units, type_map)?;
+    if has_cpp_abi || has_cpp_name || has_cpp_defaults {
+        validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
+        if expand {
+            return Err(
+                "source-owned C++ contracts do not support --expand because expansion removes inert markers"
+                    .to_string(),
+            );
+        }
+    }
+    let prepared_contract_codegen = if closure_has_any_contract
+        || has_cpp_abi
+        || has_cpp_name
+        || has_cpp_defaults
+    {
+        Some(prepare_crate_codegen(
+            &sources,
+            &source_units,
+            crate_name,
+            transpile_options,
+            module_preamble,
+        )?)
+    } else {
+        None
+    };
+    if has_cpp_defaults {
+        let prepared = prepared_contract_codegen
+            .as_ref()
+            .expect("source contract codegen context must be prepared");
+        for (path, source) in &source_units {
+            if !cpp_default_args::source_mentions_marker(source) {
+                continue;
+            }
+            let file = syn::parse_file(source).map_err(|error| {
+                format!(
+                    "{}: could not parse cpp_default_argument source: {error}",
+                    path.display()
+                )
+            })?;
+            let module_name = cmake::map_rs_to_cppm(path, crate_name).1;
+            let includes = prepared
+                .module_preambles
+                .get(&module_name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            cpp_default_args::validate_required_gmf_includes(&file, includes)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+
+    // Every active source contract promises fail-closed crate generation.
+    // Lower every root source before the first output mutation and retain
+    // those exact bytes for the write phase.
+    let prepared_contract_outputs = if let Some(prepared) = &prepared_contract_codegen {
+        let mut outputs = Vec::with_capacity(source_units.len());
+        for (path, source) in &source_units {
+            let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
+            let mut module_options = prepared.options.clone();
+            module_options.flat_import_type_authorizations = cpp_abi_preflight
+                .flat_import_type_authorizations
+                .iter()
+                .filter(|authorization| {
+                    authorization.consumer_source.as_path() == path.as_path()
+                })
+                .cloned()
+                .collect();
+            module_options.explicit_gmf_includes = prepared
+                .module_preambles
+                .get(&module_name)
+                .cloned()
+                .unwrap_or_default();
+            let output = transpile::transpile_with_type_map_and_extension_hints_and_options(
+                source,
+                Some(&module_name),
+                type_map,
+                &prepared.extension_method_hints,
+                &module_options,
+            )
+            .map_err(|error| {
+                format!(
+                    "source-owned C++ contract root codegen preflight for {} failed before output: {error}",
+                    path.display()
+                )
+            })?;
+            outputs.push(output);
+        }
+        Some(outputs)
+    } else {
+        None
+    };
+    if closure_has_any_contract && !inherited_atomic_dependency_errors {
+        let mut visited = BTreeSet::new();
+        visited.insert(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
+        preflight_local_dependency_codegen_without_output(
+            generation_dependencies,
+            project_dir,
+            &runtime_validation.runtime_provided,
+            type_map,
+            transpile_options,
+            cargo_flags,
+            effective_dependencies,
+            &mut visited,
+        )
+        .map_err(|error| {
+            format!(
+                "source-owned C++ contract dependency codegen preflight failed before output: {error}"
+            )
+        })?;
+    }
+    // Create output directory
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| format!("Failed to create output dir: {}", e))?;
+
+    // Detect and handle dependencies
+    let mut local_dep_dirs: Vec<String> = Vec::new();
+
+    let unconditional_dependencies = generation_dependencies
+        .iter()
+        .filter(|dependency| dependency.target.is_none())
+        .collect::<Vec<_>>();
+    if !unconditional_dependencies.is_empty() {
+        println!("\nDependencies:");
+        for dep in unconditional_dependencies {
+            if runtime_validation.runtime_provided.contains(&dep.name) {
+                let dep_path = dep.path.as_deref().unwrap_or("?");
+                println!(
+                    "  {} (local: {}) — provided by the rusty C++ runtime; rustc facade is not generated",
+                    dep.name, dep_path
+                );
+                continue;
+            }
+            if dep.is_local {
+                let dep_path = dep.path.as_deref().unwrap_or("?");
+                println!(
+                    "  {} (local: {}) — will transpile recursively",
+                    dep.name, dep_path
+                );
+
+                // Recursively transpile local path dependencies
+                let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
+                if dep_cargo_toml.exists() {
+                    let dep_out_dir = output_dir.join(&dep.name);
+                    let dependency_generation = (|| {
+                        let dependency_flags = if let Some(graph) = effective_dependencies {
+                            effective_local_package_cargo_flags(
+                                graph,
+                                &dep_cargo_toml,
+                                cargo_flags,
+                            )?
+                        } else {
+                            cargo_non_feature_resolution_flags(cargo_flags)?
+                        };
+                        let dependency_options =
+                            authenticated_crate_transpile_options_with_context(
+                                &dep_cargo_toml,
+                                None,
+                                &dependency_flags,
+                                transpile_options,
+                            )?;
+                        transpile_crate_impl(
+                            &dep_cargo_toml,
+                            &dep_out_dir,
+                            type_map,
+                            expand,
+                            verify,
+                            &dependency_options,
+                            None,
+                            None,
+                            &dependency_flags,
+                            atomic_dependency_errors,
+                            effective_dependencies,
+                        )
+                    })();
+                    match dependency_generation {
+                        Ok(()) => {
+                            local_dep_dirs.push(dep.name.clone());
+                        }
+                        Err(e) if atomic_dependency_errors => {
+                            return Err(format!(
+                                "source-owned C++ contract dependency generation for '{}' failed: {}",
+                                dep.name, e
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  Warning: failed to transpile dependency '{}': {}",
+                                dep.name, e
+                            );
+                        }
+                    }
+                } else if atomic_dependency_errors {
+                    return Err(format!(
+                        "source-owned C++ contract dependency generation for '{}' failed: Cargo.toml not found at {}",
+                        dep.name,
+                        dep_cargo_toml.display()
+                    ));
+                } else {
+                    eprintln!(
+                        "  Warning: Cargo.toml not found for local dep '{}' at {}",
+                        dep.name,
+                        dep_cargo_toml.display()
+                    );
+                }
+            } else {
+                println!(
+                    "  {} = \"{}\" (external — types may need manual mapping)",
+                    dep.name,
+                    dep.version.as_deref().unwrap_or("*")
+                );
+            }
+        }
+        println!();
+    }
+
+    // If --expand, use cargo expand for the whole crate (macro expansion)
+    if expand {
+        println!("Running cargo expand on '{}'...", crate_name);
         match run_cargo_expand(cargo_toml_path) {
             Ok(expanded_source) => {
                 let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
                 let extension_method_hints =
                     transpile::collect_extension_method_hints(&expanded_source);
+                let expanded_options = if let Some(manifest) = module_preamble {
+                    let selected = manifest.select_for_modules([crate_name.as_str()])?;
+                    let mut opts = transpile_options.clone();
+                    opts.explicit_gmf_includes =
+                        selected.get(crate_name).cloned().unwrap_or_default();
+                    opts
+                } else {
+                    transpile_options.clone()
+                };
                 match transpile::transpile_with_type_map_and_extension_hints_and_options(
                     &expanded_source,
                     Some(crate_name),
                     type_map,
                     &extension_method_hints,
-                    transpile_options,
+                    &expanded_options,
                 ) {
                     Ok(cpp_output) => {
                         std::fs::write(&cppm_path, &cpp_output)
@@ -427,70 +4224,50 @@ fn transpile_crate(
     // can write a single `rusty_hand_slots.md` summary at the end.
     // See `slots.rs` for the rationale.
     let mut hand_slots: Vec<slots::Slot> = Vec::new();
-    let mut extension_method_hints = HashSet::new();
-    let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
-    let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
-    let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
-    let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
-    for rs_path in &sources {
-        let full_rs_path = project_dir.join(rs_path);
-        if let Ok(source) = std::fs::read_to_string(&full_rs_path) {
-            extension_method_hints.extend(transpile::collect_extension_method_hints(&source));
-            cross_file_enums.extend(transpile::collect_crate_enum_decls(&source));
-            cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(&source));
-            cross_file_structs.extend(transpile::collect_crate_struct_decls(&source));
-            cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(&source));
-        }
-    }
-    // Build a per-crate transpile options clone with the collected cross-file
-    // enum decls and impl blocks injected. This lets each file's codegen seed
-    // its data-enum tracking from sibling files (so bare-glob variant patterns
-    // resolve when `Foo` is declared in another file) and detect orphan-impl
-    // blocks (so out-of-line member definitions can be emitted and matching
-    // forward declarations injected into the host struct's body).
-    // Collect every C++ module name we'll produce for this crate so
-    // the codegen can convert `use super::sibling::Item;` into a
-    // proper `import sibling_module;` instead of the broken
-    // `using ::sibling::Item;`. We compute the same module name the
-    // per-file loop will use below (via `cmake::map_rs_to_cppm`) so
-    // the names match exactly.
-    let crate_module_names: Vec<String> = sources
-        .iter()
-        .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
-        .collect();
-    let crate_transpile_options = {
-        let mut opts = transpile_options.clone();
-        opts.cross_file_enums = cross_file_enums;
-        opts.cross_file_impl_blocks = cross_file_impl_blocks;
-        opts.cross_file_structs = cross_file_structs;
-        opts.cross_file_type_aliases = cross_file_type_aliases;
-        opts.crate_module_names = crate_module_names;
-        opts
+    let prepared_codegen = match prepared_contract_codegen {
+        Some(prepared) => prepared,
+        None => prepare_crate_codegen(
+            &sources,
+            &source_units,
+            crate_name,
+            transpile_options,
+            module_preamble,
+        )?,
     };
 
-    for rs_path in &sources {
+    for (source_index, (rs_path, source)) in source_units.iter().enumerate() {
         let (cppm_path, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
-        let full_rs_path = project_dir.join(rs_path);
         let full_cppm_path = output_dir.join(&cppm_path);
 
-        let source = match std::fs::read_to_string(&full_rs_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("  Error reading {}: {}", full_rs_path.display(), e);
-                error_count += 1;
-                continue;
-            }
-        };
+        let mut module_options = prepared_codegen.options.clone();
+        module_options.flat_import_type_authorizations = cpp_abi_preflight
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_source.as_path() == rs_path.as_path()
+            })
+            .cloned()
+            .collect();
+        module_options.explicit_gmf_includes = prepared_codegen
+            .module_preambles
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_default();
 
-        match transpile::transpile_with_type_map_and_extension_hints_and_options(
-            &source,
-            Some(&module_name),
-            type_map,
-            &extension_method_hints,
-            &crate_transpile_options,
-        ) {
+        let transpile_result = match &prepared_contract_outputs {
+            Some(outputs) => Ok(std::borrow::Cow::Borrowed(outputs[source_index].as_str())),
+            None => transpile::transpile_with_type_map_and_extension_hints_and_options(
+                source,
+                Some(&module_name),
+                type_map,
+                &prepared_codegen.extension_method_hints,
+                &module_options,
+            )
+            .map(std::borrow::Cow::Owned),
+        };
+        match transpile_result {
             Ok(cpp_output) => {
-                if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
+                if let Err(e) = std::fs::write(&full_cppm_path, cpp_output.as_bytes()) {
                     eprintln!("  Error writing {}: {}", full_cppm_path.display(), e);
                     error_count += 1;
                     continue;
@@ -598,24 +4375,56 @@ fn transpile_crate(
 
 /// Run `cargo expand` on the input file's crate to get macro-expanded source.
 fn run_cargo_expand(input_path: &Path) -> Result<String, String> {
-    let mut dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    run_cargo_expand_with_context(input_path, None, &[])
+}
 
-    loop {
-        if dir.join("Cargo.toml").exists() {
-            break;
-        }
-        if !dir.pop() {
-            return Err("Could not find Cargo.toml for cargo expand".to_string());
-        }
-    }
+fn run_cargo_expand_with_context(
+    input_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<String, String> {
+    let manifest = nearest_cargo_manifest(input_path)
+        .ok_or_else(|| "Could not find Cargo.toml for cargo expand".to_string())?;
+    run_cargo_expand_for_exact_target_with_context(
+        &manifest,
+        input_path,
+        package_filter,
+        cargo_flags,
+    )
+}
+
+fn run_cargo_expand_for_exact_target_with_context(
+    manifest: &Path,
+    target_source_path: &Path,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<String, String> {
+    let dir = manifest.parent().unwrap_or(Path::new("."));
 
     eprintln!("Running cargo expand in {}...", dir.display());
+
+    let compilation = metadata::compilation_context_for_source(
+        manifest,
+        package_filter,
+        cargo_flags,
+        target_source_path,
+        false,
+    )?;
 
     let mut expand_cmd = std::process::Command::new("cargo");
     expand_cmd
         .arg("expand")
+        .arg("--manifest-path")
+        .arg(manifest)
         .arg("--theme=none")
         .current_dir(&dir);
+    if let Some(package) = package_filter {
+        expand_cmd.arg("-p").arg(package);
+    }
+    expand_cmd.args(compilation.cargo_target_args()?);
+    for flag in cargo_flags {
+        expand_cmd.arg(flag);
+    }
     if let Some(target) = shared_cargo_target_dir() {
         expand_cmd.env("CARGO_TARGET_DIR", &target);
     }
@@ -813,6 +4622,2294 @@ fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_closure_fixture(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture file parent")).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn assert_no_crate_output_transaction_artifacts(parent: &Path) {
+        assert!(
+            std::fs::read_dir(parent).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rusty-cpp-")
+            }),
+            "crate output transaction leaked a staging or backup path in {}",
+            parent.display()
+        );
+    }
+
+    #[test]
+    fn crate_output_publish_replaces_the_complete_tree_and_removes_stale_entries() {
+        let fixture = tempfile::tempdir().unwrap();
+        let staged = fixture.path().join(".stage");
+        let output = fixture.path().join("cpp-out");
+
+        write_closure_fixture(&staged, "root.cppm", "new root\n");
+        write_closure_fixture(&staged, "CMakeLists.txt", "new cmake\n");
+        write_closure_fixture(&staged, "local_dep/local_dep.cppm", "new dep\n");
+        write_closure_fixture(
+            &staged,
+            "local_dep/CMakeLists.txt",
+            "new dependency cmake\n",
+        );
+
+        // Exercise both collision directions. A recursive merge cannot replace
+        // these safely, while a complete top-level tree transaction can.
+        write_closure_fixture(&output, "CMakeLists.txt/old-child", "old directory\n");
+        write_closure_fixture(&output, "local_dep", "old file\n");
+        write_closure_fixture(&output, "stale.cppm", "stale generated output\n");
+
+        publish_staged_output_tree(&staged, &output).unwrap();
+
+        assert_eq!(std::fs::read(output.join("root.cppm")).unwrap(), b"new root\n");
+        assert_eq!(
+            std::fs::read(output.join("CMakeLists.txt")).unwrap(),
+            b"new cmake\n"
+        );
+        assert_eq!(
+            std::fs::read(output.join("local_dep/local_dep.cppm")).unwrap(),
+            b"new dep\n"
+        );
+        assert!(!output.join("stale.cppm").exists());
+        assert!(!staged.exists());
+        assert_no_crate_output_transaction_artifacts(fixture.path());
+    }
+
+    #[test]
+    fn crate_output_publish_rolls_back_an_injected_commit_rename_failure() {
+        let fixture = tempfile::tempdir().unwrap();
+        let staged = fixture.path().join(".stage");
+        let output = fixture.path().join("cpp-out");
+        write_closure_fixture(&staged, "root.cppm", "new root\n");
+        write_closure_fixture(&staged, "local_dep/late.cppm", "new late dep\n");
+        write_closure_fixture(&output, "root.cppm", "old root\n");
+        write_closure_fixture(&output, "local_dep/old.cppm", "old dep\n");
+        write_closure_fixture(&output, "sentinel.txt", "preserve exactly\n");
+
+        let mut rename_count = 0usize;
+        let error = publish_staged_output_tree_with_rename(
+            &staged,
+            &output,
+            |source, destination| {
+                rename_count += 1;
+                if rename_count == 2 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected commit rename failure",
+                    ))
+                } else {
+                    std::fs::rename(source, destination)
+                }
+            },
+        )
+        .expect_err("the injected top-level commit rename must fail");
+
+        assert!(error.contains("restored the previous output unchanged"), "{error}");
+        assert_eq!(rename_count, 3, "backup, commit, and rollback renames");
+        assert_eq!(std::fs::read(output.join("root.cppm")).unwrap(), b"old root\n");
+        assert_eq!(
+            std::fs::read(output.join("local_dep/old.cppm")).unwrap(),
+            b"old dep\n"
+        );
+        assert_eq!(
+            std::fs::read(output.join("sentinel.txt")).unwrap(),
+            b"preserve exactly\n"
+        );
+        assert!(!output.join("local_dep/late.cppm").exists());
+        assert_eq!(std::fs::read(staged.join("root.cppm")).unwrap(), b"new root\n");
+        assert_no_crate_output_transaction_artifacts(fixture.path());
+    }
+
+    #[test]
+    fn crate_output_publish_rejects_a_non_directory_without_touching_it() {
+        let fixture = tempfile::tempdir().unwrap();
+        let staged = fixture.path().join(".stage");
+        let output = fixture.path().join("cpp-out");
+        write_closure_fixture(&staged, "root.cppm", "new root\n");
+        std::fs::write(&output, b"existing non-directory\n").unwrap();
+
+        let error = publish_staged_output_tree(&staged, &output)
+            .expect_err("a non-directory output must fail closed");
+        assert!(error.contains("not a real directory"), "{error}");
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing non-directory\n");
+        assert_eq!(std::fs::read(staged.join("root.cppm")).unwrap(), b"new root\n");
+        assert_no_crate_output_transaction_artifacts(fixture.path());
+    }
+
+    #[test]
+    fn crate_output_publish_lock_contention_fails_before_touching_either_tree() {
+        let fixture = tempfile::tempdir().unwrap();
+        let staged = fixture.path().join(".stage");
+        let output = fixture.path().join("cpp-out");
+        write_closure_fixture(&staged, "root.cppm", "new root\n");
+        write_closure_fixture(&output, "root.cppm", "old root\n");
+        write_closure_fixture(&output, "sentinel.txt", "preserve exactly\n");
+        let competing_lock = crate_output_sibling(&output, "publish-lock").unwrap();
+        std::fs::create_dir(&competing_lock).unwrap();
+
+        let error = publish_staged_output_tree(&staged, &output)
+            .expect_err("an owned publish lock must serialize compatible publishers");
+        assert!(error.contains("exclusive lock"), "{error}");
+        assert_eq!(std::fs::read(output.join("root.cppm")).unwrap(), b"old root\n");
+        assert_eq!(
+            std::fs::read(output.join("sentinel.txt")).unwrap(),
+            b"preserve exactly\n"
+        );
+        assert_eq!(std::fs::read(staged.join("root.cppm")).unwrap(), b"new root\n");
+        assert!(competing_lock.is_dir());
+    }
+
+    #[test]
+    fn crate_output_transaction_skips_preexisting_stage_and_backup_candidates() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output = fixture.path().join("cpp-out");
+        write_closure_fixture(&output, "root.cppm", "old root\n");
+
+        let stem = output.file_name().unwrap().to_string_lossy();
+        let competing_stage = fixture.path().join(format!(
+            ".rusty-cpp-{stem}-stage-{}-0",
+            std::process::id()
+        ));
+        let competing_backup = fixture.path().join(format!(
+            ".rusty-cpp-{stem}-backup-{}-0",
+            std::process::id()
+        ));
+        write_closure_fixture(&competing_stage, "owner.txt", "other stage\n");
+        write_closure_fixture(&competing_backup, "owner.txt", "other backup\n");
+
+        let staging = CrateOutputStaging::create(&output).unwrap();
+        assert_ne!(staging.path(), competing_stage);
+        write_closure_fixture(staging.path(), "root.cppm", "new root\n");
+        staging.publish(&output).unwrap();
+
+        assert_eq!(std::fs::read(output.join("root.cppm")).unwrap(), b"new root\n");
+        assert_eq!(
+            std::fs::read(competing_stage.join("owner.txt")).unwrap(),
+            b"other stage\n"
+        );
+        assert_eq!(
+            std::fs::read(competing_backup.join("owner.txt")).unwrap(),
+            b"other backup\n"
+        );
+        assert!(!crate_output_sibling(&output, "publish-lock").unwrap().exists());
+    }
+
+    fn transactional_test_tree_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut entries = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    stack.push(path);
+                } else if metadata.is_file() {
+                    let bytes = std::fs::read(&path).unwrap();
+                    entries.push((path, bytes));
+                }
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    fn transactional_test_dir_entry_names(dir: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn transactional_crate_output_rejects_self_or_ancestor_aliases_before_staging() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source_root = fixture.path().join("work");
+        let source_dir = source_root.join("proj");
+        write_closure_fixture(
+            &source_dir,
+            "Cargo.toml",
+            "[package]\nname = \"pathprobe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(&source_dir, "src/lib.rs", "pub fn answer() -> i32 {\n    42\n}\n");
+        write_closure_fixture(&source_dir, "SENTINEL.txt", "sacrificial sentinel\n");
+        let manifest = source_dir.join("Cargo.toml");
+
+        for unsafe_output in [Path::new("."), Path::new(".."), Path::new("foo/..")] {
+            let error = prepare_transactional_crate_output_path(unsafe_output, &manifest)
+                .expect_err("self/ancestor output aliases must fail closed");
+            assert!(
+                error.contains("generator-owned child")
+                    || error.contains("current working directory"),
+                "{}: {error}",
+                unsafe_output.display()
+            );
+        }
+
+        let current_dir = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let error = prepare_transactional_crate_output_path(&current_dir, &manifest)
+            .expect_err("an absolute current-directory spelling must fail closed");
+        assert!(error.contains("current working directory"), "{error}");
+
+        // The test process cwd is the crate under test, which is unrelated to
+        // the tempdir fixture: exactly the review's "cwd set elsewhere" shape.
+        // Every ownership refusal below must hold with no help from the cwd
+        // check.
+        let exe_dir = std::fs::canonicalize(std::env::current_exe().unwrap())
+            .unwrap()
+            .parent()
+            .expect("test binary parent directory")
+            .to_path_buf();
+        let exe_bytes_before = std::fs::read(
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        // Symlinked physical-parent aliases of the source dir, of a source
+        // ancestor, and of the generator-binary dir.
+        let parent_alias = fixture.path().join("parent-alias");
+        std::os::unix::fs::symlink(&source_root, &parent_alias).unwrap();
+        let root_alias = fixture.path().join("root-alias");
+        std::os::unix::fs::symlink(fixture.path(), &root_alias).unwrap();
+        let exe_parent_alias = fixture.path().join("exe-parent-alias");
+        std::os::unix::fs::symlink(exe_dir.parent().expect("exe dir parent"), &exe_parent_alias)
+            .unwrap();
+
+        let source_bytes_before = transactional_test_tree_bytes(&source_root);
+        let fixture_names_before = transactional_test_dir_entry_names(fixture.path());
+        let exe_dir_names_before = transactional_test_dir_entry_names(&exe_dir);
+
+        let source_cases = [
+            source_dir.clone(),           // output = the source dir itself
+            source_root.clone(),          // output = a source ancestor
+            fixture.path().to_path_buf(), // output = a deeper source ancestor
+            parent_alias.join("proj"),    // symlinked alias of the source dir
+            root_alias.join("work"),      // symlinked alias of the source ancestor
+        ];
+        for unsafe_output in &source_cases {
+            let error = prepare_transactional_crate_output_path(unsafe_output, &manifest)
+                .expect_err("source-owning outputs must fail closed from an unrelated cwd");
+            assert!(
+                error.contains("crate source directory"),
+                "{}: {error}",
+                unsafe_output.display()
+            );
+        }
+
+        let exe_cases = [
+            exe_dir.clone(),                                     // output = the generator binary dir
+            exe_dir.parent().unwrap().to_path_buf(),             // output = its ancestor
+            exe_parent_alias.join(exe_dir.file_name().unwrap()), // symlinked alias of the binary dir
+        ];
+        for unsafe_output in &exe_cases {
+            let error = prepare_transactional_crate_output_path(unsafe_output, &manifest)
+                .expect_err("generator-owning outputs must fail closed from an unrelated cwd");
+            assert!(
+                error.contains("generator binary directory"),
+                "{}: {error}",
+                unsafe_output.display()
+            );
+        }
+
+        // Every refusal happened before staging: the source tree is
+        // byte-identical, no transaction artifacts appeared anywhere, and the
+        // running generator binary is byte-identical in an unchanged
+        // directory.
+        assert_eq!(source_bytes_before, transactional_test_tree_bytes(&source_root));
+        assert_eq!(fixture_names_before, transactional_test_dir_entry_names(fixture.path()));
+        assert_eq!(exe_dir_names_before, transactional_test_dir_entry_names(&exe_dir));
+        assert_eq!(
+            exe_bytes_before,
+            std::fs::read(std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap())
+                .unwrap()
+        );
+        assert_no_crate_output_transaction_artifacts(fixture.path());
+        assert_no_crate_output_transaction_artifacts(&source_root);
+        assert_no_crate_output_transaction_artifacts(&source_dir);
+
+        let trailing_dot = fixture.path().join("cpp-out").join(".");
+        let resolved = prepare_transactional_crate_output_path(&trailing_dot, &manifest).unwrap();
+        assert_eq!(resolved, fixture.path().join("cpp-out"));
+        let staging = CrateOutputStaging::create(&resolved).unwrap();
+        assert_eq!(staging.path().parent(), resolved.parent());
+        drop(staging);
+        assert!(!resolved.exists());
+    }
+
+    fn snapshot_output_tree(root: &Path) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
+        fn visit(root: &Path, directory: &Path, out: &mut Vec<(PathBuf, &'static str, Vec<u8>)>) {
+            let mut entries = std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect::<Vec<_>>();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.file_type().is_symlink() {
+                    out.push((
+                        relative,
+                        "symlink",
+                        std::fs::read_link(&path)
+                            .unwrap()
+                            .to_string_lossy()
+                            .as_bytes()
+                            .to_vec(),
+                    ));
+                } else if metadata.is_dir() {
+                    out.push((relative, "directory", Vec::new()));
+                    visit(root, &path, out);
+                } else {
+                    out.push((relative, "file", std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+
+        let mut snapshot = Vec::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn seed_atomic_output(root: &Path, label: &str) {
+        std::fs::create_dir_all(root.join("deep/inner")).unwrap();
+        std::fs::write(root.join("alpha.txt"), format!("alpha:{label}\n")).unwrap();
+        std::fs::write(root.join("deep/beta.txt"), format!("beta:{label}\nline-two\n"))
+            .unwrap();
+        let mut binary = vec![0, 1, 2, 0xff];
+        binary.extend_from_slice(label.as_bytes());
+        binary.push(0);
+        std::fs::write(root.join("deep/inner/binary.bin"), binary).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../alpha.txt", root.join("deep/alpha-link")).unwrap();
+    }
+
+    fn closure_manifest(name: &str, dependencies: &[(&str, &str)]) -> String {
+        let mut manifest =
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");
+        if !dependencies.is_empty() {
+            manifest.push_str("\n[dependencies]\n");
+            for (dependency, path) in dependencies {
+                manifest.push_str(&format!("{dependency} = {{ path = \"{path}\" }}\n"));
+            }
+        }
+        manifest
+    }
+
+    fn assert_cpp_abi_crate_fails_without_output(manifest: &Path, expected: &str) {
+        let output = manifest
+            .parent()
+            .expect("manifest parent")
+            .join("cpp_abi_test_output");
+        let error = transpile_crate(
+            manifest,
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &transpile::TranspileOptions::default(),
+            None,
+        )
+        .expect_err("cpp_abi fixture must fail before output");
+        assert!(error.contains(expected), "{error}");
+        assert!(!output.exists(), "created output at {}", output.display());
+    }
+
+    #[test]
+    fn cpp_inherit_authentication_uses_exact_cargo_package_identity() {
+        let fixture = tempfile::tempdir().unwrap();
+        let runtime = fixture.path().join("runtime");
+        let genuine = fixture.path().join("genuine");
+        let evil = fixture.path().join("evil_macros");
+        let spoof = fixture.path().join("spoof");
+        for package in [&runtime, &genuine, &evil, &spoof] {
+            std::fs::create_dir_all(package.join("src")).unwrap();
+        }
+
+        write_closure_fixture(
+            &runtime,
+            "Cargo.toml",
+            "[package]\nname='rusty'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='rusty'\n[workspace]\n",
+        );
+        write_closure_fixture(&runtime, "src/lib.rs", "pub fn facade() {}\n");
+        write_closure_fixture(
+            &genuine,
+            "Cargo.toml",
+            "[package]\nname='genuine'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nrusty={path='../runtime'}\n[workspace]\n",
+        );
+        write_closure_fixture(&genuine, "src/lib.rs", "pub fn consumer() {}\n");
+        let genuine_roots =
+            authenticated_cpp_inherit_roots_for_manifest(&genuine.join("Cargo.toml")).unwrap();
+        assert_eq!(genuine_roots, HashSet::from(["rusty".to_string()]));
+        assert_eq!(
+            nearest_cargo_manifest(&genuine.join("src/lib.rs")),
+            Some(genuine.join("Cargo.toml"))
+        );
+
+        write_closure_fixture(
+            &evil,
+            "Cargo.toml",
+            "[package]\nname='evil_macros'\nversion='0.0.0'\nedition='2024'\n[lib]\nproc-macro=true\n[workspace]\n",
+        );
+        write_closure_fixture(
+            &evil,
+            "src/lib.rs",
+            "use proc_macro::TokenStream;\n#[proc_macro_attribute]\npub fn cpp_inherit(_: TokenStream, item: TokenStream) -> TokenStream { item }\n",
+        );
+        write_closure_fixture(
+            &spoof,
+            "Cargo.toml",
+            "[package]\nname='spoof'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nrusty={package='evil_macros',path='../evil_macros'}\n[workspace]\n",
+        );
+        write_closure_fixture(
+            &spoof,
+            "src/lib.rs",
+            "use rusty::cpp_inherit;\npub struct Host;\n#[cpp_inherit]\nimpl Host {}\n",
+        );
+        let check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(spoof.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", fixture.path().join("target"))
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "renamed proc-macro fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let error = authenticated_cpp_inherit_roots_for_manifest(&spoof.join("Cargo.toml"))
+            .expect_err("an evil package renamed to rusty must not authenticate");
+        assert!(error.contains("selects package 'evil_macros'"), "{error}");
+    }
+
+    #[test]
+    fn crate_mode_default_authentication_rejects_dependency_named_std() {
+        let fixture = tempfile::tempdir().unwrap();
+        let fake_std = fixture.path().join("fake_std");
+        let consumer = fixture.path().join("consumer");
+        write_closure_fixture(
+            &fake_std,
+            "Cargo.toml",
+            "[package]\nname='std'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='std'\n[workspace]\n",
+        );
+        write_closure_fixture(
+            &fake_std,
+            "src/lib.rs",
+            "#![no_std]\npub mod default { pub trait Default {} }\n",
+        );
+        write_closure_fixture(
+            &consumer,
+            "Cargo.toml",
+            "[package]\nname='std_consumer'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nstd={path='../fake_std'}\n[workspace]\n",
+        );
+        write_closure_fixture(
+            &consumer,
+            "src/lib.rs",
+            r#"#![no_std]
+pub trait Decode { fn decode(&mut self); }
+impl<T: std::default::Default> Decode for core::option::Option<T> {
+    fn decode(&mut self) {}
+}
+"#,
+        );
+        let check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(consumer.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", fixture.path().join("target"))
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "fake-std consumer must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let roots = authenticated_sysroot_roots_for_manifest(&consumer.join("Cargo.toml"))
+            .unwrap();
+        assert_eq!(roots, HashSet::from(["core".to_string()]));
+
+        let aliased_sysroot = fixture.path().join("aliased_sysroot");
+        write_closure_fixture(
+            &aliased_sysroot,
+            "Cargo.toml",
+            "[package]\nname='aliased_sysroot'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+        );
+        write_closure_fixture(
+            &aliased_sysroot,
+            "src/lib.rs",
+            "#![no_std]\nextern crate std as real_std;\npub fn value<T: real_std::default::Default>() {}\n",
+        );
+        let check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(aliased_sysroot.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", fixture.path().join("target-aliased"))
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "aliased sysroot fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        assert_eq!(
+            authenticated_sysroot_roots_for_manifest(&aliased_sysroot.join("Cargo.toml"))
+                .unwrap(),
+            HashSet::from(["std".to_string(), "core".to_string()])
+        );
+
+        let output_dir = fixture.path().join("cpp_out");
+        transpile_crate(
+            &consumer.join("Cargo.toml"),
+            &output_dir,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &transpile::TranspileOptions::default(),
+            None,
+        )
+        .unwrap();
+        let generated = std::fs::read_to_string(output_dir.join("std_consumer.cppm")).unwrap();
+        assert!(
+            generated.contains(
+                "constrained/const generic partial specializations are unsupported"
+            ),
+            "fake std acquired the erased Default Adapter lane:\n{generated}"
+        );
+        assert!(
+            !generated.contains("class DecodeAdapter<rusty::Option<T>>"),
+            "fake std emitted an unconstrained Adapter partial specialization:\n{generated}"
+        );
+    }
+
+    #[test]
+    fn cargo_context_authentication_handles_fake_core_alloc_rusty_and_real_sysroot() {
+        let fixture = tempfile::tempdir().unwrap();
+
+        for reserved_root in ["core", "alloc"] {
+            let provider = fixture.path().join(format!("fake_{reserved_root}"));
+            let consumer = fixture.path().join(format!("{reserved_root}_consumer"));
+            write_closure_fixture(
+                &provider,
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname='provider'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='{reserved_root}'\n[workspace]\n"
+                ),
+            );
+            write_closure_fixture(
+                &provider,
+                "src/lib.rs",
+                if reserved_root == "core" {
+                    "#![no_std]\nextern crate core as real_core;\npub use real_core::*;\n"
+                } else {
+                    "#![no_std]\npub mod default { pub trait Default {} }\n"
+                },
+            );
+            write_closure_fixture(
+                &consumer,
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname='{reserved_root}_consumer'\nversion='0.0.0'\nedition='2024'\n[features]\ndefault=[]\nfake=['dep:provider']\n[dependencies]\nprovider={{path='../fake_{reserved_root}',optional=true}}\n[workspace]\n"
+                ),
+            );
+            let consumer_source = if reserved_root == "core" {
+                "#![no_std]\nextern crate core;\npub fn value() {}\n".to_string()
+            } else {
+                format!(
+                    "#![no_std]\nextern crate {reserved_root};\npub fn value<T: {reserved_root}::default::Default>() {{}}\n"
+                )
+            };
+            write_closure_fixture(&consumer, "src/lib.rs", &consumer_source);
+            let check = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--manifest-path")
+                .arg(consumer.join("Cargo.toml"))
+                .arg("--features")
+                .arg("fake")
+                .env(
+                    "CARGO_TARGET_DIR",
+                    fixture.path().join(format!("target-{reserved_root}")),
+                )
+                .output()
+                .unwrap();
+            assert!(
+                check.status.success(),
+                "fake-{reserved_root} fixture must be Cargo-valid:\n{}",
+                String::from_utf8_lossy(&check.stderr)
+            );
+            let roots = authenticated_sysroot_roots_for_manifest_with_context(
+                &consumer.join("Cargo.toml"),
+                None,
+                &["--features".to_string(), "fake".to_string()],
+            )
+            .unwrap();
+            if reserved_root == "core" {
+                assert!(!roots.contains("core"), "fake core authenticated: {roots:?}");
+            } else {
+                assert_eq!(
+                    roots,
+                    HashSet::from(["core".to_string()]),
+                    "fake alloc changed unrelated sysroot identities: {roots:?}"
+                );
+            }
+        }
+
+        let fake_rusty = fixture.path().join("fake_rusty");
+        let rusty_consumer = fixture.path().join("rusty_consumer");
+        write_closure_fixture(
+            &fake_rusty,
+            "Cargo.toml",
+            "[package]\nname='rusty'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='rusty'\n[workspace]\n",
+        );
+        write_closure_fixture(&fake_rusty, "src/lib.rs", "pub fn facade() {}\n");
+        write_closure_fixture(
+            &rusty_consumer,
+            "Cargo.toml",
+            "[package]\nname='rusty_consumer'\nversion='0.0.0'\nedition='2024'\n[features]\ndefault=[]\nfake-rusty=['dep:rusty']\n[dependencies]\nrusty={path='../fake_rusty',optional=true}\n[workspace]\n",
+        );
+        write_closure_fixture(&rusty_consumer, "src/lib.rs", "pub fn value() {}\n");
+        let rusty_check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(rusty_consumer.join("Cargo.toml"))
+            .arg("--features")
+            .arg("fake-rusty")
+            .env("CARGO_TARGET_DIR", fixture.path().join("target-rusty"))
+            .output()
+            .unwrap();
+        assert!(
+            rusty_check.status.success(),
+            "optional-rusty fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&rusty_check.stderr)
+        );
+        let inactive = authenticated_cpp_inherit_roots_for_manifest_with_context(
+            &rusty_consumer.join("Cargo.toml"),
+            None,
+            &["--no-default-features".to_string()],
+        )
+        .expect_err("an inactive optional reserved facade must not authenticate");
+        assert!(inactive.contains("is optional"), "{inactive}");
+        let active = authenticated_cpp_inherit_roots_for_manifest_with_context(
+            &rusty_consumer.join("Cargo.toml"),
+            None,
+            &["--features".to_string(), "fake-rusty".to_string()],
+        )
+        .expect_err("an active optional reserved facade must not authenticate");
+        assert!(active.contains("is optional"), "{active}");
+
+        let genuine = fixture.path().join("genuine_sysroot");
+        write_closure_fixture(
+            &genuine,
+            "Cargo.toml",
+            "[package]\nname='genuine_sysroot'\nversion='0.0.0'\nedition='2024'\n[features]\ndefault=[]\nunrelated=[]\n[workspace]\n",
+        );
+        write_closure_fixture(
+            &genuine,
+            "src/lib.rs",
+            "#![no_std]\nextern crate std;\npub fn value<T: std::default::Default>() {}\n",
+        );
+        let genuine_check = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(genuine.join("Cargo.toml"))
+            .arg("--all-features")
+            .env("CARGO_TARGET_DIR", fixture.path().join("target-genuine"))
+            .output()
+            .unwrap();
+        assert!(
+            genuine_check.status.success(),
+            "genuine sysroot fixture must be Cargo-valid:\n{}",
+            String::from_utf8_lossy(&genuine_check.stderr)
+        );
+        assert_eq!(
+            authenticated_sysroot_roots_for_manifest_with_context(
+                &genuine.join("Cargo.toml"),
+                None,
+                &["--all-features".to_string()],
+            )
+            .unwrap(),
+            HashSet::from(["std".to_string(), "core".to_string()])
+        );
+    }
+
+    #[test]
+    fn dev_dependency_lib_name_rusty_never_authenticates_compiler_markers() {
+        let fixture = tempfile::tempdir().unwrap();
+        let fake = fixture.path().join("fake");
+        let consumer = fixture.path().join("consumer");
+        write_closure_fixture(
+            &fake,
+            "Cargo.toml",
+            "[package]\nname='innocent_package'\nversion='0.0.0'\nedition='2024'\n[lib]\nname='rusty'\n[workspace]\n",
+        );
+        write_closure_fixture(&fake, "src/lib.rs", "pub fn lookalike() {}\n");
+        write_closure_fixture(
+            &consumer,
+            "Cargo.toml",
+            "[package]\nname='dev_rusty_consumer'\nversion='0.0.0'\nedition='2024'\n\
+             [dev-dependencies]\ninnocent_package={path='../fake'}\n\
+             [[test]]\nname='marker_test'\npath='tests/marker.rs'\n\
+             [workspace]\n",
+        );
+        write_closure_fixture(&consumer, "src/lib.rs", "pub fn value() {}\n");
+        write_closure_fixture(
+            &consumer,
+            "tests/marker.rs",
+            "use rusty::cpp_inherit;\npub struct Host;\n#[cpp_inherit]\nimpl Host {}\n",
+        );
+        let manifest = consumer.join("Cargo.toml");
+        let (_, targets) =
+            metadata::discover_targets_with_context(&manifest, None, &[]).unwrap();
+        let test = targets
+            .iter()
+            .find(|target| matches!(target.kind, metadata::TargetKind::Test))
+            .unwrap();
+        let compilation = metadata::CargoCompilationContext::exact(test, false);
+        let visible = metadata::inspect_resolved_extern_dependencies_for_compilation(
+            &manifest,
+            None,
+            &[],
+            &compilation,
+        )
+        .unwrap();
+        assert_eq!(
+            visible,
+            vec![metadata::ResolvedExternDependency {
+                extern_crate_root: "rusty".to_string(),
+                package_name: "innocent_package".to_string(),
+            }]
+        );
+        assert!(
+            authenticated_cpp_inherit_roots_for_compilation(
+                &manifest,
+                None,
+                &[],
+                &compilation,
+            )
+            .unwrap()
+            .is_empty(),
+            "a dev dependency whose actual library name is rusty authenticated compiler markers"
+        );
+    }
+
+
+    const CLOSURE_ADAPTER: &str = r#"
+#[cfg_attr(any(), cpp_abi(param(bytes, std_string_bytes), returns(std_string_bytes)))]
+pub fn adapted(bytes: Vec<u8>) -> Vec<u8> { bytes }
+"#;
+
+    #[test]
+    fn cpp_import_namespace_crate_mode_keeps_dependency_private_and_ordered() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod rand; pub mod outer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/rand.rs",
+            "pub fn randgen_rand_max() -> f64 { 1.0 }\npub fn randgen_rand_raw() -> u64 { 7 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/outer.rs",
+            "pub mod rand; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/outer/rand.rs",
+            "pub fn unrelated() -> u64 { 99 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/outer/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::{randgen_rand_max, randgen_rand_raw};
+pub fn draw() -> f64 { randgen_rand_raw() as f64 / randgen_rand_max() }
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap();
+
+        let consumer = std::fs::read_to_string(output.join("rrr.outer.consumer.cppm")).unwrap();
+        let module = consumer
+            .find("export module rrr.outer.consumer;")
+            .unwrap();
+        let import = consumer.find("import rrr.rand;").unwrap();
+        let namespace = consumer.find("namespace rrr {").unwrap();
+        let body = consumer.find("randgen_rand_raw()").unwrap();
+        assert!(module < import && import < namespace && namespace < body, "{consumer}");
+        assert!(!consumer.contains("using ::rrr::"), "{consumer}");
+        assert!(!consumer.contains("import rrr.outer.rand;"), "{consumer}");
+        assert!(!consumer.contains("namespace rand ="), "{consumer}");
+        assert!(!consumer.contains("::rrr::rand::"), "{consumer}");
+        let slots = std::fs::read_to_string(output.join("rusty_hand_slots.md")).unwrap();
+        assert!(slots.contains("0 slot(s)") && slots.contains("No slots detected"), "{slots}");
+
+        let mismatch = fixture.path().join("mismatch-out");
+        options.cxx_namespace = Some("wrong".to_string());
+        let error = transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &mismatch,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("does not match active C++ namespace"), "{error}");
+        assert!(!mismatch.exists());
+
+        let inline_child = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            inline_child.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            inline_child.path(),
+            "src/lib.rs",
+            "pub mod rand { pub fn randgen_rand_raw() -> u64 { 7 } } pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            inline_child.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::rand::randgen_rand_raw;
+pub fn draw() -> u64 { randgen_rand_raw() }
+"#,
+        );
+        let inline_child_output = inline_child.path().join("out");
+        options.cxx_namespace = Some("rrr".to_string());
+        let error = transpile_crate(
+            &inline_child.path().join("Cargo.toml"),
+            &inline_child_output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("physical generated root module"), "{error}");
+        assert!(!inline_child_output.exists());
+    }
+
+    #[test]
+    fn cpp_import_namespace_crate_mode_flattens_proven_sibling_types() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nrusty = { path = \"runtime\" }\n\n[workspace]\nmembers = [\"runtime\"]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "runtime/Cargo.toml",
+            "[package]\nname = \"rusty\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[lib]\nname = \"rusty\"\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "runtime/src/lib.rs",
+            "pub fn cpp_inherit() {}\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            r#"
+#[repr(i32)]
+#[cfg_attr(not(any()), derive(Clone, Copy))]
+pub enum ChannelError { None = 0 }
+#[repr(C)]
+pub struct ChannelFrame { pub value: i32 }
+pub trait ChannelBase { fn code(&self) -> i32; }
+pub type ChannelProxy = Box<dyn ChannelBase>;
+"#,
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::{ChannelBase, ChannelError, ChannelFrame, ChannelProxy};
+use rusty::cpp_inherit;
+pub mod external {
+    #[repr(i32)]
+    pub enum ChannelError { Foreign = 11 }
+    #[repr(C)]
+    pub struct ChannelFrame { pub foreign: i32 }
+}
+use self::external::ChannelFrame as OtherLeaf;
+pub struct LocalChannel { pub value: i32 }
+#[cpp_inherit]
+impl ChannelBase for LocalChannel {
+    fn code(&self) -> i32 { self.value }
+}
+pub fn inspect(
+    frame: &ChannelFrame,
+    foreign: &external::ChannelFrame,
+    renamed: &OtherLeaf,
+    _: Option<ChannelProxy>,
+) -> ChannelError {
+    let _ = frame.value + foreign.foreign + renamed.foreign;
+    ChannelError::None
+}
+pub fn external_enum_value() -> external::ChannelError {
+    external::ChannelError::Foreign
+}
+pub fn make_external(value: i32) -> external::ChannelFrame {
+    external::ChannelFrame { foreign: value }
+}
+pub fn inspect_crate(value: &crate::consumer::external::ChannelFrame) -> i32 {
+    value.foreign
+}
+pub fn external_enum_crate() -> crate::consumer::external::ChannelError {
+    crate::consumer::external::ChannelError::Foreign
+}
+pub mod nested {
+    pub fn inspect_super(value: &super::external::ChannelFrame) -> i32 { value.foreign }
+    pub fn inspect_crate(value: &crate::consumer::external::ChannelFrame) -> i32 {
+        value.foreign
+    }
+}
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap();
+
+        let consumer = std::fs::read_to_string(output.join("rrr.consumer.cppm")).unwrap();
+        assert_eq!(
+            consumer
+                .lines()
+                .filter(|line| line.trim() == "import rrr.channel;")
+                .count(),
+            1,
+            "{consumer}"
+        );
+        assert!(!consumer.contains("export import rrr.channel;"), "{consumer}");
+        for leaf in [
+            "ChannelBase",
+            "ChannelError",
+            "ChannelFrame",
+            "ChannelProxy",
+        ] {
+            assert!(
+                consumer.contains(&format!("using ::rrr::{leaf};")),
+                "{consumer}"
+            );
+        }
+        assert!(
+            consumer.contains("struct LocalChannel : public ChannelBase"),
+            "{consumer}"
+        );
+        assert!(consumer.contains("::rrr::ChannelFrame"), "{consumer}");
+        assert!(
+            consumer.contains("const external::ChannelFrame& foreign"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("const external::ChannelFrame& renamed"),
+            "{consumer}"
+        );
+        assert!(
+            !consumer.contains("const ::rrr::ChannelFrame& foreign"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("external::ChannelError external_enum_value()"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("external::ChannelFrame make_external(int32_t value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains(
+                "int32_t inspect_crate(const ::rrr::external::ChannelFrame& value)"
+            ),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("::rrr::external::ChannelError external_enum_crate()"),
+            "{consumer}"
+        );
+        assert!(!consumer.contains("::consumer::external::"), "{consumer}");
+        assert!(!consumer.contains("::rrr::channel::"), "{consumer}");
+    }
+
+    #[test]
+    fn cpp_import_namespace_nested_type_binding_is_lexical() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+pub mod marked {
+    #[cfg_attr(any(), cpp_import_namespace(rrr))]
+    use crate::channel::Target;
+    pub fn inspect(value: &Target) -> i32 { value.value }
+    pub mod child {
+        use super::Target;
+        use super::Target as ImportedTarget;
+        pub fn inspect_super(value: &super::Target) -> i32 { value.value }
+        pub fn inspect_import(value: &Target) -> i32 { value.value }
+        pub fn inspect_alias(value: &ImportedTarget) -> i32 { value.value }
+        pub fn inspect_generic<Target>(_: &Target) {}
+    }
+}
+pub mod sibling {
+    #[repr(C)]
+    pub struct Target { pub other: i32 }
+    pub fn inspect(value: &Target) -> i32 { value.other }
+}
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .unwrap();
+
+        let consumer = std::fs::read_to_string(output.join("rrr.consumer.cppm")).unwrap();
+        assert_eq!(
+            consumer
+                .lines()
+                .filter(|line| line.trim() == "import rrr.channel;")
+                .count(),
+            1,
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect(const Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect_super(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect_import(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("using ImportedTarget = ::rrr::Target;"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("int32_t inspect_alias(const ::rrr::Target& value)"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("void inspect_generic(const Target& _")
+                && !consumer.contains("void inspect_generic(const ::rrr::Target&"),
+            "{consumer}"
+        );
+        assert!(!consumer.contains("::rrr::channel::"), "{consumer}");
+    }
+
+    #[test]
+    fn cpp_import_namespace_rejects_unbound_descendant_constructors_before_output() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            r#"
+#[repr(C)]
+pub struct ChannelFrame { pub value: i32 }
+#[repr(i32)]
+pub enum ChannelError { None = 0 }
+"#,
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::{ChannelError, ChannelFrame};
+pub mod nested {
+    pub fn invalid_struct(value: i32) -> i32 { ChannelFrame { value }.value }
+    pub fn invalid_enum() -> i32 { ChannelError::None as i32 }
+}
+"#,
+        );
+
+        let output = fixture.path().join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        let error = transpile_crate(
+            &fixture.path().join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect_err("unbound descendant flat type leaf");
+        assert!(error.contains("without an exact local binding"), "{error}");
+        assert!(error.contains("consumer::nested"), "{error}");
+        assert!(
+            !output.exists(),
+            "crate preflight must reject before creating the output directory"
+        );
+    }
+
+    #[test]
+    fn cpp_import_namespace_rejects_wrong_namespace_shadow_atomically() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+pub mod nested {
+    pub fn invalid(Target: usize, value: &Target) -> usize {
+        let _ = value;
+        Target
+    }
+}
+"#,
+        );
+
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        let manifest = fixture.path().join("Cargo.toml");
+        let absent = fixture.path().join("absent-output");
+        let error = transpile_crate(
+            &manifest,
+            &absent,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect_err("a value binding cannot satisfy the imported type leaf");
+        assert!(error.contains("type namespace"), "{error}");
+        assert!(!absent.exists(), "preflight created an absent output");
+
+        let existing = fixture.path().join("existing-output");
+        std::fs::create_dir(&existing).unwrap();
+        let sentinel = existing.join("keep.txt");
+        std::fs::write(&sentinel, "preserve\n").unwrap();
+        let error = transpile_crate(
+            &manifest,
+            &existing,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect_err("wrong-namespace rejection with preexisting output");
+        assert!(error.contains("type namespace"), "{error}");
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "preserve\n");
+        let entries = std::fs::read_dir(&existing)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("keep.txt")]);
+    }
+
+    #[test]
+    fn cpp_import_namespace_cfg_presence_matches_cargo_and_is_atomic() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+
+        let manifest = fixture.path().join("Cargo.toml");
+        let options = transpile::TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..Default::default()
+        };
+        for (label, nested) in [
+            (
+                "cfg-type",
+                "#[cfg(any())] pub struct Target { pub local: usize } pub fn invalid(value: &Target) -> usize { value.local }",
+            ),
+            (
+                "cfg-attr-type",
+                "#[cfg_attr(not(any()), cfg(any()))] pub struct Target { pub local: usize } pub fn invalid(value: &Target) -> usize { value.local }",
+            ),
+            (
+                "cfg-value",
+                "#[cfg(any())] pub const Target: usize = 1; pub fn invalid() -> usize { Target }",
+            ),
+            (
+                "cfg-constructor",
+                "#[cfg(any())] pub struct Target(pub usize); pub fn invalid() -> usize { Target(1).0 }",
+            ),
+            (
+                "cfg-module",
+                "#[cfg(any())] pub mod Target { pub const VALUE: usize = 1; } pub fn invalid() -> usize { Target::VALUE }",
+            ),
+            (
+                "cfg-import-alias",
+                "pub struct Other; #[cfg(any())] use self::Other as Target; pub fn invalid(_: &Target) {}",
+            ),
+            (
+                "cfg-attr-import-alias",
+                "pub struct Other; #[cfg_attr(not(any()), cfg(any()))] use self::Other as Target; pub fn invalid(_: &Target) {}",
+            ),
+            (
+                "cfg-pattern-binding",
+                "pub fn invalid() -> usize { #[cfg(any())] let Target = 1usize; Target }",
+            ),
+            (
+                "cfg-variant-pattern-head",
+                "pub enum Other { #[cfg(any())] Target } use self::Other::Target; pub fn invalid() { let _ = Target; }",
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!(
+                    r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+
+pub mod nested {{
+    {nested}
+}}
+"#
+                ),
+            );
+
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert!(
+                !cargo.status.success(),
+                "Cargo unexpectedly accepted the {label} fixture"
+            );
+            assert!(
+                !cargo.stderr.is_empty(),
+                "Cargo rejected {label} without a diagnostic"
+            );
+
+            let absent = fixture.path().join(format!("{label}-absent-output"));
+            let error = transpile_crate(
+                &manifest,
+                &absent,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("cfg-disabled evidence must fail before absent output");
+            assert!(
+                error.contains("without an exact local binding")
+                    || error.contains("unsupported presence/path attributes"),
+                "{label}: {error}"
+            );
+            assert!(!absent.exists(), "{label}: preflight created absent output");
+
+            let existing = fixture.path().join(format!("{label}-existing-output"));
+            std::fs::create_dir(&existing).unwrap();
+            let sentinel = existing.join("keep.txt");
+            std::fs::write(&sentinel, format!("preserve-{label}\n")).unwrap();
+            let error = transpile_crate(
+                &manifest,
+                &existing,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("cfg-disabled evidence must preserve existing output");
+            assert!(
+                error.contains("without an exact local binding")
+                    || error.contains("unsupported presence/path attributes"),
+                "{label}: {error}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).unwrap(),
+                format!("preserve-{label}\n")
+            );
+            let entries = std::fs::read_dir(&existing)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                entries,
+                vec![std::ffi::OsString::from("keep.txt")],
+                "{label}: invalid preflight added output files"
+            );
+        }
+
+        write_closure_fixture(
+            fixture.path(),
+            "src/consumer.rs",
+            r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+
+pub mod nested {
+    pub struct Other;
+    impl Other { pub const Target: usize = 7; }
+    pub fn valid() -> usize { self::Other::Target }
+}
+"#,
+        );
+        let cargo = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--quiet")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "Cargo rejected associated-member fixture: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+
+        let associated_output = fixture.path().join("associated-output");
+        transpile_crate(
+            &manifest,
+            &associated_output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )
+        .expect("a distinctly qualified associated member must transpile");
+        let consumer_cpp =
+            std::fs::read_to_string(associated_output.join("rrr.consumer.cppm")).unwrap();
+        assert!(
+            consumer_cpp.contains("return nested::Other::Target;")
+                || consumer_cpp.contains("return Other::Target;"),
+            "associated const was misclassified as a constructor:\n{consumer_cpp}"
+        );
+        assert!(!consumer_cpp.contains("Other::Target{}"), "{consumer_cpp}");
+    }
+
+    #[test]
+    fn cpp_import_namespace_foreign_member_presence_matches_cargo_and_is_atomic() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+
+        let manifest = fixture.path().join("Cargo.toml");
+        let options = transpile::TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..Default::default()
+        };
+        for (label, foreign, use_, cargo_valid) in [
+            (
+                "cfg-disabled-foreign-fn",
+                "#[cfg(any())] fn Target() -> usize;",
+                "pub fn invalid() -> usize { unsafe { Target() } }",
+                false,
+            ),
+            (
+                "cfg-attr-disabled-foreign-fn",
+                "#[cfg_attr(all(), cfg(any()))] fn Target() -> usize;",
+                "pub fn invalid() -> usize { unsafe { Target() } }",
+                false,
+            ),
+            (
+                "unknown-target-foreign-fn",
+                "#[cfg(target_os = \"linux\")] fn Target() -> usize;",
+                "pub fn valid_for_cargo() -> usize { unsafe { Target() } }",
+                true,
+            ),
+            (
+                "cfg-disabled-foreign-static",
+                "#[cfg(any())] static Target: usize;",
+                "pub fn invalid() -> usize { unsafe { Target } }",
+                false,
+            ),
+            (
+                "cfg-attr-disabled-foreign-static",
+                "#[cfg_attr(all(), cfg(any()))] static Target: usize;",
+                "pub fn invalid() -> usize { unsafe { Target } }",
+                false,
+            ),
+            (
+                "unknown-target-foreign-static",
+                "#[cfg(target_os = \"linux\")] static Target: usize;",
+                "pub fn valid_for_cargo() -> usize { unsafe { Target } }",
+                true,
+            ),
+            (
+                "cfg-disabled-foreign-type",
+                "#[cfg(any())] type Target;",
+                "pub fn invalid(_: &Target) {}",
+                false,
+            ),
+            (
+                "cfg-attr-disabled-foreign-type",
+                "#[cfg_attr(all(), cfg(any()))] type Target;",
+                "pub fn invalid(_: &Target) {}",
+                false,
+            ),
+            (
+                "unknown-target-foreign-type",
+                "#[cfg(target_os = \"windows\")] type Target;",
+                "pub fn invalid(_: &Target) {}",
+                false,
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!(
+                    r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+
+pub mod nested {{
+    unsafe extern "C" {{
+        {foreign}
+    }}
+    {use_}
+}}
+"#,
+                ),
+            );
+
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                cargo.status.success(),
+                cargo_valid,
+                "Cargo parity mismatch for {label}: {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+
+            let absent = fixture.path().join(format!("{label}-absent-output"));
+            let error = transpile_crate(
+                &manifest,
+                &absent,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("conditional foreign member must not prove a descendant binding");
+            assert!(error.contains("without an exact local binding"), "{label}: {error}");
+            assert!(!absent.exists(), "{label}: preflight created absent output");
+
+            let existing = fixture.path().join(format!("{label}-existing-output"));
+            seed_atomic_output(&existing, label);
+            let before = snapshot_output_tree(&existing);
+            let error = transpile_crate(
+                &manifest,
+                &existing,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("conditional foreign member must preserve existing output");
+            assert!(error.contains("without an exact local binding"), "{label}: {error}");
+            assert_eq!(snapshot_output_tree(&existing), before, "{label}");
+        }
+    }
+
+    #[test]
+    fn cpp_import_namespace_enclosing_foreign_block_presence_matches_cargo_and_is_atomic() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[features]\ndefault = [\"present\"]\npresent = []\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/lib.rs",
+            "pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "src/channel.rs",
+            "#[repr(C)] pub struct Target { pub value: i32 }\n",
+        );
+
+        let manifest = fixture.path().join("Cargo.toml");
+        let options = transpile::TranspileOptions {
+            cxx_namespace: Some("rrr".to_string()),
+            ..Default::default()
+        };
+        let marker = r#"
+#[cfg_attr(any(), cpp_import_namespace(rrr))]
+use crate::channel::Target;
+"#;
+
+        for (label, body) in [
+            (
+                "enclosing-cfg-disabled-foreign-fn",
+                r#"
+#[cfg(any())]
+unsafe extern "C" { fn Target() -> usize; }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-cfg-attr-disabled-foreign-fn",
+                r#"
+#[cfg_attr(all(), cfg(any()))]
+unsafe extern "C" { fn Target() -> usize; }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-nested-cfg-attr-disabled-foreign-macro",
+                r#"
+#[cfg_attr(all(), cfg_attr(all(), cfg(any())))]
+unsafe extern "C" { Target!(); }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "member-cfg-disabled-verbatim-safe-fn",
+                r#"
+unsafe extern "C" {
+    #[cfg(any())]
+    safe fn Target() -> usize;
+}
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-decisively-absent-foreign-type",
+                r#"
+#[cfg(all(any(target_os = "linux"), not(all())))]
+unsafe extern "C" { type Target; }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+            (
+                "enclosing-static-present-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg(any(target_os = "impossible", all()))]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn valid() -> usize { unsafe { Target() } }
+}
+"#,
+            ),
+            (
+                "mixed-member-presence",
+                r#"
+unsafe extern "C" {
+    #[cfg(any())]
+    fn Target() -> usize;
+    fn Other() -> usize;
+}
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!("{marker}\n{body}"),
+            );
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "Cargo rejected {label}: {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+
+            let output = fixture.path().join(format!("{label}-output"));
+            transpile_crate(
+                &manifest,
+                &output,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{label} should transpile: {error}"));
+            assert!(output.join("rusty_hand_slots.md").is_file(), "{label}");
+        }
+
+        for (label, body, cargo_valid, expected_error) in [
+            (
+                "enclosing-unknown-target-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn cargo_valid() -> usize { unsafe { Target() } }
+}
+"#,
+                true,
+                "without an exact local binding",
+            ),
+            (
+                "enclosing-unknown-feature-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg(feature = "present")]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn cargo_valid() -> usize { unsafe { Target() } }
+}
+"#,
+                true,
+                "without an exact local binding",
+            ),
+            (
+                "enclosing-unknown-cfg-attr-foreign-fn",
+                r#"
+pub mod nested {
+    #[cfg_attr(target_os = "linux", cfg(any()))]
+    unsafe extern "C" { fn Target() -> usize; }
+    pub fn cargo_invalid() -> usize { unsafe { Target() } }
+}
+"#,
+                false,
+                "without an exact local binding",
+            ),
+            (
+                "enclosing-unknown-target-foreign-macro",
+                r#"
+#[cfg(target_os = "linux")]
+unsafe extern "C" { Target!(); }
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+                false,
+                "opaque macro syntax",
+            ),
+            (
+                "member-unknown-target-verbatim-safe-fn",
+                r#"
+unsafe extern "C" {
+    #[cfg(target_os = "linux")]
+    safe fn Target() -> usize;
+}
+pub fn valid(value: &Target) -> i32 { value.value }
+"#,
+                true,
+                "opaque foreign item syntax",
+            ),
+        ] {
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!("{marker}\n{body}"),
+            );
+            let cargo = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .env("CARGO_TARGET_DIR", fixture.path().join("cargo-target"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                cargo.status.success(),
+                cargo_valid,
+                "Cargo parity mismatch for {label}: {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+
+            let absent = fixture.path().join(format!("{label}-absent-output"));
+            let error = transpile_crate(
+                &manifest,
+                &absent,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("unknown enclosing presence must fail closed");
+            assert!(error.contains(expected_error), "{label}: {error}");
+            assert!(!absent.exists(), "{label}: preflight created absent output");
+
+            let existing = fixture.path().join(format!("{label}-existing-output"));
+            seed_atomic_output(&existing, label);
+            let before = snapshot_output_tree(&existing);
+            let error = transpile_crate(
+                &manifest,
+                &existing,
+                &types::UserTypeMap::default(),
+                false,
+                false,
+                &options,
+                None,
+            )
+            .expect_err("unknown enclosing presence must preserve existing output");
+            assert!(error.contains(expected_error), "{label}: {error}");
+            assert_eq!(snapshot_output_tree(&existing), before, "{label}");
+        }
+    }
+
+    #[test]
+    fn cpp_abi_crate_mode_requires_an_explicit_modern_edition() {
+        for (label, edition, expected) in [
+            (
+                "explicit_2015",
+                "edition = \"2015\"\n",
+                "found `2015`",
+            ),
+            (
+                "omitted",
+                "",
+                "an omitted edition selects Rust 2015",
+            ),
+            (
+                "workspace_inherited",
+                "edition.workspace = true\n",
+                "workspace-inherited or non-string editions are unsupported",
+            ),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let mut manifest = format!(
+                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\n{edition}\n[workspace]\n"
+            );
+            if label == "workspace_inherited" {
+                manifest.push_str("\n[workspace.package]\nedition = \"2015\"\n");
+            }
+            write_closure_fixture(fixture.path(), "Cargo.toml", &manifest);
+            write_closure_fixture(fixture.path(), "src/lib.rs", CLOSURE_ADAPTER);
+            let manifest_path = fixture.path().join("Cargo.toml");
+
+            let error = preflight_cpp_abi_whole_dependency_closure(&manifest_path, false)
+                .expect_err("unsupported edition must fail closed");
+            assert!(error.contains(expected), "{label}: {error}");
+            assert_cpp_abi_crate_fails_without_output(&manifest_path, expected);
+        }
+
+        for edition in ["2018", "2021", "2024"] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"edition_{edition}\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n\n[workspace]\n"
+                ),
+            );
+            write_closure_fixture(fixture.path(), "src/lib.rs", CLOSURE_ADAPTER);
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("Cargo.toml"),
+                    false,
+                )
+                .unwrap(),
+                true,
+                "explicit Rust {edition} must be supported"
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_abi_edition_guard_does_not_change_marker_free_crates() {
+        for (label, edition) in [("explicit_2015", "edition = \"2015\"\n"), ("omitted", "")]
+        {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"marker_free_{label}\"\nversion = \"0.1.0\"\n{edition}\n[workspace]\n"
+                ),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "src/lib.rs",
+                "pub fn ordinary() -> u32 { 1 }\n",
+            );
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("Cargo.toml"),
+                    false,
+                )
+                .unwrap(),
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_reports_missing_malformed_and_cycles_deterministically() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "root/Cargo.toml",
+            &closure_manifest(
+                "root",
+                &[("z_missing", "../z_missing"), ("a_missing", "../a_missing")],
+            ),
+        );
+        write_closure_fixture(fixture.path(), "root/src/lib.rs", CLOSURE_ADAPTER);
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &fixture.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("a_missing/Cargo.toml"), "{error}");
+        assert!(error.contains("z_missing/Cargo.toml"), "{error}");
+        assert!(
+            error.find("a_missing/Cargo.toml").unwrap()
+                < error.find("z_missing/Cargo.toml").unwrap(),
+            "{error}"
+        );
+
+        let malformed = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            malformed.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("bad", "../bad")]),
+        );
+        write_closure_fixture(malformed.path(), "root/src/lib.rs", CLOSURE_ADAPTER);
+        write_closure_fixture(malformed.path(), "bad/Cargo.toml", "not valid toml = [");
+        write_closure_fixture(malformed.path(), "bad/src/lib.rs", CLOSURE_ADAPTER);
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &malformed.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("could not parse local dependency manifest"),
+            "{error}"
+        );
+
+        let cycle = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            cycle.path(),
+            "a/Cargo.toml",
+            &closure_manifest("a", &[("b", "../b")]),
+        );
+        write_closure_fixture(cycle.path(), "a/src/lib.rs", CLOSURE_ADAPTER);
+        write_closure_fixture(
+            cycle.path(),
+            "b/Cargo.toml",
+            &closure_manifest("b", &[("a", "../a")]),
+        );
+        write_closure_fixture(cycle.path(), "b/src/lib.rs", "pub fn ordinary() {}\n");
+        let error =
+            preflight_cpp_abi_whole_dependency_closure(&cycle.path().join("a/Cargo.toml"), false)
+                .unwrap_err();
+        assert!(error.contains("local dependency cycle detected"), "{error}");
+        assert!(error.matches("a/Cargo.toml").count() >= 2, "{error}");
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_accepts_valid_two_level_and_diamond_graphs() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("left", "../left"), ("right", "../right")]),
+        );
+        write_closure_fixture(fixture.path(), "root/src/lib.rs", CLOSURE_ADAPTER);
+        write_closure_fixture(
+            fixture.path(),
+            "left/Cargo.toml",
+            &closure_manifest("left", &[("leaf", "../leaf")]),
+        );
+        write_closure_fixture(fixture.path(), "left/src/lib.rs", "pub fn left() {}\n");
+        write_closure_fixture(
+            fixture.path(),
+            "right/Cargo.toml",
+            &closure_manifest("right", &[("leaf", "../leaf")]),
+        );
+        write_closure_fixture(fixture.path(), "right/src/lib.rs", "pub fn right() {}\n");
+        write_closure_fixture(
+            fixture.path(),
+            "leaf/Cargo.toml",
+            &closure_manifest("leaf", &[]),
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "leaf/src/lib.rs",
+            "pub fn leaf() -> u32 { 1 }\n",
+        );
+        assert_eq!(
+            preflight_cpp_abi_whole_dependency_closure(
+                &fixture.path().join("root/Cargo.toml"),
+                false,
+            )
+            .unwrap(),
+            true
+        );
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_rejects_adapters_in_local_dependencies() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            fixture.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("dep_adapter", "../dep")]),
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "root/src/lib.rs",
+            "pub fn call(bytes: Vec<u8>) -> Vec<u8> { dep_adapter::adapted(bytes) }\n",
+        );
+        write_closure_fixture(
+            fixture.path(),
+            "dep/Cargo.toml",
+            &closure_manifest("dep_adapter", &[]),
+        );
+        write_closure_fixture(fixture.path(), "dep/src/lib.rs", CLOSURE_ADAPTER);
+
+        let root_manifest = fixture.path().join("root/Cargo.toml");
+        let error = preflight_cpp_abi_whole_dependency_closure(&root_manifest, false)
+            .expect_err("cross-crate adapter must fail closed");
+        assert!(error.contains("local dependency"), "{error}");
+        assert!(error.contains("cross-crate adapter calls"), "{error}");
+        assert_cpp_abi_crate_fails_without_output(&root_manifest, "cross-crate adapter calls");
+
+        assert_eq!(
+            preflight_cpp_abi_whole_dependency_closure(
+                &fixture.path().join("dep/Cargo.toml"),
+                false,
+            )
+            .unwrap(),
+            true
+        );
+    }
+
+    #[test]
+    fn cpp_abi_closure_preflight_preserves_marker_free_incomplete_dependency_behavior() {
+        for malformed in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "root/Cargo.toml",
+                &closure_manifest("root", &[("bad", "../bad")]),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "root/src/lib.rs",
+                "pub fn ordinary() -> u32 { 1 }\n",
+            );
+            if malformed {
+                write_closure_fixture(fixture.path(), "bad/Cargo.toml", "invalid = [");
+                write_closure_fixture(
+                    fixture.path(),
+                    "bad/src/lib.rs",
+                    "pub fn ordinary() -> u32 { 2 }\n",
+                );
+            }
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("root/Cargo.toml"),
+                    false,
+                )
+                .unwrap(),
+                false
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_abi_closure_preflight_follows_logical_file_and_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let file_link = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            file_link.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("missing", "../missing")]),
+        );
+        write_closure_fixture(file_link.path(), "root/real.rs", CLOSURE_ADAPTER);
+        std::fs::create_dir_all(file_link.path().join("root/src")).unwrap();
+        symlink("../real.rs", file_link.path().join("root/src/lib.rs")).unwrap();
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &file_link.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("missing/Cargo.toml"), "{error}");
+        assert_cpp_abi_crate_fails_without_output(
+            &file_link.path().join("root/Cargo.toml"),
+            "missing/Cargo.toml",
+        );
+
+        let directory_link = tempfile::tempdir().unwrap();
+        write_closure_fixture(
+            directory_link.path(),
+            "root/Cargo.toml",
+            &closure_manifest("root", &[("missing", "../missing")]),
+        );
+        write_closure_fixture(directory_link.path(), "root/src/lib.rs", "pub mod api;\n");
+        write_closure_fixture(
+            directory_link.path(),
+            "root/real_api/mod.rs",
+            CLOSURE_ADAPTER,
+        );
+        symlink(
+            "../real_api",
+            directory_link.path().join("root/src/api"),
+        )
+        .unwrap();
+        let error = preflight_cpp_abi_whole_dependency_closure(
+            &directory_link.path().join("root/Cargo.toml"),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("missing/Cargo.toml"), "{error}");
+        assert_cpp_abi_crate_fails_without_output(
+            &directory_link.path().join("root/Cargo.toml"),
+            "missing/Cargo.toml",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_abi_closure_preflight_reports_broken_links_and_directory_cycles() {
+        use std::os::unix::fs::symlink;
+
+        for label in ["broken source link", "source directory cycle"] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "root/Cargo.toml",
+                &closure_manifest(
+                    "root",
+                    &[("adapter", "../adapter"), ("problem", "../problem")],
+                ),
+            );
+            write_closure_fixture(fixture.path(), "root/src/lib.rs", "pub fn root() {}\n");
+            write_closure_fixture(
+                fixture.path(),
+                "adapter/Cargo.toml",
+                &closure_manifest("adapter", &[]),
+            );
+            write_closure_fixture(fixture.path(), "adapter/src/lib.rs", CLOSURE_ADAPTER);
+            write_closure_fixture(
+                fixture.path(),
+                "problem/Cargo.toml",
+                &closure_manifest("problem", &[]),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "problem/src/lib.rs",
+                "pub fn ordinary() {}\n",
+            );
+            let problem = fixture.path().join("problem");
+            if label == "broken source link" {
+                symlink("missing-target.rs", problem.join("src/ghost.rs")).unwrap();
+            } else {
+                symlink(".", problem.join("src/loop")).unwrap();
+            }
+
+            let error = preflight_cpp_abi_whole_dependency_closure(
+                &fixture.path().join("root/Cargo.toml"),
+                false,
+            )
+            .expect_err(label);
+            match label {
+                "broken source link" => {
+                    assert!(error.contains("could not inspect source path"), "{error}");
+                    assert!(error.contains("ghost.rs"), "{error}");
+                }
+                _ => assert!(error.contains("source directory symlink cycle"), "{error}"),
+            }
+            let expected = if label == "broken source link" {
+                "ghost.rs"
+            } else {
+                "source directory symlink cycle"
+            };
+            assert_cpp_abi_crate_fails_without_output(
+                &fixture.path().join("root/Cargo.toml"),
+                expected,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_abi_symlink_scan_allows_aliases_and_preserves_marker_free_gating() {
+        use std::os::unix::fs::symlink;
+
+        let aliases = tempfile::tempdir().unwrap();
+        write_closure_fixture(aliases.path(), "crate/src/lib.rs", "pub fn root() {}\n");
+        write_closure_fixture(aliases.path(), "crate/real/mod.rs", "pub fn item() {}\n");
+        symlink("../real", aliases.path().join("crate/src/left")).unwrap();
+        symlink("../real", aliases.path().join("crate/src/right")).unwrap();
+        let mut preflight = CppAbiClosurePreflight::new(false);
+        let files = preflight.collect_rs_files(&aliases.path().join("crate"));
+        assert!(files.contains(&PathBuf::from("src/left/mod.rs")));
+        assert!(files.contains(&PathBuf::from("src/right/mod.rs")));
+        assert!(preflight.report.issues.is_empty());
+
+        for label in ["broken", "cycle"] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "root/Cargo.toml",
+                &closure_manifest("root", &[]),
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "root/src/lib.rs",
+                "pub fn ordinary() {}\n",
+            );
+            let root = fixture.path().join("root");
+            if label == "broken" {
+                symlink("missing.rs", root.join("src/ghost.rs")).unwrap();
+            } else {
+                symlink(".", root.join("src/loop")).unwrap();
+            }
+            assert_eq!(
+                preflight_cpp_abi_whole_dependency_closure(
+                    &fixture.path().join("root/Cargo.toml"),
+                    false,
+                )
+                .expect(label),
+                false
+            );
+        }
+    }
 
     #[test]
     fn test_consumer_rust_module_cli_requires_map_and_module_name() {
@@ -1109,6 +7206,37 @@ export void rusty_test_arrayvec_tests_regular_case() {
             vec!["--features".to_string(), "serde,std".to_string(),]
         );
     }
+
+    #[test]
+    fn test_cargo_resolution_flags_preserve_graph_shaping_context() {
+        assert_eq!(
+            cargo_resolution_flags(
+                Some("fake-std,serde"),
+                false,
+                true,
+                Some("x86_64-unknown-linux-gnu"),
+                &["net.offline=true".to_string(), "config.toml".to_string()],
+                true,
+                false,
+                false,
+            ),
+            vec![
+                "--features",
+                "fake-std,serde",
+                "--no-default-features",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--config",
+                "net.offline=true",
+                "--config",
+                "config.toml",
+                "--locked",
+            ]
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
 }
 
 fn run_cargo_test(
@@ -1304,7 +7432,13 @@ fn run_baseline_attempt(
     work_dir: &Path,
     extra_rustflags: Option<&str>,
 ) -> Result<Output, String> {
-    let initial = run_cargo_test(project_dir, None, package, cargo_flags, extra_rustflags)?;
+    let initial = run_cargo_test(
+        project_dir,
+        Some(manifest),
+        package,
+        cargo_flags,
+        extra_rustflags,
+    )?;
     if initial.status.success() {
         return Ok(initial);
     }
@@ -1415,8 +7549,9 @@ fn discover_targets_with_workspace_fallback(
     package: Option<&str>,
     crate_name: &str,
     work_dir: &Path,
+    cargo_flags: &[String],
 ) -> Result<(String, Vec<metadata::CrateTarget>), String> {
-    let initial = metadata::discover_targets(manifest, package);
+    let initial = metadata::discover_targets_with_context(manifest, package, cargo_flags);
     if initial.is_ok() {
         return initial;
     }
@@ -1435,8 +7570,11 @@ fn discover_targets_with_workspace_fallback(
             workspace_manifest.display(),
             selected_package
         );
-        let workspace_attempt =
-            metadata::discover_targets(&workspace_manifest, Some(selected_package));
+        let workspace_attempt = metadata::discover_targets_with_context(
+            &workspace_manifest,
+            Some(selected_package),
+            cargo_flags,
+        );
         if workspace_attempt.is_ok() {
             return workspace_attempt;
         }
@@ -1459,7 +7597,7 @@ fn discover_targets_with_workspace_fallback(
         "  Metadata retry: cargo metadata --manifest-path {}",
         isolated_manifest.display()
     );
-    metadata::discover_targets(&isolated_manifest, package)
+    metadata::discover_targets_with_context(&isolated_manifest, package, cargo_flags)
 }
 
 fn discover_local_dependencies_with_workspace_fallback(
@@ -1544,7 +7682,13 @@ fn run_cargo_expand_with_workspace_fallback(
     work_dir: &Path,
     isolated_manifest_cache: &mut Option<PathBuf>,
 ) -> Result<Output, String> {
-    let initial = run_cargo_expand_command(project_dir, None, None, expand_args, cargo_flags)?;
+    let initial = run_cargo_expand_command(
+        project_dir,
+        Some(manifest),
+        package,
+        expand_args,
+        cargo_flags,
+    )?;
     if initial.status.success() {
         return Ok(initial);
     }
@@ -1641,6 +7785,166 @@ fn clear_stage_outputs(work_dir: &Path) -> Result<(), String> {
         remove_file_if_exists(&work_dir.join(file_name))?;
     }
     Ok(())
+}
+
+fn cargo_config_fingerprints(project_dir: &Path, cargo_flags: &[String]) -> Vec<(String, String)> {
+    let mut candidates = BTreeSet::new();
+    for ancestor in project_dir.ancestors() {
+        candidates.insert(ancestor.join(".cargo/config.toml"));
+        candidates.insert(ancestor.join(".cargo/config"));
+    }
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        let cargo_home = PathBuf::from(cargo_home);
+        candidates.insert(cargo_home.join("config.toml"));
+        candidates.insert(cargo_home.join("config"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        let cargo_home = PathBuf::from(home).join(".cargo");
+        candidates.insert(cargo_home.join("config.toml"));
+        candidates.insert(cargo_home.join("config"));
+    }
+
+    let mut index = 0usize;
+    while index < cargo_flags.len() {
+        if cargo_flags[index] == "--config" {
+            if let Some(value) = cargo_flags.get(index + 1)
+                && !value.contains('=')
+            {
+                let path = PathBuf::from(value);
+                candidates.insert(if path.is_absolute() {
+                    path
+                } else {
+                    project_dir.join(path)
+                });
+            }
+            index += 2;
+        } else if let Some(value) = cargo_flags[index].strip_prefix("--config=") {
+            if !value.contains('=') {
+                let path = PathBuf::from(value);
+                candidates.insert(if path.is_absolute() {
+                    path
+                } else {
+                    project_dir.join(path)
+                });
+            }
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    candidates
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = fs::read(&path).ok()?;
+            let canonical = fs::canonicalize(&path).unwrap_or(path);
+            Some((
+                canonical.to_string_lossy().into_owned(),
+                format!("{:x}", Sha256::digest(bytes)),
+            ))
+        })
+        .collect()
+}
+
+fn parity_cargo_context_evidence(
+    manifest: &Path,
+    package: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<String, String> {
+    let project_dir = manifest.parent().unwrap_or(Path::new("."));
+    let cargo_metadata_sha256 =
+        metadata::cargo_resolution_graph_fingerprint(manifest, package, cargo_flags)?;
+    let mut cargo_environment = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_string_lossy().into_owned();
+            (key.starts_with("CARGO_")
+                || key.starts_with("RUST")
+                || matches!(key.as_str(), "PATH" | "HOME"))
+            .then(|| (key, value.to_string_lossy().into_owned()))
+        })
+        .collect::<Vec<_>>();
+    cargo_environment.sort();
+    let config_files = cargo_config_fingerprints(project_dir, cargo_flags);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "version": 1,
+        "manifest": fs::canonicalize(manifest).unwrap_or_else(|_| manifest.to_path_buf()),
+        "package": package,
+        "cargo_flags": cargo_flags,
+        "cargo_metadata_sha256": cargo_metadata_sha256,
+        "cargo_environment": cargo_environment,
+        "cargo_config_files": config_files,
+    }))
+    .map_err(|error| format!("could not serialize Cargo resolution context: {error}"))
+}
+
+fn directory_contains_reusable_parity_artifact(path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if directory_contains_reusable_parity_artifact(&path) {
+                return true;
+            }
+        } else if path.extension().is_some_and(|extension| {
+            matches!(extension.to_str(), Some("rs" | "cppm" | "json"))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_or_write_parity_cargo_context(
+    work_dir: &Path,
+    manifest: &Path,
+    package: Option<&str>,
+    cargo_flags: &[String],
+    reuse_requested: bool,
+    skip_expand: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    if dry_run {
+        return Ok(());
+    }
+    let evidence = parity_cargo_context_evidence(manifest, package, cargo_flags)?;
+    let evidence_path = work_dir.join("cargo-resolution-context.json");
+    if reuse_requested {
+        match fs::read_to_string(&evidence_path) {
+            Ok(previous) if previous == evidence => return Ok(()),
+            Ok(_) => {
+                return Err(format!(
+                    "refusing to reuse parity artifacts from a different Cargo resolution context; remove or replace {}",
+                    evidence_path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let has_artifacts = directory_contains_reusable_parity_artifact(
+                    &target_artifacts_root(work_dir),
+                ) || directory_contains_reusable_parity_artifact(
+                    &dependency_artifacts_root(work_dir),
+                );
+                if skip_expand || has_artifacts {
+                    return Err(format!(
+                        "refusing to reuse unauthenticated parity artifacts: {} is missing",
+                        evidence_path.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not read Cargo resolution context {}: {error}",
+                    evidence_path.display()
+                ));
+            }
+        }
+    }
+    fs::write(&evidence_path, evidence).map_err(|error| {
+        format!(
+            "could not write Cargo resolution context {}: {error}",
+            evidence_path.display()
+        )
+    })
 }
 
 fn is_external_crate_root_candidate(root: &str) -> bool {
@@ -1877,6 +8181,106 @@ fn dependency_expand_cargo_flags(resolved_features: &[String]) -> Vec<String> {
         flags.push(features.join(","));
     }
     flags
+}
+
+fn cargo_resolution_flags(
+    features: Option<&str>,
+    all_features: bool,
+    no_default_features: bool,
+    target: Option<&str>,
+    cargo_config: &[String],
+    locked: bool,
+    offline: bool,
+    frozen: bool,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if let Some(features) = features.map(str::trim).filter(|value| !value.is_empty()) {
+        flags.push("--features".to_string());
+        flags.push(features.to_string());
+    }
+    if all_features {
+        flags.push("--all-features".to_string());
+    }
+    if no_default_features {
+        flags.push("--no-default-features".to_string());
+    }
+    if let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) {
+        flags.push("--target".to_string());
+        flags.push(target.to_string());
+    }
+    for config in cargo_config
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        flags.push("--config".to_string());
+        flags.push(config.to_string());
+    }
+    if frozen {
+        flags.push("--frozen".to_string());
+    } else {
+        if locked {
+            flags.push("--locked".to_string());
+        }
+        if offline {
+            flags.push("--offline".to_string());
+        }
+    }
+    flags
+}
+
+/// Preserve non-feature context while replacing the selected package's feature
+/// set with Cargo's resolved feature set for a dependency expansion.
+fn cargo_non_feature_resolution_flags(cargo_flags: &[String]) -> Result<Vec<String>, String> {
+    let mut flags = Vec::new();
+    let mut index = 0usize;
+    while index < cargo_flags.len() {
+        match cargo_flags[index].as_str() {
+            "--features" | "-F" => {
+                if cargo_flags.get(index + 1).is_none() {
+                    return Err("Cargo feature flag requires a value".to_string());
+                }
+                index += 2;
+            }
+            "--all-features" | "--no-default-features" => index += 1,
+            flag if flag.starts_with("--features=") => index += 1,
+            "--target" | "--filter-platform" | "--config" => {
+                let value = cargo_flags.get(index + 1).ok_or_else(|| {
+                    format!("Cargo resolution flag '{}' requires a value", cargo_flags[index])
+                })?;
+                flags.push(cargo_flags[index].clone());
+                flags.push(value.clone());
+                index += 2;
+            }
+            "--locked" | "--offline" | "--frozen" => {
+                flags.push(cargo_flags[index].clone());
+                index += 1;
+            }
+            flag
+                if flag.starts_with("--target=")
+                    || flag.starts_with("--filter-platform=")
+                    || flag.starts_with("--config=") =>
+            {
+                flags.push(cargo_flags[index].clone());
+                index += 1;
+            }
+            flag => {
+                return Err(format!(
+                    "unsupported Cargo resolution flag '{flag}' while deriving dependency context"
+                ));
+            }
+        }
+    }
+    Ok(flags)
+}
+
+fn dependency_cargo_resolution_flags(
+    resolved_features: &[String],
+    root_cargo_flags: &[String],
+) -> Result<Vec<String>, String> {
+    let mut flags = dependency_expand_cargo_flags(resolved_features);
+    flags.extend(cargo_non_feature_resolution_flags(root_cargo_flags)?);
+    Ok(flags)
 }
 
 fn reset_target_artifacts(
@@ -3711,27 +10115,77 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     let should_stop = |stage: &str| -> bool { args.stop_after.as_deref() == Some(stage) };
 
-    // Create work directory and canonicalize
-    std::fs::create_dir_all(&args.work_dir)
-        .map_err(|e| format!("Failed to create work dir: {}", e))?;
-    let work_dir = std::fs::canonicalize(&args.work_dir).unwrap_or_else(|_| args.work_dir.clone());
-    if !args.dry_run && !args.incremental_transpile {
-        clear_stage_outputs(&work_dir)?;
-    }
-
     let project_dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     // Build cargo feature flags
-    let mut cargo_flags: Vec<String> = Vec::new();
-    if let Some(ref features) = args.features {
-        cargo_flags.push("--features".to_string());
-        cargo_flags.push(features.clone());
+    let cargo_flags = cargo_resolution_flags(
+        args.features.as_deref(),
+        args.all_features,
+        args.no_default_features,
+        args.target.as_deref(),
+        &args.cargo_config,
+        args.locked,
+        args.offline,
+        args.frozen,
+    );
+    // Authentication consumes the exact same immutable Cargo resolution
+    // context and target dependency kinds as Stage A/B. Resolve and
+    // authenticate every target before creating or clearing parity artifacts.
+    validate_selected_package_matches_manifest(&manifest, args.package.as_deref())?;
+    let (_, provenance_targets) = metadata::discover_targets_with_context(
+        &manifest,
+        args.package.as_deref(),
+        &cargo_flags,
+    )?;
+    if provenance_targets.is_empty() {
+        return Err("No test-capable targets found".to_string());
     }
-    if args.all_features {
-        cargo_flags.push("--all-features".to_string());
+    let mut target_cpp_inherit_roots: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut target_sysroot_roots: HashMap<String, HashSet<String>> = HashMap::new();
+    for target in &provenance_targets {
+        // Parity expands the library with `--lib --tests`, so its expanded
+        // source has development-dependency visibility just like an explicit
+        // integration-test target. Other target commands use their ordinary
+        // Cargo dependency context.
+        let include_dev_dependencies = matches!(
+            target.kind,
+            metadata::TargetKind::Lib | metadata::TargetKind::Test
+        );
+        let compilation =
+            metadata::CargoCompilationContext::exact(target, include_dev_dependencies);
+        let cpp_roots = authenticated_cpp_inherit_roots_for_compilation(
+            &manifest,
+            args.package.as_deref(),
+            &cargo_flags,
+            &compilation,
+        )?;
+        let sysroot_roots = authenticated_sysroot_roots_for_compilation(
+            &manifest,
+            args.package.as_deref(),
+            &cargo_flags,
+            &compilation,
+        )?;
+        target_cpp_inherit_roots.insert(target.module_name.clone(), cpp_roots);
+        target_sysroot_roots.insert(target.module_name.clone(), sysroot_roots);
     }
-    if args.no_default_features {
-        cargo_flags.push("--no-default-features".to_string());
+
+    // No parity artifact directory is created or cleared until every
+    // compiler-owned identity has been authenticated in the exact Cargo
+    // context above.
+    std::fs::create_dir_all(&args.work_dir)
+        .map_err(|e| format!("Failed to create work dir: {}", e))?;
+    let work_dir = std::fs::canonicalize(&args.work_dir).unwrap_or_else(|_| args.work_dir.clone());
+    validate_or_write_parity_cargo_context(
+        &work_dir,
+        &manifest,
+        args.package.as_deref(),
+        &cargo_flags,
+        args.incremental_transpile || args.skip_expand,
+        args.skip_expand,
+        args.dry_run,
+    )?;
+    if !args.dry_run && !args.incremental_transpile {
+        clear_stage_outputs(&work_dir)?;
     }
 
     println!("╔═══════════════════════════════════════════════════╗");
@@ -3787,6 +10241,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         args.package.as_deref(),
         crate_name,
         &work_dir,
+        &cargo_flags,
     )?;
     println!("  Package: {}", pkg_name);
     for t in &targets {
@@ -3825,6 +10280,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let mut dependency_targets: Vec<ParityDependencyTarget> = Vec::new();
     let mut non_library_dependency_roots: HashSet<String> = HashSet::new();
     for dep in dependency_packages {
+        let dep_cargo_flags =
+            dependency_cargo_resolution_flags(&dep.resolved_features, &cargo_flags)?;
         let dep_project_dir = dep
             .manifest_path
             .parent()
@@ -3836,13 +10293,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             Some(dep.name.as_str()),
             dep.name.as_str(),
             &work_dir,
+            &dep_cargo_flags,
         )?;
         if let Some(lib_target) = dep_targets
             .iter()
             .find(|target| matches!(target.kind, metadata::TargetKind::Lib))
         {
             let is_registry = !local_dependency_manifests.contains(&dep.manifest_path);
-            let dep_cargo_flags = dependency_expand_cargo_flags(&dep.resolved_features);
             let mut extern_crate_roots = dep.extern_crate_roots.clone();
             extern_crate_roots.push(dep.name.replace('-', "_"));
             extern_crate_roots.push(lib_target.module_name.clone());
@@ -4333,9 +10790,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         consumer_module_map: transpile::ConsumerModuleMap::default(),
         consumer_rust_module: None,
         external_crate_module_aliases: HashMap::new(),
+        // Root target provenance is injected per target below. Keeping the
+        // shared template empty prevents an accidental package-wide fallback.
+        authenticated_cpp_inherit_roots: HashSet::new(),
+        cpp_name_trusted_cpp_inherit_provenance: false,
+        authenticated_sysroot_roots: HashSet::new(),
+        cross_file_rust_item_import_bindings:
+            transpile::RustItemImportBindings::new(),
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: args.import_std,
+        explicit_gmf_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -4345,8 +10810,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         inline_rust_block: false,
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
+        cross_file_traits: Vec::new(),
+        cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
+        flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: None,
         crate_namespace_wrap: false,
@@ -4428,6 +10896,18 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             }
             let mut dep_options = transpile_options.clone();
             dep_options.is_dependency = true;
+            dep_options.authenticated_cpp_inherit_roots =
+                authenticated_cpp_inherit_roots_for_manifest_with_context(
+                    &dep.manifest_path,
+                    Some(dep.package_name.as_str()),
+                    &dep.cargo_flags,
+                )?;
+            dep_options.authenticated_sysroot_roots =
+                authenticated_sysroot_roots_for_manifest_with_context(
+                    &dep.manifest_path,
+                    Some(dep.package_name.as_str()),
+                    &dep.cargo_flags,
+                )?;
             dep_options.emit_ufcs_trait_manifest_path = Some(ufcs_manifest_path.clone());
             dep_options.dependency_ufcs_trait_manifests = ufcs_dep_manifest_paths.clone();
             dep_options.external_crate_module_aliases = flattened_dependency_aliases
@@ -4608,11 +11088,33 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             {
                 dependency_ufcs_trait_manifests.push(lib_manifest.clone());
             }
+            let authenticated_cpp_inherit_roots = target_cpp_inherit_roots
+                .get(&target.module_name)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Cargo target '{}' was not present during pre-output compiler provenance authentication",
+                        target.module_name
+                    )
+                })?;
+            let authenticated_sysroot_roots = target_sysroot_roots
+                .get(&target.module_name)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Cargo target '{}' was not present during pre-output sysroot provenance authentication",
+                        target.module_name
+                    )
+                })?;
             let target_options = transpile::TranspileOptions {
                 by_value_cycle_breaking_prototype: opt_by_value,
                 cpp_module_symbol_index: opt_cpp_index.clone(),
                 cpp_module_symbol_index_sources: opt_cpp_index_sources.clone(),
                 external_crate_module_aliases: flattened_dependency_aliases.clone(),
+                authenticated_cpp_inherit_roots,
+                authenticated_sysroot_roots,
+                cross_file_rust_item_import_bindings:
+                    transpile::RustItemImportBindings::new(),
                 dependency_ufcs_trait_manifests,
                 emit_ufcs_trait_manifest_path: Some(target_dir.join("ufcs-traits.json")),
                 // A skippable target's `<auto>` leak must reach the
@@ -4864,6 +11366,20 @@ fn find_rusty_include_dir() -> PathBuf {
 fn main() {
     let cli = Cli::parse();
 
+    if cli.module_preamble.is_some() && (cli.build_info || cli.command.is_some()) {
+        eprintln!("Error: --module-preamble requires module output");
+        process::exit(1);
+    }
+
+    if cli.build_info {
+        println!(
+            r#"{{"git_hash":"{}","git_dirty":{}}}"#,
+            env!("RUSTY_CPP_GIT_HASH"),
+            env!("RUSTY_CPP_GIT_DIRTY")
+        );
+        return;
+    }
+
     // Handle subcommands
     if let Some(ref command) = cli.command {
         match command {
@@ -4909,6 +11425,17 @@ fn main() {
         }
     }
 
+    let cargo_flags = cargo_resolution_flags(
+        cli.features.as_deref(),
+        cli.all_features,
+        cli.no_default_features,
+        cli.target.as_deref(),
+        &cli.cargo_config,
+        cli.locked,
+        cli.offline,
+        cli.frozen,
+    );
+
     // Load user type map if provided
     let type_map = if let Some(ref type_map_path) = cli.type_map {
         match types::UserTypeMap::load(type_map_path) {
@@ -4950,6 +11477,17 @@ fn main() {
     } else {
         transpile::ConsumerModuleMap::default()
     };
+    let module_preamble_manifest = if let Some(path) = cli.module_preamble.as_ref() {
+        match transpile::load_module_preamble_file(path, cli.preamble_target_os.as_deref()) {
+            Ok(manifest) => Some(manifest),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     let transpile_options = transpile::TranspileOptions {
         // Crate mode's collect pass sees whole files; the sibling-block
         // cpp_inherit harvest is an inline-rust-only need.
@@ -4963,9 +11501,18 @@ fn main() {
         consumer_module_map,
         consumer_rust_module: cli.consumer_rust_module.clone(),
         external_crate_module_aliases: HashMap::new(),
+        authenticated_cpp_inherit_roots: HashSet::new(),
+        cpp_name_trusted_cpp_inherit_provenance: false,
+        authenticated_sysroot_roots: HashSet::from([
+            "std".to_string(),
+            "core".to_string(),
+        ]),
+        cross_file_rust_item_import_bindings:
+            transpile::RustItemImportBindings::new(),
         emit_ufcs_trait_manifest_path: None,
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: false,
+        explicit_gmf_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -4975,8 +11522,11 @@ fn main() {
         inline_rust_block: false,
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
+        cross_file_traits: Vec::new(),
+        cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
+        flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: cli.cxx_namespace.clone(),
         crate_namespace_wrap: cli.crate_namespace_wrap,
@@ -4986,13 +11536,16 @@ fn main() {
 
     // Handle --crate: transpile entire crate
     if let Some(ref cargo_toml_path) = cli.crate_ {
-        match transpile_crate(
+        match transpile_crate_with_context(
             cargo_toml_path,
             &cli.output_dir,
             &type_map,
             cli.expand,
             cli.verify,
             &transpile_options,
+            module_preamble_manifest.as_ref(),
+            cli.package.as_deref(),
+            &cargo_flags,
         ) {
             Ok(()) => {}
             Err(e) => {
@@ -5035,8 +11588,37 @@ fn main() {
         p
     });
 
+    if cli.expand {
+        match std::fs::read_to_string(input_path) {
+            Ok(source) if cpp_default_args::source_mentions_marker(&source) => {
+                eprintln!(
+                    "Error: cpp_default_argument does not support --expand because expansion removes inert source markers"
+                );
+                process::exit(1);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Error reading '{}': {}", input_path.display(), error);
+                process::exit(1);
+            }
+        }
+    }
+
     let source = if cli.expand {
-        match run_cargo_expand(input_path) {
+        let original = match std::fs::read_to_string(input_path) {
+            Ok(source) => source,
+            Err(e) => {
+                eprintln!("Error reading '{}': {}", input_path.display(), e);
+                process::exit(1);
+            }
+        };
+        if cpp_name::source_mentions_reserved_marker(&original) {
+            eprintln!(
+                "Error: cpp_name does not support --expand because expansion removes inert name markers"
+            );
+            process::exit(1);
+        }
+        match run_cargo_expand_with_context(input_path, cli.package.as_deref(), &cargo_flags) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -5053,13 +11635,104 @@ fn main() {
         }
     };
 
+    let mut single_transpile_options = transpile_options;
+    if let Some(manifest_path) = nearest_cargo_manifest(input_path) {
+        // A raw source file is not itself a Cargo invocation.  Unless the
+        // caller explicitly selects a feature set, authenticate against the
+        // conservative all-feature graph so an inactive optional `std`/`core`
+        // provider can never be mistaken for a guaranteed sysroot root.
+        let feature_selection_is_explicit = cli
+            .features
+            .as_deref()
+            .is_some_and(|features| !features.trim().is_empty())
+            || cli.all_features
+            || cli.no_default_features;
+        let mut authentication_flags = cargo_flags.clone();
+        // With `--expand`, Cargo itself selects the default graph when no
+        // feature selector is present, so authentication must use that exact
+        // default context.  Raw source mode has no Cargo execution that can
+        // establish which valid feature graph produced the source; retain the
+        // fail-closed all-features envelope required by the V5 rejection.
+        if !feature_selection_is_explicit && !cli.expand {
+            authentication_flags.push("--all-features".to_string());
+        }
+        let compilation = match metadata::compilation_context_for_source(
+            &manifest_path,
+            cli.package.as_deref(),
+            &authentication_flags,
+            input_path,
+            false,
+        ) {
+            Ok(context) => context,
+            Err(e) => {
+                eprintln!(
+                    "Error resolving Cargo target provenance from {}: {}",
+                    manifest_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
+        };
+        single_transpile_options.authenticated_cpp_inherit_roots =
+            match authenticated_cpp_inherit_roots_for_compilation(
+                &manifest_path,
+                cli.package.as_deref(),
+                &authentication_flags,
+                &compilation,
+            ) {
+                Ok(roots) => roots,
+                Err(e) => {
+                    eprintln!(
+                        "Error authenticating compiler-owned attributes from {}: {}",
+                        manifest_path.display(),
+                        e
+                    );
+                    process::exit(1);
+                }
+            };
+        single_transpile_options.authenticated_sysroot_roots =
+            match authenticated_sysroot_roots_for_compilation(
+                &manifest_path,
+                cli.package.as_deref(),
+                &authentication_flags,
+                &compilation,
+            ) {
+                Ok(roots) => roots,
+                Err(e) => {
+                    eprintln!(
+                        "Error authenticating compiler sysroot crates from {}: {}",
+                        manifest_path.display(),
+                        e
+                    );
+                    process::exit(1);
+                }
+            };
+    }
+    if let Some(manifest) = module_preamble_manifest.as_ref() {
+        let Some(module_name) = cli.module_name.as_deref() else {
+            eprintln!(
+                "Error: --module-preamble requires module output; pass --module-name for single-file transpilation"
+            );
+            process::exit(1);
+        };
+        let selected = match manifest.select_for_modules([module_name]) {
+            Ok(selected) => selected,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        };
+        single_transpile_options.explicit_gmf_includes =
+            selected.get(module_name).cloned().unwrap_or_default();
+    }
+
     let cpp_output = match transpile::transpile_full_with_options(
         &source,
         cli.module_name.as_deref(),
         &type_map,
         &HashSet::new(),
         None,
-        &transpile_options,
+        &single_transpile_options,
     ) {
         Ok(output) => output,
         Err(e) => {

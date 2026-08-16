@@ -1,0 +1,5 @@
+[package]
+name = "cppabi_edition_omitted_repro"
+version = "0.1.0"
+
+[workspace]

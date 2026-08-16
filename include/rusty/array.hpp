@@ -1,7 +1,6 @@
 #ifndef RUSTY_ARRAY_HPP
 #define RUSTY_ARRAY_HPP
 
-#include <rusty/enum_tags.hpp>      // rusty::detail::enum_variant_tags
 #include <rusty/panic_handler.hpp>  // rusty::panic::do_panic
 #include <string>     // std::to_string (rusty::index panic message)
 #include <array>
@@ -971,106 +970,6 @@ auto collect_range(Range&& range_like) {
     }
 }
 
-/// Rust `collect::<Result<Vec<T>, E>>()` — FromIterator for Result:
-/// short-circuit on the FIRST Err (elements after it are not consumed),
-/// else Ok(all the Ok payloads). Element-wise `collect_range` is NOT
-/// equivalent (it would yield `std::vector<Result<T, E>>` with the Errs
-/// kept in place). Receiver flavors mirror collect_range.
-template<typename Range>
-auto collect_result_range(Range&& range_like) {
-    if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
-        auto owned = std::forward<Range>(range_like);
-        using Res = std::decay_t<decltype(detail::option_take_value(
-            std::declval<decltype(owned.next())&>()))>;
-        using Out = rusty::Result<std::vector<typename Res::ok_type>,
-                                  typename Res::err_type>;
-        std::vector<typename Res::ok_type> ok_values;
-        while (true) {
-            auto item = owned.next();
-            if (!detail::option_has_value(item)) {
-                break;
-            }
-            Res elem = detail::option_take_value(item);
-            if (elem.is_err()) {
-                return Out::Err(std::move(elem).unwrap_err());
-            }
-            ok_values.push_back(std::move(elem).unwrap());
-        }
-        return Out::Ok(std::move(ok_values));
-    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
-        return collect_result_range(std::forward<Range>(range_like).into_iter());
-    } else {
-        using Res = std::decay_t<decltype(*std::begin(range_like))>;
-        using Out = rusty::Result<std::vector<typename Res::ok_type>,
-                                  typename Res::err_type>;
-        std::vector<typename Res::ok_type> ok_values;
-        for (auto&& elem : range_like) {
-            if (elem.is_err()) {
-                return Out::Err(std::forward<decltype(elem)>(elem).unwrap_err());
-            }
-            ok_values.push_back(std::forward<decltype(elem)>(elem).unwrap());
-        }
-        return Out::Ok(std::move(ok_values));
-    }
-}
-
-/// Rust `collect::<Option<Vec<T>>>()` — the Option twin: short-circuit
-/// on the first None.
-template<typename Range>
-auto collect_option_range(Range&& range_like) {
-    if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
-        auto owned = std::forward<Range>(range_like);
-        using Opt = std::decay_t<decltype(detail::option_take_value(
-            std::declval<decltype(owned.next())&>()))>;
-        using ItemT = std::remove_cvref_t<decltype(std::declval<Opt&>().unwrap())>;
-        using Out = rusty::Option<std::vector<ItemT>>;
-        std::vector<ItemT> values;
-        while (true) {
-            auto item = owned.next();
-            if (!detail::option_has_value(item)) {
-                break;
-            }
-            Opt elem = detail::option_take_value(item);
-            if (elem.is_none()) {
-                return Out(rusty::None);
-            }
-            values.push_back(std::move(elem).unwrap());
-        }
-        return Out(std::move(values));
-    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
-        return collect_option_range(std::forward<Range>(range_like).into_iter());
-    } else {
-        using Opt = std::decay_t<decltype(*std::begin(range_like))>;
-        using ItemT = std::remove_cvref_t<decltype(std::declval<Opt&>().unwrap())>;
-        using Out = rusty::Option<std::vector<ItemT>>;
-        std::vector<ItemT> values;
-        for (auto&& elem : range_like) {
-            if (elem.is_none()) {
-                return Out(rusty::None);
-            }
-            values.push_back(std::forward<decltype(elem)>(elem).unwrap());
-        }
-        return Out(std::move(values));
-    }
-}
-
-namespace detail {
-// A `rusty::Box<[T]>` is Rust's boxed slice, and `&mut boxed` deref-coerces to
-// `&mut [T]`. The Box exposes neither data() nor begin(), so as_ptr/as_mut_ptr
-// used to fall through to their `&value` fallback and callers derived the
-// element type as the BOX rather than T — `owned_container_slice`'s
-// `operator std::span<elem_type>()` then produced a span of the wrong type and
-// no conversion to `std::span<T>` existed.
-//
-// Narrowed to a Box whose PAYLOAD is itself contiguous, so `Box<int>` and every
-// other wrapper keep the existing fallback untouched.
-template<typename T>
-inline constexpr bool is_boxed_contiguous_v = false;
-template<typename T, typename A>
-inline constexpr bool is_boxed_contiguous_v<rusty::Box<T, A>> =
-    requires(T& payload) { payload.data(); };
-}  // namespace detail
-
 template<typename T>
 decltype(auto) as_ptr(const T& value) {
     if constexpr (requires { value.as_ptr(); }) {
@@ -1095,9 +994,6 @@ decltype(auto) as_ptr(const T& value) {
         } else {
             return &value;
         }
-    } else if constexpr (detail::is_boxed_contiguous_v<std::remove_cvref_t<T>>) {
-        // Boxed slice: peel to the payload (see is_boxed_contiguous_v).
-        return rusty::as_ptr(*value);
     } else {
         return &value;
     }
@@ -1115,9 +1011,6 @@ decltype(auto) as_mut_ptr(T& value) {
         } else {
             return &value;
         }
-    } else if constexpr (detail::is_boxed_contiguous_v<std::remove_cvref_t<T>>) {
-        // Boxed slice: peel to the payload (see is_boxed_contiguous_v).
-        return rusty::as_mut_ptr(*value);
     } else {
         return &value;
     }
@@ -1172,38 +1065,6 @@ decltype(auto) as_ref_ptr(const T& value) {
 
 // Lazy zip view — Rust's `a.zip(b)` semantics. Eager vector
 // materialization hangs on unbounded sides (indexmap's
-// Lazy mapped view over a zip_view (or any begin/end range): exposes the
-// Option-shaped next() the slice.hpp adapter machinery duck-types
-// (option_like_has_value/take_value), so downstream .next()/for_in/collect
-// all work.
-template<typename View, typename F>
-struct zip_map_view {
-    View view;
-    F func;
-    using base_iter = decltype(std::begin(std::declval<View&>()));
-    std::optional<base_iter> cur{};
-
-    using mapped_type = std::decay_t<decltype(std::invoke(
-        std::declval<F&>(), *std::declval<base_iter&>()))>;
-
-    using Item = mapped_type;
-
-    // rusty::Option, not std::optional: transpiled code calls
-    // .unwrap()/.is_none() DIRECTLY on this next()'s result (the duck-typed
-    // option_like machinery tolerates either, member calls do not).
-    rusty::Option<mapped_type> next() {
-        if (!cur) {
-            cur.emplace(std::begin(view));
-        }
-        if (*cur == std::end(view)) {
-            return rusty::None;
-        }
-        rusty::Option<mapped_type> value(std::invoke(func, **cur));
-        ++*cur;
-        return value;
-    }
-};
-
 // `(start..).zip(end..)` shift loops zip two `range_from`s and are
 // bounded only by the OUTER zip with the entries vector).
 template<typename Left, typename Right>
@@ -1261,16 +1122,6 @@ struct zip_view {
         }
         return false;
     }
-
-    // Rust `a.zip(b).map(f)` chains call .map on the zip result — zip_view
-    // is a bare range view with no adapter members. Return the LAZY
-    // zip_map_view (an eager std::vector broke downstream `.next()` calls
-    // on the mapped result).
-    template<typename F>
-    auto map(F&& func) {
-        return zip_map_view<zip_view, std::decay_t<F>>{
-            std::move(*this), std::forward<F>(func)};
-    }
 };
 
 // Heterogeneous-safe comparisons for emitted range-bound gates: the
@@ -1326,42 +1177,6 @@ struct next_range {
     iterator begin() { return iterator{&it, it.next()}; }
     sentinel end() { return sentinel{}; }
 };
-
-// Range-for bridge for Rust-shaped iterators that are USED IN PLACE rather
-// than wrapped. `next_range` above OWNS its iterator, which is right for zip
-// but wrong for a port type that wants to hand out begin()/end() for itself
-// (`for (auto& v : a.intersection(b))`). These let such a type add
-//     auto begin() { return rusty::rust_range_begin(*this); }
-//     auto end()   { return rusty::rust_range_sentinel{}; }
-// without copying itself or growing a data member (which would break the
-// aggregate initialization the transpiler emits for these structs).
-//
-// Free begin()/end() cannot do this job: for a port view like
-// `Intersection<T, S, rusty::alloc::Global>` the associated namespace ADL
-// reaches is `rusty::alloc` (from the allocator argument), NOT `rusty`, so
-// functions declared here are never found. Members always are.
-struct rust_range_sentinel {};
-
-template<typename It>
-struct rust_range_iter {
-    It* src;
-    using next_t = decltype(std::declval<It&>().next());
-    // mutable: operator* is const but unwrap() mutates the Option payload,
-    // same reason next_range::iterator::cur is mutable.
-    mutable next_t cur;
-    decltype(auto) operator*() const { return cur.unwrap(); }
-    rust_range_iter& operator++() {
-        cur = src->next();
-        return *this;
-    }
-    bool operator==(rust_range_sentinel) const { return !cur.is_some(); }
-    bool operator!=(rust_range_sentinel s) const { return !(*this == s); }
-};
-
-template<typename It>
-rust_range_iter<It> rust_range_begin(It& it) {
-    return rust_range_iter<It>{&it, it.next()};
-}
 
 // Pick the walkable form of a zip side: std-iterables pass through
 // (LVALUES BY REFERENCE — a BTreeMap side must not be copied; its copy
@@ -1504,6 +1319,23 @@ bool is_empty(const Container& container) {
         return static_cast<bool>(container.is_empty());
     } else if constexpr (requires { container.empty(); }) {
         return static_cast<bool>(container.empty());
+    } else if constexpr (!requires { container.len(); }
+                         && !requires { container.size(); }
+                         && !requires { container.as_str(); }
+                         && !requires { std::size(container); }
+                         && !requires { container.size_hint(); }
+                         && !requires { container.into_iter(); }
+                         && requires { (*container).is_empty(); }) {
+        // A guard (`Ref`/`RefMut`/`MutexGuard`) wrapping a payload whose
+        // ONLY emptiness surface is `is_empty()` and which has no length
+        // at all — `rusty::Function` is the case: Rust's shim really does
+        // define `Function::is_empty()`, but nothing about a callable has
+        // a length, so len's ladder bottoms out in its static_assert
+        // instead of answering. Peel exactly one level, and only after
+        // every len-ladder shape above has been excluded — that exclusion
+        // is what keeps an ITERATOR out of this arm, since `*it` yields an
+        // element rather than a container (the hazard named below).
+        return static_cast<bool>((*container).is_empty());
     } else {
         // Everything else — including a guard wrapping a container — defers
         // to len, whose ladder ends with the deref-peel arm. Peeling HERE
@@ -1709,17 +1541,7 @@ auto filter_map(Range&& range, Func&& func) {
             std::forward<Range>(range),
             std::forward<Func>(func)
         );
-    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }
-                         && !std::is_same_v<
-                                std::remove_cvref_t<
-                                    decltype(std::declval<Range&&>().into_iter())>,
-                                std::remove_cvref_t<Range>>) {
-        // Guarded against IDENTITY into_iter(): Rust's blanket
-        // `impl IntoIterator for I: Iterator` returns Self, and the runtime
-        // mirrors that, so an unguarded recursion here re-entered this same
-        // specialization forever ("function with deduced return type cannot be
-        // used before it is defined"). A next-only iterator is claimed instead
-        // by the constrained overload in slice.hpp, beside the lazy adapters.
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
         return filter_map(std::forward<Range>(range).into_iter(), std::forward<Func>(func));
     } else {
         static_assert(
@@ -1932,18 +1754,6 @@ struct Bound_Excluded {
 template<typename T>
 using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded<T>>;
 
-// Enum-lowering channel (see rusty::detail::enum_variant_tags): a match arm
-// naming `Unbounded`/`Included`/`Excluded` on a Bound it did not declare
-// cannot know this enum lowered to a std::variant rather than an enum class.
-namespace detail {
-template<typename T>
-struct enum_variant_tags<Bound<T>> {
-    using Unbounded = Bound_Unbounded<T>;
-    using Included = Bound_Included<T>;
-    using Excluded = Bound_Excluded<T>;
-};
-} // namespace detail
-
 // Value-position factories for Rust's `Bound::…` variant constructors —
 // `Bound` is an alias template over std::variant, so `Bound::Excluded(x)`
 // cannot be spelled directly. `bound_unbounded` is a tag VALUE convertible
@@ -1961,6 +1771,7 @@ struct bound_unbounded_t {
     operator Bound<T>() const { return Bound<T>(Bound_Unbounded<T>{}); }
 };
 inline constexpr bound_unbounded_t bound_unbounded{};
+
 
 namespace detail {
 
@@ -2071,13 +1882,8 @@ public:
     requires std::is_convertible_v<U, T>
         : start(static_cast<T>(other.start)), end_(static_cast<T>(other.end_)) {}
 
-    // Rust's by-value IntoIterator; ranges are trivially copyable, so a
-    // const receiver (emitted const locals) just copies. The IntoIter/Item
-    // typedefs back UFCS spellings of `<I as IntoIterator>::IntoIter::Item`.
-    using IntoIter = range;
-    using Item = T;
-    range into_iter() const {
-        return *this;
+    range into_iter() {
+        return std::move(*this);
     }
 
     struct iterator {
@@ -2250,13 +2056,8 @@ public:
           end_(static_cast<T>(other.end_)),
           done_(other.done_) {}
 
-    // Rust's by-value IntoIterator; ranges are trivially copyable, so a
-    // const receiver (emitted const locals) just copies. IntoIter/Item
-    // back UFCS spellings — see range.
-    using IntoIter = range_inclusive;
-    using Item = T;
-    range_inclusive into_iter() const {
-        return *this;
+    range_inclusive into_iter() {
+        return std::move(*this);
     }
 
     struct iterator {
@@ -2382,23 +2183,8 @@ template<typename T>
 struct range_from {
     T start;
 
-    constexpr range_from() = default;
-    constexpr range_from(T s) : start(std::move(s)) {}
-    // Element-type conversion, mirroring `range`: the transpiled
-    // iter_index overloads take range_from<size_t>, call sites build
-    // range_from<int>.
-    template<typename U>
-    constexpr range_from(const range_from<U>& other)
-    requires std::is_convertible_v<U, T>
-        : start(static_cast<T>(other.start)) {}
-
-    // Rust's by-value IntoIterator; ranges are trivially copyable, so a
-    // const receiver (emitted const locals) just copies. IntoIter/Item
-    // back UFCS spellings — see range.
-    using IntoIter = range_from;
-    using Item = T;
-    range_from into_iter() const {
-        return *this;
+    range_from into_iter() {
+        return std::move(*this);
     }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
@@ -2456,13 +2242,6 @@ template<typename T>
 struct range_to {
     T end;
 
-    constexpr range_to() = default;
-    constexpr range_to(T e) : end(std::move(e)) {}
-    template<typename U>
-    constexpr range_to(const range_to<U>& other)
-    requires std::is_convertible_v<U, T>
-        : end(static_cast<T>(other.end)) {}
-
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end}); }
 
@@ -2496,13 +2275,6 @@ struct range_to_inclusive {
     static constexpr bool rusty_inclusive_range = true;
 
     T end;
-
-    constexpr range_to_inclusive() = default;
-    constexpr range_to_inclusive(T e) : end(std::move(e)) {}
-    template<typename U>
-    constexpr range_to_inclusive(const range_to_inclusive<U>& other)
-    requires std::is_convertible_v<U, T>
-        : end(static_cast<T>(other.end)) {}
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end}); }

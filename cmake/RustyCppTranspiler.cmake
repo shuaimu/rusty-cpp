@@ -59,6 +59,7 @@ function(create_rustycpp_transpiler_build_target)
         COMMAND
             ${CARGO_EXECUTABLE}
             build
+            --locked
             -p
             rusty-cpp-transpiler
             ${RUSTYCPP_TRANSPILER_CARGO_BUILD_FLAGS}

@@ -50,13 +50,24 @@ constexpr bool fits_in_sbo_v =
     alignof(T) <= kFunctionSBOAlign &&
     std::is_nothrow_move_constructible_v<T>;
 
-// Vtable for type-erased operations
+// Vtable for non-const-callable type-erased operations.
 template<typename R, typename... Args>
 struct FunctionVTable {
     R (*invoke)(void* storage, Args...);
     void (*move)(void* dst, void* src);
     void (*destroy)(void* storage);
     bool is_inline;  // True if stored inline (SBO), false if on heap
+};
+
+// Vtable for const-callable type-erased operations. Keeping const invocation
+// in a separate table means Function<R(Args...)> never instantiates a const
+// call expression for mutable-only callables.
+template<typename R, typename... Args>
+struct ConstFunctionVTable {
+    R (*invoke)(const void* storage, Args...);
+    void (*move)(void* dst, void* src);
+    void (*destroy)(void* storage);
+    bool is_inline;
 };
 
 // Vtable implementation for inline (SBO) storage
@@ -83,6 +94,30 @@ struct InlineVTableImpl {
 
 template<typename Callable, typename R, typename... Args>
 constexpr FunctionVTable<R, Args...> InlineVTableImpl<Callable, R, Args...>::vtable;
+
+template<typename Callable, typename R, typename... Args>
+struct ConstInlineVTableImpl {
+    static R invoke(const void* storage, Args... args) {
+        const Callable& callable = *static_cast<const Callable*>(storage);
+        return callable(std::forward<Args>(args)...);
+    }
+
+    static void move(void* dst, void* src) {
+        InlineVTableImpl<Callable, R, Args...>::move(dst, src);
+    }
+
+    static void destroy(void* storage) {
+        InlineVTableImpl<Callable, R, Args...>::destroy(storage);
+    }
+
+    static constexpr ConstFunctionVTable<R, Args...> vtable = {
+        &invoke, &move, &destroy, true
+    };
+};
+
+template<typename Callable, typename R, typename... Args>
+constexpr ConstFunctionVTable<R, Args...>
+    ConstInlineVTableImpl<Callable, R, Args...>::vtable;
 
 // Vtable implementation for heap storage
 template<typename Callable, typename R, typename... Args>
@@ -113,6 +148,30 @@ struct HeapVTableImpl {
 template<typename Callable, typename R, typename... Args>
 constexpr FunctionVTable<R, Args...> HeapVTableImpl<Callable, R, Args...>::vtable;
 
+template<typename Callable, typename R, typename... Args>
+struct ConstHeapVTableImpl {
+    static R invoke(const void* storage, Args... args) {
+        Callable* const ptr = *static_cast<Callable* const*>(storage);
+        return static_cast<const Callable&>(*ptr)(std::forward<Args>(args)...);
+    }
+
+    static void move(void* dst, void* src) {
+        HeapVTableImpl<Callable, R, Args...>::move(dst, src);
+    }
+
+    static void destroy(void* storage) {
+        HeapVTableImpl<Callable, R, Args...>::destroy(storage);
+    }
+
+    static constexpr ConstFunctionVTable<R, Args...> vtable = {
+        &invoke, &move, &destroy, false
+    };
+};
+
+template<typename Callable, typename R, typename... Args>
+constexpr ConstFunctionVTable<R, Args...>
+    ConstHeapVTableImpl<Callable, R, Args...>::vtable;
+
 // Get the appropriate vtable for a callable type
 template<typename Callable, typename R, typename... Args>
 constexpr const FunctionVTable<R, Args...>* get_vtable() {
@@ -120,6 +179,15 @@ constexpr const FunctionVTable<R, Args...>* get_vtable() {
         return &InlineVTableImpl<Callable, R, Args...>::vtable;
     } else {
         return &HeapVTableImpl<Callable, R, Args...>::vtable;
+    }
+}
+
+template<typename Callable, typename R, typename... Args>
+constexpr const ConstFunctionVTable<R, Args...>* get_const_vtable() {
+    if constexpr (fits_in_sbo_v<Callable>) {
+        return &ConstInlineVTableImpl<Callable, R, Args...>::vtable;
+    } else {
+        return &ConstHeapVTableImpl<Callable, R, Args...>::vtable;
     }
 }
 
@@ -139,7 +207,7 @@ struct FunctionTraits<R(Args...)> {
 template<typename R, typename... Args>
 struct FunctionTraits<R(Args...) const> {
     using ReturnType = R;
-    using VTableType = FunctionVTable<R, Args...>;
+    using VTableType = ConstFunctionVTable<R, Args...>;
     static constexpr bool is_const = true;
 };
 
@@ -262,6 +330,26 @@ public:
         return *this;
     }
 
+    // @safe - Rust's erasure entry point.
+    //
+    // In the Rust facade (`rusty-rustc`), erasing a closure into a
+    // `rusty::Function<dyn FnMut(..)>` is an ASSOCIATED function --
+    // `Function::<dyn FnMut()>::from_callable(f)` -- not a constructor,
+    // because `dyn Fn` / `dyn FnMut` is not nameable as a C++-style
+    // conversion target. Source written that way lowers to
+    // `Function<void()>::from_callable(lambda)`, which had no facade to
+    // bind to. Admission criteria are exactly the converting
+    // constructor's, which it delegates to, so nothing previously
+    // ill-formed becomes well-formed by a second route.
+    template<typename Callable,
+             typename = std::enable_if_t<
+                 !std::is_same_v<std::decay_t<Callable>, Function> &&
+                 std::is_invocable_r_v<R, Callable, Args...>
+             >>
+    static Function from_callable(Callable&& callable) {
+        return Function(std::forward<Callable>(callable));
+    }
+
     // @safe - Invoke the stored callable
     R operator()(Args... args) {
         if (!vtable_) {
@@ -311,7 +399,7 @@ public:
     using result_type = R;
 
 private:
-    using VTable = detail::FunctionVTable<R, Args...>;
+    using VTable = detail::ConstFunctionVTable<R, Args...>;
 
     detail::FunctionStorage storage_;
     const VTable* vtable_ = nullptr;
@@ -322,7 +410,7 @@ private:
         static_assert(detail::fits_in_sbo_v<DecayedCallable>,
                       "Callable does not fit in SBO");
         new (&storage_) DecayedCallable(std::forward<Callable>(callable));
-        vtable_ = detail::get_vtable<DecayedCallable, R, Args...>();
+        vtable_ = detail::get_const_vtable<DecayedCallable, R, Args...>();
     }
 
     template<typename Callable>
@@ -330,7 +418,7 @@ private:
         using DecayedCallable = std::decay_t<Callable>;
         DecayedCallable* ptr = new DecayedCallable(std::forward<Callable>(callable));
         *reinterpret_cast<DecayedCallable**>(&storage_) = ptr;
-        vtable_ = detail::get_vtable<DecayedCallable, R, Args...>();
+        vtable_ = detail::get_const_vtable<DecayedCallable, R, Args...>();
     }
 
 public:
@@ -412,13 +500,23 @@ public:
         return *this;
     }
 
+    // @safe - Rust's erasure entry point (const-signature counterpart of
+    // the `Function<R(Args...)>` overload above; see the note there).
+    template<typename Callable,
+             typename = std::enable_if_t<
+                 !std::is_same_v<std::decay_t<Callable>, Function> &&
+                 std::is_invocable_r_v<R, const std::decay_t<Callable>&, Args...>
+             >>
+    static Function from_callable(Callable&& callable) {
+        return Function(std::forward<Callable>(callable));
+    }
+
     // @safe - Const invoke - callable must be const-invocable
     R operator()(Args... args) const {
         if (!vtable_) {
             std::abort();
         }
-        return vtable_->invoke(const_cast<void*>(static_cast<const void*>(&storage_)),
-                               std::forward<Args>(args)...);
+        return vtable_->invoke(&storage_, std::forward<Args>(args)...);
     }
 
     // @safe - Check if Function contains a callable

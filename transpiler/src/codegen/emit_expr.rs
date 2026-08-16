@@ -617,13 +617,28 @@ impl CodeGen {
         let multi_use = collect_multi_use_vars(&block.stmts);
         block_profile_mark("collect_multi_use_vars");
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
+        // Pre-scan (C6, checkpoint contract 6): locals that flow into a
+        // runtime-facade field whose native C++ type is a copyable
+        // `std::function` (`rusty::Waker { wake_fn }`). Their declarations
+        // take the authenticated contract type instead of the move-only
+        // boxed-callable spelling.
+        let callable_contracts = self.collect_copyable_callable_contract_locals(&block.stmts);
+        block_profile_mark("collect_copyable_callable_contract_locals");
+        let prev_callable_contracts = std::mem::replace(
+            &mut self.copyable_callable_contract_locals,
+            callable_contracts,
+        );
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
         block_profile_mark("collect_reassigned_vars");
         let deref_assigned = collect_deref_assigned_vars(&block.stmts);
         block_profile_mark("collect_deref_assigned_vars");
-        let consuming =
+        let mut consuming =
             self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
+        // A by-value move-out `match` consumes its scrutinee exactly the way a
+        // by-value method receiver does; without this the local stayed
+        // `const auto` and the non-const visitor parameters could not bind.
+        consuming.extend(collect_by_value_match_moved_scrutinee_vars(&block.stmts));
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
         let for_iterated = Self::collect_for_loop_iterated_bare_locals(&block.stmts);
         let method_pairs = Self::collect_bare_local_method_call_pairs(&block.stmts);
@@ -1054,6 +1069,7 @@ impl CodeGen {
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;
+        self.copyable_callable_contract_locals = prev_callable_contracts;
         block_profile_mark("done");
     }
 
@@ -2888,18 +2904,16 @@ impl CodeGen {
                         .map(|e| self.emit_expr_maybe_move(e))
                         .collect();
                     format!("rusty::Vec{{{}}}", items.join(", "))
-                } else if let Ok(rep) = syn::parse_str::<syn::ExprRepeat>(&format!("[{}]", tokens))
+                } else if let Ok(rep) =
+                    syn::parse_str::<syn::ExprRepeat>(&format!("[{}]", tokens))
                 {
-                    // `vec![elem; len]`. The legacy fallback spliced the raw
-                    // `elem ; len` tokens into a braced initializer and emitted
-                    // `rusty::Vec{0 ; k}`, which is not valid C++ at all — the
-                    // repeat form was a hard compile error wherever it appeared.
-                    // `rusty::array_repeat` is the runtime's repeat constructor
-                    // (same target the real-array `[elem; len]` path uses) and
-                    // converts to Vec/span at the use site.
-                    let val = self.emit_expr_maybe_move(&rep.expr);
-                    let len = self.emit_expr_to_string(&rep.len);
-                    format!("rusty::array_repeat({}, {})", val, len)
+                    // vec![elem; n] — Rust's alloc::vec::from_elem. The
+                    // raw token pass-through below emitted the `;`
+                    // verbatim (`rusty::Vec{elem ; n}`), which is not
+                    // valid C++ at all.
+                    let elem = self.emit_expr_maybe_move(&rep.expr);
+                    let count = self.emit_expr_to_string(&rep.len);
+                    format!("rusty::vec_from_elem({}, {})", elem, count)
                 } else {
                     // Unparseable — keep the legacy path.
                     let items = self.convert_macro_tokens(&tokens);
@@ -14074,6 +14088,9 @@ impl CodeGen {
         path_expr: &syn::ExprPath,
         expected_ty: Option<&syn::Type>,
     ) -> Option<String> {
+        if self.is_associated_const_value_path(&path_expr.path) {
+            return None;
+        }
         let expected_ty = expected_ty?;
         if path_expr.path.segments.len() == 1 {
             let local_name = path_expr.path.segments[0].ident.to_string();
@@ -17421,11 +17438,480 @@ impl CodeGen {
         Some(format!("rusty::Arc<{}>::make()", payload_cpp))
     }
 
+    /// Prove the only Arc/cpp_ctor fusion shape currently needed by canonical
+    /// carriers. The proof is intentionally narrower than ordinary Rust name
+    /// resolution: a bare root-local owner, one inherent associated function,
+    /// an exact lowerable cpp_ctor body, and matching non-generic parameters.
+    /// Anything imported, nested, overloaded, generic, or otherwise ambiguous
+    /// falls back to the historical Arc::new lowering.
+    fn proven_cpp_ctor_arc_make_target<'a>(
+        &self,
+        expr: &'a syn::Expr,
+    ) -> Option<(String, &'a syn::ExprCall, Vec<syn::Type>)> {
+        let mut inner = self.peel_paren_group_expr(expr);
+        if let syn::Expr::Unsafe(unsafe_expr) = inner {
+            if unsafe_expr.block.stmts.len() != 1 {
+                return None;
+            }
+            inner = match &unsafe_expr.block.stmts[0] {
+                syn::Stmt::Expr(expr, _) => self.peel_paren_group_expr(expr),
+                _ => return None,
+            };
+        }
+        let syn::Expr::Call(ctor_call) = inner else {
+            return None;
+        };
+        let syn::Expr::Path(func_path) = ctor_call.func.as_ref() else {
+            return None;
+        };
+        if func_path.qself.is_some()
+            || func_path.path.leading_colon.is_some()
+            || func_path.path.segments.len() != 2
+            || !self.module_stack.is_empty()
+        {
+            return None;
+        }
+        let mut segments = func_path.path.segments.iter();
+        let owner_segment = segments.next()?;
+        let method_segment = segments.next()?;
+        if !matches!(owner_segment.arguments, syn::PathArguments::None)
+            || !matches!(method_segment.arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+        let owner = owner_segment.ident.to_string();
+        let method_name = method_segment.ident.to_string();
+        // C11: the authenticated ctor contract is a property of the TYPE, not
+        // of the file that happens to construct it. A crate type declared in a
+        // sibling module (`crate::epoll_wrapper::Epoll`) has exactly the same
+        // constructor in C++, and its impl block is available through the
+        // crate-mode cross-file harvest — the marker itself is still the only
+        // authority, and an unknown owner still declines.
+        let locally_declared = self.local_declared_types.contains(&owner)
+            && self.struct_field_order.contains_key(&owner);
+        let cross_file_declared = !locally_declared
+            && self.cross_file_struct_field_types.contains_key(&owner)
+            && !self.cross_file_unit_struct_tails.contains(&owner);
+        if !locally_declared && !cross_file_declared {
+            return None;
+        }
+
+        let mut matched: Option<&syn::ImplItemFn> = None;
+        if locally_declared {
+            for items in [
+                self.impl_blocks.get(&owner),
+                self.consumed_impl_blocks.get(&owner),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for item in items {
+                    let syn::ImplItem::Fn(method) = item else {
+                        continue;
+                    };
+                    if method.sig.ident != method_name {
+                        continue;
+                    }
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(method);
+                }
+            }
+        } else {
+            for item_impl in &self.cross_file_impl_blocks {
+                if item_impl.trait_.is_some() || !item_impl.generics.params.is_empty() {
+                    continue;
+                }
+                let syn::Type::Path(self_path) = item_impl.self_ty.as_ref() else {
+                    continue;
+                };
+                if self_path.qself.is_some()
+                    || self_path.path.segments.last().is_none_or(|seg| {
+                        seg.ident != owner
+                            || !matches!(seg.arguments, syn::PathArguments::None)
+                    })
+                {
+                    continue;
+                }
+                for item in &item_impl.items {
+                    let syn::ImplItem::Fn(method) = item else {
+                        continue;
+                    };
+                    if method.sig.ident != method_name {
+                        continue;
+                    }
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(method);
+                }
+            }
+        }
+        let method = matched?;
+        if !Self::has_inert_cpp_ctor_attr(&method.attrs)
+            || method.sig.generics.params.len() != 0
+            || method.sig.generics.where_clause.is_some()
+            || method.sig.constness.is_some()
+            || method.sig.asyncness.is_some()
+            || method.sig.abi.is_some()
+            || method.sig.variadic.is_some()
+            || Self::extract_cpp_ctor_struct_literal(&method.block, &owner).is_none()
+        {
+            return None;
+        }
+        let param_types = method
+            .sig
+            .inputs
+            .iter()
+            .map(|input| match input {
+                syn::FnArg::Typed(param) => Some((*param.ty).clone()),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if param_types.len() != ctor_call.args.len() {
+            return None;
+        }
+
+        let owner_type = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path::from(owner_segment.ident.clone()),
+        });
+        let owner_cpp = self.map_type(&owner_type);
+        if owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+        {
+            return None;
+        }
+        Some((owner_cpp, ctor_call, param_types))
+    }
+
+    fn try_emit_cpp_ctor_arc_make(&self, call: &syn::ExprCall) -> Option<String> {
+        if call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        if func_path.qself.is_some()
+            || func_path.path.segments.last()?.ident != "new"
+            || !func_path
+                .path
+                .segments
+                .iter()
+                .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return None;
+        }
+        // Resolve the source path through the exact Rust import graph, then
+        // require Cargo to have authenticated the compiler sysroot root. A
+        // local module or ordinary dependency may legally occupy `std`, so
+        // neither source spelling nor the emitted `rusty::Arc` mapping is
+        // authority for this allocation-elision seam.
+        //
+        // C11 (checkpoint contract 11) extends the same authenticated seam to
+        // the other two owning constructors, because the SAME defect —
+        // `Rc::new(Reactor::new())` emitting a nonexistent `Reactor::new_()`
+        // and then value-constructing an `Rc` — applies verbatim to
+        // `Rc`/`Box`. The in-place factories are the runtime's own
+        // constructor path for non-movable types (rc_port `Rc::make`
+        // "critical for non-copyable / non-movable mako rrr types like
+        // Reactor and Fiber"; `Box::emplace` placement-news T from forwarded
+        // ctor args).
+        let resolved = crate::transpile::resolve_external_rust_item_path(
+            &func_path.path,
+            &self.module_stack,
+            &self.trait_declared_paths,
+            &self.rust_item_import_bindings,
+        );
+        let (owner_name, owner_cpp, factory, sysroot_root) = match resolved.as_deref() {
+            Some("std::sync::Arc::new") => ("Arc", "rusty::Arc", "make", Some("std")),
+            Some("alloc::sync::Arc::new") => ("Arc", "rusty::Arc", "make", Some("alloc")),
+            Some("std::rc::Rc::new") => ("Rc", "rusty::Rc", "make", Some("std")),
+            Some("alloc::rc::Rc::new") => ("Rc", "rusty::Rc", "make", Some("alloc")),
+            Some("std::boxed::Box::new") => ("Box", "rusty::Box", "emplace", Some("std")),
+            Some("alloc::boxed::Box::new") => ("Box", "rusty::Box", "emplace", Some("alloc")),
+            // `Box` is a prelude item: an unimported source spelling has no
+            // import edge to resolve, so the resolver hands back the source
+            // path itself — exactly what the `unresolved_box_ctor` path below
+            // already assumes. The crate-declares-its-own-Box guards
+            // underneath are what keep this from over-firing.
+            None | Some("Box::new")
+                if func_path.path.segments.len() == 2
+                    && func_path.path.segments[0].ident == "Box" =>
+            {
+                ("Box", "rusty::Box", "emplace", None)
+            }
+            _ => return None,
+        };
+        if let Some(root) = sysroot_root
+            && !self.authenticated_sysroot_roots.contains(root)
+        {
+            return None;
+        }
+        if self.struct_field_order.contains_key(owner_name)
+            || self.declared_type_params.contains_key(owner_name)
+        {
+            return None;
+        }
+        let (owner, ctor_call, param_types) =
+            self.proven_cpp_ctor_arc_make_target(&call.args[0])?;
+        let args = ctor_call
+            .args
+            .iter()
+            .zip(param_types.iter())
+            .map(|(arg, expected)| {
+                self.emit_expr_to_string_with_expected_and_move_if_needed(arg, Some(expected))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("{}<{}>::{}({})", owner_cpp, owner, factory, args))
+    }
+
+    /// C11 (checkpoint contract 11): a Rust associated constructor that the
+    /// authenticated `cpp_ctor` contract lowers to a native C++ constructor
+    /// is INVOKED through that constructor. The generated class declares
+    /// `Reactor()` / `Epoll()` / `explicit fiber_task_t(auto)` and no
+    /// `Type::new_` static exists, so the historical emission
+    /// `Reactor::new_()` cannot compile ("no member named 'new_' in
+    /// 'rrr::Reactor'"). Same authentication as the smart-pointer fusion
+    /// above: the marked, non-generic, struct-literal-bodied associated fn of
+    /// a crate-declared type, arity-matched.
+    fn try_emit_cpp_ctor_direct_construction(&self, call: &syn::ExprCall) -> Option<String> {
+        let expr = syn::Expr::Call(call.clone());
+        let (owner, ctor_call, param_types) = self.proven_cpp_ctor_arc_make_target(&expr)?;
+        let args = ctor_call
+            .args
+            .iter()
+            .zip(param_types.iter())
+            .map(|(arg, expected)| {
+                self.emit_expr_to_string_with_expected_and_move_if_needed(arg, Some(expected))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("{}({})", owner, args))
+    }
+
+    /// C6: is this call one of Rust's owning boxed-callable constructors
+    /// (`Box::new(f)` / `Box::new_(f)` / `Box::make(f)`, with or without an
+    /// explicit turbofish owner)?
+    pub(super) fn expr_call_is_box_ctor(call: &syn::ExprCall) -> bool {
+        if call.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Path(fp) = call.func.as_ref() else {
+            return false;
+        };
+        if fp.path.segments.len() < 2 {
+            return false;
+        }
+        let method = fp.path.segments.last().map(|s| s.ident.to_string());
+        let owner = fp
+            .path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|s| s.ident.to_string());
+        matches!(method.as_deref(), Some("new" | "new_" | "make"))
+            && matches!(owner.as_deref(), Some("Box"))
+    }
+
+    /// C6 (checkpoint contract 6): `Box::new(<callable>)` whose EXPECTED type
+    /// is an explicitly declared owning boxed callable
+    /// (`Box<dyn Fn() + Send + Sync>`) is that callable — Rust's `Box` around
+    /// a `dyn Fn` IS the type-erased owning callable, and its C++ contract is
+    /// `rusty::Function<Sig>`. The owner-recovery paths instead read the
+    /// closure argument and produce `rusty::Box<std::function<void()>>::new_`
+    /// — a Box OF a callable, a different type from the declared one.
+    fn try_emit_boxed_callable_coercion(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if !Self::expr_call_is_box_ctor(call) {
+            return None;
+        }
+        let expected = expected_ty?;
+        // The annotation is either the boxed callable itself
+        // (`Box<dyn Fn() + Send + Sync>`) or a name for it — an authenticated
+        // alias (`type Factory = Box<dyn FnMut() -> …>`) that already maps to
+        // the owning callable. Both name the same C++ contract.
+        let direct = self.owned_boxed_callable_cpp(expected);
+        let contract_cpp = match direct.clone() {
+            Some(cpp) => cpp,
+            None => {
+                let mapped = self.map_type(expected);
+                let trimmed = mapped.trim_start_matches("const ").trim().to_string();
+                if trimmed.starts_with("rusty::Function<") || trimmed.starts_with("std::function<")
+                {
+                    trimmed
+                } else {
+                    return None;
+                }
+            }
+        };
+        if type_string_has_auto_placeholder(&contract_cpp) || contract_cpp.contains("/* TODO") {
+            return None;
+        }
+        // Keep the argument's own expected type exactly what the Box wraps
+        // (the `dyn Fn…` trait object), matching the make_box path below.
+        let inner_expected: Option<syn::Type> = direct.as_ref().and_then(|_| {
+            match self.peel_reference_paren_group_type(expected) {
+                syn::Type::Path(tp) => tp
+                    .path
+                    .segments
+                    .last()
+                    .and_then(|last| match &last.arguments {
+                        syn::PathArguments::AngleBracketed(args) => {
+                            args.args.iter().find_map(|arg| match arg {
+                                syn::GenericArgument::Type(inner) => Some(inner.clone()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    }),
+                _ => None,
+            }
+        });
+        let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+            &call.args[0],
+            inner_expected.as_ref(),
+        );
+        Some(format!("{}({})", contract_cpp, arg))
+    }
+
+    /// C6: emit the initializer of a local that carries a runtime-facade
+    /// COPYABLE callable contract (`rusty::Waker::wake_fn` —
+    /// `std::function<void()>`, include/rusty/async.hpp:50-53). The
+    /// declaration already carries the contract type, so the initializer is
+    /// the bare callable: a closure literal, or the callable inside the
+    /// source's owning `Box::new(...)`. Any other shape is an unsupported
+    /// coercion and rejects BEFORE output (contract 6), because silently
+    /// keeping the move-only `rusty::Function` spelling produces a
+    /// `std::function` copy-construction from a deleted constructor.
+    pub(super) fn try_emit_copyable_callable_contract_init(
+        &self,
+        expr: &syn::Expr,
+        contract_cpp: &str,
+    ) -> Option<String> {
+        let peeled = self.peel_paren_group_expr(expr);
+        let callable = match peeled {
+            syn::Expr::Call(call) if Self::expr_call_is_box_ctor(call) => {
+                self.peel_paren_group_expr(&call.args[0])
+            }
+            other => other,
+        };
+        match callable {
+            syn::Expr::Closure(_) => Some(self.emit_expr_to_string(callable)),
+            syn::Expr::Path(p)
+                if p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && self
+                        .copyable_callable_contract_locals
+                        .get(&p.path.segments[0].ident.to_string())
+                        .is_some_and(|c| *c == contract_cpp) =>
+            {
+                Some(self.emit_expr_maybe_move(callable))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        let emitted = self.emit_call_expr_to_string_lowered(call, expected_ty);
+        // C11 family (checkpoint contract 11): the hand-written runtime
+        // facades have no such static member — collapse the emitted call onto
+        // the constructor / free function the runtime really declares. The
+        // owner spelling in `emitted` is the pipeline's own (H5-authenticated)
+        // provenance decision, so this adds no inference of its own.
+        self.collapse_runtime_facade_assoc_call(call, &emitted)
+            .unwrap_or(emitted)
+    }
+
+    /// C11 family — `rusty::sync::Weak` is default-constructed and declares no
+    /// `new_` (include/rusty/sync/weak.hpp:28), and `downgrade` is the free
+    /// `rusty::downgrade` (weak.hpp:174/184), not an `Arc` static. The
+    /// transpiled `rc_port` types DO declare `Weak::new_` and `Rc::downgrade`
+    /// statics, and their emitted spellings (`rusty::rc::Weak<…>`,
+    /// `rusty::port::rc::Rc<…>`) are deliberately excluded here.
+    fn collapse_runtime_facade_assoc_call(
+        &self,
+        call: &syn::ExprCall,
+        emitted: &str,
+    ) -> Option<String> {
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        let segments = &func_path.path.segments;
+        if segments.len() < 2 {
+            return None;
+        }
+        let method = segments.last()?.ident.to_string();
+        let owner_ident = segments.iter().nth_back(1)?.ident.to_string();
+        match method.as_str() {
+            "new" | "new_"
+                if call.args.is_empty()
+                    && matches!(owner_ident.as_str(), "Weak" | "ArcWeak" | "RcWeak") =>
+            {
+                let owner = emitted.strip_suffix("::new_()")?;
+                let head = owner.trim_start_matches("::").split('<').next()?;
+                if !matches!(head, "rusty::sync::Weak" | "sync::Weak") || !owner.contains('<') {
+                    return None;
+                }
+                Some(format!("{}()", owner))
+            }
+            "downgrade" if call.args.len() == 1 && owner_ident == "Arc" => {
+                if self.struct_field_order.contains_key("Arc")
+                    || self.declared_type_params.contains_key("Arc")
+                {
+                    return None;
+                }
+                let inner = emitted.strip_suffix(')')?;
+                let (owner, arg) = inner.split_once("::downgrade(")?;
+                let head = owner.trim_start_matches("::").split('<').next()?;
+                if !matches!(head, "rusty::Arc" | "Arc") || !owner.contains('<') {
+                    return None;
+                }
+                // `rusty::downgrade(const Arc<T>&)` borrows — the argument
+                // text the pipeline produced is passed through unchanged.
+                Some(format!("rusty::downgrade({})", arg))
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_call_expr_to_string_lowered(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        // C6 (checkpoint contract 6) — boxed callable coercion. This must
+        // precede every owner-recovery path below: those infer `Box::new`'s
+        // owner from the ARGUMENT (a closure → `std::function<…>`) and emit
+        // `rusty::Box<std::function<void()>>::new_(…)`, which is neither the
+        // explicitly declared type nor convertible to it. The expected type
+        // is the authenticated contract, so the boxed callable IS the
+        // callable: emit the target callable directly.
+        if let Some(coerced) = self.try_emit_boxed_callable_coercion(call, expected_ty) {
+            return coerced;
+        }
+        // This must precede expected-type call rewriting: that path can turn
+        // Arc::new into an already-specialized `Arc<Owner>::new_` and return
+        // before the generic smart-pointer lowering below sees the source AST.
+        if let Some(fused) = self.try_emit_cpp_ctor_arc_make(call) {
+            return fused;
+        }
+        // C11: the same authenticated ctor contract at an unwrapped call site
+        // (`Epoll::new()` in a struct literal), and the hand-written runtime
+        // facades whose associated calls are constructors/free functions.
+        if let Some(constructed) = self.try_emit_cpp_ctor_direct_construction(call) {
+            return constructed;
+        }
         // `Box<dyn FnMut(..)>` already maps to rusty::Function. Construct that
         // erased owner directly from its closure instead of first allocating a
         // Box<std::function<..>> and then wrapping the Box as another callable.
@@ -18824,6 +19310,38 @@ impl CodeGen {
                     .map(|arg| self.emit_expr_maybe_move(arg))
                     .collect();
                 return self.emit_receiver_member_call(&call.args[0], &method, None, &args, None);
+            }
+        }
+
+        // mako-rrr serde UFCS dispatch: `Serialize_::serialize(&x, ar)` /
+        // `Deserialize_::deserialize(&mut x, ar)` name a FREE-FN overload
+        // family (static dispatch by C++ overload resolution — the trait
+        // impls lower to free fns, there are no members), so the general
+        // desugar below would emit `x.deserialize(ar)`, a member call that
+        // does not exist. Keep the qualified free-fn form. Every parameter
+        // of the family is a reference by construction, so reference-shaped
+        // args collapse to bare lvalues; other args emit without a move
+        // wrap (archives are never consumed, and value temporaries bind
+        // const& without one).
+        if let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) {
+            let segs = &path_expr.path.segments;
+            if segs.len() >= 2 {
+                let owner = segs[segs.len() - 2].ident.to_string();
+                let method = segs[segs.len() - 1].ident.to_string();
+                if (owner == "Serialize_" && method == "serialize")
+                    || (owner == "Deserialize_" && method == "deserialize")
+                {
+                    let path = self.emit_path_to_string(&path_expr.path);
+                    let args: Vec<String> = call
+                        .args
+                        .iter()
+                        .map(|a| match self.peel_paren_group_expr(a) {
+                            syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                            _ => self.emit_expr_to_string(a),
+                        })
+                        .collect();
+                    return format!("{}({})", path, args.join(", "));
+                }
             }
         }
 

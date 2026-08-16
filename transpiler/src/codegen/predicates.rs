@@ -35,6 +35,96 @@ impl AutoTrait {
 }
 
 impl CodeGen {
+    /// Recognize only the compiler-owned inactive trait-dispatch marker.
+    /// Keeping the entire shape exact prevents an active, qualified,
+    /// argument-bearing, or multi-attribute `cfg_attr` from silently changing
+    /// code generation semantics.
+    pub(super) fn has_exact_inactive_cpp_trait_member_dispatch_attr(
+        attrs: &[syn::Attribute],
+    ) -> bool {
+        attrs.iter().any(|attr| {
+            let syn::Meta::List(list) = &attr.meta else {
+                return false;
+            };
+            if !list.path.is_ident("cfg_attr") {
+                return false;
+            }
+            let parser =
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+            parser.parse2(list.tokens.clone()).is_ok_and(|nested| {
+                if nested.len() != 2 {
+                    return false;
+                }
+                let Some(syn::Meta::List(predicate)) = nested.first() else {
+                    return false;
+                };
+                let Some(syn::Meta::Path(marker)) = nested.iter().nth(1) else {
+                    return false;
+                };
+                predicate.path.is_ident("any")
+                    && predicate.tokens.is_empty()
+                    && marker.is_ident("cpp_trait_member_dispatch")
+            })
+        })
+    }
+
+    /// Collect the exact lexical owner key of every marked trait.  A bare
+    /// trait name is not sufficient: Rust permits unrelated traits with the
+    /// same leaf name in sibling modules, and marking `a::Clash` must not
+    /// change the UFCS surface or Adapter lowering of `b::Clash`.
+    pub(super) fn collect_cpp_trait_member_dispatch_traits(items: &[syn::Item]) -> HashSet<String> {
+        fn walk(items: &[syn::Item], module_path: &mut Vec<String>, out: &mut HashSet<String>) {
+            for item in items {
+                match item {
+                    syn::Item::Trait(trait_item)
+                        if CodeGen::has_exact_inactive_cpp_trait_member_dispatch_attr(
+                            &trait_item.attrs,
+                        ) =>
+                    {
+                        let trait_name = trait_item.ident.to_string();
+                        let key = if module_path.is_empty() {
+                            trait_name
+                        } else {
+                            format!("{}::{}", module_path.join("::"), trait_name)
+                        };
+                        out.insert(key);
+                    }
+                    syn::Item::Mod(module) => {
+                        if CodeGen::should_skip_cfg_attrs(&module.attrs) {
+                            continue;
+                        }
+                        if let Some((_, nested)) = &module.content {
+                            module_path.push(module.ident.to_string());
+                            walk(nested, module_path, out);
+                            module_path.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut out = HashSet::new();
+        walk(items, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Resolve a trait impl to the same lexical owner-key form used by
+    /// `collect_cpp_trait_member_dispatch_traits` and test whether that exact
+    /// trait is marked.  `resolve_trait_scoped_key_for_impl` understands bare,
+    /// `self`, `super`, and `crate` paths in the current inline-module scope.
+    pub(super) fn impl_uses_cpp_trait_member_dispatch(
+        &self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) -> bool {
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return false;
+        };
+        let trait_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        self.cpp_trait_member_dispatch_traits.contains(&trait_key)
+    }
+
     pub(super) fn should_rewrite_by_value_cycle_field_declaration(
         &self,
         owner_type: &str,
@@ -165,7 +255,33 @@ impl CodeGen {
         )
     }
 
+    /// Checkpoint contract 7 — the AUTHENTICATED internal-linkage marker.
+    ///
+    /// Rust visibility cannot decide this on its own. srpc's reactor has ten
+    /// non-`pub` items whose symbols the incumbent object never owned
+    /// (`verify`, `reactor_log_line`, four `stackless_profile_*`,
+    /// `thread_id_to_u64`, `current_thread_gettid`, `reusing_fiber`,
+    /// `STACKLESS_UNREGISTERED_SLOT`) and, in the very same file, non-`pub`
+    /// items the incumbent manifest REQUIRES to be strong (`event_state_seed`,
+    /// `quorum_event_is_slow`, `stackless_profile_note_*`). A blanket
+    /// "private means internal" rule would turn three missing symbols into
+    /// twenty-three. So the source says which, per item, in the established
+    /// inert-marker idiom:
+    ///
+    ///     #[cfg_attr(any(), cpp_internal)]
+    ///     fn verify(value: bool) { ... }
+    ///
+    /// It is inert for rustc (the `any()` predicate is never satisfied) and
+    /// authoritative for this transpiler, exactly like `cpp_name`, `cpp_abi`,
+    /// `cpp_default_argument` and `cpp_import_namespace`.
+    pub(super) fn has_cpp_internal_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_internal")
+    }
+
     pub(super) fn should_emit_internal_linkage_function(&self, f: &syn::ItemFn) -> bool {
+        if Self::has_cpp_internal_attr(&f.attrs) {
+            return true;
+        }
         self.is_non_root_expanded_test_module() && !matches!(f.vis, syn::Visibility::Public(_))
     }
 
@@ -559,6 +675,40 @@ impl CodeGen {
         Self::has_cpp_only_marker_attr(attrs, "cpp_ctor")
     }
 
+    /// The source-level Arc/cpp_ctor fusion is used on rustc-compiled canonical
+    /// Rust, so it accepts only the exact inert marker spelling. A live direct
+    /// attribute may be a proc macro and is not authenticated by syntax alone.
+    pub(super) fn has_inert_cpp_ctor_attr(attrs: &[syn::Attribute]) -> bool {
+        let mut exact_markers = 0usize;
+        for attr in attrs {
+            if !Self::token_stream_mentions_ident(attr.meta.to_token_stream(), "cpp_ctor") {
+                continue;
+            }
+            if !attr.path().is_ident("cfg_attr") {
+                return false;
+            }
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            if args.len() != 2 {
+                return false;
+            }
+            let Some(syn::Meta::List(predicate)) = args.first() else {
+                return false;
+            };
+            if !predicate.path.is_ident("any")
+                || !predicate.tokens.is_empty()
+                || !matches!(args.get(1), Some(syn::Meta::Path(path)) if path.is_ident("cpp_ctor"))
+            {
+                return false;
+            }
+            exact_markers += 1;
+        }
+        exact_markers == 1
+    }
+
     /// Recognize a C++-only marker either directly, or hidden from rustc in
     /// the permanently-disabled `#[cfg_attr(any(), marker)]` spelling.
     fn has_cpp_only_marker_attr(attrs: &[syn::Attribute], marker: &str) -> bool {
@@ -584,6 +734,92 @@ impl CodeGen {
                     .skip(1)
                     .any(|meta| meta.path().is_ident(marker))
         })
+    }
+
+    /// H1 (checkpoint contract 1) — the authenticated NAMESPACE-PLACEMENT
+    /// contract, in the audited-naming style of `cpp_ctor`/`cpp_name`: only
+    /// the exact inert spelling `#[cfg_attr(any(), cpp_namespace(::target))]`
+    /// is honored, because a live attribute could be a proc macro and is not
+    /// authenticated by syntax alone.
+    ///
+    /// The target is ABSOLUTE by construction: a leading `::` is semantic and
+    /// means module-global placement, never nesting under the configured
+    /// cxx-namespace (`rrr::janus` mangles differently and is explicitly not
+    /// a substitute). Everything else — a relative target, a multi-segment
+    /// target, more than one marker on one item, or a malformed argument —
+    /// is REJECTED rather than guessed: `Err` is a fail-closed diagnostic.
+    pub(super) fn inert_cpp_namespace_target(
+        attrs: &[syn::Attribute],
+    ) -> Result<Option<String>, String> {
+        let mut found: Option<String> = None;
+        for attr in attrs {
+            if !Self::token_stream_mentions_ident(attr.meta.to_token_stream(), "cpp_namespace") {
+                continue;
+            }
+            if !attr.path().is_ident("cfg_attr") {
+                return Err("`cpp_namespace` placement contract must use the inert                             `#[cfg_attr(any(), cpp_namespace(::target))]` spelling"
+                    .to_string());
+            }
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            };
+            if args.len() != 2 {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            }
+            let Some(syn::Meta::List(predicate)) = args.first() else {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            };
+            if !predicate.path.is_ident("any") || !predicate.tokens.is_empty() {
+                return Err("`cpp_namespace` placement contract must be inert                             (`cfg_attr(any(), …)`)"
+                    .to_string());
+            }
+            let Some(syn::Meta::List(marker)) = args.get(1) else {
+                return Err("`cpp_namespace` placement contract needs a target:                             `cpp_namespace(::target)`"
+                    .to_string());
+            };
+            if !marker.path.is_ident("cpp_namespace") {
+                return Err("malformed `cpp_namespace` placement contract".to_string());
+            }
+            let Ok(path) = syn::parse2::<syn::Path>(marker.tokens.clone()) else {
+                return Err("`cpp_namespace` target must be an absolute path                             (`::target`)"
+                    .to_string());
+            };
+            if path.leading_colon.is_none() {
+                return Err(format!(
+                    "`cpp_namespace` target `{}` is relative; placement targets are                      absolute (`::{}`) — a relative target is ambiguous about exactly                      the distinction this contract exists to make",
+                    quote::quote!(#path),
+                    quote::quote!(#path)
+                ));
+            }
+            if path.segments.len() != 1 {
+                return Err(format!(
+                    "`cpp_namespace` target `::{}` must name exactly one                      module-global namespace",
+                    path.segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                ));
+            }
+            let target = path.segments[0].ident.to_string();
+            if found.as_deref().is_some_and(|prev| prev != target) {
+                return Err(format!(
+                    "overlapping `cpp_namespace` placement contracts (`::{}` and `::{}`)                      on one item",
+                    found.unwrap_or_default(),
+                    target
+                ));
+            }
+            if found.is_some() {
+                return Err(format!(
+                    "duplicate `cpp_namespace` placement contract `::{}` on one item",
+                    target
+                ));
+            }
+            found = Some(target);
+        }
+        Ok(found)
     }
 
     /// Recognize the exact Rust-valid spelling for a C++ declaration-only
@@ -688,8 +924,66 @@ impl CodeGen {
     /// fieldwise + move ctor) instead of the default `TraitAdapter<Type>`
     /// wrapper, so existing call sites that upcast `Arc<Type>` /
     /// `shared_ptr<Type>` to the trait base keep compiling. Opt-in only.
-    pub(super) fn has_cpp_inherit_attr(attrs: &[syn::Attribute]) -> bool {
-        Self::has_cpp_only_marker_attr(attrs, "cpp_inherit")
+    pub(super) fn has_cpp_inherit_attr(
+        &self,
+        attrs: &[syn::Attribute],
+        module_path: &[String],
+    ) -> bool {
+        crate::transpile::has_authenticated_cpp_inherit_attr(
+            attrs,
+            module_path,
+            &self.rust_item_import_bindings,
+            &self.authenticated_cpp_inherit_roots,
+        )
+    }
+
+    /// Authenticate the one erased bound admitted by generic foreign Adapter
+    /// partial specializations. A bare `Default` is the standard prelude trait
+    /// only when no lexical declaration or named import shadows it; explicit
+    /// and aliased spellings must resolve exactly to `std`/`core` Default.
+    pub(super) fn is_authenticated_std_default_bound(
+        &self,
+        trait_bound: &syn::TraitBound,
+        module_path: &[String],
+    ) -> bool {
+        if trait_bound.modifier != syn::TraitBoundModifier::None
+            || trait_bound.lifetimes.is_some()
+            || trait_bound
+                .path
+                .segments
+                .iter()
+                .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return false;
+        }
+        let written = trait_bound
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let Some(resolved) = crate::transpile::resolve_external_rust_item_path(
+            &trait_bound.path,
+            module_path,
+            &self.trait_declared_paths,
+            &self.rust_item_import_bindings,
+        ) else {
+            return false;
+        };
+        if resolved == "Default" && written == "Default" {
+            // The prelude spelling is provided by `std` in an ordinary crate
+            // and by `core` under `#![no_std]`; either authenticated sysroot is
+            // sufficient because both paths name the same compiler trait.
+            return self.authenticated_sysroot_roots.contains("std")
+                || self.authenticated_sysroot_roots.contains("core");
+        }
+        for root in ["std", "core"] {
+            if resolved == format!("{root}::default::Default") {
+                return self.authenticated_sysroot_roots.contains(root);
+            }
+        }
+        false
     }
 
     /// Return the C++ fixed underlying type requested by a Rust integer
@@ -833,6 +1127,48 @@ impl CodeGen {
                 .collect::<Vec<_>>()
                 .join(" && ")
         })
+    }
+
+    /// Return the first `#[cfg]` predicate that cannot be preserved by the
+    /// C++ preprocessor lowering. Const/static emission uses this fail-closed
+    /// check before it starts either the forward or definition pass: emitting
+    /// an unsupported predicate unguarded would create a platform-dependent
+    /// definition that rustc never sees, while partially retaining one of
+    /// several `#[cfg]` attributes changes their required AND semantics.
+    pub(crate) fn unsupported_cfg_cpp_attr(attrs: &[syn::Attribute]) -> Option<String> {
+        for attr in attrs.iter().filter(|a| a.path().is_ident("cfg_attr")) {
+            let Ok(args) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Some(attr.meta.to_token_stream().to_string());
+            };
+            if args
+                .iter()
+                .skip(1)
+                .any(|payload| {
+                    payload.path().is_ident("cfg") || payload.path().is_ident("cfg_attr")
+                })
+            {
+                return Some(attr.meta.to_token_stream().to_string());
+            }
+        }
+        for attr in attrs.iter().filter(|a| a.path().is_ident("cfg")) {
+            if !matches!(Self::eval_cfg_meta(&attr.meta), CfgEval::Unknown) {
+                continue;
+            }
+            let syn::Meta::List(list) = &attr.meta else {
+                return Some(attr.meta.to_token_stream().to_string());
+            };
+            let Ok(args) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Some(attr.meta.to_token_stream().to_string());
+            };
+            if args.len() != 1 || Self::cfg_meta_to_cpp(&args[0]).is_none() {
+                return Some(attr.meta.to_token_stream().to_string());
+            }
+        }
+        None
     }
 
     /// One `cfg` predicate -> C++ condition. `None` for anything not
@@ -4677,6 +5013,9 @@ impl CodeGen {
     pub(super) fn is_associated_const_value_path(&self, path: &syn::Path) -> bool {
         if path.segments.len() < 2 {
             return false;
+        }
+        if self.lookup_associated_const_type(path).is_some() {
+            return true;
         }
         let Some(owner_seg) = path.segments.iter().nth_back(1) else {
             return false;

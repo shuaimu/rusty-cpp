@@ -262,6 +262,37 @@ public:
         );
     }
 
+    // @safe - Rust-shaped wait_timeout_while: takes a `std::time::Duration`
+    // (the emitted `Duration` value type, recognised structurally by its
+    // `as_nanos()` accessor — the header cannot name a per-module type) and
+    // returns `WaitTimeoutResult`, matching
+    // `Condvar::wait_timeout_while(guard, dur, cond) ->
+    //  LockResult<(MutexGuard<T>, WaitTimeoutResult)>`.
+    //
+    // `WaitTimeoutResult::timed_out()` is Rust's "the timeout is known to
+    // have elapsed without the condition becoming false", i.e. the negation
+    // of the `bool` the std::chrono overload above reports. That overload
+    // keeps its existing shape; this one is selected only for durations that
+    // are not `std::chrono::duration`, so the two never compete.
+    template<typename T, typename D, typename Condition>
+    requires (!requires (const D& d) { typename D::rep; typename D::period; })
+             && requires (const D& d) { d.as_nanos(); }
+    [[nodiscard]] Result<std::pair<MutexGuard<T>, WaitTimeoutResult>, PoisonError<T>>
+    wait_timeout_while(
+        MutexGuard<T>&& guard,
+        const D& duration,
+        Condition condition
+    ) const {
+        const auto nanos = std::chrono::nanoseconds(
+            static_cast<std::chrono::nanoseconds::rep>(duration.as_nanos()));
+        auto result = wait_timeout_while(std::move(guard), nanos, std::move(condition));
+        auto pair_value = std::move(result).unwrap();
+        using ResultType = std::pair<MutexGuard<T>, WaitTimeoutResult>;
+        return Result<ResultType, PoisonError<T>>::Ok(
+            ResultType(std::move(pair_value.first), WaitTimeoutResult(!pair_value.second))
+        );
+    }
+
     // @safe - Microsecond-count variant of wait_timeout_while, for DSL
     // callers: std::chrono never appears in the caller's code (the
     // duration is built here, inside the runtime's std-wrapping

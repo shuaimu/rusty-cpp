@@ -2,7 +2,7 @@ use crate::codegen::CodeGen;
 use crate::types::UserTypeMap;
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
@@ -459,6 +459,350 @@ pub fn load_consumer_module_map(path: &Path) -> Result<ConsumerModuleMap, String
     Ok(ConsumerModuleMap { modules })
 }
 
+/// Delimiter used for an explicitly requested global-module-fragment include.
+///
+/// This deliberately models only the two C++ include forms.  The preamble API
+/// does not accept arbitrary preprocessor text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GmfIncludeForm {
+    Angle,
+    Quote,
+}
+
+/// One validated-by-transpilation include request for a C++ module's global
+/// module fragment.  Entries are emitted in the order supplied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GmfIncludeSpec {
+    pub path: String,
+    pub form: GmfIncludeForm,
+}
+
+impl GmfIncludeSpec {
+    fn render(&self) -> String {
+        match self.form {
+            GmfIncludeForm::Angle => format!("#include <{}>", self.path),
+            GmfIncludeForm::Quote => format!("#include \"{}\"", self.path),
+        }
+    }
+}
+
+const MODULE_PREAMBLE_FILE_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModulePreambleFile {
+    version: u32,
+    #[serde(default, rename = "module")]
+    modules: Vec<ModulePreambleFileRow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModulePreambleFileRow {
+    name: String,
+    #[serde(default)]
+    includes: Vec<GmfIncludeFileSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GmfIncludeFileSpec {
+    path: String,
+    form: GmfIncludeFileForm,
+    #[serde(default)]
+    when: Option<GmfIncludeFileCondition>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum GmfIncludeFileForm {
+    Angle,
+    Quote,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GmfIncludeFileCondition {
+    target_os: Vec<String>,
+}
+
+/// A loaded, target-filtered module-preamble sidecar.  Selection is separate
+/// from loading so crate mode can reject rows that no emitted module collected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModulePreambleManifest {
+    source: PathBuf,
+    modules: BTreeMap<String, Vec<GmfIncludeSpec>>,
+}
+
+impl ModulePreambleManifest {
+    /// Select preambles for one complete emission set.  Missing rows are fine
+    /// (most modules need no additional headers), but every row present in the
+    /// sidecar must be collected.  That makes renamed/deleted module rows a
+    /// deterministic error instead of silently ignoring stale configuration.
+    pub fn select_for_modules<'a, I>(
+        &self,
+        emitted_modules: I,
+    ) -> Result<BTreeMap<String, Vec<GmfIncludeSpec>>, String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let emitted: std::collections::BTreeSet<String> =
+            emitted_modules.into_iter().map(str::to_string).collect();
+        let stale: Vec<&str> = self
+            .modules
+            .keys()
+            .filter(|name| !emitted.contains(*name))
+            .map(String::as_str)
+            .collect();
+        if !stale.is_empty() {
+            let emitted_label = if emitted.is_empty() {
+                "<none>".to_string()
+            } else {
+                emitted.iter().cloned().collect::<Vec<_>>().join(", ")
+            };
+            return Err(format!(
+                "Module preamble {} has stale/uncollected [[module]] row(s): {} (emitted modules: {})",
+                self.source.display(),
+                stale.join(", "),
+                emitted_label
+            ));
+        }
+
+        Ok(self
+            .modules
+            .iter()
+            .filter(|(name, _)| emitted.contains(*name))
+            .map(|(name, includes)| (name.clone(), includes.clone()))
+            .collect())
+    }
+}
+
+fn validate_module_preamble_name(name: &str) -> Result<(), String> {
+    let valid_segment = |segment: &str| {
+        let mut chars = segment.chars();
+        chars
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    };
+    if name.is_empty() || !name.split('.').all(valid_segment) {
+        return Err(format!(
+            "invalid module preamble name {:?}: expected dot-separated C++ identifiers",
+            name
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target_os_name(target_os: &str) -> Result<(), String> {
+    if target_os.is_empty()
+        || !target_os
+            .chars()
+            .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid module-preamble target_os {:?}: expected lowercase ASCII letters, digits, or underscore",
+            target_os
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the injection-safe subset accepted by the structured preamble
+/// API.  Paths are portable, relative include names; directives, delimiters,
+/// escapes, whitespace, traversal, and duplicate/conflicting rows are rejected.
+pub fn validate_explicit_gmf_includes(includes: &[GmfIncludeSpec]) -> Result<(), String> {
+    let mut paths: BTreeMap<&str, GmfIncludeForm> = BTreeMap::new();
+    for (index, include) in includes.iter().enumerate() {
+        let path = include.path.as_str();
+        if path.is_empty() {
+            return Err(format!("GMF include #{} has an empty path", index + 1));
+        }
+        if Path::new(path).is_absolute() || path.starts_with('/') {
+            return Err(format!(
+                "GMF include #{} path {:?} must be relative",
+                index + 1,
+                path
+            ));
+        }
+        if path.chars().any(char::is_control) {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a control character",
+                index + 1,
+                path
+            ));
+        }
+        if path.contains(['\"', '\'', '<', '>']) {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a quote or include delimiter",
+                index + 1,
+                path
+            ));
+        }
+        if path.contains('\\') {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a backslash; use forward slashes",
+                index + 1,
+                path
+            ));
+        }
+        if !path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/'))
+        {
+            return Err(format!(
+                "GMF include #{} path {:?} contains a disallowed character",
+                index + 1,
+                path
+            ));
+        }
+        if path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            return Err(format!(
+                "GMF include #{} path {:?} contains an empty, '.' or '..' component",
+                index + 1,
+                path
+            ));
+        }
+        if let Some(previous_form) = paths.insert(path, include.form) {
+            let kind = if previous_form == include.form {
+                "duplicate"
+            } else {
+                "conflicting angle/quote"
+            };
+            return Err(format!(
+                "GMF include #{} is a {} entry for path {:?}",
+                index + 1,
+                kind,
+                path
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Load the strict version-1 TOML sidecar used by `--module-preamble`.
+///
+/// `when = { target_os = [...] }` is the only supported condition.  If any
+/// condition is present, the caller must name the intended target explicitly;
+/// host autodetection would be wrong for cross compilation, so omission fails
+/// closed.
+pub fn load_module_preamble_file(
+    path: &Path,
+    target_os: Option<&str>,
+) -> Result<ModulePreambleManifest, String> {
+    if let Some(target_os) = target_os {
+        validate_target_os_name(target_os)?;
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read module preamble {}: {}", path.display(), e))?;
+    let file: ModulePreambleFile = toml::from_str(&content)
+        .map_err(|e| format!("Invalid TOML module preamble {}: {}", path.display(), e))?;
+    if file.version != MODULE_PREAMBLE_FILE_VERSION {
+        return Err(format!(
+            "Unsupported module preamble version {} in {} (expected version {})",
+            file.version,
+            path.display(),
+            MODULE_PREAMBLE_FILE_VERSION
+        ));
+    }
+    if file.modules.is_empty() {
+        return Err(format!(
+            "Module preamble {} must contain at least one [[module]] row",
+            path.display()
+        ));
+    }
+
+    let has_condition = file
+        .modules
+        .iter()
+        .flat_map(|row| &row.includes)
+        .any(|include| include.when.is_some());
+    if has_condition && target_os.is_none() {
+        return Err(format!(
+            "Module preamble {} contains a target_os condition; pass --preamble-target-os explicitly",
+            path.display()
+        ));
+    }
+
+    let mut modules = BTreeMap::new();
+    for row in file.modules {
+        validate_module_preamble_name(&row.name)
+            .map_err(|e| format!("{} in {}", e, path.display()))?;
+        if row.includes.is_empty() {
+            return Err(format!(
+                "Module preamble {} row {:?} has no includes",
+                path.display(),
+                row.name
+            ));
+        }
+
+        let mut unfiltered = Vec::with_capacity(row.includes.len());
+        let mut conditions = Vec::with_capacity(row.includes.len());
+        for include in row.includes {
+            if let Some(condition) = &include.when {
+                if condition.target_os.is_empty() {
+                    return Err(format!(
+                        "Module preamble {} row {:?} has an empty target_os condition",
+                        path.display(),
+                        row.name
+                    ));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for value in &condition.target_os {
+                    validate_target_os_name(value).map_err(|e| {
+                        format!("{} in module {:?} of {}", e, row.name, path.display())
+                    })?;
+                    if !seen.insert(value) {
+                        return Err(format!(
+                            "Module preamble {} row {:?} repeats target_os {:?}",
+                            path.display(),
+                            row.name,
+                            value
+                        ));
+                    }
+                }
+            }
+            unfiltered.push(GmfIncludeSpec {
+                path: include.path,
+                form: match include.form {
+                    GmfIncludeFileForm::Angle => GmfIncludeForm::Angle,
+                    GmfIncludeFileForm::Quote => GmfIncludeForm::Quote,
+                },
+            });
+            conditions.push(include.when);
+        }
+        validate_explicit_gmf_includes(&unfiltered)
+            .map_err(|e| format!("{} in module {:?} of {}", e, row.name, path.display()))?;
+
+        let selected = unfiltered
+            .into_iter()
+            .zip(conditions)
+            .filter_map(|(include, condition)| {
+                let enabled = condition.as_ref().is_none_or(|condition| {
+                    let target_os = target_os.expect("conditions require target_os above");
+                    condition.target_os.iter().any(|value| value == target_os)
+                });
+                enabled.then_some(include)
+            })
+            .collect::<Vec<_>>();
+        if modules.insert(row.name.clone(), selected).is_some() {
+            return Err(format!(
+                "Module preamble {} repeats [[module]] name {:?}",
+                path.display(),
+                row.name
+            ));
+        }
+    }
+
+    Ok(ModulePreambleManifest {
+        source: path.to_path_buf(),
+        modules,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranspileOptions {
     /// Enable `CodeGen::set_crate_name` on the `--crate` path (using the module
@@ -537,6 +881,25 @@ pub struct TranspileOptions {
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
+    /// External crate roots whose selected Cargo package identity is trusted
+    /// to provide compiler-owned attributes. Empty for source-only/direct
+    /// transpilation, which therefore fails closed on lookalike proc macros.
+    pub authenticated_cpp_inherit_roots: std::collections::HashSet<String>,
+    /// Crate-mode preflight proved that the selected `rusty` facade re-exports
+    /// the exact inert `rusty-cpp-markers::cpp_inherit` implementation.  Keep
+    /// this separate from package-root authentication: an exact package name
+    /// alone does not prove that an attribute macro cannot synthesize hidden
+    /// items beside a cpp_name overload contract.
+    pub cpp_name_trusted_cpp_inherit_provenance: bool,
+    /// Compiler sysroot crate roots that Cargo has proved are not occupied by
+    /// an extern-prelude dependency of the current package. Source-only calls
+    /// use the ordinary `std`/`core` assumption; Cargo-backed lanes replace it
+    /// with manifest-specific provenance before lowering erased `Default`.
+    pub authenticated_sysroot_roots: std::collections::HashSet<String>,
+    /// Exact Rust item bindings harvested from sibling inline blocks. Inline
+    /// payloads form one logical Rust module even though each block is lowered
+    /// separately, so compiler-owned markers must see imports in any block.
+    pub cross_file_rust_item_import_bindings: RustItemImportBindings,
     /// C++ `using X = Y;` aliases from the translation unit an inline-rust
     /// block is spliced into. Lets type predicates see through a C++ alias
     /// to the underlying rusty type (`WeakClientConnection` ->
@@ -553,6 +916,10 @@ pub struct TranspileOptions {
     /// In module mode, prefer `import std;` over explicit standard-header includes.
     /// Requires Stage D toolchain setup that provides a prebuilt `std` module.
     pub use_import_std_in_modules: bool,
+    /// Ordered, structured include requests for this module's global module
+    /// fragment.  Rejected for non-module output and validated before parsing
+    /// or code generation.  Empty preserves the historical output byte-for-byte.
+    pub explicit_gmf_includes: Vec<GmfIncludeSpec>,
     /// Prefer `rusty::Unit` alias spelling for Rust `()` in generated
     /// output. Defaults to `true` (see `impl Default`) — the two C++
     /// types are identical via `using Unit = std::tuple<>;` but the
@@ -583,6 +950,14 @@ pub struct TranspileOptions {
     /// (`use Foo::*; match { Variant(...) => ... }`) resolve when `Foo` is
     /// declared in a sibling file. Empty for single-file mode.
     pub cross_file_enums: Vec<syn::ItemEnum>,
+    /// Trait declarations harvested from every file of the crate (C9): a
+    /// module that imports a crate trait still needs to know its interface
+    /// class exists.
+    pub cross_file_traits: Vec<syn::ItemTrait>,
+    /// B: crate-wide (Rust name -> audited C++ name) for cpp_name identities
+    /// owned by ANY file of the crate, so a caller in another file emits the
+    /// owner's identity instead of the crate audit rejecting the reference.
+    pub cross_file_cpp_name_targets: std::collections::BTreeMap<String, String>,
     /// Cross-file impl blocks collected during a crate-mode pre-pass —
     /// every `Item::Impl` across the crate. Used by the per-file codegen
     /// to (a) inject forward declarations for cross-module orphan impl
@@ -610,6 +985,12 @@ pub struct TranspileOptions {
     /// so the methods are absorbed into the struct's body and the
     /// orphan emission is suppressed. Empty for single-file mode.
     pub cross_file_type_aliases: Vec<syn::ItemType>,
+    /// Source-specific, crate-preflight-proven type bindings.  Each record
+    /// retains its physical consumer/provider modules, lexical marker scope,
+    /// exact marked-use leaf group, C++ namespace, and provider kind.  An
+    /// empty set is the fail-closed default outside audited crate mode.
+    pub(crate) flat_import_type_authorizations:
+        BTreeSet<crate::cpp_abi::FlatImportTypeAuthorization>,
     /// Every C++ module name produced by the current crate-mode run
     /// (e.g. `["btree_port.btree.node", "btree_port.btree.map", …]`).
     /// Used by `emit_use` to detect when a Rust `use super::sibling::*`
@@ -668,6 +1049,18 @@ pub enum MethodNameClass {
 /// trait uses. Recurses into inline modules.
 #[allow(dead_code)]
 pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameClass> {
+    classify_method_names_excluding_traits(items, &std::collections::HashSet::new())
+}
+
+/// The ordinary UFCS classifier with an explicit set of local traits that
+/// must preserve member dispatch. The compiler-owned
+/// `cpp_trait_member_dispatch` marker feeds this set from codegen; keeping the
+/// filtering here means a same-named inherent method or an unmarked trait still
+/// contributes its normal classification.
+pub fn classify_method_names_excluding_traits(
+    items: &[syn::Item],
+    excluded_traits: &std::collections::HashSet<String>,
+) -> HashMap<String, MethodNameClass> {
     // UFCS lowering applies ONLY to traits this crate DECLARES. Prelude/std
     // traits a crate merely *implements* (`Clone`, `Display`, `Debug`,
     // `PartialOrd`, `Iterator`, `Deref`, …) already have working dedicated
@@ -679,10 +1072,19 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
     // (Phase-7 fallout category A). So `impl Tr for U` contributes a *trait*
     // use only when `Tr` is crate-declared; otherwise it contributes nothing
     // (the call stays whatever the non-UFCS path makes it).
-    let declared_traits = collect_declared_trait_names(items);
+    let declared_trait_paths = collect_declared_trait_paths(items);
+    let import_bindings = collect_rust_item_import_bindings(items);
     let mut inherent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut trait_named: std::collections::HashSet<String> = std::collections::HashSet::new();
-    collect_method_name_uses(items, &declared_traits, &mut inherent, &mut trait_named);
+    collect_method_name_uses(
+        items,
+        &declared_trait_paths,
+        &import_bindings,
+        excluded_traits,
+        &[],
+        &mut inherent,
+        &mut trait_named,
+    );
 
     let mut out = HashMap::new();
     for name in inherent.union(&trait_named) {
@@ -746,10 +1148,9 @@ pub fn collect_declared_trait_modules(
                         // Minimal escape matching codegen's module spelling
                         // (private/mut_/etc get a trailing underscore).
                         let escaped = match seg.as_str() {
-                            "private" | "mut" | "new" | "delete" | "default"
-                            | "register" | "template" | "typename" | "union"
-                            | "unsigned" | "signed" | "int" | "char" | "float"
-                            | "double" | "namespace" | "operator" | "class" => {
+                            "private" | "mut" | "new" | "delete" | "default" | "register"
+                            | "template" | "typename" | "union" | "unsigned" | "signed" | "int"
+                            | "char" | "float" | "double" | "namespace" | "operator" | "class" => {
                                 format!("{}_", seg)
                             }
                             _ => seg,
@@ -793,6 +1194,649 @@ fn collect_declared_trait_names_into(
             }
             _ => {}
         }
+    }
+}
+
+/// Fully-qualified lexical paths of every crate-declared trait.  Unlike the
+/// legacy short-name registry, these keys distinguish `a::Clash` from
+/// `b::Clash` and are therefore safe for compiler-owned, per-trait behavior.
+pub(crate) fn collect_declared_trait_paths(
+    items: &[syn::Item],
+) -> std::collections::HashSet<String> {
+    fn walk(
+        items: &[syn::Item],
+        module_path: &mut Vec<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(trait_item) => {
+                    let trait_name = trait_item.ident.to_string();
+                    let key = if module_path.is_empty() {
+                        trait_name
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    };
+                    out.insert(key);
+                }
+                syn::Item::Mod(module) => {
+                    if module_is_cfg_disabled(module) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        walk(nested, module_path, out);
+                        module_path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = std::collections::HashSet::new();
+    walk(items, &mut Vec::new(), &mut out);
+    out
+}
+
+/// Exact Rust item-import bindings, keyed by `(lexical module, local name)`.
+///
+/// These bindings intentionally retain Rust paths rather than their emitted
+/// C++ spelling.  Compiler-owned attributes and per-trait lowering decisions
+/// must be based on the declaration that rustc resolves, not on an equal leaf
+/// name or on a C++ namespace alias.
+pub type RustItemImportBindings = std::collections::HashMap<
+    (String, String),
+    std::collections::HashSet<String>,
+>;
+
+fn rust_local_module_shadow_key(local_name: &str) -> String {
+    // `@` cannot occur in a Rust identifier, so this cannot collide with a
+    // source import binding stored in the same compact resolution table.
+    format!("@local-module:{local_name}")
+}
+
+fn rust_local_trait_shadow_key(local_name: &str) -> String {
+    // Traits and modules both live in Rust's type namespace. Keep a distinct
+    // sentinel only so the resolver can tell whether a remaining path tail is
+    // legal after selecting the declaration.
+    format!("@local-trait:{local_name}")
+}
+
+fn rust_glob_import_key() -> String {
+    // Like the local-module sentinel above, this key cannot collide with a
+    // source identifier. A glob can introduce any public leaf, so identity-
+    // sensitive resolution must fail closed when one is lexically visible.
+    "@glob-import".to_string()
+}
+
+pub(crate) fn collect_rust_item_import_bindings(
+    items: &[syn::Item],
+) -> RustItemImportBindings {
+    fn normalized_target(module_path: &[String], segments: &[String]) -> String {
+        let mut prefix = Vec::new();
+        let mut index = 0usize;
+        let mut explicitly_local = false;
+        if segments.first().is_some_and(|segment| segment == "crate") {
+            index = 1;
+            explicitly_local = true;
+        } else if segments
+            .first()
+            .is_some_and(|segment| segment == "self" || segment == "super")
+        {
+            prefix = module_path.to_vec();
+            explicitly_local = true;
+            while index < segments.len() {
+                match segments[index].as_str() {
+                    "self" => index += 1,
+                    "super" => {
+                        prefix.pop();
+                        index += 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let normalized = prefix
+            .iter()
+            .chain(segments[index..].iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("::");
+        if explicitly_local {
+            format!("@crate:{normalized}")
+        } else {
+            normalized
+        }
+    }
+
+    fn flatten(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        module_path: &[String],
+        scope: &str,
+        leading_colon: bool,
+        out: &mut RustItemImportBindings,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                flatten(
+                    &path.tree,
+                    prefix,
+                    module_path,
+                    scope,
+                    leading_colon,
+                    out,
+                );
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                let mut target = prefix.clone();
+                if name.ident != "self" {
+                    target.push(name.ident.to_string());
+                }
+                let Some(local_name) = target.last().cloned() else {
+                    return;
+                };
+                let mut target = normalized_target(module_path, &target);
+                if leading_colon {
+                    target.insert_str(0, "::");
+                }
+                if !target.is_empty() {
+                    out.entry((scope.to_string(), local_name))
+                        .or_default()
+                        .insert(target);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut target = prefix.clone();
+                if rename.ident != "self" {
+                    target.push(rename.ident.to_string());
+                }
+                let mut target = normalized_target(module_path, &target);
+                if leading_colon {
+                    target.insert_str(0, "::");
+                }
+                let local_name = rename.rename.to_string();
+                if local_name != "_" && !target.is_empty() {
+                    out.entry((scope.to_string(), local_name))
+                        .or_default()
+                        .insert(target);
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for nested in &group.items {
+                    flatten(
+                        nested,
+                        prefix,
+                        module_path,
+                        scope,
+                        leading_colon,
+                        out,
+                    );
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                let mut target = normalized_target(module_path, prefix);
+                if leading_colon {
+                    target.insert_str(0, "::");
+                }
+                out.entry((scope.to_string(), rust_glob_import_key()))
+                    .or_default()
+                    .insert(target);
+            }
+        }
+    }
+
+    fn walk(
+        items: &[syn::Item],
+        module_path: &mut Vec<String>,
+        out: &mut RustItemImportBindings,
+    ) {
+        let scope = module_path.join("::");
+        for item in items {
+            match item {
+                syn::Item::Use(item_use) => {
+                    flatten(
+                        &item_use.tree,
+                        &mut Vec::new(),
+                        module_path,
+                        &scope,
+                        item_use.leading_colon.is_some(),
+                        out,
+                    );
+                }
+                syn::Item::Mod(module) if !module_is_cfg_disabled(module) => {
+                    out.entry((
+                        scope.clone(),
+                        rust_local_module_shadow_key(&module.ident.to_string()),
+                    ))
+                    .or_default()
+                    .insert(if scope.is_empty() {
+                        module.ident.to_string()
+                    } else {
+                        format!("{}::{}", scope, module.ident)
+                    });
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        walk(nested, module_path, out);
+                        module_path.pop();
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    out.entry((
+                        scope.clone(),
+                        rust_local_trait_shadow_key(&item_trait.ident.to_string()),
+                    ))
+                    .or_default()
+                    .insert(if scope.is_empty() {
+                        item_trait.ident.to_string()
+                    } else {
+                        format!("{}::{}", scope, item_trait.ident)
+                    });
+                }
+                syn::Item::ExternCrate(item_extern_crate) => {
+                    let local_name = item_extern_crate
+                        .rename
+                        .as_ref()
+                        .map(|(_, rename)| rename.to_string())
+                        .unwrap_or_else(|| item_extern_crate.ident.to_string());
+                    out.entry((scope.clone(), local_name))
+                        .or_default()
+                        .insert(format!("::{}", item_extern_crate.ident));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = RustItemImportBindings::new();
+    walk(items, &mut Vec::new(), &mut out);
+    out
+}
+
+fn nearest_rust_item_import_targets<'a>(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &'a RustItemImportBindings,
+) -> Option<(Vec<String>, &'a std::collections::HashSet<String>)> {
+    for depth in (0..=module_path.len()).rev() {
+        let scope = module_path[..depth].join("::");
+        if let Some(targets) = bindings.get(&(scope, local_name.to_string())) {
+            return Some((module_path[..depth].to_vec(), targets));
+        }
+    }
+    None
+}
+
+fn exact_rust_item_targets<'a>(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &'a RustItemImportBindings,
+) -> Option<&'a std::collections::HashSet<String>> {
+    bindings.get(&(module_path.join("::"), local_name.to_string()))
+}
+
+fn nearest_rust_item_binding_depth(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+) -> Option<usize> {
+    nearest_rust_item_import_targets(local_name, module_path, bindings)
+        .map(|(scope, _)| scope.len())
+}
+
+pub(crate) fn rust_glob_import_is_visible(
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+) -> bool {
+    nearest_rust_item_import_targets(&rust_glob_import_key(), module_path, bindings).is_some()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResolvedRustItemPath {
+    LocalModule(Vec<String>),
+    LocalTrait(String),
+    External(Vec<String>),
+}
+
+fn append_resolved_rust_path(
+    resolved: ResolvedRustItemPath,
+    tail: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    if tail.is_empty() {
+        return Some(resolved);
+    }
+    match resolved {
+        ResolvedRustItemPath::LocalModule(scope) => resolve_local_rust_path(
+            &scope,
+            tail,
+            declared_trait_paths,
+            bindings,
+            visiting,
+        ),
+        ResolvedRustItemPath::External(mut path) => {
+            path.extend(tail.iter().cloned());
+            Some(ResolvedRustItemPath::External(path))
+        }
+        ResolvedRustItemPath::LocalTrait(_) => None,
+    }
+}
+
+fn resolve_rust_import_target(
+    target: &str,
+    binding_scope: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    if let Some(local) = target.strip_prefix("@crate:") {
+        let segments = local
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        return resolve_local_rust_path(
+            &[],
+            &segments,
+            declared_trait_paths,
+            bindings,
+            visiting,
+        );
+    }
+    if let Some(external) = target.strip_prefix("::") {
+        return Some(ResolvedRustItemPath::External(
+            external
+                .split("::")
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ));
+    }
+    let segments = target
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    resolve_relative_rust_path(
+        &segments,
+        binding_scope,
+        declared_trait_paths,
+        bindings,
+        visiting,
+    )
+}
+
+fn resolve_local_rust_path(
+    scope: &[String],
+    segments: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    let head = segments.first()?;
+    let tail = &segments[1..];
+    let imports = exact_rust_item_targets(head, scope, bindings);
+    let module_targets = exact_rust_item_targets(
+        &rust_local_module_shadow_key(head),
+        scope,
+        bindings,
+    );
+    let trait_targets = exact_rust_item_targets(
+        &rust_local_trait_shadow_key(head),
+        scope,
+        bindings,
+    );
+    let present = usize::from(imports.is_some())
+        + usize::from(module_targets.is_some())
+        + usize::from(trait_targets.is_some());
+    if present != 1 {
+        return None;
+    }
+    let resolved = if let Some(targets) = imports {
+        if targets.len() != 1 {
+            return None;
+        }
+        let visit_key = (scope.join("::"), head.clone());
+        if !visiting.insert(visit_key.clone()) {
+            return None;
+        }
+        let resolved = resolve_rust_import_target(
+            targets.iter().next()?,
+            scope,
+            declared_trait_paths,
+            bindings,
+            visiting,
+        );
+        visiting.remove(&visit_key);
+        resolved?
+    } else if let Some(targets) = module_targets {
+        if targets.len() != 1 {
+            return None;
+        }
+        ResolvedRustItemPath::LocalModule(
+            targets
+                .iter()
+                .next()?
+                .split("::")
+                .map(str::to_string)
+                .collect(),
+        )
+    } else {
+        let target = trait_targets?.iter().next()?.clone();
+        if !declared_trait_paths.contains(&target) {
+            return None;
+        }
+        ResolvedRustItemPath::LocalTrait(target)
+    };
+    append_resolved_rust_path(resolved, tail, declared_trait_paths, bindings, visiting)
+}
+
+fn resolve_relative_rust_path(
+    segments: &[String],
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> Option<ResolvedRustItemPath> {
+    let head = segments.first()?;
+    let tail = &segments[1..];
+    let candidates = [
+        nearest_rust_item_import_targets(head, module_path, bindings)
+            .map(|(scope, targets)| (scope, targets, 0u8)),
+        nearest_rust_item_import_targets(
+            &rust_local_module_shadow_key(head),
+            module_path,
+            bindings,
+        )
+        .map(|(scope, targets)| (scope, targets, 1u8)),
+        nearest_rust_item_import_targets(
+            &rust_local_trait_shadow_key(head),
+            module_path,
+            bindings,
+        )
+        .map(|(scope, targets)| (scope, targets, 2u8)),
+    ];
+    let best_depth = candidates
+        .iter()
+        .flatten()
+        .map(|(scope, _, _)| scope.len())
+        .max();
+    let glob_depth = nearest_rust_item_binding_depth(
+        &rust_glob_import_key(),
+        module_path,
+        bindings,
+    );
+    let Some(best_depth) = best_depth else {
+        if glob_depth.is_some() {
+            return None;
+        }
+        return Some(ResolvedRustItemPath::External(segments.to_vec()));
+    };
+    // A nearer glob can supply the same name. At the same scope an explicit
+    // item or import wins over a glob, matching rustc's lexical precedence.
+    if glob_depth.is_some_and(|depth| depth > best_depth) {
+        return None;
+    }
+    let mut best = candidates
+        .into_iter()
+        .flatten()
+        .filter(|(scope, _, _)| scope.len() == best_depth);
+    let selected = best.next()?;
+    if best.next().is_some() || selected.1.len() != 1 {
+        return None;
+    }
+    let (scope, targets, kind) = selected;
+    let resolved = match kind {
+        0 => {
+            let visit_key = (scope.join("::"), head.clone());
+            if !visiting.insert(visit_key.clone()) {
+                return None;
+            }
+            let resolved = resolve_rust_import_target(
+                targets.iter().next()?,
+                &scope,
+                declared_trait_paths,
+                bindings,
+                visiting,
+            );
+            visiting.remove(&visit_key);
+            resolved?
+        }
+        1 => ResolvedRustItemPath::LocalModule(
+            targets
+                .iter()
+                .next()?
+                .split("::")
+                .map(str::to_string)
+                .collect(),
+        ),
+        2 => {
+            let target = targets.iter().next()?.clone();
+            if !declared_trait_paths.contains(&target) {
+                return None;
+            }
+            ResolvedRustItemPath::LocalTrait(target)
+        }
+        _ => unreachable!(),
+    };
+    append_resolved_rust_path(resolved, tail, declared_trait_paths, bindings, visiting)
+}
+
+fn resolve_rust_item_path(
+    path: &syn::Path,
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+) -> Option<ResolvedRustItemPath> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    let mut visiting = std::collections::HashSet::new();
+    if path.leading_colon.is_some() {
+        return Some(ResolvedRustItemPath::External(segments));
+    }
+    match segments.first().map(String::as_str) {
+        Some("crate") => resolve_local_rust_path(
+            &[],
+            &segments[1..],
+            declared_trait_paths,
+            bindings,
+            &mut visiting,
+        ),
+        Some("self" | "super") => {
+            let mut scope = module_path.to_vec();
+            let mut index = 0usize;
+            while index < segments.len() {
+                match segments[index].as_str() {
+                    "self" => index += 1,
+                    "super" => {
+                        scope.pop();
+                        index += 1;
+                    }
+                    _ => break,
+                }
+            }
+            resolve_local_rust_path(
+                &scope,
+                &segments[index..],
+                declared_trait_paths,
+                bindings,
+                &mut visiting,
+            )
+        }
+        _ => resolve_relative_rust_path(
+            &segments,
+            module_path,
+            declared_trait_paths,
+            bindings,
+            &mut visiting,
+        ),
+    }
+}
+
+pub(crate) fn resolve_external_rust_item_path(
+    path: &syn::Path,
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+) -> Option<String> {
+    match resolve_rust_item_path(path, module_path, declared_trait_paths, bindings)? {
+        ResolvedRustItemPath::External(segments) => Some(segments.join("::")),
+        ResolvedRustItemPath::LocalModule(_) | ResolvedRustItemPath::LocalTrait(_) => None,
+    }
+}
+
+pub(crate) fn has_authenticated_cpp_inherit_attr(
+    attrs: &[syn::Attribute],
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+    authenticated_roots: &std::collections::HashSet<String>,
+) -> bool {
+    attrs.iter().any(|attribute| {
+        attribute.path().is_ident("cpp_inherit")
+            && authenticated_roots.contains("rusty")
+            && resolve_external_rust_item_path(
+                attribute.path(),
+                module_path,
+                &std::collections::HashSet::new(),
+                bindings,
+            )
+            .is_some_and(|path| path == "rusty::cpp_inherit")
+    })
+}
+
+pub(crate) fn rust_item_import_name_is_bound(
+    local_name: &str,
+    module_path: &[String],
+    bindings: &RustItemImportBindings,
+) -> bool {
+    nearest_rust_item_import_targets(local_name, module_path, bindings).is_some()
+}
+
+/// Resolve an impl's trait path to a crate-local lexical trait key.  Resolution
+/// is intentionally fail-closed: explicit `crate`/`self`/`super` paths must
+/// name a declared trait, and bare imports are resolved through their exact
+/// binding rather than guessed from a same-leaf declaration.
+pub(crate) fn resolve_declared_trait_path_key(
+    path: &syn::Path,
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    import_bindings: &RustItemImportBindings,
+) -> Option<String> {
+    match resolve_rust_item_path(path, module_path, declared_trait_paths, import_bindings)? {
+        ResolvedRustItemPath::LocalTrait(key) if declared_trait_paths.contains(&key) => Some(key),
+        ResolvedRustItemPath::LocalModule(_) | ResolvedRustItemPath::External(_)
+        | ResolvedRustItemPath::LocalTrait(_) => None,
     }
 }
 
@@ -1043,6 +2087,18 @@ pub fn collect_concrete_trait_impl_method_owners(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
 ) -> HashMap<String, std::collections::BTreeSet<String>> {
+    collect_concrete_trait_impl_method_owners_excluding_traits(
+        items,
+        declared_traits,
+        &std::collections::HashSet::new(),
+    )
+}
+
+pub fn collect_concrete_trait_impl_method_owners_excluding_traits(
+    items: &[syn::Item],
+    declared_traits: &std::collections::HashSet<String>,
+    excluded_traits: &std::collections::HashSet<String>,
+) -> HashMap<String, std::collections::BTreeSet<String>> {
     // Traits that declare an associated CONSTANT are emitted via the runtime-
     // helper path (`emit_trait_interface_pattern` skips them, `has_assoc_const`),
     // so their methods live in `<Tr>RuntimeHelper`, NOT `namespace <Tr>_`.
@@ -1052,22 +2108,39 @@ pub fn collect_concrete_trait_impl_method_owners(
     // `Flags` trait (`const FLAGS`, `type Bits`): `complement`/`contains`/`bits`
     // are NOT in `Flags_`. (Assoc-TYPE-only traits like ToOwned DO use the
     // interface + free-function path, so they are NOT excluded.)
+    let declared_trait_paths = collect_declared_trait_paths(items);
+    let import_bindings = collect_rust_item_import_bindings(items);
     let mut assoc_const_traits = std::collections::HashSet::new();
-    collect_assoc_const_trait_names_into(items, &mut assoc_const_traits);
+    collect_assoc_const_trait_names_into(items, &[], &mut assoc_const_traits);
     let mut out: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
-    collect_concrete_trait_impl_method_owners_into(items, declared_traits, &assoc_const_traits, &mut out);
+    collect_concrete_trait_impl_method_owners_into(
+        items,
+        declared_traits,
+        &declared_trait_paths,
+        &import_bindings,
+        &assoc_const_traits,
+        excluded_traits,
+        &[],
+        &mut out,
+    );
     out
 }
 
 fn collect_assoc_const_trait_names_into(
     items: &[syn::Item],
+    module_path: &[String],
     out: &mut std::collections::HashSet<String>,
 ) {
     for item in items {
         match item {
             syn::Item::Trait(t) => {
                 if t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Const(_))) {
-                    out.insert(t.ident.to_string());
+                    let trait_name = t.ident.to_string();
+                    out.insert(if module_path.is_empty() {
+                        trait_name
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    });
                 }
             }
             syn::Item::Mod(m) => {
@@ -1075,7 +2148,9 @@ fn collect_assoc_const_trait_names_into(
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
-                    collect_assoc_const_trait_names_into(nested, out);
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(m.ident.to_string());
+                    collect_assoc_const_trait_names_into(nested, &nested_path, out);
                 }
             }
             _ => {}
@@ -1086,7 +2161,11 @@ fn collect_assoc_const_trait_names_into(
 fn collect_concrete_trait_impl_method_owners_into(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
+    declared_trait_paths: &std::collections::HashSet<String>,
+    import_bindings: &RustItemImportBindings,
     assoc_const_traits: &std::collections::HashSet<String>,
+    excluded_traits: &std::collections::HashSet<String>,
+    module_path: &[String],
     out: &mut HashMap<String, std::collections::BTreeSet<String>>,
 ) {
     for item in items {
@@ -1095,17 +2174,31 @@ fn collect_concrete_trait_impl_method_owners_into(
                 let Some((_, trait_path, _)) = &impl_block.trait_ else {
                     continue;
                 };
-                let Some(trait_name) =
+                let Some(written_trait_name) =
                     trait_path.segments.last().map(|s| s.ident.to_string())
                 else {
                     continue;
                 };
+                let Some(trait_key) = resolve_declared_trait_path_key(
+                    trait_path,
+                    module_path,
+                    declared_trait_paths,
+                    import_bindings,
+                ) else {
+                    continue;
+                };
+                let trait_name = trait_key
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&written_trait_name)
+                    .to_string();
                 // Only crate-declared traits (foreign-trait impls aren't UFCS-
                 // lowered), skip assoc-const (runtime-helper) traits, and only
                 // concrete impls (no type-param generics) — generic/blanket
                 // impls don't reliably emit an early-declared `<Tr>_`.
                 if !declared_traits.contains(&trait_name)
-                    || assoc_const_traits.contains(&trait_name)
+                    || assoc_const_traits.contains(&trait_key)
+                    || excluded_traits.contains(&trait_key)
                 {
                     continue;
                 }
@@ -1133,7 +2226,14 @@ fn collect_concrete_trait_impl_method_owners_into(
                 // name too. Skip assoc-const (runtime-helper) traits, matching
                 // the impl branch and the default-method emitter.
                 let trait_name = t.ident.to_string();
-                if !assoc_const_traits.contains(&trait_name) {
+                let trait_key = if module_path.is_empty() {
+                    trait_name.clone()
+                } else {
+                    format!("{}::{}", module_path.join("::"), trait_name)
+                };
+                if !assoc_const_traits.contains(&trait_key)
+                    && !excluded_traits.contains(&trait_key)
+                {
                     for ti in &t.items {
                         if let syn::TraitItem::Fn(m) = ti
                             && m.default.is_some()
@@ -1151,10 +2251,16 @@ fn collect_concrete_trait_impl_method_owners_into(
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(m.ident.to_string());
                     collect_concrete_trait_impl_method_owners_into(
                         nested,
                         declared_traits,
+                        declared_trait_paths,
+                        import_bindings,
                         assoc_const_traits,
+                        excluded_traits,
+                        &nested_path,
                         out,
                     );
                 }
@@ -1166,7 +2272,10 @@ fn collect_concrete_trait_impl_method_owners_into(
 
 fn collect_method_name_uses(
     items: &[syn::Item],
-    declared_traits: &std::collections::HashSet<String>,
+    declared_trait_paths: &std::collections::HashSet<String>,
+    import_bindings: &RustItemImportBindings,
+    excluded_traits: &std::collections::HashSet<String>,
+    module_path: &[String],
     inherent: &mut std::collections::HashSet<String>,
     trait_named: &mut std::collections::HashSet<String>,
 ) {
@@ -1175,12 +2284,17 @@ fn collect_method_name_uses(
             syn::Item::Impl(impl_block) => {
                 // A trait impl counts as a *trait* use only when the implemented
                 // trait is crate-declared (see `classify_method_names`).
-                let impl_trait_name = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
-                    path.segments.last().map(|s| s.ident.to_string())
+                let impl_trait_key = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
+                    resolve_declared_trait_path_key(
+                        path,
+                        module_path,
+                        declared_trait_paths,
+                        import_bindings,
+                    )
                 });
-                let is_crate_trait_impl = impl_trait_name
+                let is_crate_trait_impl = impl_trait_key
                     .as_ref()
-                    .is_some_and(|n| declared_traits.contains(n));
+                    .is_some_and(|key| !excluded_traits.contains(key));
                 for impl_item in &impl_block.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         let name = method.sig.ident.to_string();
@@ -1196,6 +2310,15 @@ fn collect_method_name_uses(
                 }
             }
             syn::Item::Trait(t) => {
+                let trait_name = t.ident.to_string();
+                let trait_key = if module_path.is_empty() {
+                    trait_name
+                } else {
+                    format!("{}::{}", module_path.join("::"), trait_name)
+                };
+                if excluded_traits.contains(&trait_key) {
+                    continue;
+                }
                 for trait_item in &t.items {
                     if let syn::TraitItem::Fn(method) = trait_item {
                         trait_named.insert(method.sig.ident.to_string());
@@ -1207,7 +2330,17 @@ fn collect_method_name_uses(
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
-                    collect_method_name_uses(nested, declared_traits, inherent, trait_named);
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(m.ident.to_string());
+                    collect_method_name_uses(
+                        nested,
+                        declared_trait_paths,
+                        import_bindings,
+                        excluded_traits,
+                        &nested_path,
+                        inherent,
+                        trait_named,
+                    );
                 }
             }
             _ => {}
@@ -1229,10 +2362,18 @@ impl Default for TranspileOptions {
             consumer_module_map: ConsumerModuleMap::default(),
             consumer_rust_module: None,
             external_crate_module_aliases: HashMap::new(),
+            authenticated_cpp_inherit_roots: std::collections::HashSet::new(),
+            cpp_name_trusted_cpp_inherit_provenance: false,
+            authenticated_sysroot_roots: std::collections::HashSet::from([
+                "std".to_string(),
+                "core".to_string(),
+            ]),
+            cross_file_rust_item_import_bindings: RustItemImportBindings::new(),
             cpp_type_aliases: HashMap::new(),
             emit_ufcs_trait_manifest_path: None,
             dependency_ufcs_trait_manifests: Vec::new(),
             use_import_std_in_modules: false,
+            explicit_gmf_includes: Vec::new(),
             // Default to the `rusty::Unit` alias spelling (replacing
             // `std::tuple<>` post-emission). The two C++ types are
             // identical via `using Unit = std::tuple<>;`, but the alias
@@ -1246,10 +2387,13 @@ impl Default for TranspileOptions {
             interface_traits: false,
             inline_rust_block: false,
             cross_file_enums: Vec::new(),
+            cross_file_traits: Vec::new(),
+            cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
             cross_file_type_aliases: Vec::new(),
+            flat_import_type_authorizations: BTreeSet::new(),
             crate_module_names: Vec::new(),
             cxx_namespace: None,
             auto_namespace: false,
@@ -1364,9 +2508,22 @@ fn merge_cpp_module_symbol_index_file(
             })?;
         }
 
+        let namespace = module
+            .namespace
+            .map(|namespace| {
+                canonical_cpp_export_namespace_path(&namespace).map_err(|detail| {
+                    format!(
+                        "C++ module symbol index {} has invalid namespace for module '{}': {}",
+                        source_path.display(),
+                        module_path,
+                        detail
+                    )
+                })
+            })
+            .transpose()?;
         let incoming = CppModuleIndexModule {
             cpp_module: module.cpp_module,
-            namespace: module.namespace,
+            namespace,
             symbols: module
                 .symbols
                 .into_iter()
@@ -1448,6 +2605,51 @@ fn merge_cpp_module_entry(
 
 fn canonical_cpp_module_path(path: &str) -> String {
     path.trim().replace('.', "::")
+}
+
+fn canonical_cpp_export_namespace_path(path: &str) -> Result<String, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("namespace must not be empty".to_string());
+    }
+    if path.starts_with("::") {
+        return Err("leading `::` is not supported".to_string());
+    }
+
+    let mut segments = Vec::new();
+    for (segment_index, raw_segment) in path.split("::").enumerate() {
+        let segment = raw_segment.trim();
+        if segment.is_empty() {
+            return Err("namespace contains an empty identifier segment".to_string());
+        }
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return Err("namespace contains an empty identifier segment".to_string());
+        };
+        if !(first.is_ascii_alphabetic() || first == '_')
+            || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(format!(
+                "namespace segment '{}' is not a C++ identifier",
+                segment
+            ));
+        }
+        let reserved_identifier = crate::codegen::escape_cpp_keyword(segment) != segment
+            || segment.contains("__")
+            || (segment_index == 0 && segment.starts_with('_'))
+            || segment
+                .strip_prefix('_')
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|ch| ch.is_ascii_uppercase());
+        if reserved_identifier {
+            return Err(format!(
+                "namespace segment '{}' is reserved in C++",
+                segment
+            ));
+        }
+        segments.push(segment);
+    }
+    Ok(segments.join("::"))
 }
 
 fn cpp_symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
@@ -1532,6 +2734,25 @@ fn validate_cpp_module_symbol_index_contract(
         }
     }
     Ok(())
+}
+
+fn collect_cpp_module_export_namespace_map(
+    index: &CppModuleSymbolIndex,
+) -> Result<HashMap<String, String>, String> {
+    let mut by_module = HashMap::new();
+    for (module_path, module_entry) in &index.modules {
+        let Some(namespace) = module_entry.namespace.as_ref() else {
+            continue;
+        };
+        let namespace = canonical_cpp_export_namespace_path(namespace).map_err(|detail| {
+            format!(
+                "C++ module symbol index has invalid namespace for module '{}': {}",
+                module_path, detail
+            )
+        })?;
+        by_module.insert(module_path.clone(), namespace);
+    }
+    Ok(by_module)
 }
 
 /// Transpile Rust source code to C++ code.
@@ -1622,6 +2843,150 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
+    transpile_full_with_options_impl(
+        rust_source,
+        module_name,
+        type_map,
+        extension_method_hints,
+        crate_name,
+        options,
+        None,
+    )
+}
+
+/// Validate the narrow `extern "Rust"` seam used by named C++ modules whose
+/// definitions live in a C++ module implementation unit.
+///
+/// A Rust-ABI foreign declaration has no literal C++ linkage-specification
+/// equivalent: `extern "Rust"` is not a C++ language linkage.  In named-module
+/// output we deliberately lower it to an ordinary module-attached C++
+/// declaration.  Outside a named module there is no implementation-unit
+/// ownership contract to bind that declaration to, so fail before emitting an
+/// invalid or silently different ABI surface.
+fn validate_rust_abi_foreign_declarations(
+    file: &syn::File,
+    module_name: Option<&str>,
+) -> Result<(), String> {
+    struct Validator<'a> {
+        module_name: Option<&'a str>,
+        block_depth: usize,
+        error: Option<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Validator<'_> {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            self.block_depth += 1;
+            syn::visit::visit_block(self, block);
+            self.block_depth -= 1;
+        }
+
+        fn visit_item_foreign_mod(&mut self, foreign: &'ast syn::ItemForeignMod) {
+            if self.error.is_some()
+                || foreign.abi.name.as_ref().map(syn::LitStr::value).as_deref() != Some("Rust")
+            {
+                syn::visit::visit_item_foreign_mod(self, foreign);
+                return;
+            }
+
+            if self.module_name.is_none() {
+                self.error = Some(
+                    "`extern \"Rust\"` declarations require named C++ module output".to_string(),
+                );
+                return;
+            }
+            if foreign.unsafety.is_none() {
+                self.error = Some(
+                    "`extern \"Rust\"` declarations must use an `unsafe extern` block".to_string(),
+                );
+                return;
+            }
+            if self.block_depth != 0 {
+                self.error = Some(
+                    "`extern \"Rust\"` declarations are only supported at module scope".to_string(),
+                );
+                return;
+            }
+
+            for item in &foreign.items {
+                let syn::ForeignItem::Fn(function) = item else {
+                    self.error = Some(
+                        "named-module `extern \"Rust\"` supports function declarations only"
+                            .to_string(),
+                    );
+                    return;
+                };
+                if function.sig.variadic.is_some() {
+                    self.error = Some(format!(
+                        "named-module `extern \"Rust\"` function `{}` cannot be variadic",
+                        function.sig.ident
+                    ));
+                    return;
+                }
+                if function.attrs.iter().any(|attr| {
+                    attr.path().is_ident("link_name") || attr.path().is_ident("link_ordinal")
+                }) {
+                    self.error = Some(format!(
+                        "named-module `extern \"Rust\"` function `{}` cannot override its link name",
+                        function.sig.ident
+                    ));
+                    return;
+                }
+            }
+
+            syn::visit::visit_item_foreign_mod(self, foreign);
+        }
+    }
+
+    let mut validator = Validator {
+        module_name,
+        block_depth: 0,
+        error: None,
+    };
+    syn::visit::Visit::visit_file(&mut validator, file);
+    validator.error.map_or(Ok(()), Err)
+}
+
+/// Render a cpp_abi file that was already collected, globally validated, and
+/// lowered by the ordered inline-block preflight.  This seam is intentionally
+/// crate-private: ordinary standalone callers must continue through
+/// `transpile_full_with_options`, which rejects module-less ABI facades.
+pub(crate) fn transpile_prepared_inline_cpp_abi(
+    file: syn::File,
+    plan: crate::cpp_abi::CppAbiEmissionPlan,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    options: &TranspileOptions,
+) -> Result<String, String> {
+    if !options.inline_rust_block {
+        return Err("prepared cpp_abi rendering requires inline-rust code generation".to_string());
+    }
+    transpile_full_with_options_impl(
+        "",
+        None,
+        type_map,
+        extension_method_hints,
+        None,
+        options,
+        Some((file, plan)),
+    )
+}
+
+fn transpile_full_with_options_impl(
+    rust_source: &str,
+    module_name: Option<&str>,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    crate_name: Option<&str>,
+    options: &TranspileOptions,
+    prepared_cpp_abi: Option<(syn::File, crate::cpp_abi::CppAbiEmissionPlan)>,
+) -> Result<String, String> {
+    validate_explicit_gmf_includes(&options.explicit_gmf_includes)?;
+    if module_name.is_none() && !options.explicit_gmf_includes.is_empty() {
+        return Err(
+            "Explicit GMF includes require module output (provide a C++ module name)".to_string(),
+        );
+    }
+
     let consumer_rust_module = match options.consumer_rust_module.as_deref() {
         None => None,
         Some(raw) => {
@@ -1697,9 +3062,88 @@ pub fn transpile_full_with_options(
         }
     };
     log_profile("start");
-    let mut file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
-        .map_err(|e| format!("Parse error: {}", e))?;
-    log_profile("parse_with_expand_hygiene_fallback");
+    let is_prepared_inline = prepared_cpp_abi.is_some();
+    let validate_cpp_defaults = |file: &syn::File| {
+        if options.crate_module_names.is_empty() {
+            crate::cpp_default_args::validate_file(file, type_map)
+        } else {
+            crate::cpp_default_args::validate_file_after_crate_preflight(file, type_map)
+        }
+    };
+    let (mut file, cpp_abi_plan, has_cpp_defaults) = if let Some((file, plan)) = prepared_cpp_abi {
+        let has_cpp_defaults = validate_cpp_defaults(&file)?;
+        (file, plan, has_cpp_defaults)
+    } else {
+        let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
+            .map_err(|e| format!("Parse error: {}", e))?;
+        log_profile("parse_with_expand_hygiene_fallback");
+        let has_cpp_defaults = validate_cpp_defaults(&file)?;
+        match crate::cpp_abi::lower(&file)? {
+            Some((lowered, plan)) => (lowered, plan, has_cpp_defaults),
+            None => (
+                file,
+                crate::cpp_abi::CppAbiEmissionPlan::default(),
+                has_cpp_defaults,
+            ),
+        }
+    };
+    if has_cpp_defaults && is_prepared_inline {
+        return Err(
+            "cpp_default_argument is supported only by source files in named-module crate mode, not inline Rust blocks"
+                .to_string(),
+        );
+    }
+    if has_cpp_defaults && module_name.is_none() {
+        return Err(
+            "cpp_default_argument requires named C++ module output so the default belongs to an exported declaration"
+                .to_string(),
+        );
+    }
+    if has_cpp_defaults {
+        crate::cpp_default_args::validate_required_gmf_includes(
+            &file,
+            &options.explicit_gmf_includes,
+        )?;
+    }
+    let cpp_name_plan = if options.crate_module_names.is_empty() {
+        crate::cpp_name::collect(&file)?
+    } else {
+        crate::cpp_name::collect_with_crate_provenance(
+            &file,
+            options.cpp_name_trusted_cpp_inherit_provenance,
+        )?
+    };
+    if !cpp_name_plan.is_empty()
+        && (module_name.is_none() || is_prepared_inline || options.inline_rust_block)
+    {
+        return Err(
+            "cpp_name requires named-module or crate-mode output and is not supported in inline/module-less transpilation"
+                .to_string(),
+        );
+    }
+    if !is_prepared_inline {
+        cpp_abi_plan.validate_flat_import_namespace(
+            options.cxx_namespace.as_deref(),
+            "crate/module transpilation",
+        )?;
+    }
+    validate_rust_abi_foreign_declarations(&file, module_name)?;
+    if cpp_abi_plan.has_flat_imports()
+        && !is_prepared_inline
+        && options.crate_module_names.is_empty()
+    {
+        return Err(
+            "cpp_import_namespace requires prepared crate mode or prepared inline-rust mode; direct named-module transpilation cannot prove the physical sibling import"
+                .to_string(),
+        );
+    }
+    if !cpp_abi_plan.is_empty() && module_name.is_none() && !is_prepared_inline {
+        return Err(
+            "cpp_abi adapters require named C++ module output; standalone output is unsupported"
+                .to_string(),
+        );
+    }
+    log_profile("cpp_abi_lower");
     validate_cpp_declaration_markers(&file)?;
     log_profile("validate_cpp_declaration_markers");
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
@@ -1774,8 +3218,22 @@ pub fn transpile_full_with_options(
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
+    codegen.set_authenticated_cpp_inherit_roots(
+        options.authenticated_cpp_inherit_roots.clone(),
+    );
+    codegen.set_authenticated_sysroot_roots(options.authenticated_sysroot_roots.clone());
+    codegen.set_cross_file_rust_item_import_bindings(
+        options.cross_file_rust_item_import_bindings.clone(),
+    );
     codegen.set_cpp_type_aliases(options.cpp_type_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
+    codegen.set_explicit_module_gmf_includes(
+        options
+            .explicit_gmf_includes
+            .iter()
+            .map(GmfIncludeSpec::render)
+            .collect(),
+    );
     codegen.set_in_umbrella_closure(options.in_umbrella_closure);
     codegen.lenient_auto_template_args = options.lenient_auto_template_args;
     codegen.set_cxx_namespace(effective_cxx_namespace);
@@ -1785,21 +3243,30 @@ pub fn transpile_full_with_options(
     codegen.set_interface_traits(options.interface_traits);
     codegen.inline_rust_block = options.inline_rust_block;
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
+    codegen.set_cross_file_traits(&options.cross_file_traits);
+    codegen.set_cross_file_cpp_name_targets(options.cross_file_cpp_name_targets.clone());
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
+    codegen.set_flat_import_type_authorizations(
+        options.flat_import_type_authorizations.clone(),
+    );
     codegen.set_crate_module_names(options.crate_module_names.clone());
     codegen.set_consumer_module_map(
         options.consumer_module_map.clone(),
         module_name,
         consumer_rust_module.as_deref(),
     );
+    codegen.set_cpp_abi_plan(cpp_abi_plan);
+    codegen.set_cpp_name_plan(cpp_name_plan);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
         codegen.set_cpp_module_namespaces(collect_cpp_module_namespace_map(index));
         codegen.set_cpp_module_import_names(collect_cpp_module_import_name_map(index));
+        let export_namespaces = collect_cpp_module_export_namespace_map(index)?;
+        codegen.set_cpp_module_export_namespaces(export_namespaces);
     }
     // UFCS cross-crate (book § 3.2.7): load dependency trait manifests so the
     // classifier + call-site qualification know the dependency's trait methods
@@ -1812,6 +3279,9 @@ pub fn transpile_full_with_options(
     log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
     log_profile("codegen_emit_file");
+    if let Some(error) = codegen.take_codegen_error() {
+        return Err(error);
+    }
     // UFCS cross-crate: emit this crate's trait manifest (declared traits +
     // actually-emitted `<Tr>_::m` owner map) for dependents to consume.
     if let Some(path) = options.emit_ufcs_trait_manifest_path.as_ref() {
@@ -1839,8 +3309,7 @@ pub fn transpile_full_with_options(
                     || trimmed.contains("operator<")
                     || trimmed.contains("operator>")
                     || trimmed.contains("operator!="));
-            if is_defaulted_declarator
-                && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
+            if is_defaulted_declarator && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
             {
                 continue;
             }
@@ -2167,6 +3636,17 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
         self.pop_cpp_binding_scope();
     }
 
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        // Rust item bodies establish their own safety context. In particular,
+        // a function, module, const, static, impl, or trait declared inside an
+        // `unsafe` block does not inherit that block's permission to perform
+        // unsafe operations. Expression bodies such as closures are not items
+        // and continue to inherit their enclosing lexical safety context.
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_item(self, item);
+        self.unsafe_context_depth = enclosing_unsafe_context;
+    }
+
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         let Some((_, items)) = &module.content else {
             return;
@@ -2182,27 +3662,33 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
 
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
         self.context_stack.push(function.sig.ident.to_string());
-        let was_unsafe = function.sig.unsafety.is_some();
-        if was_unsafe {
-            self.unsafe_context_depth += 1;
-        }
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_signature(self, &function.sig);
+        self.unsafe_context_depth = usize::from(function.sig.unsafety.is_some());
         visit::visit_block(self, &function.block);
-        if was_unsafe {
-            self.unsafe_context_depth -= 1;
-        }
+        self.unsafe_context_depth = enclosing_unsafe_context;
         self.context_stack.pop();
     }
 
     fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
         self.context_stack.push(method.sig.ident.to_string());
-        let was_unsafe = method.sig.unsafety.is_some();
-        if was_unsafe {
-            self.unsafe_context_depth += 1;
-        }
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_signature(self, &method.sig);
+        self.unsafe_context_depth = usize::from(method.sig.unsafety.is_some());
         visit::visit_block(self, &method.block);
-        if was_unsafe {
-            self.unsafe_context_depth -= 1;
+        self.unsafe_context_depth = enclosing_unsafe_context;
+        self.context_stack.pop();
+    }
+
+    fn visit_trait_item_fn(&mut self, method: &'ast syn::TraitItemFn) {
+        self.context_stack.push(method.sig.ident.to_string());
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        visit::visit_signature(self, &method.sig);
+        self.unsafe_context_depth = usize::from(method.sig.unsafety.is_some());
+        if let Some(block) = &method.default {
+            visit::visit_block(self, block);
         }
+        self.unsafe_context_depth = enclosing_unsafe_context;
         self.context_stack.pop();
     }
 
@@ -2218,6 +3704,41 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
         self.unsafe_context_depth += 1;
         visit::visit_expr_unsafe(self, unsafe_expr);
         self.unsafe_context_depth -= 1;
+    }
+
+    fn visit_type_array(&mut self, array: &'ast syn::TypeArray) {
+        self.visit_type(&array.elem);
+        // Array/repeat lengths and const generic arguments are lowered as
+        // anonymous const items, so they do not inherit lexical unsafety.
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        self.visit_expr(&array.len);
+        self.unsafe_context_depth = enclosing_unsafe_context;
+    }
+
+    fn visit_expr_repeat(&mut self, repeat: &'ast syn::ExprRepeat) {
+        for attribute in &repeat.attrs {
+            self.visit_attribute(attribute);
+        }
+        self.visit_expr(&repeat.expr);
+        let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+        self.visit_expr(&repeat.len);
+        self.unsafe_context_depth = enclosing_unsafe_context;
+    }
+
+    fn visit_generic_argument(&mut self, argument: &'ast syn::GenericArgument) {
+        match argument {
+            syn::GenericArgument::Const(expression) => {
+                let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+                self.visit_expr(expression);
+                self.unsafe_context_depth = enclosing_unsafe_context;
+            }
+            syn::GenericArgument::AssocConst(assoc_const) => {
+                let enclosing_unsafe_context = std::mem::replace(&mut self.unsafe_context_depth, 0);
+                visit::visit_assoc_const(self, assoc_const);
+                self.unsafe_context_depth = enclosing_unsafe_context;
+            }
+            _ => visit::visit_generic_argument(self, argument),
+        }
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -2324,12 +3845,7 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         module: &'b CppModuleIndexModule,
         symbol_name: &str,
     ) -> Option<&'b CppModuleIndexSymbol> {
-        module.symbols.get(symbol_name).or_else(|| {
-            symbol_name
-                .rsplit("::")
-                .next()
-                .and_then(|tail| module.symbols.get(tail))
-        })
+        module.symbols.get(symbol_name)
     }
 
     fn symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
@@ -2829,6 +4345,37 @@ fn collect_enum_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemEnum
     }
 }
 
+/// Walk a Rust source file and collect every top-level / nested `Item::Trait`
+/// declaration. Threaded across files in crate-mode transpilation so a module
+/// that only IMPORTS a crate trait still knows the trait has a real C++
+/// interface class in a sibling module (C9 / checkpoint contract 9: an owning
+/// `Box<dyn CrateTrait>` must not erase to `void*`).
+pub fn collect_crate_trait_decls(rust_source: &str) -> Vec<syn::ItemTrait> {
+    let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_trait_decls_recursive(&file.items, &mut out);
+    out
+}
+
+fn collect_trait_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemTrait>) {
+    for item in items {
+        match item {
+            syn::Item::Trait(t) => out.push(t.clone()),
+            syn::Item::Mod(m) => {
+                if module_is_cfg_disabled(m) {
+                    continue;
+                }
+                if let Some((_, nested)) = &m.content {
+                    collect_trait_decls_recursive(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Walk a Rust source file and collect every top-level / nested `Item::Impl`
 /// block. The result is intended to be threaded across files in crate-mode
 /// transpilation so the per-file codegen can detect when an impl block's
@@ -3067,6 +4614,95 @@ fn qualify_relative_path(raw: &str, module_path: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cpp_default_argument_type_map() -> UserTypeMap {
+        let mut type_map = UserTypeMap::default();
+        type_map.mappings.insert(
+            "rusty::SourceLocation".to_string(),
+            "std::source_location".to_string(),
+        );
+        type_map
+            .mappings
+            .insert("rusty::CFile".to_string(), "FILE".to_string());
+        type_map
+    }
+
+    #[test]
+    fn cpp_default_arguments_emit_only_on_named_module_forward_declarations() {
+        let source = r#"
+            pub fn verify<Expr>(
+                expr: &Expr,
+                #[cfg_attr(any(), cpp_default_argument(source_location))]
+                location: &::rusty::SourceLocation,
+            ) where Expr: Copy {}
+
+            pub unsafe fn print_stack_trace(
+                #[cfg_attr(any(), cpp_default_argument(stderr))]
+                stream: *mut ::rusty::CFile,
+            ) {}
+        "#;
+        let options = TranspileOptions {
+            explicit_gmf_includes: vec![
+                GmfIncludeSpec {
+                    path: "stdio.h".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+                GmfIncludeSpec {
+                    path: "source_location".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+            ],
+            ..TranspileOptions::default()
+        };
+        let output = transpile_full_with_options(
+            source,
+            Some("rrr.debugging"),
+            &cpp_default_argument_type_map(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("typed defaults should transpile");
+        assert_eq!(
+            output.matches(" = std::source_location::current()").count(),
+            1,
+            "source-location default must occur on one declaration only:\n{output}"
+        );
+        assert_eq!(
+            output.matches(" = stderr").count(),
+            1,
+            "stderr default must occur on one declaration only:\n{output}"
+        );
+        assert!(
+            output
+                .contains("const std::source_location& location = std::source_location::current()")
+        );
+        assert!(output.contains("FILE* stream = stderr"));
+        assert!(output.contains("const std::source_location& location)"));
+        assert!(output.contains("FILE* stream)"));
+
+        let error = transpile_with_type_map(source, None, &cpp_default_argument_type_map())
+            .expect_err("moduleless defaults must fail closed");
+        assert!(
+            error.contains("requires named C++ module output"),
+            "{error}"
+        );
+
+        let mut inline_options = TranspileOptions::default();
+        inline_options.inline_rust_block = true;
+        let inline_error = transpile_prepared_inline_cpp_abi(
+            syn::parse_file(source).expect("parse inline fixture"),
+            crate::cpp_abi::CppAbiEmissionPlan::default(),
+            &cpp_default_argument_type_map(),
+            &HashSet::new(),
+            &inline_options,
+        )
+        .expect_err("inline defaults must fail closed");
+        assert!(
+            inline_error.contains("not inline Rust blocks"),
+            "{inline_error}"
+        );
+    }
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -3083,6 +4719,223 @@ mod tests {
     fn test_transpile_error() {
         let result = transpile("fn {{{ invalid", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_explicit_gmf_includes_are_ordered_before_module_declaration() {
+        let source = "pub fn answer() -> i32 { 42 }";
+        let baseline = transpile(source, Some("demo.preamble")).unwrap();
+        let empty_options = transpile_full_with_options(
+            source,
+            Some("demo.preamble"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &TranspileOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            baseline, empty_options,
+            "empty preamble changed legacy bytes"
+        );
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(baseline.as_bytes())),
+            "7ba59e308ba31cf408c7b3a3f83c856d4a5ab888f5e4fa7361437708fc24cd86",
+            "default module output drifted from the ba70 no-preamble baseline"
+        );
+
+        let options = TranspileOptions {
+            explicit_gmf_includes: vec![
+                GmfIncludeSpec {
+                    path: "demo/first.hpp".to_string(),
+                    form: GmfIncludeForm::Quote,
+                },
+                GmfIncludeSpec {
+                    path: "sys/types.h".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+            ],
+            ..TranspileOptions::default()
+        };
+        let output = transpile_full_with_options(
+            source,
+            Some("demo.preamble"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .unwrap();
+        let repeated = transpile_full_with_options(
+            source,
+            Some("demo.preamble"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(
+            output, repeated,
+            "explicit preamble output is not deterministic"
+        );
+        let module_fragment = output.find("\nmodule;\n").unwrap();
+        let first = output.find("#include \"demo/first.hpp\"").unwrap();
+        let second = output.find("#include <sys/types.h>").unwrap();
+        let fixed = output.find("#include <cstdint>").unwrap();
+        let declaration = output.find("export module demo.preamble;").unwrap();
+        assert!(module_fragment < first && first < second && second < fixed && fixed < declaration);
+    }
+
+    #[test]
+    fn test_explicit_gmf_includes_require_module_output() {
+        let options = TranspileOptions {
+            explicit_gmf_includes: vec![GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            }],
+            ..TranspileOptions::default()
+        };
+        let error = transpile_full_with_options(
+            "fn f() {}",
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .unwrap_err();
+        assert!(error.contains("require module output"), "{error}");
+    }
+
+    #[test]
+    fn test_explicit_gmf_include_validation_rejects_injection_and_collisions() {
+        for invalid in [
+            "/absolute.hpp",
+            "../escape.hpp",
+            "dir/../escape.hpp",
+            "dir//header.hpp",
+            "dir/./header.hpp",
+            "dir\\header.hpp",
+            "header.hpp\n#define BAD 1",
+            "header.hpp\"",
+            "<header.hpp>",
+            "header.hpp;bad",
+            "header with spaces.hpp",
+        ] {
+            let error = validate_explicit_gmf_includes(&[GmfIncludeSpec {
+                path: invalid.to_string(),
+                form: GmfIncludeForm::Quote,
+            }])
+            .unwrap_err();
+            assert!(error.contains("GMF include"), "path={invalid:?}: {error}");
+        }
+
+        let duplicate = vec![
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            },
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            },
+        ];
+        assert!(
+            validate_explicit_gmf_includes(&duplicate)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+
+        let conflict = vec![
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            },
+            GmfIncludeSpec {
+                path: "demo/header.hpp".to_string(),
+                form: GmfIncludeForm::Angle,
+            },
+        ];
+        assert!(
+            validate_explicit_gmf_includes(&conflict)
+                .unwrap_err()
+                .contains("conflicting")
+        );
+    }
+
+    #[test]
+    fn test_module_preamble_sidecar_filters_target_and_rejects_stale_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("module-preamble.toml");
+        std::fs::write(
+            &path,
+            r#"
+version = 1
+
+[[module]]
+name = "demo.net"
+includes = [
+    { path = "sys/epoll.h", form = "angle", when = { target_os = ["linux", "android"] } },
+    { path = "demo/net.hpp", form = "quote" },
+]
+"#,
+        )
+        .unwrap();
+
+        let missing_target = load_module_preamble_file(&path, None).unwrap_err();
+        assert!(missing_target.contains("--preamble-target-os"));
+
+        let linux = load_module_preamble_file(&path, Some("linux")).unwrap();
+        let selected = linux.select_for_modules(["demo", "demo.net"]).unwrap();
+        assert!(
+            !selected.contains_key("demo"),
+            "an emitted module without a sidecar row must remain valid and empty"
+        );
+        assert_eq!(
+            selected["demo.net"],
+            vec![
+                GmfIncludeSpec {
+                    path: "sys/epoll.h".to_string(),
+                    form: GmfIncludeForm::Angle,
+                },
+                GmfIncludeSpec {
+                    path: "demo/net.hpp".to_string(),
+                    form: GmfIncludeForm::Quote,
+                },
+            ]
+        );
+
+        let windows = load_module_preamble_file(&path, Some("windows")).unwrap();
+        assert_eq!(
+            windows.select_for_modules(["demo.net"]).unwrap()["demo.net"],
+            vec![GmfIncludeSpec {
+                path: "demo/net.hpp".to_string(),
+                form: GmfIncludeForm::Quote,
+            }]
+        );
+
+        let stale = linux.select_for_modules(["demo"]).unwrap_err();
+        assert!(stale.contains("stale/uncollected"), "{stale}");
+        assert!(stale.contains("demo.net"), "{stale}");
+    }
+
+    #[test]
+    fn test_module_preamble_sidecar_denies_unknown_fields_at_every_level() {
+        let cases = [
+            "version = 1\nunknown = true\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"x.h\", form = \"angle\" }]\n",
+            "version = 1\n[[module]]\nname = \"demo\"\nunknown = true\nincludes = [{ path = \"x.h\", form = \"angle\" }]\n",
+            "version = 1\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"x.h\", form = \"angle\", unknown = true }]\n",
+            "version = 1\n[[module]]\nname = \"demo\"\nincludes = [{ path = \"x.h\", form = \"angle\", when = { target_os = [\"linux\"], feature = [\"x\"] } }]\n",
+        ];
+        for (index, content) in cases.into_iter().enumerate() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(format!("unknown-{index}.toml"));
+            std::fs::write(&path, content).unwrap();
+            let error = load_module_preamble_file(&path, Some("linux")).unwrap_err();
+            assert!(error.contains("unknown field"), "case {index}: {error}");
+        }
     }
 
     #[test]
@@ -3155,10 +5008,8 @@ mod tests {
         assert!(
             output.contains("add(1, 2)")
                 || output.contains("::add(1, 2)")
-                || output
-                    .contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
-                || output
-                    .contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
+                || output.contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
+                || output.contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
             "{output}"
         );
     }
@@ -3394,8 +5245,7 @@ mod tests {
         // the first argument inside the lambda.
         assert!(
             output.contains("rusty_ext::tap_err(result,")
-                || (output.contains("rusty_ext::tap_err(")
-                    && output.contains("})(result")),
+                || (output.contains("rusty_ext::tap_err(") && output.contains("})(result")),
             "{output}"
         );
         assert!(!output.contains("rusty::tap_err("));
@@ -3654,9 +5504,7 @@ mod tests {
         // The shim is now 3-branch: a final `else` that calls the member
         // `.hello()` on the dereferenced receiver (the dyn dispatch route).
         assert!(
-            on.contains(".hello(); }")
-                || on.contains(".hello() ; }")
-                || on.contains(").hello();"),
+            on.contains(".hello(); }") || on.contains(".hello() ; }") || on.contains(").hello();"),
             "flag-on shim must end in a member-call fallback `deref(__self).hello()`\nGot: {on}"
         );
         // The member branch comes FIRST (rustc resolves inherent methods
@@ -3676,7 +5524,6 @@ mod tests {
             free_call_count >= 2,
             "flag-on shim must keep both free-call branches (got {free_call_count})\nGot: {on}"
         );
-
     }
 
     #[test]
@@ -3813,7 +5660,6 @@ mod tests {
             on.contains("Greet_::describe("),
             "`f.describe()` must qualify to Greet_::describe\nGot: {on}"
         );
-
     }
 
     #[test]
@@ -3843,8 +5689,7 @@ mod tests {
         .expect("ufcs transpile should succeed");
 
         let text = std::fs::read_to_string(&path).expect("manifest must be written");
-        let manifest: UfcsTraitManifest =
-            serde_json::from_str(&text).expect("manifest must parse");
+        let manifest: UfcsTraitManifest = serde_json::from_str(&text).expect("manifest must parse");
         let _ = std::fs::remove_file(&path);
         assert_eq!(manifest.module, "depmod");
         assert!(
@@ -4696,6 +6541,117 @@ pub unsafe fn encode(value: i32, ar: &mut legacy::BinaryWriteArchive) {
     }
 
     #[test]
+    fn test_load_cpp_module_symbol_index_rejects_removed_safe_field() {
+        let dir = tempdir().expect("tempdir");
+        let index_path = dir.path().join("cpp_index.toml");
+        std::fs::write(
+            &index_path,
+            r#"
+version = 1
+[modules.std.symbols.max]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+safe = true
+"#,
+        )
+        .expect("write toml index");
+
+        let err = load_cpp_module_symbol_index_files(&[index_path])
+            .expect_err("removed safe metadata must be rejected");
+        assert!(err.contains("Invalid TOML C++ module symbol index"));
+        assert!(err.contains("unknown field `safe`"));
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_canonicalizes_and_merges_namespace() {
+        let dir = tempdir().expect("tempdir");
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::fs::write(
+            &first,
+            r#"
+version = 1
+[modules."rrr::logging"]
+namespace = " rrr :: logging_api "
+[modules."rrr::logging".symbols.first]
+kind = "function"
+callable_signatures = ["void()"]
+"#,
+        )
+        .expect("write first index");
+        std::fs::write(
+            &second,
+            r#"
+version = 1
+[modules."rrr::logging"]
+namespace = "rrr::logging_api"
+[modules."rrr::logging".symbols.second]
+kind = "function"
+callable_signatures = ["void()"]
+"#,
+        )
+        .expect("write second index");
+
+        let index =
+            load_cpp_module_symbol_index_files(&[first, second]).expect("merge canonical paths");
+        let module = index.modules.get("rrr::logging").expect("merged module");
+        assert_eq!(module.namespace.as_deref(), Some("rrr::logging_api"));
+        assert!(module.symbols.contains_key("first"));
+        assert!(module.symbols.contains_key("second"));
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_rejects_conflicting_namespace() {
+        let dir = tempdir().expect("tempdir");
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::fs::write(&first, "version = 1\n[modules.demo]\nnamespace = \"one\"\n")
+            .expect("write first index");
+        std::fs::write(
+            &second,
+            "version = 1\n[modules.demo]\nnamespace = \"two\"\n",
+        )
+        .expect("write second index");
+
+        let err = load_cpp_module_symbol_index_files(&[first, second])
+            .expect_err("conflicting namespace must be rejected");
+        assert!(err.contains("conflicting namespace"));
+        assert!(err.contains("'one' vs 'two'"));
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_rejects_invalid_namespace() {
+        for invalid in [
+            "",
+            "::rrr",
+            "rrr::",
+            "rrr::::logging",
+            "rrr.logging",
+            "rrr::logging<int>",
+            "rrr::class",
+            "_rrr::logging",
+            "rrr::_Logging",
+            "rrr::log__detail",
+            "rrr; injected",
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let index_path = dir.path().join("cpp_index.toml");
+            std::fs::write(
+                &index_path,
+                format!("version = 1\n[modules.demo]\nnamespace = {:?}\n", invalid),
+            )
+            .expect("write invalid index");
+
+            let err = load_cpp_module_symbol_index_files(&[index_path])
+                .expect_err("invalid namespace must be rejected");
+            assert!(
+                err.contains("invalid namespace for module 'demo'"),
+                "invalid={invalid:?}, err={err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_cpp_module_import_requires_symbol_index() {
         let err = transpile("use cpp::std as cpp_std;\nfn f() {}", None)
             .expect_err("cpp import without index should fail");
@@ -4816,6 +6772,557 @@ fn max2(lo: i32, hi: i32) -> i32 {
 
         assert!(output.contains("// @unsafe"));
         assert!(output.contains("std::max("));
+    }
+
+    #[test]
+    fn test_cpp_module_unsafe_context_does_not_cross_nested_item_boundaries() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+fn outer() {
+    unsafe {
+        fn nested_fn() -> i32 { cpp_std::max(1, 2) }
+
+        struct Local;
+        impl Local {
+            fn nested_method() -> i32 { cpp_std::max(3, 4) }
+            const NESTED_ASSOC_CONST: i32 = cpp_std::max(5, 6);
+        }
+        trait LocalTrait {
+            fn nested_default() -> i32 { cpp_std::max(7, 8) }
+            const NESTED_ASSOC_DEFAULT: i32 = cpp_std::max(9, 10);
+        }
+
+        const NESTED_CONST: i32 = cpp_std::max(11, 12);
+        static NESTED_STATIC: i32 = cpp_std::max(13, 14);
+
+        mod nested_module {
+            use cpp::std as cpp_std;
+            pub fn nested_module_fn() -> i32 { cpp_std::max(15, 16) }
+        }
+    }
+}
+
+fn safe_closure() {
+    let _call_later = || cpp_std::max(17, 18);
+}
+"#,
+        )
+        .expect("nested item safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert_eq!(
+            diagnostics.len(),
+            9,
+            "each safe nested item and safe closure call must be rejected: {diagnostics:#?}"
+        );
+        for context in [
+            "outer::nested_fn",
+            "outer::nested_method",
+            "outer::nested_default",
+            "outer::nested_module::nested_module_fn",
+            "safe_closure",
+        ] {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(context)),
+                "missing violation in {context}: {diagnostics:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cpp_module_unsafe_context_keeps_unsafe_items_blocks_and_closures() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+unsafe fn unsafe_function() -> i32 { cpp_std::max(1, 2) }
+
+struct Host;
+impl Host {
+    unsafe fn unsafe_method() -> i32 { cpp_std::max(3, 4) }
+}
+trait HostTrait {
+    unsafe fn unsafe_default() -> i32 { cpp_std::max(5, 6) }
+}
+
+fn outer() {
+    unsafe {
+        fn nested_explicit_block() -> i32 { unsafe { cpp_std::max(7, 8) } }
+        unsafe fn nested_unsafe_fn() -> i32 { cpp_std::max(9, 10) }
+
+        struct Local;
+        impl Local {
+            unsafe fn nested_unsafe_method() -> i32 { cpp_std::max(11, 12) }
+            fn nested_explicit_method() -> i32 { unsafe { cpp_std::max(13, 14) } }
+        }
+        trait LocalTrait {
+            unsafe fn nested_unsafe_default() -> i32 { cpp_std::max(15, 16) }
+            fn nested_explicit_default() -> i32 { unsafe { cpp_std::max(17, 18) } }
+        }
+
+        let _inherits_unsafe_block = || cpp_std::max(19, 20);
+    }
+}
+"#,
+        )
+        .expect("positive item safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert!(
+            diagnostics.is_empty(),
+            "unsafe functions/methods, explicit unsafe blocks, and closures inside an unsafe block remain allowed: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_callable_signatures_never_inherit_unsafe_context() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+fn outer() {
+    unsafe {
+        fn safe_free(_: [u8; cpp_std::max(1, 2) as usize]) {}
+        unsafe fn unsafe_free(_: [u8; cpp_std::max(3, 4) as usize]) {}
+
+        struct Local;
+        impl Local {
+            fn safe_method(_: [u8; cpp_std::max(5, 6) as usize]) {}
+            unsafe fn unsafe_method(_: [u8; cpp_std::max(7, 8) as usize]) {}
+        }
+        trait LocalTrait {
+            fn safe_trait_method(_: [u8; cpp_std::max(9, 10) as usize]);
+            unsafe fn unsafe_trait_method(_: [u8; cpp_std::max(11, 12) as usize]);
+        }
+    }
+}
+"#,
+        )
+        .expect("signature safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert_eq!(
+            diagnostics.len(),
+            6,
+            "safe and unsafe callable signatures must both reject implicit unsafe context: {diagnostics:#?}"
+        );
+        for context in [
+            "outer::safe_free",
+            "outer::unsafe_free",
+            "outer::safe_method",
+            "outer::unsafe_method",
+            "outer::safe_trait_method",
+            "outer::unsafe_trait_method",
+        ] {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(context)),
+                "missing signature violation in {context}: {diagnostics:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cpp_module_callable_signatures_allow_explicit_unsafe_blocks() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+fn safe_free(_: [u8; (unsafe { cpp_std::max(1, 2) }) as usize]) {}
+unsafe fn unsafe_free(_: [u8; (unsafe { cpp_std::max(3, 4) }) as usize]) {}
+
+struct Host;
+impl Host {
+    fn safe_method(_: [u8; (unsafe { cpp_std::max(5, 6) }) as usize]) {}
+    unsafe fn unsafe_method(_: [u8; (unsafe { cpp_std::max(7, 8) }) as usize]) {}
+}
+trait HostTrait {
+    fn safe_trait_method(_: [u8; (unsafe { cpp_std::max(9, 10) }) as usize]);
+    unsafe fn unsafe_trait_method(_: [u8; (unsafe { cpp_std::max(11, 12) }) as usize]);
+}
+"#,
+        )
+        .expect("explicitly unsafe signature fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert!(
+            diagnostics.is_empty(),
+            "explicit unsafe blocks in callable signatures must remain allowed: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_anonymous_consts_do_not_inherit_unsafe_context() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+struct Generic<const N: usize>;
+trait HasConst { const N: usize; }
+fn takes<const N: usize>() {}
+
+fn outer() {
+    unsafe {
+        let _repeat = [0; { cpp_std::max(1, 2) as usize }];
+        let _: [i32; { cpp_std::max(3, 4) as usize }];
+        let _: Generic<{ cpp_std::max(5, 6) as usize }>;
+        takes::<{ cpp_std::max(7, 8) as usize }>();
+        let _: &dyn HasConst<N = { cpp_std::max(9, 10) as usize }>;
+    }
+}
+"#,
+        )
+        .expect("anonymous const safety fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert_eq!(
+            diagnostics.len(),
+            5,
+            "repeat/array lengths and positional/associated const arguments must establish fresh safe contexts: {diagnostics:#?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.contains("outer")),
+            "all anonymous-const violations should retain their lexical diagnostic label: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_anonymous_consts_allow_only_explicit_unsafe_context() {
+        let file = syn::parse_str::<syn::File>(
+            r#"
+use cpp::std as cpp_std;
+
+struct Generic<const N: usize>;
+trait HasConst { const N: usize; }
+fn takes<const N: usize>() {}
+
+fn explicit() {
+    let _repeat = [0; { (unsafe { cpp_std::max(1, 2) }) as usize }];
+    let _: [i32; { (unsafe { cpp_std::max(3, 4) }) as usize }];
+    let _: Generic<{ (unsafe { cpp_std::max(5, 6) }) as usize }>;
+    takes::<{ (unsafe { cpp_std::max(7, 8) }) as usize }>();
+    let _: &dyn HasConst<N = { (unsafe { cpp_std::max(9, 10) }) as usize }>;
+}
+
+fn lexical_expressions_still_inherit() {
+    unsafe {
+        let _repeat_element = [cpp_std::max(11, 12); 1];
+        let _closure = || cpp_std::max(13, 14);
+        let _async_block = async { cpp_std::max(15, 16) };
+        let _inline_const = const { cpp_std::max(17, 18) };
+    }
+}
+"#,
+        )
+        .expect("explicitly unsafe anonymous const fixture should parse");
+
+        let diagnostics = collect_cpp_foreign_call_unsafe_violations(&file);
+        assert!(
+            diagnostics.is_empty(),
+            "explicit unsafe blocks in anonymous consts and lexical closure/async/inline-const inheritance must remain allowed: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn test_cpp_module_nested_symbol_identity_matches_exact_index_entries() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "host".to_string(),
+                    CppModuleIndexModule {
+                        cpp_module: "host".to_string(),
+                        namespace: Some("host_api".to_string()),
+                        symbols: BTreeMap::from([
+                            (
+                                "other::increment".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("function".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                            (
+                                "Counter::add".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("method".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                        ]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::host;
+fn nested(v: i32) -> i32 {
+    unsafe { host::other::increment(v) }
+}
+fn member<T>(counter: &mut T, v: i32) -> i32 {
+    unsafe { host::Counter::add(counter, v) }
+}
+"#,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("exact nested function and member identities should transpile");
+
+        assert!(
+            output.contains("host_api::other::increment("),
+            "Got: {output}"
+        );
+        assert!(output.contains("rusty::deref_call("), "Got: {output}");
+        assert!(output.contains("__mdisp_add"), "Got: {output}");
+        assert!(!output.contains("host_api::Counter::add("), "Got: {output}");
+    }
+
+    #[test]
+    fn test_cpp_module_nested_symbol_identity_rejects_tail_only_index_entries() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "host".to_string(),
+                    CppModuleIndexModule {
+                        cpp_module: "host".to_string(),
+                        namespace: Some("host_api".to_string()),
+                        symbols: BTreeMap::from([
+                            (
+                                "increment".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("function".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                            (
+                                "add".to_string(),
+                                CppModuleIndexSymbol {
+                                    kind: Some("method".to_string()),
+                                    callable_signatures: vec!["int(int)".to_string()],
+                                },
+                            ),
+                        ]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+
+        let nested_err = transpile_full_with_options(
+            "use cpp::host; fn f(v: i32) -> i32 { unsafe { host::other::increment(v) } }",
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("tail-only function entry must not match a nested symbol");
+        assert!(nested_err.contains("symbol is not present"));
+        assert!(nested_err.contains("symbol `other::increment`"));
+
+        let member_err = transpile_full_with_options(
+            "use cpp::host; fn f<T>(c: &mut T, v: i32) -> i32 { unsafe { host::Counter::add(c, v) } }",
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("tail-only method entry must not match a nested symbol");
+        assert!(member_err.contains("symbol is not present"));
+        assert!(member_err.contains("symbol `Counter::add`"));
+    }
+
+    #[test]
+    fn test_cpp_module_import_identity_is_separate_from_export_namespace() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "log_line".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec![
+                    "void(int,int,const int8_t*,const std::string&)".to_string(),
+                ],
+            },
+        );
+        modules.insert(
+            "rrr::logging".to_string(),
+            CppModuleIndexModule {
+                cpp_module: "rrr.logging".to_string(),
+                namespace: Some("rrr".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::rrr::logging as cpp_logging;
+fn write(message: &String) {
+    unsafe { cpp_logging::log_line(3, 0, core::ptr::null(), message) }
+}
+"#,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("indexed namespace should transpile");
+
+        assert!(output.contains("import rrr.logging;"));
+        assert!(output.contains("rrr::log_line("));
+        assert!(!output.contains("rrr::logging::log_line("));
+    }
+
+    #[test]
+    fn test_cpp_module_zero_argument_template_call_does_not_underflow() {
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr::reactor".to_string(),
+                    CppModuleIndexModule {
+                        cpp_module: "rrr.reactor".to_string(),
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::from([(
+                            "create_sp_box_event".to_string(),
+                            CppModuleIndexSymbol {
+                                kind: Some("function_template".to_string()),
+                                callable_signatures: vec!["BoxEvent<T>()".to_string()],
+                            },
+                        )]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::rrr::reactor as cpp_reactor;
+fn make<T>() {
+    unsafe { cpp_reactor::create_sp_box_event::<T>(); }
+}
+"#,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("zero-argument indexed template call should transpile");
+
+        assert!(output.contains("import rrr.reactor;"));
+        assert!(output.contains("rrr::create_sp_box_event<T>()"));
+    }
+
+    #[test]
+    fn test_cpp_module_export_namespace_keeps_index_resolution_fail_closed() {
+        let source = r#"
+use cpp::rrr::logging as cpp_logging;
+fn write(message: &String) {
+    unsafe { cpp_logging::log_line(3, 0, core::ptr::null(), message) }
+}
+"#;
+
+        let symbol = CppModuleIndexSymbol {
+            kind: Some("function".to_string()),
+            callable_signatures: vec!["void(int,int,const int8_t*,const std::string&)".to_string()],
+        };
+        let wrong_module_options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr".to_string(),
+                    CppModuleIndexModule {
+                        cpp_module: "rrr".to_string(),
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::from([("log_line".to_string(), symbol.clone())]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+        let err = transpile_full_with_options(
+            source,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &wrong_module_options,
+        )
+        .expect_err("matching namespace must not substitute for module identity");
+        assert!(err.contains("module path is not present"));
+        assert!(err.contains("module `rrr::logging`"));
+
+        let wrong_symbol_options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr::logging".to_string(),
+                    CppModuleIndexModule {
+                        cpp_module: "rrr.logging".to_string(),
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::new(),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+        let err = transpile_full_with_options(
+            source,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &wrong_symbol_options,
+        )
+        .expect_err("export namespace must not bypass indexed symbol lookup");
+        assert!(err.contains("symbol is not present"));
+        assert!(err.contains("symbol `log_line`"));
+
+        let wrong_signature_options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex {
+                modules: BTreeMap::from([(
+                    "rrr::logging".to_string(),
+                    CppModuleIndexModule {
+                        cpp_module: "rrr.logging".to_string(),
+                        namespace: Some("rrr".to_string()),
+                        symbols: BTreeMap::from([(
+                            "log_line".to_string(),
+                            CppModuleIndexSymbol {
+                                kind: Some("function".to_string()),
+                                callable_signatures: vec!["void(int,int)".to_string()],
+                            },
+                        )]),
+                    },
+                )]),
+            }),
+            ..TranspileOptions::default()
+        };
+        let err = transpile_full_with_options(
+            source,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &wrong_signature_options,
+        )
+        .expect_err("export namespace must not bypass indexed signature matching");
+        assert!(err.contains("call cannot be matched to indexed callable family"));
+        assert!(err.contains("arity 4"));
+        assert!(err.contains("void(int,int)"));
     }
 
     #[test]

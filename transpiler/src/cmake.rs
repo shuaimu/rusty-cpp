@@ -12,15 +12,27 @@ pub struct CargoToml {
     pub bins: Option<Vec<BinTarget>>,
     #[serde(default)]
     pub dependencies: Option<toml::value::Table>,
+    /// Target-qualified dependency tables. Crate mode does not evaluate
+    /// Cargo cfg expressions, but reserved runtime identities must still be
+    /// visible so validation can fail closed instead of silently bypassing.
+    #[serde(default)]
+    pub target: Option<toml::value::Table>,
 }
 
 /// Information about an external crate dependency.
 #[derive(Debug, Clone)]
 pub struct CrateDep {
     pub name: String,
+    /// Cargo package selected by a renamed dependency (`package = "..."`).
+    /// `None` means the dependency key is also the package identity.
+    pub package: Option<String>,
     pub version: Option<String>,
     pub path: Option<String>,
     pub is_local: bool,
+    pub workspace_inherited: bool,
+    pub optional: bool,
+    /// Cargo target selector for `[target.<selector>.dependencies]`.
+    pub target: Option<String>,
 }
 
 /// Extract dependency information from the parsed Cargo.toml.
@@ -28,39 +40,82 @@ pub fn extract_dependencies(cargo: &CargoToml) -> Vec<CrateDep> {
     let mut deps = Vec::new();
 
     if let Some(ref dep_table) = cargo.dependencies {
-        for (name, value) in dep_table {
-            match value {
-                toml::Value::String(version) => {
-                    deps.push(CrateDep {
-                        name: name.clone(),
-                        version: Some(version.clone()),
-                        path: None,
-                        is_local: false,
-                    });
-                }
-                toml::Value::Table(t) => {
-                    let version = t
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let path = t
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let is_local = path.is_some();
-                    deps.push(CrateDep {
-                        name: name.clone(),
-                        version,
-                        path,
-                        is_local,
-                    });
-                }
-                _ => {}
-            }
+        extract_dependency_table(dep_table, None, &mut deps);
+    }
+
+    if let Some(targets) = &cargo.target {
+        for (selector, target_value) in targets {
+            let Some(target_table) = target_value.as_table() else {
+                continue;
+            };
+            let Some(dep_table) = target_table
+                .get("dependencies")
+                .and_then(toml::Value::as_table)
+            else {
+                continue;
+            };
+            extract_dependency_table(dep_table, Some(selector), &mut deps);
         }
     }
 
     deps
+}
+
+fn extract_dependency_table(
+    dep_table: &toml::value::Table,
+    target: Option<&str>,
+    deps: &mut Vec<CrateDep>,
+) {
+    for (name, value) in dep_table {
+        match value {
+            toml::Value::String(version) => {
+                deps.push(CrateDep {
+                    name: name.clone(),
+                    package: None,
+                    version: Some(version.clone()),
+                    path: None,
+                    is_local: false,
+                    workspace_inherited: false,
+                    optional: false,
+                    target: target.map(str::to_string),
+                });
+            }
+            toml::Value::Table(t) => {
+                let package = t
+                    .get("package")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let version = t
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let path = t
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let workspace_inherited = t
+                    .get("workspace")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false);
+                let optional = t
+                    .get("optional")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false);
+                let is_local = path.is_some();
+                deps.push(CrateDep {
+                    name: name.clone(),
+                    package,
+                    version,
+                    path,
+                    is_local,
+                    workspace_inherited,
+                    optional,
+                    target: target.map(str::to_string),
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -368,6 +423,7 @@ mod tests {
                 path: Some("src/main.rs".to_string()),
             }]),
             dependencies: None,
+            target: None,
         };
         let sources = vec![PathBuf::from("src/main.rs")];
         let cmake = generate_cmake(&cargo, &sources);
@@ -390,6 +446,7 @@ mod tests {
             }),
             bins: None,
             dependencies: None,
+            target: None,
         };
         let sources = vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/utils.rs")];
         let cmake = generate_cmake(&cargo, &sources);
@@ -449,8 +506,59 @@ mod tests {
         let deps = extract_dependencies(&cargo);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "my_lib");
+        assert_eq!(deps[0].package, None);
         assert_eq!(deps[0].path.as_deref(), Some("../my_lib"));
         assert!(deps[0].is_local);
+    }
+
+    #[test]
+    fn test_extract_dependencies_preserves_renamed_package_identity() {
+        let toml_str = r#"
+            [package]
+            name = "test"
+            version = "0.1.0"
+            [dependencies]
+            runtime = { package = "rusty", path = "../rusty" }
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        let deps = extract_dependencies(&cargo);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "runtime");
+        assert_eq!(deps[0].package.as_deref(), Some("rusty"));
+        assert_eq!(deps[0].path.as_deref(), Some("../rusty"));
+        assert!(deps[0].is_local);
+    }
+
+    #[test]
+    fn test_extract_dependencies_preserves_workspace_and_target_context() {
+        let toml_str = r#"
+            [package]
+            name = "test"
+            version = "0.1.0"
+
+            [dependencies]
+            inherited = { workspace = true }
+
+            [target.'cfg(unix)'.dependencies]
+            runtime = { package = "rusty", path = "../rusty" }
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        let deps = extract_dependencies(&cargo);
+        assert_eq!(deps.len(), 2);
+        let inherited = deps
+            .iter()
+            .find(|dependency| dependency.name == "inherited")
+            .unwrap();
+        assert!(inherited.workspace_inherited);
+        assert!(!inherited.optional);
+        assert_eq!(inherited.target, None);
+        let runtime = deps
+            .iter()
+            .find(|dependency| dependency.name == "runtime")
+            .unwrap();
+        assert_eq!(runtime.package.as_deref(), Some("rusty"));
+        assert_eq!(runtime.target.as_deref(), Some("cfg(unix)"));
+        assert!(!runtime.workspace_inherited);
     }
 
     #[test]

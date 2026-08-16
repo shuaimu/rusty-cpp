@@ -1070,7 +1070,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     /// The `write`/`read` carve-out below is the same idea applied
     /// earlier and more narrowly: both are in the C++-keyword list, and
     /// both are safe as members.
-    pub(super) fn escape_cpp_method_name(method_name: &str) -> String {
+    pub(crate) fn escape_cpp_method_name(method_name: &str) -> String {
         if matches!(method_name, "write" | "read") {
             method_name.to_string()
         } else {
@@ -1183,6 +1183,159 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // A path ROOTED at a reserved `cpp::` module binding names a symbol of
+        // THAT C++ module and must resolve through the module's declared export
+        // namespace. Without this, an interior segment that happens to name a
+        // Rust `mod` (`use cpp::rrr::serializable;` +
+        // `serializable::Serialize_::serialize`, where `Serialize_` is a
+        // `pub mod` of the crate's own `serializable` module) fell through to
+        // the ordinary scope-import table, which re-expanded the binding to
+        // `cpp::rrr::serializable::…` and then applied `use rusty as cpp;`,
+        // emitting the nonexistent `rusty::rrr::serializable::Serialize_`.
+        // Interior segments naming TYPES already resolved correctly through the
+        // same rewrite further down the expression path; this makes the rule
+        // hold for every caller of the shared path emitter.
+        if path.leading_colon.is_none()
+            && segments.len() >= 2
+            && path.segments.first().is_some_and(|segment| {
+                self.name_resolver
+                    .cpp_binding(&segment.ident.to_string())
+                    .is_some()
+            })
+            && let Some(rewritten) = self.rewrite_cpp_import_bound_expr_path(path)
+        {
+            return rewritten;
+        }
+        // A complete `crate::<root-child>::<leaf>` identity may name a flat
+        // type without borrowing the marked `use` binding from another
+        // source unit. Crate preflight records this authorization only after
+        // proving the exact provider item and exact source path; never recover
+        // it from a tail spelling or a self/super/alias path.
+        if path.leading_colon.is_none()
+            && segments.len() >= 3
+            && segments.first().is_some_and(|segment| segment == "crate")
+            && path
+                .segments
+                .iter()
+                .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+        {
+            let mut targets = self
+                .flat_import_type_authorizations
+                .iter()
+                .filter(|authorization| {
+                    authorization.consumer_physical_module == self.current_physical_module
+                        && authorization.reference_kind
+                            == crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath
+                        && authorization.consumer_lexical_module.0 == self.module_stack
+                        && authorization.provider_physical_module.0
+                            == [segments[1].clone()]
+                        && authorization.leaf == segments[2]
+                })
+                .map(|authorization| {
+                    let mut target = vec![
+                        authorization.cpp_namespace.clone(),
+                        authorization.leaf.clone(),
+                    ];
+                    target.extend(segments[3..].iter().cloned());
+                    format!(
+                        "::{}",
+                        target
+                            .iter()
+                            .map(|segment| escape_cpp_keyword(segment))
+                            .collect::<Vec<_>>()
+                            .join("::")
+                    )
+                })
+                .collect::<Vec<_>>();
+            targets.sort();
+            targets.dedup();
+            if targets.len() == 1 {
+                return targets.remove(0);
+            }
+        }
+        // Rust child modules do not inherit a parent's `use`, but they may
+        // explicitly reach it with `self::` / `super::`. Resolve only the
+        // exact lexical source identity proven by crate preflight. A bare
+        // same-tail path never enters this branch and cannot borrow the
+        // parent's authorization.
+        if path.leading_colon.is_none()
+            && segments
+                .first()
+                .is_some_and(|segment| matches!(segment.as_str(), "self" | "super"))
+        {
+            let mut lexical = self.module_stack.clone();
+            let mut index = 0usize;
+            if segments[index] == "self" {
+                index += 1;
+            } else {
+                while index < segments.len() && segments[index] == "super" {
+                    lexical.pop();
+                    index += 1;
+                }
+            }
+            if segments.len().saturating_sub(index) == 1 {
+                let leaf = &segments[index];
+                let mut targets = self
+                    .flat_import_type_authorizations
+                    .iter()
+                    .filter(|authorization| {
+                        authorization.consumer_physical_module == self.current_physical_module
+                            && authorization.reference_kind
+                                == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                            && authorization.consumer_lexical_module.0 == lexical
+                            && authorization.leaf == *leaf
+                    })
+                    .map(|authorization| {
+                        format!("::{}::{}", authorization.cpp_namespace, authorization.leaf)
+                    })
+                    .collect::<Vec<_>>();
+                targets.sort();
+                targets.dedup();
+                if targets.len() == 1 {
+                    return targets.remove(0);
+                }
+            }
+        }
+        // A `crate::<this physical file module>::...` path names a symbol in
+        // this named module.  The physical file-module segment is not an
+        // emitted C++ namespace; the configured namespace is.  Resolve this
+        // exact qualified identity before any tail-based recovery, but only
+        // when the path contains a leaf from this source's proven flat-import
+        // tuple.  This keeps `crate::consumer::external::Leaf` distinct from
+        // the marked bare `Leaf` while leaving unrelated crate paths alone.
+        if path.leading_colon.is_none()
+            && segments.first().is_some_and(|segment| segment == "crate")
+            && !self.current_physical_module.0.is_empty()
+            && segments[1..].starts_with(&self.current_physical_module.0)
+        {
+            let relative = &segments[1 + self.current_physical_module.0.len()..];
+            let mut namespaces = self
+                .flat_import_type_authorizations
+                .iter()
+                .filter(|authorization| {
+                    authorization.consumer_physical_module == self.current_physical_module
+                        && authorization.reference_kind
+                            == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                        && relative
+                            .iter()
+                            .any(|segment| segment == &authorization.leaf)
+                })
+                .map(|authorization| authorization.cpp_namespace.clone())
+                .collect::<Vec<_>>();
+            namespaces.sort();
+            namespaces.dedup();
+            if namespaces.len() == 1 && !relative.is_empty() {
+                return format!(
+                    "::{}::{}",
+                    namespaces.remove(0),
+                    relative
+                        .iter()
+                        .map(|segment| escape_cpp_keyword(segment))
+                        .collect::<Vec<_>>()
+                        .join("::")
+                );
+            }
+        }
         // General Layer 1 Stage B: expand a `use <std-mod>::{self}` MODULE self-alias
         // whose target is a std/alloc/core module, so a bare `vec::Drain` (from
         // `use alloc::vec::{self, Vec}`, which binds `vec` → `std::vec`) reaches the
@@ -1261,6 +1414,27 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 return "std::max".to_string();
             }
             _ => {}
+        }
+        // `crate::<module>::<Item>` under a configured `--cxx-namespace` WITHOUT
+        // `--auto-namespace`: every crate module emits its items FLAT into that
+        // one namespace (`--auto-namespace` is the mode that gives each Rust
+        // module its own C++ namespace). The Rust module segment is therefore
+        // not a C++ namespace at all, and keeping it produced
+        // `::errors::RpcError` for `crate::errors::RpcError` — a namespace no
+        // translation unit declares. Root the item at the configured namespace
+        // instead, and only when the segment is a proven sibling crate module.
+        if let Some(ns) = self.cxx_namespace.as_deref()
+            && !self.auto_namespace
+            && segments.len() >= 3
+            && segments.first().is_some_and(|seg| seg == "crate")
+            && self
+                .crate_module_names
+                .iter()
+                .any(|module| module.rsplit('.').next() == Some(segments[1].as_str()))
+        {
+            let mut flattened = vec![escape_cpp_keyword(ns)];
+            flattened.extend(segments[2..].iter().map(|segment| escape_cpp_keyword(segment)));
+            return format!("::{}", flattened.join("::"));
         }
         while segments
             .first()
@@ -2199,6 +2373,17 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 .chars()
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
+            // A flat-import authorization belongs only to the exact bare
+            // binding introduced by its marked `use`.  A qualified
+            // `external::Leaf` (or `other::Leaf`, `self::Leaf`, etc.) keeps
+            // its own Rust identity and must never enter tail-only recovery.
+            && !self
+                .flat_import_type_authorizations
+                .iter()
+                .any(|authorization| {
+                    authorization.consumer_physical_module == self.current_physical_module
+                        && authorization.leaf == segments[1]
+                })
             && !matches!(segments[0].as_str(), "std" | "core" | "alloc" | "rusty")
             && !self.is_type_param_in_scope(&segments[0])
             && segments[0] != "Self"
@@ -3115,6 +3300,37 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
+        if let Some(target) = self.cpp_name_call_target(path) {
+            return target;
+        }
+        // A path whose ROOT segment is a reserved `cpp::` module binding always
+        // names a symbol of THAT C++ module, so it must resolve through the
+        // module's declared export namespace — never through the crate-local
+        // module/import tables. The general resolution below re-expands the
+        // binding through the ordinary scope-import table whenever an interior
+        // segment happens to name a Rust `mod` (`use cpp::rrr::serializable;`
+        // plus `serializable::Serialize_::serialize`, where `Serialize_` is a
+        // `pub mod` of the crate's own `serializable` module): the binding
+        // expanded back to `cpp::rrr::serializable::…` and the `use rusty as
+        // cpp;` alias then produced the nonexistent
+        // `rusty::rrr::serializable::Serialize_::serialize`. Interior segments
+        // that name TYPES (`SparseInt::dump32`, `SerializableRegistry::create`)
+        // already reached the rewrite below and are unaffected — this only
+        // moves the same rewrite ahead of the interception.
+        if path.segments.len() >= 3
+            && path.segments.first().is_some_and(|segment| {
+                self.name_resolver
+                    .cpp_binding(&segment.ident.to_string())
+                    .is_some()
+            })
+            && self.map_function_path_scope_aware(&joined).is_none()
+            && let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path)
+        {
+            if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                rewritten.push_str(&template_args);
+            }
+            return rewritten;
+        }
         // A trait comparison method used as a VALUE (a function reference, e.g.
         // `it.merge_join_by(other, Ord::cmp)` / `k_smallest_relaxed_by(k, Ord::cmp)`).
         // Emitted verbatim, `Ord::cmp` is an undeclared identifier in C++. Lower to
@@ -3195,6 +3411,29 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     return override_name.to_string();
                 }
                 return "(*this)".to_string();
+            }
+            // These four single-segment constructors are owned by Rust's
+            // prelude Option/Result surface unless an exact lexical binding
+            // shadows them.  Resolve them before globally seeded C-like enum
+            // metadata: importing the TYPE `ChannelError` must never make its
+            // `None` variant visible, so `None` cannot become
+            // `ChannelError::None` merely because that enum is known.
+            let canonical_prelude_ctor = self.canonical_variant_name(&name).to_string();
+            if matches!(canonical_prelude_ctor.as_str(), "None" | "Some" | "Ok" | "Err")
+                && self.lookup_local_binding_type(&name).is_none()
+                && !self.is_local_binding_in_scope(&name)
+                && self
+                    .resolve_scope_import_binding_target_for_exact_scope(
+                        &self.module_stack.join("::"),
+                        &name,
+                    )
+                    .is_none()
+                && !self.glob_imported_enum_tails.iter().any(|owner| {
+                    self.path_matches_c_like_enum_const(owner, &name)
+                        || self.enum_has_variant_name(owner, &canonical_prelude_ctor)
+                })
+            {
+                return format!("rusty::{canonical_prelude_ctor}");
             }
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
                 // #84: membership is keyed by the RESOLVED cpp name. A shadow
@@ -3293,18 +3532,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 if let Some(owner) = builtin_owner {
                     return format!("{}::{}", owner, name);
                 }
-            }
-        }
-        if path.segments.len() == 1 {
-            let canonical = self
-                .canonical_variant_name(&path.segments[0].ident.to_string())
-                .to_string();
-            match canonical.as_str() {
-                "None" => return "rusty::None".to_string(),
-                "Some" => return "rusty::Some".to_string(),
-                "Ok" => return "rusty::Ok".to_string(),
-                "Err" => return "rusty::Err".to_string(),
-                _ => {}
             }
         }
         if path.segments.len() >= 3 {

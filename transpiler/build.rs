@@ -1,10 +1,10 @@
 use std::process::Command;
+use std::{env, path::PathBuf};
 
 /// Embed the transpiler's git revision so the parity-matrix module cache can fold
 /// it into its env hash — a transpiler change must invalidate stale cached BMIs /
-/// objects (the committed source identity; uncommitted edits are additionally
-/// covered at runtime by the binary's mtime). Best-effort: outside a git checkout
-/// the values fall back to "unknown".
+/// objects. The same revision and dirty state are exposed by `--build-info`.
+/// Best-effort: outside a git checkout the values fall back to "unknown".
 fn main() {
     let git = |args: &[&str]| {
         Command::new("git")
@@ -24,9 +24,24 @@ fn main() {
     println!("cargo:rustc-env=RUSTY_CPP_GIT_HASH={hash}");
     println!("cargo:rustc-env=RUSTY_CPP_GIT_DIRTY={dirty}");
 
-    // Re-run when HEAD or the ref it points at moves, so the embedded hash tracks
-    // the current commit. Paths are relative to the workspace's .git (one level up
-    // from this crate). If they don't exist the directives are simply inert.
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    println!("cargo:rerun-if-changed=../.git/refs/heads");
+    // Ask Git for its real administrative paths: a submodule or linked worktree
+    // does not keep HEAD in the workspace's `../.git/HEAD`.
+    for git_path in ["HEAD", "refs/heads", "packed-refs"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", git_path]).map(PathBuf::from) {
+            let absolute = if path.is_absolute() {
+                path
+            } else if let Ok(current_dir) = env::current_dir() {
+                current_dir.join(path)
+            } else {
+                continue;
+            };
+            let resolved = absolute.canonicalize().unwrap_or(absolute);
+            if resolved.exists() {
+                println!("cargo:rerun-if-changed={}", resolved.display());
+            }
+        }
+    }
+
+    // Recompute the dirty bit whenever transpiler source changes.
+    println!("cargo:rerun-if-changed=src");
 }

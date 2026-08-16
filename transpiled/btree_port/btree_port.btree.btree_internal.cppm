@@ -1,3 +1,4 @@
+// btree_port port: merge-path write() value args bind non-const (codifies the ("write", 0) value-arg consumption fix — const decayed the forced move to a deleted copy for move-only V)
 // btree_port port step 60: step-58/59 lazy gates + extra fixes codified
 // btree_port port step 55: step-54 insert-path fixes codified by post_transpile_patch.py
 // btree_port port: assume_init_ref method→free-fn by post_transpile_patch.py

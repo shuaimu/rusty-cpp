@@ -2,6 +2,139 @@ use super::*;
 use super::predicates::AutoTrait;
 
 impl CodeGen {
+    fn cpp_abi_facade_params(
+        &self,
+        sig: &syn::Signature,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) -> Vec<String> {
+        sig.inputs
+            .iter()
+            .filter_map(|arg| {
+                let syn::FnArg::Typed(arg) = arg else {
+                    return None;
+                };
+                let syn::Pat::Ident(pattern) = arg.pat.as_ref() else {
+                    return None;
+                };
+                let rust_name = pattern.ident.to_string();
+                let name = escape_cpp_keyword(&rust_name);
+                let ty = match facade
+                    .contract
+                    .params
+                    .get(rust_name.strip_prefix("r#").unwrap_or(&rust_name))
+                {
+                    Some(crate::cpp_abi::ParamAdapter::StdStringBytes) => "std::string".to_string(),
+                    Some(crate::cpp_abi::ParamAdapter::ConstRef { alias, .. }) => {
+                        format!("const {}&", escape_cpp_keyword(alias))
+                    }
+                    None => self.resolve_param_cpp_type(&arg.ty),
+                };
+                Some(format!("{} {}", ty, name))
+            })
+            .collect()
+    }
+
+    fn cpp_abi_facade_return_type(
+        &self,
+        sig: &syn::Signature,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) -> String {
+        if facade.contract.returns.is_some() {
+            "std::string".to_string()
+        } else {
+            self.map_return_type(&sig.output)
+        }
+    }
+
+    fn emit_cpp_abi_facade_body(
+        &mut self,
+        sig: &syn::Signature,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) {
+        let mut args = Vec::new();
+        let detail_namespace = self.cpp_abi_plan.detail_namespace();
+        for (index, arg) in sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(arg) = arg else {
+                continue;
+            };
+            let syn::Pat::Ident(pattern) = arg.pat.as_ref() else {
+                continue;
+            };
+            let rust_name = pattern.ident.to_string();
+            let key = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
+            let name = escape_cpp_keyword(&rust_name);
+            match facade.contract.params.get(key) {
+                Some(crate::cpp_abi::ParamAdapter::StdStringBytes) => {
+                    let local = format!("rusty_cpp_abi_arg_{index}");
+                    self.writeln(&format!(
+                        "auto {local} = {detail_namespace}::bytes_from_std_string({name});"
+                    ));
+                    args.push(format!("std::move({local})"));
+                }
+                Some(crate::cpp_abi::ParamAdapter::ConstRef { .. }) => {
+                    let local = format!("rusty_cpp_abi_arg_{index}");
+                    self.writeln(&format!(
+                        "auto {local} = {detail_namespace}::f64_span_from_std_vector({name});"
+                    ));
+                    args.push(local);
+                }
+                None => args.push(name),
+            }
+        }
+        let call = format!("{}({})", facade.helper_name, args.join(", "));
+        if facade.contract.returns.is_some() {
+            self.writeln(&format!("auto rusty_cpp_abi_result = {call};"));
+            self.writeln(&format!("return {detail_namespace}::std_string_from_bytes(std::move(rusty_cpp_abi_result));"));
+        } else if matches!(&sig.output, syn::ReturnType::Default)
+            || matches!(&sig.output, syn::ReturnType::Type(_, ty) if matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty()))
+        {
+            self.writeln(&format!("{call};"));
+        } else {
+            self.writeln(&format!("return {call};"));
+        }
+    }
+
+    fn emit_cpp_abi_free_facade_decl(
+        &mut self,
+        f: &syn::ItemFn,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) {
+        let export_prefix = if self.should_export_item(&f.vis, &f.sig.ident.to_string()) {
+            "export "
+        } else {
+            ""
+        };
+        let return_type = self.cpp_abi_facade_return_type(&f.sig, facade);
+        let params = self.cpp_abi_facade_params(&f.sig, facade).join(", ");
+        self.writeln(&format!(
+            "{export_prefix}{return_type} {}({params});",
+            escape_cpp_keyword(&f.sig.ident.to_string())
+        ));
+    }
+
+    fn emit_cpp_abi_free_facade_definition(
+        &mut self,
+        f: &syn::ItemFn,
+        facade: &crate::cpp_abi::CallableFacade,
+    ) {
+        self.emit_doc_comments(&f.attrs);
+        let export_prefix = if self.should_export_item(&f.vis, &f.sig.ident.to_string()) {
+            "export "
+        } else {
+            ""
+        };
+        let return_type = self.cpp_abi_facade_return_type(&f.sig, facade);
+        let params = self.cpp_abi_facade_params(&f.sig, facade).join(", ");
+        self.writeln(&format!(
+            "{export_prefix}{return_type} {}({params}) {{",
+            escape_cpp_keyword(&f.sig.ident.to_string())
+        ));
+        self.indent += 1;
+        self.emit_cpp_abi_facade_body(&f.sig, facade);
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
     /// Resolve crate-LOCAL type aliases in a forward-declaration's parameter
     /// list. A C++ type alias cannot be forward-declared, and the function
     /// forward-decl block precedes the module bodies where the aliases are
@@ -12,7 +145,7 @@ impl CodeGen {
     /// ("no type named 'yaml_read_handler_t' in namespace ..."). Spelling the
     /// alias's UNDERLYING type in the fwd-decl sidesteps the ordering;
     /// the later definition still uses the alias.
-    fn resolve_local_alias_fn_inputs(
+    pub(super) fn resolve_local_alias_fn_inputs(
         &self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
     ) -> syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]> {
@@ -48,10 +181,44 @@ impl CodeGen {
         resolved
     }
 
-    pub(super) fn emit_function_forward_decl(&mut self, f: &syn::ItemFn, allow_non_unit: bool) -> bool {
+    pub(super) fn emit_function_forward_decl(
+        &mut self,
+        f: &syn::ItemFn,
+        allow_non_unit: bool,
+    ) -> bool {
+        let has_cpp_defaults = match crate::cpp_default_args::function_has_defaults(f) {
+            Ok(value) => value,
+            Err(error) => {
+                if self.codegen_error.is_none() {
+                    self.codegen_error = Some(error);
+                }
+                return false;
+            }
+        };
+        if let Some(facade) = self
+            .cpp_abi_plan
+            .free_facade(&self.module_stack, &f.sig.ident.to_string())
+            .cloned()
+        {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument cannot be combined with cpp_abi on `{}`",
+                    f.sig.ident
+                ));
+                return false;
+            }
+            self.emit_cpp_abi_free_facade_decl(f, &facade);
+            return true;
+        }
         // Skip Rust libtest scaffolding and #[test] entrypoints in forward declarations.
         // Those are emitted via dedicated test-wrapper paths, not as top-level functions.
         if self.is_rust_libtest_main(f) || Self::has_test_attr(&f.attrs) {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument function `{}` cannot be omitted from forward declarations",
+                    f.sig.ident
+                ));
+            }
             return false;
         }
         let alias_resolved_inputs = self.resolve_local_alias_fn_inputs(&f.sig.inputs);
@@ -76,15 +243,25 @@ impl CodeGen {
             }
         };
         if !can_forward_declare {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument function `{}` cannot be forward declared exactly",
+                    f.sig.ident
+                ));
+            }
             return false;
         }
 
         let rust_name = f.sig.ident.to_string();
         let name = self
-            .module_qualified_functions
-            .get(&rust_name)
-            .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
-            .cloned()
+            .source_owned_cpp_function_name(&rust_name)
+            .map(str::to_string)
+            .or_else(|| {
+                self.module_qualified_functions
+                    .get(&rust_name)
+                    .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
+                    .cloned()
+            })
             .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
         let is_async = f.sig.asyncness.is_some();
         let undeduced_return_type_param = self.undeduced_return_type_param_for_function(
@@ -156,7 +333,20 @@ impl CodeGen {
         } else {
             self.map_return_type(&f.sig.output)
         };
-        let mut params = self.map_fn_params(&alias_resolved_inputs);
+        let mut params = if has_cpp_defaults {
+            match self.map_fn_params_with_cpp_defaults(&alias_resolved_inputs) {
+                Ok(params) => params,
+                Err(error) => {
+                    if self.codegen_error.is_none() {
+                        self.codegen_error = Some(error);
+                    }
+                    self.pop_type_param_scope();
+                    return false;
+                }
+            }
+        } else {
+            self.map_fn_params(&alias_resolved_inputs)
+        };
         let mut param_types = self.map_fn_param_types(&alias_resolved_inputs);
         let mut signature_has_unresolved_scoped_paths = self
             .forward_decl_type_spelling_has_unresolved_scoped_path(&return_type)
@@ -171,7 +361,21 @@ impl CodeGen {
             } else {
                 self.map_return_type(&f.sig.output)
             };
-            let fallback_params = self.map_fn_params(&alias_resolved_inputs);
+            let fallback_params = if has_cpp_defaults {
+                match self.map_fn_params_with_cpp_defaults(&alias_resolved_inputs) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        if self.codegen_error.is_none() {
+                            self.codegen_error = Some(error);
+                        }
+                        self.in_forward_decl_signature = prev_forward_decl_signature;
+                        self.pop_type_param_scope();
+                        return false;
+                    }
+                }
+            } else {
+                self.map_fn_params(&alias_resolved_inputs)
+            };
             let fallback_param_types = self.map_fn_param_types(&alias_resolved_inputs);
             let fallback_has_unresolved = self
                 .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_return_type)
@@ -199,12 +403,35 @@ impl CodeGen {
             }
         }
         self.in_forward_decl_signature = prev_forward_decl_signature;
+        let param_types_for_unknown_check = if has_cpp_defaults {
+            match self.map_fn_nondefault_param_types(&alias_resolved_inputs) {
+                Ok(types) => types,
+                Err(error) => {
+                    if self.codegen_error.is_none() {
+                        self.codegen_error = Some(error);
+                    }
+                    self.pop_type_param_scope();
+                    return false;
+                }
+            }
+        } else {
+            param_types.clone()
+        };
         let signature_has_unqualified_unknown_type = self
-            .forward_decl_signature_has_unqualified_unknown_type_name(&return_type, &param_types);
+            .forward_decl_signature_has_unqualified_unknown_type_name(
+                &return_type,
+                &param_types_for_unknown_check,
+            );
         self.pop_type_param_scope();
         if (signature_has_unresolved_scoped_paths || signature_has_unqualified_unknown_type)
             && !self.module_body_forward_decl_pass
         {
+            if has_cpp_defaults && self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_default_argument function `{}` has a forward declaration whose parameter types cannot be resolved exactly",
+                    f.sig.ident
+                ));
+            }
             return false;
         }
 
@@ -231,7 +458,11 @@ impl CodeGen {
         // fn that happens to share a re-export target's name (semver's test
         // util `version` vs the crate's re-exported `version`) would otherwise
         // emit the ill-formed `export static`.
-        let export_prefix = if !self.should_emit_internal_linkage_function(f)
+        let cpp_abi_semantic_helper = self
+            .cpp_abi_plan
+            .is_semantic_helper(&self.module_stack, &f.sig.ident.to_string());
+        let export_prefix = if !cpp_abi_semantic_helper
+            && !self.should_emit_internal_linkage_function(f)
             && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
                 || self.should_force_export_private_root_module_function(f))
         {
@@ -244,13 +475,20 @@ impl CodeGen {
         } else {
             ""
         };
+        let linkage_prefix = if cpp_abi_semantic_helper {
+            if self.inline_rust_block {
+                "inline "
+            } else {
+                "static "
+            }
+        } else if self.should_emit_internal_linkage_function(f) {
+            "static "
+        } else {
+            ""
+        };
         let static_prefix = format!(
             "{}{}",
-            if self.should_emit_internal_linkage_function(f) {
-                "static "
-            } else {
-                ""
-            },
+            linkage_prefix,
             constexpr_prefix
         );
         self.emit_template_declaration_with_type_defaults(
@@ -626,6 +864,15 @@ impl CodeGen {
     }
 
     pub(super) fn emit_function(&mut self, f: &syn::ItemFn) {
+        if let Some(facade) = self
+            .cpp_abi_plan
+            .free_facade(&self.module_stack, &f.sig.ident.to_string())
+            .cloned()
+        {
+            self.emit_cpp_abi_free_facade_definition(f, &facade);
+            return;
+        }
+
         // The normal forward pass owns C++ emission for declaration-only
         // functions; Cargo retains and executes the Rust forwarding body.
         if Self::has_cpp_declaration_attr(&f.attrs) {
@@ -730,10 +977,14 @@ impl CodeGen {
         }
 
         let name = self
-            .module_qualified_functions
-            .get(&fn_name)
-            .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
-            .cloned()
+            .source_owned_cpp_function_name(&fn_name)
+            .map(str::to_string)
+            .or_else(|| {
+                self.module_qualified_functions
+                    .get(&fn_name)
+                    .filter(|mapped| !mapped.is_empty() && !mapped.contains("::"))
+                    .cloned()
+            })
             .unwrap_or_else(|| escape_cpp_keyword(&f.sig.ident.to_string()));
         let is_async = f.sig.asyncness.is_some();
         let undeduced_return_type_param = self.undeduced_return_type_param_for_function(
@@ -1150,7 +1401,11 @@ impl CodeGen {
         // fn that happens to share a re-export target's name (semver's test
         // util `version` vs the crate's re-exported `version`) would otherwise
         // emit the ill-formed `export static`.
-        let export_prefix = if !self.should_emit_internal_linkage_function(f)
+        let cpp_abi_semantic_helper = self
+            .cpp_abi_plan
+            .is_semantic_helper(&self.module_stack, &f.sig.ident.to_string());
+        let export_prefix = if !cpp_abi_semantic_helper
+            && !self.should_emit_internal_linkage_function(f)
             && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
                 || self.should_force_export_private_root_module_function(f))
         {
@@ -1163,13 +1418,20 @@ impl CodeGen {
         } else {
             ""
         };
+        let linkage_prefix = if cpp_abi_semantic_helper {
+            if self.inline_rust_block {
+                "inline "
+            } else {
+                "static "
+            }
+        } else if self.should_emit_internal_linkage_function(f) {
+            "static "
+        } else {
+            ""
+        };
         let static_prefix = format!(
             "{}{}",
-            if self.should_emit_internal_linkage_function(f) {
-                "static "
-            } else {
-                ""
-            },
+            linkage_prefix,
             constexpr_prefix
         );
         // Template declarations must be emitted outside the function's type-param scope.
@@ -1339,24 +1601,170 @@ impl CodeGen {
     }
 
     pub(super) fn emit_foreign_mod(&mut self, fm: &syn::ItemForeignMod) {
+        // Rust's native ABI is not a C++ language-linkage string.  In named
+        // module output, an `unsafe extern "Rust"` block is the source-side
+        // spelling for declarations whose ordinary C++ definitions live in a
+        // module implementation unit.  Emit each declaration directly so it
+        // is attached to the active C++ module/namespace, and export only the
+        // Rust-public surface.  The transpile preflight rejects this ABI in
+        // direct mode and rejects unsupported foreign item kinds.
+        if self.module_name.is_some()
+            && fm.abi.name.as_ref().map(syn::LitStr::value).as_deref() == Some("Rust")
+        {
+            if Self::should_skip_cfg_attrs(&fm.attrs) {
+                return;
+            }
+            if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&fm.attrs) {
+                if self.codegen_error.is_none() {
+                    self.codegen_error = Some(format!(
+                        "cannot preserve unsupported #[cfg] predicate on extern Rust block: {}",
+                        predicate
+                    ));
+                }
+                return;
+            }
+            let block_cfg_guard = Self::cfg_cpp_guard(&fm.attrs);
+            if let Some(condition) = &block_cfg_guard {
+                self.writeln(&format!("#if {}", condition));
+            }
+            for item in &fm.items {
+                let syn::ForeignItem::Fn(f) = item else {
+                    continue;
+                };
+                if Self::should_skip_cfg_attrs(&f.attrs) {
+                    continue;
+                }
+                if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&f.attrs) {
+                    if self.codegen_error.is_none() {
+                        self.codegen_error = Some(format!(
+                            "cannot preserve unsupported #[cfg] predicate on extern Rust function {}: {}",
+                            f.sig.ident, predicate
+                        ));
+                    }
+                    continue;
+                }
+                let name_str = f.sig.ident.to_string();
+                let name = escape_cpp_keyword(&name_str);
+                let return_type = self.map_return_type(&f.sig.output);
+                let params = self.map_fn_params(&f.sig.inputs);
+                let export_prefix = if self.should_export_item(&f.vis, &name_str) {
+                    "export "
+                } else {
+                    ""
+                };
+                let cfg_guard = Self::cfg_cpp_guard(&f.attrs);
+                if let Some(condition) = &cfg_guard {
+                    self.writeln(&format!("#if {}", condition));
+                }
+                self.writeln(&format!(
+                    "{}{} {}({});",
+                    export_prefix, return_type, name, params
+                ));
+                if let Some(condition) = &cfg_guard {
+                    self.writeln(&format!("#endif  // {}", condition));
+                }
+            }
+            if let Some(condition) = &block_cfg_guard {
+                self.writeln(&format!("#endif  // {}", condition));
+            }
+            return;
+        }
+
         // extern "C" { fn foo(...); } → extern "C" { declarations }
         let abi = if let Some(abi_name) = &fm.abi.name {
             format!("\"{}\"", abi_name.value())
         } else {
             "\"C\"".to_string()
         };
+        // H3 fail-closed (checkpoint contract 3): a foreign-C declaration
+        // whose callable parameter the raw C spelling cannot express (a
+        // Rust-ABI fn pointer) must reject with a diagnostic BEFORE any
+        // output — precedent: the transpile preflight rejects variadic
+        // extern-Rust fns. Emitting the class-type wrapper instead would
+        // silently conflict with the authoritative C header's prototype.
+        for item in &fm.items {
+            if let syn::ForeignItem::Fn(f) = item {
+                for arg in &f.sig.inputs {
+                    let syn::FnArg::Typed(pat_type) = arg else {
+                        continue;
+                    };
+                    if Self::type_contains_non_c_abi_bare_fn(&pat_type.ty) {
+                        if self.codegen_error.is_none() {
+                            self.codegen_error = Some(format!(
+                                "foreign C declaration `{}` has a callable parameter \
+                                 with no raw C spelling (non-C-ABI fn pointer); \
+                                 extern {} declarations must match the authoritative \
+                                 C header",
+                                f.sig.ident, abi
+                            ));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         self.writeln(&format!("extern {} {{", abi));
         self.indent += 1;
         for item in &fm.items {
             if let syn::ForeignItem::Fn(f) = item {
-                let name = &f.sig.ident;
+                let name_str = f.sig.ident.to_string();
+                let name = escape_cpp_keyword(&name_str);
                 let return_type = self.map_return_type(&f.sig.output);
-                let params = self.map_fn_params(&f.sig.inputs);
-                self.writeln(&format!("{} {}({});", return_type, name, params));
+                // H3: map the params in foreign-C-declaration context — a
+                // C-ABI BareFn param lowers to a raw C function pointer with
+                // its name inside the declarator (`void (*entry_fn)(void*)`),
+                // matching the authoritative C header.
+                let prev_foreign_c = self.in_foreign_c_declaration;
+                self.in_foreign_c_declaration = true;
+                let mut params = self.map_fn_params(&f.sig.inputs);
+                self.in_foreign_c_declaration = prev_foreign_c;
+                // H3: the declaration-level varargs survive
+                // (`long syscall(long number, ...);`).
+                if f.sig.variadic.is_some() {
+                    if params.is_empty() {
+                        params.push_str("...");
+                    } else {
+                        params.push_str(", ...");
+                    }
+                }
+                // Linkage-specification braces do not create a namespace
+                // scope, so an export-declaration is valid here. Export each
+                // Rust-public foreign declaration independently; keeping the
+                // block itself unexported leaves private siblings attached to
+                // the module but unreachable to importers.
+                let export_prefix = if self.should_export_item(&f.vis, &name_str) {
+                    "export "
+                } else {
+                    ""
+                };
+                self.writeln(&format!(
+                    "{}{} {}({});",
+                    export_prefix, return_type, name, params
+                ));
             }
         }
         self.indent -= 1;
         self.writeln("}");
+    }
+
+    /// True when a foreign-C parameter type contains a bare-fn form the raw
+    /// C spelling cannot express — a Rust-ABI `fn(…)` pointer at any depth.
+    /// (H3; C-ABI bare fns lower to raw C fn pointers instead.)
+    fn type_contains_non_c_abi_bare_fn(ty: &syn::Type) -> bool {
+        struct Finder {
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Finder {
+            fn visit_type_bare_fn(&mut self, bf: &'ast syn::TypeBareFn) {
+                if !CodeGen::bare_fn_has_c_abi(bf) {
+                    self.found = true;
+                }
+                syn::visit::visit_type_bare_fn(self, bf);
+            }
+        }
+        let mut finder = Finder { found: false };
+        syn::visit::Visit::visit_type(&mut finder, ty);
+        finder.found
     }
 
     /// Emit a Rust `union` (pervasive in c2rust C ports, e.g.
@@ -4430,9 +4838,33 @@ impl CodeGen {
             return false;
         }
 
+        let cpp_abi_alias = self
+            .cpp_abi_plan
+            .alias(&self.module_stack, &alias_rust_name)
+            .is_some();
         self.push_type_param_scope(&t.generics);
-        let mut target = self.map_type(&t.ty);
+        let mut target = if cpp_abi_alias {
+            "std::vector<double>".to_string()
+        } else {
+            self.map_type(&t.ty)
+        };
         self.pop_type_param_scope();
+        // C8 (checkpoint contract 8): an EXPORTED alias is part of the
+        // module's public C++ surface, which is exactly what an authenticated
+        // type map governs — so the alias DECLARATION honors its own target,
+        // not just its uses. `SrcFileCStr` is mapped to `const char*` and its
+        // parameter uses already lower that way, while the alias itself was
+        // emitted from the Rust right-hand side (`&'static str` →
+        // `std::string_view`), i.e. one name with two C++ types.
+        // Deliberately scoped to exported, non-generic aliases: a private
+        // alias is module-internal spelling that the map does not govern.
+        if should_export_alias
+            && t.generics.params.is_empty()
+            && let Some(mapped) = self.user_type_map.lookup(&alias_rust_name)
+            && !mapped.is_empty()
+        {
+            target = mapped.to_string();
+        }
         target = Self::rewrite_private_keyword_namespace_in_type_path(&target);
         if self.block_depth > 0 {
             self.emit_template_prefix(&t.generics);
@@ -4549,6 +4981,18 @@ impl CodeGen {
     }
 
     pub(super) fn emit_const(&mut self, c: &syn::ItemConst) {
+        if Self::should_skip_cfg_attrs(&c.attrs) {
+            return;
+        }
+        if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&c.attrs) {
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cannot preserve unsupported #[cfg] predicate on const {}: {}",
+                    c.ident, predicate
+                ));
+            }
+            return;
+        }
         // A wildcard const (`const _: () = ...;`) is one of two things and
         // they need different answers.
         //
@@ -4569,7 +5013,14 @@ impl CodeGen {
         // immune to the collision above and can simply be emitted.
         if c.ident == "_" {
             if let Some(cond) = Self::wildcard_const_assertion(&c.expr) {
+                let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+                if let Some(predicate) = &cfg_guard {
+                    self.writeln(&format!("#if {}", predicate));
+                }
                 self.emit_static_assertion(&cond, &c.expr);
+                if let Some(predicate) = &cfg_guard {
+                    self.writeln(&format!("#endif  // {}", predicate));
+                }
             }
             return;
         }
@@ -4583,7 +5034,9 @@ impl CodeGen {
         if self.block_depth == 0 {
             let rust_name = c.ident.to_string();
             let scoped_name = self.scoped_const_key(&rust_name);
-            if self.forward_emitted_consts.contains(&scoped_name) {
+            let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+            let variant_key = Self::cfg_item_variant_key(&scoped_name, cfg_guard.as_deref());
+            if self.forward_emitted_consts.contains(&variant_key) {
                 return;
             }
         }
@@ -4608,6 +5061,10 @@ impl CodeGen {
             ));
             return;
         }
+        let cfg_guard = Self::cfg_cpp_guard(&c.attrs);
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#if {}", cond));
+        }
         if self.is_local_new_const_constructor_call(&c.expr) {
             let rust_name = c.ident.to_string();
             let cpp_name = self.allocate_local_cpp_name(&rust_name);
@@ -4624,6 +5081,9 @@ impl CodeGen {
 
             if let Some(scope) = self.local_cpp_bindings.last_mut() {
                 scope.insert(rust_name, format!("{}()", cpp_name));
+            }
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#endif  // {}", cond));
             }
             return;
         }
@@ -4661,6 +5121,9 @@ impl CodeGen {
                 "{}const {} {} = {};",
                 export_prefix, ty, cpp_name, storage_name
             ));
+            if let Some(cond) = &cfg_guard {
+                self.writeln(&format!("#endif  // {}", cond));
+            }
             return;
         }
         let expr_requires_runtime_storage = expr.contains("thread_local ")
@@ -4714,26 +5177,54 @@ impl CodeGen {
             self.record_local_const_binding(&rust_name, true);
             self.record_local_item_const_name(&rust_name);
         }
-        let export_prefix = if self.block_depth == 0 && self.should_export_item(&c.vis, &rust_name)
+        // Contract 7: `#[cfg_attr(any(), cpp_internal)]` makes the definition
+        // TU-local. A namespace-scope `const`/`constexpr` is NOT implicitly
+        // internal inside a module purview (P1815 attaches it to the module),
+        // so the keyword is load-bearing: without it the constant is an
+        // ordinary strong module-owned symbol.
+        let internal_marker = Self::has_cpp_internal_attr(&c.attrs);
+        let export_prefix = if !internal_marker
+            && self.block_depth == 0
+            && self.should_export_item(&c.vis, &rust_name)
         {
             "export "
         } else {
             ""
         };
+        let internal_prefix = if internal_marker && self.block_depth == 0 {
+            "static "
+        } else {
+            ""
+        };
         if storage == "const" && ty.contains('*') {
             self.writeln(&format!(
-                "{}{} const {} = {};",
-                export_prefix, ty, cpp_name, expr
+                "{}{}{} const {} = {};",
+                export_prefix, internal_prefix, ty, cpp_name, expr
             ));
         } else {
             self.writeln(&format!(
-                "{}{} {} {} = {};",
-                export_prefix, storage, ty, cpp_name, expr
+                "{}{}{} {} {} = {};",
+                export_prefix, internal_prefix, storage, ty, cpp_name, expr
             ));
+        }
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#endif  // {}", cond));
         }
     }
 
     pub(super) fn emit_static(&mut self, s: &syn::ItemStatic) {
+        if Self::should_skip_cfg_attrs(&s.attrs) {
+            return;
+        }
+        if let Some(predicate) = Self::unsupported_cfg_cpp_attr(&s.attrs) {
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cannot preserve unsupported #[cfg] predicate on static {}: {}",
+                    s.ident, predicate
+                ));
+            }
+            return;
+        }
         if self.is_rust_libtest_metadata_type(&s.ty) {
             self.writeln(&format!(
                 "// Rust-only libtest metadata static skipped: {}",
@@ -4751,12 +5242,7 @@ impl CodeGen {
         // turns it into one process-wide object shared by every thread —
         // which compiles, runs, and is silently wrong: threads see each
         // other's writes. C++ spells it the same way, so carry it over.
-        let is_thread_local = s.attrs.iter().any(|a| {
-            a.path()
-                .segments
-                .last()
-                .is_some_and(|seg| seg.ident == "thread_local")
-        });
+        let is_thread_local = has_exact_thread_local_storage_attr(&s.attrs);
         let storage = match (self.block_depth > 0, is_thread_local) {
             (true, true) => "static thread_local ",
             (true, false) => "static ",
@@ -4765,7 +5251,14 @@ impl CodeGen {
             (false, true) => "inline thread_local ",
             (false, false) => "inline ",
         };
+        let cfg_guard = Self::cfg_cpp_guard(&s.attrs);
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#if {}", cond));
+        }
         self.writeln(&format!("{}{} {} = {};", storage, ty, name, expr));
+        if let Some(cond) = &cfg_guard {
+            self.writeln(&format!("#endif  // {}", cond));
+        }
     }
 
     pub(super) fn emit_trait(&mut self, t: &syn::ItemTrait) {
@@ -4856,6 +5349,21 @@ impl CodeGen {
         // structs (always namespace scope) but driven by the actual
         // `vis` field, which is the Rust idiom.
         let wrap_in_anon_ns = !Self::visibility_is_any_pub(&t.vis);
+        // Checkpoint contract 4/10: register the trait so every later phase
+        // that synthesizes machinery FOR it (Adapter primary templates, Adapter
+        // specializations) puts that machinery in the SAME anonymous namespace.
+        // A root-scope adapter deriving from an anon-wrapped base is both an
+        // ODR hazard and an ordinary strong symbol the incumbent never had.
+        if wrap_in_anon_ns {
+            self.internal_linkage_traits.insert(trait_name_str.clone());
+            if !self.module_stack.is_empty() {
+                self.internal_linkage_traits.insert(format!(
+                    "{}::{}",
+                    self.module_stack.join("::"),
+                    trait_name_str
+                ));
+            }
+        }
 
         // Marker traits: emit as a no-op concept, same as the Pro path.
         if matches!(
@@ -5061,7 +5569,7 @@ impl CodeGen {
                 // the use-site rewrite silently never fires.
                 self.trait_associated_type_names
                     .insert(trait_name.to_string(), marker_assoc_names.clone());
-                self.emit_trait_assoc_traits_maps(trait_name, &marker_assoc_names);
+                self.emit_trait_assoc_traits_maps(trait_name, &marker_assoc_names, &cls_export);
                 self.writeln("");
             }
             // Module-mode static helper for qualified UFCS calls — see the
@@ -5507,18 +6015,35 @@ impl CodeGen {
             )
         };
         self.newline();
+        // The Adapter family is part of a public trait's C++ surface.  The
+        // primary declaration is what makes both the template name and its
+        // later explicit/partial specializations reachable to an importer;
+        // exporting only the abstract base leaves downstream code unable to
+        // name `TraitAdapter<Concrete>` even though that is the concrete type
+        // used to implement Rust's dyn coercion.  Keep private-trait adapters
+        // module-local, matching the trait itself: contract 4 requires the
+        // adapter declarations to inhabit the SAME anonymous namespace as the
+        // trait class, and contract 10 forbids them from adding ordinary strong
+        // symbols.  Omitting `export` alone does neither — a module-attached
+        // class still emits strong `T` definitions for its members.
+        if wrap_in_anon_ns {
+            self.writeln("namespace {");
+        }
         self.writeln(&format!(
-            "template <{}> class {}Adapter;",
-            adapter_template_args, trait_name
+            "{}template <{}> class {}Adapter;",
+            cls_export, adapter_template_args, trait_name
         ));
         self.writeln(&format!(
-            "template <{}> class {}AdapterRef;",
-            adapter_template_args, trait_name
+            "{}template <{}> class {}AdapterRef;",
+            cls_export, adapter_template_args, trait_name
         ));
         self.writeln(&format!(
-            "template <{}> class {}AdapterRefMut;",
-            adapter_template_args, trait_name
+            "{}template <{}> class {}AdapterRefMut;",
+            cls_export, adapter_template_args, trait_name
         ));
+        if wrap_in_anon_ns {
+            self.writeln("}");
+        }
 
         // Phase 3b.1: helper traits class forward decl. For each trait
         // with associated types, emit `template <class B> struct
@@ -5530,7 +6055,7 @@ impl CodeGen {
         // Trait can then route through `typename <Trait>Traits<B>::AssocName`,
         // which works even when B is foreign (no nested typedef).
         // Phase 3b.2 wires the rewrite at type-emit sites.
-        self.emit_trait_assoc_traits_maps(trait_name, &trait_assoc_type_names);
+        self.emit_trait_assoc_traits_maps(trait_name, &trait_assoc_type_names, &cls_export);
 
         self.pop_type_param_scope();
         self.current_struct_assoc_cpp_types.pop();
@@ -5563,6 +6088,7 @@ impl CodeGen {
         &mut self,
         trait_name: &syn::Ident,
         trait_assoc_type_names: &[String],
+        cls_export: &str,
     ) {
         if !trait_assoc_type_names.is_empty() {
             // Primary template: default each associated type to the nested
@@ -5580,7 +6106,10 @@ impl CodeGen {
             // an undefined forward-decl, so any unspecced `<Trait>Traits<B>` was
             // a hard error — currently-passing code therefore never reached it,
             // making this strictly additive.)
-            let mut primary = format!("template <class B> struct {}Traits {{ ", trait_name);
+            let mut primary = format!(
+                "{}template <class B> struct {}Traits {{ ",
+                cls_export, trait_name
+            );
             for name in trait_assoc_type_names {
                 primary.push_str(&format!("using {0} = typename B::{0}; ", name));
             }
@@ -5596,8 +6125,8 @@ impl CodeGen {
             // pointer/reference-bound param does).
             for ptr_or_ref in ["S*", "S&"] {
                 let mut spec = format!(
-                    "template <class S> struct {}Traits<{}> {{ ",
-                    trait_name, ptr_or_ref
+                    "{}template <class S> struct {}Traits<{}> {{ ",
+                    cls_export, trait_name, ptr_or_ref
                 );
                 for name in trait_assoc_type_names {
                     spec.push_str(&format!(
@@ -6103,7 +6632,14 @@ impl CodeGen {
         // Group methods by implementing self type.
         let mut by_self: Vec<(String, Vec<&ExtensionImplMethod>)> = Vec::new();
         for m in methods {
+            if !m.impl_generic_names.is_empty() {
+                self.type_param_scopes
+                    .push(m.impl_generic_names.iter().cloned().collect());
+            }
             let self_cpp = self.map_type(&m.self_ty);
+            if !m.impl_generic_names.is_empty() {
+                self.type_param_scopes.pop();
+            }
             if let Some(group) = by_self.iter_mut().find(|(k, _)| k == &self_cpp) {
                 group.1.push(m);
             } else {
@@ -6120,29 +6656,59 @@ impl CodeGen {
                 ));
                 continue;
             }
-            // Skip generic impls (self type contains free type parameters
-            // like `Option<T>`, `RangeInclusive<Idx>`). Full + partial
-            // specializations of the Adapter primary template require
-            // `template <T>` headers and inheritance/storage forms not
-            // yet implemented. Detection: the impl had any type params
-            // OR the self type's textual rendering still references one
-            // of those param idents.
-            if let Some(first_method) = group.first() {
-                let has_impl_generics = !first_method.impl_generic_names.is_empty();
-                let mentions_impl_generic = first_method
-                    .impl_generic_names
-                    .iter()
-                    .any(|name| self_cpp.contains(name));
-                if has_impl_generics && mentions_impl_generic {
-                    self.writeln(&format!(
-                        "// TODO(interface_traits): skipped generic impl `{}Adapter<{}>`",
-                        trait_name, self_cpp
-                    ));
-                    continue;
-                }
-                if self.type_contains_unbound_single_letter_generic(&first_method.self_ty) {
-                    continue;
-                }
+            // A generic impl whose Self type contains its impl parameters is a
+            // C++ partial specialization of the Adapter primary template. The
+            // class body/storage shape is otherwise identical to a concrete
+            // specialization, so carry the exact impl parameter names into
+            // the shared emitter. Generic *trait methods* remain unsupported
+            // and are rejected separately by the method emitter.
+            let impl_generic_names = group
+                .first()
+                .map(|method| method.impl_generic_names.clone())
+                .unwrap_or_default();
+            let referenced_impl_generics: Vec<String> = impl_generic_names
+                .iter()
+                .filter(|name| {
+                    group.first().is_some_and(|method| {
+                        self.type_mentions_named_type_param(&method.self_ty, name)
+                    })
+                })
+                .cloned()
+                .collect();
+            let mapped_impl_generics: Vec<String> = referenced_impl_generics
+                .iter()
+                .filter(|name| {
+                    Self::cpp_type_expr_mentions_identifier(
+                        self_cpp,
+                        &escape_cpp_keyword(name),
+                    )
+                })
+                .cloned()
+                .collect();
+            let partial_spec_params = group
+                .first()
+                .filter(|method| method.foreign_adapter_partial_spec_compatible)
+                .map(|_| referenced_impl_generics.clone())
+                .unwrap_or_default();
+            if group.first().is_some_and(|method| {
+                method.foreign_adapter_has_non_lifetime_generics
+                    && (!method.foreign_adapter_partial_spec_compatible
+                        || partial_spec_params.len() != impl_generic_names.len()
+                        || mapped_impl_generics.len() != referenced_impl_generics.len())
+            })
+            {
+                self.writeln(&format!(
+                    "// TODO(interface_traits): skipped generic impl `{}Adapter<{}>` — constrained/const generic partial specializations are unsupported",
+                    trait_name, self_cpp
+                ));
+                continue;
+            }
+            if partial_spec_params.is_empty()
+                && group.first().is_some_and(|method| {
+                    self.type_contains_unbound_single_letter_generic(&method.self_ty)
+                })
+            {
+                continue;
             }
             // Dedup: skip if we've already emitted Adapter trio for this
             // (trait, self) pair. Foreign-impl pipelines may iterate the
@@ -6170,7 +6736,14 @@ impl CodeGen {
                 .first()
                 .map(|m| m.associated_type_bindings.clone())
                 .unwrap_or_default();
+            if !partial_spec_params.is_empty() {
+                self.type_param_scopes
+                    .push(partial_spec_params.iter().cloned().collect());
+            }
             let bindings_cpp = self.extension_assoc_cpp_bindings(&assoc_bindings);
+            if !partial_spec_params.is_empty() {
+                self.type_param_scopes.pop();
+            }
             let trait_args: Vec<String> = self
                 .trait_associated_type_names
                 .get(trait_name)
@@ -6187,6 +6760,7 @@ impl CodeGen {
             self.emit_one_foreign_adapter(
                 trait_name,
                 &trait_args,
+                &partial_spec_params,
                 "Adapter",
                 self_cpp,
                 AdapterStorageKind::Owning,
@@ -6195,6 +6769,7 @@ impl CodeGen {
             self.emit_one_foreign_adapter(
                 trait_name,
                 &trait_args,
+                &partial_spec_params,
                 "AdapterRef",
                 self_cpp,
                 AdapterStorageKind::ConstRef,
@@ -6203,6 +6778,7 @@ impl CodeGen {
             self.emit_one_foreign_adapter(
                 trait_name,
                 &trait_args,
+                &partial_spec_params,
                 "AdapterRefMut",
                 self_cpp,
                 AdapterStorageKind::MutRef,
@@ -6227,7 +6803,12 @@ impl CodeGen {
                         .map(|ty| (assoc_name.clone(), ty))
                 })
                 .collect();
-            self.emit_assoc_type_helper_spec(trait_name, self_cpp, &assoc_pairs);
+            self.emit_assoc_type_helper_spec(
+                trait_name,
+                self_cpp,
+                &assoc_pairs,
+                &partial_spec_params,
+            );
         }
     }
 
@@ -6781,6 +7362,71 @@ impl CodeGen {
                 );
             }
         }
+
+        let flat_import = self
+            .cpp_abi_plan
+            .flat_import_for_use(&self.module_stack, u)
+            .map(|(namespace, child, leaves)| {
+                (namespace.to_string(), child.to_string(), leaves.to_vec())
+            });
+        if let Some((namespace, child, leaves)) = flat_import {
+            // The contract's Rust path is exactly `crate::<child>::...`, so its
+            // dependency is the exact generated root-child module.  Do not
+            // use nearest ancestor-sibling lookup: preflight requires a direct
+            // root-level free function and rejects inline children/re-exports.
+            let sibling_module = self.resolve_crate_root_child_module_path(&child);
+            if !self.crate_module_names.is_empty() && sibling_module.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_import_namespace crate child `{child}` does not resolve to a generated sibling module"
+                ));
+                return;
+            }
+            if let Some(sibling_module) = sibling_module
+                && self.sibling_modules_imported.insert(sibling_module.clone())
+            {
+                self.writeln(&format!("import {sibling_module};"));
+            }
+            let marked_leaves = leaves.clone();
+            for leaf in leaves {
+                if let Some(authorization) = self
+                    .flat_import_type_authorizations
+                    .iter()
+                    .find(|authorization| {
+                        authorization.consumer_physical_module
+                            == self.current_physical_module
+                            && authorization.reference_kind
+                                == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                            && authorization.consumer_lexical_module.0 == self.module_stack
+                            && authorization.marked_rust_child == child
+                            && authorization.marked_leaves == marked_leaves
+                            && authorization.leaf == leaf
+                            && authorization.cpp_namespace == namespace
+                            && authorization.provider_physical_module.0
+                                == [child.clone()]
+                    })
+                {
+                    // C++ using-declarations cannot name a namespace. Exact
+                    // namespace carriers are resolved through the recorded
+                    // Rust binding to `::{namespace}::{leaf}` at every use
+                    // site; emitting an alias here would broaden or duplicate
+                    // that binding.
+                    if authorization.provider_kind
+                        != crate::cpp_abi::FlatImportTypeProviderKind::Namespace
+                    {
+                        self.writeln(&format!("using ::{namespace}::{leaf};"));
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(sibling_module) = self.resolve_crate_module_underscore_import(u) {
+            if self.sibling_modules_imported.insert(sibling_module.clone()) {
+                self.writeln(&format!("import {sibling_module};"));
+            }
+            return;
+        }
+
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
 
         // Flatten once up front so mapped crate roots can be recognized before
@@ -6832,6 +7478,11 @@ impl CodeGen {
         };
         for (path_index, raw_path) in paths.iter().enumerate() {
             let path = self.rewrite_external_crate_import_path(raw_path);
+            // Preserve the exact Rust source identity before generic import
+            // resolution can collapse `super::Leaf` onto an unrelated local
+            // same-tail declaration. The late pass remains as an idempotent
+            // guard for paths introduced by later generic rewrites.
+            let path = self.rewrite_flat_import_type_using_path(&path);
             if let Some(cpp_import) = classify_cpp_module_use_import(&path) {
                 self.record_cpp_module_use_import(&cpp_import);
                 if cpp_import.explicit_alias {
@@ -7027,6 +7678,10 @@ impl CodeGen {
             // type alias (`using C = rusty::a::b::C;`): the declaration form
             // binds functions as well as types, and the alias form is
             // ill-formed for a function.
+            if resolved_path.trim_start_matches("::") == "rusty::cpp_inherit" {
+                self.writeln("// Rust-only compiler marker import: rusty::cpp_inherit");
+                continue;
+            }
             if resolved_path.trim_start_matches("::").starts_with("rusty::") {
                 self.writeln(&format!("using {};", resolved_path.trim_start_matches("::")));
                 continue;
@@ -7064,6 +7719,10 @@ impl CodeGen {
                     continue;
                 }
             }
+            if is_external && use_import_is_underscore_alias(&resolved_path) {
+                self.writeln("// Rust-only external underscore import omitted.");
+                continue;
+            }
             if is_external {
                 let allow_external_mapping = is_supported_external_import_mapping(&resolved_path);
                 if !allow_external_mapping || matches!(use_action, UseImportAction::RustOnly) {
@@ -7090,16 +7749,46 @@ impl CodeGen {
             // previously emitted nothing, leaving `time::f()` with
             // nothing declaring `time`.
             if let Some(sibling_module) = self.resolve_crate_module_use_path(&resolved_path) {
-                if self.sibling_modules_imported.insert(sibling_module.clone()) {
+                let alias = normalize_use_import_path(&resolved_path)
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                // Re-binding a name that is ALREADY a reserved `cpp::` module
+                // binding (`use cpp::rrr::debugging;` at file scope, then
+                // `use super::debugging;` inside a nested `mod`) needs no C++
+                // declaration at all: the cpp-binding table already resolves
+                // every path through it. Emitting anything here was doubly
+                // ill-formed — an `import` at namespace scope, plus an alias
+                // to a `rrr::debugging` namespace that does not exist.
+                if !alias.is_empty() && self.name_resolver.cpp_binding(&alias).is_some() {
+                    continue;
+                }
+                // A C++ `import` is only well-formed at global scope in the
+                // module purview. Inside a nested namespace the module is
+                // either already imported at the top or reachable through the
+                // enclosing scope; emitting one here cannot compile.
+                if self.module_stack.is_empty()
+                    && self.sibling_modules_imported.insert(sibling_module.clone())
+                {
                     self.writeln(&format!("import {};", sibling_module));
                 }
                 if self.cxx_namespace.is_some() {
-                    let alias = normalize_use_import_path(&resolved_path)
-                        .rsplit("::")
-                        .next()
-                        .unwrap_or_default()
-                        .to_string();
-                    let ns_path = self.consumer_cpp_namespace_for_module(&sibling_module);
+                    // A C++ MODULE NAME is not a namespace. Prefer, in order:
+                    // the consumer module map (which may deliberately project
+                    // several named modules into one flat namespace), the
+                    // module index's declared export namespace (srpc emits
+                    // every `rrr.*` module into a flat `namespace rrr`), and
+                    // only then the dotted-name-as-namespace fallback.
+                    let module_key = sibling_module.replace('.', "::");
+                    let ns_path = if !self.consumer_module_map.is_empty() {
+                        self.consumer_cpp_namespace_for_module(&sibling_module)
+                    } else {
+                        self.cpp_module_export_namespaces
+                            .get(&module_key)
+                            .cloned()
+                            .unwrap_or(module_key)
+                    };
                     if !alias.is_empty() {
                         self.writeln(&format!(
                             "namespace {} = ::{};",
@@ -7255,6 +7944,7 @@ impl CodeGen {
                         self.rewrite_global_using_path_for_private_alias_root(&using_path);
                     let using_path =
                         self.rewrite_using_path_for_module_runtime_helper_trait(&using_path);
+                    let using_path = self.rewrite_flat_import_type_using_path(&using_path);
                     // Collapse a renamed re-export of a Rust primitive
                     // (`pub use core::primitive::u8 as yaml_char_t;`) to the C++
                     // primitive (`using yaml_char_t = uint8_t;`). Otherwise the
@@ -8000,10 +8690,25 @@ impl CodeGen {
         // (with a proper `self_` parameter) — the member-style orphan
         // stub below would be a dead `#if 0` duplicate whose
         // `(*this)` bodies read as live bugs to anyone grepping. Skip it.
-        if let Some((trait_name, _)) =
+        if let Some((written_trait_name, _)) =
             Self::ufcs_trait_impl_specs(i, &self.ufcs_trait_default_methods)
-            && self.ufcs_declared_trait_names.contains(&trait_name)
+            && let Some((_, trait_path, _)) = i.trait_.as_ref()
+            && {
+                let trait_key = self.resolve_trait_scoped_key_for_impl(
+                    trait_path,
+                    &self.module_stack,
+                );
+                self.trait_declared_paths.contains(&trait_key)
+            }
         {
+            let trait_name = i
+                .trait_
+                .as_ref()
+                .map(|(_, trait_path, _)| {
+                    self.resolve_trait_scoped_key_for_impl(trait_path, &self.module_stack)
+                })
+                .and_then(|key| key.rsplit("::").next().map(str::to_string))
+                .unwrap_or(written_trait_name);
             self.writeln(&format!(
                 "// trait impl for `{}` lowered via the {}_ free functions above",
                 Self::impl_self_type_path(i.self_ty.as_ref())
@@ -8280,6 +8985,58 @@ impl CodeGen {
         self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty))
     }
 
+    fn try_emit_cpp_abi_method_facade(&mut self, method: &syn::ImplItemFn) -> bool {
+        let Some(owner) = self.current_struct.clone() else {
+            return false;
+        };
+        let Some(facade) = self
+            .cpp_abi_plan
+            .method_facade(&self.module_stack, &owner, &method.sig.ident.to_string())
+            .cloned()
+        else {
+            return false;
+        };
+        let name = Self::escape_cpp_method_name(&method.sig.ident.to_string());
+        let params = self.cpp_abi_facade_params(&method.sig, &facade);
+        if !self.method_emission_skip_conflict_registration {
+            let conflict_key = self.emitted_method_conflict_key(&name, "", "", true, &params);
+            if !self.mark_emitted_method_conflict_key(conflict_key) {
+                return true;
+            }
+        }
+        let return_type = self.cpp_abi_facade_return_type(&method.sig, &facade);
+        if self.method_emission_declaration_only {
+            self.emit_doc_comments(&method.attrs);
+            self.writeln(&format!(
+                "static {return_type} {name}({});",
+                params.join(", ")
+            ));
+            return true;
+        }
+        let Some(out_of_line_owner) = self.method_emission_out_of_line_owner.clone() else {
+            // Lowering validates the narrow owner shapes that the struct
+            // emitter schedules for an out-of-line definition.  Never fall
+            // through to ordinary method emission if that invariant changes:
+            // the lowered semantic body is intentionally `unreachable!()`.
+            if self.codegen_error.is_none() {
+                self.codegen_error = Some(format!(
+                    "cpp_abi internal scheduling error: static facade `{}::{}` was not emitted as an out-of-line owner definition",
+                    owner, method.sig.ident
+                ));
+            }
+            return true;
+        };
+        self.writeln(&format!(
+            "{return_type} {out_of_line_owner}::{name}({}) {{",
+            params.join(", ")
+        ));
+        self.indent += 1;
+        self.emit_cpp_abi_facade_body(&method.sig, &facade);
+        self.indent -= 1;
+        self.writeln("}");
+        true
+    }
+
     pub(super) fn emit_method(&mut self, method: &syn::ImplItemFn) {
         // #88: expose the declaring impl's instantiated Self type to body
         // emission (types `self.FIELD` when the field's declared type is a
@@ -8299,6 +9056,9 @@ impl CodeGen {
     }
 
     fn emit_method_inner(&mut self, method: &syn::ImplItemFn) {
+        if self.try_emit_cpp_abi_method_facade(method) {
+            return;
+        }
         let profile_method = std::env::var_os("RUSTY_CPP_PROFILE_METHODS").is_some();
         let method_profile_start = if profile_method {
             let owner = self.current_struct.as_deref().unwrap_or("<free-impl>");
@@ -9070,13 +9830,26 @@ impl CodeGen {
         } else {
             ""
         };
+        // Checkpoint contract 7: a method merged in from `impl <private trait>
+        // for Type` is compiler plumbing, not the ported surface.  In a named
+        // module its out-of-line definition would otherwise be an ordinary
+        // STRONG symbol (clang gives module-attached definitions no vague
+        // linkage), adding names the incumbent owned manifest never had.
+        // `inline` keeps the member callable exactly as before while making the
+        // definition weak/discardable — verified: nm `W`, not `T`.
+        let internal_linkage_prefix = if self.method_is_private_trait_plumbing(&method.sig.ident.to_string()) {
+            "inline "
+        } else {
+            ""
+        };
         let static_prefix = format!(
-            "{}{}",
+            "{}{}{}",
             if is_static && out_of_line_owner.is_none() {
                 "static "
             } else {
                 ""
             },
+            internal_linkage_prefix,
             constexpr_prefix
         );
         let emitted_callable_name = if let Some(ref owner) = out_of_line_owner {

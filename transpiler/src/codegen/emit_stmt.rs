@@ -10,11 +10,14 @@ impl CodeGen {
     /// This complements `emit_trait_adapter_specializations`, which handles
     /// the foreign-type case (impls collected via the rusty_ext pipeline).
     pub(super) fn emit_local_trait_adapter_specializations(&mut self, items: &[syn::Item]) {
-        // Tuple shape: (trait_name, trait_args, self_cpp, methods, module_path)
+        // Tuple shape: (trait_name, trait_key, trait_args, self_cpp, methods,
+        // module_path). `trait_key` is the full lexical owner path and keeps
+        // same-leaf traits in sibling modules independent.
         // where trait_args is the C++ form of the impl's trait generic args
         // (e.g., "int32_t" for `impl Container<i32> for Foo`), empty when the
         // trait is non-generic.
         let mut grouped: Vec<(
+            String,
             String,
             Vec<String>,
             String,
@@ -23,7 +26,7 @@ impl CodeGen {
         )> = Vec::new();
         self.collect_local_trait_impls_for_adapter(items, &[], &mut grouped);
 
-        for (trait_name, trait_args, self_cpp, methods, module_path) in &grouped {
+        for (trait_name, trait_key, trait_args, self_cpp, methods, module_path) in &grouped {
             // Skip Adapter emission when the trait was itself skipped.
             // Generic traits ARE emitted: their primary template is
             // declared `template <T..., U> class TraitAdapter;`, and
@@ -40,7 +43,7 @@ impl CodeGen {
             // (trait, U). This shares one set with the foreign-impl
             // path because they emit into the same C++ namespace and
             // would collide on `template <> class TraitAdapter<U>`.
-            let dedup_key = (trait_name.clone(), self_cpp.clone());
+            let dedup_key = (trait_key.clone(), self_cpp.clone());
             if !self.emitted_foreign_adapter_specs.insert(dedup_key) {
                 continue;
             }
@@ -53,11 +56,8 @@ impl CodeGen {
             // (matches the prior behavior for traits declared in the
             // same module as the impl).
             let mut trait_ns_path: Vec<String> = Vec::new();
-            let found_in_paths = if let Some(full) = self
-                .trait_declared_path_by_short_name
-                .get(trait_name)
-            {
-                let segments: Vec<&str> = full.split("::").collect();
+            let found_in_paths = if self.trait_declared_paths.contains(trait_key) {
+                let segments: Vec<&str> = trait_key.split("::").collect();
                 if segments.len() > 1 {
                     trait_ns_path = segments[..segments.len() - 1]
                         .iter()
@@ -88,9 +88,21 @@ impl CodeGen {
                 let renamed = self.renamed_module_scope_segments(&trait_ns_path);
                 self.writeln(&format!("namespace {} {{", renamed.join("::")));
             }
+            // Contract 4/10: a specialization of a private trait's adapter goes
+            // in the SAME anonymous namespace the primary template and the
+            // trait class were emitted in.  Anonymous namespaces unify within
+            // the TU, so this is one entity, and its members/vtable/typeinfo
+            // become internal-linkage symbols instead of module-owned strong
+            // ones the incumbent manifest never had.
+            let anon_adapter =
+                self.trait_uses_internal_linkage(trait_name, trait_key);
+            if anon_adapter {
+                self.writeln("namespace {");
+            }
             // Owning: holds U by value.
             self.emit_one_local_adapter(
                 trait_name,
+                trait_key,
                 trait_args,
                 "Adapter",
                 &qualified_self_cpp,
@@ -100,6 +112,7 @@ impl CodeGen {
             // Borrowing const ref: holds const U&.
             self.emit_one_local_adapter(
                 trait_name,
+                trait_key,
                 trait_args,
                 "AdapterRef",
                 &qualified_self_cpp,
@@ -109,6 +122,7 @@ impl CodeGen {
             // Borrowing mut ref: holds U&.
             self.emit_one_local_adapter(
                 trait_name,
+                trait_key,
                 trait_args,
                 "AdapterRefMut",
                 &qualified_self_cpp,
@@ -137,13 +151,62 @@ impl CodeGen {
                     trait_name,
                     &qualified_self_cpp,
                     &assoc_pairs,
+                    &[],
                 );
+            }
+            if anon_adapter {
+                self.writeln("}");
             }
             if needs_ns {
                 self.writeln("}");
                 self.newline();
             }
         }
+    }
+
+    /// Contract 4/10 predicate: does this trait's synthesized machinery share
+    /// the trait class's anonymous-namespace (internal) linkage?  True exactly
+    /// when the Rust trait is not `pub` — see `emit_trait_interface_pattern`.
+    pub(super) fn trait_uses_internal_linkage(
+        &self,
+        trait_name: &str,
+        trait_key: &str,
+    ) -> bool {
+        self.internal_linkage_traits.contains(trait_key)
+            || self.internal_linkage_traits.contains(trait_name)
+    }
+
+    /// Contract 10 (narrowed): does this trait's synthesized `<Trait>_` UFCS
+    /// layer take vague linkage? True for a non-`pub` trait (whose whole
+    /// machinery is already internal) and for a trait the SOURCE marks
+    /// `#[cfg_attr(any(), cpp_internal)]`. A plain `pub` trait keeps ordinary
+    /// strong UFCS symbols, because that is exactly what accepted modules'
+    /// incumbent objects own.
+    pub(super) fn ufcs_layer_uses_internal_linkage(
+        &self,
+        trait_name: &str,
+        trait_key: &str,
+    ) -> bool {
+        self.trait_uses_internal_linkage(trait_name, trait_key)
+            || self.ufcs_internal_linkage_traits.contains(trait_key)
+            || self.ufcs_internal_linkage_traits.contains(trait_name)
+    }
+
+    /// Contract 7: is the method currently being emitted one the compiler
+    /// merged into `current_struct` from an `impl <non-pub trait> for Type`?
+    /// Only true in module mode, where the alternative really is a strong
+    /// module-owned symbol.
+    pub(super) fn method_is_private_trait_plumbing(&self, method_name: &str) -> bool {
+        if self.module_name.is_none() {
+            return false;
+        }
+        let Some(owner) = self.current_struct.as_deref() else {
+            return false;
+        };
+        self.impl_method_source_trait
+            .get(owner)
+            .and_then(|per_type| per_type.get(method_name))
+            .is_some_and(|trait_leaf| self.internal_linkage_traits.contains(trait_leaf))
     }
 
     pub(super) fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {
@@ -3823,6 +3886,25 @@ impl CodeGen {
                     // `let x = unsafe { recv.method() };` is a common shape
                     // for &mut T-returning unsafe methods (e.g. reborrow).
                     let peeled = peel_to_tail_expr(&init.expr);
+                    // C13: the SAME Arc carve-out, for the ASSOCIATED-call
+                    // spelling. `Arc::get_mut(&mut a)` is the form Rust
+                    // recommends (a Deref target's inherent `get_mut` cannot
+                    // shadow it), and it is what rrr.reactor writes. It is a
+                    // `syn::Expr::Call` with path `Arc::get_mut`, so the
+                    // method-call carve-out below never saw it and the local
+                    // was reference-bound: `auto& opt = Arc<Ev>::get_mut(ev);`
+                    // cannot bind the by-value `Option<T&>` temporary.
+                    if let Some(syn::Expr::Call(call)) = peeled
+                        && let syn::Expr::Path(path_expr) = call.func.as_ref()
+                        && path_expr.path.segments.len() >= 2
+                    {
+                        let segments = &path_expr.path.segments;
+                        let owner = segments[segments.len() - 2].ident.to_string();
+                        let associated = segments[segments.len() - 1].ident.to_string();
+                        if associated == "get_mut" && matches!(owner.as_str(), "Arc" | "Rc") {
+                            return false;
+                        }
+                    }
                     if let Some(syn::Expr::MethodCall(mc)) = peeled {
                         let method = mc.method.to_string();
                         // `Arc<T>::get_mut()` returns `Option<&mut T>` BY VALUE,
@@ -3831,7 +3913,7 @@ impl CodeGen {
                         // otherwise we'd emit `auto& opt = …` which can't
                         // bind to the by-value `Option` temporary.
                         let receiver_is_arc_get_mut = matches!(method.as_str(), "get_mut")
-                            && self.receiver_is_arc_wrapper_type(&mc.receiver);
+                            && self.receiver_get_mut_returns_option_by_value(&mc.receiver);
                         if receiver_is_arc_get_mut {
                             return false;
                         }
@@ -3998,7 +4080,7 @@ impl CodeGen {
                         // by value, not `&mut T`. Suppress the generic
                         // `get_mut → &mut T` heuristic when the receiver is an `Arc`.
                         let receiver_is_arc_get_mut = matches!(method.as_str(), "get_mut")
-                            && self.receiver_is_arc_wrapper_type(&mc.receiver);
+                            && self.receiver_get_mut_returns_option_by_value(&mc.receiver);
                         // `OnceNonZeroUsize::get_unchecked()` / `OnceBool::get_unchecked()`
                         // — the primitive-optimized once_cell variants — return their
                         // inner value BY VALUE (`NonZeroUsize` / `bool`), not by ref
@@ -5705,6 +5787,38 @@ impl CodeGen {
                     } else {
                         mapped_ty
                     };
+                    // C6 (checkpoint contract 6): this local flows into a
+                    // runtime-facade field that stores a COPYABLE
+                    // `std::function` (`rusty::Waker { wake_fn }`). The
+                    // authenticated contract comes from that explicitly typed
+                    // field, so the declaration takes the contract type
+                    // instead of the move-only boxed-callable
+                    // `rusty::Function<…>` spelling that `std::function`
+                    // cannot be constructed from. A declared type that cannot
+                    // express the contract rejects BEFORE output.
+                    let callable_contract = self
+                        .copyable_callable_contract_locals
+                        .get(&name_str)
+                        .copied();
+                    let mut ty = ty;
+                    if let Some(contract) = callable_contract {
+                        let declared_copyable = self.copyable_boxed_callable_cpp(&resolved_ty);
+                        if declared_copyable.as_deref() != Some(contract) {
+                            if self.codegen_error.is_none() {
+                                self.codegen_error = Some(format!(
+                                    "unsupported callable coercion: local `{}` initializes a \
+                                     runtime-facade field whose contract is `{}`, but its \
+                                     declared type lowers to `{}`",
+                                    name_str,
+                                    contract,
+                                    declared_copyable.unwrap_or(ty.clone())
+                                ));
+                            }
+                            return;
+                        }
+                        ty = contract.to_string();
+                    }
+                    let ty = ty;
                     let resolved_mut_reference_binding = Self::is_mut_reference_type(&resolved_ty);
                     let is_consumed = self
                         .consuming_method_receiver_vars
@@ -5847,7 +5961,31 @@ impl CodeGen {
                             } else {
                                 None
                             };
-                            let expr_str = if let Some(coerced) = deref_coerced {
+                            // C6: under a copyable-callable contract the
+                            // declaration already carries the contract type,
+                            // so the initializer is the bare callable —
+                            // never `rusty::Box<std::function<…>>::new_(…)`.
+                            let mut contract_init: Option<String> = None;
+                            if let Some(contract) = callable_contract {
+                                contract_init = self.try_emit_copyable_callable_contract_init(
+                                    &init.expr, contract,
+                                );
+                                if contract_init.is_none() {
+                                    if self.codegen_error.is_none() {
+                                        self.codegen_error = Some(format!(
+                                            "unsupported callable coercion: local `{}` must \
+                                             lower to the runtime contract `{}`, but its \
+                                             initializer is not a callable this coercion can \
+                                             express",
+                                            name_str, contract
+                                        ));
+                                    }
+                                    return;
+                                }
+                            }
+                            let expr_str = if let Some(contract_expr) = contract_init {
+                                contract_expr
+                            } else if let Some(coerced) = deref_coerced {
                                 coerced
                             } else if let Some(callable_item_expr) =
                                 self.emit_callable_path_item_expr(&init.expr)

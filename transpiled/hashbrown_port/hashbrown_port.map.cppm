@@ -4606,6 +4606,20 @@ struct HashMap {
         auto&& bucket = b.unwrap();
         return ::rusty::Option<V&>(std::get<1>(bucket.as_mut()));
     }
+    // `get_mut` is a genuine inherent HashMap method in Rust returning
+    // `Option<&mut V>` -- NOT a slice/Deref helper -- and the port had only
+    // the `OccupiedEntry::get_mut` form, so `map.get_mut(&k)` had nothing to
+    // bind to. Same lookup as the non-const `get` above, which already hands
+    // back a mutable `V&`; spelled separately so the Rust name resolves.
+    ::rusty::Option<V&> get_mut(const K& key) {
+        auto h = make_hash<K, S>(this->hash_builder, key);
+        auto b = this->table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        });
+        if (b.is_none()) return ::rusty::Option<V&>(::rusty::None);
+        auto&& bucket = b.unwrap();
+        return ::rusty::Option<V&>(std::get<1>(bucket.as_mut()));
+    }
     ::rusty::Option<const V&> get(const K& key) const {
         auto& m = const_cast<HashMap<K, V, S, A>&>(*this);
         auto h = make_hash<K, S>(m.hash_builder, key);

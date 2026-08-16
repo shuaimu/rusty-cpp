@@ -553,6 +553,34 @@ rusty-cpp-transpiler --crate path/to/Cargo.toml --expand
 rusty-cpp-transpiler input.rs -o output.cppm --verify
 ```
 
+Modules that need platform or project headers in the global module fragment can
+use a strict, versioned TOML sidecar:
+
+```toml
+version = 1
+
+[[module]]
+name = "my_crate.epoll"
+includes = [
+    { path = "sys/epoll.h", form = "angle", when = { target_os = ["linux"] } },
+    { path = "my_crate/reactor.hpp", form = "quote" },
+]
+```
+
+```bash
+rusty-cpp-transpiler --crate path/to/Cargo.toml --output-dir cpp_out \
+  --module-preamble module-preamble.toml --preamble-target-os linux
+```
+
+These ordered includes are emitted after `module;` and before the fixed runtime
+includes and `export module`. The schema accepts only angle/quote include specs,
+not raw directives, macros, pragmas, or snippets. Paths must be relative and
+cannot contain traversal components, delimiters, controls, whitespace, or
+backslashes. Unknown fields, duplicate/conflicting includes, duplicate module
+rows, and rows not collected by the current crate are errors. A sidecar with a
+`target_os` condition requires the explicit `--preamble-target-os` argument;
+the host OS is never inferred, so cross-compilation fails closed.
+
 Compiling the output requires a clang toolchain with C++20 modules support (the test matrix builds with `clang++ -std=c++23`); the emitted code `#include`s the header-only `rusty/` runtime from this repository. Generated code can also call *into* existing C++: `use cpp::...` imports resolve against a user-supplied C++ module symbol index (`--cpp-module-index`).
 
 ### What's covered
@@ -596,7 +624,7 @@ rusty-cpp-transpiler inline-rust --check --files src/*.cpp
 rusty-cpp-transpiler inline-rust --rewrite --files src/*.cpp
 ```
 
-The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. V1 deliberately accepts a conservative Rust subset (free functions, structs with named fields, inherent impls, `Option`/`Result`/`Vec`/`String`, standard control flow) and keeps each block local to its translation unit — no cross-TU declaration magic. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the normative grammar and subset.
+The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. V1 deliberately accepts a conservative Rust subset (free functions, structs with named fields, inherent impls, `Option`/`Result`/`Vec`/`String`, standard control flow) and keeps each block local to its translation unit — no cross-TU declaration magic. Source-owned `cpp_abi` adapters may preserve selected legacy STL signatures across blocks in one module carrier: direct calls may target only providers in the same or an earlier block, and the carrier must satisfy the strict module/import/namespace contract. Every requested file is preflighted and rendered before atomic replacement. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the normative grammar and subset.
 
 ---
 

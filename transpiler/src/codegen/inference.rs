@@ -531,6 +531,23 @@ impl CodeGen {
         None
     }
 
+    /// Resolve the exact physical crate child named by a
+    /// `crate::<child>::...` flat-import contract.  This intentionally does
+    /// not use ancestor-sibling lookup: from `crate::outer::consumer`, Rust's
+    /// `crate::rand` still names the root child `crate::rand`, even when a
+    /// nearer `crate::outer::rand` module also exists.
+    pub(super) fn resolve_crate_root_child_module_path(
+        &self,
+        segment: &str,
+    ) -> Option<String> {
+        let current = self.module_name.as_deref()?;
+        let crate_module = current.split('.').next()?;
+        let candidate = format!("{crate_module}.{segment}");
+        self.crate_module_names
+            .contains(&candidate)
+            .then_some(candidate)
+    }
+
     /// Resolve a `use` path that names a MODULE of this crate (rather
     /// than an item inside one) to that module's C++ module name.
     ///
@@ -583,6 +600,40 @@ impl CodeGen {
             }
         }
         None
+    }
+
+    /// Resolve Rust's intentionally-unbound module import
+    /// (`use crate::provider as _;`) to its physical sibling C++ module.
+    ///
+    /// The underscore binding exists only to bring an implementation or other
+    /// dependency into scope; it must not become a C++ type/namespace alias.
+    /// Keep this deliberately narrower than ordinary renamed imports: only an
+    /// exact `_` alias whose complete target is a known crate-local module or
+    /// an item owned by one is accepted.
+    pub(super) fn resolve_crate_module_underscore_import(
+        &self,
+        item: &syn::ItemUse,
+    ) -> Option<String> {
+        // Preserve `crate::` here.  The ordinary emission flattener removes it,
+        // which would make an external same-tail path indistinguishable from a
+        // crate-local one and could import the wrong sibling module.
+        let paths = self.flatten_use_tree_preserve_crate(&item.tree, "");
+        if paths.len() != 1 {
+            return None;
+        }
+        let normalized = normalize_use_import_path(&paths[0]);
+        let (alias, target) = split_use_import_alias(normalized)?;
+        if alias.trim() != "_" {
+            return None;
+        }
+        let target = target.trim().strip_prefix("crate::")?;
+        self.resolve_crate_module_use_path(target).or_else(|| {
+            let segments: Vec<&str> = target
+                .split("::")
+                .filter(|segment| !segment.is_empty())
+                .collect();
+            self.resolve_item_owner_module(&segments)
+        })
     }
 
     /// The module that DECLARES the item named by a use path — the
@@ -717,6 +768,157 @@ impl CodeGen {
         None
     }
 
+    /// Resolve only an exact preflight-authorized flat type binding in the
+    /// marker's lexical Rust module.  Descendants must use a qualified Rust
+    /// path, which crate preflight either proves independently or rejects;
+    /// callers handling such a path must never tail-match this binding.
+    pub(super) fn resolve_flat_import_type_authorization_for_exact_scope(
+        &self,
+        scope_key: &str,
+        local_name: &str,
+    ) -> Option<String> {
+        let exact_module_declaration = if self.module_stack.is_empty() {
+            self.root_declared_type_names.contains(local_name)
+                || self.type_alias_targets.contains_key(local_name)
+        } else {
+            self.module_path_declares_type_name_exact(&self.module_stack, local_name)
+        };
+        if local_name.is_empty()
+            || self.is_type_param_in_scope(local_name)
+            || self.is_local_type_name_in_scope(local_name)
+            || exact_module_declaration
+            || self.current_scope_declares_function_name(local_name)
+        {
+            return None;
+        }
+        let local_variants = Self::scope_binding_key_variants(local_name);
+        let scope_variants = Self::scope_binding_key_variants(scope_key);
+        let mut targets = self
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.reference_kind
+                        == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                    && scope_variants.iter().any(|scope| {
+                        scope == &authorization.consumer_lexical_module.0.join("::")
+                    })
+                    && local_variants
+                    .iter()
+                    .any(|local| local == &authorization.leaf)
+            })
+            .map(|authorization| {
+                format!(
+                    "::{}::{}",
+                    authorization.cpp_namespace, authorization.leaf
+                )
+            })
+            .collect::<Vec<_>>();
+        targets.sort();
+        targets.dedup();
+        if targets.len() == 1 {
+            targets.pop()
+        } else {
+            None
+        }
+    }
+
+    /// Rebind a normal descendant `use super::Leaf` target back to the exact
+    /// flat C++ type identity owned by the marked parent binding. Generic use
+    /// lowering otherwise spells this as `parent::Leaf`, which is declared by
+    /// a later `using` and is therefore unavailable to early forward
+    /// declarations. Same-tail imports from unrelated modules do not match
+    /// either exact Rust source identity and remain untouched.
+    pub(super) fn rewrite_flat_import_type_consumer_binding_target(
+        &self,
+        target: &str,
+    ) -> String {
+        let normalized = target.trim().trim_start_matches("::");
+        let target_segments = normalized
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(Self::unescape_cpp_keyword_segment)
+            .collect::<Vec<_>>();
+        // Resolve Rust-relative roots before comparing identities. Recorded
+        // descendant bindings retain their source spelling (`super::Leaf`,
+        // `super::super::Leaf`, ...); tail matching that spelling is both too
+        // weak and wrong in the presence of an unrelated same-tail type.
+        let source_identity = if let Some(first) = target_segments.first() {
+            let mut base = self.current_physical_module.0.clone();
+            base.extend(self.module_stack.iter().cloned());
+            let mut index = 0usize;
+            match first.as_str() {
+                "crate" => {
+                    base.clear();
+                    index = 1;
+                }
+                "self" => index = 1,
+                "super" => {
+                    while index < target_segments.len()
+                        && target_segments[index] == "super"
+                    {
+                        base.pop();
+                        index += 1;
+                    }
+                }
+                _ => {}
+            }
+            base.extend(target_segments[index..].iter().cloned());
+            Some(base)
+        } else {
+            None
+        };
+        let mut matches = self
+            .flat_import_type_authorizations
+            .iter()
+            .filter(|authorization| {
+                authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.reference_kind
+                        == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+            })
+            .filter(|authorization| {
+                let mut lexical_identity = authorization.consumer_lexical_module.0.clone();
+                lexical_identity.push(authorization.leaf.clone());
+                let mut physical_identity = authorization.consumer_physical_module.0.clone();
+                physical_identity.extend(lexical_identity.iter().cloned());
+                let cpp_identity = vec![
+                    authorization.cpp_namespace.clone(),
+                    authorization.leaf.clone(),
+                ];
+                target_segments == lexical_identity
+                    || target_segments == physical_identity
+                    || target_segments == cpp_identity
+                    || source_identity.as_ref() == Some(&physical_identity)
+            })
+            .map(|authorization| {
+                format!("::{}::{}", authorization.cpp_namespace, authorization.leaf)
+            })
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        if matches.len() == 1 {
+            matches.remove(0)
+        } else {
+            target.to_string()
+        }
+    }
+
+    /// Canonicalize the target of a descendant import only when its complete
+    /// Rust identity is the authorized flat type consumer binding. Preserve a
+    /// Rust rename (`use super::Leaf as Alias`) while rewriting its target; an
+    /// unrelated same-tail import never matches the complete identity.
+    pub(super) fn rewrite_flat_import_type_using_path(&self, using_path: &str) -> String {
+        if let Some((alias, target)) = split_use_import_alias(using_path) {
+            let rewritten = self.rewrite_flat_import_type_consumer_binding_target(target);
+            if rewritten != target.trim() {
+                return format!("{} = {}", alias.trim(), rewritten);
+            }
+            return using_path.to_string();
+        }
+
+        self.rewrite_flat_import_type_consumer_binding_target(using_path)
+    }
+
     pub(super) fn resolve_scope_import_binding_path_for_scope(
         &self,
         scope_key: &str,
@@ -805,6 +1007,12 @@ impl CodeGen {
             return None;
         }
         self.resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
+            .or_else(|| {
+                self.resolve_flat_import_type_authorization_for_exact_scope(
+                    &scope_key,
+                    local_name,
+                )
+            })
     }
 
     pub(super) fn resolve_unique_scope_import_binding_path_any_scope(
@@ -1455,12 +1663,48 @@ impl CodeGen {
         trait_path: &syn::Path,
         module_path: &[String],
     ) -> String {
+        // Trait ownership must use the declaration's exact lexical key.  In
+        // particular, `a::Clash` and `b::Clash` are distinct even though the
+        // older type-oriented qualifier below sees only a shared leaf name.
+        // Keep the legacy qualifier only for an unbound bare name (foreign
+        // prelude traits and inline-rust cross-block declarations). An import,
+        // glob, absolute path, or unresolved qualified path carries identity
+        // information that must not collapse back onto a local same-leaf
+        // declaration.
+        if let Some(key) = crate::transpile::resolve_declared_trait_path_key(
+            trait_path,
+            module_path,
+            &self.trait_declared_paths,
+            &self.rust_item_import_bindings,
+        ) {
+            return key;
+        }
         let raw = trait_path
             .segments
             .iter()
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
+        let first = trait_path
+            .segments
+            .first()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_default();
+        if trait_path.leading_colon.is_some()
+            || trait_path.segments.len() != 1
+            || matches!(first.as_str(), "crate" | "self" | "super")
+            || crate::transpile::rust_item_import_name_is_bound(
+                &first,
+                module_path,
+                &self.rust_item_import_bindings,
+            )
+            || crate::transpile::rust_glob_import_is_visible(
+                module_path,
+                &self.rust_item_import_bindings,
+            )
+        {
+            return format!("@unresolved-trait::{raw}");
+        }
         qualify_impl_type_name(
             &raw,
             module_path,
@@ -1650,6 +1894,40 @@ impl CodeGen {
 
     pub(super) fn resolve_single_segment_scope_import_bound_type(&self, local_name: &str) -> Option<String> {
         let scope_key = self.module_stack.join("::");
+        let is_flat_type_leaf = self
+            .flat_import_type_authorizations
+            .iter()
+            .any(|authorization| {
+                authorization.consumer_physical_module == self.current_physical_module
+                    && authorization.reference_kind
+                        == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                    && authorization.leaf == local_name
+            });
+        if is_flat_type_leaf {
+            // Flat type authorization is one exact Rust binding, not a
+            // permission to recover the same tail from a parent or arbitrary
+            // scope. In particular, a child module does not inherit its
+            // parent's `use`; it must qualify or import that binding exactly.
+            if self.is_type_param_in_scope(local_name) {
+                return None;
+            }
+            if let Some(target) = self
+                .resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
+            {
+                return Some(
+                    self.rewrite_flat_import_type_consumer_binding_target(&target),
+                );
+            }
+            if self.current_module_declares_type_name_exact(local_name)
+                || self.module_path_declares_type_name_exact(&self.module_stack, local_name)
+            {
+                return None;
+            }
+            return self.resolve_flat_import_type_authorization_for_exact_scope(
+                &scope_key,
+                local_name,
+            );
+        }
         let bound_target = self
             .resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
             .or_else(|| self.resolve_scope_import_binding_path_for_scope("", local_name))
@@ -14653,9 +14931,17 @@ impl CodeGen {
         // never deduces. Erase them on the param side too — by-value key
         // arrays match every call shape the emitter produces.
         let mapped = Self::deref_wrap_const_array_param_elems(&mapped);
-        if let Some(softened) = self.soften_dyn_trait_object_param_type(ty, &mapped) {
-            return softened;
-        }
+        // C21b (contract 8): NO dyn-trait-object parameter softening. A
+        // `&dyn T` / `&mut dyn T` parameter used to be rewritten to
+        // `auto&` / `const auto&`, which silently turns an ordinary function
+        // into an uninstantiated abbreviated function template — the caller's
+        // TU instantiates it, so nothing fails to compile, but the defining
+        // module emits NO SYMBOL for the function at all. `auto` is only
+        // valid for an actual source generic. A resolvable trait object now
+        // lowers to its interface-class reference (see
+        // module_mode_dyn_trait_ref_interface_cpp_name); anything else keeps
+        // the declared `void*` fallback, which is at least a real signature
+        // with a real symbol.
         self.soften_incomplete_nominal_param_type(ty, &mapped)
             .unwrap_or(mapped)
     }

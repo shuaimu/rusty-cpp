@@ -27,6 +27,79 @@ impl CodeGen {
         }
     }
 
+    /// H5 / checkpoint contract 5 — resolve which `Weak` a reference means.
+    ///
+    /// Rust's `std::rc::Weak` and `std::sync::Weak` share the bare leaf name,
+    /// and the rusty umbrella deliberately declares no ambiguous top-level
+    /// `rusty::Weak` alias (see `types::map_std_type`). `map_std_type` only
+    /// ever sees the leaf, so it must guess — it documents the rc default.
+    /// The provenance is knowable, though: an explicit `rc`/`sync` module
+    /// segment, the `RcWeak`/`ArcWeak` import aliases (precedent: the alias
+    /// rewrites in `map_type`), or the scope import binding for the bare
+    /// name. `None` means "unresolved" — the caller keeps the documented
+    /// default rather than inventing provenance.
+    pub(super) fn resolve_weak_family_cpp_base(&self, path: &syn::Path) -> Option<&'static str> {
+        let leaf = path.segments.last()?.ident.to_string();
+        match leaf.as_str() {
+            "ArcWeak" => return Some("rusty::sync::Weak"),
+            "RcWeak" => return Some("rusty::rc::Weak"),
+            "Weak" => {}
+            _ => return None,
+        }
+        if path.segments.len() >= 2 {
+            return Self::weak_cpp_base_for_owner_module(
+                &path.segments[path.segments.len() - 2].ident.to_string(),
+            );
+        }
+        let bound = self.resolve_scope_import_binding_path("Weak")?;
+        Self::weak_cpp_base_for_bound_target(&bound)
+    }
+
+    /// The same resolution, falling back to `map_std_type`'s documented
+    /// default for an unimported bare `Weak` so that callers which have
+    /// already established the reference IS a Weak (a trait-object target,
+    /// say) always get a spelling. Returns `None` for non-Weak paths.
+    pub(super) fn weak_family_cpp_base_or_default(&self, path: &syn::Path) -> Option<String> {
+        let leaf = path.segments.last()?.ident.to_string();
+        if !matches!(leaf.as_str(), "Weak" | "RcWeak" | "ArcWeak") {
+            return None;
+        }
+        Some(
+            self.resolve_weak_family_cpp_base(path)
+                .map(|base| base.to_string())
+                .unwrap_or_else(|| {
+                    types::map_std_type(&leaf)
+                        .map(|(cpp, _)| cpp.to_string())
+                        .unwrap_or_else(|| "rusty::rc::Weak".to_string())
+                }),
+        )
+    }
+
+    fn weak_cpp_base_for_owner_module(owner_module: &str) -> Option<&'static str> {
+        match owner_module {
+            "sync" => Some("rusty::sync::Weak"),
+            "rc" => Some("rusty::rc::Weak"),
+            _ => None,
+        }
+    }
+
+    fn weak_cpp_base_for_bound_target(bound: &str) -> Option<&'static str> {
+        let parts: Vec<&str> = bound
+            .trim_start_matches("::")
+            .split("::")
+            .filter(|seg| !seg.is_empty())
+            .collect();
+        if parts.last() != Some(&"Weak") {
+            return None;
+        }
+        parts
+            .iter()
+            .rev()
+            .nth(1)
+            .copied()
+            .and_then(Self::weak_cpp_base_for_owner_module)
+    }
+
     pub(super) fn type_tokens_contain_import_alias(&self, ty: &syn::Type) -> bool {
         if self.import_alias_names.is_empty() {
             return false;
@@ -2466,6 +2539,67 @@ impl CodeGen {
                 }
                 if tp.qself.is_none()
                     && tp.path.segments.len() == 1
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|segment| {
+                            matches!(segment.arguments, syn::PathArguments::None)
+                        })
+                {
+                    let local_name = tp.path.segments[0].ident.to_string();
+                    let scope_key = self.module_stack.join("::");
+                    let is_flat_type_leaf = self
+                        .flat_import_type_authorizations
+                        .iter()
+                        .any(|authorization| {
+                            authorization.consumer_physical_module
+                                == self.current_physical_module
+                                && authorization.reference_kind
+                                    == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                                && authorization.leaf == local_name
+                        });
+                    if is_flat_type_leaf {
+                        // Once crate preflight has proven a flat type leaf,
+                        // every single-segment occurrence is resolved from
+                        // its exact Rust scope. Type parameters and exact
+                        // local declarations shadow it; an exact descendant
+                        // `use` is honored; otherwise only the marker's own
+                        // scope may resolve to the flat C++ identity. Never
+                        // continue into global/unique-tail recovery.
+                        if self.is_type_param_in_scope(&local_name) {
+                            return escape_cpp_keyword(&local_name);
+                        }
+                        if let Some(bound) = self.resolve_scope_import_binding_path_for_scope(
+                            &scope_key,
+                            &local_name,
+                        )
+                        {
+                            return self.rewrite_flat_import_type_consumer_binding_target(
+                                &bound,
+                            );
+                        }
+                        if self.current_module_declares_type_name_exact(&local_name)
+                            || self.module_path_declares_type_name_exact(
+                                &self.module_stack,
+                                &local_name,
+                            )
+                        {
+                            return escape_cpp_keyword(&local_name);
+                        }
+                        if let Some(authorized) = self
+                            .resolve_flat_import_type_authorization_for_exact_scope(
+                                &scope_key,
+                                &local_name,
+                            )
+                        {
+                            return authorized;
+                        }
+                        return escape_cpp_keyword(&local_name);
+                    }
+                }
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
                     && let Some(current_struct) = self.current_struct.as_ref()
                     && let Some(seg) = tp.path.segments.first()
                 {
@@ -3073,6 +3207,19 @@ impl CodeGen {
                 if path_str == "ArcWeak" || path_str.ends_with("::ArcWeak") {
                     path_str = "rusty::sync::Weak".to_string();
                 }
+                // A BARE `Weak` is ambiguous in Rust and `map_std_type` — which
+                // only ever sees the leaf — defaults it to the rc form. The
+                // scope import decides (`use std::sync::{Arc, Weak}` means the
+                // sync one), and the reference must resolve the SAME way on
+                // every surface, not only in forward-decl signatures (the one
+                // path that already resolved imports, which is precisely how
+                // one source type acquired two C++ spellings — H5).
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "Weak"
+                    && let Some(weak_base) = self.resolve_weak_family_cpp_base(&tp.path)
+                {
+                    path_str = weak_base.to_string();
+                }
                 if let Some(mapped_into_iter) =
                     self.rewrite_mapped_assoc_into_iter_cpp_type(&path_str)
                 {
@@ -3220,6 +3367,31 @@ impl CodeGen {
                     }
                 }
 
+                // C8 (checkpoint contract 8): the runtime facades `rusty::Task`
+                // and `rusty::Poll` DECLARE a `void` specialization
+                // (include/rusty/async.hpp:40 / :145). Rust spells the same
+                // thing `Task<()>`, which the ordinary unit mapping turns into
+                // `rusty::Task<rusty::Unit>` — a DIFFERENT, undeclared
+                // instantiation. The authenticated native position is the
+                // `void` specialization.
+                if let Some(last_seg) = tp.path.segments.last()
+                    && matches!(last_seg.ident.to_string().as_str(), "Task" | "Poll")
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|seg| seg.ident == "rusty")
+                    && let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
+                    && args.args.len() == 1
+                    && matches!(
+                        args.args.first(),
+                        Some(syn::GenericArgument::Type(syn::Type::Tuple(tuple)))
+                            if tuple.elems.is_empty()
+                    )
+                {
+                    return format!("rusty::{}<void>", last_seg.ident);
+                }
+
                 // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or rusty::Function for Fn traits
                 if let Some(last_seg) = tp.path.segments.last() {
                     let seg_name = last_seg.ident.to_string();
@@ -3231,11 +3403,25 @@ impl CodeGen {
                     // a shared pointer is as ordinary as one behind a
                     // unique pointer — srpc's poll thread holds its
                     // pollables as Arc<dyn Pollable>.
-                    if seg_name == "Arc" || seg_name == "Rc" {
+                    // `Weak<dyn T>` is the same shape one indirection out and
+                    // gets the same treatment (H5 / checkpoint contract 5):
+                    // without it the trait-object target fell to the
+                    // module-mode `void*` blanket, so the ONE source type
+                    // `Weak<dyn EventPollable>` was emitted with an erased
+                    // target that no `upgrade()` could dispatch through. The
+                    // base spelling carries `Weak`'s PROVENANCE (the bare leaf
+                    // is ambiguous in Rust — see resolve_weak_family_cpp_base).
+                    let weak_family_base = (!matches!(seg_name.as_str(), "Arc" | "Rc"))
+                        .then(|| self.weak_family_cpp_base_or_default(&tp.path))
+                        .flatten();
+                    if seg_name == "Arc" || seg_name == "Rc" || weak_family_base.is_some() {
                         if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
                             && let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
                                 args.args.first()
                         {
+                            let smart_ptr_base = weak_family_base
+                                .clone()
+                                .unwrap_or_else(|| format!("rusty::{}", seg_name));
                             let trait_paths: Vec<&syn::Path> = to
                                 .bounds
                                 .iter()
@@ -3251,12 +3437,12 @@ impl CodeGen {
                             if !trait_paths.is_empty() && trait_names.len() == trait_paths.len() {
                                 if trait_names.len() == 1 {
                                     let trait_cpp = self.interface_trait_cpp_name(trait_paths[0]);
-                                    return format!("rusty::{}<{}>", seg_name, trait_cpp);
+                                    return format!("{}<{}>", smart_ptr_base, trait_cpp);
                                 }
                                 let mut sorted = trait_names.clone();
                                 sorted.sort();
                                 let combined = self.register_and_synthesize_dyn_multi_name(sorted);
-                                return format!("rusty::{}<{}>", seg_name, combined);
+                                return format!("{}<{}>", smart_ptr_base, combined);
                             }
                         }
                     }
@@ -3308,14 +3494,6 @@ impl CodeGen {
                                         return "rusty::io::DynWrite".to_string();
                                     }
                                 }
-                                if let Some(local_trait) =
-                                    self.known_local_dyn_trait_cpp_name(to)
-                                {
-                                    return format!("rusty::Box<{}>", local_trait);
-                                }
-                                if self.module_name.is_some() {
-                                    return "void*".to_string();
-                                }
                                 // Collect all trait names for multi-bound
                                 let trait_paths: Vec<&syn::Path> = to
                                     .bounds
@@ -3325,6 +3503,20 @@ impl CodeGen {
                                         _ => None,
                                     })
                                     .collect();
+                                // Named-module mode historically erased every boxed
+                                // trait object to `void*`.  That remains the safe
+                                // fallback for an unknown/external trait, but a trait
+                                // declared by this emitted source has a concrete C++
+                                // interface class below.  Preserve that local owner as
+                                // `rusty::Box<Trait>` so public proxy aliases retain
+                                // their established ABI.
+                                if self.module_name.is_some()
+                                    && trait_paths.iter().any(|path| {
+                                        !self.trait_object_target_is_expressible(path)
+                                    })
+                                {
+                                    return "void*".to_string();
+                                }
                                 let trait_names: Vec<String> = trait_paths
                                     .iter()
                                     .filter_map(|p| p.segments.last().map(|s| s.ident.to_string()))
@@ -3765,6 +3957,20 @@ impl CodeGen {
                         }
                     }
                     if self.module_name.is_some() {
+                        // C21b (contracts 8 + 9): a referenced trait object
+                        // whose interface class this module can NAME is an
+                        // ordinary reference parameter. Erasing it to `void*`
+                        // fed the parameter softener, which rewrote it to
+                        // `auto&` and turned three ordinary reactor functions
+                        // into uninstantiated abbreviated templates that emit
+                        // no symbol at all. See
+                        // module_mode_dyn_trait_ref_interface_cpp_name.
+                        if let Some(iface) = self.module_mode_dyn_trait_ref_interface_cpp_name(to) {
+                            if r.mutability.is_some() {
+                                return format!("{}&", iface);
+                            }
+                            return format!("const {}&", iface);
+                        }
                         if r.mutability.is_some() {
                             return "void*".to_string();
                         }
@@ -3840,6 +4046,20 @@ impl CodeGen {
                         } else {
                             format!("std::span<const {}>", elem)
                         }
+                    } else if let syn::Type::TraitObject(to) = elem_ty
+                        && let Some(iface) = self.dyn_trait_object_interface_cpp_name(to)
+                    {
+                        // `*const dyn Job` / `*mut dyn Job`. A BARE `dyn Trait`
+                        // has no C++ representation, so map_type answers
+                        // `void*` for it in module mode -- correct for the
+                        // unsized value, and exactly wrong once a pointer is
+                        // wrapped around it: `*const dyn Job` then came out
+                        // `const void**`, a pointer to a pointer, and the
+                        // subsequent `(*job_mut).Ready()` had nothing to call.
+                        // Behind a pointer the trait object IS the interface
+                        // class -- the same spelling `Arc<dyn Job>` already
+                        // lowers to (`rusty::Arc<Job>`).
+                        iface
                     } else {
                         self.map_type(&p.elem)
                     }
@@ -4040,6 +4260,27 @@ impl CodeGen {
                 }
             }
             syn::Type::BareFn(bf) => {
+                // Foreign-C declaration context (H3, checkpoint contract 3):
+                // inside an `extern "C" { … }` block the authoritative C
+                // header spells a C-ABI callable parameter as a raw C
+                // function pointer — `void (*)(void*)` — honoring the
+                // pointer's own variadic. The class-type wrappers below
+                // conflict with the real C prototype. Non-C-ABI callables in
+                // this context are rejected fail-closed by
+                // `emit_foreign_mod` before output, so they never take the
+                // wrapper path either.
+                if self.in_foreign_c_declaration && Self::bare_fn_has_c_abi(bf) {
+                    let mut param_types: Vec<String> =
+                        bf.inputs.iter().map(|arg| self.map_type(&arg.ty)).collect();
+                    if bf.variadic.is_some() {
+                        param_types.push("...".to_string());
+                    }
+                    let return_type = match &bf.output {
+                        syn::ReturnType::Default => "void".to_string(),
+                        syn::ReturnType::Type(_, ty) => self.map_type(ty),
+                    };
+                    return format!("{} (*)({})", return_type, param_types.join(", "));
+                }
                 // fn(A, B) -> C → rusty::SafeFn<C(A, B)>
                 // unsafe fn(A, B) -> C → rusty::UnsafeFn<C(A, B)>
                 let param_types: Vec<String> =
@@ -4850,6 +5091,15 @@ impl CodeGen {
         }
     }
 
+    /// True when a bare-fn type carries the C ABI (`extern "C" fn(…)` or the
+    /// bare `extern fn(…)`, which defaults to "C"). A plain `fn(…)` is
+    /// Rust-ABI and has no raw C spelling.
+    pub(super) fn bare_fn_has_c_abi(bf: &syn::TypeBareFn) -> bool {
+        bf.abi
+            .as_ref()
+            .is_some_and(|abi| abi.name.as_ref().map(|n| n.value() == "C").unwrap_or(true))
+    }
+
     pub(super) fn map_fn_params(
         &self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
@@ -4863,12 +5113,66 @@ impl CodeGen {
                         syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => "_".to_string(),
                     };
+                    // Foreign-C declaration context (H3): a top-level
+                    // C-ABI callable param lowered to a raw C fn pointer
+                    // carries its name INSIDE the declarator —
+                    // `void (*entry_fn)(void*)`, never
+                    // `void (*)(void*) entry_fn` (ill-formed).
+                    if self.in_foreign_c_declaration
+                        && Self::param_type_is_bare_fn(&pat_type.ty)
+                        && ty.contains("(*)")
+                    {
+                        return ty.replacen("(*)", &format!("(*{})", name), 1);
+                    }
                     format!("{} {}", ty, name)
                 }
                 syn::FnArg::Receiver(_) => "/* self */".to_string(),
             })
             .collect();
         params.join(", ")
+    }
+
+    /// The param type IS a bare-fn (through parens) — the only shape whose
+    /// raw-C-pointer lowering needs the declarator-name interpolation above.
+    fn param_type_is_bare_fn(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::BareFn(_) => true,
+            syn::Type::Paren(p) => Self::param_type_is_bare_fn(&p.elem),
+            _ => false,
+        }
+    }
+
+    pub(super) fn map_fn_params_with_cpp_defaults(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> Result<String, String> {
+        let mut params = Vec::with_capacity(inputs.len());
+        for arg in inputs {
+            match arg {
+                syn::FnArg::Typed(pat_type) => {
+                    let ty = self.resolve_param_cpp_type(&pat_type.ty);
+                    let name = match pat_type.pat.as_ref() {
+                        syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                        _ => "_".to_string(),
+                    };
+                    let mut rendered = format!("{} {}", ty, name);
+                    if let Some(kind) = crate::cpp_default_args::parameter_kind(pat_type)? {
+                        if ty != kind.required_cpp_parameter_type() {
+                            return Err(format!(
+                                "cpp_default_argument requires emitted parameter type `{}`, found `{}`",
+                                kind.required_cpp_parameter_type(),
+                                ty
+                            ));
+                        }
+                        rendered.push_str(" = ");
+                        rendered.push_str(kind.cpp_expression());
+                    }
+                    params.push(rendered);
+                }
+                syn::FnArg::Receiver(_) => params.push("/* self */".to_string()),
+            }
+        }
+        Ok(params.join(", "))
     }
 
     pub(super) fn map_fn_param_types(
@@ -4883,5 +5187,21 @@ impl CodeGen {
             })
             .collect();
         params.join(", ")
+    }
+
+    pub(super) fn map_fn_nondefault_param_types(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> Result<String, String> {
+        let mut params = Vec::new();
+        for arg in inputs {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            if crate::cpp_default_args::parameter_kind(pat_type)?.is_none() {
+                params.push(self.resolve_param_cpp_type(&pat_type.ty));
+            }
+        }
+        Ok(params.join(", "))
     }
 }

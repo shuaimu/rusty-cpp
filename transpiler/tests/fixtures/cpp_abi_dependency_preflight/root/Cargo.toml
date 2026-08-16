@@ -1,0 +1,10 @@
+[package]
+name = "cppabi_root_with_bad_dep"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cppabi_bad_dep = { path = "../bad_dep" }

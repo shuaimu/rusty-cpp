@@ -301,6 +301,34 @@ void test_const_signature() {
     printf("PASS\n");
 }
 
+struct DualConstCallable {
+    int operator()() { return 2; }
+    int operator()() const { return 1; }
+};
+
+struct LargeDualConstCallable {
+    char padding[rusty::detail::kFunctionSBOSize + 1]{};
+
+    int operator()() { return 4; }
+    int operator()() const { return 3; }
+};
+
+// A const-qualified Function must dispatch through the stored callable's
+// const overload, not merely check const-invocability during construction.
+void test_const_signature_dispatches_const_callable() {
+    printf("test_const_signature_dispatches_const_callable: ");
+
+    Function<int() const> inline_fn = DualConstCallable{};
+    assert(inline_fn.is_inline());
+    assert(inline_fn() == 1);
+
+    Function<int() const> heap_fn = LargeDualConstCallable{};
+    assert(!heap_fn.is_inline());
+    assert(heap_fn() == 3);
+
+    printf("PASS\n");
+}
+
 // ============================================================================
 // Test 16: Void Return Type
 // ============================================================================
@@ -526,6 +554,7 @@ int main() {
     test_sbo();
     test_heap_allocation();
     test_const_signature();
+    test_const_signature_dispatches_const_callable();
     test_void_return();
     test_multiple_args();
     test_string_args();
@@ -538,7 +567,7 @@ int main() {
     test_move_in_vector();
 
     printf("\n========================================\n");
-    printf("All 25 tests PASSED!\n");
+    printf("All 26 tests PASSED!\n");
     printf("========================================\n");
 
     return 0;
