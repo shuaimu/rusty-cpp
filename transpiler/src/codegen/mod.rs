@@ -16358,6 +16358,52 @@ impl CodeGen {
         Some(self.interface_trait_cpp_name(trait_paths[0]))
     }
 
+    /// C21b (checkpoint contracts 8 + 9) — the C++ interface-class spelling
+    /// for a `&dyn Trait` / `&mut dyn Trait` in NAMED-MODULE mode, or None
+    /// when the trait object has no interface class this module can name.
+    ///
+    /// Module mode used to erase every referenced trait object to `void*`
+    /// (contract 9's forbidden erasure), and the parameter softener then
+    /// rewrote that `void*` to `auto&` — which silently turns an ordinary
+    /// function into an UNINSTANTIATED abbreviated function template, so the
+    /// module emits no symbol for it at all (contract 8: `auto` is only valid
+    /// for an actual source generic). Callers still compiled, because the
+    /// template instantiated in the caller's TU; the module just quietly
+    /// stopped owning the incumbent ABI symbol.
+    ///
+    /// The interface class is what a trait object behind an indirection
+    /// already lowers to everywhere else in module mode — `Arc<dyn T>` →
+    /// `rusty::Arc<T>` (contract 5's `Weak<EventPollable>` precedent) and
+    /// `*mut dyn T` → `T*`. A reference is the same indirection.
+    ///
+    /// The name is AUTHENTICATED rather than assumed: only a trait this
+    /// source declares, or one it imports by `use` (a sibling module's
+    /// `pub trait`, re-exported into scope as `using ::<ns>::<Trait>;`), has
+    /// an interface class the emitted module can name. Anything else keeps
+    /// the `void*` fallback, which is at least a real, emitted signature.
+    pub(crate) fn module_mode_dyn_trait_ref_interface_cpp_name(
+        &self,
+        to: &syn::TypeTraitObject,
+    ) -> Option<String> {
+        let iface = self.dyn_trait_object_interface_cpp_name(to)?;
+        let short = iface.split('<').next().unwrap_or(iface.as_str()).to_string();
+        if short.is_empty() {
+            return None;
+        }
+        let declared = self.trait_declared_path_by_short_name.contains_key(&short)
+            || self.declared_item_names.contains(&short)
+            || self.local_declared_types.contains(&short);
+        if declared {
+            return Some(iface);
+        }
+        let scope_key = self.module_stack.join("::");
+        let imported = self
+            .resolve_scope_import_binding_path_for_scope(&scope_key, &short)
+            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &short))
+            .is_some();
+        imported.then_some(iface)
+    }
+
     fn interface_trait_cpp_name(&self, path: &syn::Path) -> String {
         let Some(last) = path.segments.last() else {
             return String::new();
@@ -49082,31 +49128,18 @@ impl CodeGen {
         }
     }
 
-    fn soften_dyn_trait_object_param_type(&self, ty: &syn::Type, mapped: &str) -> Option<String> {
-        if !(self.module_name.is_some() || self.expanded_libtest_mode) {
-            return None;
-        }
-        if !matches!(mapped, "void*" | "const void*") {
-            return None;
-        }
-        match self.peel_paren_group_type(ty) {
-            syn::Type::Reference(r) => {
-                if matches!(
-                    self.peel_paren_group_type(&r.elem),
-                    syn::Type::TraitObject(_)
-                ) {
-                    if r.mutability.is_some() {
-                        return Some("auto&".to_string());
-                    }
-                    return Some("const auto&".to_string());
-                }
-                None
-            }
-            syn::Type::TraitObject(_) => Some("auto&&".to_string()),
-            _ => None,
-        }
-    }
-
+    // C21b: `soften_dyn_trait_object_param_type` DELETED. It rewrote every
+    // erased (`void*`) trait-object parameter to `auto&` / `const auto&` /
+    // `auto&&` in module and expanded-libtest mode. That is a contract-8
+    // violation with a silent failure mode: the function becomes an
+    // abbreviated function template, so the module that DEFINES it emits no
+    // symbol, while every caller still compiles by instantiating the template
+    // locally. srpc's reactor lost three incumbent ABI symbols this way
+    // (PollThread::remove, PollThreadWorker::update_mode,
+    // pollworker_update_mode — all taking `&mut dyn Pollable`). Resolvable
+    // trait objects now lower to their interface-class reference; the rest
+    // keep the honest `void*` fallback. See
+    // Codegen::module_mode_dyn_trait_ref_interface_cpp_name.
 }
 
 /// String-level rewrite for `--interface-traits` smart-pointer construction.

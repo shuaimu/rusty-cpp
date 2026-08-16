@@ -3136,6 +3136,20 @@ impl CodeGen {
                         }
                     }
                     if self.module_name.is_some() {
+                        // C21b (contracts 8 + 9): a referenced trait object
+                        // whose interface class this module can NAME is an
+                        // ordinary reference parameter. Erasing it to `void*`
+                        // fed the parameter softener, which rewrote it to
+                        // `auto&` and turned three ordinary reactor functions
+                        // into uninstantiated abbreviated templates that emit
+                        // no symbol at all. See
+                        // module_mode_dyn_trait_ref_interface_cpp_name.
+                        if let Some(iface) = self.module_mode_dyn_trait_ref_interface_cpp_name(to) {
+                            if r.mutability.is_some() {
+                                return format!("{}&", iface);
+                            }
+                            return format!("const {}&", iface);
+                        }
                         if r.mutability.is_some() {
                             return "void*".to_string();
                         }

@@ -14325,9 +14325,17 @@ impl CodeGen {
         // never deduces. Erase them on the param side too — by-value key
         // arrays match every call shape the emitter produces.
         let mapped = Self::deref_wrap_const_array_param_elems(&mapped);
-        if let Some(softened) = self.soften_dyn_trait_object_param_type(ty, &mapped) {
-            return softened;
-        }
+        // C21b (contract 8): NO dyn-trait-object parameter softening. A
+        // `&dyn T` / `&mut dyn T` parameter used to be rewritten to
+        // `auto&` / `const auto&`, which silently turns an ordinary function
+        // into an uninstantiated abbreviated function template — the caller's
+        // TU instantiates it, so nothing fails to compile, but the defining
+        // module emits NO SYMBOL for the function at all. `auto` is only
+        // valid for an actual source generic. A resolvable trait object now
+        // lowers to its interface-class reference (see
+        // module_mode_dyn_trait_ref_interface_cpp_name); anything else keeps
+        // the declared `void*` fallback, which is at least a real signature
+        // with a real symbol.
         self.soften_incomplete_nominal_param_type(ty, &mapped)
             .unwrap_or(mapped)
     }

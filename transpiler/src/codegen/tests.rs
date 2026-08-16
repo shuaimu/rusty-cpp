@@ -7505,6 +7505,69 @@ fn test_unresolved_dyn_trait_param_falls_back_to_void_ptr() {
 }
 
 #[test]
+fn test_module_dyn_trait_ref_param_is_an_interface_reference_not_an_abbreviated_template() {
+    // C21b (contracts 8 + 9). srpc's reactor declares three functions taking
+    // `&mut dyn Pollable`:
+    //   PollThread::remove(&self, poll: &mut dyn Pollable)
+    //   PollThreadWorker::update_mode(&mut self, poll: &mut dyn Pollable, i32)
+    //   pollworker_update_mode(&mut PollThreadWorker, &mut dyn Pollable, i32)
+    // Module mode erased the parameter to `void*`, the parameter softener
+    // then rewrote that to `auto&`, and the three ordinary functions became
+    // UNINSTANTIATED abbreviated function templates. Callers still compiled
+    // (the template instantiates in the caller's TU), so the failure was
+    // silent — but the module emitted no symbol at all for any of them, and
+    // a consumer linking against the library's real ABI could not find them.
+    //
+    // The parameter must be the interface class reference, which is also the
+    // receiver shape the body needs: `poll.fd()`, not `poll->fd()`.
+    let out = transpile_str_module(
+        r#"
+        pub trait Pollable {
+            fn fd(&self) -> i32;
+        }
+        pub fn pollworker_update_mode(poll: &mut dyn Pollable, new_mode: i32) -> i32 {
+            poll.fd() + new_mode
+        }
+        pub fn inspect(poll: &dyn Pollable) -> i32 {
+            poll.fd()
+        }
+        "#,
+        "rrr",
+    );
+    assert!(
+        out.contains("pollworker_update_mode(Pollable& poll, int32_t new_mode)"),
+        "&mut dyn param must be an interface reference: {out}"
+    );
+    assert!(
+        out.contains("inspect(const Pollable& poll)"),
+        "&dyn param must be a const interface reference: {out}"
+    );
+    assert!(
+        !out.contains("auto& poll"),
+        "dyn param softened to an abbreviated template — emits no symbol: {out}"
+    );
+    assert!(
+        !out.contains("void* poll"),
+        "dyn param erased to void* (contract 9): {out}"
+    );
+    assert!(
+        out.contains("poll.fd()") && !out.contains("poll->fd()"),
+        "interface reference receiver must use `.`, not `->`: {out}"
+    );
+}
+
+#[test]
+fn test_module_unresolved_dyn_trait_ref_param_keeps_the_void_ptr_fallback() {
+    // The C21b interface-reference lowering is AUTHENTICATED: only a trait
+    // this source declares or imports has an interface class the module can
+    // name. An external trait keeps the erased fallback, which is at least a
+    // real, emitted signature rather than an uninstantiated template.
+    let out = transpile_str_module("fn f(x: &dyn std::error::Error) {}", "my_crate");
+    assert!(out.contains("const void* x"), "{out}");
+    assert!(!out.contains("const ErrorFacade& x"), "{out}");
+}
+
+#[test]
 fn test_module_fmt_display_dyn_param_maps_to_display_ref() {
     let out = transpile_str_module("fn f(x: &dyn core::fmt::Display) {}", "my_crate");
     assert!(out.contains("void f(rusty::fmt::DisplayRef x)"));
