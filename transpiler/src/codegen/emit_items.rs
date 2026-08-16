@@ -4618,6 +4618,21 @@ impl CodeGen {
         // structs (always namespace scope) but driven by the actual
         // `vis` field, which is the Rust idiom.
         let wrap_in_anon_ns = !Self::visibility_is_any_pub(&t.vis);
+        // Checkpoint contract 4/10: register the trait so every later phase
+        // that synthesizes machinery FOR it (Adapter primary templates, Adapter
+        // specializations) puts that machinery in the SAME anonymous namespace.
+        // A root-scope adapter deriving from an anon-wrapped base is both an
+        // ODR hazard and an ordinary strong symbol the incumbent never had.
+        if wrap_in_anon_ns {
+            self.internal_linkage_traits.insert(trait_name_str.clone());
+            if !self.module_stack.is_empty() {
+                self.internal_linkage_traits.insert(format!(
+                    "{}::{}",
+                    self.module_stack.join("::"),
+                    trait_name_str
+                ));
+            }
+        }
 
         // Marker traits: emit as a no-op concept, same as the Pro path.
         if matches!(
@@ -5239,7 +5254,14 @@ impl CodeGen {
         // exporting only the abstract base leaves downstream code unable to
         // name `TraitAdapter<Concrete>` even though that is the concrete type
         // used to implement Rust's dyn coercion.  Keep private-trait adapters
-        // module-local, matching the trait itself.
+        // module-local, matching the trait itself: contract 4 requires the
+        // adapter declarations to inhabit the SAME anonymous namespace as the
+        // trait class, and contract 10 forbids them from adding ordinary strong
+        // symbols.  Omitting `export` alone does neither — a module-attached
+        // class still emits strong `T` definitions for its members.
+        if wrap_in_anon_ns {
+            self.writeln("namespace {");
+        }
         self.writeln(&format!(
             "{}template <{}> class {}Adapter;",
             cls_export, adapter_template_args, trait_name
@@ -5252,6 +5274,9 @@ impl CodeGen {
             "{}template <{}> class {}AdapterRefMut;",
             cls_export, adapter_template_args, trait_name
         ));
+        if wrap_in_anon_ns {
+            self.writeln("}");
+        }
 
         // Phase 3b.1: helper traits class forward decl. For each trait
         // with associated types, emit `template <class B> struct
@@ -8572,13 +8597,26 @@ impl CodeGen {
         } else {
             ""
         };
+        // Checkpoint contract 7: a method merged in from `impl <private trait>
+        // for Type` is compiler plumbing, not the ported surface.  In a named
+        // module its out-of-line definition would otherwise be an ordinary
+        // STRONG symbol (clang gives module-attached definitions no vague
+        // linkage), adding names the incumbent owned manifest never had.
+        // `inline` keeps the member callable exactly as before while making the
+        // definition weak/discardable — verified: nm `W`, not `T`.
+        let internal_linkage_prefix = if self.method_is_private_trait_plumbing(&method.sig.ident.to_string()) {
+            "inline "
+        } else {
+            ""
+        };
         let static_prefix = format!(
-            "{}{}",
+            "{}{}{}",
             if is_static && out_of_line_owner.is_none() {
                 "static "
             } else {
                 ""
             },
+            internal_linkage_prefix,
             constexpr_prefix
         );
         let emitted_callable_name = if let Some(ref owner) = out_of_line_owner {

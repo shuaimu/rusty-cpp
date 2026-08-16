@@ -88,6 +88,17 @@ impl CodeGen {
                 let renamed = self.renamed_module_scope_segments(&trait_ns_path);
                 self.writeln(&format!("namespace {} {{", renamed.join("::")));
             }
+            // Contract 4/10: a specialization of a private trait's adapter goes
+            // in the SAME anonymous namespace the primary template and the
+            // trait class were emitted in.  Anonymous namespaces unify within
+            // the TU, so this is one entity, and its members/vtable/typeinfo
+            // become internal-linkage symbols instead of module-owned strong
+            // ones the incumbent manifest never had.
+            let anon_adapter =
+                self.trait_uses_internal_linkage(trait_name, trait_key);
+            if anon_adapter {
+                self.writeln("namespace {");
+            }
             // Owning: holds U by value.
             self.emit_one_local_adapter(
                 trait_name,
@@ -143,11 +154,43 @@ impl CodeGen {
                     &[],
                 );
             }
+            if anon_adapter {
+                self.writeln("}");
+            }
             if needs_ns {
                 self.writeln("}");
                 self.newline();
             }
         }
+    }
+
+    /// Contract 4/10 predicate: does this trait's synthesized machinery share
+    /// the trait class's anonymous-namespace (internal) linkage?  True exactly
+    /// when the Rust trait is not `pub` — see `emit_trait_interface_pattern`.
+    pub(super) fn trait_uses_internal_linkage(
+        &self,
+        trait_name: &str,
+        trait_key: &str,
+    ) -> bool {
+        self.internal_linkage_traits.contains(trait_key)
+            || self.internal_linkage_traits.contains(trait_name)
+    }
+
+    /// Contract 7: is the method currently being emitted one the compiler
+    /// merged into `current_struct` from an `impl <non-pub trait> for Type`?
+    /// Only true in module mode, where the alternative really is a strong
+    /// module-owned symbol.
+    pub(super) fn method_is_private_trait_plumbing(&self, method_name: &str) -> bool {
+        if self.module_name.is_none() {
+            return false;
+        }
+        let Some(owner) = self.current_struct.as_deref() else {
+            return false;
+        };
+        self.impl_method_source_trait
+            .get(owner)
+            .and_then(|per_type| per_type.get(method_name))
+            .is_some_and(|trait_leaf| self.internal_linkage_traits.contains(trait_leaf))
     }
 
     pub(super) fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {

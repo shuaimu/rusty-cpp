@@ -5094,6 +5094,22 @@ impl CodeGen {
                     let return_ty = self.collect_return_type_from_output(&f.sig.output);
                     self.record_function_return_type(&scoped_name, return_ty);
                 }
+                syn::Item::Trait(t) => {
+                    // Checkpoint contract 4/7/10: a non-`pub` trait's C++ class
+                    // is emitted inside an anonymous namespace, and everything
+                    // synthesized FOR it must share that internal/vague linkage.
+                    // Record it HERE, in the collect pass, so the flag is
+                    // available to every later emission phase regardless of the
+                    // order the trait, its adapters and the implementing
+                    // structs happen to be emitted in.
+                    if !Self::visibility_is_any_pub(&t.vis) {
+                        self.internal_linkage_traits.insert(t.ident.to_string());
+                        if !module_path.is_empty() {
+                            self.internal_linkage_traits
+                                .insert(format!("{}::{}", module_path.join("::"), t.ident));
+                        }
+                    }
+                }
                 syn::Item::Impl(impl_block) => {
                     // #88: record each method's declaring-impl Self type
                     // (keyed by the type's TAIL name, matching current_struct
@@ -5104,6 +5120,24 @@ impl CodeGen {
                     {
                         use quote::ToTokens;
                         let tail = tail_seg.ident.to_string();
+                        // …and record which trait (if any) each merged method
+                        // came from, so emission can tell a private trait's
+                        // plumbing apart from the type's own inherent surface.
+                        if let Some((_, trait_path, _)) = impl_block.trait_.as_ref()
+                            && let Some(trait_seg) = trait_path.segments.last()
+                        {
+                            let trait_leaf = trait_seg.ident.to_string();
+                            let per_type = self
+                                .impl_method_source_trait
+                                .entry(tail.clone())
+                                .or_default();
+                            for item in &impl_block.items {
+                                if let syn::ImplItem::Fn(m) = item {
+                                    per_type
+                                        .insert(m.sig.ident.to_string(), trait_leaf.clone());
+                                }
+                            }
+                        }
                         for item in &impl_block.items {
                             let syn::ImplItem::Fn(m) = item else { continue };
                             if let Some(syn::FnArg::Receiver(recv)) = m.sig.inputs.first() {

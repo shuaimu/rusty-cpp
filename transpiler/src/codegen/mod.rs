@@ -1822,6 +1822,20 @@ pub struct CodeGen {
     /// Scoped trait paths declared in this crate/module (including traits with
     /// no default static methods). Used to avoid cross-trait fallback injection.
     pub(crate) trait_declared_paths: HashSet<String>,
+    /// Traits whose C++ class is emitted inside an anonymous namespace because
+    /// the Rust trait is NOT `pub` (see `emit_trait_interface_pattern`'s
+    /// `wrap_in_anon_ns`).  Checkpoint contracts 4/7/10: everything the
+    /// compiler synthesizes FOR such a trait — its three Adapter primary
+    /// templates and every Adapter specialization — must share that internal
+    /// linkage rather than adding ordinary strong symbols to the module.
+    /// Holds the leaf name and the module-qualified key so either lookup hits.
+    pub(crate) internal_linkage_traits: HashSet<String>,
+    /// `impl Trait for Type` provenance for methods merged into a concrete
+    /// class: type tail name → method name → trait leaf name.  Lets emission
+    /// distinguish a private trait's plumbing (contract 7: no ordinary strong
+    /// symbols) from the type's own inherent surface, which the incumbent
+    /// manifest DOES own.
+    pub(crate) impl_method_source_trait: HashMap<String, HashMap<String, String>>,
     /// Fully scoped Rust paths of traits explicitly lowered as non-inheriting
     /// C++ marker registries.  Bounds on only these traits become C++
     /// `requires Registry<..., T>::value` predicates; ordinary user-trait
@@ -3062,6 +3076,8 @@ impl CodeGen {
             trait_default_const_exprs: HashMap::new(),
             ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
+            internal_linkage_traits: HashSet::new(),
+            impl_method_source_trait: HashMap::new(),
             cpp_marker_trait_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             module_runtime_helper_traits: HashSet::new(),
@@ -20915,14 +20931,31 @@ impl CodeGen {
             &free_generics,
             export_prefix,
             &format!(
-                "{}{} {}({});",
+                "{}{}{} {}({});",
                 requires_prefix,
+                self.ufcs_free_function_inline_prefix(),
                 return_type,
                 escaped_method_name,
                 params.join(", ")
             ),
         );
         true
+    }
+
+    /// Checkpoint contract 10: the generated `<Trait>_` UFCS layer is synthetic
+    /// adapter machinery, not part of the ported surface.  In module mode a
+    /// non-template function defined in the module purview gets an ORDINARY
+    /// STRONG definition (clang does not give module-attached functions vague
+    /// linkage), so each concrete `impl` overload would add a strong symbol the
+    /// incumbent manifest never had.  `inline` keeps the name exported and
+    /// resolvable across the module boundary while giving the definition weak
+    /// (discardable) linkage — verified: `export inline` emits nm `W`.
+    fn ufcs_free_function_inline_prefix(&self) -> &'static str {
+        if self.module_name.is_some() {
+            "inline "
+        } else {
+            ""
+        }
     }
 
     fn canonicalize_extension_overload_type_for_dedupe(&self, ty: &str) -> String {
@@ -21269,8 +21302,9 @@ impl CodeGen {
             &free_generics,
             export_prefix,
             &format!(
-                "{}{} {}({}) {{",
+                "{}{}{} {}({}) {{",
                 requires_prefix,
+                self.ufcs_free_function_inline_prefix(),
                 return_type,
                 escaped_method_name,
                 params.join(", ")
