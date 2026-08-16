@@ -49175,11 +49175,37 @@ impl CodeGen {
         if is_reference_param {
             Some("const auto&".to_string())
         } else {
-            // By-value Rust param. C++20 abbreviated function template
-            // syntax (`auto`) preserves the value semantics and defers
-            // type checking just like `const auto&` did — so the
-            // forward-decl/body interplay still works — but downstream
-            // destructured bindings see a mutable source.
+            // C21d: a BY-VALUE parameter whose nominal type this module also
+            // DEFINES is not an incomplete nominal, so it must keep its
+            // concrete spelling.
+            //
+            // This is the same silent failure C21b removed one instance of:
+            // `auto` makes the function an abbreviated function template, so
+            // the module that defines it emits NO symbol while every caller
+            // still compiles by instantiating locally. srpc's rrr.client lost
+            // five incumbent ABI symbols this way -- Future::create,
+            // Future::Future, ClientPool::new_, ClientPool::set_pool_config
+            // and clientpool_is_client_healthy_with, all taking a by-value
+            // FutureAttr or PoolConfig.
+            //
+            // Softening only ever fires for types this module declares (see
+            // the declared_item_names / local_declared_types guard above), and
+            // it existed for the forward-decl/body interplay. A by-value
+            // parameter does not need a complete type in a DECLARATION, and
+            // every generated module emits its struct definitions ahead of its
+            // function definitions -- so when the struct's fields are known
+            // here, the concrete spelling is always available.
+            //
+            // The itertools `sub_scalar` case the by-value branch was written
+            // for is unaffected: it needed a non-const source for
+            // `auto&& [low, hi] = x;`, which a concrete by-value parameter
+            // provides just as well as `auto` -- it was `const auto&` that
+            // over-qualified it.
+            if self.struct_field_types.contains_key(&ident)
+                || self.struct_field_types.contains_key(&scoped_ident)
+            {
+                return None;
+            }
             Some("auto".to_string())
         }
     }
