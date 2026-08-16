@@ -1803,16 +1803,50 @@ pub(crate) fn has_authenticated_cpp_inherit_attr(
     authenticated_roots: &std::collections::HashSet<String>,
 ) -> bool {
     attrs.iter().any(|attribute| {
-        attribute.path().is_ident("cpp_inherit")
-            && authenticated_roots.contains("rusty")
-            && resolve_external_rust_item_path(
-                attribute.path(),
-                module_path,
-                &std::collections::HashSet::new(),
-                bindings,
-            )
-            .is_some_and(|path| path == "rusty::cpp_inherit")
+        // Route 1: a LIVE `#[cpp_inherit]` is honored only when it resolves
+        // through the exact Rust import graph to the authenticated
+        // `rusty::cpp_inherit` marker — a live attribute may be a proc macro
+        // and is not authenticated by syntax alone.
+        if attribute.path().is_ident("cpp_inherit") {
+            return authenticated_roots.contains("rusty")
+                && resolve_external_rust_item_path(
+                    attribute.path(),
+                    module_path,
+                    &std::collections::HashSet::new(),
+                    bindings,
+                )
+                .is_some_and(|path| path == "rusty::cpp_inherit");
+        }
+        // Route 2: the exact INERT spelling `#[cfg_attr(any(), cpp_inherit)]`
+        // is compiler-owned by construction — its predicate is permanently
+        // false, so rustc never resolves the payload and no proc macro can
+        // occupy it. This is the same self-authentication argument the
+        // `cpp_ctor` contract's inert form relies on.
+        has_exact_inert_cpp_inherit_attr(attribute)
     })
+}
+
+/// The exact `#[cfg_attr(any(), cpp_inherit)]` spelling: a two-element
+/// cfg_attr whose predicate is an empty `any()` and whose payload is the bare
+/// `cpp_inherit` path. Anything qualified, nested, active, or multi-payload
+/// is rejected.
+fn has_exact_inert_cpp_inherit_attr(attribute: &syn::Attribute) -> bool {
+    if !attribute.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let Ok(args) = attribute.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    ) else {
+        return false;
+    };
+    if args.len() != 2 {
+        return false;
+    }
+    let predicate_is_exact_inactive = matches!(args.first(), Some(syn::Meta::List(any))
+        if any.path.is_ident("any") && any.tokens.is_empty());
+    let payload_is_exact_marker = matches!(args.iter().nth(1), Some(syn::Meta::Path(path))
+        if path.is_ident("cpp_inherit"));
+    predicate_is_exact_inactive && payload_is_exact_marker
 }
 
 pub(crate) fn rust_item_import_name_is_bound(
@@ -2497,17 +2531,9 @@ fn merge_cpp_module_symbol_index_file(
                 )
             },
         )?;
-        if let Some(namespace) = module.namespace.as_deref() {
-            validate_cpp_qualified_name(namespace, "::", "C++ namespace").map_err(|error| {
-                format!(
-                    "C++ module symbol index {} entry '{}' contains {}",
-                    source_path.display(),
-                    module_path,
-                    error
-                )
-            })?;
-        }
-
+        // The namespace field is validated by canonicalization below, which
+        // deliberately accepts (and trims) whitespace-formatted input from
+        // heterogeneous index producers before rejecting degenerate forms.
         let namespace = module
             .namespace
             .map(|namespace| {
@@ -6572,6 +6598,7 @@ safe = true
             r#"
 version = 1
 [modules."rrr::logging"]
+cpp_module = "rrr.logging"
 namespace = " rrr :: logging_api "
 [modules."rrr::logging".symbols.first]
 kind = "function"
@@ -6584,6 +6611,7 @@ callable_signatures = ["void()"]
             r#"
 version = 1
 [modules."rrr::logging"]
+cpp_module = "rrr.logging"
 namespace = "rrr::logging_api"
 [modules."rrr::logging".symbols.second]
 kind = "function"
@@ -6605,11 +6633,11 @@ callable_signatures = ["void()"]
         let dir = tempdir().expect("tempdir");
         let first = dir.path().join("first.toml");
         let second = dir.path().join("second.toml");
-        std::fs::write(&first, "version = 1\n[modules.demo]\nnamespace = \"one\"\n")
+        std::fs::write(&first, "version = 1\n[modules.demo]\ncpp_module = \"demo\"\nnamespace = \"one\"\n")
             .expect("write first index");
         std::fs::write(
             &second,
-            "version = 1\n[modules.demo]\nnamespace = \"two\"\n",
+            "version = 1\n[modules.demo]\ncpp_module = \"demo\"\nnamespace = \"two\"\n",
         )
         .expect("write second index");
 
@@ -6638,7 +6666,10 @@ callable_signatures = ["void()"]
             let index_path = dir.path().join("cpp_index.toml");
             std::fs::write(
                 &index_path,
-                format!("version = 1\n[modules.demo]\nnamespace = {:?}\n", invalid),
+                format!(
+                    "version = 1\n[modules.demo]\ncpp_module = \"demo\"\nnamespace = {:?}\n",
+                    invalid
+                ),
             )
             .expect("write invalid index");
 

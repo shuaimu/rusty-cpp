@@ -62099,61 +62099,6 @@ fn enum_is_c_like(item: &syn::ItemEnum) -> bool {
             .all(|variant| variant.fields.is_empty())
 }
 
-fn c_like_enum_underlying_suffix(item: &syn::ItemEnum) -> &'static str {
-    for attr in &item.attrs {
-        if !attr.path().is_ident("repr") {
-            continue;
-        }
-        let Ok(reprs) = attr.parse_args_with(
-            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-        ) else {
-            continue;
-        };
-        for repr in reprs {
-            let syn::Meta::Path(path) = repr else {
-                continue;
-            };
-            if path.is_ident("i8") {
-                return " : int8_t";
-            }
-            if path.is_ident("u8") {
-                return " : uint8_t";
-            }
-            if path.is_ident("i16") {
-                return " : int16_t";
-            }
-            if path.is_ident("u16") {
-                return " : uint16_t";
-            }
-            if path.is_ident("i32") {
-                return " : int32_t";
-            }
-            if path.is_ident("u32") {
-                return " : uint32_t";
-            }
-            if path.is_ident("i64") {
-                return " : int64_t";
-            }
-            if path.is_ident("u64") {
-                return " : uint64_t";
-            }
-            if path.is_ident("i128") {
-                return " : __int128";
-            }
-            if path.is_ident("u128") {
-                return " : unsigned __int128";
-            }
-            if path.is_ident("isize") {
-                return " : intptr_t";
-            }
-            if path.is_ident("usize") {
-                return " : uintptr_t";
-            }
-        }
-    }
-    ""
-}
-
 fn rewrite_either_import(path: &str) -> Option<UseImportAction> {
     if path == "either" {
         return Some(UseImportAction::Raw(

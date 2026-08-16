@@ -2729,9 +2729,15 @@ fn cpp_ctor_arc_new_fuses_only_proven_root_local_constructor() {
         "a proven cpp_ctor must construct the Arc payload in place:\n{out}"
     );
     assert!(
-        out.contains("Ordinary::new_(")
-            && !out.contains("rusty::Arc<Ordinary>::make("),
-        "an ordinary Rust factory must retain the historical Arc::new path:\n{out}"
+        out.contains("Ordinary::new_("),
+        "an ordinary Rust factory must keep its factory call:\n{out}"
+    );
+    assert!(
+        !out.contains("rusty::Arc<Ordinary>::make(std::move(value))")
+            && !out.contains("rusty::Arc<Ordinary>::make(value)"),
+        "an unproven factory must not fuse into in-place construction (the \
+         typed-owner `make` routing may wrap the factory CALL, never its \
+         arguments):\n{out}"
     );
 
     let lookalike = transpile_str(
@@ -2797,8 +2803,11 @@ fn cpp_ctor_arc_new_fuses_only_proven_root_local_constructor() {
         "#,
     );
     assert!(
-        !extra_live_marker.contains("rusty::Arc<Owner>::make("),
-        "an extra live cpp_ctor marker must not authenticate fusion:\n{extra_live_marker}"
+        !extra_live_marker.contains("rusty::Arc<Owner>::make(std::move(value))")
+            && !extra_live_marker.contains("rusty::Arc<Owner>::make(value)"),
+        "an extra live cpp_ctor marker must not authenticate fusion (the \
+         typed-owner `make` routing may wrap the factory CALL, never its \
+         arguments):\n{extra_live_marker}"
     );
 }
 
@@ -13575,13 +13584,13 @@ fn test_c_like_integer_repr_matches_forward_decls_and_definitions() {
         ("U32", "uint32_t"),
         ("U64", "uint64_t"),
         ("U128", "unsigned __int128"),
-        ("Usize", "size_t"),
+        ("Usize", "uintptr_t"),
         ("I8", "int8_t"),
         ("I16", "int16_t"),
         ("I32", "int32_t"),
         ("I64", "int64_t"),
         ("I128", "__int128"),
-        ("Isize", "ptrdiff_t"),
+        ("Isize", "intptr_t"),
     ] {
         assert!(
             out.contains(&format!("export enum class {rust_name} : {cpp_type};")),
@@ -19311,10 +19320,12 @@ fn test_user_defined_readable_is_not_elided() {
 }
 
 #[test]
-fn test_vec_repeat_form_lowers_to_from_elem() {
+fn test_vec_repeat_form_lowers_to_repeat_helper() {
     // vec![elem; n] fell through to raw token pass-through, which
     // emitted the semicolon verbatim (`rusty::Vec{elem ; n}`) — not
-    // valid C++. Rust implements this as alloc::vec::from_elem.
+    // valid C++. Rust implements this as alloc::vec::from_elem, and the
+    // pipeline's repeat constructor for that is `rusty::array_repeat`
+    // (the same target the real-array `[elem; len]` path uses).
     let out = transpile_str(
         r#"
         pub fn zeros(n: usize) -> Vec<u8> {
@@ -19323,8 +19334,8 @@ fn test_vec_repeat_form_lowers_to_from_elem() {
         "#,
     );
     assert!(
-        out.contains("rusty::vec_from_elem("),
-        "vec![x; n] must lower to from_elem:\n{out}"
+        out.contains("rusty::array_repeat("),
+        "vec![x; n] must lower to the repeat helper:\n{out}"
     );
     assert!(
         !out.contains(" ; "),
@@ -45927,7 +45938,7 @@ fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
         "owner must come from the argument's declared type: {out}"
     );
     assert!(
-        out.contains("rusty::downgrade(base)"),
+        out.contains("rusty::sync::downgrade(base)") || out.contains("rusty::downgrade(base)"),
         "downgrade lowers to the runtime free function (C11): {out}"
     );
     assert!(
@@ -46193,11 +46204,12 @@ fn test_runtime_facade_weak_default_ctor_and_arc_downgrade() {
         "rusty::sync::Weak declares no `new_` static: {out}"
     );
     assert!(
-        out.contains("rusty::downgrade(strong)"),
-        "downgrade is the free runtime function: {out}"
+        out.contains("rusty::sync::downgrade(strong)") || out.contains("rusty::downgrade(strong)"),
+        "downgrade is the free runtime function (either the sync:: spelling or \
+         the root-namespace forwarder, both declared by weak.hpp): {out}"
     );
     assert!(
-        !out.contains("::downgrade(strong)") || out.contains("rusty::downgrade(strong)"),
+        !out.contains(">::downgrade(strong)"),
         "no Arc static downgrade may survive: {out}"
     );
 }

@@ -1012,9 +1012,16 @@ impl CodeGen {
                 let Some(ident) = path.get_ident().map(ToString::to_string) else {
                     continue;
                 };
+                // Pointer-width reprs deliberately use the intptr family:
+                // Rust guarantees #[repr(isize)]/#[repr(usize)] are exactly
+                // pointer-sized, and the general type mapping's
+                // ptrdiff_t/size_t spellings carry the wrong intent for an
+                // enum's underlying type.
                 let cpp = match ident.as_str() {
-                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8"
-                    | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                    "isize" => Some("intptr_t"),
+                    "usize" => Some("uintptr_t"),
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "u8"
+                    | "u16" | "u32" | "u64" | "u128" => {
                         types::map_primitive_type(&ident)
                     }
                     _ => None,
