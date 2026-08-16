@@ -260,6 +260,7 @@ fn audited_transpiler_marker_meta(meta: &Meta) -> bool {
                     | "cpp_default_argument"
                     | "cpp_explicit"
                     | "cpp_import_namespace"
+                    | "cpp_internal"
                     | "cpp_marker_impl"
                     | "cpp_marker_trait"
                     | "cpp_namespace"

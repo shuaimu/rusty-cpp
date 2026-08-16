@@ -1830,6 +1830,20 @@ pub struct CodeGen {
     /// linkage rather than adding ordinary strong symbols to the module.
     /// Holds the leaf name and the module-qualified key so either lookup hits.
     pub(crate) internal_linkage_traits: HashSet<String>,
+    /// Contract 10 (NARROWED, C21c): the trait whose `<Trait>_` UFCS layer is
+    /// currently being emitted, when that trait is non-`pub` and therefore
+    /// already carries internal linkage. Set for the duration of one UFCS
+    /// emission block; `None` everywhere else (including the `rusty_ext`
+    /// extension-function path, which has no owning user trait).
+    pub(crate) ufcs_emitting_internal_linkage_trait: bool,
+    /// Traits carrying `#[cfg_attr(any(), cpp_internal)]`. The trait's own
+    /// interface class stays exactly as declared (it is named by exported
+    /// signatures); only the SYNTHESIZED `<Trait>_` UFCS layer takes vague
+    /// linkage. Needed because a `pub` trait can still have a UFCS layer the
+    /// incumbent object never owned — srpc's reactor `EventPollable` is the
+    /// worked example (54 such symbols), while rrr.serializable's `Serialize`
+    /// and `Deserialize` DO own theirs and are deliberately unmarked.
+    pub(crate) ufcs_internal_linkage_traits: HashSet<String>,
     /// `impl Trait for Type` provenance for methods merged into a concrete
     /// class: type tail name → method name → trait leaf name.  Lets emission
     /// distinguish a private trait's plumbing (contract 7: no ordinary strong
@@ -3077,6 +3091,8 @@ impl CodeGen {
             ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
             internal_linkage_traits: HashSet::new(),
+            ufcs_emitting_internal_linkage_trait: false,
+            ufcs_internal_linkage_traits: HashSet::new(),
             impl_method_source_trait: HashMap::new(),
             cpp_marker_trait_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
@@ -12992,12 +13008,24 @@ impl CodeGen {
                 continue;
             }
             emitted_consts.insert(name.clone());
-            let export_prefix =
-                if self.should_export_item_at_module_depth(&c.vis, module_depth, &rust_name) {
-                    "export "
-                } else {
-                    ""
-                };
+            // Contract 7: `#[cfg_attr(any(), cpp_internal)]`. A namespace-scope
+            // const is NOT implicitly internal in a module purview (P1815
+            // attaches it to the module), so the keyword is load-bearing —
+            // without it the constant is an ordinary strong module-owned
+            // symbol the incumbent object never had.
+            let internal_marker = Self::has_cpp_internal_attr(&c.attrs);
+            let export_prefix = if !internal_marker
+                && self.should_export_item_at_module_depth(&c.vis, module_depth, &rust_name)
+            {
+                "export "
+            } else {
+                ""
+            };
+            let export_prefix = if internal_marker {
+                "static "
+            } else {
+                export_prefix
+            };
             let ty = self.map_type(&c.ty);
             if type_string_has_auto_placeholder(&ty) {
                 continue;
@@ -19229,6 +19257,12 @@ impl CodeGen {
             .next()
             .unwrap_or(&written_trait_name)
             .to_string();
+        // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
+        // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
+        // ported surface — rrr.serializable's incumbent object owns 50 of
+        // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+        self.ufcs_emitting_internal_linkage_trait =
+            self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
             return;
         }
@@ -19350,6 +19384,12 @@ impl CodeGen {
             .next()
             .unwrap_or(&written_trait_name)
             .to_string();
+        // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
+        // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
+        // ported surface — rrr.serializable's incumbent object owns 50 of
+        // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+        self.ufcs_emitting_internal_linkage_trait =
+            self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
             return;
         }
@@ -19637,6 +19677,12 @@ impl CodeGen {
                     {
                         continue;
                     }
+                    // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
+                    // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
+                    // ported surface — rrr.serializable's incumbent object owns 50 of
+                    // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+                                self.ufcs_emitting_internal_linkage_trait =
+                        self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
                     // Suppress methods an imported dependency already provides — the
                     // shared `<Trait>_` namespace would otherwise declare the same
@@ -19705,6 +19751,12 @@ impl CodeGen {
                     {
                         continue;
                     }
+                    // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
+                    // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
+                    // ported surface — rrr.serializable's incumbent object owns 50 of
+                    // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+                                self.ufcs_emitting_internal_linkage_trait =
+                        self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
                     // Suppress methods an imported dependency already provides (see
                     // extension_trait_method_provided_by_dependency): avoids the
@@ -19763,6 +19815,10 @@ impl CodeGen {
         trait_name: &str,
         methods: &[ExtensionImplMethod],
     ) {
+        // Contract 10 (NARROWED, C21c): the `rusty_ext` extension layer has
+        // no owning non-`pub` trait — it is ordinary ported surface (25 such
+        // symbols are in rrr.serializable's incumbent object, MEASURED).
+        self.ufcs_emitting_internal_linkage_trait = false;
         self.writeln(&format!(
             "// Extension trait {} lowered to rusty_ext:: free functions",
             trait_name
@@ -20997,7 +21053,7 @@ impl CodeGen {
     /// resolvable across the module boundary while giving the definition weak
     /// (discardable) linkage — verified: `export inline` emits nm `W`.
     fn ufcs_free_function_inline_prefix(&self) -> &'static str {
-        if self.module_name.is_some() {
+        if self.module_name.is_some() && self.ufcs_emitting_internal_linkage_trait {
             "inline "
         } else {
             ""

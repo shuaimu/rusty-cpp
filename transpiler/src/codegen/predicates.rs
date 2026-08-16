@@ -255,7 +255,33 @@ impl CodeGen {
         )
     }
 
+    /// Checkpoint contract 7 — the AUTHENTICATED internal-linkage marker.
+    ///
+    /// Rust visibility cannot decide this on its own. srpc's reactor has ten
+    /// non-`pub` items whose symbols the incumbent object never owned
+    /// (`verify`, `reactor_log_line`, four `stackless_profile_*`,
+    /// `thread_id_to_u64`, `current_thread_gettid`, `reusing_fiber`,
+    /// `STACKLESS_UNREGISTERED_SLOT`) and, in the very same file, non-`pub`
+    /// items the incumbent manifest REQUIRES to be strong (`event_state_seed`,
+    /// `quorum_event_is_slow`, `stackless_profile_note_*`). A blanket
+    /// "private means internal" rule would turn three missing symbols into
+    /// twenty-three. So the source says which, per item, in the established
+    /// inert-marker idiom:
+    ///
+    ///     #[cfg_attr(any(), cpp_internal)]
+    ///     fn verify(value: bool) { ... }
+    ///
+    /// It is inert for rustc (the `any()` predicate is never satisfied) and
+    /// authoritative for this transpiler, exactly like `cpp_name`, `cpp_abi`,
+    /// `cpp_default_argument` and `cpp_import_namespace`.
+    pub(super) fn has_cpp_internal_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_cpp_only_marker_attr(attrs, "cpp_internal")
+    }
+
     pub(super) fn should_emit_internal_linkage_function(&self, f: &syn::ItemFn) -> bool {
+        if Self::has_cpp_internal_attr(&f.attrs) {
+            return true;
+        }
         self.is_non_root_expanded_test_module() && !matches!(f.vis, syn::Visibility::Public(_))
     }
 

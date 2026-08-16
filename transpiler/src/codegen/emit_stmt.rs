@@ -176,6 +176,22 @@ impl CodeGen {
             || self.internal_linkage_traits.contains(trait_name)
     }
 
+    /// Contract 10 (narrowed): does this trait's synthesized `<Trait>_` UFCS
+    /// layer take vague linkage? True for a non-`pub` trait (whose whole
+    /// machinery is already internal) and for a trait the SOURCE marks
+    /// `#[cfg_attr(any(), cpp_internal)]`. A plain `pub` trait keeps ordinary
+    /// strong UFCS symbols, because that is exactly what accepted modules'
+    /// incumbent objects own.
+    pub(super) fn ufcs_layer_uses_internal_linkage(
+        &self,
+        trait_name: &str,
+        trait_key: &str,
+    ) -> bool {
+        self.trait_uses_internal_linkage(trait_name, trait_key)
+            || self.ufcs_internal_linkage_traits.contains(trait_key)
+            || self.ufcs_internal_linkage_traits.contains(trait_name)
+    }
+
     /// Contract 7: is the method currently being emitted one the compiler
     /// merged into `current_struct` from an `impl <non-pub trait> for Type`?
     /// Only true in module mode, where the alternative really is a strong

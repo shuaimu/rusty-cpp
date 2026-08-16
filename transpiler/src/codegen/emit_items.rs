@@ -4459,21 +4459,34 @@ impl CodeGen {
             self.record_local_const_binding(&rust_name, true);
             self.record_local_item_const_name(&rust_name);
         }
-        let export_prefix = if self.block_depth == 0 && self.should_export_item(&c.vis, &rust_name)
+        // Contract 7: `#[cfg_attr(any(), cpp_internal)]` makes the definition
+        // TU-local. A namespace-scope `const`/`constexpr` is NOT implicitly
+        // internal inside a module purview (P1815 attaches it to the module),
+        // so the keyword is load-bearing: without it the constant is an
+        // ordinary strong module-owned symbol.
+        let internal_marker = Self::has_cpp_internal_attr(&c.attrs);
+        let export_prefix = if !internal_marker
+            && self.block_depth == 0
+            && self.should_export_item(&c.vis, &rust_name)
         {
             "export "
         } else {
             ""
         };
+        let internal_prefix = if internal_marker && self.block_depth == 0 {
+            "static "
+        } else {
+            ""
+        };
         if storage == "const" && ty.contains('*') {
             self.writeln(&format!(
-                "{}{} const {} = {};",
-                export_prefix, ty, cpp_name, expr
+                "{}{}{} const {} = {};",
+                export_prefix, internal_prefix, ty, cpp_name, expr
             ));
         } else {
             self.writeln(&format!(
-                "{}{} {} {} = {};",
-                export_prefix, storage, ty, cpp_name, expr
+                "{}{}{} {} {} = {};",
+                export_prefix, internal_prefix, storage, ty, cpp_name, expr
             ));
         }
         if let Some(cond) = &cfg_guard {

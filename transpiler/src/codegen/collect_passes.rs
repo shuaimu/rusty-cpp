@@ -5109,6 +5109,16 @@ impl CodeGen {
                                 .insert(format!("{}::{}", module_path.join("::"), t.ident));
                         }
                     }
+                    // Contract 10 (narrowed): a `pub` trait whose SYNTHESIZED
+                    // UFCS layer is not part of the ported surface says so in
+                    // the source. The interface class is untouched.
+                    if Self::has_cpp_internal_attr(&t.attrs) {
+                        self.ufcs_internal_linkage_traits.insert(t.ident.to_string());
+                        if !module_path.is_empty() {
+                            self.ufcs_internal_linkage_traits
+                                .insert(format!("{}::{}", module_path.join("::"), t.ident));
+                        }
+                    }
                 }
                 syn::Item::Impl(impl_block) => {
                     // #88: record each method's declaring-impl Self type

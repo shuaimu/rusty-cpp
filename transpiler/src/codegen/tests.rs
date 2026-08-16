@@ -7505,6 +7505,77 @@ fn test_unresolved_dyn_trait_param_falls_back_to_void_ptr() {
 }
 
 #[test]
+fn test_cpp_internal_marker_gives_private_helpers_internal_linkage() {
+    // Checkpoint contract 7 — the AUTHENTICATED internal-linkage marker.
+    // Rust visibility cannot decide this: srpc's reactor has non-`pub` items
+    // the incumbent object never owned AND non-`pub` items the incumbent
+    // manifest REQUIRES to be strong, in the same file. A blanket
+    // "private means internal" rule turns 3 missing symbols into 23.
+    let out = transpile_str_module(
+        r#"
+        #[cfg_attr(any(), cpp_internal)]
+        fn marked_helper(v: bool) -> bool { !v }
+        fn unmarked_helper(v: bool) -> bool { !v }
+        #[cfg_attr(any(), cpp_internal)]
+        const MARKED_SLOT: usize = 7;
+        pub fn use_them(v: bool) -> usize {
+            if marked_helper(v) && unmarked_helper(v) { MARKED_SLOT } else { 0 }
+        }
+        "#,
+        "mycrate",
+    );
+    assert!(
+        out.contains("static bool marked_helper(bool v)"),
+        "marked fn must be internal-linkage: {out}"
+    );
+    assert!(
+        !out.contains("static bool unmarked_helper"),
+        "an UNMARKED private fn is ordinary surface the incumbent owns: {out}"
+    );
+    // A namespace-scope const is NOT implicitly internal in a module purview,
+    // so the keyword is load-bearing here.
+    assert!(
+        out.contains("static constexpr size_t MARKED_SLOT"),
+        "marked const must be internal-linkage: {out}"
+    );
+}
+
+#[test]
+fn test_ufcs_layer_linkage_is_narrow_and_source_authenticated() {
+    // Contract 10, NARROWED. Making every `<Trait>_` UFCS free function
+    // `inline` repo-wide removes 50 symbols that rrr.serializable's INCUMBENT
+    // object genuinely owns (measured with nm: 25 Serialize_/Deserialize_ plus
+    // 25 rusty_ext, all present). So a `pub` trait keeps ordinary strong UFCS
+    // symbols; a non-`pub` trait (whose machinery is internal anyway) and a
+    // trait the SOURCE marks `cpp_internal` do not.
+    let out = transpile_str_module(
+        r#"
+        pub trait Surface { fn m(&self) -> i32; }
+        #[cfg_attr(any(), cpp_internal)]
+        pub trait MarkedSurface { fn n(&self) -> i32; }
+        trait Plumbing { fn q(&self) -> i32; }
+        pub struct S { pub x: i32 }
+        impl Surface for S { fn m(&self) -> i32 { self.x } }
+        impl MarkedSurface for S { fn n(&self) -> i32 { self.x } }
+        impl Plumbing for S { fn q(&self) -> i32 { self.x } }
+        "#,
+        "mycrate",
+    );
+    assert!(
+        out.contains("int32_t m(const S& self_)") && !out.contains("inline int32_t m(const S& self_)"),
+        "a `pub` trait's UFCS layer is ported surface and stays strong: {out}"
+    );
+    assert!(
+        out.contains("inline int32_t n(const S& self_)"),
+        "a cpp_internal-marked trait's UFCS layer must take vague linkage: {out}"
+    );
+    assert!(
+        out.contains("inline int32_t q(const S& self_)"),
+        "a non-`pub` trait's UFCS layer must take vague linkage: {out}"
+    );
+}
+
+#[test]
 fn test_module_dyn_trait_ref_param_is_an_interface_reference_not_an_abbreviated_template() {
     // C21b (contracts 8 + 9). srpc's reactor declares three functions taking
     // `&mut dyn Pollable`:
