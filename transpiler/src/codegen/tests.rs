@@ -43019,7 +43019,11 @@ fn test_module_mode_sync_imported_weak_dyn_agrees_across_surfaces() {
         "inherent impl surface: {out}"
     );
     assert!(
-        out.contains("export const rusty::sync::Weak<Pollable>& core_self(const Ev& self_)"),
+        // C21 / checkpoint contract 10: the generated UFCS layer is `inline`,
+        // so the module does not own an ordinary strong symbol for it. The
+        // TYPE surface this test exists to pin — `rusty::sync::Weak<Pollable>`
+        // rather than `void*` — is unchanged.
+        out.contains("export inline const rusty::sync::Weak<Pollable>& core_self(const Ev& self_)"),
         "UFCS surface: {out}"
     );
     assert!(
