@@ -20466,13 +20466,13 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         module_path: &[String],
     ) {
-        // A cpp_inherit impl is already represented by real virtual member
-        // overrides.  Emitting the ordinary UFCS companion functions as well
-        // duplicates the public API and can instantiate a second, incompatible
-        // dispatch path that the legacy inheritance lowering never exposed.
-        if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) {
-            return;
-        }
+        // A cpp_inherit impl is represented by real virtual member overrides
+        // AND still exports the ordinary UFCS companion functions: the ported
+        // surface owns both spellings (srpc's ratified incumbent ABI pins
+        // rrr::Job_::{Ready,Work,Done}(OneTimeJob&) alongside the virtual
+        // members), and importers reach the free-function form through
+        // `using namespace <Tr>_;`. Do not re-add a cpp_inherit skip here —
+        // it silently deletes provider-owned strong symbols.
         let Some((written_trait_name, specs)) =
             Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
         else {
@@ -20604,10 +20604,8 @@ impl CodeGen {
         module_path: &[String],
     ) {
         // Keep the declaration pass exactly aligned with the definition pass:
-        // cpp_inherit impls dispatch through virtual members, not UFCS helpers.
-        if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) {
-            return;
-        }
+        // cpp_inherit impls dispatch through virtual members AND export the
+        // UFCS companions (see emit_ufcs_trait_impl_block_free_functions).
         let Some((written_trait_name, specs)) =
             Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
         else {

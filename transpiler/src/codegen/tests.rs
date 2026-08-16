@@ -44848,11 +44848,82 @@ fn test_module_mode_local_dyn_trait_box_and_hidden_cpp_inherit_are_nominal() {
         !out.contains("PollableBaseAdapter<PollableShim"),
         "a directly inherited object must not be wrapped in an absent adapter:\n{out}"
     );
+    // A cpp_inherit impl keeps BOTH dispatch spellings: virtual members for
+    // the inheritance surface and the `<Tr>_` UFCS companions for free-form
+    // call sites. srpc's ratified incumbent ABI pins the companions
+    // (rrr::Job_::{Ready,Work,Done}(OneTimeJob&)) alongside the members, so
+    // suppressing them silently deletes provider-owned strong symbols.
     assert!(
-        !out.contains("namespace PollableBase_")
-            && !out.contains("using namespace PollableBase_"),
-        "cpp_inherit virtual overrides must not also export UFCS companions:\n{out}"
+        out.contains("namespace PollableBase_")
+            && out.contains("using namespace PollableBase_"),
+        "cpp_inherit virtual overrides must also export the UFCS companions:\n{out}"
     );
+}
+
+#[test]
+fn test_cpp_inherit_impl_keeps_both_virtual_members_and_ufcs_companions() {
+    // Regression: the srpc rrr.misc Job shape. The incumbent provider ABI
+    // owns rrr::Job_::{Ready,Work,Done}(OneTimeJob&) AND the virtual
+    // overrides; a cpp_inherit skip in the UFCS emitter deleted the three
+    // free-function symbols from the generated module.
+    let out = transpile_str_with_authenticated_cpp_inherit(
+        r#"
+        use rusty::cpp_inherit;
+
+        #[allow(unsafe_code)]
+        pub unsafe trait Job: Send + Sync {
+            fn Ready(&mut self) -> bool;
+            fn Work(&mut self);
+            fn Done(&mut self) -> bool;
+        }
+
+        pub struct OneTimeJob {
+            done_: bool,
+            ready_: bool,
+            func_: Box<dyn FnMut() + Send + Sync>,
+        }
+
+        impl OneTimeJob {
+            pub fn new(func: Box<dyn FnMut() + Send + Sync>) -> OneTimeJob {
+                OneTimeJob { done_: false, ready_: true, func_: func }
+            }
+        }
+
+        #[cpp_inherit]
+        #[allow(unsafe_code)]
+        unsafe impl Job for OneTimeJob {
+            fn Ready(&mut self) -> bool { self.ready_ }
+            fn Work(&mut self) {
+                self.ready_ = false;
+                (self.func_)();
+                self.done_ = true;
+            }
+            fn Done(&mut self) -> bool { self.done_ }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("struct OneTimeJob : public Job"),
+        "cpp_inherit must keep direct inheritance:\n{out}"
+    );
+    assert!(
+        out.contains("bool Ready() override"),
+        "cpp_inherit must keep the virtual member overrides:\n{out}"
+    );
+    assert!(
+        out.contains("namespace Job_") && out.contains("using namespace Job_;"),
+        "the UFCS companion namespace must survive a cpp_inherit impl:\n{out}"
+    );
+    for signature in [
+        "bool Ready(OneTimeJob& self_)",
+        "void Work(OneTimeJob& self_)",
+        "bool Done(OneTimeJob& self_)",
+    ] {
+        assert!(
+            out.contains(signature),
+            "missing pinned UFCS companion `{signature}`:\n{out}"
+        );
+    }
 }
 
 #[test]
