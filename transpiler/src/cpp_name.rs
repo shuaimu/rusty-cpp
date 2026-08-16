@@ -1681,7 +1681,8 @@ pub(crate) fn crate_wide_function_targets(
         let Ok(file) = syn::parse_file(source) else {
             continue;
         };
-        let Ok(plan) = collect(&file) else {
+        let allow_cpp_inherit = source_imports_audited_cpp_inherit(&file);
+        let Ok(plan) = collect_with_crate_provenance(&file, allow_cpp_inherit) else {
             continue;
         };
         for rust_name in plan.rust_names() {
