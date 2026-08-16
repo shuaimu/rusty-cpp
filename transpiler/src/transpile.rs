@@ -3172,6 +3172,8 @@ fn transpile_full_with_options_impl(
     log_profile("cpp_abi_lower");
     validate_cpp_declaration_markers(&file)?;
     log_profile("validate_cpp_declaration_markers");
+    validate_reserved_cpp_marker_names(&file)?;
+    log_profile("validate_reserved_cpp_marker_names");
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
     log_profile("file_contains_cpp_module_imports");
     if has_cpp_module_imports {
@@ -3350,6 +3352,89 @@ fn transpile_full_with_options_impl(
 /// Validate the deliberately narrow declaration-only ownership marker before
 /// codegen. A marked body remains native Rust; C++ receives only the ordinary
 /// declaration emitted by the existing forward-declaration pass.
+/// Every reserved `cpp_*` marker name this compiler honors, in any of its
+/// spellings. The inert `#[cfg_attr(any(), cpp_*)]` carrier exists precisely
+/// so contracts survive rustc unseen — which also means a MISSPELLED or
+/// not-yet-ported contract would otherwise vanish silently. Fail closed: an
+/// unknown `cpp_*` name inside an inert carrier is a hard error, never a
+/// silent no-op.
+const KNOWN_CPP_MARKER_NAMES: &[&str] = &[
+    "cpp_abi",
+    "cpp_abi_alias",
+    "cpp_abi_core",
+    "cpp_ctor",
+    "cpp_declaration",
+    "cpp_default_argument",
+    "cpp_explicit",
+    "cpp_import_namespace",
+    "cpp_inherit",
+    "cpp_internal",
+    "cpp_marker_impl",
+    "cpp_marker_trait",
+    "cpp_name",
+    "cpp_namespace",
+    "cpp_no_auto_traits",
+    "cpp_noexcept",
+    "cpp_no_fieldwise_ctor",
+    "cpp_trait_member_dispatch",
+];
+
+/// Reject `#[cfg_attr(any(), <payload>)]` carriers whose payload names an
+/// UNKNOWN `cpp_*` marker. Only the permanently-inactive `any()` predicate is
+/// policed: an active `cfg_attr` payload is ordinary Rust that rustc itself
+/// resolves, while the inert spelling is compiler-owned and has exactly one
+/// legitimate use — carrying a contract this compiler knows.
+fn validate_reserved_cpp_marker_names(file: &syn::File) -> Result<(), String> {
+    struct Validator {
+        error: Option<String>,
+    }
+
+    impl Validator {
+        fn check_attribute(&mut self, attribute: &syn::Attribute) {
+            if self.error.is_some() || !attribute.path().is_ident("cfg_attr") {
+                return;
+            }
+            let Ok(args) = attribute.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return;
+            };
+            let predicate_is_exact_inactive = matches!(args.first(), Some(syn::Meta::List(any))
+                if any.path.is_ident("any") && any.tokens.is_empty());
+            if !predicate_is_exact_inactive {
+                return;
+            }
+            for payload in args.iter().skip(1) {
+                let Some(name) = payload.path().segments.last().map(|s| s.ident.to_string())
+                else {
+                    continue;
+                };
+                if name.starts_with("cpp_") && !KNOWN_CPP_MARKER_NAMES.contains(&name.as_str())
+                {
+                    self.error = Some(format!(
+                        "unknown reserved marker `{name}` in `#[cfg_attr(any(), {name})]`: \
+                         this compiler does not implement such a contract, and the inert \
+                         spelling would otherwise discard it silently. Known cpp_* markers: \
+                         {}",
+                        KNOWN_CPP_MARKER_NAMES.join(", ")
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Validator {
+        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+            self.check_attribute(attribute);
+        }
+    }
+
+    let mut validator = Validator { error: None };
+    syn::visit::Visit::visit_file(&mut validator, file);
+    validator.error.map_or(Ok(()), Err)
+}
+
 fn validate_cpp_declaration_markers(file: &syn::File) -> Result<(), String> {
     use syn::visit::Visit;
 
@@ -6678,6 +6763,47 @@ callable_signatures = ["void()"]
             assert!(
                 err.contains("invalid namespace for module 'demo'"),
                 "invalid={invalid:?}, err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_inert_cpp_marker_name_is_a_hard_error() {
+        // The inert carrier exists so contracts survive rustc unseen — a
+        // misspelled or unported contract must fail loudly, not vanish.
+        for source in [
+            "#[cfg_attr(any(), cpp_nmae(\"x\"))] pub fn f() {}",
+            "#[cfg_attr(any(), cpp_frobnicate)] pub struct S;",
+            "pub struct T; #[cfg_attr(any(), cpp_virtual_dispatch)] impl T { pub fn m(&self) {} }",
+        ] {
+            let err = transpile(source, None)
+                .expect_err("unknown inert cpp_* marker must be rejected");
+            assert!(
+                err.contains("unknown reserved marker"),
+                "source={source:?}, err={err}"
+            );
+            assert!(
+                err.contains("Known cpp_* markers"),
+                "the diagnostic must list the known roster: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_known_inert_cpp_markers_and_foreign_payloads_still_pass() {
+        // Known contracts keep working; and an inert payload that is not a
+        // cpp_* name at all (thread_local, allow) is not this validator's
+        // business.
+        for source in [
+            "pub struct S { v: i32 }\nimpl S {\n    #[cfg_attr(any(), cpp_ctor)]\n    fn new(v: i32) -> S { S { v } }\n}",
+            "#[cfg_attr(any(), thread_local)] static X: i32 = 0;",
+            "#[cfg_attr(any(), allow(dead_code))] pub fn g() {}",
+            // ACTIVE cfg_attr predicates are rustc's own surface, not ours.
+            "#[cfg_attr(test, cpp_this_is_rustcs_problem)] pub fn h() {}",
+        ] {
+            assert!(
+                transpile(source, None).is_ok(),
+                "source={source:?} must transpile"
             );
         }
     }
