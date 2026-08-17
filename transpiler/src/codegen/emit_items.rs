@@ -1093,6 +1093,50 @@ impl CodeGen {
         if !f.sig.inputs.is_empty() {
             use quote::ToTokens;
             let body_text = f.block.to_token_stream().to_string();
+            // A param that OTHER generic params' bounds (or where-predicates
+            // on other params) mention is the case this drop exists for:
+            // Rust infers it through those bounds, call sites do not spell
+            // it, and C++ could never deduce it. A param mentioned by NO
+            // other bound is Rust-UNinferable — every Rust call site
+            // turbofishes it, the emitted call sites carry the explicit
+            // argument, and the forward declaration stays templated — so
+            // dropping it from the definition head orphans both (srpc's
+            // phantom wake-domain helpers:
+            // `fn stackless_wake_reactor_key<WakeDomain>(&Reactor)` gained
+            // three strong plain-function symbols the ratified ABI does not
+            // have, while the templated decls/calls went undefined).
+            let other_bounds_text: String = {
+                let mut pieces: Vec<String> = f
+                    .sig
+                    .generics
+                    .params
+                    .iter()
+                    .map(|param| match param {
+                        syn::GenericParam::Type(tp) => {
+                            let mut clause = tp.bounds.to_token_stream().to_string();
+                            // The param's own name would self-satisfy the
+                            // scan; strip it from its own piece by keying
+                            // the piece with the bounds only (done) and
+                            // tagging which param owns it below.
+                            clause.insert_str(0, &format!("__owner_{} : ", tp.ident));
+                            clause
+                        }
+                        _ => String::new(),
+                    })
+                    .collect();
+                if let Some(where_clause) = &f.sig.generics.where_clause {
+                    for predicate in &where_clause.predicates {
+                        if let syn::WherePredicate::Type(pt) = predicate {
+                            pieces.push(format!(
+                                "__owner_{} : {}",
+                                pt.bounded_ty.to_token_stream(),
+                                pt.bounds.to_token_stream()
+                            ));
+                        }
+                    }
+                }
+                pieces.join(" ; ")
+            };
             // Token scan, not syn traversal: `-> impl Fn(&T, &T) -> Ordering`
             // mentions T only inside the Fn sugar's parenthesized args, which
             // type_mentions_named_type_param does not reach.
@@ -1127,6 +1171,12 @@ impl CodeGen {
                         .iter()
                         .any(|(_, expr)| Self::cpp_type_expr_mentions_identifier(expr, &name))
                     {
+                        return None;
+                    }
+                    // Only bound-carried params are droppable (see
+                    // other_bounds_text above): everything else is spelled
+                    // explicitly at every call site and must keep its head.
+                    if !names_word(&other_bounds_text, &name) {
                         return None;
                     }
                     Some(name)

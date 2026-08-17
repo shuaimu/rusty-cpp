@@ -45525,6 +45525,31 @@ fn const_derived_from_non_constexpr_const_is_not_forward_constexpr() {
 }
 
 #[test]
+fn explicit_turbofish_phantom_generic_fn_keeps_its_template_head() {
+    // srpc's wake-domain helpers: `fn domain_key<Domain>(r: &Registry)` — the
+    // param appears in no input, no return type, no body, and no OTHER
+    // param's bound, so Rust cannot infer it and every call site turbofishes
+    // it. Dropping it from the definition head (while the forward declaration
+    // and the emitted `domain_key<rusty::Unit>(...)` call sites keep it)
+    // leaves the template declared, called, and never defined — and mints a
+    // plain strong twin symbol the ratified srpc reactor ABI does not have
+    // (stackless_wake_{reactor_key,request,binding_context}).
+    let out = transpile_str(
+        r#"
+        pub struct Registry { value: i32 }
+        fn domain_key<Domain>(r: &Registry) -> i32 { r.value }
+        pub fn use_domain(r: &Registry) -> i32 { domain_key::<()>(r) }
+        "#,
+    );
+    assert!(
+        out.contains("template<typename Domain>\nint32_t domain_key(const Registry& r) {"),
+        "the DEFINITION must keep the template head for a turbofish-only \
+         param — dropping it orphans the templated declaration and call \
+         sites and adds a strong plain-function symbol:\n{out}"
+    );
+}
+
+#[test]
 fn zero_arg_generic_fn_keeps_its_template_head() {
     // `fn assert_send_sync<T: Send + Sync>() {}` — T is named in no parameter,
     // no return type, and an empty body, so the pure-phantom filter dropped it
