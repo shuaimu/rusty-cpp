@@ -130,6 +130,12 @@ pub(crate) struct CppAbiEmissionPlan {
     pub(crate) facades: BTreeMap<CallableKey, CallableFacade>,
     pub(crate) semantic_helpers: BTreeMap<(ModulePath, String), CallableKey>,
     flat_imports: BTreeMap<FlatImportKey, FlatImportContract>,
+    /// Crate-level flat-import inference namespace. When set (prepared crate
+    /// mode with `--flat-import-namespace`), emission re-parses private
+    /// `use crate::…` items under the same inference rules that produced
+    /// `flat_imports`, so an unmarked contract-shaped item resolves exactly
+    /// like a marked one.
+    flat_import_inference: Option<String>,
     emit_string_support: bool,
     emit_vector_support: bool,
     inline_identity: Option<String>,
@@ -208,9 +214,11 @@ impl CppAbiEmissionPlan {
         module: &[String],
         item: &syn::ItemUse,
     ) -> Option<(&str, &str, &[String])> {
-        let parsed = parse_flat_import_use(item, &ModulePath(
-            module.iter().map(|part| canonical_name(part)).collect(),
-        ))
+        let parsed = parse_flat_import_use(
+            item,
+            &ModulePath(module.iter().map(|part| canonical_name(part)).collect()),
+            self.flat_import_inference.as_deref(),
+        )
         .ok()
         .flatten()?;
         let contract = self.flat_imports.get(&parsed.key)?;
@@ -395,9 +403,51 @@ fn parse_flat_import_marker_attr(attr: &Attribute) -> Result<Option<String>, Str
     Ok(Some(namespace))
 }
 
+/// Whether any path in this use tree is spelled from the `crate` root.
+/// Deliberately deep: a group like `use {crate::errors::RpcError, std::x::Y};`
+/// must not slip past crate-level flat-import inference as "not crate-rooted".
+fn use_tree_mentions_crate(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            ident_key(&path.ident) == "crate" || use_tree_mentions_crate(&path.tree)
+        }
+        syn::UseTree::Name(name) => ident_key(&name.ident) == "crate",
+        syn::UseTree::Rename(rename) => ident_key(&rename.ident) == "crate",
+        syn::UseTree::Glob(_) => false,
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_mentions_crate),
+    }
+}
+
+/// The one deliberate inference exemption: a private `use crate::<child> as _;`
+/// anchor binds no names and keeps today's unmarked emission exactly.
+fn is_flat_import_underscore_anchor(item: &syn::ItemUse) -> bool {
+    if item.leading_colon.is_some() {
+        return false;
+    }
+    let syn::UseTree::Path(crate_root) = &item.tree else {
+        return false;
+    };
+    if ident_key(&crate_root.ident) != "crate" {
+        return false;
+    }
+    matches!(
+        crate_root.tree.as_ref(),
+        syn::UseTree::Rename(rename) if rename.rename == "_"
+    )
+}
+
+fn canonical_flat_import_inference_namespace(inference: &str) -> Result<String, String> {
+    canonical_cpp_namespace(inference).ok_or_else(|| {
+        format!(
+            "flat import namespace inference requires a canonical C++ namespace path; `{inference}` is not one"
+        )
+    })
+}
+
 fn parse_flat_import_use(
     item: &syn::ItemUse,
     module: &ModulePath,
+    flat_import_inference: Option<&str>,
 ) -> Result<Option<FlatImportContract>, String> {
     let mut namespace = None;
     for attr in &item.attrs {
@@ -408,14 +458,66 @@ fn parse_flat_import_use(
         }
     }
     let Some(cpp_namespace) = namespace else {
-        return Ok(None);
+        // Crate-level inference: with `--flat-import-namespace` active, every
+        // PRIVATE `use crate::<child>::<Name leaves>` item carries an implicit
+        // contract validated by the identical pipeline as the explicit marker.
+        let Some(inference) = flat_import_inference else {
+            return Ok(None);
+        };
+        if !matches!(item.vis, syn::Visibility::Inherited) {
+            // Re-exports are not private bindings; inference leaves them to
+            // the ordinary emitters exactly as before.
+            return Ok(None);
+        }
+        if item.leading_colon.is_some() || !use_tree_mentions_crate(&item.tree) {
+            // Not a crate-rooted use item; outside the inference rule.
+            return Ok(None);
+        }
+        if is_flat_import_underscore_anchor(item) {
+            return Ok(None);
+        }
+        let inferred_namespace = canonical_flat_import_inference_namespace(inference)?;
+        let contract = (|| -> Result<FlatImportContract, String> {
+            if !item.attrs.is_empty() {
+                return Err(
+                    "inferred contract use items support no attributes".to_string(),
+                );
+            }
+            parse_flat_import_contract_shape(item, module, inferred_namespace)
+        })()
+        .map_err(|error| {
+            format!(
+                "flat import namespace inference: private use item `{}` must be either an exact `use crate::<child>::<Name leaves>;` contract or a `use crate::<child> as _;` anchor: {error}",
+                item.to_token_stream()
+            )
+        })?;
+        return Ok(Some(contract));
     };
+    if let Some(inference) = flat_import_inference {
+        let inferred_namespace = canonical_flat_import_inference_namespace(inference)?;
+        if cpp_namespace != inferred_namespace {
+            return Err(format!(
+                "cpp_import_namespace `{cpp_namespace}` contradicts the crate-level flat import namespace `{inferred_namespace}`"
+            ));
+        }
+    }
     if item.attrs.len() != 1 {
         return Err(
             "cpp_import_namespace use items support only the namespace marker attribute"
                 .to_string(),
         );
     }
+    parse_flat_import_contract_shape(item, module, cpp_namespace).map(Some)
+}
+
+/// The exact contract shape shared by the explicit marker and crate-level
+/// inference: a private `use crate::<child>::<Name leaves>` item whose child
+/// and leaves are already exact C++ identifiers.
+fn parse_flat_import_contract_shape(
+    item: &syn::ItemUse,
+    module: &ModulePath,
+    cpp_namespace: String,
+) -> Result<FlatImportContract, String> {
     if !matches!(item.vis, syn::Visibility::Inherited) {
         return Err("cpp_import_namespace requires a private use item".to_string());
     }
@@ -493,10 +595,10 @@ fn parse_flat_import_use(
         rust_child,
         leaves,
     };
-    Ok(Some(FlatImportContract {
+    Ok(FlatImportContract {
         key,
         cpp_namespace,
-    }))
+    })
 }
 
 /// Collect and validate all ABI contracts in a Rust file.
@@ -506,10 +608,18 @@ fn parse_flat_import_use(
 /// `#[cfg_attr(any(), cpp_abi_alias(std_vector))]`.
 /// Exact marker identifiers are reserved in all opaque macro tokens because a
 /// macro can construct either attribute from otherwise disconnected tokens.
-pub(crate) fn collect(file: &syn::File) -> Result<CppAbiContracts, String> {
+pub(crate) fn collect(
+    file: &syn::File,
+    flat_import_inference: Option<&str>,
+) -> Result<CppAbiContracts, String> {
     reject_marker_attrs(&file.attrs, "crate-level inner attribute")?;
     let mut contracts = CppAbiContracts::default();
-    collect_module(&file.items, &ModulePath(Vec::new()), &mut contracts)?;
+    collect_module(
+        &file.items,
+        &ModulePath(Vec::new()),
+        &mut contracts,
+        flat_import_inference,
+    )?;
     Ok(contracts)
 }
 
@@ -517,6 +627,7 @@ fn collect_module(
     items: &[Item],
     module: &ModulePath,
     contracts: &mut CppAbiContracts,
+    flat_import_inference: Option<&str>,
 ) -> Result<(), String> {
     let mut ordinary_alias_names = BTreeSet::new();
 
@@ -647,7 +758,9 @@ fn collect_module(
                 let _ = parse_single_marker(&alias.attrs)?;
             }
             Item::Use(item_use) => {
-                if let Some(contract) = parse_flat_import_use(item_use, module)? {
+                if let Some(contract) =
+                    parse_flat_import_use(item_use, module, flat_import_inference)?
+                {
                     if contracts
                         .flat_imports
                         .insert(contract.key.clone(), contract)
@@ -681,7 +794,12 @@ fn collect_module(
         {
             let mut nested_path = module.0.clone();
             nested_path.push(ident_key(&item_mod.ident));
-            collect_module(nested, &ModulePath(nested_path), contracts)?;
+            collect_module(
+                nested,
+                &ModulePath(nested_path),
+                contracts,
+                flat_import_inference,
+            )?;
         }
     }
     Ok(())
@@ -1145,7 +1263,7 @@ fn token_stream_mentions_reserved_marker(tokens: proc_macro2::TokenStream) -> bo
 
 pub(crate) fn source_mentions_reserved_marker(source: &str) -> bool {
     match syn::parse_file(source) {
-        Ok(file) => match collect(&file) {
+        Ok(file) => match collect(&file, None) {
             Ok(contracts) => {
                 !contracts.callables.is_empty()
                     || !contracts.aliases.is_empty()
@@ -1349,7 +1467,7 @@ fn joined_inline_file(files: &[syn::File]) -> syn::File {
 /// caller uses this cheap first pass to reserve names across all requested
 /// carriers before any file is rendered or written.
 pub(crate) fn inline_contract_names(files: &[syn::File]) -> Result<BTreeSet<String>, String> {
-    let contracts = collect(&joined_inline_file(files))?;
+    let contracts = collect(&joined_inline_file(files), None)?;
     Ok(reserved_contract_names(&contracts))
 }
 
@@ -1357,7 +1475,7 @@ pub(crate) fn inline_generated_helper_names(
     files: &[syn::File],
     inline_identity: &str,
 ) -> Result<BTreeSet<String>, String> {
-    let contracts = collect(&joined_inline_file(files))?;
+    let contracts = collect(&joined_inline_file(files), None)?;
     Ok(contracts
         .callables
         .keys()
@@ -1373,7 +1491,7 @@ pub(crate) fn inline_external_contract_indexes(
         global.add(
             index,
             &ModulePath(Vec::new()),
-            &collect(&joined_inline_file(files))?,
+            &collect(&joined_inline_file(files), None)?,
         );
     }
     Ok((0..carriers.len())
@@ -1396,7 +1514,7 @@ pub(crate) fn validate_inline_projected_cpp_name_collisions(
     let mut census = ProjectedCppCensus::default();
     for (source, files) in sources.iter().zip(carriers) {
         let joined = joined_inline_file(files);
-        let contracts = collect(&joined)?;
+        let contracts = collect(&joined, None)?;
         collect_projected_cpp_names(
             &joined.items,
             &ModulePath(Vec::new()),
@@ -1553,8 +1671,8 @@ pub(crate) fn prepare_inline_carrier(
         )?;
     }
     let joined = joined_inline_file(files);
-    let contracts = collect(&joined)?;
-    validate_lowering_surface(&joined, &contracts)?;
+    let contracts = collect(&joined, None)?;
+    validate_lowering_surface(&joined, &contracts, None)?;
 
     if !external_contracts.values.is_empty() || !external_contracts.types.is_empty() {
         let known_modules = BTreeSet::new();
@@ -1586,11 +1704,11 @@ pub(crate) fn prepare_inline_carrier(
     let mut adapted_blocks = BTreeSet::new();
     let mut flat_import_blocks = BTreeSet::new();
     for (index, file) in files.iter().enumerate() {
-        let local = collect(file)?;
+        let local = collect(file, None)?;
         if !local.callables.is_empty() || !local.aliases.is_empty() {
             // This deliberately pins alias+const_ref and static-method owners
             // to one block for the first inline implementation slice.
-            validate_lowering_surface(file, &local)?;
+            validate_lowering_surface(file, &local, None)?;
             adapted_blocks.insert(index);
         }
         if !local.flat_imports.is_empty() {
@@ -1693,13 +1811,16 @@ pub(crate) fn prepare_inline_carrier(
 /// Validate and lower the source-owned ABI markers.  `None` is the exact
 /// no-marker fast path: callers must pass the original parsed file to codegen
 /// so an unannotated source cannot be perturbed by this feature.
-pub(crate) fn lower(file: &syn::File) -> Result<Option<(syn::File, CppAbiEmissionPlan)>, String> {
-    let contracts = collect(file)?;
+pub(crate) fn lower(
+    file: &syn::File,
+    flat_import_inference: Option<&str>,
+) -> Result<Option<(syn::File, CppAbiEmissionPlan)>, String> {
+    let contracts = collect(file, flat_import_inference)?;
     if contracts.callables.is_empty() && contracts.flat_imports.is_empty() {
         return Ok(None);
     }
 
-    validate_lowering_surface(file, &contracts)?;
+    validate_lowering_surface(file, &contracts, flat_import_inference)?;
     let helper_names = allocate_helper_names(file, &contracts)?;
     let mut lowered = file.clone();
     rewrite_semantic_calls(&mut lowered, &contracts, &helper_names)?;
@@ -1707,6 +1828,7 @@ pub(crate) fn lower(file: &syn::File) -> Result<Option<(syn::File, CppAbiEmissio
     let mut plan = CppAbiEmissionPlan {
         aliases: contracts.aliases.clone(),
         flat_imports: contracts.flat_imports.clone(),
+        flat_import_inference: flat_import_inference.map(str::to_string),
         ..CppAbiEmissionPlan::default()
     };
     for (key, contract) in &contracts.callables {
@@ -3448,27 +3570,33 @@ pub(crate) fn validate_source_contract_module_graph(
 }
 
 pub(crate) fn preflight_crate_sources(inputs: &[(PathBuf, String)]) -> Result<bool, String> {
-    Ok(preflight_crate_sources_impl(inputs, false, None)?.has_contracts)
+    Ok(preflight_crate_sources_impl(inputs, false, None, None)?.has_contracts)
 }
 
 pub(crate) fn preflight_crate_sources_with_cxx_namespace(
     inputs: &[(PathBuf, String)],
     cxx_namespace: Option<&str>,
+    flat_import_inference: Option<&str>,
 ) -> Result<bool, String> {
-    Ok(preflight_crate_sources_impl(inputs, true, cxx_namespace)?.has_contracts)
+    Ok(
+        preflight_crate_sources_impl(inputs, true, cxx_namespace, flat_import_inference)?
+            .has_contracts,
+    )
 }
 
 pub(crate) fn preflight_crate_plan_with_cxx_namespace(
     inputs: &[(PathBuf, String)],
     cxx_namespace: Option<&str>,
+    flat_import_inference: Option<&str>,
 ) -> Result<CppAbiCratePreflight, String> {
-    preflight_crate_sources_impl(inputs, true, cxx_namespace)
+    preflight_crate_sources_impl(inputs, true, cxx_namespace, flat_import_inference)
 }
 
 fn preflight_crate_sources_impl(
     inputs: &[(PathBuf, String)],
     validate_cxx_namespace: bool,
     cxx_namespace: Option<&str>,
+    flat_import_inference: Option<&str>,
 ) -> Result<CppAbiCratePreflight, String> {
     struct Unit {
         path: PathBuf,
@@ -3477,9 +3605,17 @@ fn preflight_crate_sources_impl(
         contracts: CppAbiContracts,
     }
 
-    if inputs
-        .iter()
-        .all(|(_, source)| !source_mentions_reserved_marker(source))
+    // The configured inference namespace fails closed even for a crate with
+    // no `use crate::…` items at all.
+    if let Some(inference) = flat_import_inference {
+        canonical_flat_import_inference_namespace(inference)?;
+    }
+    // The textual no-marker fast path is only sound without inference: an
+    // unmarked contract-shaped `use crate::…` item never mentions a marker.
+    if flat_import_inference.is_none()
+        && inputs
+            .iter()
+            .all(|(_, source)| !source_mentions_reserved_marker(source))
     {
         return Ok(CppAbiCratePreflight::default());
     }
@@ -3493,7 +3629,7 @@ fn preflight_crate_sources_impl(
                 path.display()
             )
         })?;
-        let contracts = collect(&file)
+        let contracts = collect(&file, flat_import_inference)
             .map_err(|error| format!("cpp_abi crate preflight {}: {error}", path.display()))?;
         units.push(Unit {
             path: path.clone(),
@@ -3792,7 +3928,7 @@ fn preflight_crate_sources_impl(
             || !unit.contracts.aliases.is_empty()
             || !unit.contracts.flat_imports.is_empty()
         {
-            lower(&unit.file).map_err(|error| {
+            lower(&unit.file, flat_import_inference).map_err(|error| {
                 format!("cpp_abi crate preflight {}: {error}", unit.path.display())
             })?;
         }
@@ -3817,6 +3953,7 @@ fn preflight_crate_sources_impl(
             &flat_import_type_bindings,
             &qualified_type_providers,
             &flat_import_rust_namespaces,
+            flat_import_inference,
         )
         .map_err(|error| format!("{error} in {}", unit.path.display()))?;
         for (provider, leaf, consumer_lexical_module) in qualified_type_references {
@@ -4782,6 +4919,7 @@ fn collect_use_source_paths(
 
 struct FlatImportCrateReferenceAudit<'a> {
     rules: &'a FlatImportCrateRules,
+    flat_import_inference: Option<&'a str>,
     type_bindings: &'a FlatImportTypeBindings,
     qualified_type_providers: &'a FlatImportQualifiedTypeProviders,
     rust_namespaces: &'a FlatImportRustNamespaceIndex,
@@ -5176,9 +5314,10 @@ impl FlatImportCrateReferenceAudit<'_> {
     }
 
     fn marked_use_is_authorized(&self, item: &syn::ItemUse) -> bool {
-        let Some(contract) = parse_flat_import_use(item, &ModulePath(Vec::new()))
-            .ok()
-            .flatten()
+        let Some(contract) =
+            parse_flat_import_use(item, &ModulePath(Vec::new()), self.flat_import_inference)
+                .ok()
+                .flatten()
         else {
             return false;
         };
@@ -6024,12 +6163,14 @@ fn validate_flat_import_crate_references(
     type_bindings: &FlatImportTypeBindings,
     qualified_type_providers: &FlatImportQualifiedTypeProviders,
     rust_namespaces: &FlatImportRustNamespaceIndex,
+    flat_import_inference: Option<&str>,
 ) -> Result<FlatImportQualifiedTypeReferences, String> {
     if rules.is_empty() {
         return Ok(BTreeSet::new());
     }
     let mut audit = FlatImportCrateReferenceAudit {
         rules,
+        flat_import_inference,
         type_bindings,
         qualified_type_providers,
         rust_namespaces,
@@ -6055,6 +6196,7 @@ fn validate_flat_import_crate_references(
 struct FlatImportBindingAudit<'a> {
     leaves: &'a BTreeSet<String>,
     module: &'a ModulePath,
+    flat_import_inference: Option<&'a str>,
     error: Option<String>,
 }
 
@@ -6090,7 +6232,7 @@ impl<'ast> Visit<'ast> for FlatImportBindingAudit<'_> {
             return;
         }
         if let Item::Use(item_use) = item {
-            if parse_flat_import_use(item_use, self.module)
+            if parse_flat_import_use(item_use, self.module, self.flat_import_inference)
                 .ok()
                 .flatten()
                 .is_some()
@@ -6172,11 +6314,13 @@ fn validate_flat_import_module_bindings(
     items: &[Item],
     module: &ModulePath,
     leaves_by_module: &BTreeMap<ModulePath, BTreeSet<String>>,
+    flat_import_inference: Option<&str>,
 ) -> Result<(), String> {
     if let Some(active_leaves) = leaves_by_module.get(module) {
         let mut audit = FlatImportBindingAudit {
             leaves: active_leaves,
             module,
+            flat_import_inference,
             error: None,
         };
         for item in items {
@@ -6196,6 +6340,7 @@ fn validate_flat_import_module_bindings(
                 nested,
                 &ModulePath(nested_path),
                 leaves_by_module,
+                flat_import_inference,
             )?;
         }
     }
@@ -6205,12 +6350,14 @@ fn validate_flat_import_module_bindings(
 fn validate_flat_import_binding_surface(
     file: &syn::File,
     contracts: &CppAbiContracts,
+    flat_import_inference: Option<&str>,
 ) -> Result<(), String> {
     let leaves_by_module = flat_import_leaves_by_module(contracts)?;
     validate_flat_import_module_bindings(
         &file.items,
         &ModulePath(Vec::new()),
         &leaves_by_module,
+        flat_import_inference,
     )
 }
 
@@ -6352,7 +6499,11 @@ fn validate_flat_import_opaque_surface(
     )
 }
 
-fn validate_lowering_surface(file: &syn::File, contracts: &CppAbiContracts) -> Result<(), String> {
+fn validate_lowering_surface(
+    file: &syn::File,
+    contracts: &CppAbiContracts,
+    flat_import_inference: Option<&str>,
+) -> Result<(), String> {
     validate_cpp_abi_file_attrs(&file.attrs, "source file")?;
     for alias in contracts.aliases.values() {
         if !is_exact_simple_type(&alias.element, "f64") {
@@ -6362,7 +6513,7 @@ fn validate_lowering_surface(file: &syn::File, contracts: &CppAbiContracts) -> R
             ));
         }
     }
-    validate_flat_import_binding_surface(file, contracts)?;
+    validate_flat_import_binding_surface(file, contracts, flat_import_inference)?;
     validate_flat_import_opaque_surface(file, contracts)?;
     validate_reserved_imports_and_macros(file, contracts)?;
     validate_local_callable_shadowing(&file.items, &ModulePath(Vec::new()), contracts)?;
@@ -8102,7 +8253,7 @@ mod tests {
 
     fn contracts(source: &str) -> Result<CppAbiContracts, String> {
         let file = syn::parse_str(source).expect("test source must parse as Rust");
-        collect(&file)
+        collect(&file, None)
     }
 
     fn assert_rustc_valid(source: &str, label: &str) {
@@ -8885,7 +9036,7 @@ mod tests {
         assert!(parsed.callables.is_empty());
 
         let file = syn::parse_str(source).unwrap();
-        let (lowered, plan) = lower(&file).unwrap().expect("marker-only lowering");
+        let (lowered, plan) = lower(&file, None).unwrap().expect("marker-only lowering");
         assert!(plan.facades.is_empty());
         assert!(!plan.is_empty());
         assert!(lowered
@@ -8976,7 +9127,7 @@ mod tests {
             let file = syn::parse_str(source).unwrap_or_else(|error| {
                 panic!("{label} fixture must parse as Rust syntax: {error}")
             });
-            assert!(collect(&file).is_err(), "accepted {label}: {source}");
+            assert!(collect(&file, None).is_err(), "accepted {label}: {source}");
             assert!(source_mentions_reserved_marker(source), "missed {label}");
         }
     }
@@ -9051,7 +9202,7 @@ mod tests {
             ),
         ] {
             let file = syn::parse_str(source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(
                 error.contains("shadow")
                     || error.contains("glob import")
@@ -9110,7 +9261,7 @@ mod tests {
             );
             assert_rustc_valid(&source, label);
             let file = syn::parse_str(&source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(error.contains("same C++ spelling"), "{label}: {error}");
         }
     }
@@ -9155,7 +9306,7 @@ mod tests {
             fn bytes_inner(v: Vec<u8>) -> Vec<u8> { bytes(v) }
         "#;
         let file = syn::parse_str(source).unwrap();
-        let (lowered, plan) = lower(&file).unwrap().expect("nonempty lowering");
+        let (lowered, plan) = lower(&file, None).unwrap().expect("nonempty lowering");
         let text = lowered.to_token_stream().to_string();
         assert!(text.contains("fn rusty_cpp_abi_sem_bytes"));
         assert!(text.contains("rusty_cpp_abi_sem_bytes (v)"));
@@ -9177,7 +9328,7 @@ mod tests {
             }
         "#;
         let file = syn::parse_str(source).unwrap();
-        let (lowered, _) = lower(&file).unwrap().expect("nonempty lowering");
+        let (lowered, _) = lower(&file, None).unwrap().expect("nonempty lowering");
         let text = lowered.to_token_stream().to_string();
         assert!(text.contains("rusty_cpp_abi_sem_right (v)"));
         assert!(text.contains("rusty_cpp_abi_sem_left (v)"));
@@ -9231,7 +9382,7 @@ mod tests {
             "#,
         ] {
             let file = syn::parse_str(source).unwrap();
-            assert!(lower(&file).is_err(), "accepted unsupported use: {source}");
+            assert!(lower(&file, None).is_err(), "accepted unsupported use: {source}");
         }
     }
 
@@ -9277,7 +9428,7 @@ mod tests {
         ] {
             assert_rustc_valid(source, label);
             let file = syn::parse_str(source).unwrap();
-            assert!(lower(&file).is_err(), "accepted reviewer repro: {label}");
+            assert!(lower(&file, None).is_err(), "accepted reviewer repro: {label}");
         }
     }
 
@@ -9384,7 +9535,7 @@ mod tests {
         ] {
             assert_rustc_valid(source, label);
             let file = syn::parse_str(source).unwrap();
-            assert!(lower(&file).is_err(), "accepted local shadow: {label}");
+            assert!(lower(&file, None).is_err(), "accepted local shadow: {label}");
         }
     }
 
@@ -9442,7 +9593,7 @@ mod tests {
         ] {
             assert_rustc_valid(source, label);
             let file = syn::parse_str(source).unwrap();
-            assert!(lower(&file).is_err(), "accepted collision: {label}");
+            assert!(lower(&file, None).is_err(), "accepted collision: {label}");
         }
     }
 
@@ -9501,7 +9652,7 @@ mod tests {
             assert_rustc_valid(source, label);
             let file = syn::parse_str(source).unwrap();
             assert!(
-                lower(&file).is_err(),
+                lower(&file, None).is_err(),
                 "accepted unsupported ancestor: {label}"
             );
         }
@@ -9526,7 +9677,7 @@ mod tests {
         "#;
         assert_rustc_valid(source, "raw nested ABI surface");
         let file = syn::parse_str(source).unwrap();
-        let (_, plan) = lower(&file).unwrap().expect("nonempty lowering");
+        let (_, plan) = lower(&file, None).unwrap().expect("nonempty lowering");
         assert!(
             plan.free_facade(&["r#private".into()], "r#static")
                 .is_some()
@@ -9626,12 +9777,12 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            preflight_crate_sources_with_cxx_namespace(&allowed, Some("rrr")).unwrap(),
+            preflight_crate_sources_with_cxx_namespace(&allowed, Some("rrr"), None).unwrap(),
             true
         );
-        assert!(preflight_crate_sources_with_cxx_namespace(&allowed, None).is_err());
+        assert!(preflight_crate_sources_with_cxx_namespace(&allowed, None, None).is_err());
         assert!(
-            preflight_crate_sources_with_cxx_namespace(&allowed, Some("wrong")).is_err()
+            preflight_crate_sources_with_cxx_namespace(&allowed, Some("wrong"), None).is_err()
         );
 
         let typed = crate_units(&[
@@ -9670,7 +9821,7 @@ mod tests {
             ),
         ]);
         let typed_plan =
-            preflight_crate_plan_with_cxx_namespace(&typed, Some("rrr")).unwrap();
+            preflight_crate_plan_with_cxx_namespace(&typed, Some("rrr"), None).unwrap();
         assert!(typed_plan.has_contracts);
         assert_eq!(
             typed_plan
@@ -9752,7 +9903,7 @@ mod tests {
             ),
         ]);
         let inert_plan =
-            preflight_crate_plan_with_cxx_namespace(&inert_no_fieldwise_ctor, Some("rrr"))
+            preflight_crate_plan_with_cxx_namespace(&inert_no_fieldwise_ctor, Some("rrr"), None)
                 .expect("exact inert Reactor Epoll marker must remain an importable struct");
         assert!(inert_plan.flat_import_type_authorizations.iter().any(
             |authorization| authorization.leaf == "Epoll"
@@ -9791,7 +9942,7 @@ mod tests {
             ),
         ]);
         let unsafe_job_plan =
-            preflight_crate_plan_with_cxx_namespace(&unsafe_job, Some("rrr"))
+            preflight_crate_plan_with_cxx_namespace(&unsafe_job, Some("rrr"), None)
                 .expect("exact Reactor unsafe Send + Sync job contract");
         assert!(unsafe_job_plan.flat_import_type_authorizations.iter().any(
             |authorization| authorization.leaf == "Job"
@@ -9817,6 +9968,7 @@ mod tests {
         let error = preflight_crate_sources_with_cxx_namespace(
             &adapted_owner,
             Some("rrr"),
+            None,
         )
         .unwrap_err();
         assert!(
@@ -9890,7 +10042,7 @@ mod tests {
                 ("src/rand.rs", provider_source),
                 ("src/consumer.rs", leaf_consumer),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(error.contains(expected), "{label}: {error}");
         }
@@ -9906,7 +10058,7 @@ mod tests {
             ("src/rand.rs", "pub unsafe fn target() -> u64 { 0 }"),
             ("src/consumer.rs", leaf_consumer),
         ]);
-        preflight_crate_sources_with_cxx_namespace(&unsafe_leaf_units, Some("rrr"))
+        preflight_crate_sources_with_cxx_namespace(&unsafe_leaf_units, Some("rrr"), None)
             .expect("an unsafe free-function provider leaf is ordinary");
 
         for (label, provider_source, expected) in [
@@ -10104,7 +10256,7 @@ mod tests {
                     "#[cfg_attr(any(), cpp_import_namespace(rrr))] use crate::channel::Target;",
                 ),
             ]);
-            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(error.contains(expected), "{label}: {error}");
         }
@@ -10133,7 +10285,7 @@ mod tests {
             ),
         ]);
         let error =
-            preflight_crate_plan_with_cxx_namespace(&external_same_tail, Some("rrr"))
+            preflight_crate_plan_with_cxx_namespace(&external_same_tail, Some("rrr"), None)
                 .expect_err("external same-tail binding");
         assert!(error.contains("another use binding"), "{error}");
     }
@@ -10232,7 +10384,7 @@ mod tests {
                 "#,
             ),
         ]);
-        let plan = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+        let plan = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
             .expect("exact qualified flat type provider paths");
         let qualified = plan
             .flat_import_type_authorizations
@@ -10279,7 +10431,7 @@ mod tests {
                 "pub fn call() -> i32 { crate::channel::target() }",
             ),
         ]);
-        let error = preflight_crate_plan_with_cxx_namespace(&qualified_callable, Some("rrr"))
+        let error = preflight_crate_plan_with_cxx_namespace(&qualified_callable, Some("rrr"), None)
             .expect_err("qualified callable must not borrow the type-only proof");
         assert!(error.contains("qualified reference"), "{error}");
 
@@ -10295,7 +10447,7 @@ mod tests {
                 "use crate::channel as provider; pub type Alias = dyn provider::Target;",
             ),
         ]);
-        let error = preflight_crate_plan_with_cxx_namespace(&aliased_provider, Some("rrr"))
+        let error = preflight_crate_plan_with_cxx_namespace(&aliased_provider, Some("rrr"), None)
             .expect_err("a provider alias must not become full-path provenance");
         assert!(error.contains("unmarked import"), "{error}");
 
@@ -10318,7 +10470,7 @@ mod tests {
                 ),
                 ("src/other.rs", other_source),
             ]);
-            let error = preflight_crate_plan_with_cxx_namespace(&invalid, Some("rrr"))
+            let error = preflight_crate_plan_with_cxx_namespace(&invalid, Some("rrr"), None)
                 .expect_err(label);
             assert!(error.contains("qualified reference"), "{label}: {error}");
         }
@@ -10365,6 +10517,7 @@ mod tests {
             preflight_crate_sources_with_cxx_namespace(
                 &unrelated_same_named_local,
                 Some("rrr"),
+                None,
             )
             .unwrap(),
             true
@@ -10411,7 +10564,7 @@ mod tests {
                 ("src/consumer.rs", consumer_source),
                 ("src/other.rs", other_source),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("cpp_import_namespace crate preflight rejects"),
@@ -10487,7 +10640,7 @@ mod tests {
                 ("src/outer.rs", "pub mod consumer;"),
                 ("src/outer/consumer.rs", &consumer_source),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("marked consumer ancestor"),
@@ -10518,7 +10671,7 @@ mod tests {
                 ("src/lib.rs", &root_source),
                 ("src/rand.rs", provider),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("marked consumer ancestor")
@@ -10603,7 +10756,7 @@ mod tests {
                 ("src/consumer.rs", consumer_source),
                 ("src/other.rs", other_source),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("namespace-root alias")
@@ -10665,7 +10818,7 @@ mod tests {
                 ("src/consumer.rs", consumer),
                 ("src/other.rs", other_source),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("collides with a flat sibling leaf")
@@ -10704,7 +10857,7 @@ mod tests {
                 ("src/consumer.rs", escaped_consumer),
                 ("src/other.rs", other_source),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("collides with a flat sibling leaf"),
@@ -10770,7 +10923,7 @@ mod tests {
                 ("src/rand.rs", provider_source),
                 ("src/consumer.rs", escaped_consumer),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("collides with a flat sibling leaf"),
@@ -10845,7 +10998,7 @@ mod tests {
                 ("src/consumer.rs", escaped_consumer),
                 ("src/other.rs", other_source),
             ]);
-            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_sources_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("hoist") && error.contains("flat sibling leaf"),
@@ -10908,6 +11061,7 @@ mod tests {
             preflight_crate_sources_with_cxx_namespace(
                 &escaped_local_units,
                 Some("rrr"),
+                None,
             )
             .unwrap(),
             true
@@ -10940,7 +11094,7 @@ mod tests {
                 "#,
             ),
         ]);
-        let plan = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+        let plan = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
             .expect("nested marker and sibling same-tail declaration");
         assert!(plan.has_contracts);
         assert_eq!(plan.flat_import_type_authorizations.len(), 1);
@@ -10977,7 +11131,7 @@ mod tests {
                 "#,
             ),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&external_qualified, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&external_qualified, Some("rrr"), None)
             .expect("qualified external same-tail path preserves its identity");
     }
 
@@ -11102,7 +11256,7 @@ mod tests {
             ),
             ("src/consumer.rs", positive_consumer),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&positive, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&positive, Some("rrr"), None)
             .expect("every descendant reference has an exact Rust binding");
 
         let negative_consumer = r#"
@@ -11127,7 +11281,7 @@ mod tests {
             ),
             ("src/consumer.rs", negative_consumer),
         ]);
-        let error = preflight_crate_plan_with_cxx_namespace(&negative, Some("rrr"))
+        let error = preflight_crate_plan_with_cxx_namespace(&negative, Some("rrr"), None)
             .expect_err("unbound descendant must fail before code generation");
         assert!(error.contains("without an exact local binding"), "{error}");
         assert!(error.contains("consumer::nested"), "{error}");
@@ -11189,7 +11343,7 @@ mod tests {
                 ("src/channel.rs", provider),
                 ("src/consumer.rs", &consumer),
             ]);
-            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("without an exact local binding"),
@@ -11283,7 +11437,7 @@ mod tests {
                 ("src/channel.rs", target_provider),
                 ("src/consumer.rs", &consumer),
             ]);
-            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("without an exact local binding")
@@ -11370,7 +11524,7 @@ mod tests {
             ("src/channel.rs", target_provider),
             ("src/consumer.rs", &exact_shadow_consumer),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&exact_shadow_units, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&exact_shadow_units, Some("rrr"), None)
             .expect("namespace-exact local/imported/qualified shadows must remain valid");
 
         let option_units = crate_units(&[
@@ -11387,7 +11541,7 @@ mod tests {
                 "#,
             ),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&option_units, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&option_units, Some("rrr"), None)
             .expect("the standard prelude Option binding is exact in a descendant");
     }
 
@@ -11450,7 +11604,7 @@ mod tests {
                 ("src/consumer.rs", &consumer),
             ]);
             let error =
-                preflight_crate_plan_with_cxx_namespace(&units, Some("rrr")).expect_err(label);
+                preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None).expect_err(label);
             assert!(
                 error.contains("without an exact local binding")
                     || error.contains("unsupported presence/path attributes"),
@@ -11484,7 +11638,7 @@ mod tests {
                 ("src/channel.rs", target_provider),
                 ("src/consumer.rs", &consumer),
             ]);
-            preflight_crate_plan_with_cxx_namespace(&units, Some("rrr")).expect(label);
+            preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None).expect(label);
         }
 
         let unknown_presence = format!(
@@ -11502,7 +11656,7 @@ mod tests {
             ("src/channel.rs", target_provider),
             ("src/consumer.rs", &unknown_presence),
         ]);
-        let error = preflight_crate_plan_with_cxx_namespace(&unknown_units, Some("rrr"))
+        let error = preflight_crate_plan_with_cxx_namespace(&unknown_units, Some("rrr"), None)
             .expect_err("unknown target cfg must fail closed as namespace evidence");
         assert!(error.contains("without an exact local binding"), "{error}");
     }
@@ -11552,7 +11706,7 @@ mod tests {
             ("src/channel.rs", provider),
             ("src/consumer.rs", &positive_consumer),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&positive_units, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&positive_units, Some("rrr"), None)
             .expect("only exact, unconditional foreign values may prove descendant paths");
 
         for (label, foreign, use_, expected_namespace) in [
@@ -11591,7 +11745,7 @@ mod tests {
                 ("src/channel.rs", provider),
                 ("src/consumer.rs", &consumer),
             ]);
-            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+            let error = preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains(&format!("in the {expected_namespace} namespace")),
@@ -11622,7 +11776,7 @@ mod tests {
             ("src/consumer.rs", &unknown_verbatim_consumer),
         ]);
         let error =
-            preflight_crate_plan_with_cxx_namespace(&unknown_verbatim_units, Some("rrr"))
+            preflight_crate_plan_with_cxx_namespace(&unknown_verbatim_units, Some("rrr"), None)
                 .expect_err("unknown parser-verbatim tokens must remain opaque and fail closed");
         assert!(error.contains("opaque foreign item syntax"), "{error}");
 
@@ -11650,7 +11804,7 @@ mod tests {
             ("src/consumer.rs", &unknown_macro_consumer),
         ]);
         let error =
-            preflight_crate_plan_with_cxx_namespace(&unknown_macro_units, Some("rrr"))
+            preflight_crate_plan_with_cxx_namespace(&unknown_macro_units, Some("rrr"), None)
                 .expect_err("an unknown foreign macro must remain visible to fail-closed audit");
         assert!(error.contains("opaque macro syntax"), "{error}");
     }
@@ -11687,7 +11841,7 @@ mod tests {
             ("src/channel.rs", provider),
             ("src/consumer.rs", &inert_consumer),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&inert_units, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&inert_units, Some("rrr"), None)
             .expect("absent enclosing foreign blocks must be inert to every audit");
 
         let unknown_function = format!(
@@ -11706,7 +11860,7 @@ mod tests {
             ("src/consumer.rs", &unknown_function),
         ]);
         let error =
-            preflight_crate_plan_with_cxx_namespace(&unknown_function_units, Some("rrr"))
+            preflight_crate_plan_with_cxx_namespace(&unknown_function_units, Some("rrr"), None)
                 .expect_err("an unknown enclosing block must not prove a value binding");
         assert!(error.contains("without an exact local binding"), "{error}");
 
@@ -11722,7 +11876,7 @@ mod tests {
             ("src/channel.rs", provider),
             ("src/consumer.rs", &unknown_macro),
         ]);
-        let error = preflight_crate_plan_with_cxx_namespace(&unknown_macro_units, Some("rrr"))
+        let error = preflight_crate_plan_with_cxx_namespace(&unknown_macro_units, Some("rrr"), None)
             .expect_err("an unknown enclosing macro must remain visible to opaque audit");
         assert!(error.contains("opaque macro syntax"), "{error}");
     }
@@ -11776,7 +11930,7 @@ mod tests {
             ("src/channel.rs", "pub struct Target;"),
             ("src/consumer.rs", consumer),
         ]);
-        preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"))
+        preflight_crate_plan_with_cxx_namespace(&units, Some("rrr"), None)
             .expect("a proved non-module owner makes the same-tailed associated item distinct");
 
         for (label, nested) in [
@@ -11805,7 +11959,7 @@ mod tests {
                 ("src/channel.rs", "pub struct Target;"),
                 ("src/consumer.rs", &invalid_consumer),
             ]);
-            let error = preflight_crate_plan_with_cxx_namespace(&invalid_units, Some("rrr"))
+            let error = preflight_crate_plan_with_cxx_namespace(&invalid_units, Some("rrr"), None)
                 .expect_err(label);
             assert!(
                 error.contains("without an exact local binding"),
@@ -12188,7 +12342,7 @@ int main() {
         );
         assert_rustc_valid(&ordinary, "macro-free assert expression");
         let file = syn::parse_str(&ordinary).unwrap();
-        assert!(lower(&file).unwrap().is_some());
+        assert!(lower(&file, None).unwrap().is_some());
         assert!(preflight_crate_sources(&crate_units(&[("src/lib.rs", &ordinary)])).unwrap());
 
         for (label, helpers, invocation) in [
@@ -12211,7 +12365,7 @@ int main() {
             let source = format!("{helpers}\n{provider}\npub fn checked() {{ {invocation} }}");
             assert_rustc_valid(&source, label);
             let file = syn::parse_str(&source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(
                 error.contains("nested opaque macro")
                     && error.contains("assert!(EXPR[, \"literal\"])"),
@@ -12243,7 +12397,7 @@ int main() {
             let source = format!("{provider}\n{binding}");
             assert_rustc_valid(&source, label);
             let file = syn::parse_str(&source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(error.contains("binding `assert`"), "{label}: {error}");
             let error =
                 preflight_crate_sources(&crate_units(&[("src/lib.rs", &source)])).expect_err(label);
@@ -12262,7 +12416,7 @@ int main() {
         ] {
             assert_rustc_valid(&source, label);
             let file = syn::parse_str(&source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(error.contains("#[macro_use]"), "{label}: {error}");
             let error =
                 preflight_crate_sources(&crate_units(&[("src/lib.rs", &source)])).expect_err(label);
@@ -12324,7 +12478,7 @@ int main() {
             let source = format!("{declaration}\n{provider}");
             assert_rustc_valid(&source, label);
             let file = syn::parse_str(&source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(error.contains("macro"), "{label}: {error}");
             if label != "macro token assembly" {
                 assert!(error.contains("assert"), "{label}: {error}");
@@ -12358,7 +12512,7 @@ int main() {
         // so stabilization cannot silently reintroduce an assert shadow.
         let macro_two = format!("pub macro assert($e:expr) {{ {{ let _ = $e; }} }}\n{provider}");
         let file = syn::parse_str(&macro_two).expect("syn accepts decl_macro as Verbatim");
-        let error = lower(&file).unwrap_err();
+        let error = lower(&file, None).unwrap_err();
         assert!(
             error.contains("macro") && error.contains("assert"),
             "{error}"
@@ -12388,7 +12542,7 @@ int main() {
             let source = format!("{binding}\n{provider}");
             assert_rustc_valid(&source, label);
             let file = syn::parse_str(&source).unwrap();
-            let error = lower(&file).expect_err(label);
+            let error = lower(&file, None).expect_err(label);
             assert!(
                 error.contains("unsupported") || error.contains("rejects"),
                 "{label}: {error}"
@@ -12752,7 +12906,7 @@ int main() {
         "#;
         assert_rustc_valid(source, "callable name in lint attribute");
         let file = syn::parse_str(source).unwrap();
-        assert!(lower(&file).is_err());
+        assert!(lower(&file, None).is_err());
     }
 
     #[test]
@@ -12788,7 +12942,7 @@ int main() {
         ] {
             let file = syn::parse_str(source).unwrap();
             assert!(
-                lower(&file).is_err(),
+                lower(&file, None).is_err(),
                 "accepted unsupported surface: {source}"
             );
         }
@@ -12834,7 +12988,7 @@ int main() {
         ] {
             let file = syn::parse_str(source).unwrap();
             assert!(
-                lower(&file).is_err(),
+                lower(&file, None).is_err(),
                 "accepted marked alias in semantic Rust: {source}"
             );
         }
@@ -12861,7 +13015,7 @@ int main() {
         ] {
             let file = syn::parse_str(source).unwrap();
             assert!(
-                lower(&file).is_err(),
+                lower(&file, None).is_err(),
                 "accepted impl-dependent body: {source}"
             );
         }
@@ -13012,7 +13166,7 @@ int main() {
     fn unmarked_nested_source_stays_on_the_empty_fast_path() {
         let source = "mod nested { pub fn ordinary(v: Vec<u8>) -> Vec<u8> { v } }";
         let file = syn::parse_str(source).unwrap();
-        assert!(lower(&file).unwrap().is_none());
+        assert!(lower(&file, None).unwrap().is_none());
         let cpp = crate::transpile::transpile(source, Some("ordinary")).unwrap();
         assert!(!cpp.contains("rusty_cpp_abi_"));
         assert!(!cpp.contains("#include <vector>"));

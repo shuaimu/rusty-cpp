@@ -1007,6 +1007,15 @@ pub struct TranspileOptions {
     /// legacy flat-export behavior. Used to disambiguate sibling
     /// modules that export same-named types — see rusty-std-book §2.10.
     pub cxx_namespace: Option<String>,
+    /// Crate-level flat-import inference (prepared crate mode only). When
+    /// `Some("rrr")`, every PRIVATE `use crate::<child>::<Name leaves>;`
+    /// item in a crate source carries an implicit
+    /// `cpp_import_namespace(rrr)` contract validated by the identical
+    /// pipeline as the explicit marker; a private `use crate::<child> as _;`
+    /// anchor is exempt, and any other private crate-rooted use item is a
+    /// hard error. Declared per crate (srpc: rust-modules.toml
+    /// `flat_import_namespace`) and plumbed via `--flat-import-namespace`.
+    pub flat_import_namespace: Option<String>,
     /// When true, auto-derive `cxx_namespace` from the module name
     /// (replace `.` with `::`) AND emit namespace aliases for each
     /// imported sibling module so path-qualified emit shapes resolve
@@ -2430,6 +2439,7 @@ impl Default for TranspileOptions {
             flat_import_type_authorizations: BTreeSet::new(),
             crate_module_names: Vec::new(),
             cxx_namespace: None,
+            flat_import_namespace: None,
             auto_namespace: false,
         }
     }
@@ -3104,7 +3114,7 @@ fn transpile_full_with_options_impl(
             .map_err(|e| format!("Parse error: {}", e))?;
         log_profile("parse_with_expand_hygiene_fallback");
         let has_cpp_defaults = validate_cpp_defaults(&file)?;
-        match crate::cpp_abi::lower(&file)? {
+        match crate::cpp_abi::lower(&file, options.flat_import_namespace.as_deref())? {
             Some((lowered, plan)) => (lowered, plan, has_cpp_defaults),
             None => (
                 file,

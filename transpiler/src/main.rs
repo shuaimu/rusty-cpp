@@ -162,6 +162,16 @@ struct Cli {
     #[arg(long = "cxx-namespace")]
     cxx_namespace: Option<String>,
 
+    /// Crate-level flat-import inference (prepared crate mode only): treat
+    /// every PRIVATE `use crate::<child>::<Name leaves>;` item in a crate
+    /// source as an implicit `cpp_import_namespace(<NS>)` contract, validated
+    /// by the identical pipeline as the explicit marker. A private
+    /// `use crate::<child> as _;` anchor is exempt; any other private
+    /// crate-rooted use item is a hard error. Declared per crate (srpc:
+    /// `flat_import_namespace` in rust-modules.toml).
+    #[arg(long = "flat-import-namespace")]
+    flat_import_namespace: Option<String>,
+
     /// Wrap the crate's emitted purview in `namespace <crate> { … }` AND
     /// requalify the crate's own qualified self-references (the Rules 1-5 in
     /// `wrap_module_purview_in_crate_namespace`). Unlike `--cxx-namespace`,
@@ -2560,6 +2570,7 @@ fn transpile_crate_to_output_with_context(
     let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
         &source_units,
         transpile_options.cxx_namespace.as_deref(),
+        transpile_options.flat_import_namespace.as_deref(),
     )?;
     if has_cpp_abi {
         validate_cpp_abi_conventional_lib_crate(&cargo, &sources)?;
@@ -2625,6 +2636,9 @@ fn transpile_crate_to_output_with_context(
             let mut dependency_options = transpile_options.clone();
             dependency_options.cxx_namespace = Some(dep.dependency_key.replace('-', "_"));
             dependency_options.auto_namespace = false;
+            // Flat-import inference is declared per crate; a dependency crate
+            // never inherits the root's declaration.
+            dependency_options.flat_import_namespace = None;
             transpile_crate_to_output_with_context(
                 &dep.manifest_path,
                 &dep_out_dir,
@@ -3574,6 +3588,11 @@ fn preflight_local_dependency_codegen_without_output(
     effective_dependencies: Option<&metadata::EffectiveLocalNormalDependencyGraph>,
     visited: &mut BTreeSet<PathBuf>,
 ) -> Result<(), String> {
+    // Flat-import inference is declared per crate; dependency preflight must
+    // not inherit the root crate's declaration.
+    let mut dependency_options = transpile_options.clone();
+    dependency_options.flat_import_namespace = None;
+    let transpile_options = &dependency_options;
     let mut dependencies = dependencies
         .iter()
         .filter(|dependency| dependency.target.is_none() && dependency.is_local)
@@ -3677,6 +3696,7 @@ fn preflight_crate_codegen_without_output(
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
         transpile_options.cxx_namespace.as_deref(),
+        transpile_options.flat_import_namespace.as_deref(),
     )?;
     let has_cpp_abi = cpp_abi_preflight.has_contracts;
     let has_cpp_defaults = cpp_default_args::preflight_crate_sources(&source_units, type_map)?;
@@ -3933,6 +3953,7 @@ fn transpile_crate_impl(
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
         transpile_options.cxx_namespace.as_deref(),
+        transpile_options.flat_import_namespace.as_deref(),
     )?;
     let has_cpp_abi = cpp_abi_preflight.has_contracts;
     let has_cpp_name = preflight_cpp_name_crate_sources_exact(
@@ -5520,6 +5541,203 @@ pub fn draw() -> u64 { randgen_rand_raw() }
         .unwrap_err();
         assert!(error.contains("physical generated root module"), "{error}");
         assert!(!inline_child_output.exists());
+    }
+
+    fn write_flat_import_inference_fixture(root: &Path, marked: bool) {
+        let marker = if marked {
+            "#[cfg_attr(any(), cpp_import_namespace(rrr))]\n"
+        } else {
+            ""
+        };
+        write_closure_fixture(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        );
+        write_closure_fixture(
+            root,
+            "src/lib.rs",
+            "pub mod rand; pub mod channel; pub mod consumer;\n",
+        );
+        write_closure_fixture(
+            root,
+            "src/rand.rs",
+            "pub fn randgen_rand_max() -> f64 { 1.0 }\npub fn randgen_rand_raw() -> u64 { 7 }\n",
+        );
+        write_closure_fixture(
+            root,
+            "src/channel.rs",
+            "#[repr(i32)]\n#[cfg_attr(not(any()), derive(Clone, Copy))]\npub enum ChannelError { None = 0 }\n#[repr(C)]\npub struct ChannelFrame { pub value: i32 }\n",
+        );
+        write_closure_fixture(
+            root,
+            "src/consumer.rs",
+            &format!(
+                "{marker}use crate::rand::{{randgen_rand_max, randgen_rand_raw}};\n\
+                 {marker}use crate::channel::{{ChannelError, ChannelFrame}};\n\
+                 pub fn draw() -> f64 {{ randgen_rand_raw() as f64 / randgen_rand_max() }}\n\
+                 pub fn inspect(frame: &ChannelFrame) -> ChannelError {{\n\
+                     let _ = frame.value;\n\
+                     ChannelError::None\n\
+                 }}\n"
+            ),
+        );
+    }
+
+    fn transpile_flat_import_fixture(
+        root: &Path,
+        flat_import_namespace: Option<&str>,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let output = root.join("out");
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("rrr".to_string());
+        options.flat_import_namespace = flat_import_namespace.map(str::to_string);
+        transpile_crate(
+            &root.join("Cargo.toml"),
+            &output,
+            &types::UserTypeMap::default(),
+            false,
+            false,
+            &options,
+            None,
+        )?;
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(&output).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                files.insert(
+                    entry.file_name().to_string_lossy().to_string(),
+                    std::fs::read_to_string(entry.path()).unwrap(),
+                );
+            }
+        }
+        Ok(files)
+    }
+
+    /// Crate-level flat-import inference (a)+(e): the configured namespace
+    /// key makes an UNMARKED private `use crate::<child>::<leaves>` emit
+    /// BYTE-IDENTICALLY to the explicit marker, and an agreeing marker+key
+    /// pair emits identically too (marker-only back-compat is exercised by
+    /// every other cpp_import_namespace test in this module).
+    #[test]
+    fn flat_import_inference_emits_identically_to_the_marker() {
+        let marked = tempfile::tempdir().unwrap();
+        write_flat_import_inference_fixture(marked.path(), true);
+        let marker_outputs = transpile_flat_import_fixture(marked.path(), None).unwrap();
+
+        let inferred = tempfile::tempdir().unwrap();
+        write_flat_import_inference_fixture(inferred.path(), false);
+        let inferred_outputs =
+            transpile_flat_import_fixture(inferred.path(), Some("rrr")).unwrap();
+
+        let agreeing = tempfile::tempdir().unwrap();
+        write_flat_import_inference_fixture(agreeing.path(), true);
+        let agreeing_outputs =
+            transpile_flat_import_fixture(agreeing.path(), Some("rrr")).unwrap();
+
+        assert_eq!(marker_outputs, inferred_outputs);
+        assert_eq!(marker_outputs, agreeing_outputs);
+        let consumer = marker_outputs
+            .get("rrr.consumer.cppm")
+            .expect("consumer module emitted");
+        assert!(consumer.contains("import rrr.rand;"), "{consumer}");
+        assert!(consumer.contains("import rrr.channel;"), "{consumer}");
+    }
+
+    /// Crate-level flat-import inference (b): the private
+    /// `use crate::<child> as _;` anchor binds no names and stays exempt —
+    /// inference emits exactly what the unmarked legacy path did.
+    #[test]
+    fn flat_import_inference_exempts_underscore_anchor() {
+        let write = |root: &Path| {
+            write_closure_fixture(
+                root,
+                "Cargo.toml",
+                "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            );
+            write_closure_fixture(root, "src/lib.rs", "pub mod rand; pub mod consumer;\n");
+            write_closure_fixture(
+                root,
+                "src/rand.rs",
+                "pub fn randgen_rand_raw() -> u64 { 7 }\n",
+            );
+            write_closure_fixture(
+                root,
+                "src/consumer.rs",
+                "#[allow(unused_imports)]\nuse crate::rand as _;\npub fn touch() -> i32 { 3 }\n",
+            );
+        };
+        let legacy = tempfile::tempdir().unwrap();
+        write(legacy.path());
+        let legacy_outputs = transpile_flat_import_fixture(legacy.path(), None).unwrap();
+
+        let inferred = tempfile::tempdir().unwrap();
+        write(inferred.path());
+        let inferred_outputs =
+            transpile_flat_import_fixture(inferred.path(), Some("rrr")).unwrap();
+
+        assert_eq!(legacy_outputs, inferred_outputs);
+    }
+
+    /// Crate-level flat-import inference (c): with the key set, a private
+    /// crate-rooted use item that is neither contract-shaped nor an
+    /// underscore anchor fails closed, atomically, naming the rule.
+    #[test]
+    fn flat_import_inference_rejects_nonconforming_private_use() {
+        for (label, item) in [
+            ("rename", "use crate::rand::randgen_rand_raw as raw;\n"),
+            ("glob", "use crate::rand::*;\n"),
+            ("nested path", "use crate::rand::nested::Deep;\n"),
+            ("bare child", "use crate::rand;\n"),
+            ("grouped crate path", "use {crate::rand::randgen_rand_raw, std::vec::Vec};\n"),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            write_closure_fixture(
+                fixture.path(),
+                "Cargo.toml",
+                "[package]\nname = \"rrr\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "src/lib.rs",
+                "pub mod rand; pub mod consumer;\n",
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "src/rand.rs",
+                "pub fn randgen_rand_raw() -> u64 { 7 }\n",
+            );
+            write_closure_fixture(
+                fixture.path(),
+                "src/consumer.rs",
+                &format!("{item}pub fn touch() -> i32 {{ 3 }}\n"),
+            );
+            let error = transpile_flat_import_fixture(fixture.path(), Some("rrr"))
+                .expect_err(label);
+            assert!(
+                error.contains("flat import namespace inference"),
+                "{label}: {error}"
+            );
+            assert!(
+                !fixture.path().join("out").exists(),
+                "{label}: failure must be atomic"
+            );
+        }
+    }
+
+    /// Crate-level flat-import inference (d): an explicit marker that
+    /// contradicts the configured key is a hard error, atomically.
+    #[test]
+    fn flat_import_inference_rejects_marker_key_mismatch() {
+        let fixture = tempfile::tempdir().unwrap();
+        write_flat_import_inference_fixture(fixture.path(), true);
+        let error =
+            transpile_flat_import_fixture(fixture.path(), Some("other")).unwrap_err();
+        assert!(
+            error.contains("contradicts the crate-level flat import namespace"),
+            "{error}"
+        );
+        assert!(!fixture.path().join("out").exists());
     }
 
     #[test]
@@ -10864,6 +11082,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: None,
+        flat_import_namespace: None,
         crate_namespace_wrap: false,
         // Parity-matrix crates are CONSUMERS of rusty — outside the umbrella's
         // re-export closure — so they keep their `rusty::X` spelling. The port
@@ -11576,6 +11795,7 @@ fn main() {
         flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
         cxx_namespace: cli.cxx_namespace.clone(),
+        flat_import_namespace: cli.flat_import_namespace.clone(),
         crate_namespace_wrap: cli.crate_namespace_wrap,
         in_umbrella_closure: cli.in_umbrella_closure,
         auto_namespace: cli.auto_namespace,

@@ -105,7 +105,7 @@ fn cpp_abi_method_facade_scheduling_mismatch_is_a_fatal_diagnostic() {
         "#,
     )
     .unwrap();
-    let (lowered, plan) = crate::cpp_abi::lower(&file)
+    let (lowered, plan) = crate::cpp_abi::lower(&file, None)
         .unwrap()
         .expect("adapter contract must lower");
     let method = lowered

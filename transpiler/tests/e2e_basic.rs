@@ -3898,6 +3898,76 @@ pub fn make() -> RpcError { crate::errors::make_error(7i32) }
     );
 }
 
+/// Crate-level flat-import inference through the real CLI:
+/// `--flat-import-namespace rrr` makes an UNMARKED private
+/// `use crate::<child>::<leaf>;` behave exactly like the explicit
+/// cpp_import_namespace marker — same import, same flat resolution.
+#[test]
+fn test_flat_import_namespace_flag_infers_unmarked_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='flat_import_infer'\nversion='0.0.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub mod errors;\npub mod callbacks;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/errors.rs"),
+        r#"
+pub struct RpcError { pub code: i32 }
+pub fn make_error(code: i32) -> RpcError { RpcError { code } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/callbacks.rs"),
+        r#"
+use crate::errors::RpcError;
+
+pub fn report(e: &RpcError) -> i32 { e.code }
+
+pub fn make() -> RpcError { crate::errors::make_error(7i32) }
+"#,
+    )
+    .unwrap();
+
+    let out_dir = root.join("out");
+    let output = transpiler_bin()
+        .args(["--crate", root.join("Cargo.toml").to_str().unwrap()])
+        .args(["--output-dir", out_dir.to_str().unwrap()])
+        .args(["--cxx-namespace", "rrr"])
+        .args(["--flat-import-namespace", "rrr"])
+        .output()
+        .expect("failed to run crate-mode flat-import inference probe");
+    assert!(
+        output.status.success(),
+        "crate transpile failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let consumer =
+        std::fs::read_to_string(out_dir.join("flat_import_infer.callbacks.cppm")).unwrap();
+    assert!(
+        consumer.contains("::rrr::make_error("),
+        "an inferred child's item resolves in the configured namespace: {consumer}"
+    );
+    assert!(
+        !consumer.contains("::errors::"),
+        "no global namespace named after the Rust module may be emitted: {consumer}"
+    );
+    assert!(
+        !consumer.contains("::rrr::errors::"),
+        "the inferred contract is FLAT: items do not nest under the child module: {consumer}"
+    );
+}
+
 /// B — a renamed callee is reachable from a sibling file. The crate-wide
 /// cpp_name audit used to be a textual token veto: any file other than the
 /// owner that so much as MENTIONED a cpp_name source or C++ identity was
