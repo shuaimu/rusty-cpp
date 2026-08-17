@@ -5661,6 +5661,39 @@ namespace hash {
     export using random::DefaultHasher;
     export using random::RandomState;
 
+    namespace compat {
+        // Hand-written 8-byte deterministic BuildHasher, ported from
+        // hashbrown_port's DefaultHasher stub — the `S` the ratified srpc
+        // ABI (symbol strings AND layout oracles) was measured with.
+        // std_port's RandomState carries two sip keys (16 bytes) and
+        // therefore shifts every HashMap/HashSet-bearing struct layout by
+        // +8; srpc's 57 pinned layout asserts and the reactor 29-row
+        // oracle pin the 8-byte shape. Deterministic by construction:
+        // hash VALUES never surface in assertions, only layout and
+        // internal consistency do. build_hasher() hands the shared
+        // deterministic rusty::hash::SipHasher to the generic
+        // make_hash/rusty::hash::hash pipeline.
+        // NOTE: shape mirrors random::RandomState exactly (plain field, no
+        // default member initializer, no defaulted comparisons): clang 22
+        // crashes (SIGSEGV, CheckTemplateArgumentList) substituting a
+        // module-exported default template argument whose struct carries a
+        // default member initializer.
+        export struct DefaultHasher {
+            uint64_t state;  // FNV-1a offset basis; layout carrier only
+
+            rusty::hash::SipHasher build_hasher() const {
+                return rusty::hash::SipHasher::new_();
+            }
+            DefaultHasher clone() const { return *this; }
+            static DefaultHasher new_() {
+                return DefaultHasher{14695981039346656037ULL};
+            }
+            static DefaultHasher default_() {
+                return DefaultHasher{14695981039346656037ULL};
+            }
+        };
+    }
+
 }
 
 namespace collections {
@@ -6847,7 +6880,9 @@ return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_po
             /// static RANDOM_MAP: LazyLock<Mutex<HashMap<String, Vec<i32>>>> =
             ///     LazyLock::new(|| Mutex::new(HashMap::new()));
             /// ```
-            export template<typename K, typename V, typename S = ::std_port::hash::random::RandomState, typename A = rusty::alloc::Global>
+            // Compat default S: the 8-byte deterministic builder the ratified
+            // srpc ABI/layout was measured with (see hash::compat above).
+            export template<typename K, typename V, typename S = ::std_port::hash::compat::DefaultHasher, typename A = rusty::alloc::Global>
                 requires (rusty::alloc::Allocator<A>)
             struct HashMap {
                 using Item = std::tuple<K, V>;
@@ -6869,11 +6904,15 @@ return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_po
                 HashMap(hashbrown::hash_map::HashMap<K, V, S, A> base_init)
                     : base(std::move(base_init)) {}
 
-                static HashMap<K, V, ::std_port::hash::random::RandomState> new_() {
-                    return HashMap<K, V, ::std_port::hash::random::RandomState>::with_hasher(::std_port::hash::random::RandomState::new_());
+                // Compat: factories construct the CURRENT instantiation's S
+                // (Rust pins new()/with_capacity() to the default builder; the
+                // compat default S above changes what that default IS, so the
+                // hard-coded RandomState returns would no longer convert).
+                static HashMap<K, V, S, A> new_() {
+                    return HashMap<K, V, S, A>::with_hasher_in(rusty::default_value<S>(), rusty::default_value<A>());
                 }
-                static HashMap<K, V, ::std_port::hash::random::RandomState> with_capacity(size_t capacity) {
-                    return HashMap<K, V, ::std_port::hash::random::RandomState>::with_capacity_and_hasher(std::move(capacity), rusty::default_value<::std_port::hash::random::RandomState>());
+                static HashMap<K, V, S, A> with_capacity(size_t capacity) {
+                    return HashMap<K, V, S, A>::with_capacity_and_hasher_in(std::move(capacity), rusty::default_value<S>(), rusty::default_value<A>());
                 }
                 static HashMap<K, V, S, A> new_in(A alloc) {
                     return HashMap<K, V, S, A>::with_hasher_in(rusty::default_value<S>(), std::move(alloc));
@@ -7631,7 +7670,8 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
             /// static SET: Mutex<HashSet<String, BuildHasherDefault<DefaultHasher>>> =
             ///     Mutex::new(HashSet::with_hasher(BuildHasherDefault::new()));
             /// ```
-            export template<typename T, typename S = ::std_port::hash::random::RandomState, typename A = rusty::alloc::Global>
+            // Compat default S — same rationale as HashMap above.
+            export template<typename T, typename S = ::std_port::hash::compat::DefaultHasher, typename A = rusty::alloc::Global>
                 requires (rusty::alloc::Allocator<A>)
             struct HashSet {
                 using Item = T;
@@ -7649,17 +7689,19 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 HashSet(hashbrown::hash_set::HashSet<T, S, A> base_init)
                     : base(std::move(base_init)) {}
 
-                static HashSet<T, ::std_port::hash::random::RandomState> new_() {
-                    return HashSet<T, ::std_port::hash::random::RandomState>::with_capacity_and_hasher(0, ::std_port::hash::random::RandomState::new_());
+                // Compat: factories construct the CURRENT instantiation's S
+                // (same rationale as HashMap's factories).
+                static HashSet<T, S, A> new_() {
+                    return HashSet<T, S, A>::with_capacity_and_hasher_in(0, rusty::default_value<S>(), rusty::default_value<A>());
                 }
-                static HashSet<T, ::std_port::hash::random::RandomState> with_capacity(size_t capacity) {
-                    return HashSet<T, ::std_port::hash::random::RandomState>::with_capacity_and_hasher(std::move(capacity), rusty::default_value<::std_port::hash::random::RandomState>());
+                static HashSet<T, S, A> with_capacity(size_t capacity) {
+                    return HashSet<T, S, A>::with_capacity_and_hasher_in(std::move(capacity), rusty::default_value<S>(), rusty::default_value<A>());
                 }
-                static HashSet<T, ::std_port::hash::random::RandomState, A> new_in(A alloc) {
-                    return HashSet<T, ::std_port::hash::random::RandomState, A>::with_hasher_in(rusty::default_value<::std_port::hash::random::RandomState>(), std::move(alloc));
+                static HashSet<T, S, A> new_in(A alloc) {
+                    return HashSet<T, S, A>::with_hasher_in(rusty::default_value<S>(), std::move(alloc));
                 }
-                static HashSet<T, ::std_port::hash::random::RandomState, A> with_capacity_in(size_t capacity, A alloc) {
-                    return HashSet<T, ::std_port::hash::random::RandomState, A>::with_capacity_and_hasher_in(std::move(capacity), rusty::default_value<::std_port::hash::random::RandomState>(), std::move(alloc));
+                static HashSet<T, S, A> with_capacity_in(size_t capacity, A alloc) {
+                    return HashSet<T, S, A>::with_capacity_and_hasher_in(std::move(capacity), rusty::default_value<S>(), std::move(alloc));
                 }
                 static constexpr HashSet<T, S> with_hasher(S hasher) {
                     return HashSet<T, S>(hashbrown::hash_set::HashSet<T, S, A>::with_hasher(std::move(hasher)));
