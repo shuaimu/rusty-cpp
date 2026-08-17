@@ -6854,6 +6854,21 @@ return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_po
                 using IntoIter = ::std_port::collections::hash::map::IntoIter<K, V, A>;
                 hashbrown::hash_map::HashMap<K, V, S, A> base;
 
+                // Hand-written-HashMap-compatibility extension, ported from
+                // hashbrown_port's compat block (docs/hashbrown_port/
+                // hashmap_compat_block.cppm.inc): srpc's generated modules
+                // declare plain `rusty::HashMap<K,V>` fields and take them
+                // through rusty::mem::take / rusty::default_like, both of
+                // which require default construction; the transpiled
+                // aggregate otherwise has none.  Declaring ctors suppresses
+                // aggregate init, so the from-base form the factory
+                // functions relied on is spelled out explicitly.
+                HashMap()
+                    : base(hashbrown::hash_map::HashMap<K, V, S, A>::with_hasher_in(
+                          rusty::default_value<S>(), rusty::default_value<A>())) {}
+                HashMap(hashbrown::hash_map::HashMap<K, V, S, A> base_init)
+                    : base(std::move(base_init)) {}
+
                 static HashMap<K, V, ::std_port::hash::random::RandomState> new_() {
                     return HashMap<K, V, ::std_port::hash::random::RandomState>::with_hasher(::std_port::hash::random::RandomState::new_());
                 }
@@ -6944,6 +6959,16 @@ return entry; }(); } if (rusty::detail::variant_index(rusty::detail::deref_if_po
                     requires (rusty::alloc::Allocator<A>)
                 rusty::Option<const V&> get(const Q& k) const {
                     return this->base.get(k);
+                }
+                // Compat overload (ported from hashbrown_port): a non-const
+                // map yields a non-const payload reference, so generated
+                // call sites may invoke a stored rusty::Function or mutate
+                // through the reference exactly as they did against
+                // hashbrown_port's map.
+                template<typename Q>
+                    requires (rusty::alloc::Allocator<A>)
+                rusty::Option<V&> get(const Q& k) {
+                    return this->base.get_mut(k);
                 }
                 template<typename Q>
                     requires (rusty::alloc::Allocator<A>)
@@ -7612,6 +7637,17 @@ return other.get(rusty::detail::deref_if_pointer_like(key)).map_or(false, [&](au
                 using Item = T;
                 using IntoIter = ::std_port::collections::hash::set::IntoIter<T, A>;
                 hashbrown::hash_set::HashSet<T, S, A> base;
+
+                // Hand-written-HashSet-compatibility extension: same
+                // rationale as HashMap's compat block above (default
+                // construction for plain fields + rusty::mem::take, plus the
+                // explicit from-base ctor the factories relied on through
+                // aggregate init).
+                HashSet()
+                    : base(hashbrown::hash_set::HashSet<T, S, A>::with_hasher_in(
+                          rusty::default_value<S>(), rusty::default_value<A>())) {}
+                HashSet(hashbrown::hash_set::HashSet<T, S, A> base_init)
+                    : base(std::move(base_init)) {}
 
                 static HashSet<T, ::std_port::hash::random::RandomState> new_() {
                     return HashSet<T, ::std_port::hash::random::RandomState>::with_capacity_and_hasher(0, ::std_port::hash::random::RandomState::new_());
