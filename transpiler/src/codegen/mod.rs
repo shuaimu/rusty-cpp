@@ -1905,6 +1905,17 @@ pub struct CodeGen {
     /// `= default` copy ctor would SHALLOW-copy the owning pointer and
     /// double-free at scope exit; emit a clone-delegating copy ctor instead.
     pub(crate) types_with_user_clone: HashSet<String>,
+    /// Structs with a `PhantomPinned` field (this file). Their emitted C++
+    /// carries DELETED move operations, so they are never aggregates:
+    /// expression emission must route their struct literals through the
+    /// synthesized fieldwise ctor, and the smart-pointer factory fusion must
+    /// construct them in place (`make_with`) instead of by value-move.
+    /// Populated by `collect_struct_metadata`; cleared per file.
+    pub(crate) types_with_phantom_pinned: HashSet<String>,
+    /// Tails of `PhantomPinned` structs declared anywhere in the crate
+    /// (crate mode). Set once by `set_cross_file_structs`, never cleared by
+    /// `emit_file`'s per-file reset.
+    pub(crate) cross_file_phantom_pinned_tails: HashSet<String>,
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     pub(crate) current_struct: Option<String>,
@@ -3403,6 +3414,8 @@ impl CodeGen {
             operator_renames: HashMap::new(),
             drop_trait_methods: HashSet::new(),
             types_with_user_clone: HashSet::new(),
+            types_with_phantom_pinned: HashSet::new(),
+            cross_file_phantom_pinned_tails: HashSet::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
             type_param_scope_order: Vec::new(),
@@ -6445,6 +6458,18 @@ impl CodeGen {
                 )
             })
             .collect();
+        // `PhantomPinned` structs from sibling files: their literals and
+        // smart-pointer constructions in THIS file must still know the
+        // emitted C++ type is non-movable (deleted move operations).
+        self.cross_file_phantom_pinned_tails = structs
+            .iter()
+            .filter(|s| {
+                s.fields
+                    .iter()
+                    .any(|field| Self::type_is_phantom_pinned_marker(&field.ty))
+            })
+            .map(|s| s.ident.to_string())
+            .collect();
         self.cross_file_struct_tails = structs
             .into_iter()
             .map(|s| s.ident.to_string())
@@ -7700,6 +7725,7 @@ impl CodeGen {
         self.operator_renames.clear();
         self.drop_trait_methods.clear();
         self.types_with_user_clone.clear();
+        self.types_with_phantom_pinned.clear();
         self.pending_explicit_auto_trait_specializations.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
@@ -17863,11 +17889,29 @@ impl CodeGen {
     /// Matches the last path segment so both `PhantomPinned` and
     /// `rusty::marker::PhantomPinned` are recognised.
     pub(super) fn struct_fields_have_phantom_pinned(&self, fields: &syn::Fields) -> bool {
-        fields.iter().any(|field| {
-            matches!(&field.ty, syn::Type::Path(tp)
-                if tp.path.segments.last()
-                    .is_some_and(|seg| seg.ident == "PhantomPinned"))
-        })
+        fields
+            .iter()
+            .any(|field| Self::type_is_phantom_pinned_marker(&field.ty))
+    }
+
+    /// The single field-type test behind `struct_fields_have_phantom_pinned`,
+    /// shared with the cross-file seeding in `set_cross_file_structs`.
+    pub(super) fn type_is_phantom_pinned_marker(ty: &syn::Type) -> bool {
+        matches!(ty, syn::Type::Path(tp)
+            if tp.path.segments.last()
+                .is_some_and(|seg| seg.ident == "PhantomPinned"))
+    }
+
+    /// Registry-backed pinned-ness answer for expression emission, where the
+    /// struct's `syn::Fields` are no longer at hand. A `PhantomPinned` struct
+    /// lowers with deleted move operations, so it is not an aggregate and
+    /// cannot be value-moved into `Box`/`Rc`/`Arc`.
+    pub(super) fn type_has_phantom_pinned(&self, type_name: &str) -> bool {
+        self.types_with_phantom_pinned.contains(type_name)
+            || self
+                .types_with_phantom_pinned
+                .contains(&self.scoped_type_key(type_name))
+            || self.cross_file_phantom_pinned_tails.contains(type_name)
     }
 
     /// Returns true if any field of the struct contains a known non-copyable

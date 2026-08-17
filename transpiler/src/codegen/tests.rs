@@ -2621,6 +2621,136 @@ fn test_drop_mixed_cpp_ctors_retain_fieldwise_ctor() {
 }
 
 #[test]
+fn test_no_fieldwise_marker_without_cpp_ctor_emits_private_inline_fieldwise_ctor() {
+    // Factory-only shape: `#[cpp_no_fieldwise_ctor]` with NO `#[cpp_ctor]`.
+    // The factory's struct literal still needs a constructor to lower to,
+    // but the marker keeps it off the public construction surface: emitted
+    // `private:` (the static factory has member access) and `inline` (a
+    // private implementation detail must not add strong ABI symbols).
+    let out = transpile_str(
+        r#"
+        #[cfg_attr(any(), cpp_no_fieldwise_ctor)]
+        struct PinnedTask {
+            fn_: i32,
+            _pin: rusty::marker::PhantomPinned,
+        }
+        impl PinnedTask {
+            fn new(fn_: i32) -> PinnedTask {
+                PinnedTask {
+                    fn_: fn_,
+                    _pin: rusty::marker::PhantomPinned {},
+                }
+            }
+        }
+        impl Drop for PinnedTask {
+            #[cfg_attr(any(), cpp_noexcept)]
+            fn drop(&mut self) {}
+        }
+        "#,
+    );
+    assert!(out.contains("private:"), "{out}");
+    assert!(out.contains("inline PinnedTask(int32_t fn__init"), "{out}");
+    let private_idx = out.find("private:").unwrap();
+    let ctor_idx = out.find("inline PinnedTask(int32_t fn__init").unwrap();
+    let public_idx = out[ctor_idx..].find("public:").map(|i| ctor_idx + i);
+    assert!(
+        private_idx < ctor_idx && public_idx.is_some(),
+        "fieldwise ctor must sit inside a private:/public: window: {out}"
+    );
+    // The factory itself lowers as the normal static, and its literal takes
+    // the positional-ctor route (a Drop struct is not an aggregate).
+    assert!(out.contains("static PinnedTask new_("), "{out}");
+    assert!(!out.contains("PinnedTask{.fn_"), "{out}");
+    // The pin deletes stay.
+    assert!(out.contains("PinnedTask(PinnedTask&&) = delete;"), "{out}");
+}
+
+#[test]
+fn test_pinned_non_drop_factory_struct_synthesizes_inline_fieldwise_ctor() {
+    // A PhantomPinned struct WITHOUT Drop still emits deleted moves, so it
+    // is not an aggregate: with no #[cpp_ctor] its factory literal needs a
+    // synthesized fieldwise ctor (inline — no new strong symbols) and the
+    // literal must route positionally, not through designated init.
+    let out = transpile_str(
+        r#"
+        struct PinnedFiber {
+            v: i32,
+            _pin: rusty::marker::PhantomPinned,
+        }
+        impl PinnedFiber {
+            fn new(v: i32) -> PinnedFiber {
+                PinnedFiber {
+                    v: v,
+                    _pin: rusty::marker::PhantomPinned {},
+                }
+            }
+        }
+        "#,
+    );
+    assert!(out.contains("inline PinnedFiber(int32_t v_init"), "{out}");
+    assert!(out.contains("PinnedFiber(PinnedFiber&&) = delete;"), "{out}");
+    assert!(out.contains("static PinnedFiber new_("), "{out}");
+    assert!(
+        !out.contains("PinnedFiber{.v"),
+        "designated init on a non-aggregate: {out}"
+    );
+    assert!(out.contains("return PinnedFiber("), "{out}");
+    // Unmarked: the synthesized ctor stays public (no private: window).
+    assert!(!out.contains("private:"), "{out}");
+}
+
+#[test]
+fn test_box_new_of_unmarked_pinned_factory_lowers_to_emplace_with() {
+    // `Box::new(T::new(...))` where T::new is an UNMARKED factory of a
+    // PhantomPinned type: the value fallback (`Box<T>::new_(T::new_(..))`)
+    // would move a move-deleted payload. The fusion must lower to the
+    // in-place `emplace_with` seam (guaranteed copy elision from the
+    // factory's returned prvalue).
+    let out = transpile_str(
+        r#"
+        struct PinnedChan {
+            v: i32,
+            _pin: rusty::marker::PhantomPinned,
+        }
+        impl PinnedChan {
+            fn new(v: i32) -> PinnedChan {
+                PinnedChan {
+                    v: v,
+                    _pin: rusty::marker::PhantomPinned {},
+                }
+            }
+        }
+        fn f() -> Box<PinnedChan> {
+            Box::new(PinnedChan::new(3i32))
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Box<PinnedChan>::emplace_with([&] { return PinnedChan::new_("),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_box_new_of_unmarked_movable_factory_keeps_value_lowering() {
+    // Regression guard: an unmarked factory of a MOVABLE type must keep the
+    // historical value lowering — the in-place seam is for pinned payloads.
+    let out = transpile_str(
+        r#"
+        struct Plain { v: i32 }
+        impl Plain {
+            fn new(v: i32) -> Plain { Plain { v: v } }
+        }
+        fn f() -> Box<Plain> {
+            Box::new(Plain::new(3i32))
+        }
+        "#,
+    );
+    assert!(!out.contains("emplace_with"), "{out}");
+    assert!(!out.contains("make_with"), "{out}");
+}
+
+#[test]
 fn test_cpp_explicit_marker_applies_to_inline_ctor_but_not_out_of_line_definition() {
     let out = transpile_str(
         r#"

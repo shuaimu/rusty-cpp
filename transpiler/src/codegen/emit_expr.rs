@@ -17480,6 +17480,78 @@ impl CodeGen {
         &self,
         expr: &'a syn::Expr,
     ) -> Option<(String, &'a syn::ExprCall, Vec<syn::Type>)> {
+        let (owner_rust, owner_cpp, ctor_call, method) =
+            self.resolve_unique_inherent_associated_call(expr)?;
+        if !Self::has_inert_cpp_ctor_attr(&method.attrs)
+            || Self::extract_cpp_ctor_struct_literal(&method.block, &owner_rust).is_none()
+        {
+            return None;
+        }
+        let param_types = Self::associated_fn_param_types(method, ctor_call)?;
+        Some((owner_cpp, ctor_call, param_types))
+    }
+
+    /// Factory-only companion to `proven_cpp_ctor_arc_make_target`: an
+    /// UNMARKED inherent `fn new` of a `PhantomPinned` type. Such a payload
+    /// cannot take the historical value lowering (`Rc<T>::new_(T::new_(..))`
+    /// materializes and then MOVES the factory result; the type's move
+    /// operations are deleted), so the caller lowers it to the runtime's
+    /// in-place `make_with`/`emplace_with` seam instead.
+    fn proven_pinned_factory_make_with_target<'a>(
+        &self,
+        expr: &'a syn::Expr,
+    ) -> Option<(String, &'a syn::ExprCall, Vec<syn::Type>)> {
+        let (owner_rust, owner_cpp, ctor_call, method) =
+            self.resolve_unique_inherent_associated_call(expr)?;
+        if method.sig.ident != "new"
+            || Self::has_inert_cpp_ctor_attr(&method.attrs)
+            || !self.type_has_phantom_pinned(&owner_rust)
+        {
+            return None;
+        }
+        let param_types = Self::associated_fn_param_types(method, ctor_call)?;
+        Some((owner_cpp, ctor_call, param_types))
+    }
+
+    /// Arity-checked parameter types of a receiverless associated fn.
+    fn associated_fn_param_types(
+        method: &syn::ImplItemFn,
+        call: &syn::ExprCall,
+    ) -> Option<Vec<syn::Type>> {
+        if method.sig.generics.params.len() != 0
+            || method.sig.generics.where_clause.is_some()
+            || method.sig.constness.is_some()
+            || method.sig.asyncness.is_some()
+            || method.sig.abi.is_some()
+            || method.sig.variadic.is_some()
+        {
+            return None;
+        }
+        let param_types = method
+            .sig
+            .inputs
+            .iter()
+            .map(|input| match input {
+                syn::FnArg::Typed(param) => Some((*param.ty).clone()),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if param_types.len() != call.args.len() {
+            return None;
+        }
+        Some(param_types)
+    }
+
+    /// Shared resolution for the smart-pointer construction fusions: a bare
+    /// two-segment `Owner::method(args)` call (optionally inside a one-stmt
+    /// `unsafe` block) whose owner is a crate-declared struct with exactly
+    /// one inherent method of that name. Returns the mapped owner spelling,
+    /// the inner call, and the matched method; each caller applies its own
+    /// authentication gate on the method.
+    fn resolve_unique_inherent_associated_call<'a>(
+        &self,
+        expr: &'a syn::Expr,
+    ) -> Option<(String, String, &'a syn::ExprCall, &syn::ImplItemFn)> {
         let mut inner = self.peel_paren_group_expr(expr);
         if let syn::Expr::Unsafe(unsafe_expr) = inner {
             if unsafe_expr.block.stmts.len() != 1 {
@@ -17581,29 +17653,6 @@ impl CodeGen {
             }
         }
         let method = matched?;
-        if !Self::has_inert_cpp_ctor_attr(&method.attrs)
-            || method.sig.generics.params.len() != 0
-            || method.sig.generics.where_clause.is_some()
-            || method.sig.constness.is_some()
-            || method.sig.asyncness.is_some()
-            || method.sig.abi.is_some()
-            || method.sig.variadic.is_some()
-            || Self::extract_cpp_ctor_struct_literal(&method.block, &owner).is_none()
-        {
-            return None;
-        }
-        let param_types = method
-            .sig
-            .inputs
-            .iter()
-            .map(|input| match input {
-                syn::FnArg::Typed(param) => Some((*param.ty).clone()),
-                syn::FnArg::Receiver(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        if param_types.len() != ctor_call.args.len() {
-            return None;
-        }
 
         let owner_type = syn::Type::Path(syn::TypePath {
             qself: None,
@@ -17616,7 +17665,7 @@ impl CodeGen {
         {
             return None;
         }
-        Some((owner_cpp, ctor_call, param_types))
+        Some((owner, owner_cpp, ctor_call, method))
     }
 
     fn try_emit_cpp_ctor_arc_make(&self, call: &syn::ExprCall) -> Option<String> {
@@ -17687,8 +17736,34 @@ impl CodeGen {
         {
             return None;
         }
+        if let Some((owner, ctor_call, param_types)) =
+            self.proven_cpp_ctor_arc_make_target(&call.args[0])
+        {
+            let args = ctor_call
+                .args
+                .iter()
+                .zip(param_types.iter())
+                .map(|(arg, expected)| {
+                    self.emit_expr_to_string_with_expected_and_move_if_needed(arg, Some(expected))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Some(format!("{}<{}>::{}({})", owner_cpp, owner, factory, args));
+        }
+        // Factory-only fusion: an UNMARKED inherent `T::new(...)` factory of
+        // a `PhantomPinned` payload. The historical fallback
+        // (`Rc<T>::new_(T::new_(...))`) materializes the factory result and
+        // then MOVES it into the allocation — but a pinned type's move
+        // operations are deleted. Lower to the runtime's in-place seam: the
+        // lambda's returned prvalue placement-news T directly inside the
+        // allocation (C++17 guaranteed copy elision), no move involved.
         let (owner, ctor_call, param_types) =
-            self.proven_cpp_ctor_arc_make_target(&call.args[0])?;
+            self.proven_pinned_factory_make_with_target(&call.args[0])?;
+        let with_factory = match factory {
+            "make" => "make_with",
+            "emplace" => "emplace_with",
+            _ => return None,
+        };
         let args = ctor_call
             .args
             .iter()
@@ -17698,7 +17773,10 @@ impl CodeGen {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        Some(format!("{}<{}>::{}({})", owner_cpp, owner, factory, args))
+        Some(format!(
+            "{}<{}>::{}([&] {{ return {}::new_({}); }})",
+            owner_cpp, owner, with_factory, owner, args
+        ))
     }
 
     /// C11 (checkpoint contract 11): a Rust associated constructor that the

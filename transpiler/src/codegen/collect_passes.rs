@@ -6146,6 +6146,20 @@ impl CodeGen {
             match item {
                 syn::Item::Struct(s) => {
                     let struct_name = s.ident.to_string();
+                    // `PhantomPinned` structs emit with deleted move
+                    // operations (non-aggregate, non-movable). Expression
+                    // emission consults this after the struct's impl blocks
+                    // were consumed, so record it during collection.
+                    if self.struct_fields_have_phantom_pinned(&s.fields) {
+                        self.types_with_phantom_pinned.insert(struct_name.clone());
+                        if !module_path.is_empty() {
+                            self.types_with_phantom_pinned.insert(format!(
+                                "{}::{}",
+                                module_path.join("::"),
+                                struct_name
+                            ));
+                        }
+                    }
                     if matches!(s.fields, syn::Fields::Unit) {
                         self.unit_struct_types.insert(struct_name.clone());
                         if !module_path.is_empty() {

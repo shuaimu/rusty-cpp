@@ -3972,6 +3972,26 @@ struct Rc {
         return Rc<T, A>::from_inner(
             rusty::ptr::NonNull<RcInner<T>>::new_unchecked(mem));
     }
+    // Companion of the `make(args...)` shim above for FACTORY-constructed
+    // payloads: `Rc::make_with(f)` placement-news T from f()'s returned
+    // prvalue, which C++17 guaranteed copy elision constructs directly in
+    // the RcInner allocation — no move ctor involved. This is the Rc entry
+    // point for non-movable types (deleted moves, e.g. PhantomPinned
+    // lowerings) whose construction goes through a `fn new` factory rather
+    // than a C++ constructor that `make` could forward to.
+    template<typename F>
+    static Rc<T> make_with(F&& factory) {
+        auto layout = rusty::alloc::Layout::new_<RcInner<T>>();
+        auto* raw = rusty::alloc::alloc(layout);
+        auto* mem = reinterpret_cast<RcInner<T>*>(raw);
+        ::new (&mem->strong) rusty::Cell<size_t>(
+            rusty::Cell<size_t>::new_(static_cast<size_t>(1)));
+        ::new (&mem->weak) rusty::Cell<size_t>(
+            rusty::Cell<size_t>::new_(static_cast<size_t>(1)));
+        ::new (&mem->value) T(std::forward<F>(factory)());
+        return Rc<T, A>::from_inner(
+            rusty::ptr::NonNull<RcInner<T>>::new_unchecked(mem));
+    }
     template<typename F>
     static Rc<T> new_cyclic(F data_fn) {
         return Rc<T, A>::new_cyclic_in(std::move(data_fn), rusty::alloc::Global{});

@@ -56,6 +56,11 @@ private:
         // variadic constructor below by the non-template tiebreaker.
         struct DeferredInit {};
 
+        // Tag for `Arc::make_with`: the payload comes from a FACTORY whose
+        // returned prvalue must initialize the heap T directly (guaranteed
+        // copy elision) — required for non-movable payloads.
+        struct FactoryInit {};
+
         T* value;
         std::atomic<size_t> strong_count;
         std::atomic<size_t> weak_count;
@@ -63,6 +68,12 @@ private:
         template<typename... Args>
         ControlBlock(Args&&... args)
             : value(new T(std::forward<Args>(args)...)),
+              strong_count(1),
+              weak_count(1) {}
+
+        template<typename F>
+        ControlBlock(FactoryInit, F&& factory)
+            : value(new T(std::forward<F>(factory)())),
               strong_count(1),
               weak_count(1) {}
 
@@ -155,6 +166,21 @@ public:
     static Arc<T> make(Args&&... args) {
         // @unsafe - new allocation
         { return Arc<T>(new ControlBlock(std::forward<Args>(args)...)); }
+    }
+
+    // In-place construction from a factory's returned prvalue (guaranteed
+    // copy elision — no move involved). The Arc entry point for non-movable
+    // payloads (deleted moves, e.g. PhantomPinned lowerings) whose
+    // construction goes through a `fn new` factory instead of a C++
+    // constructor that `make` could forward to.
+    // @lifetime: owned
+    template<typename F>
+    static Arc<T> make_with(F&& factory) {
+        // @unsafe - new allocation
+        {
+            return Arc<T>(new ControlBlock(typename ControlBlock::FactoryInit{},
+                                           std::forward<F>(factory)));
+        }
     }
 
     template<typename U>

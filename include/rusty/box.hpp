@@ -182,6 +182,34 @@ public:
         return Box(p, std::move(alloc_inst));
     }
 
+    // In-place construct a T from a factory's returned prvalue. C++17
+    // guaranteed copy elision makes `T(factory())` initialize the heap
+    // object DIRECTLY from the factory's return value — no move ctor is
+    // involved, so this is the Box entry point for non-movable payloads
+    // (deleted moves, e.g. PhantomPinned lowerings) whose construction goes
+    // through a `fn new` FACTORY instead of a real C++ constructor that
+    // `emplace(args...)` could forward to.
+    template<typename F>
+    static Box emplace_with(F&& factory)
+        requires std::is_default_constructible_v<A>
+    {
+        return emplace_with_in(A{}, std::forward<F>(factory));
+    }
+
+    template<typename F>
+    static Box emplace_with_in(A alloc_inst, F&& factory) {
+        constexpr auto layout = rusty::alloc::Layout::for_value<T>();
+        auto result = alloc_inst.allocate(layout);
+        if (result.is_err()) {
+            rusty::alloc::handle_alloc_error(layout);
+        }
+        auto raw = result.unwrap();
+        // @unsafe { placement-new into freshly allocated raw bytes;
+        // guaranteed elision constructs T from the factory prvalue in place }
+        T* p = ::new (static_cast<void*>(raw.as_ptr())) T(std::forward<F>(factory)());
+        return Box(p, std::move(alloc_inst));
+    }
+
     // Alias for backward compatibility
     // @lifetime: owned
     static Box make(T value) requires std::is_default_constructible_v<A> {

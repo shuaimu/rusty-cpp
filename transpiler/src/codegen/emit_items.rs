@@ -2158,15 +2158,24 @@ impl CodeGen {
             })
             .collect();
         let has_cpp_ctor_method = !cpp_ctor_methods.is_empty();
+        let has_no_fieldwise_marker = Self::has_cpp_no_fieldwise_ctor_attr(&s.attrs);
         // Drop structs normally need the synthesized all-fields ctor because
         // their destructor prevents aggregate initialization. A pinned holder
         // can explicitly suppress that bypass only when every annotated ctor
         // is a pure struct literal that will really lower to a constructor.
-        let suppress_drop_fieldwise_ctor = Self::has_cpp_no_fieldwise_ctor_attr(&s.attrs)
+        let suppress_drop_fieldwise_ctor = has_no_fieldwise_marker
             && !cpp_ctor_methods.is_empty()
             && cpp_ctor_methods.iter().all(|method| {
                 Self::extract_cpp_ctor_struct_literal(&method.block, &name_str).is_some()
             });
+        // Factory-only shape: `#[cpp_no_fieldwise_ctor]` with NO `#[cpp_ctor]`
+        // methods. The struct's factories still need a constructor for their
+        // struct literals to lower to, but the marker demands it stay off the
+        // public construction surface. Emit the synthesized fieldwise ctor
+        // `private:` (factories are static members, so access holds) and
+        // `inline` (a private implementation detail must not add strong
+        // symbols to the ratified ABI).
+        let private_fieldwise_ctor = has_no_fieldwise_marker && cpp_ctor_methods.is_empty();
         let reserved_member_names: HashSet<String> = merged_impl_items
             .as_ref()
             .map(|items| {
@@ -2604,12 +2613,19 @@ impl CodeGen {
                                 Some(init)
                             })
                             .collect();
+                        if private_fieldwise_ctor {
+                            self.writeln("private:");
+                        }
                         self.writeln(&format!(
-                            "{}({}) : {} {{}}",
+                            "{}{}({}) : {} {{}}",
+                            if private_fieldwise_ctor { "inline " } else { "" },
                             name,
                             ctor_params.join(", "),
                             ctor_inits.join(", ")
                         ));
+                        if private_fieldwise_ctor {
+                            self.writeln("public:");
+                        }
                     }
                     self.writeln(&copy_ctor_line);
 
@@ -2718,12 +2734,19 @@ impl CodeGen {
                                 }
                             })
                             .collect();
+                        if private_fieldwise_ctor {
+                            self.writeln("private:");
+                        }
                         self.writeln(&format!(
-                            "{}({}) : {} {{}}",
+                            "{}{}({}) : {} {{}}",
+                            if private_fieldwise_ctor { "inline " } else { "" },
                             name,
                             ctor_params.join(", "),
                             ctor_inits.join(", ")
                         ));
+                        if private_fieldwise_ctor {
+                            self.writeln("public:");
+                        }
                     }
                     self.writeln(&copy_ctor_line);
 
@@ -2775,7 +2798,13 @@ impl CodeGen {
                 }
                 syn::Fields::Unit => {
                     if !suppress_drop_fieldwise_ctor {
+                        if private_fieldwise_ctor {
+                            self.writeln("private:");
+                        }
                         self.writeln(&format!("{}() = default;", name));
+                        if private_fieldwise_ctor {
+                            self.writeln("public:");
+                        }
                     }
                     self.writeln(&copy_ctor_line);
                     self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
@@ -2919,6 +2948,64 @@ impl CodeGen {
                     ));
                     self.newline();
                 }
+            }
+        }
+
+        // A `PhantomPinned` struct WITHOUT a Drop impl still gets DELETED
+        // move operations at the close-site emission below, and a deleted
+        // move ctor is user-declared — the emitted C++ is NOT an aggregate,
+        // so designated init (the plain-struct literal lowering) is illegal.
+        // Synthesize the fieldwise ctor its positional struct-literal
+        // lowering targets, exactly like the Drop machinery above. `inline`:
+        // this synthesis is new; it must not add strong symbols to a ratified
+        // ABI. Honors `#[cpp_no_fieldwise_ctor]` by going `private:` (the
+        // factories are static members, so access holds).
+        if !has_drop_impl
+            && cpp_inherit_base.is_none()
+            && !has_cpp_ctor_method
+            && self.struct_fields_have_phantom_pinned(&s.fields)
+        {
+            if let syn::Fields::Named(fields) = &s.fields {
+                let member_of = |rust_name: &str| -> String {
+                    named_field_cpp_names
+                        .get(rust_name)
+                        .cloned()
+                        .unwrap_or_else(|| escape_cpp_keyword(rust_name))
+                };
+                let ctor_params: Vec<String> = fields
+                    .named
+                    .iter()
+                    .filter_map(|field| {
+                        let fname = field.ident.as_ref()?.to_string();
+                        Some(format!("{} {}_init", self.map_type(&field.ty), fname))
+                    })
+                    .collect();
+                let mut ctor_inits: Vec<String> = Vec::new();
+                for field in &fields.named {
+                    let Some(fname) = field.ident.as_ref().map(|i| i.to_string()) else {
+                        continue;
+                    };
+                    let member = member_of(&fname);
+                    let param = format!("{}_init", fname);
+                    if matches!(&field.ty, syn::Type::Reference(_)) {
+                        ctor_inits.push(format!("{}({})", member, param));
+                    } else {
+                        ctor_inits.push(format!("{}(std::move({}))", member, param));
+                    }
+                }
+                if private_fieldwise_ctor {
+                    self.writeln("private:");
+                }
+                self.writeln(&format!(
+                    "inline {}({}) : {} {{}}",
+                    name,
+                    ctor_params.join(", "),
+                    ctor_inits.join(", ")
+                ));
+                if private_fieldwise_ctor {
+                    self.writeln("public:");
+                }
+                self.newline();
             }
         }
 
@@ -10597,6 +10684,9 @@ impl CodeGen {
             // targets the synthesized fieldwise ctor).
             self.is_cpp_inherit_type(name)
                 || self.type_has_drop_impl(name)
+                // PhantomPinned structs emit deleted moves (user-declared) —
+                // non-aggregate, so their literals need the fieldwise ctor.
+                || self.type_has_phantom_pinned(name)
                 || self
                     .impl_blocks
                     .get(name)
