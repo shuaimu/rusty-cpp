@@ -57,7 +57,8 @@ void test_from_raw_fd_and_destructor_closes() {
 void test_into_raw_fd_releases_without_closing() {
     printf("test_into_raw_fd_releases_without_closing: ");
     int pipefd[2];
-    assert(::pipe(pipefd) == 0);
+    [[maybe_unused]] int pipe_rc1 = ::pipe(pipefd);
+    assert(pipe_rc1 == 0);
 
     int released_fd = -1;
     {
@@ -79,7 +80,8 @@ void test_into_raw_fd_releases_without_closing() {
 void test_move_ctor_transfers_ownership() {
     printf("test_move_ctor_transfers_ownership: ");
     int pipefd[2];
-    assert(::pipe(pipefd) == 0);
+    [[maybe_unused]] int pipe_rc2 = ::pipe(pipefd);
+    assert(pipe_rc2 == 0);
 
     OwnedFd source = OwnedFd::from_raw_fd(pipefd[0]);
     int raw = source.as_raw_fd();
@@ -102,8 +104,10 @@ void test_move_assign_closes_prior() {
     printf("test_move_assign_closes_prior: ");
     int pipefd_a[2];
     int pipefd_b[2];
-    assert(::pipe(pipefd_a) == 0);
-    assert(::pipe(pipefd_b) == 0);
+    [[maybe_unused]] int pipe_rc3 = ::pipe(pipefd_a);
+    assert(pipe_rc3 == 0);
+    [[maybe_unused]] int pipe_rc4 = ::pipe(pipefd_b);
+    assert(pipe_rc4 == 0);
 
     OwnedFd a = OwnedFd::from_raw_fd(pipefd_a[0]);
     OwnedFd b = OwnedFd::from_raw_fd(pipefd_b[0]);
@@ -127,7 +131,8 @@ void test_move_assign_closes_prior() {
 void test_try_clone_creates_distinct_fd() {
     printf("test_try_clone_creates_distinct_fd: ");
     int pipefd[2];
-    assert(::pipe(pipefd) == 0);
+    [[maybe_unused]] int pipe_rc5 = ::pipe(pipefd);
+    assert(pipe_rc5 == 0);
     OwnedFd a = OwnedFd::from_raw_fd(pipefd[0]);
 
     auto clone_result = a.try_clone();
@@ -160,7 +165,8 @@ void test_try_clone_invalid_fd_is_err() {
 void test_borrowed_fd_does_not_close() {
     printf("test_borrowed_fd_does_not_close: ");
     int pipefd[2];
-    assert(::pipe(pipefd) == 0);
+    [[maybe_unused]] int pipe_rc6 = ::pipe(pipefd);
+    assert(pipe_rc6 == 0);
     int raw = pipefd[0];
     {
         BorrowedFd borrow = BorrowedFd::borrow_raw(raw);
@@ -178,7 +184,8 @@ void test_borrowed_fd_does_not_close() {
 void test_as_fd_returns_non_owning_view() {
     printf("test_as_fd_returns_non_owning_view: ");
     int pipefd[2];
-    assert(::pipe(pipefd) == 0);
+    [[maybe_unused]] int pipe_rc7 = ::pipe(pipefd);
+    assert(pipe_rc7 == 0);
     OwnedFd owned = OwnedFd::from_raw_fd(pipefd[0]);
     BorrowedFd view = owned.as_fd();
     assert(view.as_raw_fd() == owned.as_raw_fd());
