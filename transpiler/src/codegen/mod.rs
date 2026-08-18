@@ -1874,9 +1874,6 @@ pub struct CodeGen {
     /// When true, first-pass module emission suppresses function definitions
     /// recursively so nested modules in split roots do not emit early bodies.
     pub(crate) defer_module_functions_recursively: bool,
-    /// Self-referential const definitions deferred until after the struct closes.
-    /// E.g., `static const Prerelease EMPTY;` declared inside, definition after.
-    pub(crate) deferred_self_const_defs: Vec<String>,
     /// Modules whose function pass was deferred for later emission.
     pub(crate) deferred_module_items: Vec<syn::ItemMod>,
     /// Crate-root `pub use de::Deserialize`-style trait re-exports for a namespace-WRAPPED
@@ -2289,6 +2286,27 @@ pub struct CodeGen {
     /// valid there — and `Owner::NAME` value references are rewritten to
     /// `Owner::NAME()` in a finalize post-pass.
     pub(crate) self_sizeof_const_fns: HashSet<(String, String)>,
+    /// `(owner_type, const_name)` for SELF-REFERENTIAL associated consts — the
+    /// ones whose C++ type is (or contains) the enclosing struct, e.g.
+    /// `impl RawTableInner { const NEW: Self = RawTableInner::new(); }`.
+    ///
+    /// Rust const-evaluates these; the C++ lowering generally cannot (the
+    /// initializer calls a function, so it is not a constant expression). A
+    /// namespace-scope `inline const T Owner::NAME = expr;` is therefore
+    /// DYNAMICALLY initialized, and inside a C++20 module purview that is
+    /// unsound: a non-module TU that reaches the value from its own static
+    /// initializer runs BEFORE the module's initializer and reads a zeroed
+    /// object. (hashbrown's `RawTableInner::NEW` did exactly that — a null
+    /// `ctrl` pointer, then a segfault on the first table resize.)
+    ///
+    /// So they are emitted as `static const T& NAME() { static const T v = …; }`
+    /// member functions — the C++11 magic-static rule initializes on first use,
+    /// which is immune to initialization order and thread-safe — and
+    /// `Owner::NAME` value references are rewritten to `Owner::NAME()` in a
+    /// finalize post-pass. Nothing is lost: the variable form was never
+    /// `constexpr`, so it was never usable in a constant expression either, and
+    /// both forms are lvalues of type `const T`.
+    pub(crate) lazy_self_const_fns: HashSet<(String, String)>,
     /// Tracks enum-member keys on C-like enums (e.g., "Ordering_SeqCst").
     /// Used to avoid misclassifying enum class variants as data-enum variants.
     pub(crate) c_like_enum_variants: HashSet<String>,
@@ -3406,7 +3424,6 @@ impl CodeGen {
             merged_method_source_modules_raw: Vec::new(),
             deferred_module_function_pass: false,
             defer_module_functions_recursively: false,
-            deferred_self_const_defs: Vec::new(),
             deferred_module_items: Vec::new(),
             deferred_crate_root_trait_reexports: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
@@ -3491,6 +3508,7 @@ impl CodeGen {
             c_like_enum_variant_paths: HashMap::new(),
             block_local_c_like_enum_variant_keys: HashSet::new(),
             self_sizeof_const_fns: HashSet::new(),
+            lazy_self_const_fns: HashSet::new(),
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
             cross_file_struct_field_types: HashMap::new(),
@@ -8736,6 +8754,8 @@ impl CodeGen {
         log_emit("normalize_private_rusty_ext_paths_in_output");
         self.rewrite_self_sizeof_const_fn_calls_in_output();
         log_emit("rewrite_self_sizeof_const_fn_calls_in_output");
+        self.rewrite_lazy_self_const_fn_calls_in_output();
+        log_emit("rewrite_lazy_self_const_fn_calls_in_output");
         // Cluster A completion: emit `__TemplateArgs` primary template plus
         // partial specializations for every inner struct that participated
         // in a structural decomposition. Placed at the end of the file so

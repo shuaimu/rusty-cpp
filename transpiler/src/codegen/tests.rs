@@ -6750,12 +6750,15 @@ fn test_ok_variant_with_struct_const_uses_clone_not_move() {
     let out = transpile_str(
         "struct VersionReq { comparators: Vec<i32> } impl VersionReq { pub const STAR: Self = VersionReq { comparators: Vec::new() }; } fn from_str(s: &str) -> Result<VersionReq, ()> { Ok(VersionReq::STAR) }",
     );
+    // `STAR` is self-referential, so it lowers to a `STAR()` accessor (see
+    // `lazy_self_const_fns`); what this test is about is clone-vs-move, which
+    // is unchanged by that.
     assert!(
-        out.contains("rusty::clone(VersionReq::STAR)"),
-        "Expected rusty::clone(VersionReq::STAR) but got:\n{}",
+        out.contains("rusty::clone(VersionReq::STAR())"),
+        "Expected rusty::clone(VersionReq::STAR()) but got:\n{}",
         out
     );
-    assert!(!out.contains("std::move(VersionReq::STAR)"));
+    assert!(!out.contains("std::move(VersionReq::STAR"));
 }
 
 #[test]
@@ -6767,8 +6770,8 @@ fn test_returning_struct_const_uses_clone_not_move() {
     // wraps const refs with clone for the const-binding and again for
     // the return position).
     assert!(
-        out.contains("return rusty::clone(VersionReq::STAR);")
-            || out.contains("return rusty::clone(rusty::clone(VersionReq::STAR));"),
+        out.contains("return rusty::clone(VersionReq::STAR());")
+            || out.contains("return rusty::clone(rusty::clone(VersionReq::STAR()));"),
         "{out}"
     );
 }
@@ -28612,7 +28615,7 @@ fn test_leaf523_non_bitflags_newtype_with_operator_impl_does_not_emit_flags_help
         "#,
     );
     assert!(
-        !out.contains("FLAGS.size()"),
+        !out.contains("FLAGS().size()"),
         "unexpected FLAGS helper emitted:\n{}",
         out
     );
@@ -39294,9 +39297,22 @@ fn test_leaf4154451_float_is_finite_lowers_to_runtime_helper() {
 }
 
 #[test]
-fn test_leaf4154452_self_referential_const_split_declaration() {
-    // `impl Prerelease { const EMPTY: Self = Prerelease(..); }` should
-    // emit declaration inside struct + definition outside.
+fn test_leaf4154452_self_referential_const_lazy_accessor() {
+    // `impl Prerelease { const EMPTY: Self = Prerelease(..); }` must NOT lower
+    // to a dynamically-initialized namespace-scope variable.
+    //
+    // It used to: an in-struct `static const Prerelease EMPTY;` declaration plus
+    // an `inline const Prerelease Prerelease::EMPTY = …;` definition after the
+    // struct. That initializer is not a constant expression, so the variable was
+    // dynamically initialized — and inside a C++20 module purview a non-module
+    // TU that reads the value from its OWN static initializer runs BEFORE the
+    // module's initializer and gets a zeroed object. hashbrown's
+    // `RawTableInner::NEW` hit exactly that (null `ctrl`, then a segfault on the
+    // first table resize) while everything compiled clean.
+    //
+    // The lowering is now a function-local static (Meyers singleton), which the
+    // C++11 magic-static rule initializes on first use — immune to
+    // initialization order, and thread-safe.
     let out = transpile_str(
         r#"
         pub struct Prerelease {
@@ -39305,22 +39321,37 @@ fn test_leaf4154452_self_referential_const_split_declaration() {
         impl Prerelease {
             pub const EMPTY: Self = Prerelease { identifier: String::new() };
         }
+        pub fn is_empty(p: &Prerelease) -> bool {
+            p.identifier == Prerelease::EMPTY.identifier
+        }
         "#,
     );
-    // Should have split declaration: `static const Prerelease EMPTY;` inside struct
+    // Accessor, defined in-class (a member-function body is a complete-class
+    // context, so naming the enclosing type in the initializer is legal).
     assert!(
-        out.contains("static const Prerelease EMPTY;"),
-        "should declare const inside struct without initializer\nGot: {out}"
+        out.contains("static const Prerelease& EMPTY() {")
+            && out.contains("static const Prerelease __rusty_lazy_const ="),
+        "self-referential const should lower to a function-local-static accessor\nGot: {out}"
     );
-    // Should have definition outside: `inline const Prerelease Prerelease::EMPTY = ...;`
+    // No dynamically-initialized namespace-scope definition anywhere.
     assert!(
-        out.contains("inline const Prerelease Prerelease::EMPTY ="),
-        "should define const after struct\nGot: {out}"
+        !out.contains("inline const Prerelease Prerelease::EMPTY"),
+        "must not emit a dynamically-initialized namespace-scope definition\nGot: {out}"
+    );
+    // No in-struct declaration-without-initializer left behind either.
+    assert!(
+        !out.contains("static const Prerelease EMPTY;"),
+        "the split declaration/definition form should be gone\nGot: {out}"
     );
     // Should NOT have constexpr self-ref inside struct
     assert!(
         !out.contains("static constexpr Prerelease EMPTY ="),
         "should not have constexpr self-referential const inside struct\nGot: {out}"
+    );
+    // Use sites are rewritten to the call form by the finalize post-pass.
+    assert!(
+        out.contains("Prerelease::EMPTY()"),
+        "qualified use sites should be rewritten to `Owner::NAME()`\nGot: {out}"
     );
 }
 
@@ -39785,7 +39816,7 @@ fn test_leaf1054010_bitflags_synthetic_iter_helpers_preserve_remaining_bits() {
         "iter_names synthetic helper should gate aliases via remaining/intersects\nGot: {out}"
     );
     assert!(
-        out.contains("if (FLAGS[i].name().empty()) { continue; }"),
+        out.contains("if (FLAGS()[i].name().empty()) { continue; }"),
         "iter helpers should skip unnamed named-flag entries before intersects/removal\nGot: {out}"
     );
     assert!(
@@ -40267,10 +40298,16 @@ fn test_impl_write_emits_non_const_auto_ref() {
 }
 
 #[test]
-fn test_self_referential_const_deferred_for_indirect_reference() {
+fn test_self_referential_const_lazy_accessor_for_indirect_reference() {
     // When a struct has a const whose type contains Self in a template
-    // argument (e.g., `std::span<const Flag<Self>>`), the initializer
-    // must be deferred outside the class body to avoid incomplete type.
+    // argument (e.g., `std::span<const Flag<Self>>`), the initializer cannot
+    // run in the class body (incomplete type). It used to be deferred to a
+    // namespace-scope `inline const … MyFlags::FLAGS = …;` definition, which is
+    // DYNAMICALLY initialized and therefore order-dependent — unsound in a
+    // module purview (see `lazy_self_const_fns`). It is now a member-function
+    // accessor holding a function-local static: a member-function body is a
+    // complete-class context, and the magic-static rule removes the ordering
+    // question entirely.
     let out = transpile_str(
         r#"
         struct Flag<B> {
@@ -40290,19 +40327,34 @@ fn test_self_referential_const_deferred_for_indirect_reference() {
         }
         "#,
     );
-    // FLAGS should be deferred (declared in-class, defined after class body)
     assert!(
-        out.contains("static const") && out.contains("FLAGS;"),
-        "FLAGS should have a declaration inside the class\nGot: {out}"
+        out.contains("static const std::span<const Flag<MyFlags>>& FLAGS() {")
+            && out.contains("static const std::span<const Flag<MyFlags>> __rusty_lazy_const ="),
+        "FLAGS should be a function-local-static accessor inside the class\nGot: {out}"
     );
     assert!(
-        out.contains("inline const") && out.contains("MyFlags::FLAGS"),
-        "FLAGS should have a deferred definition after class body\nGot: {out}"
+        !out.contains("inline const std::span<const Flag<MyFlags>> MyFlags::FLAGS"),
+        "FLAGS must not get a dynamically-initialized namespace-scope definition\nGot: {out}"
+    );
+    // The bitflags helper bodies name FLAGS unqualified, so they carry the call
+    // form themselves — if this regresses, the generated bitflags types stop
+    // compiling.
+    assert!(
+        out.contains("FLAGS().size()"),
+        "synthetic bitflags iter() must call the FLAGS accessor\nGot: {out}"
     );
 }
 
 #[test]
-fn test_leaf1054010_deferred_flags_definition_emits_after_dependent_consts() {
+fn test_leaf1054010_flags_initializer_does_not_depend_on_emission_order() {
+    // FLAGS reads MyFlags::ABC, which reads MyFlags::A. When these were
+    // namespace-scope dynamically-initialized variables that ordering was
+    // load-bearing, and the emitter had to sort the FLAGS definition last.
+    // As function-local-static accessors each one initializes on first USE, so
+    // FLAGS() → ABC() → A() resolves correctly no matter what order the
+    // declarations appear in — the source below deliberately declares FLAGS
+    // FIRST. Assert the accessors, and that no order-sensitive namespace-scope
+    // definition came back.
     let out = transpile_str(
         r#"
         struct Flag<B> {
@@ -40323,16 +40375,25 @@ fn test_leaf1054010_deferred_flags_definition_emits_after_dependent_consts() {
         }
         "#,
     );
-    let abc_pos = out
-        .find("MyFlags::ABC =")
-        .expect("missing ABC deferred definition");
-    let flags_pos = out
-        .find("MyFlags::FLAGS =")
-        .expect("missing FLAGS deferred definition");
+    for accessor in [
+        "static const MyFlags& A() {",
+        "static const MyFlags& ABC() {",
+        "static const std::span<const Flag<MyFlags>>& FLAGS() {",
+    ] {
+        assert!(
+            out.contains(accessor),
+            "missing lazy accessor `{accessor}`\nGot:\n{out}"
+        );
+    }
+    // FLAGS's initializer reaches the other two through the call form, so the
+    // dependency is resolved at first use rather than by emission order.
     assert!(
-        abc_pos < flags_pos,
-        "dependent const values should be emitted before FLAGS deferred initializer\nGot:\n{}",
-        out
+        out.contains("MyFlags::ABC()"),
+        "FLAGS initializer should call the ABC accessor\nGot:\n{out}"
+    );
+    assert!(
+        !out.contains("inline const MyFlags MyFlags::ABC ="),
+        "no order-sensitive namespace-scope definition may come back\nGot:\n{out}"
     );
 }
 
@@ -40539,12 +40600,15 @@ fn test_assoc_const_receiver_dispatches_to_user_iter_method() {
         }
         "#,
     );
+    // `NEW` is self-referential, so it lowers to a `NEW()` accessor (see
+    // `lazy_self_const_fns`); the point of this test is the RECEIVER
+    // resolution, which the call form does not change.
     assert!(
-        out.contains("RawTableInner::NEW.iter()"),
+        out.contains("RawTableInner::NEW().iter()"),
         "assoc-const receiver should dispatch to the owner's iter()\nGot: {out}"
     );
     assert!(
-        !out.contains("rusty::iter(RawTableInner::NEW)"),
+        !out.contains("rusty::iter(RawTableInner::NEW"),
         "should NOT fall back to the generic rusty::iter(...) adapter\nGot: {out}"
     );
 }

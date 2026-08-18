@@ -5267,22 +5267,20 @@ namespace control {
             Tag clone() const;
             bool operator==(const Tag& other) const;
             void assert_fields_are_eq() const;
-            static const Tag EMPTY;
-            static const Tag DELETED;
+            static const Tag& EMPTY() { static const Tag __rusty_lazy_const = Tag(static_cast<uint8_t>(255)); return __rusty_lazy_const; }
+            static const Tag& DELETED() { static const Tag __rusty_lazy_const = Tag(static_cast<uint8_t>(128)); return __rusty_lazy_const; }
             constexpr bool is_full() const;
             constexpr bool is_special() const;
             constexpr bool special_is_empty() const;
             static constexpr Tag full(uint64_t hash);
             rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
         };
-        inline const Tag Tag::EMPTY = Tag(static_cast<uint8_t>(255));
-        inline const Tag Tag::DELETED = Tag(static_cast<uint8_t>(128));
 
         export class TagSliceExt {
         public:
             virtual ~TagSliceExt() noexcept(false) {}
             virtual void fill_tag(Tag tag) = 0;
-            virtual void fill_empty() { return ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else if constexpr (requires { TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else { return TagSliceExt_::fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })((*this), Tag::EMPTY); }
+            virtual void fill_empty() { return ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else if constexpr (requires { TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else { return TagSliceExt_::fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })((*this), Tag::EMPTY()); }
             TagSliceExt(const TagSliceExt&) = delete;
             TagSliceExt& operator=(const TagSliceExt&) = delete;
             TagSliceExt(TagSliceExt&&) = delete;
@@ -5959,7 +5957,7 @@ if (_m == Fallibility::Infallible) handle_alloc_error(std::move(layout)); }();
         size_t growth_left;
         size_t items;
 
-        static const RawTableInner NEW;
+        static const RawTableInner& NEW() { static const RawTableInner __rusty_lazy_const = RawTableInner::new_(); return __rusty_lazy_const; }
         static constexpr RawTableInner new_();
         template<typename A>
         static auto new_uninitialized(const A& alloc, auto table_layout, size_t buckets, auto fallibility) -> rusty::Result<RawTableInner, TryReserveError>;
@@ -6012,7 +6010,6 @@ if (_m == Fallibility::Infallible) handle_alloc_error(std::move(layout)); }();
         void clear_no_drop();
         void erase(size_t index);
     };
-    inline const RawTableInner RawTableInner::NEW = RawTableInner::new_();
 
     /// Iterator which consumes a table and returns elements.
     export template<typename T, typename A = ::hashbrown::raw::alloc::inner::Global>
@@ -6114,14 +6111,14 @@ if (_m == Fallibility::Infallible) handle_alloc_error(std::move(layout)); }();
 
 
         static constexpr RawTable<T, A> new_() {
-            return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW)), A{}, rusty::PhantomData<T>{});
+            return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW())), A{}, rusty::PhantomData<T>{});
         }
         static RawTable<T, A> with_capacity(size_t capacity) {
             return RawTable<T, A>::with_capacity_in(std::move(capacity), A{});
         }
         static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();
         static constexpr RawTable<T, A> new_in(A alloc) {
-            return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW)), std::move(alloc), rusty::PhantomData<T>{});
+            return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW())), std::move(alloc), rusty::PhantomData<T>{});
         }
         static rusty::Result<RawTable<T, A>, TryReserveError> new_uninitialized(A alloc, size_t buckets, auto fallibility) {
             if (true) {
@@ -6212,7 +6209,7 @@ if (_m == Fallibility::Infallible) handle_alloc_error(std::move(layout)); }();
         void shrink_to(size_t min_size, auto&& hasher) {
             auto min_size_shadow1 = rusty::max(this->table.items, std::move(min_size));
             if (rusty::detail::deref_if_pointer_like(min_size_shadow1) == 0) {
-                auto old_inner = rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW)));
+                auto old_inner = rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW())));
                 // @unsafe
                 {
                     old_inner.template drop_inner_table<T>(this->alloc, rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
@@ -6457,7 +6454,7 @@ return this->find(hashes.at(i), [&](auto&& k) -> bool { return eq(std::move(i), 
                     }
                 }
             }
-            return RawDrain<T, A>(std::move(iter), rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW))), rusty::ptr::NonNull<RawTableInner>::from(&this->table), rusty::PhantomData<const RawTable<T, A>&>{});
+            return RawDrain<T, A>(std::move(iter), rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW()))), rusty::ptr::NonNull<RawTableInner>::from(&this->table), rusty::PhantomData<const RawTable<T, A>&>{});
         }
         RawIntoIter<T, A> into_iter_from(RawIter<T> iter) {
             if (true) {
@@ -6508,7 +6505,7 @@ return rusty::Option<std::tuple<rusty::ptr::NonNull<uint8_t>, ::rusty::alloc::La
         }
         void clone_from(const RawTable<T, A>& source) {
             if (source.table.is_empty_singleton()) {
-                auto old_inner = rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW)));
+                auto old_inner = rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW())));
                 // @unsafe
                 {
                     old_inner.template drop_inner_table<T>(this->alloc, rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
@@ -10441,7 +10438,7 @@ namespace control::group::sse2 {
                     [[no_unique_address]] rusty::detail::zero_length_array<Group> _align;
                     std::array<::hashbrown::control::tag::Tag, rusty::sanitize_array_capacity<Group::WIDTH()>()> tags;
                 };
-                static const AlignedTags ALIGNED_TAGS = AlignedTags{._align = std::array<Group, 0>{}, .tags = [](auto _seed) { std::array<::hashbrown::control::tag::Tag, rusty::sanitize_array_capacity<Group::WIDTH()>()> _repeat{}; _repeat.fill(_seed); return _repeat; }(rusty::clone(Tag::EMPTY))};
+                static const AlignedTags ALIGNED_TAGS = AlignedTags{._align = std::array<Group, 0>{}, .tags = [](auto _seed) { std::array<::hashbrown::control::tag::Tag, rusty::sanitize_array_capacity<Group::WIDTH()>()> _repeat{}; _repeat.fill(_seed); return _repeat; }(rusty::clone(Tag::EMPTY()))};
                 return ALIGNED_TAGS.tags;
             }
 }
@@ -10514,7 +10511,7 @@ namespace control::group::sse2 {
 
 namespace control::group::sse2 {
             ::hashbrown::control::bitmask::BitMask Group::match_empty() const {
-                return this->match_tag(rusty::clone(rusty::clone(Tag::EMPTY)));
+                return this->match_tag(rusty::clone(rusty::clone(Tag::EMPTY())));
             }
 }
 
@@ -10539,7 +10536,7 @@ namespace control::group::sse2 {
                 {
                     const auto zero = rusty::arch::x86_64::_mm_setzero_si128();
                     const auto special = rusty::arch::x86_64::_mm_cmpgt_epi8(std::move(zero), std::move(this->_0));
-                    return Group(rusty::arch::x86_64::_mm_or_si128(std::move(special), rusty::arch::x86_64::_mm_set1_epi8(static_cast<int8_t>(Tag::DELETED._0))));
+                    return Group(rusty::arch::x86_64::_mm_or_si128(std::move(special), rusty::arch::x86_64::_mm_set1_epi8(static_cast<int8_t>(Tag::DELETED()._0))));
                 }
             }
 }
@@ -10748,7 +10745,7 @@ namespace raw {
         using Item = typename RawIter<T>::Item;
         // @unsafe
         {
-            return RawTableInner::NEW.template iter<T>();
+            return RawTableInner::NEW().template iter<T>();
         }
     }
 }
@@ -10765,7 +10762,7 @@ namespace raw {
         using Item = typename FullBucketsIndices::Item;
         // @unsafe
         {
-            return RawTableInner::NEW.full_buckets_indices();
+            return RawTableInner::NEW().full_buckets_indices();
         }
     }
 }
@@ -10878,7 +10875,7 @@ namespace raw {
     template<typename A>
     auto RawTableInner::fallible_with_capacity(const A& alloc, auto table_layout, size_t capacity, auto fallibility) -> rusty::Result<RawTableInner, TryReserveError> {
         if (rusty::detail::deref_if_pointer_like(capacity) == static_cast<size_t>(0)) {
-            return rusty::Result<RawTableInner, TryReserveError>::Ok(rusty::clone(rusty::clone(RawTableInner::NEW)));
+            return rusty::Result<RawTableInner, TryReserveError>::Ok(rusty::clone(rusty::clone(RawTableInner::NEW())));
         } else {
             // @unsafe
             {
@@ -11276,8 +11273,8 @@ if (drop.is_some()) {
     auto&& _iflet_bound_scrutinee = drop;
     decltype(auto) drop = _iflet_bound_scrutinee.unwrap();
     for (auto&& i : rusty::for_in(rusty::range(0, self_.buckets()))) {
-        if (rusty::detail::deref_if_pointer_like(self_.ctrl(std::move(i))) == rusty::clone(Tag::DELETED)) {
-            self_.set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
+        if (rusty::detail::deref_if_pointer_like(self_.ctrl(std::move(i))) == rusty::clone(Tag::DELETED())) {
+            self_.set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY())));
             drop.call_unsafe(self_.bucket_ptr(std::move(i), std::move(size_of)));
             rusty::detail::deref_if_pointer_like([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.items); }) { return (__r.items); } else if constexpr (requires { (__r.items_field); }) { return (__r.items_field); } else if constexpr (requires { ((*__r).items); }) { return ((*__r).items); } else { return ((*__r).items_field); } }(self_)) -= 1;
         }
@@ -11286,7 +11283,7 @@ if (drop.is_some()) {
 [&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.growth_left); }) { return (__r.growth_left); } else if constexpr (requires { (__r.growth_left_field); }) { return (__r.growth_left_field); } else if constexpr (requires { ((*__r).growth_left); }) { return ((*__r).growth_left); } else { return ((*__r).growth_left_field); } }(self_) = bucket_mask_to_capacity(std::move([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.bucket_mask); }) { return (__r.bucket_mask); } else if constexpr (requires { (__r.bucket_mask_field); }) { return (__r.bucket_mask_field); } else if constexpr (requires { ((*__r).bucket_mask); }) { return ((*__r).bucket_mask); } else { return ((*__r).bucket_mask_field); } }(self_))) - rusty::detail::deref_if_pointer_like([&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.items); }) { return (__r.items); } else if constexpr (requires { (__r.items_field); }) { return (__r.items_field); } else if constexpr (requires { ((*__r).items); }) { return ((*__r).items); } else { return ((*__r).items_field); } }(self_));
 }](auto&& __g_place) mutable { return __g_inner(rusty::detail::deref_if_pointer(std::forward<decltype(__g_place)>(__g_place))); });
         for (auto&& i : rusty::for_in(rusty::range(0, rusty::detail::deref_if_pointer((*guard_shadow1)).buckets()))) {
-            if (rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer((*guard_shadow1)).ctrl(std::move(i))) != rusty::clone(Tag::DELETED)) {
+            if (rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer((*guard_shadow1)).ctrl(std::move(i))) != rusty::clone(Tag::DELETED())) {
                 continue;
             }
             const auto i_p = rusty::detail::deref_if_pointer((*guard_shadow1)).bucket_ptr(std::move(i), std::move(size_of));
@@ -11299,15 +11296,15 @@ if (drop.is_some()) {
                 }
                 const auto new_i_p = rusty::detail::deref_if_pointer((*guard_shadow1)).bucket_ptr(std::move(new_i), std::move(size_of));
                 const auto prev_ctrl = rusty::detail::deref_if_pointer((*guard_shadow1)).replace_ctrl_hash(std::move(new_i), std::move(hash));
-                if (rusty::detail::deref_if_pointer_like(prev_ctrl) == rusty::clone(Tag::EMPTY)) {
-                    rusty::detail::deref_if_pointer((*guard_shadow1)).set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
+                if (rusty::detail::deref_if_pointer_like(prev_ctrl) == rusty::clone(Tag::EMPTY())) {
+                    rusty::detail::deref_if_pointer((*guard_shadow1)).set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY())));
                     rusty::ptr::copy_nonoverlapping(std::move(i_p), std::move(new_i_p), std::move(size_of));
                     goto _loop14_continue;
                 } else {
                     if (true) {
                         {
                             auto _m0 = &prev_ctrl;
-                            auto&& _m1_tmp = rusty::clone(Tag::DELETED);
+                            auto&& _m1_tmp = rusty::clone(Tag::DELETED());
                             auto _m1 = &_m1_tmp;
                             auto _m_tuple = std::make_tuple(_m0, _m1);
                             bool _m_matched = false;
@@ -11390,10 +11387,10 @@ namespace raw {
         auto empty_after = Group::load(this->ctrl(std::move(index))).match_empty();
         auto ctrl = [&]() -> ::hashbrown::control::tag::Tag {
 if ((empty_before.leading_zeros() + empty_after.trailing_zeros()) >= Group::WIDTH()) {
-return rusty::clone(Tag::DELETED);
+return rusty::clone(Tag::DELETED());
 } else {
 this->growth_left += 1;
-return rusty::clone(Tag::EMPTY);
+return rusty::clone(Tag::EMPTY());
 }
 }();
         this->set_ctrl(std::move(index), std::move(ctrl));
@@ -11413,7 +11410,7 @@ namespace raw {
         using Item = typename RawIterHashIndices::Item;
         // @unsafe
         {
-            return RawIterHashIndices::new_(rusty::clone(RawTableInner::NEW), static_cast<uint64_t>(0));
+            return RawIterHashIndices::new_(rusty::clone(RawTableInner::NEW()), static_cast<uint64_t>(0));
         }
     }
 }
@@ -11641,7 +11638,7 @@ namespace TagSliceExt_ {
     export template<typename Self_>
     void fill_empty(Self_&& self_) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else if constexpr (requires { TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else { return TagSliceExt_::fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(self_, ::hashbrown::control::tag::Tag::EMPTY);
+        ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else if constexpr (requires { TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else { return TagSliceExt_::fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(self_, ::hashbrown::control::tag::Tag::EMPTY());
     }
 
 }

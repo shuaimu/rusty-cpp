@@ -7,6 +7,37 @@ transpiled hashbrown 0.16.1 they sit on. This is the layering the 2026-07-27
 directive asks for: translate from std, reach hashbrown only as std's dependency
 (see the top of `docs/port_regen/STATUS.md`).
 
+## THE SNAPSHOT IS OLDER THAN THE TRANSPILER
+
+These two files are NOT reproducible from today's `docs/rusty/build.sh`: they
+were taken with an earlier transpiler, and a fresh run emits ~170 extra prologue
+lines (the `rusty::` runtime-helper preamble has grown since) that do not
+currently compile — `hashbrown compile: 271 errors` versus zero for what is
+vendored here. Re-vendoring is therefore its own piece of work, not a step you
+take casually while fixing something else.
+
+Consequence: a targeted fix in the transpiler's LOWERING may have to be applied
+to these snapshots by hand. That is only legitimate when the generator really
+does produce the same shape, so PROVE it the way the self-referential-const fix
+did (2026-08-18): regenerate ONCE with the old transpiler and ONCE with the new
+one into two work dirs, and check that transforming the old output reproduces
+the new output byte-for-byte. Anything else is a hand-patch that the next
+regeneration silently reverts.
+
+Currently hand-applied on top of the snapshot:
+
+  * **Self-referential associated consts are function-local-static accessors.**
+    `Tag::EMPTY` / `Tag::DELETED` / `RawTableInner::NEW` (hashbrown) and
+    `Error::{READ_EXACT_EOF,WRITE_ALL_EOF,INVALID_UTF8}` (std_port) used to be
+    namespace-scope `inline const T Owner::NAME = expr;` definitions. Those are
+    DYNAMICALLY initialized, and in a module purview a non-module TU that
+    reaches them from its own static initializer runs first and reads a zeroed
+    object — mako segfaulted in `RawTableInner::full_buckets_indices` off a null
+    `ctrl`. They are now `static const T& NAME() { static const T … }`, with
+    every `Owner::NAME` use site spelled `Owner::NAME()`. The transpiler emits
+    exactly this shape; `tests/std_port_static_init_order_test.cpp` is the
+    runtime guard.
+
 ## Regenerate
 
     bash docs/rusty/build.sh <work_dir>

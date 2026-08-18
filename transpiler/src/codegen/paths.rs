@@ -35,6 +35,25 @@ impl CodeGen {
         self.output = out;
     }
 
+    /// Same rewrite for SELF-REFERENTIAL associated consts, which are emitted as
+    /// function-local-static accessors rather than dynamically-initialized
+    /// namespace-scope variables (see `lazy_self_const_fns` for why). Kept as a
+    /// separate pass from the self-`sizeof` one because only that set feeds the
+    /// `Self_::CONST()` deferred-signature machinery in `emit_method`; these
+    /// consts hold values, never appear in a type position, and must not drag a
+    /// method into being a template.
+    pub(super) fn rewrite_lazy_self_const_fn_calls_in_output(&mut self) {
+        if self.lazy_self_const_fns.is_empty() {
+            return;
+        }
+        let pairs: Vec<(String, String)> = self.lazy_self_const_fns.iter().cloned().collect();
+        let mut out = std::mem::take(&mut self.output);
+        for (owner, name) in pairs {
+            out = Self::append_call_to_qualified_const_token(&out, &format!("{}::{}", owner, name));
+        }
+        self.output = out;
+    }
+
     /// Append `()` to each standalone occurrence of `token` (a `Owner::NAME`
     /// const reference), skipping ones already followed by `(` (a call) or by an
     /// identifier char (a longer name), and ones preceded by an identifier char

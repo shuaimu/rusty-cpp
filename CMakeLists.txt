@@ -652,6 +652,16 @@ set(TEST_SOURCES
     # Mutation-through-iterator (values_mut/iter_mut) — the class that was
     # already proven broken in retain/ExtractIf by #179. #184.
     tests/std_port_map_mut_iter_test.cpp
+    # Static-INITIALIZATION-ORDER guard. `RawTableInner::NEW` / `Tag::EMPTY`
+    # used to be dynamically-initialized namespace-scope inline variables in the
+    # `hashbrown` module purview, so a non-module TU that filled a container
+    # from its own static initializer cloned a ZEROED table (null `ctrl`) and
+    # segfaulted on the first resize — eight of mako's test binaries did exactly
+    # that while everything compiled clean. Nothing else in the suite runs
+    # container work before main. The driver deliberately does NOT import the
+    # module (see its header comment); the container half lives in the sibling
+    # std_port_static_init_order_registry.cpp wired in below.
+    tests/std_port_static_init_order_test.cpp
 
     # btree_port — transpiled rustc-stdlib BTreeMap / BTreeSet exposed
     # as C++20 modules. Smoke tests import btree_port.btree.{map,set}
@@ -846,6 +856,15 @@ foreach(test_source IN LISTS TEST_SOURCES)
         target_link_libraries(${test_executable} PRIVATE std_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
+    endif()
+    # The static-init-order guard needs TWO TUs: the driver (added above as
+    # ${test_source}, so it comes FIRST on the link line and its constructors
+    # run first) plus the module-importing half. The driver must not import the
+    # module itself — clang then orders the module initializer ahead of the
+    # driver's own and the hazard disappears. See the .cpp header comments.
+    if(test_name STREQUAL "std_port_static_init_order_test")
+        target_sources(${test_executable} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/std_port_static_init_order_registry.cpp)
     endif()
     # Tests that import hashbrown_port.* link against the module library.
     # Tests that import btree_port.* link against the (clang-only) module

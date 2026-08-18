@@ -8231,16 +8231,13 @@ namespace io {
             std::string_view message_field;
 
             rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
-            static const Error READ_EXACT_EOF;
-            static const Error WRITE_ALL_EOF;
-            static const Error INVALID_UTF8;
+            static const Error& READ_EXACT_EOF() { static const Error __rusty_lazy_const = Error::new_const(::std_port::io::error::ErrorKind_UnexpectedEof(), std::string_view("failed to fill whole buffer")); return __rusty_lazy_const; }
+            static const Error& WRITE_ALL_EOF() { static const Error __rusty_lazy_const = Error::new_const(::std_port::io::error::ErrorKind_WriteZero(), std::string_view("failed to write whole buffer")); return __rusty_lazy_const; }
+            static const Error& INVALID_UTF8() { static const Error __rusty_lazy_const = Error::new_const(::std_port::io::error::ErrorKind_InvalidData(), std::string_view("stream did not contain valid UTF-8")); return __rusty_lazy_const; }
             static constexpr Error new_const(auto kind, std::string_view message);
             ErrorKind kind() const;
             std::string_view message() const;
         };
-        inline const Error Error::READ_EXACT_EOF = Error::new_const(::std_port::io::error::ErrorKind_UnexpectedEof(), std::string_view("failed to fill whole buffer"));
-        inline const Error Error::WRITE_ALL_EOF = Error::new_const(::std_port::io::error::ErrorKind_WriteZero(), std::string_view("failed to write whole buffer"));
-        inline const Error Error::INVALID_UTF8 = Error::new_const(::std_port::io::error::ErrorKind_InvalidData(), std::string_view("stream did not contain valid UTF-8"));
 
 
         // Rust-only unresolved import: using const_error;
@@ -8522,7 +8519,7 @@ return ::std_port::io::error::Result<uint64_t>::Ok(this->pos); }(); } if (rusty:
         ::std_port::io::error::Result<rusty::Unit> slice_write_all(uint64_t& pos_mut, std::span<uint8_t> slice, std::span<const uint8_t> buf) {
             auto&& n = RUSTY_TRY_INTO(slice_write(pos_mut, rusty::as_mut_slice(slice), std::span<const uint8_t>(rusty::as_slice(buf))), ::std_port::io::error::Result<rusty::Unit>);
             if (rusty::detail::deref_if_pointer_like(n) < rusty::len(buf)) {
-                return ::std_port::io::error::Result<rusty::Unit>::Err(rusty::clone(rusty::clone(::std_port::io::error::Error::WRITE_ALL_EOF)));
+                return ::std_port::io::error::Result<rusty::Unit>::Err(rusty::clone(rusty::clone(::std_port::io::error::Error::WRITE_ALL_EOF())));
             } else {
                 return ::std_port::io::error::Result<rusty::Unit>::Ok(std::make_tuple());
             }
@@ -9007,7 +9004,7 @@ namespace io {
                 using Self = std::remove_reference_t<decltype(self_)>;
                 if (rusty::len(buf) > rusty::len(self_)) {
                     self_ = rusty::slice_from(self_, rusty::len(self_));
-                    return io::error::Result<rusty::Unit>::Err(rusty::clone(rusty::clone(::std_port::io::error::Error::READ_EXACT_EOF)));
+                    return io::error::Result<rusty::Unit>::Err(rusty::clone(rusty::clone(::std_port::io::error::Error::READ_EXACT_EOF())));
                 }
                 auto [a, b] = rusty::detail::deref_if_pointer_like(rusty::split_at(self_, rusty::len(buf)));
                 if (rusty::len(buf) == 1) {
@@ -9055,7 +9052,7 @@ namespace io {
             export ::std_port::io::error::Result<rusty::Unit> write_all(std::span<uint8_t> self_, std::span<const uint8_t> data) {
                 using Self = std::remove_reference_t<decltype(self_)>;
                 if (RUSTY_TRY_INTO(([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).write_(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).write_(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else if constexpr (requires { Write_::write_(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return Write_::write_(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else { return Write_::write_(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(self_, data), io::error::Result<rusty::Unit>) < rusty::len(data)) {
-                    return io::error::Result<rusty::Unit>::Err(rusty::clone(rusty::clone(::std_port::io::error::Error::WRITE_ALL_EOF)));
+                    return io::error::Result<rusty::Unit>::Err(rusty::clone(rusty::clone(::std_port::io::error::Error::WRITE_ALL_EOF())));
                 } else {
                     return io::error::Result<rusty::Unit>::Ok(std::make_tuple());
                 }

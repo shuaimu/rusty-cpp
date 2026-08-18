@@ -3747,10 +3747,19 @@ impl CodeGen {
                             n, n, n
                         ));
                     }
-                    // iter: iterate over individual set flags using FLAGS constant
+                    // iter: iterate over individual set flags using the FLAGS
+                    // constant. `FLAGS()`, not `FLAGS`: a bitflags `FLAGS` is
+                    // `&'static [Flag<Self>]`, i.e. SELF-REFERENTIAL, so
+                    // `emit_impl_item` lowers it to a function-local-static
+                    // accessor (dynamically-initialized namespace-scope
+                    // variables are unsound in a module purview — see
+                    // `lazy_self_const_fns`). These helper bodies name it
+                    // UNQUALIFIED, so the `Owner::NAME → Owner::NAME()`
+                    // finalize pass cannot reach them and the call form has to
+                    // be baked in here.
                     if !merged_methods.contains("iter") {
                         self.writeln(&format!(
-                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; {n} rem = *this; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (FLAGS[i].name().empty()) {{ continue; }} const auto flag = FLAGS[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ result.push(flag); rem.remove(flag); }} }} if (!rem.is_empty()) {{ result.push(rem); }} return result; }}",
+                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; {n} rem = *this; for (size_t i = 0; i < FLAGS().size(); i++) {{ if (FLAGS()[i].name().empty()) {{ continue; }} const auto flag = FLAGS()[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ result.push(flag); rem.remove(flag); }} }} if (!rem.is_empty()) {{ result.push(rem); }} return result; }}",
                             n = n
                         ));
                     }
@@ -3766,7 +3775,7 @@ impl CodeGen {
                             // begin/end arm, and that asserts ("iter_mut requires mutable
                             // iterator items") because `items.begin()` on a const method
                             // yields const items. begin/end stay for plain range-for.
-                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; size_t __pos = 0; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} rusty::Option<std::tuple<std::string_view, {n}>> next() {{ if (__pos >= items.len()) {{ return rusty::None; }} return rusty::Option<std::tuple<std::string_view, {n}>>(items[__pos++]); }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (FLAGS[i].name().empty()) {{ continue; }} const auto flag = FLAGS[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ v.push(std::make_tuple(FLAGS[i].name(), flag)); rem.remove(flag); }} }} return IterNames{{std::move(v), rem}}; }}",
+                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; size_t __pos = 0; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} rusty::Option<std::tuple<std::string_view, {n}>> next() {{ if (__pos >= items.len()) {{ return rusty::None; }} return rusty::Option<std::tuple<std::string_view, {n}>>(items[__pos++]); }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS().size(); i++) {{ if (FLAGS()[i].name().empty()) {{ continue; }} const auto flag = FLAGS()[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ v.push(std::make_tuple(FLAGS()[i].name(), flag)); rem.remove(flag); }} }} return IterNames{{std::move(v), rem}}; }}",
                             n = n
                         ));
                     }
@@ -3825,17 +3834,13 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("};");
 
-        // Emit deferred self-referential const definitions after struct body.
-        // E.g., `inline const Prerelease Prerelease::EMPTY = Prerelease(...);`
-        if !self.deferred_self_const_defs.is_empty() {
-            let deferred = std::mem::take(&mut self.deferred_self_const_defs);
-            let (non_flags, flags): (Vec<String>, Vec<String>) = deferred
-                .into_iter()
-                .partition(|def| !def.contains("::FLAGS ="));
-            for def in non_flags.iter().chain(flags.iter()) {
-                self.writeln(def);
-            }
-        }
+        // (Self-referential consts used to emit a deferred out-of-struct
+        // `inline const Prerelease Prerelease::EMPTY = …;` definition here,
+        // ordered so `::FLAGS =` came last because a bitflags `FLAGS` array
+        // reads the other consts of the same type and namespace-scope dynamic
+        // initialization is order-sensitive. They are now function-local-static
+        // accessors — see `emit_impl_item` — which initialize on first use, so
+        // there is nothing left to defer and nothing left to order.)
 
         // Post-struct derives (Hash specialization)
         if derives.contains(&"Hash".to_string()) {
@@ -8996,15 +9001,45 @@ impl CodeGen {
                     ));
                     self.self_sizeof_const_fns.insert((owner_leaf, name));
                 }
-                // Self-referential const (type is the enclosing struct):
-                // split into declaration inside struct + definition after.
+                // Self-referential const (type is, or contains, the enclosing
+                // struct). Rust CONST-EVALUATES these; the C++ initializer
+                // generally cannot be a constant expression — it calls a
+                // function (`RawTableInner::new_()`) or a non-constexpr ctor —
+                // so this used to lower to an in-struct declaration plus a
+                // namespace-scope `inline const T Owner::NAME = expr;`
+                // definition, which is DYNAMICALLY initialized.
+                //
+                // Inside a C++20 module purview that is unsound. A non-module
+                // TU that reaches the value from its OWN static initializer
+                // runs before the module's initializer and reads a zeroed
+                // object: hashbrown's `RawTableInner::NEW` came back with a
+                // null `ctrl` pointer and the first table resize segfaulted,
+                // while everything compiled clean.
+                //
+                // Lower it as a function-local-static accessor instead (Meyers
+                // singleton): the C++11 magic-static rule initializes it on
+                // FIRST USE, so initialization order cannot matter, and the
+                // guard makes it thread-safe. A member-function body is a
+                // complete-class context, so the initializer may name the
+                // enclosing (still incomplete) type — the same reason the
+                // `size_of::<Self>()` branch above uses a member function.
+                // `Owner::NAME` value uses are rewritten to `Owner::NAME()` by
+                // a finalize post-pass.
+                //
+                // Nothing is lost: the old form was `const`, never `constexpr`,
+                // so it was never usable in a constant expression either, and
+                // both forms yield an lvalue of type `const T`.
                 else if self.is_self_referential_const_type(&ty) {
-                    self.writeln(&format!("static const {} {};", ty, name));
-                    if let Some(ref struct_name) = self.current_struct.clone() {
-                        self.deferred_self_const_defs.push(format!(
-                            "inline const {} {}::{} = {};",
-                            ty, struct_name, name, expr
-                        ));
+                    self.writeln(&format!(
+                        "static const {ty}& {name}() {{ static const {ty} __rusty_lazy_const = {expr}; return __rusty_lazy_const; }}"
+                    ));
+                    if let Some(struct_name) = self.current_struct.clone() {
+                        let owner_leaf = struct_name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(struct_name.as_str())
+                            .to_string();
+                        self.lazy_self_const_fns.insert((owner_leaf, name));
                     }
                 } else {
                     let storage_spec = if self.impl_const_type_requires_inline_const(&ty) {
