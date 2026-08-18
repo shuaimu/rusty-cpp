@@ -1912,10 +1912,22 @@ fn collect_crate_module_decls(
         let mut path = current.0.clone();
         path.push(ident_key(&item_mod.ident));
         let module = ModulePath(path);
+        // A crate root may move an out-of-line module's file with
+        // `#[path = "..."]`. That form changes only which file holds the
+        // module's bytes -- its name, visibility, and attachment point are
+        // untouched -- and crate-source discovery resolves exactly it, so the
+        // module graph accepts exactly it. `#[path]` anywhere else (on an
+        // inline module, or below the crate root) stays unsupported: discovery
+        // does not follow those, and accepting them would let a source vanish
+        // from the crate with no diagnostic.
+        let remappable = current.0.is_empty() && item_mod.content.is_none();
         let unsupported_attrs = item_mod
             .attrs
             .iter()
-            .filter(|attr| !is_cpp_abi_doc_or_lint_attr(attr))
+            .filter(|attr| {
+                !is_cpp_abi_doc_or_lint_attr(attr)
+                    && !(remappable && attr.path().is_ident("path"))
+            })
             .map(|attr| attr.path().to_token_stream().to_string())
             .collect();
         out.entry(module.clone())
@@ -12646,7 +12658,6 @@ int main() {
             ("private", "mod api;"),
             ("restricted", "pub(crate) mod api;"),
             ("cfg", "#[cfg(target_os = \"linux\")] pub mod api;"),
-            ("path", "#[path = \"api.rs\"] pub mod api;"),
             ("missing", ""),
         ] {
             let units = crate_units(&[("src/lib.rs", root), ("src/api.rs", provider)]);
@@ -12662,6 +12673,55 @@ int main() {
             ("src/api/mod.rs", "pub fn ordinary() {}"),
         ]);
         assert!(preflight_crate_sources(&duplicate).is_err());
+    }
+
+    #[test]
+    fn crate_preflight_accepts_a_crate_root_path_remap_and_rejects_every_other_position() {
+        let provider = r#"
+            #[cfg_attr(any(), cpp_abi(param(v, std_string_bytes)))]
+            pub fn adapted(v: Vec<u8>) {}
+        "#;
+        // Crate-source discovery resolves `#[path]` on an out-of-line module
+        // of the crate root, so the module graph must accept exactly that.
+        // The unit keeps the conventional identity discovery assigns it; only
+        // the file holding the bytes moved.
+        let remapped = crate_units(&[
+            ("src/lib.rs", "#[path = \"../elsewhere/api.rs\"] pub mod api;"),
+            ("src/api.rs", provider),
+        ]);
+        assert!(
+            preflight_crate_sources(&remapped).is_ok(),
+            "rejected a crate-root `#[path]` remap: {:?}",
+            preflight_crate_sources(&remapped)
+        );
+
+        // Every other position stays unsupported: discovery does not follow
+        // them, so accepting one would drop a source with no diagnostic.
+        for (label, units) in [
+            (
+                "inline module",
+                crate_units(&[
+                    (
+                        "src/lib.rs",
+                        "#[path = \"elsewhere\"] pub mod outer { pub mod api; }",
+                    ),
+                    ("src/outer/api.rs", provider),
+                ]),
+            ),
+            (
+                "below the crate root",
+                crate_units(&[
+                    ("src/lib.rs", "pub mod outer;"),
+                    ("src/outer.rs", "#[path = \"../elsewhere/api.rs\"] pub mod api;"),
+                    ("src/outer/api.rs", provider),
+                ]),
+            ),
+        ] {
+            assert!(
+                preflight_crate_sources(&units).is_err(),
+                "accepted `#[path]` on {label}"
+            );
+        }
     }
 
     #[test]

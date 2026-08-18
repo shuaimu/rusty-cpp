@@ -322,6 +322,212 @@ pub fn collect_source_files(project_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// One Rust source of a crate: the lexical path that gives a module its
+/// identity, and the project-relative file whose bytes are that module's
+/// source.
+///
+/// The two differ only where the crate root remaps a module with
+/// `#[path = "..."]`. Identity always keeps the conventional `src/...`
+/// spelling, so every downstream module path, C++ module name, and
+/// diagnostic reads exactly as it would if the file physically lived there.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct CrateSource {
+    /// Conventional `src/...` path. Module identity and diagnostics only.
+    pub identity: PathBuf,
+    /// Project-relative file holding this module's bytes. Reads only.
+    pub content: PathBuf,
+}
+
+impl CrateSource {
+    /// A source whose bytes live at its own conventional path.
+    fn conventional(path: PathBuf) -> Self {
+        Self {
+            identity: path.clone(),
+            content: path,
+        }
+    }
+}
+
+/// Lift the results of a plain `src/` walk, where every file's bytes live at
+/// its own conventional path.
+pub fn crate_sources_from_walk(paths: Vec<PathBuf>) -> Vec<CrateSource> {
+    paths.into_iter().map(CrateSource::conventional).collect()
+}
+
+/// The modules a crate root attaches from outside `src/` with `#[path]`.
+pub fn remapped_crate_root_sources(project_dir: &Path) -> Result<Vec<CrateSource>, String> {
+    remapped_crate_root_modules(project_dir)
+}
+
+/// Every Rust source of a crate, including modules whose crate root remaps
+/// them out of `src/` with `#[path = "..."]`.
+///
+/// A plain directory walk can only find files that physically live under
+/// `src/`, so a crate keeping a module's canonical bytes elsewhere is
+/// invisible to it. rustc does not work that way: it starts at the crate
+/// root and follows each `mod` declaration, honoring `#[path]`. Discovery
+/// follows the same rule, or a remapped module is silently dropped from the
+/// crate rather than reported.
+pub fn collect_crate_sources(project_dir: &Path) -> Result<Vec<CrateSource>, String> {
+    let mut sources = crate_sources_from_walk(collect_source_files(project_dir));
+    sources.extend(remapped_crate_root_modules(project_dir)?);
+    sources.sort();
+    for pair in sources.windows(2) {
+        if pair[0].identity == pair[1].identity {
+            return Err(format!(
+                "Rust module {} is claimed by two sources: {} and {}",
+                pair[0].identity.display(),
+                pair[0].content.display(),
+                pair[1].content.display()
+            ));
+        }
+    }
+    Ok(sources)
+}
+
+/// The conventional library or binary crate root, when the crate has one.
+fn conventional_crate_root(project_dir: &Path) -> Option<PathBuf> {
+    ["src/lib.rs", "src/main.rs"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|relative| project_dir.join(relative).is_file())
+}
+
+/// Out-of-line `#[path = "..."] mod name;` declarations at the top level of
+/// the crate root.
+///
+/// rustc resolves such a path against the directory holding the declaring
+/// file, so a crate root at `src/lib.rs` resolves against `src/`. Only that
+/// one position is followed. A `#[path]` deeper in the module tree, or on an
+/// inline module, is left for the module-graph validators to reject:
+/// accepting a form discovery does not follow would drop sources silently.
+fn remapped_crate_root_modules(project_dir: &Path) -> Result<Vec<CrateSource>, String> {
+    let Some(root_relative) = conventional_crate_root(project_dir) else {
+        return Ok(Vec::new());
+    };
+    let root = project_dir.join(&root_relative);
+    let source = std::fs::read_to_string(&root)
+        .map_err(|error| format!("Error reading {}: {error}", root.display()))?;
+    // A crate root that never spells `path` cannot carry the attribute in any
+    // form, so skip parsing it. The test is deliberately looser than `#[path`:
+    // attributes may contain whitespace, and a pre-filter that missed
+    // `#[ path = "..."]` would drop that module silently -- the exact failure
+    // this resolution exists to prevent.
+    if !source.contains("path") {
+        return Ok(Vec::new());
+    }
+    let file = match syn::parse_file(&source) {
+        Ok(file) => file,
+        // This walker also runs over dependency crates whose syntax this
+        // transpiler never has to understand, and which it otherwise only
+        // scans textually. Refuse to guess only when the text shows an
+        // attribute we would have had to resolve.
+        Err(_) if !source.contains("#[path") => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "could not parse crate root {} while resolving `#[path]` modules: {error}",
+                root.display()
+            ));
+        }
+    };
+    let root_dir = root_relative
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let mut remapped = Vec::new();
+    for item in &file.items {
+        let syn::Item::Mod(item_mod) = item else {
+            continue;
+        };
+        if item_mod.content.is_some() {
+            continue;
+        }
+        let Some(value) = module_path_attribute(&item_mod.attrs)
+            .map_err(|error| format!("{} declares `mod {};`: {error}", root.display(), item_mod.ident))?
+        else {
+            continue;
+        };
+        let name = item_mod.ident.to_string();
+        let content = resolve_module_path(project_dir, &root_dir, &value)
+            .map_err(|error| format!("`#[path]` on `mod {name};` in {}: {error}", root.display()))?;
+        remapped.push(CrateSource {
+            identity: PathBuf::from("src").join(format!("{name}.rs")),
+            content,
+        });
+    }
+    Ok(remapped)
+}
+
+/// The single `#[path = "..."]` value on a module declaration, when present.
+fn module_path_attribute(attrs: &[syn::Attribute]) -> Result<Option<String>, String> {
+    let mut found: Option<String> = None;
+    for attr in attrs {
+        if !attr.path().is_ident("path") {
+            continue;
+        }
+        let syn::Meta::NameValue(name_value) = &attr.meta else {
+            return Err("`#[path]` requires a `#[path = \"...\"]` string value".to_string());
+        };
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(literal),
+            ..
+        }) = &name_value.value
+        else {
+            return Err("`#[path]` requires a `#[path = \"...\"]` string value".to_string());
+        };
+        if found.is_some() {
+            return Err("`#[path]` is declared more than once".to_string());
+        }
+        found = Some(literal.value());
+    }
+    Ok(found)
+}
+
+/// Resolve a `#[path]` value against the declaring file's directory and
+/// return it project-relative.
+fn resolve_module_path(
+    project_dir: &Path,
+    declaring_dir: &Path,
+    value: &str,
+) -> Result<PathBuf, String> {
+    if value.is_empty() || value.contains('\\') {
+        return Err(format!(
+            "value must be a non-empty forward-slash relative path; found {value:?}"
+        ));
+    }
+    if !value.ends_with(".rs") {
+        return Err(format!(
+            "value must name a Rust source file; found {value:?}"
+        ));
+    }
+    let relative = Path::new(value);
+    if relative.is_absolute() {
+        return Err(format!("value must be relative; found {value:?}"));
+    }
+    let target = project_dir.join(declaring_dir).join(relative);
+    let canonical_target = std::fs::canonicalize(&target)
+        .map_err(|error| format!("cannot resolve {}: {error}", target.display()))?;
+    if !canonical_target.is_file() {
+        return Err(format!("{} is not a file", target.display()));
+    }
+    let canonical_project = std::fs::canonicalize(project_dir).map_err(|error| {
+        format!(
+            "cannot resolve crate directory {}: {error}",
+            project_dir.display()
+        )
+    })?;
+    canonical_target
+        .strip_prefix(&canonical_project)
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            format!(
+                "{} escapes the crate at {}",
+                target.display(),
+                project_dir.display()
+            )
+        })
+}
+
 fn collect_rs_files_recursive(base: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -571,5 +777,140 @@ mod tests {
         let cargo: CargoToml = toml::from_str(toml_str).unwrap();
         let deps = extract_dependencies(&cargo);
         assert!(deps.is_empty());
+    }
+
+    /// Build a crate directory from `(relative path, contents)` pairs.
+    fn crate_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (relative, contents) in files {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn crate_sources_resolve_a_crate_root_path_remap_to_conventional_identity() {
+        let dir = crate_dir(&[
+            (
+                "src/lib.rs",
+                "#[path = \"../base/remapped.rs\"]\npub mod remapped;\npub mod local;\n",
+            ),
+            ("src/local.rs", "pub fn local() {}\n"),
+            ("base/remapped.rs", "pub fn remapped() {}\n"),
+        ]);
+        let sources = collect_crate_sources(dir.path()).unwrap();
+        assert_eq!(
+            sources,
+            vec![
+                CrateSource {
+                    identity: PathBuf::from("src/lib.rs"),
+                    content: PathBuf::from("src/lib.rs"),
+                },
+                CrateSource {
+                    identity: PathBuf::from("src/local.rs"),
+                    content: PathBuf::from("src/local.rs"),
+                },
+                // Identity stays conventional so `map_rs_to_cppm` and every
+                // module-path validator keep the spelling they would have had
+                // if the file physically lived under src/.
+                CrateSource {
+                    identity: PathBuf::from("src/remapped.rs"),
+                    content: PathBuf::from("base/remapped.rs"),
+                },
+            ]
+        );
+        assert_eq!(
+            map_rs_to_cppm(&sources[2].identity, "demo"),
+            (PathBuf::from("demo.remapped.cppm"), "demo.remapped".to_string())
+        );
+    }
+
+    #[test]
+    fn crate_sources_reject_a_remap_that_collides_with_a_real_source() {
+        let dir = crate_dir(&[
+            ("src/lib.rs", "#[path = \"../base/api.rs\"]\npub mod api;\n"),
+            ("src/api.rs", "pub fn shadowed() {}\n"),
+            ("base/api.rs", "pub fn remapped() {}\n"),
+        ]);
+        let error = collect_crate_sources(dir.path()).unwrap_err();
+        assert!(error.contains("claimed by two sources"), "{error}");
+    }
+
+    #[test]
+    fn crate_sources_reject_a_remap_that_escapes_the_crate_or_is_missing() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("api.rs"), "pub fn outside() {}\n").unwrap();
+        let escaping = crate_dir(&[(
+            "src/lib.rs",
+            &format!(
+                "#[path = {:?}]\npub mod api;\n",
+                // A relative climb out of the crate, spelled the way a crate
+                // root would have to spell it.
+                std::path::Path::new("..")
+                    .join("..")
+                    .join(outside.path().file_name().unwrap())
+                    .join("api.rs")
+                    .to_string_lossy()
+            ),
+        )]);
+        // Either resolution fails or the target is outside the crate; both are
+        // hard errors rather than a silently skipped module.
+        assert!(collect_crate_sources(escaping.path()).is_err());
+
+        let missing = crate_dir(&[("src/lib.rs", "#[path = \"../base/gone.rs\"]\npub mod gone;\n")]);
+        let error = collect_crate_sources(missing.path()).unwrap_err();
+        assert!(error.contains("cannot resolve"), "{error}");
+    }
+
+    #[test]
+    fn crate_sources_ignore_path_on_inline_modules_and_crates_without_one() {
+        // `#[path]` on an inline module redirects that module's *children*,
+        // not its own bytes. Discovery must not invent a source for it; the
+        // module-graph validators own rejecting the form.
+        let inline = crate_dir(&[(
+            "src/lib.rs",
+            "#[path = \"elsewhere\"]\npub mod outer { pub fn inline() {} }\n",
+        )]);
+        assert_eq!(
+            collect_crate_sources(inline.path()).unwrap(),
+            vec![CrateSource {
+                identity: PathBuf::from("src/lib.rs"),
+                content: PathBuf::from("src/lib.rs"),
+            }]
+        );
+
+        let plain = crate_dir(&[
+            ("src/lib.rs", "pub mod api;\n"),
+            ("src/api.rs", "pub fn api() {}\n"),
+        ]);
+        let sources = collect_crate_sources(plain.path()).unwrap();
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.identity == source.content),
+            "a crate with no remap must keep identity and content equal: {sources:?}"
+        );
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn crate_sources_resolve_a_whitespace_spelled_path_attribute() {
+        // The pre-parse filter must not key on the exact `#[path` spelling:
+        // rustc accepts whitespace inside the attribute, and a module missed
+        // here would vanish from the crate with no diagnostic at all.
+        let dir = crate_dir(&[
+            ("src/lib.rs", "#[ path = \"../base/api.rs\" ]\npub mod api;\n"),
+            ("base/api.rs", "pub fn api() {}\n"),
+        ]);
+        let sources = collect_crate_sources(dir.path()).unwrap();
+        assert!(
+            sources.contains(&CrateSource {
+                identity: PathBuf::from("src/api.rs"),
+                content: PathBuf::from("base/api.rs"),
+            }),
+            "{sources:?}"
+        );
     }
 }

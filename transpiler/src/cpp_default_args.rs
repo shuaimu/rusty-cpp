@@ -566,6 +566,14 @@ fn item_attribute_cannot_generate_bindings(
             | "bench"
             | "ignore"
             | "should_panic"
+            // `#[path]` selects which file backs a module declaration. It
+            // introduces no items of its own, and the file it selects is
+            // already part of the audited unit set: crate-source discovery
+            // resolves the same attribute, and cpp_abi's module graph rejects
+            // it in every position discovery does not follow. Like the rest of
+            // this family it is a built-in name, so it stays subject to the
+            // macro-shadowing test below.
+            | "path"
     ) {
         return Ok(!module_has_potential_macro_import(model, module, &name));
     }
@@ -3017,6 +3025,7 @@ mod tests {
                 ) { let _ = stream; }
             "#,
             r#"
+                use binding_macros::bind_std as path;
                 #[path = "generated.rs"]
                 mod remapped;
                 pub fn rejected(
@@ -3050,6 +3059,8 @@ mod tests {
                 struct BuiltinDerives;
                 #[cfg_attr(any(), binding_macros::disabled)]
                 struct DisabledAttribute;
+                #[path = "generated.rs"]
+                mod remapped;
                 pub fn accepted(
                     #[cfg_attr(any(), cpp_default_argument(stderr))]
                     stream: *mut ::rusty::CFile,
@@ -3057,6 +3068,8 @@ mod tests {
             "#,
         )
         .unwrap();
+        // Unshadowed `#[path]` is inert here: it selects a file, generates no
+        // bindings, and the file it selects is already an audited unit.
         assert!(validate_file(&inert, &exact_type_map()).unwrap());
     }
 

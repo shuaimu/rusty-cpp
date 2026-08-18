@@ -412,6 +412,31 @@ fn source_mentions_cpp_source_contract(source: &str) -> bool {
         || cpp_default_args::source_mentions_marker(source)
 }
 
+/// Every crate source, as the identity list the rest of the pipeline uses for
+/// module paths and the matching read units keyed by that same identity.
+///
+/// Identity and content diverge only for a module the crate root remaps with
+/// `#[path]`: bytes come from the remapped file, while the module keeps its
+/// conventional `src/...` spelling everywhere downstream.
+fn read_crate_source_units(
+    project_dir: &Path,
+) -> Result<(Vec<PathBuf>, Vec<(PathBuf, String)>), String> {
+    let crate_sources = cmake::collect_crate_sources(project_dir)?;
+    if crate_sources.is_empty() {
+        return Err("No .rs source files found in src/".to_string());
+    }
+    let mut sources = Vec::with_capacity(crate_sources.len());
+    let mut source_units = Vec::with_capacity(crate_sources.len());
+    for crate_source in crate_sources {
+        let full = project_dir.join(&crate_source.content);
+        let source = std::fs::read_to_string(&full)
+            .map_err(|error| format!("Error reading {}: {error}", full.display()))?;
+        source_units.push((crate_source.identity.clone(), source));
+        sources.push(crate_source.identity);
+    }
+    Ok((sources, source_units))
+}
+
 fn reject_cpp_abi_in_nonconventional_target_roots(
     cargo: &cmake::CargoToml,
     project_dir: &Path,
@@ -646,7 +671,7 @@ impl<'a> CppAbiClosurePreflight<'a> {
         }
     }
 
-    fn collect_rs_files(&mut self, project_dir: &Path) -> Vec<PathBuf> {
+    fn collect_rs_files(&mut self, project_dir: &Path) -> Vec<cmake::CrateSource> {
         fn recurse(
             this: &mut CppAbiClosurePreflight,
             project_dir: &Path,
@@ -756,7 +781,17 @@ impl<'a> CppAbiClosurePreflight<'a> {
         recurse(self, project_dir, &src, &mut Vec::new(), &mut files);
         files.sort();
         files.dedup();
-        files
+        // The walk sees only what physically lives under src/. A crate root
+        // may also attach modules whose bytes live elsewhere via `#[path]`;
+        // missing those would under-report this crate's contract surface.
+        let mut sources = cmake::crate_sources_from_walk(files);
+        match cmake::remapped_crate_root_sources(project_dir) {
+            Ok(remapped) => sources.extend(remapped),
+            Err(error) => self.issue(error),
+        }
+        sources.sort();
+        sources.dedup();
+        sources
     }
 
     fn read_source_units(
@@ -766,14 +801,14 @@ impl<'a> CppAbiClosurePreflight<'a> {
     ) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
         let sources = self.collect_rs_files(project_dir);
         let mut units = Vec::with_capacity(sources.len());
-        for relative in &sources {
-            let full = project_dir.join(relative);
+        for source in &sources {
+            let full = project_dir.join(&source.content);
             match std::fs::read_to_string(&full) {
-                Ok(source) => {
-                    if source_mentions_cpp_source_contract(&source) {
+                Ok(text) => {
+                    if source_mentions_cpp_source_contract(&text) {
                         self.note_source_contract(cargo_toml_path);
                     }
-                    units.push((relative.clone(), source));
+                    units.push((source.identity.clone(), text));
                 }
                 Err(error) => self.issue(format!(
                     "could not read Rust source {}: {error}",
@@ -781,7 +816,13 @@ impl<'a> CppAbiClosurePreflight<'a> {
                 )),
             }
         }
-        (sources, units)
+        (
+            sources
+                .into_iter()
+                .map(|source| source.identity)
+                .collect(),
+            units,
+        )
     }
 
     fn scan_declared_target_roots(
@@ -1107,9 +1148,9 @@ fn dependency_closure_may_have_source_contract(cargo_toml_path: &Path) -> bool {
         // the authoritative closure preflight retains ownership of errors.
         let mut collector = CppAbiClosurePreflight::new(false);
         let source_paths = collector.collect_rs_files(project_dir);
-        for relative in source_paths {
-            if std::fs::read_to_string(project_dir.join(relative))
-                .is_ok_and(|source| source_mentions_cpp_source_contract(&source))
+        for source in source_paths {
+            if std::fs::read_to_string(project_dir.join(source.content))
+                .is_ok_and(|text| source_mentions_cpp_source_contract(&text))
             {
                 return true;
             }
@@ -2550,22 +2591,10 @@ fn transpile_crate_to_output_with_context(
             &compilation,
         )?;
     let transpile_options = &authenticated_transpile_options;
-    let sources = cmake::collect_source_files(project_dir);
-
-    if sources.is_empty() {
-        return Err("No .rs source files found in src/".to_string());
-    }
-
     // Source-owned ABI contracts need a crate-wide view before any output or
     // dependency directory can be created. Read every source exactly once;
     // marker-free crates continue through the ordinary per-file path below.
-    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
-    for rs_path in &sources {
-        let full_rs_path = project_dir.join(rs_path);
-        let source = std::fs::read_to_string(&full_rs_path)
-            .map_err(|error| format!("Error reading {}: {error}", full_rs_path.display()))?;
-        source_units.push((rs_path.clone(), source));
-    }
+    let (sources, source_units) = read_crate_source_units(project_dir)?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
         &source_units,
@@ -3044,7 +3073,7 @@ impl<'a> CppNameClosurePreflight<'a> {
         self.report.issues.insert(message.into());
     }
 
-    fn collect_sources(&mut self, project_dir: &Path) -> Vec<PathBuf> {
+    fn collect_sources(&mut self, project_dir: &Path) -> Vec<cmake::CrateSource> {
         // Reuse the checked, symlink-aware walker already used by cpp_abi.
         // Its report is local to this one scan; move all structural failures
         // into the cpp_name closure report so a graph containing cpp_name
@@ -3060,17 +3089,23 @@ impl<'a> CppNameClosurePreflight<'a> {
     fn read_source_units(&mut self, project_dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
         let sources = self.collect_sources(project_dir);
         let mut source_units = Vec::with_capacity(sources.len());
-        for relative in &sources {
-            let full = project_dir.join(relative);
+        for source in &sources {
+            let full = project_dir.join(&source.content);
             match std::fs::read_to_string(&full) {
-                Ok(source) => source_units.push((relative.clone(), source)),
+                Ok(text) => source_units.push((source.identity.clone(), text)),
                 Err(error) => self.issue(format!(
                     "could not read Rust source {}: {error}",
                     full.display()
                 )),
             }
         }
-        (sources, source_units)
+        (
+            sources
+                .into_iter()
+                .map(|source| source.identity)
+                .collect(),
+            source_units,
+        )
     }
 
     fn note_markers_without_manifest(&mut self, project_dir: &Path) {
@@ -3504,9 +3539,9 @@ fn dependency_closure_may_have_cpp_name(cargo_toml_path: &Path) -> bool {
         // are retained by the subsequent closure preflight.
         let mut collector = CppAbiClosurePreflight::new(false);
         let source_paths = collector.collect_rs_files(project_dir);
-        for relative in source_paths {
-            if std::fs::read_to_string(project_dir.join(relative))
-                .is_ok_and(|source| cpp_name::source_mentions_reserved_marker(&source))
+        for source in source_paths {
+            if std::fs::read_to_string(project_dir.join(source.content))
+                .is_ok_and(|text| cpp_name::source_mentions_reserved_marker(&text))
             {
                 return true;
             }
@@ -3680,18 +3715,7 @@ fn preflight_crate_codegen_without_output(
         transpile_options,
     )?;
     let transpile_options = &authenticated_transpile_options;
-    let sources = cmake::collect_source_files(project_dir);
-    if sources.is_empty() {
-        return Err("No .rs source files found in src/".to_string());
-    }
-
-    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
-    for source_path in &sources {
-        let full_source_path = project_dir.join(source_path);
-        let source = std::fs::read_to_string(&full_source_path)
-            .map_err(|error| format!("Error reading {}: {error}", full_source_path.display()))?;
-        source_units.push((source_path.clone(), source));
-    }
+    let (sources, source_units) = read_crate_source_units(project_dir)?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
@@ -3933,22 +3957,10 @@ fn transpile_crate_impl(
         .as_deref()
         .or(resolved_atomic_dependencies.as_deref())
         .unwrap_or(&deps);
-    let sources = cmake::collect_source_files(project_dir);
-
-    if sources.is_empty() {
-        return Err("No .rs source files found in src/".to_string());
-    }
-
     // Source-owned ABI contracts need a crate-wide view before any output or
     // dependency directory can be created. Read every source exactly once;
     // marker-free crates continue through the ordinary per-file path below.
-    let mut source_units = Vec::<(PathBuf, String)>::with_capacity(sources.len());
-    for rs_path in &sources {
-        let full_rs_path = project_dir.join(rs_path);
-        let source = std::fs::read_to_string(&full_rs_path)
-            .map_err(|error| format!("Error reading {}: {error}", full_rs_path.display()))?;
-        source_units.push((rs_path.clone(), source));
-    }
+    let (sources, source_units) = read_crate_source_units(project_dir)?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
@@ -4467,7 +4479,10 @@ fn run_cargo_expand_for_exact_target_with_context(
 fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
-    let sources = cmake::collect_source_files(project_dir);
+    let sources = cmake::collect_crate_sources(project_dir)?
+        .into_iter()
+        .map(|source| source.identity)
+        .collect::<Vec<_>>();
 
     if sources.is_empty() {
         return Err("No .rs source files found in src/".to_string());
@@ -7096,8 +7111,12 @@ pub fn valid(value: &Target) -> i32 { value.value }
         symlink("../real", aliases.path().join("crate/src/right")).unwrap();
         let mut preflight = CppAbiClosurePreflight::new(false);
         let files = preflight.collect_rs_files(&aliases.path().join("crate"));
-        assert!(files.contains(&PathBuf::from("src/left/mod.rs")));
-        assert!(files.contains(&PathBuf::from("src/right/mod.rs")));
+        let identities = files
+            .iter()
+            .map(|source| source.identity.clone())
+            .collect::<Vec<_>>();
+        assert!(identities.contains(&PathBuf::from("src/left/mod.rs")));
+        assert!(identities.contains(&PathBuf::from("src/right/mod.rs")));
         assert!(preflight.report.issues.is_empty());
 
         for label in ["broken", "cycle"] {
