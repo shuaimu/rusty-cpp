@@ -41,7 +41,13 @@ constexpr std::size_t kFunctionSBOSize = 3 * sizeof(void*);
 constexpr std::size_t kFunctionSBOAlign = alignof(std::max_align_t);
 
 // Aligned storage for SBO
-using FunctionStorage = std::aligned_storage_t<kFunctionSBOSize, kFunctionSBOAlign>;
+// Was `std::aligned_storage_t<...>`, deprecated in C++23. This struct is
+// that trait's exact expansion; every use takes `&storage_`, so the shape
+// (a trivially-copyable aggregate of the right size/alignment) is what
+// matters and is preserved.
+struct alignas(kFunctionSBOAlign) FunctionStorage {
+    unsigned char data[kFunctionSBOSize];
+};
 
 // Check if a type fits in SBO
 template<typename T>

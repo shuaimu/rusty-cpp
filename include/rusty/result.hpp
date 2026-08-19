@@ -75,10 +75,16 @@ private:
 
     struct UninitTag {};
 
-    // Use aligned storage for union-like behavior (C++11 compatible)
+    // Raw storage for union-like behavior. `alignas(T) unsigned char[sizeof(T)]`
+    // IS what `std::aligned_storage<N, A>::type` was — that trait is deprecated
+    // in C++23 (libc++ marks it `_LIBCPP_DEPRECATED_IN_CXX23`, and every
+    // instantiation of Result printed a -Wdeprecated-declarations warning; a
+    // mako build emitted ~27k of them). Every use below takes the ADDRESS of
+    // these members (placement new / reinterpret_cast), so the array spelling
+    // is a drop-in.
     union Storage {
-        typename std::aligned_storage<sizeof(OkStored), alignof(OkStored)>::type ok_storage;
-        typename std::aligned_storage<sizeof(ErrStored), alignof(ErrStored)>::type err_storage;
+        alignas(OkStored) unsigned char ok_storage[sizeof(OkStored)];
+        alignas(ErrStored) unsigned char err_storage[sizeof(ErrStored)];
         
         Storage() {}
         ~Storage() {}
@@ -1049,7 +1055,9 @@ template<typename E>
 class Result<void, E> {
 private:
     union Storage {
-        typename std::aligned_storage<sizeof(E), alignof(E)>::type err_storage;
+        // See the note on Result<T, E>::Storage: aligned_storage is deprecated
+        // in C++23 and this is its exact expansion.
+        alignas(E) unsigned char err_storage[sizeof(E)];
         
         Storage() {}
         ~Storage() {}
