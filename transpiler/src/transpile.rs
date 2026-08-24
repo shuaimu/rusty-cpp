@@ -3107,12 +3107,14 @@ fn transpile_full_with_options_impl(
         }
     };
     let (mut file, cpp_abi_plan, has_cpp_defaults) = if let Some((file, plan)) = prepared_cpp_abi {
+        crate::cpp_value_init::validate_file(&file)?;
         let has_cpp_defaults = validate_cpp_defaults(&file)?;
         (file, plan, has_cpp_defaults)
     } else {
         let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
             .map_err(|e| format!("Parse error: {}", e))?;
         log_profile("parse_with_expand_hygiene_fallback");
+        crate::cpp_value_init::validate_source(rust_source, &file)?;
         let has_cpp_defaults = validate_cpp_defaults(&file)?;
         match crate::cpp_abi::lower(&file, options.flat_import_namespace.as_deref())? {
             Some((lowered, plan)) => (lowered, plan, has_cpp_defaults),
@@ -3387,6 +3389,7 @@ const KNOWN_CPP_MARKER_NAMES: &[&str] = &[
     "cpp_noexcept",
     "cpp_no_fieldwise_ctor",
     "cpp_trait_member_dispatch",
+    "cpp_value_init",
 ];
 
 /// Reject `#[cfg_attr(any(), <payload>)]` carriers whose payload names an
@@ -4735,6 +4738,28 @@ fn qualify_relative_path(raw: &str, module_path: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpp_value_init_emits_braces_only_for_marked_scalar_fields() {
+        let output = transpile(
+            r#"
+            pub struct Message {
+                #[cfg_attr(any(), cpp_value_init)]
+                pub term: u64,
+                pub untouched: i32,
+                #[cfg_attr(any(), cpp_value_init)]
+                pub acknowledged: bool,
+            }
+            "#,
+            None,
+        )
+        .expect("valid cpp_value_init fields should transpile");
+
+        assert!(output.contains("uint64_t term{};"), "{output}");
+        assert!(output.contains("int32_t untouched;"), "{output}");
+        assert!(output.contains("bool acknowledged{};"), "{output}");
+        assert!(!output.contains("int32_t untouched{};"), "{output}");
+    }
 
     fn cpp_default_argument_type_map() -> UserTypeMap {
         let mut type_map = UserTypeMap::default();

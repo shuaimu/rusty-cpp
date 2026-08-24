@@ -267,6 +267,7 @@ fn audited_transpiler_marker_meta(meta: &Meta) -> bool {
                     | "cpp_no_auto_traits"
                     | "cpp_no_fieldwise_ctor"
                     | "cpp_noexcept"
+                    | "cpp_value_init"
                     | "thread_local"
             )
         })

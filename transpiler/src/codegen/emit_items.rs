@@ -2371,7 +2371,15 @@ impl CodeGen {
                     let field_type = self
                         .zero_len_array_field_type_override(&field.ty)
                         .unwrap_or(field_type);
-                    self.writeln(&format!("{} {};", field_type, emitted_field_name));
+                    let initializer = if crate::cpp_value_init::field_has_marker(field) {
+                        "{}"
+                    } else {
+                        ""
+                    };
+                    self.writeln(&format!(
+                        "{} {}{};",
+                        field_type, emitted_field_name, initializer
+                    ));
                     used_member_names.insert(emitted_field_name.clone());
                     named_field_types.insert(field_name.clone(), field.ty.clone());
                     if matches!(field.ty, syn::Type::Reference(_)) {
@@ -11399,4 +11407,3 @@ pub(super) fn contains_whole_word(haystack: &str, needle: &str) -> bool {
     }
     false
 }
-
