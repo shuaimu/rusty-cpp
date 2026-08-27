@@ -526,6 +526,25 @@ fn module_has_potential_macro_import(
                 .is_some_and(|imports| !imports.is_empty()))
 }
 
+/// Recognize a Verus verification annotation: the `verifier` tool-attribute
+/// namespace (`#[verifier::external_body]`, ...) or the `verus_spec` /
+/// `verus_verify` proc-macro attributes. All are verification-only and lower
+/// to nothing in C++.
+fn is_verus_verification_attr(path: &syn::Path) -> bool {
+    let Some(first) = path.segments.first() else {
+        return false;
+    };
+    let head = ident_text(&first.ident);
+    // `#[verifier::<x>]` — tool-attribute namespace (>= 2 path segments).
+    if head == "verifier" && path.segments.len() >= 2 {
+        return true;
+    }
+    // `#[verus_spec(..)]` / `#[verus_verify(..)]` — single-segment proc macros.
+    path.leading_colon.is_none()
+        && path.segments.len() == 1
+        && matches!(head.as_str(), "verus_spec" | "verus_verify")
+}
+
 fn item_attribute_cannot_generate_bindings(
     meta: &Meta,
     module: &[String],
@@ -533,6 +552,22 @@ fn item_attribute_cannot_generate_bindings(
     cpp_inherit_item_form: bool,
 ) -> Result<bool, String> {
     let path = meta.path();
+    // Verus verification annotations carry no runtime meaning and generate no
+    // C++ bindings, so this transpiler recognizes and drops them — a source
+    // tree can be annotated for Verus in place and still lower unchanged.
+    //
+    // Two shapes, both verification-only by construction:
+    //   * `#[verifier::<x>]` (e.g. `#[verifier::external_body]`) is a
+    //     tool-attribute namespace. A tool attribute cannot be `use`-aliased
+    //     onto a binding-generating proc macro, so it is trusted by shape.
+    //   * `#[verus_spec(..)]` / `#[verus_verify(..)]` are Verus's own
+    //     proc-macro attributes, whose defining contract is that under
+    //     standard rustc they erase to the bare annotated item (their spec
+    //     clauses compile only under the Verus tool). They therefore emit
+    //     nothing into the C++ surface.
+    if is_verus_verification_attr(path) {
+        return Ok(true);
+    }
     let Some(name) = path
         .segments
         .first()
