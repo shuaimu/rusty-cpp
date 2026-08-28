@@ -491,7 +491,30 @@ fn path_is_builtin_derive(path: &Path) -> bool {
 }
 
 fn cfg_predicate_is_definitely_false(meta: &Meta) -> bool {
-    matches!(meta, Meta::List(list) if path_is_one_ident(&list.path, "any") && list.tokens.is_empty())
+    // `#[cfg(any())]` is the canonical always-false predicate. `verus` is the
+    // verification cfg, set only by the Verus driver and never for
+    // transpilation, so `#[cfg(verus)]` / `#[cfg_attr(verus, ..)]` are equally
+    // always-false here and their gated items/attrs contribute nothing.
+    match meta {
+        Meta::Path(path) => path_is_one_ident(path, "verus"),
+        Meta::List(list) => path_is_one_ident(&list.path, "any") && list.tokens.is_empty(),
+        Meta::NameValue(_) => false,
+    }
+}
+
+/// True when an item is removed by a definitely-false `#[cfg(..)]` (e.g.
+/// `#[cfg(verus)]`), so it is not part of the transpiled program and its
+/// attribute surface need not be audited.
+fn item_is_cfg_removed(item: &Item) -> bool {
+    item_attributes(item).iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, Meta::List(list)
+                if list
+                    .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                    .ok()
+                    .and_then(|args| args.into_iter().next())
+                    .is_some_and(|pred| cfg_predicate_is_definitely_false(&pred)))
+    })
 }
 
 fn module_has_potential_macro_import(
@@ -825,6 +848,11 @@ fn validate_binding_macro_surfaces(
     model: &DefaultSignatureTypes,
 ) -> Result<(), String> {
     for item in items {
+        // Items removed by a verification-only cfg are not transpiled, so their
+        // attribute surface is irrelevant here.
+        if item_is_cfg_removed(item) {
+            continue;
+        }
         if let Item::Macro(item_macro) = item {
             return Err(format!(
                 "{MARKER} cannot prove item macro `{}` is free of macro-generated bindings in module `{}`",

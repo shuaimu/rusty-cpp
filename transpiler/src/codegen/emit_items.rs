@@ -7503,6 +7503,12 @@ impl CodeGen {
     }
 
     pub(super) fn emit_use(&mut self, u: &syn::ItemUse) {
+        // A cfg-removed `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is not
+        // part of the transpiled program, so nothing is emitted for it -- not
+        // even the unresolved-external-crate TODO.
+        if Self::should_skip_cfg_attrs(&u.attrs) {
+            return;
+        }
         if std::env::var_os("RUSTY_DBG_USE").is_some() {
             let toks = quote::ToTokens::to_token_stream(&u.tree).to_string();
             if toks.contains("Unexpected") {

@@ -18102,14 +18102,19 @@ impl CodeGen {
     fn eval_cfg_meta(meta: &syn::Meta) -> CfgEval {
         match meta {
             syn::Meta::Path(path) => {
-                if path.is_ident("test") {
+                // `verus` is the verification-only cfg: source can carry
+                // `#[cfg(verus)]` items and `#[cfg_attr(verus, ..)]` specs that
+                // only the Verus driver activates. It is never set for
+                // transpilation, so it is known-FALSE here, exactly like
+                // `test`, and such items lower to nothing.
+                if path.is_ident("test") || path.is_ident("verus") {
                     CfgEval::False
                 } else {
                     CfgEval::Unknown
                 }
             }
             syn::Meta::NameValue(nv) => {
-                if nv.path.is_ident("test") {
+                if nv.path.is_ident("test") || nv.path.is_ident("verus") {
                     CfgEval::False
                 } else {
                     CfgEval::Unknown

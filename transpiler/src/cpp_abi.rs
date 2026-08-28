@@ -2358,6 +2358,11 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
     }
 
     fn visit_item_use(&mut self, item_use: &'ast syn::ItemUse) {
+        // A cfg-absent `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is not
+        // part of the transpiled program and is not audited here.
+        if flat_import_attrs_presence(&item_use.attrs) == FlatImportPresence::Absent {
+            return;
+        }
         for attr in &item_use.attrs {
             self.visit_attribute(attr);
         }
@@ -3047,6 +3052,12 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        // A cfg-absent `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is not
+        // part of the transpiled program, so it is not audited -- a
+        // verification-only glob import must not trip the glob rejection below.
+        if flat_import_attrs_presence(&item.attrs) == FlatImportPresence::Absent {
+            return;
+        }
         for attr in &item.attrs {
             self.visit_attribute(attr);
         }
@@ -4222,8 +4233,10 @@ fn flat_import_eval_cfg_predicate(meta: &Meta) -> FlatImportPresence {
     match meta {
         Meta::Path(path) => {
             // Crate transpilation emits production C++; libtest-only bindings
-            // are therefore absent just as they are in CodeGen's cfg gate.
-            if path.is_ident("test") {
+            // are therefore absent just as they are in CodeGen's cfg gate. The
+            // `verus` verification cfg is absent for the same reason: it is set
+            // only by the Verus driver, never for transpilation.
+            if path.is_ident("test") || path.is_ident("verus") {
                 FlatImportPresence::Absent
             } else {
                 FlatImportPresence::Unknown
