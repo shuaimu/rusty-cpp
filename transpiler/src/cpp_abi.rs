@@ -7665,10 +7665,39 @@ impl<'ast> Visit<'ast> for AliasSemanticUseAudit<'_> {
     }
 }
 
+/// A `#[cfg_attr(<pred>, ...)]` whose predicate is *proved* absent for
+/// transpilation (the `verus` verification cfg, or libtest's `test`) applies
+/// NONE of its payload attributes to the emitted C++.  Such an attribute is
+/// therefore inert for provider / leaf / const purity: the transpiled program
+/// is byte-for-byte what it would be with the attribute removed.  Only a
+/// definitely-absent predicate qualifies; an `Unknown` predicate (a Cargo
+/// feature, a target, a caller `--cfg`) is left as an unsupported attribute so
+/// the existing strictness is preserved.
+fn is_transpile_absent_cfg_attr(attr: &Attribute) -> bool {
+    if !attr.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    let Ok(arguments) = parser.parse2(list.tokens.clone()) else {
+        return false;
+    };
+    let Some(predicate) = arguments.first() else {
+        return false;
+    };
+    matches!(
+        flat_import_eval_cfg_predicate(predicate),
+        FlatImportPresence::Absent
+    )
+}
+
 fn is_cpp_abi_doc_or_lint_attr(attr: &Attribute) -> bool {
     ["doc", "allow", "warn", "deny", "forbid", "expect"]
         .iter()
         .any(|name| attr.path().is_ident(name))
+        || is_transpile_absent_cfg_attr(attr)
 }
 
 fn validate_cpp_abi_file_attrs(attrs: &[Attribute], context: &str) -> Result<(), String> {
