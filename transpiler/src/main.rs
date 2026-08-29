@@ -11,6 +11,7 @@ mod codegen;
 mod cpp_abi;
 mod cpp_default_args;
 mod cpp_name;
+mod cpp_value_init;
 mod inline_rust;
 mod metadata;
 mod slots;
