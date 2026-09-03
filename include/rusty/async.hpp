@@ -80,14 +80,15 @@ public:
         // KEY: suspend_always makes it LAZY — nothing runs until poll()
         std::suspend_always initial_suspend() { return {}; }
         auto final_suspend() noexcept {
+            // Symmetric transfer to the awaiting coroutine (or a no-op when
+            // nothing awaits): tail-resumes instead of growing the stack one
+            // frame per chain link the way continuation.resume() did.
             struct FinalAwaiter {
                 bool await_ready() noexcept { return false; }
 
-                void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+                std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
                     auto continuation = h.promise().continuation;
-                    if (continuation) {
-                        continuation.resume();
-                    }
+                    return continuation ? continuation : std::noop_coroutine();
                 }
 
                 void await_resume() noexcept {}
@@ -117,10 +118,19 @@ public:
         return Poll<T>::pending();
     }
 
-    // Awaiter support: makes Task<T> co_await-able
+    // Awaiter support: makes Task<T> co_await-able.  await_suspend uses
+    // symmetric transfer to START the awaited task -- merely storing the
+    // continuation (as this did before) left the lazy inner coroutine
+    // suspended at initial_suspend forever: the chain never ran, and a second
+    // poll() of the outer task resumed PAST the co_await, completing with a
+    // default-constructed result.  With the transfer, a chain of
+    // synchronously-completing tasks finishes inside one outer resume, each
+    // inner's FinalAwaiter tail-resuming its caller.
     bool await_ready() const { return handle_.done(); }
-    void await_suspend(std::coroutine_handle<> caller) {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) {
         handle_.promise().continuation = caller;
+        handle_.promise().current_ctx = current_context_tls;
+        return handle_;
     }
     T await_resume() { return std::move(handle_.promise().result); }
 
@@ -155,14 +165,15 @@ public:
 
         std::suspend_always initial_suspend() { return {}; }
         auto final_suspend() noexcept {
+            // Symmetric transfer to the awaiting coroutine (or a no-op when
+            // nothing awaits): tail-resumes instead of growing the stack one
+            // frame per chain link the way continuation.resume() did.
             struct FinalAwaiter {
                 bool await_ready() noexcept { return false; }
 
-                void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+                std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
                     auto continuation = h.promise().continuation;
-                    if (continuation) {
-                        continuation.resume();
-                    }
+                    return continuation ? continuation : std::noop_coroutine();
                 }
 
                 void await_resume() noexcept {}
@@ -189,8 +200,13 @@ public:
         return Poll<void>::pending();
     }
 
+    // See Task<T>::await_suspend: symmetric transfer starts the awaited task.
     bool await_ready() const { return handle_.done(); }
-    void await_suspend(std::coroutine_handle<> caller) { handle_.promise().continuation = caller; }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) {
+        handle_.promise().continuation = caller;
+        handle_.promise().current_ctx = current_context_tls;
+        return handle_;
+    }
     void await_resume() {}
 
     ~Task() { if (handle_) handle_.destroy(); }
