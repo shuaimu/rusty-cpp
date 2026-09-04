@@ -2520,6 +2520,40 @@ impl CodeGen {
             .join("::");
         let tokens = mac.tokens.to_string();
 
+        // Statement-position `thread_local!` gets the same strict-grammar
+        // lowering as the item position, spelled for block scope:
+        // `static thread_local rusty::LocalKey<T> NAME{init};`.  Inside a
+        // template this keeps the C++ static per-instantiation, exactly the
+        // shape the incumbent marker emission had.
+        if macro_name == "thread_local" {
+            if let Some(statics) = crate::cpp_abi::parse_thread_local_statics(mac) {
+                for s in &statics {
+                    let name = escape_cpp_keyword(&s.ident.to_string());
+                    let ty = self.map_type(&s.ty);
+                    let init: &syn::Expr = match &*s.expr {
+                        syn::Expr::Const(inline_const) => {
+                            match inline_const.block.stmts.as_slice() {
+                                [syn::Stmt::Expr(tail, None)] => tail,
+                                _ => {
+                                    self.writeln("// TODO: thread_local!(...)");
+                                    return;
+                                }
+                            }
+                        }
+                        other => other,
+                    };
+                    let expr = self.emit_expr_to_string_with_expected(init, Some(&s.ty));
+                    self.writeln(&format!(
+                        "static thread_local rusty::LocalKey<{}> {}{{{}}};",
+                        ty, name, expr
+                    ));
+                }
+                return;
+            }
+            self.writeln("// TODO: thread_local!(...)");
+            return;
+        }
+
         match macro_name.as_str() {
             // The println family shares format!'s smart gate: args the dumb
             // token pass-through can't reproduce (casts, calls, references,

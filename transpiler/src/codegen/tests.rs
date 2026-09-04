@@ -47012,7 +47012,7 @@ pub fn bump() -> i64 {
 "#,
     );
     assert!(
-        out.contains("thread_local rusty::LocalKey<rusty::Cell<int64_t>> COUNTER{"),
+        out.contains("inline thread_local rusty::LocalKey<rusty::Cell<int64_t>> COUNTER{"),
         "declaration must lower to a per-thread LocalKey: {out}"
     );
     assert!(

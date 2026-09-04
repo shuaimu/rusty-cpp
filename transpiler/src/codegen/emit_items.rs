@@ -5403,8 +5403,13 @@ impl CodeGen {
                 syn::Visibility::Public(_) => "export ",
                 _ => "",
             };
+            // `inline` matches how the marker-attributed statics have always
+            // emitted (one weak definition across TUs, no strong symbol), so
+            // migrating a static onto the macro is ABI-neutral: the variable
+            // and its per-thread init routine stay out of the oracle's
+            // strong-symbol census either way.
             self.writeln(&format!(
-                "{}thread_local rusty::LocalKey<{}> {}{{{}}};",
+                "{}inline thread_local rusty::LocalKey<{}> {}{{{}}};",
                 export, ty, name, expr
             ));
         }

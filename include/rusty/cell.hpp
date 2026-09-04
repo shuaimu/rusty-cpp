@@ -46,6 +46,15 @@ public:
         { *value.get() = std::move(val); }
     }
 
+    // @safe - Raw pointer to the interior, mirroring Rust's Cell::as_ptr.
+    // The pointer is valid for the Cell's lifetime; for a thread_local
+    // LocalKey<Cell<...>> that is the calling thread's lifetime.
+    // @lifetime: (&'a) -> *mut T
+    T* as_ptr() const {
+        // @unsafe
+        { return value.get(); }
+    }
+
     // @safe - Replace the value and return the old one
     // @lifetime: (&'a, T) -> T
     T replace(T val) const {

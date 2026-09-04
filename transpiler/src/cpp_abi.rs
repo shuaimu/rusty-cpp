@@ -6181,6 +6181,14 @@ impl<'ast> Visit<'ast> for FlatImportCrateReferenceAudit<'_> {
         if self.error.is_some() {
             return;
         }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // Not opaque: leaf mentions inside the fixed grammar's statics
+            // are ordinary type/expr references, visited as items.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
+            return;
+        }
         let leaves = self.opaque_leaf_names();
         if mac
             .path
@@ -6458,6 +6466,16 @@ impl<'ast> Visit<'ast> for FlatImportOpaqueAudit<'_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.error.is_some() {
+            return;
+        }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // Not opaque: the fixed grammar's bindings are exactly these
+            // statics, so leaf mentions inside them are ordinary type/expr
+            // references -- visit them as items instead of failing on the
+            // raw token scan.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
             return;
         }
         if mac
