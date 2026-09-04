@@ -46994,3 +46994,49 @@ fn test_ambiguous_or_relative_placement_contracts_reject() {
         );
     }
 }
+
+#[test]
+fn test_thread_local_macro_lowers_to_local_key() {
+    let out = transpile_str(
+        r#"
+use std::cell::Cell;
+thread_local! {
+    static COUNTER: Cell<i64> = const { Cell::new(0) };
+}
+pub fn bump() -> i64 {
+    COUNTER.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+"#,
+    );
+    assert!(
+        out.contains("thread_local rusty::LocalKey<rusty::Cell<int64_t>> COUNTER{"),
+        "declaration must lower to a per-thread LocalKey: {out}"
+    );
+    assert!(
+        out.contains("COUNTER.with("),
+        "access sites stay on the ordinary method-call path: {out}"
+    );
+    assert!(!out.contains("// TODO: thread_local"), "no TODO slot: {out}");
+}
+
+#[test]
+fn test_thread_local_macro_with_attributes_stays_opaque() {
+    // An attributed entry is outside the understood grammar; it must keep
+    // failing toward the TODO/slot path rather than silently dropping the
+    // attribute.
+    let out = transpile_str(
+        r#"
+thread_local! {
+    #[allow(dead_code)]
+    static X: i64 = 0;
+}
+"#,
+    );
+    assert!(
+        out.contains("// TODO: thread_local"),
+        "attributed entries stay opaque: {out}"
+    );
+}

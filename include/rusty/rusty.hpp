@@ -62,6 +62,7 @@
 #include "rusty/alloc.hpp"
 #include "rusty/panic.hpp"
 #include "rusty/cell.hpp"
+#include "rusty/local_key.hpp"
 #include "rusty/refcell.hpp"
 #include "rusty/fmt.hpp"
 #include "rusty/string.hpp"

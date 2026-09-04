@@ -5363,6 +5363,53 @@ impl CodeGen {
         }
     }
 
+    /// Lower `thread_local! { static X: T = init; }` to
+    /// `thread_local rusty::LocalKey<T> X{init};`.
+    ///
+    /// The macro body's fixed grammar is a sequence of `static` items (syn
+    /// parses it as a File), each optionally initialized with an inline
+    /// `const { … }` block, which unwraps to its tail expression -- the
+    /// C++ thread_local dynamic initializer runs once per thread, which is
+    /// the per-thread laziness the Rust macro guarantees.  Anything the
+    /// grammar does not cover falls back to the TODO marker, so an exotic
+    /// use fails the slot gate instead of miscompiling.
+    pub(super) fn emit_thread_local_macro(&mut self, mac: &syn::Macro) {
+        // The same strict grammar the cpp_abi/cpp_default_args preflights
+        // accept: attribute-free statics only.  Anything else keeps the TODO
+        // marker so the slot gate fails closed instead of an attribute being
+        // silently dropped.
+        let Some(statics) = crate::cpp_abi::parse_thread_local_statics(mac) else {
+            self.writeln("// TODO: thread_local!(...)");
+            return;
+        };
+        for s in &statics {
+            let name = escape_cpp_keyword(&s.ident.to_string());
+            let ty = self.map_type(&s.ty);
+            let init: &syn::Expr = match &*s.expr {
+                syn::Expr::Const(inline_const) => match inline_const.block.stmts.as_slice() {
+                    [syn::Stmt::Expr(tail, None)] => tail,
+                    _ => {
+                        self.writeln(&format!(
+                            "// TODO: thread_local! initializer for {} did not lower",
+                            s.ident
+                        ));
+                        continue;
+                    }
+                },
+                other => other,
+            };
+            let expr = self.emit_expr_to_string_with_expected(init, Some(&s.ty));
+            let export = match s.vis {
+                syn::Visibility::Public(_) => "export ",
+                _ => "",
+            };
+            self.writeln(&format!(
+                "{}thread_local rusty::LocalKey<{}> {}{{{}}};",
+                export, ty, name, expr
+            ));
+        }
+    }
+
     pub(super) fn emit_static(&mut self, s: &syn::ItemStatic) {
         if Self::should_skip_cfg_attrs(&s.attrs) {
             return;

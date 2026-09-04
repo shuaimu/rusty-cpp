@@ -2411,6 +2411,14 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
             self.inside_assert_expression = false;
             return;
         }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // Not opaque: the fixed grammar's bindings are exactly these
+            // statics -- scan them like ordinary items.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
+            return;
+        }
         self.error = Some(format!(
             "cpp_abi crate preflight rejects opaque macros while adapters are present: `{}`",
             mac.path.to_token_stream()
@@ -3031,6 +3039,16 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
                 self.visit_expr(expression);
             }
             self.inside_assert_expression = false;
+            return;
+        }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // `thread_local!` has a fixed grammar the emitter lowers item by
+            // item, so its bindings are exactly these statics -- visit them
+            // as ordinary items so reserved-identifier scanning still covers
+            // their names, types and initializers.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
             return;
         }
         self.fail(format!(
@@ -13273,4 +13291,31 @@ int main() {
         assert!(!cpp.contains("rusty_cpp_abi_"));
         assert!(!cpp.contains("#include <vector>"));
     }
+}
+
+/// Parse `thread_local! { static X: T = init; ... }` into its static items.
+///
+/// Returns `None` unless the macro is exactly the std `thread_local!`
+/// invocation whose body syn can parse as a sequence of attribute-free
+/// `static` items -- the one shape the emitter lowers to
+/// `thread_local rusty::LocalKey<T>`.  Anything else stays opaque and keeps
+/// failing closed in the callers.
+pub(crate) fn parse_thread_local_statics(mac: &syn::Macro) -> Option<Vec<syn::ItemStatic>> {
+    if !mac.path.is_ident("thread_local") {
+        return None;
+    }
+    let parsed: syn::File = syn::parse2(mac.tokens.clone()).ok()?;
+    if parsed.items.is_empty() {
+        return None;
+    }
+    let mut statics = Vec::new();
+    for item in parsed.items {
+        match item {
+            syn::Item::Static(item_static) if item_static.attrs.is_empty() => {
+                statics.push(item_static)
+            }
+            _ => return None,
+        }
+    }
+    Some(statics)
 }

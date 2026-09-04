@@ -14995,6 +14995,11 @@ impl CodeGen {
                 if let Some(ref ident) = m.ident {
                     // macro_rules! name { ... } → compile-time only, skip
                     self.writeln(&format!("// macro_rules! {} {{ ... }}", ident));
+                } else if m.mac.path.is_ident("thread_local") {
+                    // thread_local! { static X: T = init; } → per-thread
+                    // rusty::LocalKey storage; access sites (`X.with(|v| …)`)
+                    // lower through the ordinary method-call path.
+                    self.emit_thread_local_macro(&m.mac);
                 } else {
                     // Unnamed macro invocation at top level
                     self.emit_macro_stmt(&m.mac);

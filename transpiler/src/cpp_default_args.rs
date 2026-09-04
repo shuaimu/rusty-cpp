@@ -854,6 +854,13 @@ fn validate_binding_macro_surfaces(
             continue;
         }
         if let Item::Macro(item_macro) = item {
+            // `thread_local!` is not opaque: its fixed grammar generates
+            // exactly the parsed statics, which carry no attribute surface
+            // (the parser rejects attributed entries), so there is nothing
+            // here for this validator to miss.
+            if crate::cpp_abi::parse_thread_local_statics(&item_macro.mac).is_some() {
+                continue;
+            }
             return Err(format!(
                 "{MARKER} cannot prove item macro `{}` is free of macro-generated bindings in module `{}`",
                 item_macro.mac.path.to_token_stream(),
