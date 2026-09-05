@@ -1072,6 +1072,17 @@ fn collect_signature_type_model(
     model: &mut DefaultSignatureTypes,
 ) -> Result<(), String> {
     for item in items {
+        // Items removed by a verification-only cfg (`#[cfg(verus)]`, `any()`)
+        // are not part of the transpiled program, so they must not seed the
+        // signature type model. In particular a `#[cfg(verus)] use vstd::..::*;`
+        // glob would otherwise mark this module as macro-tainted (via
+        // `module_has_potential_macro_import`) and block the audit of its real,
+        // transpiled items. This mirrors the guard in the attribute-audit loop.
+        // Note this only skips *definitely*-false cfgs: target-dependent
+        // constants behind mutually-exclusive cfgs are not removed here.
+        if item_is_cfg_removed(item) {
+            continue;
+        }
         match item {
             Item::Type(alias) => {
                 let name = ident_text(&alias.ident);
