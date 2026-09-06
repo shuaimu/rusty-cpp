@@ -7474,7 +7474,10 @@ T slice_remove(std::span<rusty::MaybeUninit<T>> slice, size_t idx) {
         const auto len = rusty::len(slice);
         assert((rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(len)));
         const auto slice_ptr = reinterpret_cast<std::add_pointer_t<rusty::MaybeUninit<T>>>(rusty::as_mut_ptr(slice));
-        auto ret = ((*rusty::ptr::add(slice_ptr, std::move(idx)))).assume_init_read();
+        // The removed slot becomes logically uninitialized when the remaining
+        // elements shift left.  Relocate its owner instead of cloning copyable
+        // values: a clone would be stranded in the dead trailing slot.
+        auto ret = ((*rusty::ptr::add(slice_ptr, std::move(idx)))).assume_init();
         rusty::ptr::copy(rusty::ptr::add(slice_ptr, rusty::detail::deref_if_pointer_like(idx) + 1), rusty::ptr::add(slice_ptr, std::move(idx)), (rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(idx)) - 1);
         return std::move(ret);
     }

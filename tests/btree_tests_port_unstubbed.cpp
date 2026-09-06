@@ -130,6 +130,35 @@ TEST_CASE("split_leaf_relocates_copyable_owned_value_unstubbed") {
     assert(state.live == 0);
 }
 
+TEST_CASE("slice_remove_relocates_copyable_owned_value_unstubbed") {
+    SplitOwnedValueState state;
+    {
+        auto map = make_map<int, SplitOwnedValue>();
+        for (int i = 0; i < 8; ++i) {
+            map.insert(i, SplitOwnedValue(state));
+        }
+        assert(map.len() == 8u);
+        assert(state.live == 8);
+
+        {
+            auto removed = map.remove(3);
+            assert(removed.is_some());
+            assert(map.len() == 7u);
+            assert(state.live == 8);
+        }
+        assert(state.live == 7);
+
+        {
+            auto removed = map.remove(7);
+            assert(removed.is_some());
+            assert(map.len() == 6u);
+            assert(state.live == 7);
+        }
+        assert(state.live == 6);
+    }
+    assert(state.live == 0);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_get_key_value (trimmed)
 // Full Rust source also exercises map.remove + post-remove checks; the

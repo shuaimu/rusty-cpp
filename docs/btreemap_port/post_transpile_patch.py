@@ -3276,6 +3276,34 @@ def fix_split_leaf_data_owned_relocation(path: Path) -> None:
         )
 
 
+def fix_slice_remove_owned_relocation(path: Path) -> None:
+    """Relocate the element whose slot slice_remove makes logically dead.
+
+    MaybeUninit::assume_init_read copies copy-constructible owners.  The
+    following left shift and caller-side length decrement abandon the copied
+    source, so an Rc-like value retains an unreachable strong reference.
+    The consuming assume_init overload moves the value and destroys the
+    moved-from source before the slot is overwritten.
+    """
+    src = path.read_text()
+    old = (
+        "        auto ret = ((*rusty::ptr::add(slice_ptr, std::move(idx)))).assume_init_read();\n"
+    )
+    new = (
+        "        // The removed slot becomes logically uninitialized when the remaining\n"
+        "        // elements shift left.  Relocate its owner instead of cloning copyable\n"
+        "        // values: a clone would be stranded in the dead trailing slot.\n"
+        "        auto ret = ((*rusty::ptr::add(slice_ptr, std::move(idx)))).assume_init();\n"
+    )
+    if old in src:
+        path.write_text(src.replace(old, new, 1))
+        print(f"  fixed slice_remove ownership transfer in: {path.name}")
+    elif new in src:
+        print(f"  no changes to: {path.name} (slice_remove transfer already fixed)")
+    else:
+        raise RuntimeError(f"slice_remove extraction shape not found in {path}")
+
+
 def implement_handle_force(path: Path) -> None:
     """Hand-port `Handle::force` on `Handle<NodeRef<…, LeafOrInternal>, Type>`.
     The transpiled body has the same shape as `Handle::descend` — emitted
@@ -7188,6 +7216,7 @@ def main() -> int:
     # LeafNode::new_ via new_in, middle.split path correction).
     apply_step54_insert_path_fixes(internal)
     fix_split_leaf_data_owned_relocation(internal)
+    fix_slice_remove_owned_relocation(internal)
     # Step 60: codify step 58/59 fixes — __IsNodeRef concept injection,
     # InternalNode::new_ bypass, correct_parent_link arg recovery,
     # .height → .height_field rewrites.
