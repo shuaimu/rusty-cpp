@@ -6465,8 +6465,11 @@ struct Handle {
         (*new_node_shadow1).len = static_cast<uint16_t>(new_len);
         // @unsafe
         {
-            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_read();
-            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init_read();
+            // The median slots fall outside the shortened source-node length,
+            // so this is ownership transfer, not a copy. assume_init_read()
+            // deep-copies copyable owners and strands the originals here.
+            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init();
+            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init();
             move_to_slice(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))), rusty::slice_to((*new_node_shadow1).keys, new_len));
             move_to_slice(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))), rusty::slice_to((*new_node_shadow1).vals, new_len));
             rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{}) = static_cast<uint16_t>(this->idx_field);
