@@ -6283,6 +6283,12 @@ impl<'ast> Visit<'ast> for FlatImportBindingAudit<'_> {
             return;
         }
         if let Item::Use(item_use) = item {
+            // A cfg-absent `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is
+            // not part of the transpiled program, so it cannot shadow an
+            // imported leaf. Same guard the other two `use` visitors apply.
+            if flat_import_attrs_presence(&item_use.attrs) == FlatImportPresence::Absent {
+                return;
+            }
             if parse_flat_import_use(item_use, self.module, self.flat_import_inference)
                 .ok()
                 .flatten()
@@ -7377,6 +7383,12 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
     }
 
     fn visit_item_use(&mut self, item_use: &'ast syn::ItemUse) {
+        // A cfg-absent `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is not
+        // part of the transpiled program, so it can neither introduce nor alias
+        // a cpp_abi name. Same guard the other `use` visitors apply.
+        if flat_import_attrs_presence(&item_use.attrs) == FlatImportPresence::Absent {
+            return;
+        }
         for attr in &item_use.attrs {
             self.visit_attribute(attr);
         }
