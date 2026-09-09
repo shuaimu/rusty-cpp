@@ -1,6 +1,67 @@
 use super::*;
 
 impl CodeGen {
+    /// A relative standard-library spelling can resolve to a local module.
+    /// Absolute extern-prelude paths keep their standard-library identity.
+    pub(super) fn standard_path_root_is_local_module(&self, path: &syn::Path) -> bool {
+        self.standard_path_local_module_root(path).is_some()
+    }
+
+    pub(super) fn standard_path_local_module_root(&self, path: &syn::Path) -> Option<Vec<String>> {
+        fn resolves_local(
+            codegen: &CodeGen,
+            scope: &[String],
+            segments: &[String],
+            visited: &mut HashSet<(String, String)>,
+        ) -> Option<Vec<String>> {
+            let root = segments.first()?;
+            let key = (scope.join("::"), root.clone());
+            if !visited.insert((key.0.clone(), segments.join("::"))) {
+                return None;
+            }
+            let candidate = scope.iter().map(String::as_str)
+                .chain(std::iter::once(root.as_str())).collect::<Vec<_>>().join("::");
+            if codegen.declared_module_paths.contains(&candidate) {
+                if segments.len() == 1 {
+                    let mut resolved = scope.to_vec();
+                    resolved.push(root.clone());
+                    return Some(resolved);
+                }
+                let mut child_scope = scope.to_vec();
+                child_scope.push(root.clone());
+                return resolves_local(codegen, &child_scope, &segments[1..], visited);
+            }
+            // Rust child modules do not inherit a parent's imports or modules.
+            // Follow only an exact source import in this lexical module.
+            let targets = codegen.rust_item_import_bindings.get(&key)?;
+            if targets.len() != 1 {
+                return None;
+            }
+            let target = targets.iter().next().unwrap();
+            if target.starts_with("::") {
+                return None;
+            }
+            let (target_scope, target) = if let Some(local) = target.strip_prefix("@crate:") {
+                (&[][..], local)
+            } else {
+                (scope, target.as_str())
+            };
+            let mut target_segments = target.split("::").filter(|root| !root.is_empty())
+                .map(str::to_string).collect::<Vec<_>>();
+            target_segments.extend(segments[1..].iter().cloned());
+            resolves_local(codegen, target_scope, &target_segments, visited)
+        }
+
+        if path.leading_colon.is_some() {
+            return None;
+        }
+        let root = path.segments.first()?.ident.to_string();
+        if !matches!(root.as_str(), "std" | "core" | "alloc") {
+            return None;
+        }
+        resolves_local(self, &self.module_stack, &[root], &mut HashSet::new())
+    }
+
     pub(super) fn type_references_module_path(ty: &syn::Type, module_name: &str) -> bool {
         let mut collector = ModulePathReferenceCollector::new(module_name);
         collector.visit_type(ty);
@@ -2660,14 +2721,15 @@ impl CodeGen {
                     return mapped_owner_into_iter;
                 }
                 let mut alias_resolved_path: Option<syn::TypePath> = None;
-                let alias_shadowed_by_local_type = tp.path.segments.len() == 1
+                let alias_shadowed_by_local_type = self.standard_path_root_is_local_module(&tp.path)
+                    || (tp.path.segments.len() == 1
                     && tp.path.segments.last().is_some_and(|seg| {
                         let local_name = seg.ident.to_string();
                         self.is_local_type_name_in_scope(&local_name)
                             || self.current_scope_declares_type_name(&local_name)
                             || self.current_module_declares_type_name_exact(&local_name)
                             || self.current_owner_module_declares_type_name(&local_name)
-                    });
+                    }));
                 if tp.qself.is_none() && !alias_shadowed_by_local_type {
                     // Guard alias-chain mapping from unbounded self-expansion. Some crates define
                     // alias graphs that can repeatedly re-wrap the same path under suffix matching.
@@ -2766,6 +2828,7 @@ impl CodeGen {
                     }
                 }
                 if !self.in_forward_decl_signature
+                    && !self.standard_path_root_is_local_module(&tp.path)
                     && let Some(scope_bound_ty) = self.try_map_scope_bound_type_path(tp)
                 {
                     let scope_bound_ty =
@@ -3615,17 +3678,18 @@ impl CodeGen {
                         // std alias. Critical when transpiling a std-library
                         // port (hashbrown defines HashMap/HashSet): otherwise
                         // its self-references collide with and circularly
-                        // import the very type it defines. Explicit std paths
-                        // (`std::collections::HashMap`) are multi-segment and
-                        // still map.
+                        // import the very type it defines. Qualified standard
+                        // paths still map unless their relative root resolves
+                        // to a local module with the same name.
                         // Scope-aware: suppression applies only where the bare
                         // name actually BINDS to the crate's type (declared in
                         // the current module or imported into it). A crate that
                         // declares `boxed::Box` must not lose the runtime
                         // mapping for bare `Box` in sibling modules that never
                         // import it.
-                        let suppress_std_map = tp.path.segments.len() == 1
-                            && self.bare_std_named_type_suppression_applies(&joined_no_args);
+                        let suppress_std_map = self.standard_path_root_is_local_module(&tp.path)
+                            || (tp.path.segments.len() == 1
+                                && self.bare_std_named_type_suppression_applies(&joined_no_args));
                         let std_generic_base = (!suppress_std_map)
                             .then(|| {
                                 types::map_std_type(&joined_no_args).and_then(

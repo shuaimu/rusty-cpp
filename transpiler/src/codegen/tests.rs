@@ -19236,6 +19236,233 @@ fn test_unresolved_local_field_read_in_format_args_routes_smart() {
 }
 
 #[test]
+fn consuming_receiver_from_multistatement_block_preserves_owner_type() {
+    let source = r#"
+        struct Owned { value: i32 }
+        impl Owned { fn finish(self) -> i32 { self.value } }
+        struct Shared { value: i32 }
+        impl Shared { fn finish(&self) -> i32 { self.value } }
+        fn owned() -> i32 {
+            let owned_value = { let seed = 7i32; Owned { value: seed } };
+            owned_value.finish()
+        }
+        fn shared(source: Owned) -> i32 {
+            let shared_value = {
+                let source = Shared { value: 9 };
+                source
+            };
+            shared_value.finish()
+        }
+    "#;
+    let out = transpile_str(source);
+    assert!(out.contains("auto owned_value ="), "{out}");
+    assert!(!out.contains("const auto owned_value ="), "{out}");
+    assert!(out.contains("const auto shared_value ="), "inner shadow must keep its shared receiver type: {out}");
+    let dir = tempfile::tempdir().unwrap();
+    let rust = dir.path().join("block_owner.rs");
+    std::fs::write(&rust, source).unwrap();
+    let result = std::process::Command::new("rustc")
+        .args(["--edition=2024", "--crate-type=lib"])
+        .arg(&rust).arg("--out-dir").arg(dir.path()).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let cpp = dir.path().join("block_owner.cc");
+    std::fs::write(&cpp, out).unwrap();
+    let result = std::process::Command::new(std::env::var("CXX").unwrap_or_else(|_| "clang++".into()))
+        .args(["-std=c++23", "-stdlib=libc++", "-fsyntax-only"])
+        .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+        .arg(cpp).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
+fn lexical_block_tail_preserves_typed_and_inferred_box_shadows() {
+    let source = r#"
+        pub fn inferred(stop: bool) -> i32 {
+            let value = 3_i32;
+            let result = {
+                let seed = value + 4;
+                let value = Box::new(seed);
+                if stop { return -1; }
+                value
+            };
+            *result
+        }
+        pub fn annotated(stop: bool) -> i32 {
+            let value = 3_i32;
+            let result = {
+                let seed: i32 = value + 6;
+                let value: Box<i32> = Box::new(seed);
+                if stop { return -2; }
+                value
+            };
+            *result
+        }
+    "#;
+    let dir = tempfile::tempdir().unwrap();
+    let rust = dir.path().join("box_shadows.rs");
+    let rust_exe = dir.path().join("rust_run");
+    std::fs::write(&rust, format!("{source}\nfn main() {{
+        assert_eq!(inferred(false), 7); assert_eq!(inferred(true), -1);
+        assert_eq!(annotated(false), 9); assert_eq!(annotated(true), -2);
+    }}")).unwrap();
+    let result = std::process::Command::new("rustc").args(["--edition=2024"])
+        .arg(&rust).arg("-o").arg(&rust_exe).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(std::process::Command::new(rust_exe).status().unwrap().success());
+
+    let cpp = dir.path().join("box_shadows.cc");
+    let cpp_exe = dir.path().join("cpp_run");
+    std::fs::write(&cpp, format!("{}\nint main() {{
+        if (inferred(false) != 7 || inferred(true) != -1) return 1;
+        if (annotated(false) != 9 || annotated(true) != -2) return 2;
+        return 0;
+    }}", transpile_str(source))).unwrap();
+    let result = std::process::Command::new(std::env::var("CXX").unwrap_or_else(|_| "clang++".into()))
+        .args(["-std=c++23", "-stdlib=libc++"])
+        .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+        .arg(&cpp).arg("-o").arg(&cpp_exe).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(std::process::Command::new(cpp_exe).status().unwrap().success());
+}
+
+fn consuming_receiver_import_fixture() -> CodeGen {
+    let mut cg = CodeGen::new();
+    cg.current_physical_module = crate::cpp_abi::ModulePath(vec!["consumer".into()]);
+    let provider: syn::File = syn::parse_quote! {
+        pub struct Queue { value: i32 }
+        pub struct Admission { value: i32 }
+        impl Queue { pub fn admit(&self) -> Admission { Admission { value: self.value } } }
+        impl Admission {
+            pub fn notify(self) -> i32 { self.value }
+            pub fn inspect(&self) -> i32 { self.value }
+        }
+    };
+    cg.set_cross_file_structs(provider.items.iter().filter_map(|item| match item {
+        syn::Item::Struct(item) => Some(item.clone()), _ => None,
+    }).collect());
+    cg.set_cross_file_impl_blocks(provider.items.iter().filter_map(|item| match item {
+        syn::Item::Impl(item) => Some(item.clone()), _ => None,
+    }).collect());
+    for leaf in ["Queue", "Admission"] {
+        cg.cross_file_struct_qualified_paths.insert(vec!["crate".into(), "queue".into(), leaf.into()]);
+    }
+    cg.flat_import_type_authorizations.insert(crate::cpp_abi::FlatImportTypeAuthorization {
+        consumer_source: "src/consumer.rs".into(),
+        consumer_physical_module: cg.current_physical_module.clone(),
+        consumer_lexical_module: crate::cpp_abi::ModulePath(vec![]),
+        marked_rust_child: "queue".into(),
+        marked_leaves: vec!["Queue".into()],
+        leaf: "Queue".into(),
+        cpp_namespace: "probe".into(),
+        provider_physical_module: crate::cpp_abi::ModulePath(vec!["queue".into()]),
+        provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::Struct,
+        reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse,
+    });
+    cg.local_bindings.push(HashMap::from([
+        ("queue".into(), Some(syn::parse_quote!(Queue))),
+    ]));
+    cg.by_value_method_call_pairs.insert("admission".into(), HashSet::from(["notify".into()]));
+    cg
+}
+
+#[test]
+fn consuming_receiver_preserves_flat_imported_return_owner_without_leaf_import() {
+    let cg = consuming_receiver_import_fixture();
+    let initializer: syn::Expr = syn::parse_quote!({
+        let marker = 1i32;
+        if marker == 0 { return 0; }
+        queue.admit()
+    });
+    assert!(cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+    let owner: syn::Path = syn::parse_quote!(crate::queue::Admission);
+    assert!(cg.flat_imported_method_consumes_receiver(&owner, "notify"));
+    assert!(!cg.flat_imported_method_consumes_receiver(&owner, "inspect"));
+}
+
+#[test]
+fn consuming_receiver_import_proof_rejects_wrong_scope_and_owner() {
+    let mut cg = consuming_receiver_import_fixture();
+    let initializer: syn::Expr = syn::parse_quote!({ let marker = 1i32; queue.admit() });
+    cg.module_stack.push("nested".into());
+    assert!(!cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+    cg.module_stack.clear();
+    let unrelated: syn::Path = syn::parse_quote!(crate::unrelated::Admission);
+    assert!(!cg.flat_imported_method_consumes_receiver(&unrelated, "notify"));
+    cg.flat_import_type_authorizations.clear();
+    assert!(!cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+}
+
+#[test]
+fn consuming_receiver_accepts_only_the_prepared_import_target() {
+    let mut cg = consuming_receiver_import_fixture();
+    cg.local_bindings.last_mut().unwrap().insert("queue".into(), Some(syn::parse_quote!(::probe::Queue)));
+    let initializer: syn::Expr = syn::parse_quote!({ let marker = 1i32; queue.admit() });
+    assert!(cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+
+    cg.local_bindings.last_mut().unwrap().insert("queue".into(), Some(syn::parse_quote!(::unrelated::Queue)));
+    assert!(!cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+    cg.local_bindings.last_mut().unwrap().insert("queue".into(), Some(syn::parse_quote!(::probe::Queue)));
+    cg.module_stack.push("nested".into());
+    assert!(!cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+    cg.module_stack.clear();
+    cg.flat_import_type_authorizations.clear();
+    assert!(!cg.local_has_declared_consuming_receiver("admission", None, Some(&initializer)));
+}
+
+#[test]
+fn consuming_receiver_imported_field_return_uses_preflight_provenance() {
+    let provider = r#"
+        pub struct Queue { pub value: i32 }
+        pub struct Admission { pub value: i32 }
+        impl Queue { pub fn admit(&self) -> Admission { Admission { value: self.value } } }
+        impl Admission { pub fn notify(self) -> i32 { self.value } }
+    "#;
+    let consumer = r#"
+        #[cfg_attr(any(), cpp_import_namespace(example))]
+        use crate::queue::Queue;
+        pub struct Consumer { pub pending: Queue }
+        pub fn run(conn: &Consumer, enabled: bool) -> i32 {
+            let admission = {
+                if !enabled { return 0; }
+                conn.pending.admit()
+            };
+            admission.notify()
+        }
+    "#;
+    let units = vec![
+        (std::path::PathBuf::from("src/lib.rs"), "pub mod queue; pub mod consumer;".into()),
+        (std::path::PathBuf::from("src/queue.rs"), provider.into()),
+        (std::path::PathBuf::from("src/consumer.rs"), consumer.into()),
+    ];
+    let audited = crate::cpp_abi::preflight_crate_plan_with_cxx_namespace(
+        &units, Some("example"), None,
+    ).unwrap();
+    let (lowered, plan) = crate::cpp_abi::lower(&syn::parse_file(consumer).unwrap(), None)
+        .unwrap().unwrap();
+    let provider_ast = syn::parse_file(provider).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("example");
+    cg.set_crate_module_names(vec!["example.queue".into(), "example.consumer".into()]);
+    cg.set_cxx_namespace(Some("example".into()));
+    cg.set_cpp_abi_plan(plan);
+    cg.set_flat_import_type_authorizations(audited.flat_import_type_authorizations);
+    cg.set_cross_file_structs(provider_ast.items.iter().filter_map(|item| match item {
+        syn::Item::Struct(item) => Some(item.clone()), _ => None,
+    }).collect());
+    cg.set_cross_file_impl_blocks(provider_ast.items.into_iter().filter_map(|item| match item {
+        syn::Item::Impl(item) => Some(item), _ => None,
+    }).collect());
+    for leaf in ["Queue", "Admission"] {
+        cg.cross_file_struct_qualified_paths.insert(vec!["crate".into(), "queue".into(), leaf.into()]);
+    }
+    cg.emit_file(&lowered, Some("example.consumer"));
+    assert!(cg.take_codegen_error().is_none());
+    let output = cg.into_output();
+    assert!(!output.contains("const auto admission ="), "{output}");
+    assert!(output.contains(".notify()"), "{output}");
+}
+
+#[test]
 fn test_by_value_self_method_receiver_binds_non_const() {
     let out = transpile_str(
         r#"
@@ -47720,4 +47947,193 @@ fn physical_struct_ufcs_proof_rejects_unowned_paths_and_aliases() {
     std::rc::Rc::make_mut(&mut cg.type_alias_targets).insert("child::Worker".into(), syn::parse_quote!(crate::unrelated::Worker));
     assert_eq!(lookup(&cg, "crate::provider::Worker", "read"), Some(true));
     assert_eq!(lookup(&cg, "Worker", "read"), None);
+}
+
+#[test]
+fn lifecycle_copy_value_capture_stays_const_callable() {
+    let source = r#"
+        use std::sync::{Arc, Weak};
+        struct Item { value: u64 }
+        impl Item { fn matches(&self, generation: u64) -> bool { self.value == generation } }
+        fn callback(owner: Weak<Item>, generation: u64) -> Box<dyn Fn() -> bool> {
+            Box::new(move || {
+                if let Some(item) = owner.upgrade() { item.matches(generation) } else { false }
+            })
+        }
+        pub fn exercise() -> bool {
+            let item = Arc::new(Item { value: 7 });
+            let invoke = callback(Arc::downgrade(&item), 7);
+            invoke() && invoke()
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("]() mutable"), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert!(exercise());", &output, "return exercise() ? 0 : 1;");
+    let consuming = transpile_str(r#"
+        fn consume(value: Box<i32>) -> i32 { *value }
+        fn callback(value: Box<i32>) -> Box<dyn FnOnce() -> i32> {
+            Box::new(move || consume(value))
+        }
+        fn changing(mut value: u64) -> Box<dyn FnMut() -> u64> {
+            Box::new(move || { value += 1; value })
+        }
+        #[derive(Clone, Copy)]
+        struct Packet<T> { value: T }
+        fn consume_packet(value: Packet<Box<i32>>) -> i32 { *value.value }
+        fn conditional_copy(value: Packet<Box<i32>>) -> Box<dyn FnOnce() -> i32> {
+            Box::new(move || consume_packet(value))
+        }
+    "#);
+    assert_eq!(consuming.matches("]() mutable").count(), 3, "{consuming}");
+}
+
+#[test]
+fn lifecycle_nested_arc_mutex_constructor_preserves_payload_type() {
+    let source = r#"
+        use std::sync::{Arc, Mutex};
+        fn wrap(value: i32) -> Arc<Mutex<i32>> {
+            let wrapped = Arc::new(Mutex::new(value));
+            wrapped
+        }
+        pub fn exercise() -> i32 {
+            let wrapped = wrap(19);
+            let value = *wrapped.lock().unwrap();
+            value
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("Arc<rusty::Mutex>"), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 19);", &output, "return exercise() == 19 ? 0 : 1;");
+    let unrelated = transpile_str(r#"
+        struct Mutex { value: i32 }
+        impl Mutex { fn new(value: i32) -> Mutex { Mutex { value } } }
+        pub fn exercise() -> i32 { let value = Mutex::new(23); value.value }
+    "#);
+    assert!(!unrelated.contains("rusty::Mutex<"), "{unrelated}");
+}
+
+#[test]
+fn lifecycle_delayed_option_replace_and_shadow_preserve_ownership() {
+    let source = r#"
+        use std::sync::{Arc, Mutex};
+        struct Item { value: i32 }
+        impl Item { fn read(&self) -> i32 { self.value } }
+        struct State { slot: Mutex<Option<Arc<Item>>> }
+        impl State {
+            fn replace(&self, next: Arc<Item>) -> i32 {
+                let old;
+                { old = self.slot.lock().unwrap().replace(next); }
+                if let Some(old) = old { return old.read(); }
+                0
+            }
+        }
+        fn run_callback() -> i32 {
+            let callback: Option<Box<dyn Fn() -> i32>>;
+            { callback = Some(Box::new(|| 4)); }
+            if let Some(callback) = callback { return callback(); }
+            0
+        }
+        pub fn exercise() -> i32 {
+            let state = State { slot: Mutex::new(Some(Arc::new(Item { value: 3 }))) };
+            state.replace(Arc::new(Item { value: 9 })) + run_callback()
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("decltype(auto) callback = callback.value()"), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 7);", &output, "return exercise() == 7 ? 0 : 1;");
+}
+
+#[test]
+fn lifecycle_guarded_option_clone_keeps_owner_and_reborrow_types() {
+    let source = r#"
+        use std::sync::{Arc, Mutex, MutexGuard};
+        struct Holder { slot: Mutex<Option<Arc<Mutex<Box<i32>>>>> }
+        impl Holder {
+            fn update(&self) -> i32 {
+                let owner = self.slot.lock().unwrap().clone();
+                let owner = owner.unwrap();
+                let mut guard = owner.lock().unwrap();
+                let protected: &mut Box<i32> = &mut guard;
+                **protected += 2;
+                let exact: &MutexGuard<'_, Box<i32>> = &guard;
+                ***exact
+            }
+        }
+        pub fn exercise() -> i32 {
+            let owner = Arc::new(Mutex::new(Box::new(5)));
+            let holder = Holder { slot: Mutex::new(Some(owner)) };
+            holder.update()
+        }
+    "#;
+    let output = transpile_str(source);
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 7);", &output, "return exercise() == 7 ? 0 : 1;");
+}
+
+#[test]
+fn lifecycle_mem_take_deferred_owner_keeps_outer_storage() {
+    let source = r#"
+        use std::sync::{Arc, Mutex};
+        struct Item { value: i32 }
+        impl Item { fn read(&self) -> i32 { self.value } }
+        struct State { slot: Mutex<Option<Arc<Item>>> }
+        impl State {
+            fn take(&self) -> i32 {
+                let old;
+                { old = std::mem::take(&mut *self.slot.lock().unwrap()); }
+                if let Some(old) = old { return old.read(); }
+                0
+            }
+        }
+        pub fn exercise() -> i32 {
+            let state = State { slot: Mutex::new(Some(Arc::new(Item { value: 17 }))) };
+            state.take() + state.take()
+        }
+    "#;
+    let output = transpile_str(source);
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 17);", &output, "return exercise() == 17 ? 0 : 1;");
+}
+
+#[test]
+fn lifecycle_sum_inference_does_not_assume_local_option_replace() {
+    let source = r#"
+        struct Option<T> { value: T }
+        impl<T> Option<T> {
+            fn replace(&mut self, next: T) -> T {
+                std::mem::replace(&mut self.value, next)
+            }
+        }
+        pub fn exercise() -> i32 {
+            let mut value: Option<i32> = Option { value: 31 };
+            let old;
+            { old = value.replace(7); }
+            old
+        }
+    "#;
+    let output = transpile_str(source);
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 31);", &output, "return exercise() == 31 ? 0 : 1;");
+}
+
+#[test]
+fn local_standard_module_alias_keeps_cpp_runtime_namespace_available() {
+    let source = r#"
+        pub mod std {
+            pub mod sync {
+                pub struct Mutex<T> { pub value: T }
+                impl<T> Mutex<T> {
+                    pub fn new(value: T) -> Mutex<T> { Mutex { value } }
+                }
+            }
+        }
+        mod child {
+            use crate::std;
+            pub fn exercise() -> i32 {
+                let value = std::sync::Mutex::<i32>::new(29);
+                value.value
+            }
+        }
+        pub fn exercise() -> i32 { child::exercise() }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("namespace std ="), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 29);", &output, "return exercise() == 29 ? 0 : 1;");
 }

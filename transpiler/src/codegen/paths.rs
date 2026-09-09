@@ -1202,6 +1202,16 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // Preserve a local standard-looking root before ordinary import
+        // rebasing can turn `use crate::std` into `::std`, whose leading
+        // colon would otherwise be mistaken for Rust extern provenance.
+        if let Some(mut local_root) = self.standard_path_local_module_root(path) {
+            if let Some(mapped) = self.user_type_map.lookup(&segments.join("::")) {
+                return mapped.to_string();
+            }
+            local_root.extend(segments[1..].iter().cloned());
+            return self.escape_and_rename_qualified_symbol_path(&local_root.join("::"));
+        }
         // A path ROOTED at a reserved `cpp::` module binding names a symbol of
         // THAT C++ module and must resolve through the module's declared export
         // namespace. Without this, an interior segment that happens to name a
@@ -3799,7 +3809,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             }
             return format!("{}{{}}", self.rewrite_seed_ctor_path_string(&ctor));
         }
-        if self.map_function_path_scope_aware(&joined).is_none() {
+        if !self.standard_path_root_is_local_module(path)
+            && self.map_function_path_scope_aware(&joined).is_none()
+        {
             if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
                 if let Some(template_args) = self.emit_expr_path_template_args(path) {
                     rewritten.push_str(&template_args);

@@ -13661,6 +13661,15 @@ impl CodeGen {
                     );
                 }
                 if let Some(expected_inner) = self.expected_reference_inner_type(expected_ty) {
+                    if let Some(source_ty) = self.infer_simple_expr_type(&r.expr) {
+                        let source_cpp = self.map_type(self.peel_reference_paren_group_type(&source_ty));
+                        let protected = self.peel_guard_wrapper_for_method_routing(&source_ty);
+                        if matches!(source_cpp.split('<').next(), Some("rusty::MutexGuard" | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard" | "rusty::Ref" | "rusty::RefMut"))
+                            && self.map_type(&protected) == self.map_type(expected_inner)
+                        {
+                            return format!("(*({}))", self.emit_expr_to_string(&r.expr));
+                        }
+                    }
                     return self.emit_expr_to_string_with_expected(&r.expr, Some(expected_inner));
                 }
                 if expected_ty.is_some_and(|ty| {
@@ -14835,7 +14844,26 @@ impl CodeGen {
         if owner_seg.ident != expected_last.as_str() {
             return None;
         }
-        let mut owner_cpp = self.map_type(expected_ty);
+        // A contextual return type may have lost its module qualification
+        // while inferring an impl's `Self`. It can fill omitted type arguments,
+        // but cannot retarget a proven local constructor to a runtime namesake.
+        let mut contextual_owner = expected_ty.clone();
+        if self.standard_path_root_is_local_module(func_path) {
+            let mut source_owner = func_path.clone();
+            source_owner.segments.pop();
+            if let Some(last) = source_owner.segments.last_mut()
+                && matches!(last.arguments, syn::PathArguments::None)
+                && let syn::Type::Path(expected_path) = self.peel_paren_group_type(expected_ty)
+                && let Some(expected_last) = expected_path.path.segments.last()
+            {
+                last.arguments = expected_last.arguments.clone();
+            }
+            contextual_owner = syn::Type::Path(syn::TypePath {
+                qself: None,
+                path: source_owner,
+            });
+        }
+        let mut owner_cpp = self.map_type(&contextual_owner);
         if !owner_cpp.contains('<') {
             return None;
         }
@@ -26477,6 +26505,40 @@ impl CodeGen {
         Some(emitted_segs.join("::"))
     }
 
+    fn capture_type_is_known_copy(&self, ty: &syn::Type, depth: usize) -> bool {
+        if depth >= 16 {
+            return false;
+        }
+        let ty = self.peel_paren_group_type(ty);
+        if let Some(resolved) = self.resolve_type_alias_once(ty)
+            && &resolved != ty
+        {
+            return self.capture_type_is_known_copy(&resolved, depth + 1);
+        }
+        if self.is_known_scalar_like_type(ty) {
+            return true;
+        }
+        match ty {
+            syn::Type::Ptr(_) | syn::Type::BareFn(_) => true,
+            syn::Type::Reference(reference) => reference.mutability.is_none(),
+            syn::Type::Array(array) => self.capture_type_is_known_copy(&array.elem, depth + 1),
+            syn::Type::Tuple(tuple) => tuple.elems.iter()
+                .all(|element| self.capture_type_is_known_copy(element, depth + 1)),
+            syn::Type::Path(path) if path.qself.is_none()
+                && path.path.segments.iter().all(|segment| {
+                    matches!(segment.arguments, syn::PathArguments::None)
+                }) => {
+                let key = path.path.segments.iter().map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>().join("::");
+                // Only declarations in the actual lexical scope establish
+                // Copy. An unrelated qualified leaf cannot borrow this fact,
+                // and a generic derive alone does not prove its arguments Copy.
+                self.copy_derived_types.contains(&self.scoped_type_key(&key))
+            }
+            _ => false,
+        }
+    }
+
     /// Emit an expression, wrapping local variable paths in std::move().
     /// In Rust, passing a non-Copy variable by value moves it. In C++, we need
     /// explicit std::move() to get move semantics. For Copy types, std::move()
@@ -26720,9 +26782,18 @@ impl CodeGen {
                 self.collect_value_call_argument_locals_in_stmt(stmt, &mut consumed);
             }
             outer_captures.iter().any(|cpp_name| {
-                self.lookup_rust_binding_name_for_cpp_name(cpp_name)
-                    .is_some_and(|rust_name| consumed.contains(&rust_name))
-                    || consumed.contains(cpp_name)
+                let rust_name = self.lookup_rust_binding_name_for_cpp_name(cpp_name);
+                let consumed_here = rust_name.as_ref().is_some_and(|name| consumed.contains(name))
+                    || consumed.contains(cpp_name);
+                let capture_ty = rust_name.as_ref()
+                    .and_then(|name| self.lookup_local_binding_type(name))
+                    .or_else(|| self.lookup_local_binding_type(cpp_name));
+                // Passing Copy data by value copies it in Rust. A const C++
+                // capture remains usable even when its argument is move-cast.
+                // Reassignment and mutable methods are checked separately.
+                consumed_here && !capture_ty.as_ref().is_some_and(|ty| {
+                    self.capture_type_is_known_copy(ty, 0)
+                })
             })
         };
         let no_capture_is_mutated = !body_reassigns_a_capture

@@ -177,11 +177,11 @@ impl CodeGen {
     /// Imported flat structs still own their inherent methods. Their sibling
     /// impl bodies are emitted with the physical host, but consumers need the
     /// receiver shape to lower Rust UFCS into a C++ member call.
-    fn lookup_flat_imported_inherent_method_has_receiver(
+    fn lookup_flat_imported_inherent_method(
         &self,
         owner_path: &syn::Path,
         method_name: &str,
-    ) -> Option<bool> {
+    ) -> Option<(Vec<String>, &syn::ImplItemFn)> {
         let mut owner_ty = syn::Type::Path(syn::TypePath {
             qself: None,
             path: owner_path.clone(),
@@ -194,7 +194,7 @@ impl CodeGen {
         let syn::Type::Path(owner) = self.peel_reference_paren_group_type(&owner_ty) else {
             return None;
         };
-        if owner.qself.is_some() || owner.path.leading_colon.is_some() {
+        if owner.qself.is_some() {
             return None;
         }
         let path: Vec<String> = owner.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
@@ -204,19 +204,25 @@ impl CodeGen {
         if !self.cross_file_struct_field_types.contains_key(leaf) {
             return None;
         }
-        let bare_target = if path.len() == 1 {
+        let bare_target = if owner.path.leading_colon.is_none() && path.len() == 1 {
             self.resolve_flat_import_type_authorization_for_exact_scope(
                 &self.module_stack.join("::"), leaf,
             )
         } else { None };
-        let qualified_physical_host = path.first().is_some_and(|root| root == "crate")
+        let qualified_physical_host = owner.path.leading_colon.is_none()
+            && path.first().is_some_and(|root| root == "crate")
             && self.cross_file_struct_qualified_paths.contains(&path);
-        let authorized = qualified_physical_host || self.flat_import_type_authorizations.iter().any(|authorization| {
+        let authorization = self.flat_import_type_authorizations.iter().find(|authorization| {
+            // Prepared ABI fields may already carry their absolute C++ type
+            // spelling. Match the complete target of the exact scoped proof;
+            // its leaf alone cannot recover a Rust provider.
+            let prepared_target = owner.path.leading_colon.is_some()
+                && path.join("::") == format!("{}::{}", authorization.cpp_namespace, authorization.leaf);
             authorization.consumer_physical_module == self.current_physical_module
                 && authorization.consumer_lexical_module.0 == self.module_stack
                 && authorization.provider_kind == crate::cpp_abi::FlatImportTypeProviderKind::Struct
                 && authorization.leaf == *leaf
-                && match authorization.reference_kind {
+                && (prepared_target || (owner.path.leading_colon.is_none() && match authorization.reference_kind {
                     crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse => {
                         path.len() == 1 && bare_target.as_deref() == Some(
                             format!("::{}::{}", authorization.cpp_namespace, authorization.leaf).as_str(),
@@ -226,15 +232,23 @@ impl CodeGen {
                         path.len() == 3 && path[0] == "crate"
                             && authorization.provider_physical_module.0 == [path[1].clone()]
                     }
-                }
+                }))
         });
-        if !authorized { return None; }
+        let physical_path = if qualified_physical_host {
+            path.clone()
+        } else {
+            let authorization = authorization?;
+            let mut physical = vec!["crate".to_string()];
+            physical.extend(authorization.provider_physical_module.0.iter().cloned());
+            physical.push(leaf.clone());
+            physical
+        };
         let mut methods = self.cross_file_impl_blocks.iter()
             .filter(|implementation| implementation.trait_.is_none())
             .filter(|implementation| {
                 let Some(owner) = Self::impl_self_type_path(&implementation.self_ty) else { return false; };
                 let names: Vec<String> = owner.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-                names == path || (names.len() == 1 && names[0] == *leaf)
+                names == physical_path || (names.len() == 1 && names[0] == *leaf)
             })
             .flat_map(|implementation| &implementation.items)
             .filter_map(|item| match item {
@@ -243,9 +257,59 @@ impl CodeGen {
             });
         let method = methods.next()?;
         if methods.next().is_some() { return None; }
+        Some((physical_path, method))
+    }
+
+    fn lookup_flat_imported_inherent_method_has_receiver(
+        &self,
+        owner_path: &syn::Path,
+        method_name: &str,
+    ) -> Option<bool> {
+        let (_, method) = self.lookup_flat_imported_inherent_method(owner_path, method_name)?;
         // Explicit typed-self forms have their own static lowering path.
         Some(matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
             if receiver.colon_token.is_none()))
+    }
+
+    pub(super) fn flat_imported_method_consumes_receiver(
+        &self,
+        owner_path: &syn::Path,
+        method_name: &str,
+    ) -> bool {
+        self.lookup_flat_imported_inherent_method(owner_path, method_name)
+            .is_some_and(|(_, method)| matches!(method.sig.inputs.first(),
+                Some(syn::FnArg::Receiver(receiver))
+                    if receiver.colon_token.is_none() && receiver.reference.is_none()))
+    }
+
+    /// A return type written in a sibling impl resolves in that impl's module,
+    /// not in the consumer. Preserve that provenance for inferred owner values.
+    pub(super) fn flat_imported_method_owned_return_type(
+        &self,
+        owner_path: &syn::Path,
+        method_name: &str,
+    ) -> Option<syn::Type> {
+        let (mut physical_path, method) =
+            self.lookup_flat_imported_inherent_method(owner_path, method_name)?;
+        let syn::ReturnType::Type(_, return_type) = &method.sig.output else { return None; };
+        let syn::Type::Path(return_path) = return_type.as_ref() else { return None; };
+        if return_path.qself.is_some() || return_path.path.leading_colon.is_some() {
+            return None;
+        }
+        if return_path.path.segments.len() != 1 {
+            return Some((**return_type).clone());
+        }
+        let segment = return_path.path.segments.first()?;
+        if segment.ident != "Self" {
+            physical_path.pop();
+            physical_path.push(segment.ident.to_string());
+            if !self.cross_file_struct_qualified_paths.contains(&physical_path) {
+                return None;
+            }
+        }
+        let mut path: syn::Path = syn::parse_str(&physical_path.join("::")).ok()?;
+        path.segments.last_mut()?.arguments = segment.arguments.clone();
+        Some(syn::Type::Path(syn::TypePath { qself: None, path }))
     }
 
     pub(super) fn lookup_owner_method_has_receiver_from_owner_path(
@@ -1838,6 +1902,15 @@ impl CodeGen {
                     };
                 }
                 if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if seg_name == "Box" && self.map_type(ty).starts_with("rusty::Function<") {
+                        let callable = args.args.iter().find_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(t),
+                            _ => None,
+                        })?;
+                        return self.extract_callable_return_type_from_type(callable)
+                            .or_else(|| self.extract_callable_param_types_from_type(callable)
+                                .map(|_| parse_quote!(())));
+                    }
                     if matches!(
                         seg_name.as_str(),
                         "SafeFn" | "UnsafeFn" | "Function" | "function"

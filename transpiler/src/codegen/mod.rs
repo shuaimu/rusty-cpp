@@ -24883,7 +24883,7 @@ impl CodeGen {
             if !alias_is_module_like {
                 return None;
             }
-            let escaped_alias = escape_cpp_keyword(alias);
+            let escaped_alias = self.module_import_alias_cpp_name(alias);
             if self.matches_declared_module_path(target) {
                 let escaped_target = self.escape_and_rename_qualified_name(target);
                 return Some(format!("namespace {} = ::{};", escaped_alias, escaped_target));
@@ -24944,11 +24944,26 @@ impl CodeGen {
         {
             return None;
         }
-        let alias = escape_cpp_keyword(last);
+        let alias = self.module_import_alias_cpp_name(last);
         let target = self.escape_and_rename_qualified_name(normalized);
         Some(format!("namespace {} = ::{};", alias, target))
     }
 
+    fn module_import_alias_cpp_name(&self, alias: &str) -> String {
+        // A Rust namespace import needs the same collision avoidance as a
+        // module declaration. `namespace std = ...` would also redirect the
+        // backend's ordinary std::move/type-trait calls into the user's module.
+        self.module_namespace_renames
+            .get(&self.scoped_type_key(alias))
+            .cloned()
+            .unwrap_or_else(|| {
+                if Self::module_name_conflicts_with_global_symbol(alias) {
+                    format!("{}_mod", escape_cpp_keyword(alias))
+                } else {
+                    escape_cpp_keyword(alias)
+                }
+            })
+    }
 
     fn matches_declared_module_path(&self, normalized_path: &str) -> bool {
         if self.declared_module_paths.contains(normalized_path) {
@@ -24965,7 +24980,9 @@ impl CodeGen {
         if trimmed.is_empty() {
             return;
         }
-        let alias = escape_cpp_keyword(trimmed.rsplit("::").next().unwrap_or(trimmed));
+        let alias = self.module_import_alias_cpp_name(
+            trimmed.rsplit("::").next().unwrap_or(trimmed),
+        );
         self.declared_item_names.insert(alias.clone());
         self.import_alias_names.insert(alias.clone());
         let target = self.escape_and_rename_qualified_name(trimmed);
@@ -35061,7 +35078,39 @@ impl CodeGen {
         // and we'll inject the loop var names into it afterwards.
         let loop_var_names: Vec<String> = loop_binding_names.into_iter().collect();
         let mut loop_var_types = Vec::new();
-        if let Some(item_ty) = self.infer_iter_item_type_from_expr(&for_expr.expr) {
+        let loop_item_type = self.infer_iter_item_type_from_expr(&for_expr.expr).or_else(|| {
+            // `for pair in map` uses owned IntoIterator just like
+            // `map.into_iter()`. Recover both key and value metadata before
+            // typing the pattern, including Arc receivers inside tuple values.
+            // Keep this fallback specific to an authenticated std HashMap;
+            // a local same-named collection may have a different Item type.
+            if iter_is_borrowed {
+                return None;
+            }
+            let mut owner = self.infer_simple_expr_type(&for_expr.expr)?;
+            if !self.type_is_canonical_std_hash_map(&owner) {
+                return None;
+            }
+            for _ in 0..32 {
+                let Some(next) = self.resolve_type_alias_once(&owner) else { break; };
+                if next == owner { break; }
+                owner = next;
+            }
+            let syn::Type::Path(path) = self.peel_reference_paren_group_type(&owner) else {
+                return None;
+            };
+            let syn::PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments else {
+                return None;
+            };
+            let mut types = arguments.args.iter().filter_map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            });
+            let key = types.next()?;
+            let value = types.next()?;
+            Some(parse_quote!((#key, #value)))
+        });
+        if let Some(item_ty) = loop_item_type {
             match for_expr.pat.as_ref() {
                 syn::Pat::Ident(pat_ident) if pat_ident.ident != "_" => {
                     loop_var_types.push((pat_ident.ident.to_string(), item_ty));
@@ -45339,6 +45388,25 @@ impl CodeGen {
             rendered.push(seg_text);
         }
         let mut emitted = rendered.join("::");
+        if self.standard_path_root_is_local_module(&owner_path)
+            && let Some((method, owners)) = rendered.split_last()
+            && let Some(specialized_owner) = owners.last()
+        {
+            // Recovery determines template arguments, not the owner's module.
+            // Re-rendering raw Rust prefixes here would undo the lexical path
+            // mapping, for example local `std` -> C++ `std_mod`.
+            let mut bare_owner_path = owner_path.clone();
+            if let Some(last) = bare_owner_path.segments.last_mut() {
+                last.arguments = syn::PathArguments::None;
+            }
+            let canonical_owner = self.map_type(&syn::Type::Path(syn::TypePath {
+                qself: None,
+                path: bare_owner_path,
+            }));
+            let arguments = specialized_owner.find('<')
+                .map(|index| &specialized_owner[index..]).unwrap_or("");
+            emitted = format!("{}{}::{}", canonical_owner, arguments, method);
+        }
         let mut force_leading_colon = path.leading_colon.is_some();
         if !force_leading_colon
             && !rendered.is_empty()
@@ -51100,8 +51168,65 @@ impl CodeGen {
         ))
     }
 
-    /// Best-effort lowering of a Rust block used in expression position.
-    /// Emits an IIFE that preserves simple local bindings and tail-expression return.
+    /// Whether a block transfers control to a loop or label outside itself.
+    /// Inner loops and closures retain their own break/continue targets.
+    fn block_has_escaping_loop_control(&self, block: &syn::Block) -> bool {
+        struct Scan {
+            loop_depth: usize,
+            labels: Vec<String>,
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan {
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+
+            fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+                let (label, is_loop) = match expr {
+                    syn::Expr::Closure(_) | syn::Expr::Async(_) | syn::Expr::Const(_) => return,
+                    syn::Expr::Break(value) => {
+                        self.found |= value.label.as_ref().map_or(self.loop_depth == 0, |label| {
+                            !self.labels.contains(&label.ident.to_string())
+                        });
+                        syn::visit::visit_expr(self, expr);
+                        return;
+                    }
+                    syn::Expr::Continue(value) => {
+                        self.found |= value.label.as_ref().map_or(self.loop_depth == 0, |label| {
+                            !self.labels.contains(&label.ident.to_string())
+                        });
+                        return;
+                    }
+                    syn::Expr::Loop(value) => (value.label.as_ref(), true),
+                    syn::Expr::While(value) => (value.label.as_ref(), true),
+                    syn::Expr::ForLoop(value) => {
+                        // Rust evaluates the iterable before entering the new
+                        // loop's control-flow scope, including its label.
+                        self.visit_expr(&value.expr);
+                        (value.label.as_ref(), true)
+                    }
+                    syn::Expr::Block(value) => (value.label.as_ref(), false),
+                    _ => (None, false),
+                };
+                if let Some(label) = label {
+                    self.labels.push(label.name.ident.to_string());
+                }
+                self.loop_depth += usize::from(is_loop);
+                if let syn::Expr::ForLoop(value) = expr {
+                    self.visit_block(&value.body);
+                } else {
+                    syn::visit::visit_expr(self, expr);
+                }
+                self.loop_depth -= usize::from(is_loop);
+                if label.is_some() {
+                    self.labels.pop();
+                }
+            }
+        }
+        let mut scan = Scan { loop_depth: 0, labels: Vec::new(), found: false };
+        syn::visit::Visit::visit_block(&mut scan, block);
+        scan.found
+    }
+
+    /// Lower a value block without introducing a new function or loop scope.
     fn block_expr_to_statement_expr_string(
         &self,
         block: &syn::Block,
@@ -51154,13 +51279,33 @@ impl CodeGen {
             return Some("std::make_tuple()".to_string());
         }
 
-        // `return`/`?` inside expression blocks must escape the enclosing function.
-        // Lambda IIFEs trap these returns, so use GNU statement-expression lowering.
-        if self.block_contains_early_return_or_try(block) {
+        // A lambda cannot transfer control to the enclosing function or loop.
+        // Let initializers use statement lowering where their type is known;
+        // other value positions share the existing statement-expression path.
+        if self.block_contains_early_return_or_try(block)
+            || self.block_has_escaping_loop_control(block)
+        {
             return self.block_expr_to_statement_expr_string(block, expected_ty);
         }
 
         let mut inner = self.new_inner_for_block();
+        // `Some(value)` and `None` have distinct constructor types in C++.
+        // Infer their common Option type using the block's prefix bindings,
+        // then use that type for both lambda returns and constructor lowering.
+        let inferred_option_return = if expected_ty.is_none() {
+            block.stmts.split_last().and_then(|(tail, prefix)| {
+                let syn::Stmt::Expr(syn::Expr::If(tail), None) = tail else { return None };
+                let mut inference = self.new_inner_for_block();
+                let bindings = inference.collect_pre_scan_known_local_type_hints(prefix);
+                inference.local_bindings.push(bindings.into_iter()
+                    .map(|(name, ty)| (name, Some(ty))).collect());
+                inference.infer_common_value_type_from_if(tail)
+                    .filter(|ty| inference.is_option_like_syn_type(ty))
+            })
+        } else {
+            None
+        };
+        let expected_ty = expected_ty.or(inferred_option_return.as_ref());
         let expected_return_hint = expected_ty
             .cloned()
             .map(|ty| syn::ReturnType::Type(Default::default(), Box::new(ty)));
@@ -66423,3 +66568,7 @@ mod type_solver;
 mod tests;
 #[cfg(test)]
 mod auto_trait_generics_tests;
+#[cfg(test)]
+mod owned_map_iteration_tests;
+#[cfg(test)]
+mod qualified_std_constructor_tests;

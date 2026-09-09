@@ -11037,6 +11037,96 @@ impl CodeGen {
         result
     }
 
+    /// Const qualification needs the receiver's declared ownership, including
+    /// values inferred from a sibling method's return type. Keep this separate
+    /// from the name-based consumption set, which also changes move emission.
+    pub(super) fn local_has_declared_consuming_receiver(
+        &self,
+        name: &str,
+        inferred_type: Option<&syn::Type>,
+        initializer: Option<&syn::Expr>,
+    ) -> bool {
+        let Some(methods) = self.by_value_method_call_pairs.get(name) else { return false; };
+        let consumes = |ty: &syn::Type| {
+            let syn::Type::Path(owner) = self.peel_reference_paren_group_type(ty) else {
+                return false;
+            };
+            let Some(tail) = owner.path.segments.last() else { return false; };
+            methods.iter().any(|method| {
+                self.impl_method_receiver_kinds.get(&tail.ident.to_string())
+                    .and_then(|kinds| kinds.get(method))
+                    .is_some_and(|kind| matches!(kind, 2 | 3))
+                    || self.flat_imported_method_consumes_receiver(&owner.path, method)
+            })
+        };
+        if inferred_type.is_some_and(consumes) {
+            return true;
+        }
+        initializer.and_then(|expr| self.infer_consuming_receiver_initializer_type(expr))
+            .as_ref().is_some_and(consumes)
+    }
+
+    /// Infer a block tail after each prefix declaration has entered its Rust
+    /// scope. An initializer sees earlier declarations and its previous shadow;
+    /// the tail sees the final declarations, including explicitly typed lets.
+    pub(super) fn infer_lexical_block_tail_type(&self, block: &syn::Block) -> Option<syn::Type> {
+        let tail = self.extract_tail_expr_from_block(block)?;
+        let mut inner = self.new_inner_for_block();
+        inner.local_bindings.push(HashMap::new());
+        inner.local_shadowed_binding_types.push(HashMap::new());
+        for stmt in block.stmts.iter().take(block.stmts.len().saturating_sub(1)) {
+            if let syn::Stmt::Local(local) = stmt {
+                let (pattern, annotation) = match &local.pat {
+                    syn::Pat::Type(typed) => (typed.pat.as_ref(), Some((*typed.ty).clone())),
+                    pattern => (pattern, None),
+                };
+                let ty = annotation.or_else(|| local.init.as_ref()
+                    .and_then(|init| inner.infer_consuming_receiver_initializer_type(&init.expr)));
+                let mut names = HashSet::new();
+                inner.collect_closure_param_names_from_pat(pattern, &mut names);
+                // Even an unknown inner declaration hides an outer type.
+                for name in names {
+                    inner.register_local_binding(name, None);
+                }
+                if let Some(ty) = ty {
+                    let mut bindings = HashMap::new();
+                    inner.bind_pattern_types_into_env(pattern, &ty, &mut bindings);
+                    for (name, ty) in bindings {
+                        inner.register_local_binding(name, Some(ty));
+                    }
+                }
+            }
+        }
+        inner.infer_consuming_receiver_initializer_type(tail)
+    }
+
+    fn infer_consuming_receiver_initializer_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Block(block) => return self.infer_lexical_block_tail_type(&block.block),
+            syn::Expr::Unsafe(block) => return self.infer_lexical_block_tail_type(&block.block),
+            _ => {}
+        }
+        if let syn::Expr::MethodCall(call) = expr
+            && let Some(receiver) = self.infer_simple_expr_type(&call.receiver)
+            && let syn::Type::Path(owner) = self.peel_reference_paren_group_type(&receiver)
+            && let Some(return_type) = self.flat_imported_method_owned_return_type(
+                &owner.path, &call.method.to_string(),
+            )
+        {
+            return Some(return_type);
+        }
+        self.infer_local_binding_type_from_initializer(expr)
+            .or_else(|| self.infer_simple_expr_type(expr))
+            .or_else(|| {
+                let syn::Expr::Call(call) = expr else { return None; };
+                let syn::Expr::Path(path) = call.func.as_ref() else { return None; };
+                let tail = path.path.segments.last()?;
+                self.tuple_struct_arities.contains_key(&tail.ident.to_string())
+                    .then(|| syn::Type::Path(syn::TypePath { qself: None, path: path.path.clone() }))
+            })
+    }
+
     /// Bare single-segment locals iterated by a `for` loop (`for x in v`).
     /// Rust moves the iterable; the emit-side qualifier decision combines
     /// this NAME set with a crate-Iterator/IntoIterator TYPE gate so plain

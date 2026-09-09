@@ -5138,11 +5138,22 @@ impl CodeGen {
             && segs[segs.len() - 1] == "new"
             && matches!(
                 segs[segs.len() - 2].as_str(),
-                "Box" | "Rc" | "Arc" | "RefCell" | "Cell"
+                "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Mutex" | "RwLock"
             )
             && call.args.len() == 1
         {
             let owner = segs[segs.len() - 2].clone();
+            if matches!(owner.as_str(), "Mutex" | "RwLock") {
+                let mut owner_path = p.path.clone();
+                owner_path.segments.pop();
+                let mapped = self.map_type(&syn::Type::Path(syn::TypePath {
+                    qself: None,
+                    path: owner_path,
+                }));
+                if !matches!(mapped.split('<').next(), Some("rusty::Mutex" | "rusty::RwLock")) {
+                    return None;
+                }
+            }
             let inner = self
                 .infer_simple_expr_type(&call.args[0])
                 .or_else(|| self.infer_local_binding_type_from_initializer(&call.args[0]))?;
@@ -5501,6 +5512,24 @@ impl CodeGen {
                         if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
                             return Some(arg_ty);
                         }
+                    }
+                    // A deferred assignment from mem::take owns the pointee
+                    // type. Preserve it before generic call fallback so the
+                    // declaration remains outside the assignment's scope.
+                    if call.args.len() == 1
+                        && matches!(joined.as_str(), "std::mem::take" | "core::mem::take")
+                        && (path_expr.path.leading_colon.is_some()
+                            || self.resolve_scope_import_binding_path(
+                                &path_expr.path.segments[0].ident.to_string(),
+                            ).is_none_or(|binding| {
+                                binding.trim_start_matches("::")
+                                    == path_expr.path.segments[0].ident.to_string()
+                            }))
+                        && !self.standard_path_root_is_local_module(&path_expr.path)
+                        && let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0])
+                        && let syn::Type::Reference(reference) = self.peel_paren_group_type(&arg_ty)
+                    {
+                        return Some((*reference.elem).clone());
                     }
                     if matches!(
                         joined.as_str(),
@@ -6606,10 +6635,15 @@ impl CodeGen {
             }
         }
 
-        if method == "take" && mc.args.is_empty() {
+        if (method == "take" && mc.args.is_empty())
+            || (method == "replace" && mc.args.len() == 1)
+        {
             if let Some(receiver_ty) = self
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                && (method == "take"
+                    || self.map_type(&self.peel_guard_wrapper_for_method_routing(&receiver_ty))
+                        .starts_with("rusty::Option<"))
                 && let Some((owner, type_args)) = self.option_or_result_type_args(&receiver_ty)
                 && owner == "Option"
                 && let Some(inner_ty) = type_args.first().cloned()
@@ -6877,6 +6911,16 @@ impl CodeGen {
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
             {
                 let peeled = self.peel_reference_paren_group_type(&ty);
+                // Cloning a standard sum value behind a guard clones its
+                // payload owner, not the guard. Retain that complete type for
+                // a later unwrap and its receiver's auto-deref routing.
+                let protected = self.peel_guard_wrapper_for_method_routing(&ty);
+                let protected_cpp = self.map_type(&protected);
+                if protected_cpp.starts_with("rusty::Option<")
+                    || protected_cpp.starts_with("rusty::Result<")
+                {
+                    return Some(protected.into_owned());
+                }
                 if let syn::Type::Path(tp) = peeled
                     && tp.qself.is_none()
                     && tp.path.segments.len() == 1
@@ -10422,6 +10466,13 @@ impl CodeGen {
                     }
                     "Box" | "NonNull" | "ConstNonNull" | "Ptr" | "MutPtr" | "Unique"
                     | "reference_wrapper" => first_type_arg(),
+                    "Ref" | "RefMut" | "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard"
+                        if matches!(self.map_type(ty).split('<').next(),
+                            Some("rusty::Ref" | "rusty::RefMut" | "rusty::MutexGuard"
+                                | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard")) =>
+                    {
+                        first_type_arg()
+                    }
                     _ => None,
                 }
             }
