@@ -419,10 +419,10 @@ auto spawn(F&& func, Args&&... args)
     // that fires for arbitrary user lambda types that capture
     // transpiled module values.
     detail::TypeErasedClosure body{
-        [thread_state = std::move(thread_state),
+        [worker_state = std::move(thread_state),
          func = std::forward<F>(func),
          ...args = std::forward<Args>(args)]() mutable {
-            auto s = thread_state;
+            auto s = worker_state;
             detail::run_into_state<ReturnType>(s, [&]() -> ReturnType {
                 if constexpr (std::is_void_v<RawReturn>) {
                     std::invoke(func, std::move(args)...);
@@ -522,10 +522,10 @@ public:
         auto thread_state = inner_state;
 
         detail::TypeErasedClosure body{
-            [thread_state = std::move(thread_state),
+            [worker_state = std::move(thread_state),
              fn = std::forward<Fn>(fn),
              ...args = std::forward<Args>(args)]() mutable {
-                auto s = thread_state;
+                auto s = worker_state;
                 detail::run_into_state<ReturnType>(s, [&]() {
                     return std::invoke(fn, std::forward<Args>(args)...);
                 });
