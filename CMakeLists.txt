@@ -567,6 +567,7 @@ set(TEST_SOURCES
     # Basic Rusty types - ALL WORKING
     tests/rusty_arc_test.cpp
     tests/rusty_arc_mt_test.cpp
+    tests/rusty_arc_uniqueness_test.cpp
     tests/rusty_box_test.cpp
     tests/rusty_owned_fd_test.cpp
     tests/rusty_net_tcp_test.cpp

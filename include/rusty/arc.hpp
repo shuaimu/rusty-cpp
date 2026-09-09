@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstdlib>
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <utility>
 #include "option.hpp"  // For Option<T&> and SomeRef()
@@ -91,6 +92,34 @@ private:
     };
 
     ControlBlock* ptr;
+
+    // No explicit Weak owners means the sole weak count belongs to the strong
+    // set. Temporarily reserve that count while get_mut checks uniqueness.
+    // These constants and helpers add no fields to Arc or its control block.
+    static constexpr size_t weak_count_locked = static_cast<size_t>(-1);
+    static constexpr size_t max_refcount = weak_count_locked >> 1;
+
+    // @unsafe - raw control-block access and coordinated atomic increment
+    static void increment_weak(ControlBlock* cb) {
+        size_t count = cb->weak_count.load(std::memory_order_relaxed);
+        for (;;) {
+            if (count == weak_count_locked) {
+                count = cb->weak_count.load(std::memory_order_relaxed);
+                continue;
+            }
+            // A real reference count must never collide with the lock value.
+            if (count > max_refcount) {
+                std::abort();
+            }
+            // Acquire pairs with get_mut's unlock. A downgrade cannot become
+            // visible before the protected strong-count uniqueness check.
+            if (cb->weak_count.compare_exchange_weak(
+                    count, count + 1, std::memory_order_acquire,
+                    std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
 
     // @unsafe
     static void release_weak(ControlBlock* cb) {
@@ -192,7 +221,7 @@ public:
     // `Weak<T>` that already points at the (still uninitialized) allocation,
     // so the payload can store a handle back to its own Arc.
     //
-    // Counts follow Rust exactly: the block starts strong=0/weak=1 (the one
+    // The block starts strong=0/weak=1 (the one
     // weak reference the strong set owns collectively), the callback's
     // borrowed `Weak` adds a second that is released on return, and strong
     // becomes 1 only once the payload is in place.
@@ -208,12 +237,25 @@ public:
     static Arc<T> new_cyclic(F&& data_fn) {
         // @unsafe {
         ControlBlock* cb = new ControlBlock(typename ControlBlock::DeferredInit{});
+        // Retain the implicit weak until an Arc adopts it. If construction
+        // throws, escaped Weak handles keep an expired allocation alive and
+        // the last such handle frees it; without one, this guard frees it now.
+        struct PendingWeak {
+            ControlBlock* block;
+            ~PendingWeak() {
+                if (block) {
+                    Arc<T>::release_weak(block);
+                }
+            }
+        } pending{cb};
         {
             ::rusty::sync::Weak<T> weak(cb, true);
             cb->value = new T(data_fn(weak));
             cb->strong_count.store(1, std::memory_order_release);
         }
-        return Arc<T>(cb);
+        Arc<T> result(cb);
+        pending.block = nullptr;
+        return result;
         // }
     }
 
@@ -326,7 +368,7 @@ public:
                 return 0;
             }
             size_t count = ptr->weak_count.load(std::memory_order_relaxed);
-            return count > 0 ? count - 1 : 0;
+            return count == weak_count_locked ? 0 : (count > 0 ? count - 1 : 0);
         }
     }
 
@@ -341,12 +383,26 @@ public:
         return value->clone();
     }
 
-    // Try to get mutable reference if we're the only owner
-    // Returns None if there are other references (shared state)
+    // Mutable access requires the only strong owner and no explicit Weak.
+    // Locking the weak count excludes concurrent downgrades while checking the
+    // strong count; two independent count loads cannot establish uniqueness.
     // @safe
     // @lifetime: (&'a mut self) -> Option<&'a mut T>
     Option<T&> get_mut() {
-        if (ptr && ptr->value && ptr->strong_count.load(std::memory_order_relaxed) == 1) {
+        if (!ptr || !ptr->value) {
+            return None;
+        }
+        size_t expected = 1;
+        // Acquire observes upgrades that precede the last explicit Weak drop.
+        if (!ptr->weak_count.compare_exchange_strong(
+                expected, weak_count_locked, std::memory_order_acquire,
+                std::memory_order_relaxed)) {
+            return None;
+        }
+        // Acquire observes writes before other strong owners were dropped.
+        const bool unique = ptr->strong_count.load(std::memory_order_acquire) == 1;
+        ptr->weak_count.store(1, std::memory_order_release);
+        if (unique) {
             return SomeRef(*ptr->value);
         }
         return None;
