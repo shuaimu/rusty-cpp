@@ -181,7 +181,7 @@ impl CodeGen {
         &self,
         owner_path: &syn::Path,
         method_name: &str,
-    ) -> Option<(Vec<String>, &syn::ImplItemFn)> {
+    ) -> Option<(Vec<String>, &syn::ItemImpl, &syn::ImplItemFn)> {
         let mut owner_ty = syn::Type::Path(syn::TypePath {
             qself: None,
             path: owner_path.clone(),
@@ -250,14 +250,13 @@ impl CodeGen {
                 let names: Vec<String> = owner.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
                 names == physical_path || (names.len() == 1 && names[0] == *leaf)
             })
-            .flat_map(|implementation| &implementation.items)
-            .filter_map(|item| match item {
-                syn::ImplItem::Fn(method) if method.sig.ident == method_name => Some(method),
+            .flat_map(|implementation| implementation.items.iter().filter_map(move |item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == method_name => Some((implementation, method)),
                 _ => None,
-            });
-        let method = methods.next()?;
+            }));
+        let (implementation, method) = methods.next()?;
         if methods.next().is_some() { return None; }
-        Some((physical_path, method))
+        Some((physical_path, implementation, method))
     }
 
     fn lookup_flat_imported_inherent_method_has_receiver(
@@ -265,7 +264,7 @@ impl CodeGen {
         owner_path: &syn::Path,
         method_name: &str,
     ) -> Option<bool> {
-        let (_, method) = self.lookup_flat_imported_inherent_method(owner_path, method_name)?;
+        let (_, _, method) = self.lookup_flat_imported_inherent_method(owner_path, method_name)?;
         // Explicit typed-self forms have their own static lowering path.
         Some(matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
             if receiver.colon_token.is_none()))
@@ -277,7 +276,7 @@ impl CodeGen {
         method_name: &str,
     ) -> bool {
         self.lookup_flat_imported_inherent_method(owner_path, method_name)
-            .is_some_and(|(_, method)| matches!(method.sig.inputs.first(),
+            .is_some_and(|(_, _, method)| matches!(method.sig.inputs.first(),
                 Some(syn::FnArg::Receiver(receiver))
                     if receiver.colon_token.is_none() && receiver.reference.is_none()))
     }
@@ -289,9 +288,34 @@ impl CodeGen {
         owner_path: &syn::Path,
         method_name: &str,
     ) -> Option<syn::Type> {
-        let (mut physical_path, method) =
+        let (mut physical_path, implementation, method) =
             self.lookup_flat_imported_inherent_method(owner_path, method_name)?;
         let syn::ReturnType::Type(_, return_type) = &method.sig.output else { return None; };
+        // This lookup preserves concrete declaration ownership; it does not
+        // solve provider generics. A method's T shadows any module struct T,
+        // and an impl's Self may still contain unresolved type arguments.
+        let mut unbound = HashSet::new();
+        for parameter in implementation.generics.params.iter().chain(&method.sig.generics.params) {
+            match parameter {
+                syn::GenericParam::Type(parameter) => { unbound.insert(parameter.ident.to_string()); }
+                syn::GenericParam::Const(parameter) => { unbound.insert(parameter.ident.to_string()); }
+                syn::GenericParam::Lifetime(_) => {}
+            }
+        }
+        if implementation.generics.params.iter().any(|parameter| !matches!(parameter, syn::GenericParam::Lifetime(_))) {
+            unbound.insert("Self".into());
+        }
+        struct UsesUnbound<'a> { names: &'a HashSet<String>, found: bool }
+        impl<'ast> syn::visit::Visit<'ast> for UsesUnbound<'_> {
+            fn visit_path(&mut self, path: &'ast syn::Path) {
+                self.found |= path.leading_colon.is_none()
+                    && path.segments.first().is_some_and(|segment| self.names.contains(&segment.ident.to_string()));
+                syn::visit::visit_path(self, path);
+            }
+        }
+        let mut scan = UsesUnbound { names: &unbound, found: false };
+        syn::visit::Visit::visit_type(&mut scan, return_type);
+        if scan.found { return None; }
         let syn::Type::Path(return_path) = return_type.as_ref() else { return None; };
         if return_path.qself.is_some() || return_path.path.leading_colon.is_some() {
             return None;

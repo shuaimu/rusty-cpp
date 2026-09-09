@@ -19410,6 +19410,63 @@ fn consuming_receiver_accepts_only_the_prepared_import_target() {
 }
 
 #[test]
+fn imported_method_option_payload_preserves_provider_and_rejects_wrong_scope() {
+    let mut cg = consuming_receiver_import_fixture();
+    let initializer: syn::Expr = syn::parse_quote!(Some(queue.admit()));
+    let inferred = cg.infer_local_binding_type_from_initializer(&initializer).unwrap();
+    let expected: syn::Type = syn::parse_quote!(Option<crate::queue::Admission>);
+    assert!(CodeGen::types_equivalent_by_tokens(&inferred, &expected));
+    cg.module_stack.push("nested".into());
+    assert!(cg.infer_local_binding_type_from_initializer(&initializer).is_none());
+    cg.module_stack.clear();
+    cg.local_bindings.last_mut().unwrap().insert("queue".into(), Some(syn::parse_quote!(::unrelated::Queue)));
+    assert!(cg.infer_local_binding_type_from_initializer(&initializer).is_none());
+}
+
+#[test]
+fn imported_method_return_does_not_confuse_generic_parameters_with_provider_types() {
+    let mut cg = consuming_receiver_import_fixture();
+    let provider: syn::File = syn::parse_quote! {
+        pub struct Queue { value: i32 }
+        pub struct Admission { value: i32 }
+        pub struct T { value: i32 }
+        pub struct Generic<U> { value: U }
+        impl Queue {
+            pub fn generic<T>(&self, value: T) -> T { value }
+            pub fn concrete<T>(&self, value: T) -> Admission { Admission { value: self.value } }
+            pub fn qualified<T>(&self, value: T) -> crate::queue::T { crate::queue::T { value: self.value } }
+        }
+        impl<U> Generic<U> {
+            pub fn mirror(self) -> Generic<U> { self }
+            pub fn self_owned(self) -> Self { self }
+            pub fn concrete(&self) -> Admission { Admission { value: 1 } }
+        }
+    };
+    cg.set_cross_file_structs(provider.items.iter().filter_map(|item| match item {
+        syn::Item::Struct(item) => Some(item.clone()), _ => None,
+    }).collect());
+    cg.set_cross_file_impl_blocks(provider.items.into_iter().filter_map(|item| match item {
+        syn::Item::Impl(item) => Some(item), _ => None,
+    }).collect());
+    for leaf in ["T", "Generic"] {
+        cg.cross_file_struct_qualified_paths.insert(vec!["crate".into(), "queue".into(), leaf.into()]);
+    }
+    let queue: syn::Path = syn::parse_quote!(Queue);
+    assert!(cg.flat_imported_method_owned_return_type(&queue, "generic").is_none());
+    let concrete = cg.flat_imported_method_owned_return_type(&queue, "concrete").unwrap();
+    let admission: syn::Type = syn::parse_quote!(crate::queue::Admission);
+    assert!(CodeGen::types_equivalent_by_tokens(&concrete, &admission));
+    let qualified = cg.flat_imported_method_owned_return_type(&queue, "qualified").unwrap();
+    let module_type: syn::Type = syn::parse_quote!(crate::queue::T);
+    assert!(CodeGen::types_equivalent_by_tokens(&qualified, &module_type));
+    let generic: syn::Path = syn::parse_quote!(crate::queue::Generic<i32>);
+    assert!(cg.flat_imported_method_owned_return_type(&generic, "mirror").is_none());
+    assert!(cg.flat_imported_method_owned_return_type(&generic, "self_owned").is_none());
+    let concrete = cg.flat_imported_method_owned_return_type(&generic, "concrete").unwrap();
+    assert!(CodeGen::types_equivalent_by_tokens(&concrete, &admission));
+}
+
+#[test]
 fn consuming_receiver_imported_field_return_uses_preflight_provenance() {
     let provider = r#"
         pub struct Queue { pub value: i32 }

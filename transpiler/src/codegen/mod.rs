@@ -66572,3 +66572,5 @@ mod auto_trait_generics_tests;
 mod owned_map_iteration_tests;
 #[cfg(test)]
 mod qualified_std_constructor_tests;
+#[cfg(test)]
+mod imported_guard_coercion_tests;

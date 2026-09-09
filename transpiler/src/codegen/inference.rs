@@ -7094,6 +7094,16 @@ impl CodeGen {
             }
         }
 
+        // A sibling method's result resolves in its declaring Rust module.
+        // Keep that proven owner through wrappers such as Some(method()), so
+        // branch and lambda inference can name the complete Option payload.
+        if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+            && let syn::Type::Path(owner) = self.peel_reference_paren_group_type(&receiver_ty)
+            && let Some(ret_ty) = self.flat_imported_method_owned_return_type(&owner.path, &method)
+        {
+            return Some(ret_ty);
+        }
+
         if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
             && let Some(ret_ty) =
                 self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, &method)

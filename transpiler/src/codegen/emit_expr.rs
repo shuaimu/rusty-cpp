@@ -13269,6 +13269,179 @@ impl CodeGen {
         Some(format!("rusty::index_with_range({}, {})", base, index))
     }
 
+    pub(super) fn guard_coercion_target_matches(
+        &self,
+        protected: &syn::Type,
+        expected: &syn::Type,
+    ) -> bool {
+        self.guard_coercion_mapped_types_match(&self.map_type(protected), &self.map_type(expected))
+    }
+
+    pub(super) fn guard_coercion_mapped_types_match(
+        &self,
+        protected_cpp: &str,
+        expected_cpp: &str,
+    ) -> bool {
+        if protected_cpp == expected_cpp {
+            return true;
+        }
+        // The alias table can retain a provider-qualified C++ trait while a
+        // dyn trait spells the same imported interface through its using.
+        // Normalize only identities proven by crate preflight, recursively
+        // inside the wrapper type. An unrelated same-tail name is unchanged.
+        struct ImportedIdentity<'a> {
+            cg: &'a CodeGen,
+            provider: Option<(crate::cpp_abi::ModulePath, String)>,
+            depth: usize,
+            valid: bool,
+        }
+        fn local_dyn_trait_alias(ty: &syn::Type) -> bool {
+            struct Check {
+                found: bool,
+                valid: bool,
+            }
+            impl<'ast> syn::visit::Visit<'ast> for Check {
+                fn visit_type_trait_object(&mut self, object: &'ast syn::TypeTraitObject) {
+                    self.found = true;
+                    for bound in &object.bounds {
+                        if let syn::TypeParamBound::Trait(bound) = bound {
+                            self.valid &= bound.path.leading_colon.is_none()
+                                && (bound.path.segments.len() == 1
+                                    || (bound.path.segments.len() == 2
+                                        && bound.path.segments[0].ident == "self"));
+                        }
+                    }
+                    syn::visit::visit_type_trait_object(self, object);
+                }
+            }
+            let mut check = Check {
+                found: false,
+                valid: true,
+            };
+            syn::visit::Visit::visit_type(&mut check, ty);
+            check.found && check.valid
+        }
+        impl syn::visit_mut::VisitMut for ImportedIdentity<'_> {
+            fn visit_type_path_mut(&mut self, ty: &mut syn::TypePath) {
+                syn::visit_mut::visit_type_path_mut(self, ty);
+                if ty.qself.is_some() {
+                    return;
+                }
+                let Some(last) = ty.path.segments.last() else {
+                    return;
+                };
+                let leaf = last.ident.to_string();
+                let args = last.arguments.clone();
+                let segments = ty
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                let scope = self.cg.module_stack.join("::");
+                let target = if ty.path.leading_colon.is_none() && segments.len() == 1 {
+                    if let Some((provider, namespace)) = &self.provider {
+                        let target = self.cg.flat_import_type_authorizations.iter().find_map(
+                            |authorization| {
+                                (authorization.provider_physical_module == *provider
+                                    && authorization.cpp_namespace == *namespace
+                                    && authorization.leaf == leaf
+                                    && authorization.provider_kind
+                                        == crate::cpp_abi::FlatImportTypeProviderKind::Trait)
+                                    .then_some(format!("::{namespace}::{leaf}"))
+                            },
+                        );
+                        self.valid &= target.is_some();
+                        target
+                    } else {
+                        self.cg
+                            .resolve_flat_import_type_authorization_for_exact_scope(&scope, &leaf)
+                    }
+                } else {
+                    if ty.path.leading_colon.is_none()
+                        && self.cg.current_scope_has_visible_module_root(&segments[0])
+                    {
+                        return;
+                    }
+                    self.cg
+                        .flat_import_type_authorizations
+                        .iter()
+                        .find_map(|authorization| {
+                            let target =
+                                format!("{}::{}", authorization.cpp_namespace, authorization.leaf);
+                            (authorization.consumer_physical_module
+                                == self.cg.current_physical_module
+                                && authorization.consumer_lexical_module.0 == self.cg.module_stack
+                                && segments.join("::") == target)
+                                .then_some(format!("::{target}"))
+                        })
+                };
+                if let Some(target) = target
+                    && let Ok(mut path) = syn::parse_str::<syn::Path>(&target)
+                {
+                    if self.depth < 16
+                        && matches!(args, syn::PathArguments::None)
+                        && let Some(authorization) = self
+                            .cg
+                            .flat_import_type_authorizations
+                            .iter()
+                            .find(|authorization| {
+                                authorization.consumer_physical_module
+                                    == self.cg.current_physical_module
+                                    && authorization.consumer_lexical_module.0
+                                        == self.cg.module_stack
+                                    && authorization.provider_kind
+                                        == crate::cpp_abi::FlatImportTypeProviderKind::TypeAlias
+                                    && format!(
+                                        "::{}::{}",
+                                        authorization.cpp_namespace, authorization.leaf
+                                    ) == target
+                            })
+                        && let Some(alias) = self
+                            .cg
+                            .cross_file_auto_trait_aliases
+                            .get(&authorization.leaf)
+                        && alias.generics.params.is_empty()
+                        && alias.generics.where_clause.is_none()
+                        && local_dyn_trait_alias(&alias.ty)
+                        && let Ok(syn::Type::Path(mut expanded)) =
+                            syn::parse_str::<syn::Type>(&self.cg.map_type(&alias.ty))
+                    {
+                        // The alias body resolves in its provider. In particular,
+                        // its dyn trait cannot bind to a consumer's local namesake.
+                        let old_provider = self.provider.replace((
+                            authorization.provider_physical_module.clone(),
+                            authorization.cpp_namespace.clone(),
+                        ));
+                        self.depth += 1;
+                        self.visit_type_path_mut(&mut expanded);
+                        self.depth -= 1;
+                        self.provider = old_provider;
+                        *ty = expanded;
+                        return;
+                    }
+                    path.segments.last_mut().unwrap().arguments = args;
+                    ty.path = path;
+                }
+            }
+        }
+        let (Ok(mut protected_ty), Ok(mut expected_ty)) = (
+            syn::parse_str::<syn::Type>(&protected_cpp),
+            syn::parse_str::<syn::Type>(&expected_cpp),
+        ) else {
+            return false;
+        };
+        let mut normalize = ImportedIdentity {
+            cg: self,
+            provider: None,
+            depth: 0,
+            valid: true,
+        };
+        syn::visit_mut::VisitMut::visit_type_mut(&mut normalize, &mut protected_ty);
+        syn::visit_mut::VisitMut::visit_type_mut(&mut normalize, &mut expected_ty);
+        normalize.valid && protected_ty == expected_ty
+    }
+
     /// Emit an expression with optional expected type context from its parent.
     /// Currently used for typed `let` initializers to guide enum variant constructor calls.
     pub(super) fn emit_expr_to_string_with_expected(
@@ -13665,7 +13838,7 @@ impl CodeGen {
                         let source_cpp = self.map_type(self.peel_reference_paren_group_type(&source_ty));
                         let protected = self.peel_guard_wrapper_for_method_routing(&source_ty);
                         if matches!(source_cpp.split('<').next(), Some("rusty::MutexGuard" | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard" | "rusty::Ref" | "rusty::RefMut"))
-                            && self.map_type(&protected) == self.map_type(expected_inner)
+                            && self.guard_coercion_target_matches(&protected, expected_inner)
                         {
                             return format!("(*({}))", self.emit_expr_to_string(&r.expr));
                         }
