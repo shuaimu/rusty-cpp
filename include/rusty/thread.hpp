@@ -251,6 +251,44 @@ using SpawnResultType = std::conditional_t<
     std::tuple<>,
     std::invoke_result_t<F, Args...>>;
 
+// Store the thread's owners in ordinary members. Imported function templates
+// have produced a null SharedState when this ownership transfer was expressed
+// as an init-capture inside a second lambda. This bound callable also keeps the
+// stored argument types independent of the references used to supply them.
+template<typename ReturnType, bool Scoped, typename Function, typename... Args>
+class BoundThreadTask {
+    SharedState<JoinState<ReturnType>> state_;
+    std::decay_t<Function> function_;
+    std::tuple<std::decay_t<Args>...> arguments_;
+
+    template<std::size_t... I>
+    decltype(auto) invoke(std::index_sequence<I...>) {
+        if constexpr (Scoped) {
+            return std::invoke(function_, std::forward<Args>(std::get<I>(arguments_))...);
+        } else {
+            return std::invoke(function_, std::move(std::get<I>(arguments_))...);
+        }
+    }
+
+public:
+    BoundThreadTask(SharedState<JoinState<ReturnType>> state,
+                    Function&& function, Args&&... args)
+        : state_(std::move(state)), function_(std::forward<Function>(function)),
+          arguments_(std::forward<Args>(args)...) {}
+
+    void operator()() {
+        auto retained_state = state_;
+        run_into_state<ReturnType>(retained_state, [this]() -> ReturnType {
+            if constexpr (std::is_void_v<std::invoke_result_t<Function, Args...>>) {
+                invoke(std::index_sequence_for<Args...>{});
+                if constexpr (!std::is_void_v<ReturnType>) return ReturnType{};
+            } else {
+                return invoke(std::index_sequence_for<Args...>{});
+            }
+        });
+    }
+};
+
 } // namespace detail
 
 /// Opaque thread identifier.
@@ -405,7 +443,6 @@ template<typename F, typename... Args>
              std::invocable<F, Args...>
 auto spawn(F&& func, Args&&... args)
     -> JoinHandle<detail::SpawnResultType<F, Args...>> {
-    using RawReturn = std::invoke_result_t<F, Args...>;
     using ReturnType = detail::SpawnResultType<F, Args...>;
 
     auto state = detail::SharedState<detail::JoinState<ReturnType>>::make();
@@ -419,19 +456,8 @@ auto spawn(F&& func, Args&&... args)
     // that fires for arbitrary user lambda types that capture
     // transpiled module values.
     detail::TypeErasedClosure body{
-        [worker_state = std::move(thread_state),
-         func = std::forward<F>(func),
-         ...args = std::forward<Args>(args)]() mutable {
-            auto s = worker_state;
-            detail::run_into_state<ReturnType>(s, [&]() -> ReturnType {
-                if constexpr (std::is_void_v<RawReturn>) {
-                    std::invoke(func, std::move(args)...);
-                    return ReturnType{};
-                } else {
-                    return std::invoke(func, std::move(args)...);
-                }
-            });
-        }
+        detail::BoundThreadTask<ReturnType, false, F, Args...>(
+            std::move(thread_state), std::forward<F>(func), std::forward<Args>(args)...)
     };
 
     platform::threading::thread thread(std::move(body));
@@ -522,14 +548,8 @@ public:
         auto thread_state = inner_state;
 
         detail::TypeErasedClosure body{
-            [worker_state = std::move(thread_state),
-             fn = std::forward<Fn>(fn),
-             ...args = std::forward<Args>(args)]() mutable {
-                auto s = worker_state;
-                detail::run_into_state<ReturnType>(s, [&]() {
-                    return std::invoke(fn, std::forward<Args>(args)...);
-                });
-            }};
+            detail::BoundThreadTask<ReturnType, true, Fn, Args...>(
+                std::move(thread_state), std::forward<Fn>(fn), std::forward<Args>(args)...)};
         platform::threading::thread t(std::move(body));
 
         auto state = detail::SharedState<ScopedThreadState<ReturnType>>::make(
