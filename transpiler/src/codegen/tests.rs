@@ -47463,6 +47463,168 @@ fn wrapper_aliases_keep_const_callbacks_and_real_mutation() {
     assert_eq!(negative.matches("]() mutable").count(), 2, "{negative}");
 }
 
+#[test]
+fn closure_capture_patterns_obey_lexical_scope() {
+    let cg = CodeGen::new();
+    for expression in [
+        "move || { if let Some(future) = pending { consume(future); } }",
+        "move || { while let Some(future) = pending.take() { consume(future); } }",
+        "move || { match pending { Some(future) => consume(future), None => () } }",
+        "move || { for (future, _) in items { consume(future); } }",
+        "move || { let (future, _) = pair; consume(future); }",
+        "move || { let record { future, .. } = item; consume(future); }",
+        "move || { let [future, ..] = items; consume(future); }",
+        "move || { let callback = |(future, _)| consume(future); }",
+    ] {
+        let closure = syn::parse_str(expression).unwrap();
+        let names = cg.collect_move_closure_captured_rust_names(&closure);
+        assert!(!names.contains("future"), "spurious outer capture in {expression}: {names:?}");
+    }
+    for expression in [
+        "move || { if let Some(future) = pending { consume(future); } consume(future); }",
+        "move || { if let Some(future) = pending { consume(future); } else { consume(future); } }",
+        "move || { while let Some(future) = pending.take() { consume(future); } consume(future); }",
+        "move || { match pending { Some(future) => consume(future), None => consume(future) } }",
+        "move || { for future in items { consume(future); } consume(future); }",
+        "move || { let future = future.clone(); consume(future); }",
+        "move || { { let future = local; consume(future); } consume(future); }",
+        "move || { let callback = |future| consume(future); consume(future); }",
+    ] {
+        let closure = syn::parse_str(expression).unwrap();
+        let names = cg.collect_move_closure_captured_rust_names(&closure);
+        assert!(names.contains("future"), "lost outer capture in {expression}: {names:?}");
+    }
+}
+
+#[test]
+fn shadowed_arc_capture_preserves_returned_owner_in_rust_and_cpp() {
+    let source = r#"
+        use std::sync::Arc;
+        pub struct Value { value: i32 }
+        impl Value { pub fn read(&self) -> i32 { self.value } }
+        pub fn retain(future: Arc<Value>) -> Arc<Value> {
+            let completed = Some(future.clone());
+            let callback = move || {
+                if let Some(future) = completed { let _ = future.read(); }
+            };
+            callback();
+            future
+        }
+        pub fn exercise() -> i32 {
+            let future = Arc::new(Value { value: 7 });
+            let returned = retain(future);
+            returned.read()
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("future = std::move(future)"), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 7);", &output, "return exercise() == 7 ? 0 : 1;");
+}
+
+fn run_rust_and_cpp_runtime_probe(source: &str, rust_main: &str, output: &str, cpp_main: &str) {
+    let temp = tempfile::tempdir().unwrap();
+    let rust = temp.path().join("probe.rs");
+    let rust_exe = temp.path().join("rust-probe");
+    std::fs::write(&rust, format!("{source}\nfn main() {{ {rust_main} }}\n")).unwrap();
+    let result = std::process::Command::new("rustc").arg("--edition=2024")
+        .arg(rust).arg("-o").arg(&rust_exe).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(std::process::Command::new(rust_exe).status().unwrap().success());
+    let cpp = temp.path().join("probe.cc");
+    let cpp_exe = temp.path().join("cpp-probe");
+    std::fs::write(&cpp, format!("{output}\nint main() {{ {cpp_main} }}\n")).unwrap();
+    let result = std::process::Command::new(std::env::var("CXX").unwrap_or_else(|_| "clang++".into()))
+        .args(["-std=c++23", "-stdlib=libc++"])
+        .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+        .arg(cpp).arg("-o").arg(&cpp_exe).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(std::process::Command::new(cpp_exe).status().unwrap().success());
+}
+
+#[test]
+fn generic_callable_borrow_inputs_match_rust_and_cpp() {
+    let source = r#"
+        pub struct Archive { pub value: i32 }
+        pub fn invoke_writer<F: FnMut(&mut Archive)>(mut writer: F) -> i32 {
+            let mut archive = Archive { value: 1 };
+            writer(&mut archive);
+            archive.value
+        }
+        pub fn invoke_reader<F>(padding: i32, reader: F) -> i32 where F: Fn(&Archive) -> i32 {
+            let archive = Archive { value: padding };
+            reader(&archive)
+        }
+        pub fn pointer<F: Fn(*const Archive) -> i32>(reader: F) -> i32 {
+            let archive = Archive { value: 3 };
+            reader(&archive as *const Archive)
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("writer(&archive)"), "{output}");
+    run_rust_and_cpp_runtime_probe(source,
+        "assert_eq!(invoke_writer(|archive| archive.value = 9), 9); assert_eq!(invoke_reader(5, |archive| archive.value), 5); assert_eq!(pointer(|archive| unsafe { (*archive).value }), 3);",
+        &output,
+        "if (invoke_writer([](Archive& archive) { archive.value = 9; }) != 9) return 1; if (invoke_reader(5, [](const Archive& archive) { return archive.value; }) != 5) return 2; if (pointer([](const Archive* archive) { return archive->value; }) != 3) return 3; return 0;");
+}
+
+#[test]
+fn generic_callable_shared_wrapper_input_matches_rust_and_cpp() {
+    let source = r#"
+        use std::sync::Arc;
+        pub struct Payload { value: i32 }
+        impl Payload { pub fn read(&self) -> i32 { self.value } }
+        pub fn matching<T, F>(item: T, mut predicate: F) -> T
+        where F: FnMut(&T) -> bool {
+            let accepted = predicate(&item);
+            if accepted { item } else { item }
+        }
+        pub fn exercise() -> i32 {
+            let original = Arc::new(Payload { value: 9 });
+            let kept = matching(original, |item: &Arc<Payload>| item.read() == 9);
+            kept.read()
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("predicate(&item)"), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 9);", &output, "return exercise() == 9 ? 0 : 1;");
+}
+
+#[test]
+fn generic_callable_dequeued_wrapper_borrow_matches_rust_and_cpp() {
+    let source = r#"
+        use std::collections::VecDeque;
+        use std::sync::Arc;
+        pub struct Payload { value: i32 }
+        impl Payload { pub fn read(&self) -> i32 { self.value } }
+        pub fn read_payload<T, F>(item: Arc<T>, reader: F) -> i32
+        where F: Fn(&T) -> i32 { reader(&item) }
+        pub fn move_matching<T, F>(source: &mut VecDeque<T>, destination: &mut VecDeque<T>, mut predicate: F)
+        where F: FnMut(&T) -> bool {
+            let count = source.len();
+            for _ in 0..count {
+                let item = source.pop_front().unwrap();
+                if predicate(&item) { destination.push_back(item); }
+                else { source.push_back(item); }
+            }
+        }
+        pub fn exercise() -> i32 {
+            let payload = Arc::new(Payload { value: 6 });
+            if read_payload(payload, |item: &Payload| item.read()) != 6 { return 0; }
+            let mut source: VecDeque<Arc<Payload>> = VecDeque::new();
+            let mut destination: VecDeque<Arc<Payload>> = VecDeque::new();
+            source.push_back(Arc::new(Payload { value: 9 }));
+            source.push_back(Arc::new(Payload { value: 4 }));
+            move_matching(&mut source, &mut destination, |item: &Arc<Payload>| item.read() == 9);
+            let selected: Arc<Payload> = destination.pop_front().unwrap();
+            let retained: Arc<Payload> = source.pop_front().unwrap();
+            selected.read() * 10 + retained.read()
+        }
+    "#;
+    let output = transpile_str(source);
+    assert!(!output.contains("predicate(rusty::detail::deref_if_pointer_like(item))"), "{output}");
+    run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 94);", &output, "return exercise() == 94 ? 0 : 1;");
+}
+
 
 #[test]
 fn standard_lock_constructor_moves_payload_despite_unrelated_borrowing_new() {

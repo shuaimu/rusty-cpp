@@ -17320,6 +17320,11 @@ impl CodeGen {
                 callable_bound_arg_intent,
                 Some(CallableArgPassIntent::SharedRef | CallableArgPassIntent::MutRef)
             ) {
+                if let Some(expected) = effective_expected_ty
+                    && matches!(self.peel_paren_group_type(expected), syn::Type::Reference(_))
+                {
+                    return self.emit_expr_to_string_with_expected(arg, Some(expected));
+                }
                 // Preserve explicit borrow shape for callable-bound callbacks
                 // (for example `F: FnOnce(&mut Self)`), so closure params that
                 // dereference their argument keep pointer-like call semantics.
@@ -17334,7 +17339,9 @@ impl CodeGen {
             }
             if style.is_none()
                 && effective_expected_ty
-                    .is_some_and(|expected| self.type_is_bare_generic_param_like(expected))
+                    .is_some_and(|expected|
+                        !matches!(self.peel_paren_group_type(expected), syn::Type::Reference(_))
+                            && self.type_is_bare_generic_param_like(expected))
                 && self.is_stable_reference_lvalue_expr(&r.expr)
             {
                 return self.emit_explicit_reference_call_arg(r, effective_expected_ty);

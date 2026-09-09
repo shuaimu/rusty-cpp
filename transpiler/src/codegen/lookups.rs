@@ -616,22 +616,21 @@ impl CodeGen {
         }
         let name = path_expr.path.segments[0].ident.to_string();
         let binding_ty = self.lookup_local_binding_type(&name)?;
-        // SLICE params only: those are what the C++ side can't pass without
-        // the as_slice coercion. Threading other param types changes
-        // pass-styles for args that already emitted correctly (hashbrown's
-        // `hasher(&guard, i)` with a dyn-Fn hasher moved its ScopeGuard).
-        let slice_param = |ty: &syn::Type| {
+        // Borrowed inputs need their declared C++ reference shape. Keep
+        // owned argument inference unchanged so a borrowed callable argument
+        // cannot accidentally become an ownership transfer.
+        let borrowed_param = |ty: &syn::Type| {
+            matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_)) ||
             matches!(
                 self.peel_reference_paren_group_type(ty),
                 syn::Type::Slice(_)
             )
         };
         if let Some(param_types) = self.extract_callable_param_types_from_type(&binding_ty) {
-            return param_types.get(arg_idx).filter(|ty| slice_param(ty)).cloned();
+            return param_types.get(arg_idx).filter(|ty| borrowed_param(ty)).cloned();
         }
         // Bare fn-generic binding (`f: F`): consult the recorded Fn-bound
-        // arg types for F in the enclosing generics scopes (slice-carrying
-        // signatures only, by construction of the collector).
+        // arg types for F in the enclosing generics scopes.
         let peeled = self.peel_reference_paren_group_type(&binding_ty);
         let syn::Type::Path(tp) = peeled else {
             return None;
@@ -642,7 +641,7 @@ impl CodeGen {
         let param_name = tp.path.segments[0].ident.to_string();
         for scope in self.callable_type_param_arg_scopes.iter().rev() {
             if let Some(arg_types) = scope.get(&param_name) {
-                return arg_types.get(arg_idx).filter(|ty| slice_param(ty)).cloned();
+                return arg_types.get(arg_idx).filter(|ty| borrowed_param(ty)).cloned();
             }
         }
         None

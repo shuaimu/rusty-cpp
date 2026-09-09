@@ -228,6 +228,10 @@ impl CodeGen {
             // Fallback: some field/method expressions lose concrete wrapper types during
             // inference; preserve Rust auto-deref semantics conservatively here.
             if inferred_arg_ty.is_none()
+                // An opaque generic target can itself be an owning wrapper.
+                // Without a known source wrapper, `&item: &T` must borrow T,
+                // not its possible Deref target after template instantiation.
+                && !self.type_is_shape_opaque(expected_inner)
                 && matches!(
                     self.peel_paren_group_expr(arg),
                     syn::Expr::Field(_) | syn::Expr::MethodCall(_) | syn::Expr::Path(_)
