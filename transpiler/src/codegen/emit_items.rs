@@ -5887,6 +5887,9 @@ impl CodeGen {
                     ) {
                         return None;
                     }
+                    if self.trait_path_is_cpp_marker(&tb.path) {
+                        return None;
+                    }
                     if map_operator_trait(&name).is_some() {
                         return None;
                     }
@@ -6888,14 +6891,18 @@ impl CodeGen {
                 })
                 .cloned()
                 .collect();
-            let partial_spec_params = group
-                .first()
-                .filter(|method| method.foreign_adapter_partial_spec_compatible)
-                .map(|_| referenced_impl_generics.clone())
-                .unwrap_or_default();
+            let partial_spec_constraints = group.first().and_then(|method| {
+                match &method.foreign_adapter_generics {
+                    Some((generics, scope)) => self.foreign_adapter_constraints(generics, scope),
+                    None => Some(Vec::new()),
+                }
+            });
+            let partial_spec_params = partial_spec_constraints.as_ref()
+                .map(|_| referenced_impl_generics.clone()).unwrap_or_default();
             if group.first().is_some_and(|method| {
-                method.foreign_adapter_has_non_lifetime_generics
-                    && (!method.foreign_adapter_partial_spec_compatible
+                method.foreign_adapter_generics.as_ref().is_some_and(|(generics, _)|
+                    generics.params.iter().any(|param| !matches!(param, syn::GenericParam::Lifetime(_))))
+                    && (partial_spec_constraints.is_none()
                         || partial_spec_params.len() != impl_generic_names.len()
                         || mapped_impl_generics.len() != referenced_impl_generics.len())
             })
@@ -6906,6 +6913,7 @@ impl CodeGen {
                 ));
                 continue;
             }
+            let partial_spec_constraints = partial_spec_constraints.unwrap_or_default();
             if partial_spec_params.is_empty()
                 && group.first().is_some_and(|method| {
                     self.type_contains_unbound_single_letter_generic(&method.self_ty)
@@ -6964,6 +6972,7 @@ impl CodeGen {
                 trait_name,
                 &trait_args,
                 &partial_spec_params,
+                &partial_spec_constraints,
                 "Adapter",
                 self_cpp,
                 AdapterStorageKind::Owning,
@@ -6973,6 +6982,7 @@ impl CodeGen {
                 trait_name,
                 &trait_args,
                 &partial_spec_params,
+                &partial_spec_constraints,
                 "AdapterRef",
                 self_cpp,
                 AdapterStorageKind::ConstRef,
@@ -6982,6 +6992,7 @@ impl CodeGen {
                 trait_name,
                 &trait_args,
                 &partial_spec_params,
+                &partial_spec_constraints,
                 "AdapterRefMut",
                 self_cpp,
                 AdapterStorageKind::MutRef,
@@ -7011,6 +7022,7 @@ impl CodeGen {
                 self_cpp,
                 &assoc_pairs,
                 &partial_spec_params,
+                &partial_spec_constraints,
             );
         }
     }
@@ -7340,7 +7352,7 @@ impl CodeGen {
                 let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
                 for item in ordered_items {
                     if let syn::Item::Impl(i) = item {
-                        if Self::concrete_positive_auto_trait_impl(i).is_some() {
+                        if self.concrete_positive_auto_trait_impl(i, &self.module_stack).is_some() {
                             self.emit_item(item);
                             self.newline();
                             continue;
@@ -8865,7 +8877,7 @@ impl CodeGen {
         // unconditional opt-in here: that would make a !Send instantiation
         // cross a thread boundary.  The concrete form is sufficient for the
         // inline-Rust use case and is always an exact translation.
-        if let Some(marker) = Self::concrete_positive_auto_trait_impl(i) {
+        if let Some(marker) = self.concrete_positive_auto_trait_impl(i, &self.module_stack) {
             let mut self_cpp = self.map_type(i.self_ty.as_ref());
             let self_is_unqualified = matches!(
                 i.self_ty.as_ref(),
@@ -9017,7 +9029,9 @@ impl CodeGen {
     }
 
     pub(super) fn concrete_positive_auto_trait_impl(
+        &self,
         i: &syn::ItemImpl,
+        module_path: &[String],
     ) -> Option<&'static str> {
         let (polarity, trait_path, _) = i.trait_.as_ref()?;
         if i.unsafety.is_none()
@@ -9025,14 +9039,28 @@ impl CodeGen {
             || polarity.is_some()
             || !i.generics.params.is_empty()
             || i.generics.where_clause.is_some()
+            || i.attrs.iter().any(|attribute|
+                attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
         {
             return None;
         }
-        match trait_path.segments.last()?.ident.to_string().as_str() {
-            "Send" => Some("is_send"),
-            "Sync" => Some("is_sync"),
-            _ => None,
+        let resolved = self.auto_trait_external_identity(trait_path, module_path)?;
+        for (leaf, marker) in [("Send", "is_send"), ("Sync", "is_sync")] {
+            if resolved == leaf && trait_path.is_ident(leaf)
+                && (self.authenticated_sysroot_roots.contains("std")
+                    || self.authenticated_sysroot_roots.contains("core"))
+            {
+                return Some(marker);
+            }
+            for root in ["std", "core"] {
+                if resolved == format!("{root}::marker::{leaf}")
+                    && self.authenticated_sysroot_roots.contains(root)
+                {
+                    return Some(marker);
+                }
+            }
         }
+        None
     }
 
     pub(super) fn emit_impl_item(&mut self, item: &syn::ImplItem) {
@@ -11457,4 +11485,3 @@ pub(super) fn contains_whole_word(haystack: &str, needle: &str) -> bool {
     }
     false
 }
-

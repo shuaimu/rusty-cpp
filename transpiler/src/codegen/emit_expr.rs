@@ -2911,6 +2911,8 @@ impl CodeGen {
         let tokens = mac.tokens.to_string();
 
         match macro_name.as_str() {
+            "file" if tokens.is_empty() => "__FILE__".to_string(),
+            "line" if tokens.is_empty() => "static_cast<uint32_t>(__LINE__)".to_string(),
             "format" => {
                 // The dumb pass-through path can't express Rust-only format
                 // features (inline captures `{x}`, debug specs `{:?}`); route
@@ -11123,6 +11125,21 @@ impl CodeGen {
         if method_name == "clone" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
+            // Standard borrow/lock guards do not implement method-style
+            // Clone. Rust resolves `guard.clone()` through Deref to the
+            // protected value; copying the guard would duplicate ownership
+            // of a lock or borrow. Arc/Rc do implement Clone and stay intact.
+            if let Some(ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let mapped = self.map_type(self.peel_reference_paren_group_type(&ty));
+                if matches!(mapped.split('<').next(),
+                    Some("rusty::Ref" | "rusty::RefMut" | "rusty::MutexGuard"
+                        | "rusty::SpinMutexGuard" | "rusty::RwLockReadGuard"
+                        | "rusty::RwLockWriteGuard"))
+                    && !self.receiver_has_inherent_method_named(&mc.receiver, "clone")
+                {
+                    return format!("rusty::clone(*({}))", receiver);
+                }
+            }
             return format!("rusty::clone({})", receiver);
         }
         if method_name == "to_mut"
@@ -14883,6 +14900,30 @@ impl CodeGen {
             && !self.bare_std_named_type_suppression_applies("Arc")
         {
             method = "make".to_string();
+        }
+        let mut source_owner_path = func_path.clone();
+        source_owner_path.segments.pop();
+        let source_owner_cpp = self.map_type(&syn::Type::Path(syn::TypePath {
+            qself: None, path: source_owner_path,
+        }));
+        // Standard cell/lock constructors consume their payload. A same-named
+        // `new(&Config)` on an unrelated local owner must not supply their
+        // argument pass style through the leaf-name fallback below.
+        if matches!(rust_method_name.as_str(), "new" | "new_")
+            && call.args.len() == 1
+            && source_owner_cpp.split('<').next() == owner_cpp.split('<').next()
+            && matches!(owner_cpp.split('<').next(),
+                Some("rusty::Mutex" | "rusty::SpinMutex" | "rusty::RwLock"
+                    | "rusty::Cell" | "rusty::RefCell"))
+            && let syn::Type::Path(expected_path) = expected_ty
+            && let Some(expected_owner) = expected_path.path.segments.last()
+            && let syn::PathArguments::AngleBracketed(arguments) = &expected_owner.arguments
+            && let Some(syn::GenericArgument::Type(payload)) = arguments.args.first()
+        {
+            let value = self.emit_call_arg_with_pass_style(
+                &call.args[0], Some(ArgPassStyle::Value), Some(payload), false, None,
+            );
+            return Some(format!("{}::{}({})", owner_cpp, method, value));
         }
         if self.owner_cpp_has_unusable_template_args(&owner_cpp)
             && matches!(owner_seg.arguments, syn::PathArguments::None)
@@ -22460,6 +22501,20 @@ impl CodeGen {
             func
         };
         let func = Self::collapse_constructor_like_call_path(&func);
+        // Rust callable syntax auto-dereferences a lock/borrow guard to its
+        // protected callable. C++ has no corresponding implicit operator*.
+        let guarded_callable = self.infer_simple_expr_type(&call.func)
+            .or_else(|| self.infer_local_binding_type_from_initializer(&call.func))
+            .is_some_and(|ty| {
+                let ty = self.peel_reference_paren_group_type(&ty);
+                matches!(self.map_type(ty).split('<').next(),
+                    Some("rusty::MutexGuard" | "rusty::SpinMutexGuard"
+                        | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard"
+                        | "rusty::Ref" | "rusty::RefMut"))
+            });
+        if guarded_callable {
+            return format!("(*{})({})", func, args.join(", "));
+        }
         format!("{}({})", func, args.join(", "))
     }
 
@@ -24307,8 +24362,9 @@ impl CodeGen {
                 if let syn::Expr::Unary(un) = ref_inner {
                     if matches!(un.op, syn::UnOp::Deref(_)) {
                         let operand = self.peel_paren_group_expr(&un.expr);
-                        // Collapse &*expr reborrow for simple single-deref cases:
-                        // - `&*r` where r is a simple path variable → just `r`
+                        // Collapse a reference reborrow for simple paths.
+                        // Owning pointers and guards still need operator* to
+                        // reach their payload, including if-let bindings.
                         // Do NOT collapse for:
                         // - Raw pointers (`*p` is a real dereference)
                         // - ManuallyDrop types (`*md` calls operator* for unwrapping)
@@ -24316,6 +24372,8 @@ impl CodeGen {
                         if matches!(operand, syn::Expr::Path(_) | syn::Expr::Field(_))
                             && !self.is_expr_raw_pointer_like(&un.expr)
                             && !self.method_receiver_is_manually_drop_expr(&un.expr)
+                            && !self.infer_simple_expr_type(&un.expr).as_ref()
+                                .is_some_and(|ty| self.type_is_deref_owner_or_guard_type(ty))
                         {
                             return self.emit_expr_to_string(&un.expr);
                         }
@@ -26590,6 +26648,7 @@ impl CodeGen {
         let all_captures_are_raw_pointers = outer_captures.iter().all(|cpp_name| {
                 self.lookup_rust_binding_name_for_cpp_name(cpp_name)
                     .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
+                    .or_else(|| self.lookup_local_binding_type(cpp_name))
                     .is_some_and(|ty| matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_)))
         });
         let body_reassigns_a_capture = {
@@ -26629,6 +26688,7 @@ impl CodeGen {
                     !self
                         .lookup_rust_binding_name_for_cpp_name(cpp_name)
                         .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
+                        .or_else(|| self.lookup_local_binding_type(cpp_name))
                         .is_some_and(|ty| {
                             matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_))
                                 || self.type_is_non_mutating_handle_type(&ty)

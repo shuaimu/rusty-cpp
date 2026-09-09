@@ -209,12 +209,29 @@ impl CodeGen {
         }
     }
 
-    /// Type-level form of `is_non_mutating_handle_name`, resolving one hop
+    /// Resolve source aliases in their lexical scope before classifying a
+    /// wrapper. Foreign aliases require the exact crate-preflight binding;
+    /// a same-named declaration in another module cannot supply its target.
+    fn resolve_wrapper_classification_type(&self, ty: &syn::Type) -> syn::Type {
+        let mut resolved = self.peel_reference_paren_group_type(ty).clone();
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            if !seen.insert(resolved.to_token_stream().to_string()) { break; }
+            let Some(next) = self.resolve_type_alias_once(&resolved)
+                .or_else(|| self.resolve_authorized_cross_file_type_alias(&resolved))
+            else { break; };
+            resolved = self.peel_reference_paren_group_type(&next).clone();
+        }
+        resolved
+    }
+
+    /// Type-level form of `is_non_mutating_handle_name`, resolving source
+    /// aliases and one hop
     /// through a C++ `using` alias. Used only by the closure-mutability
     /// analysis — see that predicate for why it is not the autoderef set.
     pub(super) fn type_is_non_mutating_handle_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
+        let ty = self.resolve_wrapper_classification_type(ty);
+        let syn::Type::Path(tp) = &ty else {
             return false;
         };
         let Some(seg) = tp.path.segments.last() else {
@@ -260,8 +277,8 @@ impl CodeGen {
     /// not read as a deref owner, and `*ch` collapses to `ch` — emitting
     /// `ch.method()`, a dot on a Box.
     pub(super) fn type_is_deref_owner_or_guard_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
+        let ty = self.resolve_wrapper_classification_type(ty);
+        let syn::Type::Path(tp) = &ty else {
             return false;
         };
         let Some(seg) = tp.path.segments.last() else {
@@ -280,8 +297,8 @@ impl CodeGen {
     }
 
     pub(super) fn type_is_pointer_like_owner_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
+        let ty = self.resolve_wrapper_classification_type(ty);
+        let syn::Type::Path(tp) = &ty else {
             return false;
         };
         let Some(seg) = tp.path.segments.last() else {

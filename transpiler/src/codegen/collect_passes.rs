@@ -3149,6 +3149,12 @@ impl CodeGen {
                         &self.declared_item_names,
                         &self.local_declared_types,
                     );
+                    if tp.path.segments.iter().all(|segment|
+                        matches!(segment.arguments, syn::PathArguments::None))
+                        && let Some(marker) = self.concrete_positive_auto_trait_impl(impl_block, module_path)
+                    {
+                        self.concrete_positive_auto_trait_types.insert((type_name.clone(), marker.into()));
+                    }
 
                     let trait_path = impl_block.trait_.as_ref().map(|(_, path, _)| path);
                     let trait_name = trait_path
@@ -7085,41 +7091,6 @@ impl CodeGen {
                             _ => None,
                         })
                         .collect();
-                    let foreign_adapter_partial_spec_compatible = impl_block
-                        .generics
-                        .params
-                        .iter()
-                        .all(|param| match param {
-                            syn::GenericParam::Lifetime(_) => true,
-                            syn::GenericParam::Type(type_param) => {
-                                type_param.attrs.is_empty()
-                                    // `Default` is the one erased Rust bound
-                                    // needed by SRPC's legacy container
-                                    // deserializers.  Their historical C++
-                                    // templates were likewise structurally
-                                    // available for every element spelling and
-                                    // failed only when a body requiring default
-                                    // construction was instantiated.  Preserve
-                                    // that surface while keeping every other
-                                    // trait/lifetime bound fail-closed.
-                                    && type_param.bounds.iter().all(|bound| {
-                                        matches!(bound, syn::TypeParamBound::Trait(trait_bound)
-                                            if self.is_authenticated_std_default_bound(
-                                                trait_bound,
-                                                module_path,
-                                            ))
-                                    })
-                                    && type_param.default.is_none()
-                            }
-                            syn::GenericParam::Const(_) => false,
-                        })
-                        && (impl_generic_names.is_empty()
-                            || impl_block.generics.where_clause.is_none());
-                    let foreign_adapter_has_non_lifetime_generics = impl_block
-                        .generics
-                        .params
-                        .iter()
-                        .any(|param| !matches!(param, syn::GenericParam::Lifetime(_)));
                     let entry = self
                         .extension_trait_impl_methods
                         .entry(trait_scoped_key)
@@ -7170,8 +7141,7 @@ impl CodeGen {
                             callable_param_metadata,
                             associated_type_bindings: associated_type_bindings.clone(),
                             impl_generic_names: impl_generic_names.clone(),
-                            foreign_adapter_partial_spec_compatible,
-                            foreign_adapter_has_non_lifetime_generics,
+                            foreign_adapter_generics: Some((impl_block.generics.clone(), module_path.to_vec())),
                             self_is_template_param: false,
                             extra_template_requires: None,
                         });

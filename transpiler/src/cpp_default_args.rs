@@ -348,6 +348,8 @@ fn validate_file_impl(
     type_map: Option<&UserTypeMap>,
     strict_signature_closure: bool,
 ) -> Result<bool, String> {
+    let production = crate::cpp_abi::production_contract_file(file);
+    let file = &production;
     let mentioned = token_stream_marker_count(file.to_token_stream());
     if mentioned == 0 {
         return Ok(false);
@@ -2552,7 +2554,7 @@ fn validate_crate_default_signature_types(inputs: &[(PathBuf, String)]) -> Resul
                 path.display()
             )
         })?;
-        files.push((module, file));
+        files.push((module, crate::cpp_abi::production_contract_file(&file)));
     }
     let borrowed = files
         .iter()
@@ -2686,6 +2688,22 @@ mod tests {
             .mappings
             .insert("rusty::CFile".to_string(), "FILE".to_string());
         type_map
+    }
+
+    #[test]
+    fn crate_contracts_ignore_test_modules_in_default_argument_audits() {
+        let inputs = vec![
+            (PathBuf::from("src/lib.rs"), "pub mod api;".to_string()),
+            (PathBuf::from("src/api.rs"), r#"
+                pub fn trace(
+                    #[cfg_attr(any(), cpp_default_argument(stderr))] stream: *mut ::rusty::CFile,
+                ) {}
+                #[cfg(test)] mod tests { opaque_test_macro!(); }
+            "#.to_string()),
+        ];
+        let accepted = preflight_crate_sources_syntax(&inputs);
+        assert!(accepted.is_ok(), "{accepted:?}");
+        assert!(preflight_crate_sources(&inputs, &exact_type_map()).unwrap());
     }
 
     #[test]

@@ -174,6 +174,80 @@ impl CodeGen {
             .copied()
     }
 
+    /// Imported flat structs still own their inherent methods. Their sibling
+    /// impl bodies are emitted with the physical host, but consumers need the
+    /// receiver shape to lower Rust UFCS into a C++ member call.
+    fn lookup_flat_imported_inherent_method_has_receiver(
+        &self,
+        owner_path: &syn::Path,
+        method_name: &str,
+    ) -> Option<bool> {
+        let mut owner_ty = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: owner_path.clone(),
+        });
+        for _ in 0..8 {
+            let Some(resolved) = self.resolve_type_alias_once(&owner_ty) else { break; };
+            if resolved == owner_ty { break; }
+            owner_ty = resolved;
+        }
+        let syn::Type::Path(owner) = self.peel_reference_paren_group_type(&owner_ty) else {
+            return None;
+        };
+        if owner.qself.is_some() || owner.path.leading_colon.is_some() {
+            return None;
+        }
+        let path: Vec<String> = owner.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+        let leaf = path.last()?;
+        // The sibling field table removes duplicate leaf declarations. A
+        // same-named struct in another file cannot supply ownership proof.
+        if !self.cross_file_struct_field_types.contains_key(leaf) {
+            return None;
+        }
+        let bare_target = if path.len() == 1 {
+            self.resolve_flat_import_type_authorization_for_exact_scope(
+                &self.module_stack.join("::"), leaf,
+            )
+        } else { None };
+        let qualified_physical_host = path.first().is_some_and(|root| root == "crate")
+            && self.cross_file_struct_qualified_paths.contains(&path);
+        let authorized = qualified_physical_host || self.flat_import_type_authorizations.iter().any(|authorization| {
+            authorization.consumer_physical_module == self.current_physical_module
+                && authorization.consumer_lexical_module.0 == self.module_stack
+                && authorization.provider_kind == crate::cpp_abi::FlatImportTypeProviderKind::Struct
+                && authorization.leaf == *leaf
+                && match authorization.reference_kind {
+                    crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse => {
+                        path.len() == 1 && bare_target.as_deref() == Some(
+                            format!("::{}::{}", authorization.cpp_namespace, authorization.leaf).as_str(),
+                        )
+                    }
+                    crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath => {
+                        path.len() == 3 && path[0] == "crate"
+                            && authorization.provider_physical_module.0 == [path[1].clone()]
+                    }
+                }
+        });
+        if !authorized { return None; }
+        let mut methods = self.cross_file_impl_blocks.iter()
+            .filter(|implementation| implementation.trait_.is_none())
+            .filter(|implementation| {
+                let Some(owner) = Self::impl_self_type_path(&implementation.self_ty) else { return false; };
+                let names: Vec<String> = owner.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+                names == path || (names.len() == 1 && names[0] == *leaf)
+            })
+            .flat_map(|implementation| &implementation.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == method_name => Some(method),
+                _ => None,
+            });
+        let method = methods.next()?;
+        if methods.next().is_some() { return None; }
+        // Explicit typed-self forms have their own static lowering path.
+        Some(matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+            if receiver.colon_token.is_none()))
+    }
+
     pub(super) fn lookup_owner_method_has_receiver_from_owner_path(
         &self,
         owner_path: Option<&syn::Path>,
@@ -183,7 +257,7 @@ impl CodeGen {
         let owner_path = owner_path?;
         let owner_keys = self.owner_path_to_candidate_owner_keys(owner_path, owner_name);
         if owner_keys.is_empty() {
-            return None;
+            return self.lookup_flat_imported_inherent_method_has_receiver(owner_path, method_name);
         }
 
         let mut ordered_keys: Vec<String> = Vec::new();
@@ -218,7 +292,9 @@ impl CodeGen {
                 None => merged = Some(value),
             }
         }
-        if saw_any { merged } else { None }
+        if saw_any { merged } else {
+            self.lookup_flat_imported_inherent_method_has_receiver(owner_path, method_name)
+        }
     }
 
     pub(super) fn lookup_owner_method_type_param_names<'a>(

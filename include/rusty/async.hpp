@@ -49,6 +49,10 @@ struct Poll<void> {
 // ── Waker + Context: notification mechanism ────────────────────
 struct Waker {
     std::function<void()> wake_fn;
+    template<typename F>
+    static Waker from_callable(F&& callback) {
+        return Waker{std::forward<F>(callback)};
+    }
     void wake() const { if (wake_fn) wake_fn(); }
 };
 

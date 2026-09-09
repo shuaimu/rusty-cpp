@@ -152,6 +152,7 @@ impl CodeGen {
                     &qualified_self_cpp,
                     &assoc_pairs,
                     &[],
+                    &[],
                 );
             }
             if anon_adapter {
@@ -2844,12 +2845,10 @@ impl CodeGen {
         })
     }
 
-    /// For `if let Some(name) = SCRUTINEE` where SCRUTINEE is `Option<fn ptr>` /
-    /// `Result<fn ptr, _>`, the fn-pointer payload type — so the bound `name` is
-    /// typed and a later `name(args)` call can detect an `unsafe fn` and lower it
-    /// to `.call_unsafe(args)`. Returns None for non-fn-pointer payloads (which
-    /// stay untyped, preserving prior behavior).
-    fn if_let_some_binding_fn_pointer_type(
+    /// Preserve pointer payload types in a simple Some/Ok binding. Function
+    /// pointers need their call convention, and owning pointers need Rust's
+    /// receiver autoderef when a method is called on the bound value.
+    fn if_let_some_binding_pointer_type(
         &self,
         binding_pat: Option<&syn::Pat>,
         scrutinee_expr: &syn::Expr,
@@ -2865,10 +2864,10 @@ impl CodeGen {
         }
         let scrutinee_ty = self.infer_simple_expr_type(scrutinee_expr)?;
         let payload = self.option_or_result_ok_payload_type(&scrutinee_ty)?;
-        matches!(
+        (matches!(
             self.peel_reference_paren_group_type(&payload),
             syn::Type::BareFn(_)
-        )
+        ) || self.type_is_pointer_like_owner_type(&payload))
         .then_some(payload)
     }
 
@@ -3108,12 +3107,10 @@ impl CodeGen {
             let mut local_types = HashMap::new();
             let mut local_consts = HashMap::new();
             for rust_name in binding_map.keys() {
-                // Register the Some/Ok payload type for fn-pointer if-let bindings
-                // (rare) so a later `binding(args)` call can detect an `unsafe fn`
-                // (→ rusty::UnsafeFn) and lower it to `.call_unsafe(args)`. Other
-                // bindings stay untyped, exactly as before.
+                // Calls through function and owning pointers require the
+                // payload type after the pattern has unpacked the option.
                 let ty =
-                    self.if_let_some_binding_fn_pointer_type(binding_pat, scrutinee_expr, rust_name);
+                    self.if_let_some_binding_pointer_type(binding_pat, scrutinee_expr, rust_name);
                 local_types.insert(rust_name.clone(), ty);
                 local_consts.insert(rust_name.clone(), false);
             }

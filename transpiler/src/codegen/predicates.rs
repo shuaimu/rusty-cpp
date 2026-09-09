@@ -937,15 +937,13 @@ impl CodeGen {
         )
     }
 
-    /// Authenticate the one erased bound admitted by generic foreign Adapter
-    /// partial specializations. A bare `Default` is the standard prelude trait
-    /// only when no lexical declaration or named import shadows it; explicit
-    /// and aliased spellings must resolve exactly to `std`/`core` Default.
-    pub(super) fn is_authenticated_std_default_bound(
+    /// Resolve standard bounds by identity, including prelude and alias paths.
+    /// A same-named local trait must never acquire a standard C++ constraint.
+    fn authenticated_std_adapter_bound(
         &self,
         trait_bound: &syn::TraitBound,
         module_path: &[String],
-    ) -> bool {
+    ) -> Option<&'static str> {
         if trait_bound.modifier != syn::TraitBoundModifier::None
             || trait_bound.lifetimes.is_some()
             || trait_bound
@@ -954,7 +952,7 @@ impl CodeGen {
                 .iter()
                 .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
         {
-            return false;
+            return None;
         }
         let written = trait_bound
             .path
@@ -963,27 +961,124 @@ impl CodeGen {
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
-        let Some(resolved) = crate::transpile::resolve_external_rust_item_path(
+        let resolved = crate::transpile::resolve_external_rust_item_path(
             &trait_bound.path,
             module_path,
             &self.trait_declared_paths,
             &self.rust_item_import_bindings,
-        ) else {
-            return false;
-        };
-        if resolved == "Default" && written == "Default" {
-            // The prelude spelling is provided by `std` in an ordinary crate
-            // and by `core` under `#![no_std]`; either authenticated sysroot is
-            // sufficient because both paths name the same compiler trait.
-            return self.authenticated_sysroot_roots.contains("std")
-                || self.authenticated_sysroot_roots.contains("core");
-        }
-        for root in ["std", "core"] {
-            if resolved == format!("{root}::default::Default") {
-                return self.authenticated_sysroot_roots.contains(root);
+        )?;
+        for (leaf, suffix) in [
+            ("Default", "default::Default"),
+            ("Clone", "clone::Clone"),
+            ("PartialEq", "cmp::PartialEq"),
+            ("Eq", "cmp::Eq"),
+            ("PartialOrd", "cmp::PartialOrd"),
+            ("Ord", "cmp::Ord"),
+            ("Hash", "hash::Hash"),
+        ] {
+            // Hash is not a prelude trait. Its bare spelling needs an import.
+            if leaf != "Hash" && resolved == leaf && written == leaf
+                && (self.authenticated_sysroot_roots.contains("std")
+                    || self.authenticated_sysroot_roots.contains("core"))
+            {
+                return Some(leaf);
+            }
+            for root in ["std", "core"] {
+                if resolved == format!("{root}::{suffix}")
+                    && self.authenticated_sysroot_roots.contains(root)
+                {
+                    return Some(leaf);
+                }
             }
         }
-        false
+        None
+    }
+
+    /// Constraints for a foreign trait impl's Adapter partial specialization.
+    /// Standard operations use the corresponding C++ operation requirements;
+    /// local interface bounds require a generated Adapter or direct base.
+    /// Unknown and unsupported bound forms remain rejected.
+    pub(super) fn foreign_adapter_constraints(
+        &self,
+        generics: &syn::Generics,
+        module_path: &[String],
+    ) -> Option<Vec<String>> {
+        let mut constraints = Vec::new();
+        for param in &generics.params {
+            match param {
+                syn::GenericParam::Lifetime(_) => {}
+                syn::GenericParam::Type(tp) if tp.attrs.is_empty() && tp.default.is_none() => {
+                    let ty = escape_cpp_keyword(&tp.ident.to_string());
+                    for bound in &tp.bounds {
+                        constraints.push(self.foreign_adapter_bound_constraint(bound, &ty, module_path)?);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        if let Some(clause) = &generics.where_clause {
+            for predicate in &clause.predicates {
+                match predicate {
+                    syn::WherePredicate::Lifetime(_) => {}
+                    syn::WherePredicate::Type(predicate) if predicate.lifetimes.is_none() => {
+                        let syn::Type::Path(tp) = &predicate.bounded_ty else { return None; };
+                        let Some(ident) = tp.path.get_ident() else { return None; };
+                        if !generics.type_params().any(|param| param.ident == *ident) {
+                            return None;
+                        }
+                        let ty = escape_cpp_keyword(&ident.to_string());
+                        for bound in &predicate.bounds {
+                            constraints.push(self.foreign_adapter_bound_constraint(bound, &ty, module_path)?);
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        constraints.retain(|constraint| !constraint.is_empty());
+        constraints.sort();
+        constraints.dedup();
+        Some(constraints)
+    }
+
+    fn foreign_adapter_bound_constraint(
+        &self,
+        bound: &syn::TypeParamBound,
+        ty: &str,
+        module_path: &[String],
+    ) -> Option<String> {
+        if matches!(bound, syn::TypeParamBound::Lifetime(_)) {
+            return Some(String::new());
+        }
+        let syn::TypeParamBound::Trait(tb) = bound else { return None; };
+        if tb.modifier != syn::TraitBoundModifier::None || tb.lifetimes.is_some()
+            || tb.path.segments.iter().any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return None;
+        }
+        if let Some(standard) = self.authenticated_std_adapter_bound(tb, module_path) {
+            return Some(match standard {
+                "Default" => format!("std::default_initializable<{ty}>"),
+                "Clone" => format!("rusty::clone_like<{ty}>"),
+                "PartialEq" | "Eq" => format!("std::equality_comparable<{ty}>"),
+                "PartialOrd" | "Ord" => format!("std::totally_ordered<{ty}>"),
+                "Hash" => format!("requires(const {ty}& value) {{ std::hash<{ty}>{{}}(value); }}"),
+                _ => return None,
+            });
+        }
+        let key = crate::transpile::resolve_declared_trait_path_key(
+            &tb.path, module_path, &self.trait_declared_paths, &self.rust_item_import_bindings,
+        )?;
+        let leaf = key.rsplit("::").next()?;
+        if self.skipped_interface_traits.contains(leaf)
+            || self.interface_traits_with_generics.contains(leaf)
+            || self.trait_associated_type_names.get(leaf).is_some_and(|names| !names.is_empty())
+            || !self.ufcs_declared_trait_methods.get(leaf).is_some_and(|methods| !methods.is_empty())
+        {
+            return None;
+        }
+        let cpp = self.escape_and_rename_qualified_name(&key);
+        Some(format!("(requires {{ sizeof({cpp}Adapter<{ty}>); }} || std::is_base_of_v<{cpp}, {ty}>)"))
     }
 
     /// Return the C++ fixed underlying type requested by a Rust integer
@@ -1959,6 +2054,28 @@ impl CodeGen {
         }
     }
 
+    /// Resolve exact standard identities, including explicit import aliases.
+    /// A child module does not inherit a parent's bare imported type name.
+    pub(super) fn auto_trait_external_identity(
+        &self,
+        path: &syn::Path,
+        scope: &[String],
+    ) -> Option<String> {
+        let head = path.segments.first()?.ident.to_string();
+        if path.leading_colon.is_none()
+            && !matches!(head.as_str(), "crate" | "self" | "super" | "std" | "core" | "alloc" | "rusty")
+            && !scope.is_empty()
+            && !self.rust_item_import_bindings.contains_key(&(scope.join("::"), head.clone()))
+            && self.rust_item_import_bindings.keys().any(|(binding_scope, name)|
+                name == &head && scope.join("::").starts_with(binding_scope))
+        {
+            return None;
+        }
+        crate::transpile::resolve_external_rust_item_path(
+            path, scope, &self.trait_declared_paths, &self.rust_item_import_bindings,
+        )
+    }
+
     fn auto_trait_expr_for_path(
         &self,
         tp: &syn::TypePath,
@@ -2011,6 +2128,60 @@ impl CodeGen {
             }
         };
 
+        // Resolve source-owned declarations before standard-library names.
+        // A local struct called Mutex or Function retains its own fields.
+        if let Some(result) = self.auto_trait_declared_type_expr(tp, type_params, which, visited) {
+            return result;
+        }
+
+        if let Some(identity) = self.auto_trait_external_identity(&tp.path, &self.module_stack) {
+            let root = identity.split("::").next().unwrap_or("");
+            let authenticated = self.authenticated_sysroot_roots.contains(root)
+                || (root == "rusty" && self.authenticated_cpp_inherit_roots.contains(root));
+            if authenticated {
+                match identity.as_str() {
+                    // Arc's weak handle has the same payload bounds as Arc.
+                    "std::sync::Weak" | "alloc::sync::Weak" | "rusty::sync::Weak" if args.len() == 1 => {
+                        let mut parts = all(AutoTrait::Send, visited)?;
+                        parts.extend(all(AutoTrait::Sync, visited)?);
+                        return Some(join(parts));
+                    }
+                    "std::sync::Condvar" | "rusty::Condvar"
+                    | "std::marker::PhantomPinned" | "core::marker::PhantomPinned"
+                    | "rusty::marker::PhantomPinned" if args.is_empty() => {
+                        return Some("true".into());
+                    }
+                    // Sender is Sync with a Send payload: each send transfers
+                    // ownership. Receiver itself supports only one consumer.
+                    "std::sync::mpsc::Sender" | "rusty::sync::mpsc::Sender" if args.len() == 1 => {
+                        return Some(join(all(AutoTrait::Send, visited)?));
+                    }
+                    "std::sync::mpsc::Receiver" | "rusty::sync::mpsc::Receiver" if args.len() == 1 => {
+                        return match which {
+                            AutoTrait::Send => Some(join(all(AutoTrait::Send, visited)?)),
+                            AutoTrait::Sync => None,
+                        };
+                    }
+                    // std explicitly implements both for every JoinHandle<T>.
+                    // The thread creation operation checks the result's Send
+                    // bound; the handle's own auto traits are unconditional.
+                    "std::thread::JoinHandle" | "rusty::thread::JoinHandle" if args.len() == 1 => {
+                        return Some("true".into());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // The callable adapter owns Option<Box<F>>. Only the explicit facade
+        // path carries that contract; an unrelated Function<T> is unknown.
+        if tp.path.segments.len() == 2
+            && tp.path.segments.first().is_some_and(|s| s.ident == "rusty")
+            && leaf == "Function"
+        {
+            return Some(join(all(which, visited)?));
+        }
+
         match leaf.as_str() {
             // Both, unconditionally.
             "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
@@ -2032,9 +2203,16 @@ impl CodeGen {
                 Some(join(parts))
             }
 
-            // Mutex/RwLock<T>: Send if T is Send, and Sync if T is Send —
-            // the lock is what supplies the synchronization.
-            "Mutex" | "RwLock" => Some(join(all(AutoTrait::Send, visited)?)),
+            // Mutex guards expose one mutable access at a time. RwLock's
+            // shared read guards additionally require T: Sync for Sync.
+            "Mutex" => Some(join(all(AutoTrait::Send, visited)?)),
+            "RwLock" => {
+                let mut parts = all(AutoTrait::Send, visited)?;
+                if which == AutoTrait::Sync {
+                    parts.extend(all(AutoTrait::Sync, visited)?);
+                }
+                Some(join(parts))
+            },
 
             // Unsynchronized interior mutability: Send with T, never Sync.
             "Cell" | "RefCell" => match which {
@@ -2058,84 +2236,139 @@ impl CodeGen {
                 Some("true".to_string())
             }
 
-            // A struct declared in this crate: recurse structurally
-            // rather than emitting `is_send<ThatStruct>::value`, so a
-            // recursive type resolves here instead of instantiating a
-            // cycle in the C++ trait query.
-            _ => {
-                if !args.is_empty() {
-                    // A generic crate type would need its parameters
-                    // substituted through to its fields. Not derivable.
-                    return None;
-                }
-                if !visited.insert(leaf.clone()) {
-                    return Some("true".to_string()); // coinductive
-                }
-                let fields = self.struct_field_types.get(&leaf).or_else(|| {
-                    self.struct_field_types
-                        .iter()
-                        .find_map(|(k, v)| (k.rsplit("::").next() == Some(leaf.as_str())).then_some(v))
-                });
-                if let Some(fields) = fields {
-                    let mut parts = Vec::new();
-                    for fty in fields.values() {
-                        parts.push(self.auto_trait_expr_for_type(fty, type_params, which, visited)?);
-                    }
-                    return Some(join(parts));
-                }
-                // Declared in this crate but in ANOTHER file: each file
-                // gets a fresh CodeGen, so the per-file map has nothing.
-                // The crate-mode pre-pass collected every sibling
-                // declaration, which is enough to keep recursing.
-                if let Some(field_types) = self
-                    .cross_file_struct_field_types
-                    .get(&leaf)
-                    .or_else(|| {
-                        self.cross_file_struct_field_types
-                            .iter()
-                            .find_map(|(k, v)| {
-                                (k.rsplit("::").next() == Some(leaf.as_str())).then_some(v)
-                            })
-                    })
-                {
-                    let field_types = field_types.clone();
-                    let mut parts = Vec::new();
-                    for fty in field_types.iter() {
-                        parts.push(self.auto_trait_expr_for_type(
-                            fty,
-                            type_params,
-                            which,
-                            visited,
-                        )?);
-                    }
-                    return Some(join(parts));
-                }
-                // A sibling enum: fieldless holds nothing, and a data
-                // enum is the conjunction over every variant's types.
-                if let Some(sibling) = self
-                    .cross_file_enums
-                    .iter()
-                    .find(|e| e.ident == leaf.as_str())
-                {
-                    let variant_types: Vec<syn::Type> = sibling
-                        .variants
-                        .iter()
-                        .flat_map(|v| v.fields.iter().map(|f| f.ty.clone()))
-                        .collect();
-                    let mut parts = Vec::new();
-                    for vty in variant_types.iter() {
-                        parts.push(self.auto_trait_expr_for_type(
-                            vty,
-                            type_params,
-                            which,
-                            visited,
-                        )?);
-                    }
-                    return Some(join(parts));
-                }
-                None
-            }
+            _ => None,
         }
+    }
+
+    /// Substitute a declaration's parameters before looking through its fields.
+    /// A generic argument may have different auto traits at each use site.
+    fn auto_trait_field_substitutions(
+        &self,
+        path: &syn::Path,
+        key: &str,
+        generics: Option<&syn::Generics>,
+    ) -> Option<HashMap<String, syn::Type>> {
+        let seg = path.segments.last()?;
+        let arguments: Vec<&syn::GenericArgument> = match &seg.arguments {
+            syn::PathArguments::None => Vec::new(),
+            syn::PathArguments::AngleBracketed(ab) => ab.args.iter()
+                .filter(|arg| !matches!(arg, syn::GenericArgument::Lifetime(_)))
+                .collect(),
+            _ => return None,
+        };
+        let parameters: Vec<(String, bool, Option<syn::Type>)> = if let Some(generics) = generics {
+            generics.params.iter().filter_map(|param| match param {
+                syn::GenericParam::Type(p) => Some((p.ident.to_string(), true, p.default.clone())),
+                syn::GenericParam::Const(p) => Some((p.ident.to_string(), false, None)),
+                syn::GenericParam::Lifetime(_) => None,
+            }).collect()
+        } else {
+            self.declared_type_params.get(key).into_iter().flatten().enumerate()
+                .map(|(i, name)| {
+                    let is_type = self.declared_type_param_kinds.get(key)
+                        .and_then(|kinds| kinds.get(i))
+                        .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+                    let default = self.declared_type_param_defaults.get(key)
+                        .and_then(|defaults| defaults.get(i))
+                        .and_then(|default| match default {
+                            Some(GenericParamDefault::Type(ty)) => Some(ty.clone()),
+                            _ => None,
+                        });
+                    (name.clone(), is_type, default)
+                }).collect()
+        };
+        if arguments.len() > parameters.len() {
+            return None;
+        }
+        let mut substitutions = HashMap::new();
+        for (index, (name, is_type, default)) in parameters.into_iter().enumerate() {
+            if !is_type {
+                continue;
+            }
+            let ty = match arguments.get(index) {
+                Some(syn::GenericArgument::Type(ty)) => (*ty).clone(),
+                None => default?,
+                _ => return None,
+            };
+            let ty = self.substitute_type_params_in_type(&ty, &substitutions);
+            substitutions.insert(name, ty);
+        }
+        Some(substitutions)
+    }
+
+    /// The outer Option distinguishes an unknown declaration from a known
+    /// declaration whose fields cannot prove this auto trait.
+    fn auto_trait_declared_type_expr(
+        &self,
+        tp: &syn::TypePath,
+        type_params: &HashSet<String>,
+        which: AutoTrait,
+        visited: &mut HashSet<String>,
+    ) -> Option<Option<String>> {
+        let leaf = tp.path.segments.last()?.ident.to_string();
+        let spelled = tp.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+        let key = if tp.path.segments.len() == 1 {
+            self.declared_type_key_for_path(&tp.path).unwrap_or_else(|| self.scoped_type_key(&leaf))
+        } else {
+            spelled.strip_prefix("crate::").unwrap_or(&spelled).to_string()
+        };
+        let external_root = tp.path.segments.len() > 1
+            && tp.path.segments.first().is_some_and(|s| matches!(s.ident.to_string().as_str(), "std" | "core" | "alloc" | "rusty"));
+        let mut generics = None;
+        if tp.path.segments.iter().all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+            && self.concrete_positive_auto_trait_types.contains(&(key.clone(), which.member().into()))
+            && self.struct_field_types.contains_key(&key)
+        {
+            return Some(Some("true".into()));
+        }
+        let fields: Vec<syn::Type> = if let Some(fields) = self.struct_field_types.get(&key) {
+            fields.values().cloned().collect()
+        } else if let Some(alias) = self.type_alias_targets.get(&key) {
+            vec![alias.clone()]
+        } else if external_root {
+            return None;
+        } else if let Some(fields) = self.cross_file_struct_field_types.get(&leaf) {
+            generics = self.cross_file_auto_trait_generics.get(&leaf);
+            fields.clone()
+        } else if let Some(alias) = self.cross_file_auto_trait_aliases.get(&leaf) {
+            generics = Some(&alias.generics);
+            vec![(*alias.ty).clone()]
+        } else if let Some(item) = self.cross_file_enums.iter().find(|item| item.ident == leaf) {
+            generics = Some(&item.generics);
+            item.variants.iter().flat_map(|variant| variant.fields.iter().map(|f| f.ty.clone())).collect()
+        } else if self.cross_file_struct_tails.contains(&leaf) {
+            // A known but ambiguous source declaration must not fall through
+            // to a standard adapter with the same leaf name.
+            return Some(None);
+        } else {
+            return None;
+        };
+        Some((|| {
+            let substitutions = self.auto_trait_field_substitutions(&tp.path, &key, generics)?;
+            // Keep both the instantiated type and trait in the recursion key.
+            // Shared<i32> cannot discharge Shared<Rc<i32>>, and a Send proof
+            // cannot discharge a Sync query reached through Arc.
+            let cycle_key = format!("{:?}:{}", which, tp.to_token_stream());
+            if visited.len() >= 128 {
+                return None;
+            }
+            if !visited.insert(cycle_key.clone()) {
+                return Some("true".to_string());
+            }
+            let result = (|| {
+                let mut terms = Vec::new();
+                for field in &fields {
+                    let ty = self.substitute_type_params_in_type(field, &substitutions);
+                    let term = self.auto_trait_expr_for_type(&ty, type_params, which, visited)?;
+                    if term != "true" && !terms.contains(&term) {
+                        terms.push(term);
+                    }
+                }
+                Some(if terms.is_empty() { "true".to_string() } else { terms.join(" && ") })
+            })();
+            visited.remove(&cycle_key);
+            result
+        })())
     }
 
     /// Whether this crate defines a free function of this name.

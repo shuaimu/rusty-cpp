@@ -972,6 +972,10 @@ pub struct TranspileOptions {
     /// the methods (and the orphan emission should therefore be
     /// suppressed). Empty for single-file mode.
     pub cross_file_structs: Vec<syn::ItemStruct>,
+    /// Exact Rust paths of public unconditional structs declared directly in
+    /// physical sibling modules. Module anchors and aliases do not create a
+    /// flat-import marker, but still need this ownership proof for UFCS.
+    pub(crate) cross_file_struct_qualified_paths: BTreeSet<Vec<String>>,
     /// (type, trait) pairs for `#[cpp_inherit] impl Trait for Type` blocks
     /// living in SIBLING inline-rust blocks of the same file. A struct
     /// literal of such a type must lower to the fieldwise ctor (the
@@ -2435,6 +2439,7 @@ impl Default for TranspileOptions {
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
+            cross_file_struct_qualified_paths: BTreeSet::new(),
             cross_file_type_aliases: Vec::new(),
             flat_import_type_authorizations: BTreeSet::new(),
             crate_module_names: Vec::new(),
@@ -3286,6 +3291,7 @@ fn transpile_full_with_options_impl(
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
+    codegen.cross_file_struct_qualified_paths = options.cross_file_struct_qualified_paths.clone();
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_flat_import_type_authorizations(
         options.flat_import_type_authorizations.clone(),
@@ -4536,20 +4542,60 @@ pub fn collect_crate_struct_decls(rust_source: &str) -> Vec<syn::ItemStruct> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    collect_struct_decls_recursive(&file.items, &mut out);
+    let bindings = collect_rust_item_import_bindings(&file.items);
+    let traits = collect_declared_trait_paths(&file.items);
+    collect_struct_decls_recursive(&file.items, &[], &bindings, &traits, &mut out);
     out
 }
 
-fn collect_struct_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemStruct>) {
+fn collect_struct_decls_recursive(
+    items: &[syn::Item], scope: &[String], bindings: &RustItemImportBindings,
+    traits: &HashSet<String>, out: &mut Vec<syn::ItemStruct>,
+) {
+    struct ExternalFieldImports<'a> {
+        scope: &'a [String], bindings: &'a RustItemImportBindings,
+        traits: &'a HashSet<String>, parameters: HashSet<String>,
+    }
+    impl syn::visit_mut::VisitMut for ExternalFieldImports<'_> {
+        fn visit_type_path_mut(&mut self, ty: &mut syn::TypePath) {
+            if ty.qself.is_none()
+                && let Some(first) = ty.path.segments.first()
+                && !self.parameters.contains(&first.ident.to_string())
+                && self.bindings.contains_key(&(self.scope.join("::"), first.ident.to_string()))
+                && ty.path.segments.iter().take(ty.path.segments.len().saturating_sub(1))
+                    .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+                && let Some(external) = resolve_external_rust_item_path(&ty.path, self.scope, self.traits, self.bindings)
+                && let Ok(mut resolved) = syn::parse_str::<syn::Path>(&external)
+            {
+                // Retain the field's source import identity after it leaves
+                // this provider's lexical scope. Generic payloads stay intact.
+                resolved.segments.last_mut().unwrap().arguments = ty.path.segments.last().unwrap().arguments.clone();
+                ty.path = resolved;
+            }
+            syn::visit_mut::visit_type_path_mut(self, ty);
+        }
+    }
     for item in items {
         match item {
-            syn::Item::Struct(s) => out.push(s.clone()),
+            syn::Item::Struct(s) => {
+                let mut declaration = s.clone();
+                let mut normalizer = ExternalFieldImports {
+                    scope, bindings, traits,
+                    parameters: s.generics.type_params().map(|parameter| parameter.ident.to_string()).collect(),
+                };
+                for field in &mut declaration.fields {
+                    syn::visit_mut::VisitMut::visit_type_mut(&mut normalizer, &mut field.ty);
+                }
+                out.push(declaration);
+            }
             syn::Item::Mod(m) => {
                 if module_is_cfg_disabled(m) {
                     continue;
                 }
                 if let Some((_, nested)) = &m.content {
-                    collect_struct_decls_recursive(nested, out);
+                    let mut nested_scope = scope.to_vec();
+                    nested_scope.push(m.ident.to_string());
+                    collect_struct_decls_recursive(nested, &nested_scope, bindings, traits, out);
                 }
             }
             _ => {}

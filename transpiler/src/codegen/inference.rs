@@ -6410,6 +6410,13 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
     ) -> Option<syn::Type> {
         let method = mc.method.to_string();
+        if method == "upgrade" && mc.args.is_empty()
+            && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+            && let Some(upgraded) = self.infer_weak_upgrade_result_type(&receiver_ty)
+        {
+            return Some(upgraded);
+        }
         if let Some(receiver_ty) = self
             .infer_simple_expr_type(&mc.receiver)
             .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
@@ -6528,8 +6535,31 @@ impl CodeGen {
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
             {
-                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-                if let syn::Type::Path(tp) = receiver_ty
+                let mut receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                // Standard Arc/Rc transparently dereference to their lock.
+                // Preserve that result type so both unwrap and subsequent
+                // guard method calls can use the protected payload type.
+                for _ in 0..8 {
+                    if let Some(resolved) = self.resolve_type_alias_once(&receiver_ty)
+                        && resolved != receiver_ty
+                    {
+                        receiver_ty = resolved;
+                        continue;
+                    }
+                    let mapped = self.map_type(&receiver_ty);
+                    if !matches!(mapped.split('<').next(), Some("rusty::Arc" | "rusty::Rc" | "rusty::rc::Rc")) {
+                        break;
+                    }
+                    let syn::Type::Path(tp) = &receiver_ty else { break; };
+                    let Some(last) = tp.path.segments.last() else { break; };
+                    let syn::PathArguments::AngleBracketed(args) = &last.arguments else { break; };
+                    let Some(inner) = args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                        _ => None,
+                    }) else { break; };
+                    receiver_ty = self.peel_reference_paren_group_type(&inner).clone();
+                }
+                if let syn::Type::Path(tp) = &receiver_ty
                     && let Some(last) = tp.path.segments.last()
                     && let syn::PathArguments::AngleBracketed(args) = &last.arguments
                     && let Some(inner_ty) = args.args.iter().find_map(|arg| match arg {
@@ -7045,6 +7075,35 @@ impl CodeGen {
         }
 
         None
+    }
+
+    fn infer_weak_upgrade_result_type(&self, receiver_ty: &syn::Type) -> Option<syn::Type> {
+        let mut receiver_ty = self.peel_reference_paren_group_type(receiver_ty).clone();
+        for _ in 0..8 {
+            let Some(next) = self.resolve_type_alias_once(&receiver_ty) else { break; };
+            if next == receiver_ty { break; }
+            receiver_ty = next;
+        }
+        let syn::Type::Path(path) = self.peel_reference_paren_group_type(&receiver_ty) else {
+            return None;
+        };
+        let syn::PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
+            return None;
+        };
+        let inner = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })?;
+        // Follow the same resolved runtime family as type emission. User
+        // methods named upgrade do not acquire smart-pointer return types.
+        let mapped = self.map_type(&receiver_ty);
+        match mapped.trim_start_matches("::").split('<').next()? {
+            "rusty::sync::Weak" => Some(parse_quote!(Option<std::sync::Arc<#inner>>)),
+            "rusty::rc::Weak" | "rusty::port::rc::Weak" => {
+                Some(parse_quote!(Option<std::rc::Rc<#inner>>))
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn infer_unwrap_like_method_return_type_from_receiver_type(
@@ -7809,7 +7868,9 @@ impl CodeGen {
             syn::Expr::Field(field) => {
                 let field_name = match &field.member {
                     syn::Member::Named(ident) => ident.to_string(),
-                    syn::Member::Unnamed(index) => index.index.to_string(),
+                    // Tuple-struct metadata uses emitted `_N` field names.
+                    // Plain tuple indexing is handled separately below.
+                    syn::Member::Unnamed(index) => format!("_{}", index.index),
                 };
                 let base_ty = self.infer_simple_expr_type(&field.base)?;
                 let mut struct_ty = self
@@ -10910,6 +10971,52 @@ impl CodeGen {
         Some(out)
     }
 
+    /// Resolve an imported alias only through its exact crate-preflight proof.
+    /// The sibling alias table deliberately contains only unique declarations;
+    /// a matching tail alone cannot authorize a consumer's local type.
+    pub(super) fn resolve_authorized_cross_file_type_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.leading_colon.is_some() {
+            return None;
+        }
+        let leaf = tp.path.segments.last()?;
+        if !matches!(leaf.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let leaf_name = leaf.ident.to_string();
+        let path: Vec<String> = tp.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+        let bare_target = (path.len() == 1).then(|| {
+            self.resolve_flat_import_type_authorization_for_exact_scope(
+                &self.module_stack.join("::"), &leaf_name,
+            )
+        }).flatten();
+        let authorized = self.flat_import_type_authorizations.iter().any(|authorization| {
+            authorization.consumer_physical_module == self.current_physical_module
+                && authorization.consumer_lexical_module.0 == self.module_stack
+                && authorization.provider_kind == crate::cpp_abi::FlatImportTypeProviderKind::TypeAlias
+                && authorization.leaf == leaf_name
+                && match authorization.reference_kind {
+                    crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse => {
+                        path.len() == 1 && bare_target.as_deref() == Some(
+                            format!("::{}::{}", authorization.cpp_namespace, authorization.leaf).as_str(),
+                        )
+                    }
+                    crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath => {
+                        path.len() == 3 && path[0] == "crate"
+                            && authorization.provider_physical_module.0 == [path[1].clone()]
+                    }
+                }
+        });
+        if !authorized { return None; }
+        let alias = self.cross_file_auto_trait_aliases.get(&leaf_name)?;
+        if !alias.generics.params.is_empty() || alias.generics.where_clause.is_some() {
+            return None;
+        }
+        Some((*alias.ty).clone())
+    }
+
     pub(super) fn infer_owner_first_type_arg_from_expr(
         &self,
         owner_name: &str,
@@ -10918,7 +11025,25 @@ impl CodeGen {
         let arg_ty = self
             .infer_hint_type_from_expr(expr)
             .or_else(|| self.infer_simple_expr_type(expr))?;
+        let mut arg_ty = self.peel_reference_paren_group_type(&arg_ty).clone();
+        for _ in 0..8 {
+            let Some(resolved) = self.resolve_type_alias_once(&arg_ty)
+                .or_else(|| self.resolve_authorized_cross_file_type_alias(&arg_ty))
+            else { break; };
+            if resolved == arg_ty { break; }
+            arg_ty = resolved;
+        }
         let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+        // An imported transparent alias may have only a C++ type-map entry
+        // in this module. Recover its wrapper argument from that complete
+        // spelling as well, and keep smart-pointer dyn-trait mapping intact.
+        let mapped = self.map_type(arg_ty);
+        if mapped.split('<').next()?.rsplit("::").next()? == owner_name
+            && let Some(args) = Self::cpp_type_template_args(&mapped)
+            && let Some(first) = args.first()
+        {
+            return Some(first.clone());
+        }
         let syn::Type::Path(tp) = arg_ty else {
             return None;
         };
@@ -11732,6 +11857,7 @@ impl CodeGen {
                     && matches!(
                         method_name,
                         "clone"
+                            | "as_ptr"
                             | "ptr_eq"
                             | "strong_count"
                             | "weak_count"

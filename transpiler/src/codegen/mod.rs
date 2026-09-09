@@ -35,17 +35,10 @@ pub(crate) struct ExtensionImplMethod {
     /// fail-closed C++ partial specialization when every parameter is
     /// structurally recoverable from the implementing Self type.
     impl_generic_names: Vec<String>,
-    /// Whether an impl's generic surface belongs to the deliberately narrow
-    /// foreign-Adapter lane: lifetimes (erased as before) plus default-free
-    /// type parameters that are either unconstrained or carry only the legacy
-    /// `Default` bound, with no where-clause. Const generics and every other
-    /// constrained type parameter require C++ constraint lowering and remain a
-    /// hand slot instead of producing an over-broad partial specialization.
-    foreign_adapter_partial_spec_compatible: bool,
-    /// True when the impl declares at least one type or const parameter. This
-    /// is separate from `impl_generic_names`: const parameters are purposely
-    /// excluded from that vector because this lane cannot emit them yet.
-    foreign_adapter_has_non_lifetime_generics: bool,
+    /// Original impl generics and lexical scope. Adapter partial specializations
+    /// lower their own bounds after trait declarations are available, separately
+    /// from method generics merged into `method` for extension-function emission.
+    foreign_adapter_generics: Option<(syn::Generics, Vec<String>)>,
     /// UFCS Fix A part 2 (§ 3.2.4): an extra `requires`-clause to inject after
     /// the template parameter list — used to CONSTRAIN a multi-owner default
     /// method's template (`requires requires(const Self_& s){ Tr_::__ufcs_impls(s); }`)
@@ -2114,6 +2107,8 @@ pub struct CodeGen {
     /// that path has to prepend the crate namespace itself.
     pub(crate) pending_explicit_auto_trait_specializations:
         std::collections::BTreeSet<(String, String)>,
+    /// Exact local concrete positive auto-trait impls, before item emission.
+    pub(crate) concrete_positive_auto_trait_types: HashSet<(String, String)>,
     /// Declared generic parameter kinds keyed by local type name (scoped and unscoped).
     /// Mirrors `declared_type_params` indexing (Type vs Const) so omitted-arg
     /// recovery does not substitute mismatched kind positions.
@@ -2332,6 +2327,12 @@ pub struct CodeGen {
     /// Rust's Send/Sync derivation has to see through it to decide the
     /// type that CONTAINS it.
     pub(crate) cross_file_struct_field_types: HashMap<String, Vec<syn::Type>>,
+    /// Direct physical provider identities retained by the crate pre-pass.
+    pub(crate) cross_file_struct_qualified_paths: BTreeSet<Vec<String>>,
+    /// Defining parameters retained for structural auto-trait substitution.
+    pub(crate) cross_file_auto_trait_generics: HashMap<String, syn::Generics>,
+    /// Full sibling aliases, including callable bounds erased by C++ aliases.
+    pub(crate) cross_file_auto_trait_aliases: HashMap<String, syn::ItemType>,
     /// Inherent method names emitted as free functions for C-like enums.
     /// Used as a fallback when local type inference cannot recover enum types
     /// at method-call sites (for example values extracted inside `std::visit`).
@@ -3259,6 +3260,9 @@ pub struct CodeGen {
     /// interface class in the sibling module's purview, so an owning
     /// `Box<dyn Trait>` keeps its target instead of erasing to `void*`.
     pub(crate) cross_file_trait_tails: HashSet<String>,
+    /// Crate trait declarations that explicitly require structural C++ member
+    /// dispatch. Their foreign impl methods must remain on the host type.
+    pub(crate) cross_file_member_dispatch_trait_tails: HashSet<String>,
     /// B: audited cpp_name identities owned by OTHER files of this crate. A
     /// call to one of them emits the owner's C++ identity (C++ overload
     /// resolution then picks the member of the owner's overload set); the
@@ -3469,6 +3473,7 @@ impl CodeGen {
             method_structural_decompositions: HashMap::new(),
             pending_template_args_specializations: HashSet::new(),
             pending_explicit_auto_trait_specializations: std::collections::BTreeSet::new(),
+            concrete_positive_auto_trait_types: HashSet::new(),
             declared_type_param_kinds: HashMap::new(),
             declared_type_param_defaults: HashMap::new(),
             numeric_type_aliases: HashMap::new(),
@@ -3512,6 +3517,9 @@ impl CodeGen {
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
             cross_file_struct_field_types: HashMap::new(),
+            cross_file_struct_qualified_paths: BTreeSet::new(),
+            cross_file_auto_trait_generics: HashMap::new(),
+            cross_file_auto_trait_aliases: HashMap::new(),
             c_like_enum_inherent_method_names: HashSet::new(),
             forward_emitted_c_like_enums: HashSet::new(),
             forward_emitted_consts: HashSet::new(),
@@ -3742,6 +3750,7 @@ impl CodeGen {
             auto_cross_module_by_value_rewrite_fields: HashSet::new(),
             cross_file_enums: Vec::new(),
             cross_file_trait_tails: HashSet::new(),
+            cross_file_member_dispatch_trait_tails: HashSet::new(),
             cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             crate_module_names: HashSet::new(),
             sibling_modules_imported: HashSet::new(),
@@ -6360,6 +6369,9 @@ impl CodeGen {
 
     pub fn set_cross_file_traits(&mut self, traits: &[syn::ItemTrait]) {
         self.cross_file_trait_tails = traits.iter().map(|t| t.ident.to_string()).collect();
+        self.cross_file_member_dispatch_trait_tails = traits.iter()
+            .filter(|t| Self::has_exact_inactive_cpp_trait_member_dispatch_attr(&t.attrs))
+            .map(|t| t.ident.to_string()).collect();
         // `dyn Trait` is Send/Sync exactly when the trait's supertraits say
         // so. `collect_trait_static_default_methods` records that, but only
         // for traits declared in the file being emitted -- so a field typed
@@ -6476,6 +6488,20 @@ impl CodeGen {
                 )
             })
             .collect();
+        self.cross_file_auto_trait_generics = structs
+            .iter()
+            .map(|s| (s.ident.to_string(), s.generics.clone()))
+            .collect();
+        // This pre-pass supplies leaf names. An ambiguous leaf cannot prove
+        // a field's ownership constraints without its defining module path.
+        let mut seen = HashSet::new();
+        for item in &structs {
+            let name = item.ident.to_string();
+            if !seen.insert(name.clone()) {
+                self.cross_file_struct_field_types.remove(&name);
+                self.cross_file_auto_trait_generics.remove(&name);
+            }
+        }
         // `PhantomPinned` structs from sibling files: their literals and
         // smart-pointer constructions in THIS file must still know the
         // emitted C++ type is non-movable (deleted move operations).
@@ -6536,6 +6562,16 @@ impl CodeGen {
     /// `NodeRef`'s struct body alongside the methods that directly
     /// targeted `NodeRef`.
     pub fn set_cross_file_type_aliases(&mut self, aliases: Vec<syn::ItemType>) {
+        self.cross_file_auto_trait_aliases.clear();
+        let mut seen = HashSet::new();
+        for alias in &aliases {
+            let name = alias.ident.to_string();
+            if seen.insert(name.clone()) {
+                self.cross_file_auto_trait_aliases.insert(name, alias.clone());
+            } else {
+                self.cross_file_auto_trait_aliases.remove(&name);
+            }
+        }
         let mut map = HashMap::new();
         for a in aliases {
             let alias_name = a.ident.to_string();
@@ -7745,6 +7781,7 @@ impl CodeGen {
         self.types_with_user_clone.clear();
         self.types_with_phantom_pinned.clear();
         self.pending_explicit_auto_trait_specializations.clear();
+        self.concrete_positive_auto_trait_types.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
         self.expanded_test_marker_should_panic.clear();
@@ -8155,8 +8192,43 @@ impl CodeGen {
         // (See `emit_impl_block`'s fallback for the matching suppression
         // on the orphan-impl-file side.)
         if !self.cross_file_impl_blocks.is_empty() {
+            fn collect_physical_hosts(items: &[syn::Item], hosts: &mut HashSet<String>) {
+                for item in items {
+                    match item {
+                        syn::Item::Struct(item) => { hosts.insert(item.ident.to_string()); }
+                        syn::Item::Enum(item) => { hosts.insert(item.ident.to_string()); }
+                        syn::Item::Union(item) => { hosts.insert(item.ident.to_string()); }
+                        syn::Item::Mod(item) => {
+                            if let Some((_, items)) = &item.content {
+                                collect_physical_hosts(items, hosts);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut physical_hosts = HashSet::new();
+            collect_physical_hosts(&file.items, &mut physical_hosts);
             let foreign_impls = std::mem::take(&mut self.cross_file_impl_blocks);
             for imp in &foreign_impls {
+                // Ordinary crate traits keep their implementation in the
+                // module that owns the impl, as extension functions and
+                // interface adapters. Injecting those methods into the host
+                // struct adds dependencies on the trait module's argument
+                // types and can create an import cycle. Only an explicit
+                // inheritance contract requires those virtual members on the
+                // host itself. Inherent orphans still need host members.
+                if let Some((_, trait_path, _)) = &imp.trait_
+                    && trait_path.segments.last().is_some_and(|segment|
+                        self.cross_file_trait_tails.contains(&segment.ident.to_string())
+                            && !self.cross_file_member_dispatch_trait_tails.contains(&segment.ident.to_string()))
+                    && !trait_path.segments.first().is_some_and(|segment|
+                        matches!(segment.ident.to_string().as_str(), "std" | "core" | "alloc")
+                            && self.authenticated_sysroot_roots.contains(&segment.ident.to_string()))
+                    && !self.has_cpp_inherit_attr(&imp.attrs, &[])
+                {
+                    continue;
+                }
                 let Some(host_tail) =
                     Self::impl_self_type_path(imp.self_ty.as_ref())
                         .and_then(|tp| {
@@ -8174,7 +8246,7 @@ impl CodeGen {
                 // struct — each cross-file impl is absorbed exactly once
                 // (by the host's file). Skip if the resolution still leaves
                 // us pointing at a non-local tail.
-                if !self.declared_item_names.contains(&resolved_tail) {
+                if !physical_hosts.contains(&resolved_tail) {
                     continue;
                 }
                 // If the impl targets a type alias, rewrite the self_ty's
@@ -8536,7 +8608,7 @@ impl CodeGen {
                 // A concrete positive Send/Sync impl has no methods for the
                 // host struct to drain. Let its dedicated lowering record the
                 // required global-scope trait specialization.
-                if Self::concrete_positive_auto_trait_impl(i).is_some() {
+                if self.concrete_positive_auto_trait_impl(i, &self.module_stack).is_some() {
                     self.emit_item(item);
                     self.newline();
                     continue;
@@ -20467,8 +20539,7 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: associated_type_bindings.clone(),
                 impl_generic_names: impl_generic_names.clone(),
-                foreign_adapter_partial_spec_compatible: false,
-                foreign_adapter_has_non_lifetime_generics: false,
+                foreign_adapter_generics: None,
                 self_is_template_param: false,
                 extra_template_requires: None,
             });
@@ -21003,8 +21074,7 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: HashMap::new(),
                 impl_generic_names: impl_generic_names.clone(),
-                foreign_adapter_partial_spec_compatible: false,
-                foreign_adapter_has_non_lifetime_generics: false,
+                foreign_adapter_generics: None,
                 self_is_template_param: true,
                 extra_template_requires: None,
             });
@@ -21487,6 +21557,7 @@ impl CodeGen {
         self_cpp: &str,
         assoc_pairs: &[(String, String)],
         impl_generic_names: &[String],
+        constraints: &[String],
     ) {
         if assoc_pairs.is_empty() {
             return;
@@ -21502,6 +21573,9 @@ impl CodeGen {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        if !constraints.is_empty() {
+            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
         }
         self.writeln(&format!(
             "struct {}Traits<{}> {{",
@@ -21532,6 +21606,7 @@ impl CodeGen {
         trait_name: &str,
         trait_args: &[String],
         impl_generic_names: &[String],
+        constraints: &[String],
         suffix: &str,
         self_cpp: &str,
         kind: AdapterStorageKind,
@@ -21596,6 +21671,9 @@ impl CodeGen {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        if !constraints.is_empty() {
+            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
         }
         self.writeln(&format!(
             "class {}{}<{}> final : public {} {{",
@@ -46218,6 +46296,17 @@ impl CodeGen {
         }
 
         let method_name = func_path.segments.last()?.ident.to_string();
+        // A borrowed byte slice is an argument to this standard associated
+        // function, not a receiver for a trait method on the slice.
+        if method_name == "from_utf8_lossy"
+            && trait_segment == "String"
+            && let Some(owner_path) = Self::path_without_last_segment(func_path)
+        {
+            let owner = syn::Type::Path(syn::TypePath { qself: None, path: owner_path });
+            if matches!(self.map_type(&owner).as_str(), "rusty::String" | "std::string") {
+                return None;
+            }
+        }
         if method_name
             .chars()
             .next()
@@ -66325,3 +66414,5 @@ mod type_solver;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod auto_trait_generics_tests;
