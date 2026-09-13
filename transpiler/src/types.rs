@@ -199,6 +199,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
         "Once" | "std::sync::Once" => Some(("rusty::Once", false)),
+        "std::sync::mpsc::Sender" => Some(("rusty::sync::mpsc::Sender", true)),
+        "std::sync::mpsc::Receiver" => Some(("rusty::sync::mpsc::Receiver", true)),
         "std::thread::Thread" => Some(("rusty::thread::Thread", false)),
         "std::thread::LocalKey" => Some(("rusty::thread::LocalKey", true)),
         "std::sync::atomic::AtomicBool" | "core::sync::atomic::AtomicBool" => {
@@ -535,6 +537,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "thread::current" | "std::thread::current" => Some("rusty::thread::current"),
         "thread::park" | "std::thread::park" => Some("rusty::thread::park"),
         "thread::yield_now" | "std::thread::yield_now" => Some("rusty::thread::yield_now"),
+        "std::sync::mpsc::channel" => Some("rusty::sync::mpsc::channel"),
         "std::sync::atomic::fence" | "core::sync::atomic::fence" => {
             Some("rusty::sync::atomic::fence")
         }
@@ -724,6 +727,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::rt::begin_panic" | "rt::begin_panic" => Some("rusty::panic::begin_panic"),
         "std::rt::panic_fmt" | "rt::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "std::process::abort" => Some("std::abort"),
+        "std::process::id" => Some("rusty::process::id"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "Add::add" | "core::ops::Add::add" | "std::ops::Add::add" => Some("rusty::ops::add_fn"),
         "cmp::min" | "core::cmp::min" | "std::cmp::min" => Some("rusty::cmp::min"),
