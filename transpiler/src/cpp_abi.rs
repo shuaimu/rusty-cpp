@@ -120,6 +120,9 @@ pub(crate) struct FlatImportTypeAuthorization {
     /// Standard owner identities proved in the provider's lexical scope.
     /// None forbids nullable-owner profile expansion through this binding.
     pub(crate) nullable_owner_alias_source: Option<String>,
+    /// Fully normalized nullable Box<dyn Fn*> with provider-proven standard
+    /// bounds and signature types that cannot rebind in a consumer.
+    pub(crate) nullable_callback_alias_source: Option<String>,
 }
 
 /// Out-of-band instructions consumed by code generation after the semantic
@@ -3806,6 +3809,129 @@ fn nullable_owner_alias_source(items: &[Item], leaf: &str) -> Option<String> {
         .map(|ty| ty.to_token_stream().to_string())
 }
 
+/// Prove callback transparency independently of an explicit owner profile.
+/// Provider-local signature names are intentionally unsupported until their
+/// exact identities can be carried through the consumer's import contract.
+fn nullable_callback_alias_source(items: &[Item], leaf: &str) -> Option<String> {
+    use crate::transpile::{collect_rust_item_import_bindings, resolve_external_rust_item_path};
+    let bindings = collect_rust_item_import_bindings(items);
+    let declarations = items.iter().filter_map(flat_import_direct_item_name)
+        .map(|(name, _)| ident_key(name)).collect::<std::collections::HashSet<_>>();
+    fn has_glob(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Glob(_) => true,
+            syn::UseTree::Path(path) => has_glob(&path.tree),
+            syn::UseTree::Group(group) => group.items.iter().any(has_glob),
+            _ => false,
+        }
+    }
+    let uncertain_bindings = items.iter().any(|item| match item {
+        Item::Use(item) => has_glob(&item.tree),
+        Item::Macro(_) => true,
+        _ => false,
+    });
+    let external_path = |path: &syn::Path| -> Option<String> {
+        let first = path.segments.first()?.ident.to_string();
+        if path.leading_colon.is_none() && declarations.contains(&first) { return None; }
+        if path.leading_colon.is_none() && path.segments.len() == 1
+            && !bindings.contains_key(&(String::new(), first.clone()))
+            && uncertain_bindings
+        { return None; }
+        resolve_external_rust_item_path(path, &[], &declarations, &bindings)
+    };
+    fn stable_signature_type(
+        ty: &Type, external: &impl Fn(&syn::Path) -> Option<String>, depth: usize,
+    ) -> Option<Type> {
+        if depth == 0 { return None; }
+        match ty {
+            Type::Paren(value) => stable_signature_type(&value.elem, external, depth - 1),
+            Type::Group(value) => stable_signature_type(&value.elem, external, depth - 1),
+            Type::Tuple(value) if value.elems.is_empty() => Some(ty.clone()),
+            Type::Reference(value) if value.lifetime.as_ref().is_none_or(|lifetime| lifetime.ident == "static") => {
+                let mut value = value.clone();
+                value.elem = Box::new(stable_signature_type(&value.elem, external, depth - 1)?);
+                Some(Type::Reference(value))
+            }
+            Type::Path(value) if value.qself.is_none()
+                && value.path.segments.iter().all(|part| matches!(part.arguments, PathArguments::None)) => {
+                let spelling = external(&value.path)?;
+                let segments = spelling.split("::").collect::<Vec<_>>();
+                let primitive = match segments.as_slice() {
+                    [name] => *name,
+                    [root, "primitive", name] if matches!(*root, "core" | "std") => *name,
+                    _ => return None,
+                };
+                if !matches!(primitive, "bool" | "char" | "str" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                    | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
+                { return None; }
+                syn::parse_str(&format!("::core::primitive::{primitive}")).ok()
+            }
+            _ => None,
+        }
+    }
+    fn inner_type(ty: &Type, name: &str) -> Option<Type> {
+        let Type::Path(path) = ty else { return None; };
+        let last = path.path.segments.last()?;
+        if last.ident != name { return None; }
+        let PathArguments::AngleBracketed(arguments) = &last.arguments else { return None; };
+        if arguments.args.len() != 1 { return None; }
+        match arguments.args.first()? { GenericArgument::Type(ty) => Some(ty.clone()), _ => None }
+    }
+    let option: Type = syn::parse_str(&nullable_owner_alias_source(items, leaf)?).ok()?;
+    let mut owner = inner_type(&option, "Option")?;
+    if let Type::Path(path) = &owner
+        && path.path.leading_colon.is_none() && path.path.segments.len() == 1
+        && matches!(path.path.segments[0].arguments, PathArguments::None)
+    {
+        owner = syn::parse_str(&nullable_owner_alias_source(items, &path.path.segments[0].ident.to_string())?).ok()?;
+    }
+    let Type::TraitObject(mut object) = inner_type(&owner, "Box")? else { return None; };
+    let mut saw_callable = false;
+    let mut markers = BTreeSet::new();
+    let mut saw_lifetime = false;
+    for bound in &mut object.bounds {
+        match bound {
+            syn::TypeParamBound::Lifetime(lifetime) if lifetime.ident == "static" && !saw_lifetime => {
+                saw_lifetime = true;
+            }
+            syn::TypeParamBound::Trait(bound) if bound.lifetimes.is_none()
+                && matches!(bound.modifier, syn::TraitBoundModifier::None) => {
+                let spelling = external_path(&bound.path)?;
+                let parts = spelling.split("::").collect::<Vec<_>>();
+                let name = match parts.as_slice() {
+                    [name] => *name,
+                    [root, family, name] if matches!(*root, "std" | "core")
+                        && ((*family == "ops" && matches!(*name, "Fn" | "FnMut" | "FnOnce"))
+                            || (*family == "marker" && matches!(*name, "Send" | "Sync"))) => *name,
+                    _ => return None,
+                };
+                let canonical = if matches!(name, "Fn" | "FnMut" | "FnOnce") && !saw_callable {
+                    let PathArguments::Parenthesized(arguments) = &mut bound.path.segments.last_mut()?.arguments else { return None; };
+                    for input in &mut arguments.inputs {
+                        *input = stable_signature_type(input, &external_path, 16)?;
+                    }
+                    if let syn::ReturnType::Type(_, output) = &mut arguments.output {
+                        **output = stable_signature_type(output, &external_path, 16)?;
+                    }
+                    saw_callable = true;
+                    format!("::core::ops::{name}")
+                } else if matches!(name, "Send" | "Sync") && markers.insert(name.to_string())
+                    && matches!(bound.path.segments.last()?.arguments, PathArguments::None)
+                {
+                    format!("::core::marker::{name}")
+                } else { return None; };
+                let mut normalized: syn::Path = syn::parse_str(&canonical).ok()?;
+                normalized.segments.last_mut()?.arguments = bound.path.segments.last()?.arguments.clone();
+                bound.path = normalized;
+            }
+            _ => return None,
+        }
+    }
+    if !saw_callable { return None; }
+    let normalized: Type = syn::parse_quote!(::core::option::Option<::std::boxed::Box<#object>>);
+    Some(normalized.to_token_stream().to_string())
+}
+
 /// Crate-wide facts that are safe to hand to per-file code generation only
 /// after the complete conventional module graph has passed preflight.
 #[derive(Clone, Debug, Default)]
@@ -4157,6 +4283,7 @@ fn preflight_crate_sources_impl(
                                 provider_kind,
                                 reference_kind: FlatImportTypeReferenceKind::MarkedUse,
                                 nullable_owner_alias_source: nullable_owner_alias_source(&provider.file.items, leaf),
+                                nullable_callback_alias_source: nullable_callback_alias_source(&provider.file.items, leaf),
                             },
                         );
                     }
@@ -4220,7 +4347,7 @@ fn preflight_crate_sources_impl(
         .collect::<FlatImportTypeBindings>();
     let mut qualified_type_provider_templates = BTreeMap::<
         (Vec<String>, String),
-        (String, FlatImportTypeProviderKind, Option<String>),
+        (String, FlatImportTypeProviderKind, Option<String>, Option<String>),
     >::new();
     for authorization in &flat_import_type_authorizations {
         let key = (
@@ -4231,6 +4358,7 @@ fn preflight_crate_sources_impl(
             authorization.cpp_namespace.clone(),
             authorization.provider_kind.clone(),
             authorization.nullable_owner_alias_source.clone(),
+            authorization.nullable_callback_alias_source.clone(),
         );
         if let Some(previous) = qualified_type_provider_templates.insert(key.clone(), value.clone())
             && previous != value
@@ -4290,7 +4418,7 @@ fn preflight_crate_sources_impl(
         )
         .map_err(|error| format!("{error} in {}", unit.path.display()))?;
         for (provider, leaf, consumer_lexical_module) in qualified_type_references {
-            let (cpp_namespace, provider_kind, nullable_owner_alias_source) = qualified_type_provider_templates
+            let (cpp_namespace, provider_kind, nullable_owner_alias_source, nullable_callback_alias_source) = qualified_type_provider_templates
                 .get(&(provider.clone(), leaf.clone()))
                 .expect("qualified flat type reference has an audited provider template")
                 .clone();
@@ -4310,6 +4438,7 @@ fn preflight_crate_sources_impl(
                 provider_kind,
                 reference_kind: FlatImportTypeReferenceKind::QualifiedProviderPath,
                 nullable_owner_alias_source,
+                nullable_callback_alias_source,
             });
         }
         let external = global_contracts.external_for(index);
@@ -14075,3 +14204,7 @@ pub(crate) fn parse_thread_local_statics(mac: &syn::Macro) -> Option<Vec<syn::It
     }
     Some(statics)
 }
+
+#[cfg(test)]
+#[path = "cpp_abi_nullable_callback_provenance_tests.rs"]
+mod nullable_callback_provenance_tests;
