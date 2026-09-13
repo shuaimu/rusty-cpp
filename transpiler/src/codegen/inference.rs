@@ -6439,6 +6439,16 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
     ) -> Option<syn::Type> {
         let method = mc.method.to_string();
+        // RefCell::replace returns its stored Option by value. Keep the
+        // source type so an inferred local still uses nullable-callback
+        // operations after the Option has become a C++ Function.
+        if method == "replace" && mc.args.len() == 1
+            && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+            && let Some(callback_ty) = self.transparent_nullable_callback_in_refcell(&receiver_ty)
+        {
+            return Some(callback_ty);
+        }
         if method == "upgrade" && mc.args.is_empty()
             && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
@@ -9666,14 +9676,6 @@ impl CodeGen {
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
             return Some(resolved);
         };
-        let params = self
-            .declared_type_params
-            .get(&alias_key)
-            .or_else(|| self.declared_type_params.get(&alias_name))?;
-        let param_kinds = self
-            .declared_type_param_kinds
-            .get(&alias_key)
-            .or_else(|| self.declared_type_param_kinds.get(&alias_name));
         let provided_type_args: Vec<syn::Type> = args
             .args
             .iter()
@@ -9685,6 +9687,14 @@ impl CodeGen {
         if provided_type_args.is_empty() {
             return Some(resolved);
         }
+        let params = self
+            .declared_type_params
+            .get(&alias_key)
+            .or_else(|| self.declared_type_params.get(&alias_name))?;
+        let param_kinds = self
+            .declared_type_param_kinds
+            .get(&alias_key)
+            .or_else(|| self.declared_type_param_kinds.get(&alias_name));
         let mut substitutions = HashMap::new();
         let mut provided_iter = provided_type_args.into_iter();
         for (idx, param) in params.iter().enumerate() {

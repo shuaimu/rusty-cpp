@@ -1952,6 +1952,13 @@ impl CodeGen {
         bare: &str,
         qualified: &[&[&str]],
     ) -> bool {
+        if self.standard_path_root_is_local_module(path) {
+            return false;
+        }
+        let trait_key = self.resolve_trait_scoped_key_for_impl(path, &self.module_stack);
+        if self.trait_declared_paths.contains(&trait_key) {
+            return false;
+        }
         let segments = path
             .segments
             .iter()
@@ -1970,12 +1977,11 @@ impl CodeGen {
         })
     }
 
-    /// Ordinary boxed callbacks may carry Rust's canonical thread-safety
-    /// auto traits without changing the callable C++ surface.  Keep this
-    /// separate from transparent nullable callbacks: `Option<Box<dyn Fn +
-    /// Send>>` must still fail closed rather than erase an outer semantic
-    /// constraint.  Every non-lifetime bound here must be exactly one
-    /// Fn-family trait or one of the canonical Send/Sync markers.
+    /// Boxed callbacks, including nullable ones, may carry Rust's canonical
+    /// Send/Sync auto traits without changing their callable C++ signature.
+    /// Rust still checks those bounds on the source callback. Every
+    /// non-lifetime bound must be exactly one Fn-family trait or one of the
+    /// canonical Send/Sync markers; explicit HRTBs remain unsupported.
     fn boxed_callback_fn_bound<'a>(
         &self,
         object: &'a syn::TypeTraitObject,
@@ -2428,10 +2434,10 @@ impl CodeGen {
         self.transparent_nullable_callback_in_cell_wrapper(ty, "RefCell")
     }
 
-    /// Recognize exactly `Option<Box<dyn Fn/FnMut/FnOnce(...)>>` and lower its
-    /// redundant outer discriminator to `rusty::Function`'s existing nullable
-    /// state. Lifetimes are harmless, but a second trait bound (notably
-    /// `Send`/`Sync`) rejects the optimization rather than erasing semantics.
+    /// Lower a canonical nullable boxed callback to `rusty::Function`'s
+    /// existing empty state. Accept the same lifetime and Send/Sync bounds
+    /// as an ordinary boxed callback, without accepting unrelated traits or
+    /// explicitly higher-ranked signatures.
     pub(super) fn try_map_transparent_nullable_callback_type(
         &self,
         ty: &syn::Type,
@@ -2452,42 +2458,7 @@ impl CodeGen {
         let syn::Type::TraitObject(callable) = &callable_ty else {
             return None;
         };
-        let mut fn_bound = None;
-        for bound in &callable.bounds {
-            match bound {
-                syn::TypeParamBound::Lifetime(_) => {}
-                syn::TypeParamBound::Trait(trait_bound)
-                    if fn_bound.is_none()
-                        && matches!(trait_bound.modifier, syn::TraitBoundModifier::None)
-                        && trait_bound.lifetimes.is_none() =>
-                {
-                    fn_bound = Some(trait_bound);
-                }
-                // Additional traits, `?Trait`, HRTBs, and future bound kinds
-                // are semantic constraints and therefore reject transparency.
-                _ => return None,
-            }
-        }
-        let fn_bound = fn_bound?;
-        if !self.transparent_nullable_callback_path_is_canonical(
-                &fn_bound.path,
-                fn_bound.path.segments.last()?.ident.to_string().as_str(),
-                &[
-                    &["core", "ops", "Fn"],
-                    &["core", "ops", "FnMut"],
-                    &["core", "ops", "FnOnce"],
-                    &["std", "ops", "Fn"],
-                    &["std", "ops", "FnMut"],
-                    &["std", "ops", "FnOnce"],
-                ],
-            )
-        {
-            return None;
-        }
-        let trait_name = fn_bound.path.segments.last()?.ident.to_string();
-        if !matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce") {
-            return None;
-        }
+        let fn_bound = self.boxed_callback_fn_bound(callable)?;
         self.try_map_fn_trait_bare_signature(fn_bound)
             .map(|signature| format!("rusty::Function<{}>", signature))
     }

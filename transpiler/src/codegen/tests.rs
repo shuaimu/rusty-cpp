@@ -11030,6 +11030,87 @@ fn test_nullable_callback_references_keep_reference_and_const_shape() {
 }
 
 #[test]
+fn test_nullable_callbacks_accept_canonical_auto_traits_and_borrowed_arguments() {
+    let out = transpile_str(
+        r#"
+        type Shared = Box<dyn Fn(i32) -> i32 + Send + Sync>;
+        type Borrowed<'a> = Box<dyn FnMut(&mut i32) + Sync + Send + 'a>;
+        struct Callbacks<'a> {
+            shared: Option<Shared>,
+            borrowed: RefCell<Option<Borrowed<'a>>>,
+            send_only: Option<Box<dyn FnMut() + Send>>,
+            sync_only: Option<Box<dyn Fn() + Sync>>,
+            qualified: std::option::Option<std::boxed::Box<
+                dyn std::ops::FnOnce(i32) + core::marker::Send + std::marker::Sync
+            >>,
+        }
+        fn inspect(callback: &Option<Shared>) {}
+        fn mutate(callback: &mut Option<Borrowed<'_>>) {}
+        "#,
+    );
+    for expected in [
+        "rusty::Function<int32_t(int32_t) const> shared",
+        "rusty::RefCell<rusty::Function<void(int32_t&)>> borrowed",
+        "rusty::Function<void()> send_only",
+        "rusty::Function<void() const> sync_only",
+        "rusty::Function<void(int32_t)> qualified",
+        "const rusty::Function<int32_t(int32_t) const>& callback",
+        "rusty::Function<void(int32_t&)>& callback",
+    ] {
+        assert!(out.contains(expected), "missing {expected}:\n{out}");
+    }
+    assert!(!out.contains("rusty::Option<rusty::Function"), "{out}");
+}
+
+#[test]
+fn test_nullable_callback_auto_traits_keep_unsupported_bounds_opaque() {
+    let out = transpile_str(
+        r#"
+        trait Extra {}
+        struct Rejected {
+            extra: Option<Box<dyn FnMut() + Send + Extra>>,
+            duplicate: Option<Box<dyn FnMut() + Send + std::marker::Send>>,
+            hrtb: Option<Box<dyn for<'a> FnMut(&'a mut i32) + Send + Sync>>,
+            nested: Option<Option<Box<dyn FnMut() + Send + Sync>>>,
+        }
+        "#,
+    );
+    for field in ["extra", "duplicate", "hrtb"] {
+        let line = out.lines().find(|line| line.contains(field))
+            .unwrap_or_else(|| panic!("missing {field}:\n{out}"));
+        assert!(
+            !line.trim_start().starts_with("rusty::Function<"),
+            "unsupported bounds flattened for {field}: {line}"
+        );
+    }
+    assert!(
+        out.contains("rusty::Option<rusty::Function<void()>> nested"),
+        "only the inner nullable callback may collapse:\n{out}"
+    );
+}
+
+#[test]
+fn test_nullable_callback_auto_traits_reject_shadowed_standard_module() {
+    let out = transpile_str(
+        r#"
+        mod std {
+            pub mod marker {
+                pub trait Send {}
+            }
+        }
+        struct Callbacks {
+            shadowed: Option<Box<dyn FnMut() + std::marker::Send>>,
+            absolute: Option<Box<dyn FnMut() + ::std::marker::Send>>,
+        }
+        "#,
+    );
+    let line = out.lines().find(|line| line.contains("shadowed;"))
+        .unwrap_or_else(|| panic!("missing shadowed field:\n{out}"));
+    assert!(!line.trim_start().starts_with("rusty::Function<"), "{out}");
+    assert!(out.contains("rusty::Function<void()> absolute"), "{out}");
+}
+
+#[test]
 fn test_nullable_callback_rejects_noncanonical_or_semantically_stronger_bounds() {
     let out = transpile_str(
         r#"
