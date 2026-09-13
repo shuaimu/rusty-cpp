@@ -725,8 +725,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "ManuallyDrop::new" | "std::mem::ManuallyDrop::new" | "mem::ManuallyDrop::new" => {
             Some("rusty::mem::manually_drop_new")
         }
-        "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
-        "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind"),
+        "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind_std"),
+        "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind_std"),
+        "std::panic::panic_any" | "panic::panic_any" => Some("rusty::panic::panic_any"),
         "std::panic::AssertUnwindSafe" | "panic::AssertUnwindSafe" => {
             Some("rusty::panic::AssertUnwindSafe")
         }
@@ -1261,7 +1262,7 @@ mod tests {
         );
         assert_eq!(
             map_function_path("std::panic::catch_unwind"),
-            Some("rusty::panic::catch_unwind")
+            Some("rusty::panic::catch_unwind_std")
         );
         assert_eq!(
             map_function_path("std::ptr::read"),

@@ -197,7 +197,7 @@ public:
     
     // @lifetime: owned
     static String from(const std::string& str) {
-        return String::from(str.c_str());
+        return String::from(std::string_view(str.data(), str.size()));
     }
     
     // @lifetime: owned

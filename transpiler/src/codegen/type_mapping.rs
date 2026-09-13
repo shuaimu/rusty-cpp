@@ -2590,6 +2590,7 @@ impl CodeGen {
     }
 
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
+        if let Some(mapped) = self.try_map_standard_any_type(ty) { return mapped; }
         if let Some(mapped) = self.try_map_standard_future_type(ty) { return mapped; }
         if let Some(callback) = self.try_map_transparent_nullable_callback_type(ty) {
             return callback;

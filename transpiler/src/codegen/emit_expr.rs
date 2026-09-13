@@ -20459,6 +20459,9 @@ impl CodeGen {
                 }
             }
         }
+        if let Some(emitted) = self.try_emit_standard_any_call(call, expected_ty) {
+            return emitted;
+        }
         if let Some(emitted) = self.try_emit_arc_from_assoc_call(call, expected_ty) {
             return emitted;
         }
