@@ -136,9 +136,10 @@ struct ParkTokenShared {
 };
 
 inline SharedState<ParkTokenShared> current_park_token() {
-    thread_local SharedState<ParkTokenShared> token =
-        SharedState<ParkTokenShared>::make();
-    return token;
+    struct Slot {
+        SharedState<ParkTokenShared> token = SharedState<ParkTokenShared>::make();
+    };
+    return platform::threading::thread_exit_local<Slot>().token;
 }
 
 // ──────────────────────────────────────────────────────────────────────

@@ -3,10 +3,12 @@
 #include "config.hpp"
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -23,7 +25,90 @@
 #  include <time.h>
 #endif
 
+#if defined(__GLIBC__) && !defined(RUSTY_PLATFORM_BACKEND_POSIX)
+#  include <pthread.h>
+#endif
+
 namespace rusty::platform::threading {
+
+// Glibc runs C++ TLS destructors before pthread-key destructors. Runtime
+// services used by user TLS destructors need their owning storage to survive
+// that first phase, including on threads created outside this runtime.
+#if defined(__GLIBC__)
+namespace detail {
+template<typename T>
+class NativeThreadExitLocal {
+    inline static thread_local bool native_cleanup_finished_ = false;
+    inline static std::atomic<bool> process_cleanup_started_{false};
+
+    static void destroy_thread_value(void* value) noexcept {
+        // Native cleanup is terminal: foreign pthread-key destructors must
+        // not resurrect owners beyond PTHREAD_DESTRUCTOR_ITERATIONS.
+        native_cleanup_finished_ = true;
+        delete static_cast<T*>(value);
+    }
+
+    static void destroy_process_value() noexcept {
+        process_cleanup_started_.store(true, std::memory_order_relaxed);
+        auto native_key = key();
+        auto* value = static_cast<T*>(pthread_getspecific(native_key));
+        if (pthread_setspecific(native_key, nullptr) != 0) std::terminate();
+        delete value;
+    }
+
+    static pthread_key_t key() {
+        // The key itself has process lifetime and no C++ destructor. Normal
+        // main exit skips pthread cleanup, so release its value via atexit.
+        static const pthread_key_t native_key = [] {
+            pthread_key_t created;
+            if (pthread_key_create(&created, &destroy_thread_value) != 0)
+                std::terminate();
+            if (std::atexit(&destroy_process_value) != 0) {
+                pthread_key_delete(created);
+                std::terminate();
+            }
+            return created;
+        }();
+        return native_key;
+    }
+
+public:
+    static T& get() {
+        if (native_cleanup_finished_) std::terminate();
+        auto native_key = key();
+        auto* value = static_cast<T*>(pthread_getspecific(native_key));
+        if (!value) {
+            value = new T();
+            if (pthread_setspecific(native_key, value) != 0) {
+                delete value;
+                std::terminate();
+            }
+            // An older static destructor can call us after the first main
+            // cleanup. Give its newly created value a matching cleanup too.
+            if (process_cleanup_started_.load(std::memory_order_relaxed)
+                && std::atexit(&destroy_process_value) != 0) {
+                pthread_setspecific(native_key, nullptr);
+                delete value;
+                std::terminate();
+            }
+        }
+        return *value;
+    }
+};
+} // namespace detail
+#endif
+
+template<typename T>
+T& thread_exit_local() {
+#if defined(__GLIBC__)
+    return detail::NativeThreadExitLocal<T>::get();
+#else
+    // Other platforms keep their existing C++ TLS lifetime. Their native
+    // teardown ordering needs a separate platform implementation and proof.
+    thread_local T value;
+    return value;
+#endif
+}
 
 #if !defined(RUSTY_PLATFORM_BACKEND_POSIX)
 
