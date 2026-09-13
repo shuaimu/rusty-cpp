@@ -120,6 +120,8 @@ pub fn check() -> i32 {
     if holder.inspect_box(Some(Box::new(21))) != 21 { return 20; }
     let wrapped: Callback<Box<dyn Fn(MaybeOwned) -> i32>> = Callback { function: Box::new(|value: MaybeOwned| holder.inspect_box(value)) as Box<dyn Fn(MaybeOwned) -> i32> };
     if (wrapped.callable())(Some(Box::new(22))) != 22 { return 21; }
+    let dispatched: MaybeOwned = Some(Box::new(22));
+    if (wrapped.callable())(dispatched) != 22 { return 21; }
     let mut borrowed_owner: MaybeBox<i32> = Some(Box::new(23));
     mutate_borrowed(&mut borrowed_owner);
     if inspect_borrowed(&borrowed_owner) != 24 { return 22; }
@@ -176,6 +178,32 @@ pub fn check(callback: &Callback) -> i32 {
     assert!(!cpp.contains("rusty::Option<"), "profile arguments must construct the nullable owner directly: {cpp}");
     assert!(!cpp.contains(".is_some()"), "profile patterns must inspect owner presence: {cpp}");
     assert!(cpp.contains("std::move(connection)"), "callback dispatch must move the profiled Box: {cpp}");
+    let mut combined = String::new();
+    for module in ["wrapper", "model", "consumer"] {
+        let module_cpp = std::fs::read_to_string(root.join(format!("out/nullable_imports.{module}.cppm"))).unwrap();
+        for line in module_cpp.lines() {
+            if line == "module;" || line.starts_with("import ") || line.starts_with("export module ") { continue; }
+            combined.push_str(line.strip_prefix("export ").unwrap_or(line));
+            combined.push('\n');
+        }
+    }
+    combined.push_str(r#"
+int main() {
+    probe::Callback callback{rusty::Function<int32_t(probe::OwnedThing) const>(
+        [](probe::OwnedThing value) { return *value; })};
+    return probe::check(callback) == 7 ? 0 : 1;
+}
+"#);
+    let cpp_path = root.join("imported_check.cpp");
+    std::fs::write(&cpp_path, combined).unwrap();
+    let cpp_binary = root.join("imported_check");
+    let compiled = Command::new(std::env::var("CXX").unwrap_or_else(|_| "clang++".into()))
+        .args(["-std=c++23", "-DRUSTY_PORTABLE_INTRINSICS=1", "-pthread", "-I"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+        .arg(&cpp_path).arg("-o").arg(&cpp_binary).output().unwrap();
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    let ran = Command::new(cpp_binary).output().unwrap();
+    assert!(ran.status.success(), "{}\n{}", ran.status, String::from_utf8_lossy(&ran.stderr));
     let native = Command::new("rustc").args(["--edition=2024", "--crate-type=lib"])
         .arg(root.join("src/lib.rs")).arg("-o").arg(root.join("native.rlib")).output().unwrap();
     assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));

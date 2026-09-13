@@ -4432,6 +4432,12 @@ impl CodeGen {
                     || soft_consumed_single_use
                     || for_consumed_iterable
                     || by_value_method_receiver
+                    // A profiled owner must remain movable even when an
+                    // imported callable's argument signature is unavailable.
+                    || inferred_binding_ty.as_ref().is_some_and(|ty| {
+                        !matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
+                            && self.explicit_nullable_owner_type(ty).is_some()
+                    })
                     || init_is_move_closure
                     || init_is_ptr_read
                     || local.init.as_ref().is_some_and(|init| {
@@ -5872,6 +5878,8 @@ impl CodeGen {
                         || is_consumed
                         || soft_consumed_single_use
                         || by_value_method_receiver
+                        || (!matches!(self.peel_paren_group_type(&resolved_ty), syn::Type::Reference(_))
+                            && self.explicit_nullable_owner_type(&resolved_ty).is_some())
                         || self.mutable_pointer_aliased_vars.contains(&name_str)
                         || resolved_mut_reference_binding
                         || ty.trim_start().starts_with("const ")
