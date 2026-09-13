@@ -133,7 +133,8 @@ impl Future for Deferred {
 pub async fn immediate() -> i32 { 7 }
 pub fn boxed_immediate() -> BoxFuture<i32> { Box::pin(immediate()) }
 pub fn complete<T, F: FnMut(T)>(mut task: Pin<Box<dyn Future<Output = T>>>, mut callback: F, cx: &mut Context<'_>) {
-    if let Poll::Ready(value) = task.as_mut().poll(cx) { callback(value); }
+    let result = { task.as_mut().poll(cx) };
+    if let Poll::Ready(value) = result { callback(value); }
 }
 pub fn check_future() -> i32 {
     let signal = Arc::new(Signal { count: AtomicUsize::new(0) });

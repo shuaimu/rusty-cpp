@@ -145,6 +145,42 @@ impl CodeGen {
         file
     }
 
+    /// A Ready binding moves its payload out of an owned Poll. Keep the local
+    /// mutable in C++ so unwrap cannot select the const, borrowing overload.
+    pub(super) fn collect_standard_poll_moved_scrutinees(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> std::collections::HashSet<String> {
+        struct Scan<'a> {
+            cg: &'a CodeGen,
+            found: std::collections::HashSet<String>,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan<'_> {
+            fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+                if let syn::Pat::TupleStruct(tuple) = node.pat.as_ref()
+                    && self.cg.standard_poll_variant(&tuple.path).as_deref() == Some("Ready")
+                    && tuple.elems.iter().any(|pat| {
+                        matches!(pat, syn::Pat::Ident(binding) if binding.by_ref.is_none())
+                    })
+                    && let Some(name) = by_value_match_scrutinee_local(
+                        self.cg.peel_paren_group_expr(&node.expr),
+                    )
+                {
+                    self.found.insert(name);
+                }
+                syn::visit::visit_expr_let(self, node);
+            }
+        }
+        let mut scan = Scan {
+            cg: self,
+            found: std::collections::HashSet::new(),
+        };
+        for stmt in stmts {
+            syn::visit::Visit::visit_stmt(&mut scan, stmt);
+        }
+        scan.found
+    }
+
     pub(super) fn try_emit_standard_poll_if_let(
         &mut self,
         let_expr: &syn::ExprLet,
@@ -503,6 +539,12 @@ impl CodeGen {
         &self,
         mc: &syn::ExprMethodCall,
     ) -> Option<String> {
+        if !matches!(
+            mc.method.to_string().as_str(),
+            "as_mut" | "poll" | "waker" | "wake" | "wake_by_ref" | "clone"
+        ) {
+            return None;
+        }
         let receiver_ty = self
             .infer_simple_expr_type(&mc.receiver)
             .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))?;

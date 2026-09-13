@@ -643,6 +643,7 @@ impl CodeGen {
         // by-value method receiver does; without this the local stayed
         // `const auto` and the non-const visitor parameters could not bind.
         consuming.extend(collect_by_value_match_moved_scrutinee_vars(&block.stmts));
+        consuming.extend(self.collect_standard_poll_moved_scrutinees(&block.stmts));
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
         let for_iterated = Self::collect_for_loop_iterated_bare_locals(&block.stmts);
         let method_pairs = Self::collect_bare_local_method_call_pairs(&block.stmts);

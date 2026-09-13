@@ -159,3 +159,22 @@ fn standard_future_output_keeps_the_function_template_parameter() {
     assert!(cpp.contains("template<typename T, typename F>\nvoid complete(rusty::Task<T> task, F callback, rusty::Context& cx) {"), "{cpp}");
     assert!(cpp.contains("callback(std::move(value))"), "{cpp}");
 }
+
+#[test]
+fn standard_future_named_poll_result_remains_movable() {
+    let cpp = translate(r#"
+        use std::task::{Poll, Poll::Ready as Done};
+        fn complete<T, F: FnMut(T)>(poll: Poll<T>, mut callback: F) {
+            let result = poll;
+            if let Done(value) = result { callback(value); }
+        }
+        fn borrowed(poll: Poll<i32>) -> i32 {
+            let state = poll;
+            if let Done(value) = &state { *value } else { 0 }
+        }
+    "#);
+    assert!(!cpp.contains("const auto result"), "{cpp}");
+    assert!(cpp.contains("callback(std::move(value))"), "{cpp}");
+    assert!(cpp.contains("const auto state"), "{cpp}");
+    assert!(cpp.contains("std::as_const(_poll_iflet).unwrap()"), "{cpp}");
+}
