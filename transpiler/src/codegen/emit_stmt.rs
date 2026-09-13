@@ -2360,7 +2360,7 @@ impl CodeGen {
             _ => return false,
         };
 
-        let (callback_option_ty, init_decl, init_name, init_expr, slot_expr, mutable_slot) =
+        let (callback_option_ty, init_decl, init_name, init_expr, slot_expr, mutable_slot, borrowed_slot) =
             match self.peel_paren_group_expr(&let_expr.expr) {
                 syn::Expr::Reference(reference) => {
                     let inferred = self
@@ -2381,6 +2381,7 @@ impl CodeGen {
                         self.emit_expr_to_string(&reference.expr),
                         "_iflet_callback_slot".to_string(),
                         mutable,
+                        true,
                     )
                 }
                 syn::Expr::MethodCall(method)
@@ -2407,6 +2408,7 @@ impl CodeGen {
                         self.emit_expr_to_string(&method.receiver),
                         "rusty::detail::deref_if_pointer_like(_iflet_callback_guard)".to_string(),
                         true,
+                        true,
                     )
                 }
                 other => {
@@ -2418,25 +2420,37 @@ impl CodeGen {
                     }) else {
                         return false;
                     };
-                    // A by-value scrutinee consumes its expression (Rust moves
-                    // the whole Option into the pattern), so materialize it in
-                    // the slot local. A non-place expression (`slot.take()`)
-                    // is already a prvalue; a place expression must be moved
-                    // explicitly or the move-only carrier would be copied —
-                    // sound because Rust proved the place dead afterwards.
-                    let raw_init = self.emit_expr_to_string(other);
-                    let by_value_init = if Self::struct_update_base_is_place_expr(other) {
-                        format!("std::move({})", raw_init)
-                    } else {
-                        raw_init
+                    // Match ergonomics borrow a reference-typed scrutinee;
+                    // spelling the borrow in a parameter rather than in this
+                    // expression must not move its owner or clone an Arc.
+                    // `ref`, `_`, and None patterns likewise do not consume
+                    // the matched payload from a value-typed place.
+                    let reference_mutability = match self.peel_paren_group_type(&inferred) {
+                        syn::Type::Reference(reference) => Some(reference.mutability.is_some()),
+                        _ => None,
                     };
+                    let pattern_ref_mutability = match binding_pat {
+                        Some(syn::Pat::Ident(ident)) if ident.by_ref.is_some() => Some(ident.mutability.is_some()),
+                        _ => None,
+                    };
+                    let pattern_does_not_bind_payload = !expect_some
+                        || matches!(binding_pat, Some(syn::Pat::Wild(_)));
+                    let borrowed = reference_mutability.is_some()
+                        || pattern_ref_mutability.is_some() || pattern_does_not_bind_payload;
+                    let mutable = reference_mutability
+                        .or(pattern_ref_mutability).unwrap_or(true);
+                    let raw_init = self.emit_expr_to_string(other);
+                    let init = if !borrowed && Self::struct_update_base_is_place_expr(other) {
+                        format!("std::move({})", raw_init)
+                    } else { raw_init };
                     (
                         inferred,
-                        "auto",
+                        if borrowed { if mutable { "auto&&" } else { "const auto&" } } else { "auto" },
                         "_iflet_callback_slot",
-                        by_value_init,
+                        init,
                         "_iflet_callback_slot".to_string(),
-                        true,
+                        mutable,
+                        borrowed,
                     )
                 }
             };
@@ -2478,7 +2492,13 @@ impl CodeGen {
                         "{} {} = {};",
                         binding_decl, cpp_name, slot_expr
                     ));
-                    binding_type = self.transparent_nullable_owner_type(&callback_option_ty);
+                    binding_type = self.transparent_nullable_owner_type(&callback_option_ty)
+                        .map(|owner| {
+                            if borrowed_slot {
+                                if mutable_slot { syn::parse_quote!(&mut #owner) }
+                                else { syn::parse_quote!(&#owner) }
+                            } else { owner }
+                        });
                     binding_map.insert(rust_name, cpp_name);
                 }
                 _ => {
@@ -2498,11 +2518,14 @@ impl CodeGen {
                 local_types.insert(rust_name.clone(), binding_type.clone());
                 local_consts.insert(rust_name.clone(), false);
             }
+            let reference_bindings = if borrowed_slot {
+                binding_map.keys().cloned().collect()
+            } else { HashSet::new() };
             self.local_cpp_bindings.push(binding_map);
             self.local_bindings.push(local_types);
             self.local_shadowed_binding_types.push(HashMap::new());
             self.local_const_bindings.push(local_consts);
-            self.local_reference_bindings.push(HashSet::new());
+            self.local_reference_bindings.push(reference_bindings);
             self.rebind_reference_pointer_bindings.push(HashSet::new());
             self.emit_block(then_branch);
             self.rebind_reference_pointer_bindings.pop();

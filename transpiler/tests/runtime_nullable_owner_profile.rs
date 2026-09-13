@@ -61,6 +61,16 @@ pub fn inspect_box(value: MaybeBox<i32>) -> i32 {
     if let Some(value) = value { *value } else { 0 }
 }
 
+fn mutate_borrowed(value: &mut MaybeBox<i32>) {
+    if let Some(payload) = value { **payload += 1; }
+}
+fn inspect_borrowed(value: &MaybeBox<i32>) -> i32 {
+    if let Some(payload) = value { **payload } else { 0 }
+}
+fn count_borrowed(value: &MaybeArc<i32>) -> usize {
+    if let Some(payload) = value { Arc::strong_count(payload) } else { 0 }
+}
+
 pub fn check() -> i32 {
     let mut slot: MaybeBox<i32> = None;
     if slot.is_some() { return 1; }
@@ -110,6 +120,20 @@ pub fn check() -> i32 {
     if holder.inspect_box(Some(Box::new(21))) != 21 { return 20; }
     let wrapped: Callback<Box<dyn Fn(MaybeOwned) -> i32>> = Callback { function: Box::new(|value: MaybeOwned| holder.inspect_box(value)) as Box<dyn Fn(MaybeOwned) -> i32> };
     if (wrapped.callable())(Some(Box::new(22))) != 22 { return 21; }
+    let mut borrowed_owner: MaybeBox<i32> = Some(Box::new(23));
+    mutate_borrowed(&mut borrowed_owner);
+    if inspect_borrowed(&borrowed_owner) != 24 { return 22; }
+    if let Some(ref payload) = borrowed_owner {
+        if **payload != 24 { return 23; }
+    }
+    if borrowed_owner.is_none() { return 24; }
+    if let Some(ref mut payload) = borrowed_owner { **payload += 1; }
+    if let Some(_) = borrowed_owner { } else { return 25; }
+    if let None = borrowed_owner { return 26; }
+    if inspect_borrowed(&borrowed_owner) != 25 { return 27; }
+    let borrowed_arc: MaybeArc<i32> = Some(Arc::new(26));
+    if count_borrowed(&borrowed_arc) != 1 { return 28; }
+    if count_borrowed(&borrowed_arc) != 1 { return 29; }
     0
 }
 "#;
