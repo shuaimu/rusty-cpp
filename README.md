@@ -581,6 +581,22 @@ rows, and rows not collected by the current crate are errors. A sidecar with a
 `target_os` condition requires the explicit `--preamble-target-os` argument;
 the host OS is never inferred, so cross-compilation fails closed.
 
+A module row may also provide `epilogue_includes` with the same include schema.
+These headers appear in an `export { ... }` block after all generated declarations
+and namespace closures. Use them for C++ compatibility templates that depend on
+generated types and must be visible to import-only consumers. Put their standard
+library or other external dependencies in `includes`, so those declarations stay
+in the global module fragment. A row may contain either list or both; duplicate
+paths across the two lists are rejected. Both lists share target filtering and
+path validation, and empty epilogue lists leave existing output unchanged.
+
+To pair a canonical Rust forwarding body with a C++ epilogue definition, mark its
+public free function `#[cfg_attr(any(), cpp_declaration)]`. The Rust body remains
+ordinary Rust; C++ receives its declaration only. Fully typed generic functions
+are supported, including trait bounds and const parameters. Opaque or inferred
+signature types, const/async functions, conditional declarations, and methods
+remain unsupported.
+
 Compiling the output requires a clang toolchain with C++20 modules support (the test matrix builds with `clang++ -std=c++23`); the emitted code `#include`s the header-only `rusty/` runtime from this repository. Generated code can also call *into* existing C++: `use cpp::...` imports resolve against a user-supplied C++ module symbol index (`--cpp-module-index`).
 
 ### What's covered

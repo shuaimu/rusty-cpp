@@ -1,6 +1,67 @@
 use super::*;
 
 impl CodeGen {
+    /// A relative standard-library spelling can resolve to a local module.
+    /// Absolute extern-prelude paths keep their standard-library identity.
+    pub(super) fn standard_path_root_is_local_module(&self, path: &syn::Path) -> bool {
+        self.standard_path_local_module_root(path).is_some()
+    }
+
+    pub(super) fn standard_path_local_module_root(&self, path: &syn::Path) -> Option<Vec<String>> {
+        fn resolves_local(
+            codegen: &CodeGen,
+            scope: &[String],
+            segments: &[String],
+            visited: &mut HashSet<(String, String)>,
+        ) -> Option<Vec<String>> {
+            let root = segments.first()?;
+            let key = (scope.join("::"), root.clone());
+            if !visited.insert((key.0.clone(), segments.join("::"))) {
+                return None;
+            }
+            let candidate = scope.iter().map(String::as_str)
+                .chain(std::iter::once(root.as_str())).collect::<Vec<_>>().join("::");
+            if codegen.declared_module_paths.contains(&candidate) {
+                if segments.len() == 1 {
+                    let mut resolved = scope.to_vec();
+                    resolved.push(root.clone());
+                    return Some(resolved);
+                }
+                let mut child_scope = scope.to_vec();
+                child_scope.push(root.clone());
+                return resolves_local(codegen, &child_scope, &segments[1..], visited);
+            }
+            // Rust child modules do not inherit a parent's imports or modules.
+            // Follow only an exact source import in this lexical module.
+            let targets = codegen.rust_item_import_bindings.get(&key)?;
+            if targets.len() != 1 {
+                return None;
+            }
+            let target = targets.iter().next().unwrap();
+            if target.starts_with("::") {
+                return None;
+            }
+            let (target_scope, target) = if let Some(local) = target.strip_prefix("@crate:") {
+                (&[][..], local)
+            } else {
+                (scope, target.as_str())
+            };
+            let mut target_segments = target.split("::").filter(|root| !root.is_empty())
+                .map(str::to_string).collect::<Vec<_>>();
+            target_segments.extend(segments[1..].iter().cloned());
+            resolves_local(codegen, target_scope, &target_segments, visited)
+        }
+
+        if path.leading_colon.is_some() {
+            return None;
+        }
+        let root = path.segments.first()?.ident.to_string();
+        if !matches!(root.as_str(), "std" | "core" | "alloc") {
+            return None;
+        }
+        resolves_local(self, &self.module_stack, &[root], &mut HashSet::new())
+    }
+
     pub(super) fn type_references_module_path(ty: &syn::Type, module_name: &str) -> bool {
         let mut collector = ModulePathReferenceCollector::new(module_name);
         collector.visit_type(ty);
@@ -209,12 +270,29 @@ impl CodeGen {
         }
     }
 
-    /// Type-level form of `is_non_mutating_handle_name`, resolving one hop
+    /// Resolve source aliases in their lexical scope before classifying a
+    /// wrapper. Foreign aliases require the exact crate-preflight binding;
+    /// a same-named declaration in another module cannot supply its target.
+    fn resolve_wrapper_classification_type(&self, ty: &syn::Type) -> syn::Type {
+        let mut resolved = self.peel_reference_paren_group_type(ty).clone();
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            if !seen.insert(resolved.to_token_stream().to_string()) { break; }
+            let Some(next) = self.resolve_type_alias_once(&resolved)
+                .or_else(|| self.resolve_authorized_cross_file_type_alias(&resolved))
+            else { break; };
+            resolved = self.peel_reference_paren_group_type(&next).clone();
+        }
+        resolved
+    }
+
+    /// Type-level form of `is_non_mutating_handle_name`, resolving source
+    /// aliases and one hop
     /// through a C++ `using` alias. Used only by the closure-mutability
     /// analysis — see that predicate for why it is not the autoderef set.
     pub(super) fn type_is_non_mutating_handle_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
+        let ty = self.resolve_wrapper_classification_type(ty);
+        let syn::Type::Path(tp) = &ty else {
             return false;
         };
         let Some(seg) = tp.path.segments.last() else {
@@ -260,8 +338,8 @@ impl CodeGen {
     /// not read as a deref owner, and `*ch` collapses to `ch` — emitting
     /// `ch.method()`, a dot on a Box.
     pub(super) fn type_is_deref_owner_or_guard_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
+        let ty = self.resolve_wrapper_classification_type(ty);
+        let syn::Type::Path(tp) = &ty else {
             return false;
         };
         let Some(seg) = tp.path.segments.last() else {
@@ -280,8 +358,8 @@ impl CodeGen {
     }
 
     pub(super) fn type_is_pointer_like_owner_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
+        let ty = self.resolve_wrapper_classification_type(ty);
+        let syn::Type::Path(tp) = &ty else {
             return false;
         };
         let Some(seg) = tp.path.segments.last() else {
@@ -1030,27 +1108,8 @@ impl CodeGen {
     }
 
     pub(super) fn type_resolves_to_tuple_alias(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return false;
-        };
-        if tp.path.segments.is_empty() {
-            return false;
-        }
-        let joined = tp
-            .path
-            .segments
-            .iter()
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if self.tuple_type_aliases.contains_key(&joined) {
-            return true;
-        }
-        tp.path
-            .segments
-            .last()
-            .is_some_and(|seg| self.tuple_type_aliases.contains_key(&seg.ident.to_string()))
+        matches!(self.peel_reference_paren_group_type(ty), syn::Type::Path(_))
+            && self.resolve_tuple_type_from_type(ty).is_some()
     }
 
     pub(super) fn type_is_range_with_private_end_field(&self, ty: &syn::Type) -> bool {
@@ -1874,6 +1933,13 @@ impl CodeGen {
         bare: &str,
         qualified: &[&[&str]],
     ) -> bool {
+        if self.standard_path_root_is_local_module(path) {
+            return false;
+        }
+        let trait_key = self.resolve_trait_scoped_key_for_impl(path, &self.module_stack);
+        if self.trait_declared_paths.contains(&trait_key) {
+            return false;
+        }
         let segments = path
             .segments
             .iter()
@@ -1892,12 +1958,11 @@ impl CodeGen {
         })
     }
 
-    /// Ordinary boxed callbacks may carry Rust's canonical thread-safety
-    /// auto traits without changing the callable C++ surface.  Keep this
-    /// separate from transparent nullable callbacks: `Option<Box<dyn Fn +
-    /// Send>>` must still fail closed rather than erase an outer semantic
-    /// constraint.  Every non-lifetime bound here must be exactly one
-    /// Fn-family trait or one of the canonical Send/Sync markers.
+    /// Boxed callbacks, including nullable ones, may carry Rust's canonical
+    /// Send/Sync auto traits without changing their callable C++ signature.
+    /// Rust still checks those bounds on the source callback. Every
+    /// non-lifetime bound must be exactly one Fn-family trait or one of the
+    /// canonical Send/Sync markers; explicit HRTBs remain unsupported.
     fn boxed_callback_fn_bound<'a>(
         &self,
         object: &'a syn::TypeTraitObject,
@@ -2217,6 +2282,24 @@ impl CodeGen {
             })
     }
 
+    fn normalize_local_nullable_alias_path(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::Path(path) = self.peel_paren_group_type(ty) else { return None; };
+        if path.qself.is_some() || path.path.leading_colon.is_some()
+            || path.path.segments.len() < 2
+            || path.path.segments.first()?.ident != "self"
+        { return None; }
+        // self:: is relative to this Rust lexical module. In crate mode the
+        // physical file's root is already the local alias table's root.
+        let mut normalized = path.clone();
+        let mut segments = syn::punctuated::Punctuated::new();
+        for module in &self.module_stack {
+            segments.push(syn::PathSegment::from(syn::Ident::new(module, proc_macro2::Span::call_site())));
+        }
+        segments.extend(path.path.segments.iter().skip(1).cloned());
+        normalized.path.segments = segments;
+        Some(syn::Type::Path(normalized))
+    }
+
     /// Resolve only declared Rust type aliases, with a hard depth bound and
     /// cycle detection.  Nullable-callback transparency must never be inferred
     /// from a C++ spelling or a same-named user type: it is a source-type ABI
@@ -2247,9 +2330,14 @@ impl CodeGen {
             if !matches!(current, syn::Type::Path(_)) {
                 break;
             }
-            let Some(next) = self.resolve_type_alias_once(&current) else {
-                break;
-            };
+            let normalized = self.normalize_local_nullable_alias_path(&current);
+            let query = normalized.as_ref().unwrap_or(&current);
+            let next = if self.nullable_alias_has_imported_binding(query)
+                || self.authorized_cross_file_type_alias(query).is_some()
+            {
+                self.resolve_authorized_cross_file_nullable_callback_alias(query)
+            } else { self.resolve_type_alias_once(query) };
+            let Some(next) = next else { break; };
             if next == current {
                 break;
             }
@@ -2297,6 +2385,153 @@ impl CodeGen {
             return None;
         }
         Some(box_ty)
+    }
+
+    fn nullable_alias_has_imported_binding(&self, ty: &syn::Type) -> bool {
+        match self.peel_reference_paren_group_type(ty) {
+            syn::Type::Path(path) if path.qself.is_none() && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1 => {
+                self.flat_import_type_authorizations.iter().any(|proof|
+                    proof.consumer_physical_module == self.current_physical_module
+                        && proof.consumer_lexical_module.0 == self.module_stack
+                        && proof.reference_kind == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                        && path.path.segments[0].ident == proof.leaf)
+            }
+            _ => false,
+        }
+    }
+
+    fn resolve_explicit_nullable_owner_alias_once(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let normalized = self.normalize_local_nullable_alias_path(ty);
+        let ty = normalized.as_ref().unwrap_or(ty);
+        // An imported binding takes precedence over the local alias helper's
+        // suffix lookup, which can otherwise select an unrelated nested alias.
+        if self.nullable_alias_has_imported_binding(ty) || self.authorized_cross_file_type_alias(ty).is_some() {
+            self.resolve_authorized_cross_file_nullable_owner_alias(ty)
+        } else {
+            self.resolve_type_alias_once(ty)
+        }
+    }
+
+    fn resolve_explicit_nullable_owner_aliases(&self, ty: &syn::Type) -> syn::Type {
+        let mut current = self.peel_paren_group_type(ty).clone();
+        let mut seen = HashSet::new();
+        for _ in 0..8 {
+            if !matches!(current, syn::Type::Path(_))
+                || !seen.insert(current.to_token_stream().to_string())
+            { break; }
+            let Some(next) = self.resolve_explicit_nullable_owner_alias_once(&current)
+            else { break; };
+            current = self.peel_paren_group_type(&next).clone();
+        }
+        current
+    }
+
+    /// An explicit alias profile may preserve the nullable C++ Arc/Box
+    /// representation at a boundary. The Rust type remains Option<Owner>.
+    /// Ordinary Option<Arc/Box> types do not opt in, even for the same payload.
+    pub(super) fn explicit_nullable_owner_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(path) = ty else { return None; };
+        if path.qself.is_some() { return None; }
+        let name = path.path.segments.last()?.ident.to_string();
+        let target = self.user_type_map.lookup(&name).filter(|mapped| !mapped.is_empty())?;
+        // Requiring a real Rust alias excludes user mappings of unrelated
+        // nominal owners and of std::option::Option itself.
+        self.resolve_explicit_nullable_owner_alias_once(ty)?;
+        let resolved = self.resolve_explicit_nullable_owner_aliases(ty);
+        let syn::Type::Path(option) = resolved else { return None; };
+        if !self.transparent_nullable_callback_path_is_canonical(
+            &option.path, "Option",
+            &[&["std", "option", "Option"], &["core", "option", "Option"]],
+        ) { return None; }
+        let syn::PathArguments::AngleBracketed(args) = &option.path.segments.last()?.arguments else {
+            return None;
+        };
+        if args.args.len() != 1 { return None; }
+        let syn::GenericArgument::Type(owner) = args.args.first()? else { return None; };
+        let source_owner_cpp = self.map_type(owner);
+        let owner = self.resolve_explicit_nullable_owner_aliases(owner);
+        let syn::Type::Path(owner_path) = &owner else { return None; };
+        let is_box = self.transparent_nullable_callback_path_is_canonical(
+            &owner_path.path, "Box", &[&["std", "boxed", "Box"], &["alloc", "boxed", "Box"]],
+        );
+        let is_arc = self.transparent_nullable_callback_path_is_canonical(
+            &owner_path.path, "Arc", &[&["std", "sync", "Arc"], &["alloc", "sync", "Arc"]],
+        );
+        if !(is_box || is_arc) { return None; }
+        // Imported aliases retain their exported C++ alias name in map_type.
+        // Compare the configured representation itself, with Rust generic
+        // arguments applied, against the proven source owner representation.
+        let mut alias_cpp = target.to_string();
+        if !target.contains('<')
+            && let syn::PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments
+        {
+            let arguments: Vec<_> = arguments.args.iter().filter_map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                syn::GenericArgument::Const(value) => Some(self.emit_expr_to_string(value)),
+                _ => None,
+            }).collect();
+            if !arguments.is_empty() { alias_cpp = format!("{}<{}>", target, arguments.join(", ")); }
+        }
+        // The payload can itself be a Rust alias, such as Arc<Counter> with
+        // Counter = AtomicI32. This is still the identical owner type.
+        let mut resolved_payload_owner = owner.clone();
+        if let syn::Type::Path(path) = &mut resolved_payload_owner
+            && let Some(segment) = path.path.segments.last_mut()
+            && let syn::PathArguments::AngleBracketed(arguments) = &mut segment.arguments
+        {
+            for argument in &mut arguments.args {
+                if let syn::GenericArgument::Type(payload) = argument {
+                    *payload = self.resolve_explicit_nullable_owner_aliases(payload);
+                }
+            }
+        }
+        if alias_cpp != source_owner_cpp && alias_cpp != self.map_type(&owner)
+            && alias_cpp != self.map_type(&resolved_payload_owner)
+        { return None; }
+        Some(owner)
+    }
+
+    pub(super) fn transparent_nullable_owner_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        self.explicit_nullable_owner_type(ty).or_else(|| {
+            self.try_map_transparent_nullable_callback_type(ty)?;
+            self.transparent_nullable_callback_box_type(ty)
+        })
+    }
+
+    pub(super) fn try_map_transparent_nullable_owner_type(&self, ty: &syn::Type) -> Option<String> {
+        self.explicit_nullable_owner_type(ty)
+            .map(|owner| self.map_type(&owner))
+            .or_else(|| self.try_map_transparent_nullable_callback_type(ty))
+    }
+
+    pub(super) fn transparent_nullable_owner_receiver(&self, ty: &syn::Type) -> Option<(syn::Type, bool)> {
+        if let Some(callback) = self.transparent_nullable_callback_receiver(ty) {
+            return Some(callback);
+        }
+        let ty = self.peel_reference_paren_group_type(ty);
+        if self.explicit_nullable_owner_type(ty).is_some() {
+            return Some((ty.clone(), false));
+        }
+        let resolved = self.resolve_transparent_nullable_callback_aliases(ty);
+        let syn::Type::Path(path) = resolved else { return None; };
+        let segment = path.path.segments.last()?;
+        let name = segment.ident.to_string();
+        let family = match name.as_str() {
+            "Ref" | "RefMut" => "cell",
+            "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" => "sync",
+            _ => return None,
+        };
+        if !self.transparent_nullable_callback_path_is_canonical(
+            &path.path, &name, &[&["std", family, &name], &["core", family, &name]],
+        ) { return None; }
+        let syn::PathArguments::AngleBracketed(args) = &segment.arguments else { return None; };
+        let inner = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(inner) => Some(inner), _ => None,
+        })?;
+        self.explicit_nullable_owner_type(inner)?;
+        Some((inner.clone(), true))
     }
 
     fn transparent_nullable_callback_in_cell_wrapper(
@@ -2350,10 +2585,46 @@ impl CodeGen {
         self.transparent_nullable_callback_in_cell_wrapper(ty, "RefCell")
     }
 
-    /// Recognize exactly `Option<Box<dyn Fn/FnMut/FnOnce(...)>>` and lower its
-    /// redundant outer discriminator to `rusty::Function`'s existing nullable
-    /// state. Lifetimes are harmless, but a second trait bound (notably
-    /// `Send`/`Sync`) rejects the optimization rather than erasing semantics.
+    /// Recognize the value exposed by standard references and borrow guards.
+    /// Arbitrary user wrappers do not participate in this representation.
+    pub(super) fn transparent_nullable_callback_receiver(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<(syn::Type, bool)> {
+        let mut current = self.resolve_transparent_nullable_callback_aliases(ty);
+        while let syn::Type::Reference(reference) = current {
+            current = self.resolve_transparent_nullable_callback_aliases(&reference.elem);
+        }
+        if self.try_map_transparent_nullable_callback_type(&current).is_some() {
+            return Some((current, false));
+        }
+        let syn::Type::Path(path) = &current else { return None; };
+        if path.qself.is_some() { return None; }
+        let segment = path.path.segments.last()?;
+        let name = segment.ident.to_string();
+        let family = match name.as_str() {
+            "Ref" | "RefMut" => "cell",
+            "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" => "sync",
+            _ => return None,
+        };
+        if !self.transparent_nullable_callback_path_is_canonical(
+            &path.path, &name, &[&["std", family, &name], &["core", family, &name]],
+        ) { return None; }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        let inner = arguments.args.iter().find_map(|argument| match argument {
+            syn::GenericArgument::Type(inner) => Some(inner),
+            _ => None,
+        })?;
+        self.try_map_transparent_nullable_callback_type(inner)?;
+        Some((inner.clone(), true))
+    }
+
+    /// Lower a canonical nullable boxed callback to `rusty::Function`'s
+    /// existing empty state. Accept the same lifetime and Send/Sync bounds
+    /// as an ordinary boxed callback, without accepting unrelated traits or
+    /// explicitly higher-ranked signatures.
     pub(super) fn try_map_transparent_nullable_callback_type(
         &self,
         ty: &syn::Type,
@@ -2374,47 +2645,14 @@ impl CodeGen {
         let syn::Type::TraitObject(callable) = &callable_ty else {
             return None;
         };
-        let mut fn_bound = None;
-        for bound in &callable.bounds {
-            match bound {
-                syn::TypeParamBound::Lifetime(_) => {}
-                syn::TypeParamBound::Trait(trait_bound)
-                    if fn_bound.is_none()
-                        && matches!(trait_bound.modifier, syn::TraitBoundModifier::None)
-                        && trait_bound.lifetimes.is_none() =>
-                {
-                    fn_bound = Some(trait_bound);
-                }
-                // Additional traits, `?Trait`, HRTBs, and future bound kinds
-                // are semantic constraints and therefore reject transparency.
-                _ => return None,
-            }
-        }
-        let fn_bound = fn_bound?;
-        if !self.transparent_nullable_callback_path_is_canonical(
-                &fn_bound.path,
-                fn_bound.path.segments.last()?.ident.to_string().as_str(),
-                &[
-                    &["core", "ops", "Fn"],
-                    &["core", "ops", "FnMut"],
-                    &["core", "ops", "FnOnce"],
-                    &["std", "ops", "Fn"],
-                    &["std", "ops", "FnMut"],
-                    &["std", "ops", "FnOnce"],
-                ],
-            )
-        {
-            return None;
-        }
-        let trait_name = fn_bound.path.segments.last()?.ident.to_string();
-        if !matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce") {
-            return None;
-        }
+        let fn_bound = self.boxed_callback_fn_bound(callable)?;
         self.try_map_fn_trait_bare_signature(fn_bound)
             .map(|signature| format!("rusty::Function<{}>", signature))
     }
 
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
+        if let Some(mapped) = self.try_map_standard_any_type(ty) { return mapped; }
+        if let Some(mapped) = self.try_map_standard_future_type(ty) { return mapped; }
         if let Some(callback) = self.try_map_transparent_nullable_callback_type(ty) {
             return callback;
         }
@@ -2643,14 +2881,15 @@ impl CodeGen {
                     return mapped_owner_into_iter;
                 }
                 let mut alias_resolved_path: Option<syn::TypePath> = None;
-                let alias_shadowed_by_local_type = tp.path.segments.len() == 1
+                let alias_shadowed_by_local_type = self.standard_path_root_is_local_module(&tp.path)
+                    || (tp.path.segments.len() == 1
                     && tp.path.segments.last().is_some_and(|seg| {
                         let local_name = seg.ident.to_string();
                         self.is_local_type_name_in_scope(&local_name)
                             || self.current_scope_declares_type_name(&local_name)
                             || self.current_module_declares_type_name_exact(&local_name)
                             || self.current_owner_module_declares_type_name(&local_name)
-                    });
+                    }));
                 if tp.qself.is_none() && !alias_shadowed_by_local_type {
                     // Guard alias-chain mapping from unbounded self-expansion. Some crates define
                     // alias graphs that can repeatedly re-wrap the same path under suffix matching.
@@ -2749,6 +2988,7 @@ impl CodeGen {
                     }
                 }
                 if !self.in_forward_decl_signature
+                    && !self.standard_path_root_is_local_module(&tp.path)
                     && let Some(scope_bound_ty) = self.try_map_scope_bound_type_path(tp)
                 {
                     let scope_bound_ty =
@@ -3598,17 +3838,18 @@ impl CodeGen {
                         // std alias. Critical when transpiling a std-library
                         // port (hashbrown defines HashMap/HashSet): otherwise
                         // its self-references collide with and circularly
-                        // import the very type it defines. Explicit std paths
-                        // (`std::collections::HashMap`) are multi-segment and
-                        // still map.
+                        // import the very type it defines. Qualified standard
+                        // paths still map unless their relative root resolves
+                        // to a local module with the same name.
                         // Scope-aware: suppression applies only where the bare
                         // name actually BINDS to the crate's type (declared in
                         // the current module or imported into it). A crate that
                         // declares `boxed::Box` must not lose the runtime
                         // mapping for bare `Box` in sibling modules that never
                         // import it.
-                        let suppress_std_map = tp.path.segments.len() == 1
-                            && self.bare_std_named_type_suppression_applies(&joined_no_args);
+                        let suppress_std_map = self.standard_path_root_is_local_module(&tp.path)
+                            || (tp.path.segments.len() == 1
+                                && self.bare_std_named_type_suppression_applies(&joined_no_args));
                         let std_generic_base = (!suppress_std_map)
                             .then(|| {
                                 types::map_std_type(&joined_no_args).and_then(
@@ -5051,6 +5292,12 @@ impl CodeGen {
     }
 
     pub(super) fn type_mentions_named_type_param(&self, ty: &syn::Type, name: &str) -> bool {
+        // The supported owning Future spelling emits Task<Output>. Output is
+        // therefore a deducible signature parameter even when it occurs only
+        // in a dyn-trait associated-type binding in the Rust AST.
+        if let Some(output) = self.standard_pinned_future_output(ty) {
+            return self.type_mentions_named_type_param(&output, name);
+        }
         match ty {
             syn::Type::Path(tp) => {
                 if tp.qself.is_none()

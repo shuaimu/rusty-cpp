@@ -1,9 +1,12 @@
 #ifndef RUSTY_NET_HPP
 #define RUSTY_NET_HPP
 
+#include <rusty/result.hpp>
 #include <rusty/enum_tags.hpp>   // rusty::detail::enum_variant_tags
 #include <array>
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -58,6 +61,17 @@ struct Ipv6Addr {
     bool operator==(const Ipv6Addr& other) const = default;
 };
 
+class AddrParseError {
+    enum class Kind { SocketV4 };
+    Kind kind_;
+    explicit AddrParseError(Kind kind) : kind_(kind) {}
+    friend struct SocketAddrV4;
+
+public:
+    std::string to_string() const { return "invalid IPv4 socket address syntax"; }
+    bool operator==(const AddrParseError&) const = default;
+};
+
 struct SocketAddrV4 {
     Ipv4Addr ip_{};
     std::uint16_t port_{0};
@@ -77,8 +91,48 @@ struct SocketAddrV4 {
         return port_;
     }
 
+    static rusty::Result<SocketAddrV4, AddrParseError> from_str(std::string_view text);
+
+    std::string to_string() const {
+        const auto& bytes = ip_.octets();
+        return std::to_string(bytes[0]) + "." + std::to_string(bytes[1]) + "." +
+               std::to_string(bytes[2]) + "." + std::to_string(bytes[3]) + ":" +
+               std::to_string(port_);
+    }
+
     bool operator==(const SocketAddrV4& other) const = default;
 };
+
+inline rusty::Result<SocketAddrV4, AddrParseError>
+SocketAddrV4::from_str(std::string_view text) {
+    auto invalid = [] {
+        return rusty::Err<SocketAddrV4, AddrParseError>(
+            AddrParseError(AddrParseError::Kind::SocketV4));
+    };
+    std::array<std::uint8_t, 4> bytes{};
+    std::size_t offset = 0;
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        const auto start = offset;
+        unsigned value = 0;
+        while (offset < text.size() && text[offset] >= '0' && text[offset] <= '9') {
+            value = value * 10 + static_cast<unsigned>(text[offset++] - '0');
+            if (offset - start > 3 || value > 255) return invalid();
+        }
+        if (offset == start || (offset - start > 1 && text[start] == '0')) return invalid();
+        bytes[index] = static_cast<std::uint8_t>(value);
+        const char separator = index == 3 ? ':' : '.';
+        if (offset == text.size() || text[offset++] != separator) return invalid();
+    }
+    if (offset == text.size()) return invalid();
+    unsigned port = 0;
+    for (; offset < text.size(); ++offset) {
+        if (text[offset] < '0' || text[offset] > '9') return invalid();
+        port = port * 10 + static_cast<unsigned>(text[offset] - '0');
+        if (port > 65535) return invalid();
+    }
+    return rusty::Ok<SocketAddrV4, AddrParseError>(
+        SocketAddrV4(Ipv4Addr(bytes), static_cast<std::uint16_t>(port)));
+}
 
 struct SocketAddrV6 {
     Ipv6Addr ip_{};

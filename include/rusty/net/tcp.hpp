@@ -36,6 +36,7 @@
 #include <string_view>
 #include <span>
 #include <utility>
+#include <tuple>
 
 #include "rusty/io.hpp"
 #include "rusty/net.hpp"
@@ -209,6 +210,54 @@ inline rusty::io::Error errno_to_io_error(int e, const char* op) {
     // @unsafe { strerror is libc — uses global thread-unsafe buffer. }
     { msg += std::strerror(e); }
     return rusty::io::Error(kind, std::move(msg));
+}
+
+// @safe - Decode the address families returned by standard TCP sockets.
+inline rusty::Result<SocketAddr, rusty::io::Error>
+socket_addr_from_storage(const ::sockaddr_storage& storage) {
+    if (storage.ss_family == AF_INET) {
+        ::sockaddr_in address{};
+        // @unsafe { Copy the active sockaddr representation without aliasing. }
+        { std::memcpy(&address, &storage, sizeof(address)); }
+        return rusty::Ok<SocketAddr, rusty::io::Error>(
+            SocketAddr_V4(socket_addr_v4_from_sockaddr_in(address)));
+    }
+    if (storage.ss_family == AF_INET6) {
+        ::sockaddr_in6 address{};
+        std::array<std::uint8_t, 16> octets{};
+        std::uint16_t port;
+        std::uint32_t flowinfo;
+        // @unsafe { Copy libc POD fields and convert network byte order. }
+        {
+            std::memcpy(&address, &storage, sizeof(address));
+            std::memcpy(octets.data(), &address.sin6_addr, octets.size());
+            port = ::ntohs(address.sin6_port);
+            flowinfo = ::ntohl(address.sin6_flowinfo);
+        }
+        return rusty::Ok<SocketAddr, rusty::io::Error>(SocketAddr_V6(
+            SocketAddrV6::new_(Ipv6Addr(octets), port, flowinfo, address.sin6_scope_id)));
+    }
+    return rusty::Err<SocketAddr, rusty::io::Error>(
+        rusty::io::Error(rusty::io::Error::Kind::InvalidInput,
+                         "socket address is neither IPv4 nor IPv6"));
+}
+
+// @safe - Standard local_addr / peer_addr preserve the socket address family.
+inline rusty::Result<SocketAddr, rusty::io::Error>
+socket_endpoint(const rusty::os::fd::OwnedFd& fd, bool peer) {
+    ::sockaddr_storage address{};
+    ::socklen_t length = sizeof(address);
+    int rc;
+    // @unsafe { Query an owned socket using libc. }
+    {
+        rc = peer ? ::getpeername(fd.as_raw_fd(), reinterpret_cast<::sockaddr*>(&address), &length)
+                  : ::getsockname(fd.as_raw_fd(), reinterpret_cast<::sockaddr*>(&address), &length);
+    }
+    if (rc != 0) {
+        return rusty::Err<SocketAddr, rusty::io::Error>(
+            errno_to_io_error(errno, peer ? "getpeername" : "getsockname"));
+    }
+    return socket_addr_from_storage(address);
 }
 
 // @safe - getsockname on an existing fd, returning the bound
@@ -449,6 +498,24 @@ class TcpStream {
         return detail::getpeername_v4(fd_);
     }
 
+    // @safe - std::net::TcpStream address methods return SocketAddr.
+    rusty::Result<SocketAddr, rusty::io::Error> local_socket_addr() const {
+        return detail::socket_endpoint(fd_, false);
+    }
+    // @safe - Preserve IPv4 and IPv6 peer addresses.
+    rusty::Result<SocketAddr, rusty::io::Error> peer_socket_addr() const {
+        return detail::socket_endpoint(fd_, true);
+    }
+
+    // @safe - Borrow the descriptor without transferring ownership.
+    int as_raw_fd() const noexcept { return fd_.as_raw_fd(); }
+    // @safe - Transfer ownership to the caller, as std::os::fd::IntoRawFd does.
+    int into_raw_fd() noexcept { return fd_.into_raw_fd(); }
+    // @unsafe - The caller transfers ownership of a live connected socket.
+    static TcpStream from_raw_fd(int fd) {
+        return TcpStream(rusty::os::fd::OwnedFd::from_raw_fd(fd));
+    }
+
     // @safe - True iff the stream owns a valid fd.
     bool is_connected() const noexcept { return fd_.is_valid(); }
 
@@ -577,6 +644,45 @@ class TcpListener {
     // port 0 to discover the kernel-assigned ephemeral port.
     rusty::Result<SocketAddrV4, rusty::io::Error> local_addr() const {
         return detail::getsockname_v4(fd_);
+    }
+
+    // @safe - std::net::TcpListener::accept returns the full SocketAddr.
+    rusty::Result<std::tuple<TcpStream, SocketAddr>, rusty::io::Error>
+    accept_socket_addr() const {
+        ::sockaddr_storage peer{};
+        ::socklen_t length = sizeof(peer);
+        int raw_fd;
+        // @unsafe { Accept into storage large enough for either IP family. }
+        { raw_fd = ::accept(fd_.as_raw_fd(), reinterpret_cast<::sockaddr*>(&peer), &length); }
+        if (raw_fd < 0) {
+            return rusty::Err<std::tuple<TcpStream, SocketAddr>, rusty::io::Error>(
+                detail::errno_to_io_error(errno, "accept"));
+        }
+        TcpStream stream;
+        // @unsafe { accept returned a new descriptor owned by this operation. }
+        { stream = TcpStream::from_raw_fd(raw_fd); }
+        auto address = detail::socket_addr_from_storage(peer);
+        if (address.is_err()) {
+            return rusty::Err<std::tuple<TcpStream, SocketAddr>, rusty::io::Error>(
+                std::move(address).unwrap_err());
+        }
+        return rusty::Ok<std::tuple<TcpStream, SocketAddr>, rusty::io::Error>(
+            std::make_tuple(std::move(stream), std::move(address).unwrap()));
+    }
+
+    // @safe - Standard local_addr preserves the address family.
+    rusty::Result<SocketAddr, rusty::io::Error> local_socket_addr() const {
+        return detail::socket_endpoint(fd_, false);
+    }
+    // @safe - Borrow the descriptor without transferring ownership.
+    int as_raw_fd() const noexcept { return fd_.as_raw_fd(); }
+    // @safe - Transfer ownership to the caller, as std::os::fd::IntoRawFd does.
+    int into_raw_fd() noexcept { return fd_.into_raw_fd(); }
+    // @unsafe - The caller transfers ownership of a live listening socket.
+    static TcpListener from_raw_fd(int fd) {
+        TcpListener listener;
+        listener.fd_ = rusty::os::fd::OwnedFd::from_raw_fd(fd);
+        return listener;
     }
 
     // @safe - Set the listener's non-blocking mode. Mirrors

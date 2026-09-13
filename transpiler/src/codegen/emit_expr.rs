@@ -228,6 +228,10 @@ impl CodeGen {
             // Fallback: some field/method expressions lose concrete wrapper types during
             // inference; preserve Rust auto-deref semantics conservatively here.
             if inferred_arg_ty.is_none()
+                // An opaque generic target can itself be an owning wrapper.
+                // Without a known source wrapper, `&item: &T` must borrow T,
+                // not its possible Deref target after template instantiation.
+                && !self.type_is_shape_opaque(expected_inner)
                 && matches!(
                     self.peel_paren_group_expr(arg),
                     syn::Expr::Field(_) | syn::Expr::MethodCall(_) | syn::Expr::Path(_)
@@ -639,6 +643,7 @@ impl CodeGen {
         // by-value method receiver does; without this the local stayed
         // `const auto` and the non-const visitor parameters could not bind.
         consuming.extend(collect_by_value_match_moved_scrutinee_vars(&block.stmts));
+        consuming.extend(self.collect_standard_poll_moved_scrutinees(&block.stmts));
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
         let for_iterated = Self::collect_for_loop_iterated_bare_locals(&block.stmts);
         let method_pairs = Self::collect_bare_local_method_call_pairs(&block.stmts);
@@ -2520,6 +2525,40 @@ impl CodeGen {
             .join("::");
         let tokens = mac.tokens.to_string();
 
+        // Statement-position `thread_local!` gets the same strict-grammar
+        // lowering as the item position, spelled for block scope:
+        // `static thread_local rusty::LocalKey<T> NAME{init};`.  Inside a
+        // template this keeps the C++ static per-instantiation, exactly the
+        // shape the incumbent marker emission had.
+        if macro_name == "thread_local" {
+            if let Some(statics) = crate::cpp_abi::parse_thread_local_statics(mac) {
+                for s in &statics {
+                    let name = escape_cpp_keyword(&s.ident.to_string());
+                    let ty = self.map_type(&s.ty);
+                    let init: &syn::Expr = match &*s.expr {
+                        syn::Expr::Const(inline_const) => {
+                            match inline_const.block.stmts.as_slice() {
+                                [syn::Stmt::Expr(tail, None)] => tail,
+                                _ => {
+                                    self.writeln("// TODO: thread_local!(...)");
+                                    return;
+                                }
+                            }
+                        }
+                        other => other,
+                    };
+                    let expr = self.emit_expr_to_string_with_expected(init, Some(&s.ty));
+                    self.writeln(&format!(
+                        "static thread_local rusty::LocalKey<{}> {}{{{}}};",
+                        ty, name, expr
+                    ));
+                }
+                return;
+            }
+            self.writeln("// TODO: thread_local!(...)");
+            return;
+        }
+
         match macro_name.as_str() {
             // The println family shares format!'s smart gate: args the dumb
             // token pass-through can't reproduce (casts, calls, references,
@@ -2877,6 +2916,8 @@ impl CodeGen {
         let tokens = mac.tokens.to_string();
 
         match macro_name.as_str() {
+            "file" if tokens.is_empty() => "__FILE__".to_string(),
+            "line" if tokens.is_empty() => "static_cast<uint32_t>(__LINE__)".to_string(),
             "format" => {
                 // The dumb pass-through path can't express Rust-only format
                 // features (inline captures `{x}`, debug specs `{:?}`); route
@@ -6582,11 +6623,101 @@ impl CodeGen {
         Self::emitted_pointer_add_or_offset_call(&raw_receiver)
     }
 
+    /// Select the standard SocketAddr-returning TCP methods only when the
+    /// source receiver resolves to std::net. Existing runtime IPv4 methods
+    /// remain available to hand-written C++ and explicitly mapped facades.
+    fn std_net_receiver_type(&self, ty: &syn::Type) -> Option<&'static str> {
+        let mut current = ty.clone();
+        for _ in 0..16 {
+            let peeled = self.peel_reference_paren_group_type(&current);
+            let syn::Type::Path(tp) = peeled else {
+                return None;
+            };
+            if tp.qself.is_some() {
+                return None;
+            }
+            if let Some(resolved) = self.resolve_type_alias_once(peeled) {
+                if !Self::types_equivalent_by_tokens(peeled, &resolved) {
+                    current = resolved;
+                    continue;
+                }
+            }
+            if self.standard_path_root_is_local_module(&tp.path) {
+                return None;
+            }
+            let path = crate::transpile::resolve_external_rust_item_path(
+                &tp.path,
+                &self.module_stack,
+                &self.trait_declared_paths,
+                &self.rust_item_import_bindings,
+            )?;
+            let kind = match path.as_str() {
+                "std::net::TcpListener" => Some("TcpListener"),
+                "std::net::TcpStream" => Some("TcpStream"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Some(kind);
+            }
+            let is_wrapper = matches!(
+                path.as_str(),
+                "std::sync::Arc"
+                    | "alloc::sync::Arc"
+                    | "std::boxed::Box"
+                    | "alloc::boxed::Box"
+                    | "std::rc::Rc"
+                    | "alloc::rc::Rc"
+            ) || (path == "Box"
+                && !self.bare_std_named_type_suppression_applies("Box"));
+            if !is_wrapper {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &tp.path.segments.last()?.arguments
+            else {
+                return None;
+            };
+            current = args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })?;
+        }
+        None
+    }
+
     pub(super) fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if mc.method == "file" && mc.args.is_empty()
+            && self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
+                self.map_type(ty).trim_start_matches("const ").trim_end_matches('&')
+                    == "std::source_location"
+            })
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("std::string_view({}.file_name())", receiver);
+        }
+        if let Some(mapped) = self.try_emit_standard_future_method(mc) { return mapped; }
+        if mc.args.is_empty()
+            && mc.turbofish.is_none()
+            && matches!(
+                mc.method.to_string().as_str(),
+                "accept" | "local_addr" | "peer_addr"
+            )
+            && let Some(ty) = self.infer_simple_expr_type(&mc.receiver)
+            && let Some(kind) = self.std_net_receiver_type(&ty)
+        {
+            let method = match (kind, mc.method.to_string().as_str()) {
+                ("TcpListener", "accept") => Some("accept_socket_addr"),
+                (_, "local_addr") => Some("local_socket_addr"),
+                ("TcpStream", "peer_addr") => Some("peer_socket_addr"),
+                _ => None,
+            };
+            if let Some(method) = method {
+                return self.emit_receiver_member_call(&mc.receiver, method, None, &[], None);
+            }
+        }
         // `.map(third)` / `.map(util::third)` — a GENERIC free fn passed as
         // the callable: C++ can't bind a raw template name to the adapter's
         // deduced F. Wrap it in a forwarding lambda (the path emission also
@@ -9187,38 +9318,63 @@ impl CodeGen {
         let transparent_callback_receiver_ty = self
             .infer_simple_expr_type(&mc.receiver)
             .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver));
-        if transparent_callback_receiver_ty.as_ref().is_some_and(|ty| {
-            self.try_map_transparent_nullable_callback_type(ty).is_some()
-        }) {
-            // The transparent carrier folds `Option<Box<dyn Fn*>>` into
-            // rusty::Function's own nullable state, so the Option surface
-            // must be lowered by hand. Each supported operation mirrors the
-            // Rust semantics exactly; everything else stays fail-closed.
+        if let Some((option_ty, guard)) = transparent_callback_receiver_ty.as_ref()
+            .and_then(|ty| self.transparent_nullable_owner_receiver(ty))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if guard {
+                format!("rusty::detail::deref_if_pointer_like({})", receiver)
+            } else { receiver };
+            // The selected carrier represents Option with its own empty
+            // state. Preserve Rust's operations on that representation;
+            // unsupported operations remain explicit errors.
             match (mc.method.to_string().as_str(), mc.args.len()) {
+                ("as_ref" | "as_mut", 0) => {
+                    let qualifier = if mc.method == "as_ref" { "const " } else { "" };
+                    return format!(
+                        "([]({qualifier}auto& __cb) {{ using Borrow = rusty::Option<decltype(__cb)>; return static_cast<bool>(__cb) ? Borrow(__cb) : Borrow(rusty::None); }})({receiver})"
+                    );
+                }
                 // `take()` moves the callback out and leaves the empty (None)
                 // state behind — exactly rusty::mem::take on the carrier.
                 ("take", 0) => {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    if let Some(owner) = self.explicit_nullable_owner_type(&option_ty) {
+                        return format!("std::exchange({}, {}(nullptr))", receiver, self.map_type(&owner));
+                    }
                     return format!("rusty::mem::take({})", receiver);
                 }
                 ("is_some", 0) => {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
                     return format!("static_cast<bool>({})", receiver);
                 }
                 ("is_none", 0) => {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
                     return format!("!static_cast<bool>({})", receiver);
                 }
                 // `unwrap()` consumes the Option by value; the None arm must
                 // keep Rust's panic. Moving out of the bound reference is
                 // sound: Rust already proved the receiver is dead after this.
                 ("unwrap", 0) => {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
                     return format!(
                         "([](auto&& __cb) {{ if (!static_cast<bool>(__cb)) {{ rusty::panic::do_panic(\"called `Option::unwrap()` on a `None` value\"); }} return std::move(__cb); }})({})",
                         receiver
                     );
                 }
+                ("clone", 0) if self.explicit_nullable_owner_type(&option_ty).is_some() => {
+                    return format!(
+                        "([](const auto& __owner) {{ using Owner = std::remove_cvref_t<decltype(__owner)>; return static_cast<bool>(__owner) ? rusty::clone(__owner) : Owner(nullptr); }})({})",
+                        receiver
+                    );
+                }
+                ("replace", 1) if self.explicit_nullable_owner_type(&option_ty).is_some() => {
+                    let owner = self.explicit_nullable_owner_type(&option_ty).unwrap();
+                    let value = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &mc.args[0], Some(&owner),
+                    );
+                    return format!("std::exchange({}, {})", receiver, value);
+                }
+                _ if self.explicit_nullable_owner_type(&option_ty).is_some() => panic!(
+                    "unsupported Option operation `{}` on an explicit nullable owner profile",
+                    mc.method
+                ),
                 _ => panic!(
                     "unsupported Option operation `{}` on transparent Option<Box<dyn Fn*>>",
                     mc.method
@@ -11089,6 +11245,21 @@ impl CodeGen {
         if method_name == "clone" && mc.args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
+            // Standard borrow/lock guards do not implement method-style
+            // Clone. Rust resolves `guard.clone()` through Deref to the
+            // protected value; copying the guard would duplicate ownership
+            // of a lock or borrow. Arc/Rc do implement Clone and stay intact.
+            if let Some(ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let mapped = self.map_type(self.peel_reference_paren_group_type(&ty));
+                if matches!(mapped.split('<').next(),
+                    Some("rusty::Ref" | "rusty::RefMut" | "rusty::MutexGuard"
+                        | "rusty::SpinMutexGuard" | "rusty::RwLockReadGuard"
+                        | "rusty::RwLockWriteGuard"))
+                    && !self.receiver_has_inherent_method_named(&mc.receiver, "clone")
+                {
+                    return format!("rusty::clone(*({}))", receiver);
+                }
+            }
             return format!("rusty::clone({})", receiver);
         }
         if method_name == "to_mut"
@@ -13214,6 +13385,179 @@ impl CodeGen {
         Some(format!("rusty::index_with_range({}, {})", base, index))
     }
 
+    pub(super) fn guard_coercion_target_matches(
+        &self,
+        protected: &syn::Type,
+        expected: &syn::Type,
+    ) -> bool {
+        self.guard_coercion_mapped_types_match(&self.map_type(protected), &self.map_type(expected))
+    }
+
+    pub(super) fn guard_coercion_mapped_types_match(
+        &self,
+        protected_cpp: &str,
+        expected_cpp: &str,
+    ) -> bool {
+        if protected_cpp == expected_cpp {
+            return true;
+        }
+        // The alias table can retain a provider-qualified C++ trait while a
+        // dyn trait spells the same imported interface through its using.
+        // Normalize only identities proven by crate preflight, recursively
+        // inside the wrapper type. An unrelated same-tail name is unchanged.
+        struct ImportedIdentity<'a> {
+            cg: &'a CodeGen,
+            provider: Option<(crate::cpp_abi::ModulePath, String)>,
+            depth: usize,
+            valid: bool,
+        }
+        fn local_dyn_trait_alias(ty: &syn::Type) -> bool {
+            struct Check {
+                found: bool,
+                valid: bool,
+            }
+            impl<'ast> syn::visit::Visit<'ast> for Check {
+                fn visit_type_trait_object(&mut self, object: &'ast syn::TypeTraitObject) {
+                    self.found = true;
+                    for bound in &object.bounds {
+                        if let syn::TypeParamBound::Trait(bound) = bound {
+                            self.valid &= bound.path.leading_colon.is_none()
+                                && (bound.path.segments.len() == 1
+                                    || (bound.path.segments.len() == 2
+                                        && bound.path.segments[0].ident == "self"));
+                        }
+                    }
+                    syn::visit::visit_type_trait_object(self, object);
+                }
+            }
+            let mut check = Check {
+                found: false,
+                valid: true,
+            };
+            syn::visit::Visit::visit_type(&mut check, ty);
+            check.found && check.valid
+        }
+        impl syn::visit_mut::VisitMut for ImportedIdentity<'_> {
+            fn visit_type_path_mut(&mut self, ty: &mut syn::TypePath) {
+                syn::visit_mut::visit_type_path_mut(self, ty);
+                if ty.qself.is_some() {
+                    return;
+                }
+                let Some(last) = ty.path.segments.last() else {
+                    return;
+                };
+                let leaf = last.ident.to_string();
+                let args = last.arguments.clone();
+                let segments = ty
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                let scope = self.cg.module_stack.join("::");
+                let target = if ty.path.leading_colon.is_none() && segments.len() == 1 {
+                    if let Some((provider, namespace)) = &self.provider {
+                        let target = self.cg.flat_import_type_authorizations.iter().find_map(
+                            |authorization| {
+                                (authorization.provider_physical_module == *provider
+                                    && authorization.cpp_namespace == *namespace
+                                    && authorization.leaf == leaf
+                                    && authorization.provider_kind
+                                        == crate::cpp_abi::FlatImportTypeProviderKind::Trait)
+                                    .then_some(format!("::{namespace}::{leaf}"))
+                            },
+                        );
+                        self.valid &= target.is_some();
+                        target
+                    } else {
+                        self.cg
+                            .resolve_flat_import_type_authorization_for_exact_scope(&scope, &leaf)
+                    }
+                } else {
+                    if ty.path.leading_colon.is_none()
+                        && self.cg.current_scope_has_visible_module_root(&segments[0])
+                    {
+                        return;
+                    }
+                    self.cg
+                        .flat_import_type_authorizations
+                        .iter()
+                        .find_map(|authorization| {
+                            let target =
+                                format!("{}::{}", authorization.cpp_namespace, authorization.leaf);
+                            (authorization.consumer_physical_module
+                                == self.cg.current_physical_module
+                                && authorization.consumer_lexical_module.0 == self.cg.module_stack
+                                && segments.join("::") == target)
+                                .then_some(format!("::{target}"))
+                        })
+                };
+                if let Some(target) = target
+                    && let Ok(mut path) = syn::parse_str::<syn::Path>(&target)
+                {
+                    if self.depth < 16
+                        && matches!(args, syn::PathArguments::None)
+                        && let Some(authorization) = self
+                            .cg
+                            .flat_import_type_authorizations
+                            .iter()
+                            .find(|authorization| {
+                                authorization.consumer_physical_module
+                                    == self.cg.current_physical_module
+                                    && authorization.consumer_lexical_module.0
+                                        == self.cg.module_stack
+                                    && authorization.provider_kind
+                                        == crate::cpp_abi::FlatImportTypeProviderKind::TypeAlias
+                                    && format!(
+                                        "::{}::{}",
+                                        authorization.cpp_namespace, authorization.leaf
+                                    ) == target
+                            })
+                        && let Some(alias) = self
+                            .cg
+                            .cross_file_auto_trait_aliases
+                            .get(&authorization.leaf)
+                        && alias.generics.params.is_empty()
+                        && alias.generics.where_clause.is_none()
+                        && local_dyn_trait_alias(&alias.ty)
+                        && let Ok(syn::Type::Path(mut expanded)) =
+                            syn::parse_str::<syn::Type>(&self.cg.map_type(&alias.ty))
+                    {
+                        // The alias body resolves in its provider. In particular,
+                        // its dyn trait cannot bind to a consumer's local namesake.
+                        let old_provider = self.provider.replace((
+                            authorization.provider_physical_module.clone(),
+                            authorization.cpp_namespace.clone(),
+                        ));
+                        self.depth += 1;
+                        self.visit_type_path_mut(&mut expanded);
+                        self.depth -= 1;
+                        self.provider = old_provider;
+                        *ty = expanded;
+                        return;
+                    }
+                    path.segments.last_mut().unwrap().arguments = args;
+                    ty.path = path;
+                }
+            }
+        }
+        let (Ok(mut protected_ty), Ok(mut expected_ty)) = (
+            syn::parse_str::<syn::Type>(&protected_cpp),
+            syn::parse_str::<syn::Type>(&expected_cpp),
+        ) else {
+            return false;
+        };
+        let mut normalize = ImportedIdentity {
+            cg: self,
+            provider: None,
+            depth: 0,
+            valid: true,
+        };
+        syn::visit_mut::VisitMut::visit_type_mut(&mut normalize, &mut protected_ty);
+        syn::visit_mut::VisitMut::visit_type_mut(&mut normalize, &mut expected_ty);
+        normalize.valid && protected_ty == expected_ty
+    }
+
     /// Emit an expression with optional expected type context from its parent.
     /// Currently used for typed `let` initializers to guide enum variant constructor calls.
     pub(super) fn emit_expr_to_string_with_expected(
@@ -13221,6 +13565,7 @@ impl CodeGen {
         expr: &syn::Expr,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
         if self.expected_type_is_string_view(expected_ty)
             && matches!(self.peel_paren_group_expr(expr), syn::Expr::Field(_))
         {
@@ -13606,6 +13951,15 @@ impl CodeGen {
                     );
                 }
                 if let Some(expected_inner) = self.expected_reference_inner_type(expected_ty) {
+                    if let Some(source_ty) = self.infer_simple_expr_type(&r.expr) {
+                        let source_cpp = self.map_type(self.peel_reference_paren_group_type(&source_ty));
+                        let protected = self.peel_guard_wrapper_for_method_routing(&source_ty);
+                        if matches!(source_cpp.split('<').next(), Some("rusty::MutexGuard" | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard" | "rusty::Ref" | "rusty::RefMut"))
+                            && self.guard_coercion_target_matches(&protected, expected_inner)
+                        {
+                            return format!("(*({}))", self.emit_expr_to_string(&r.expr));
+                        }
+                    }
                     return self.emit_expr_to_string_with_expected(&r.expr, Some(expected_inner));
                 }
                 if expected_ty.is_some_and(|ty| {
@@ -13813,9 +14167,17 @@ impl CodeGen {
                             )
                         })
                         .collect();
-                    if self.tuple_expected_needs_typed_constructor(&expected_tuple_ty) {
-                        let expected_tuple_cpp =
-                            self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+                    let expected_alias = expected_ty
+                        .map(|ty| self.peel_reference_paren_group_type(ty))
+                        .filter(|ty| matches!(ty, syn::Type::Path(_)));
+                    if expected_alias.is_some()
+                        || self.tuple_expected_needs_typed_constructor(&expected_tuple_ty)
+                    {
+                        // Preserve the alias profile at construction. Expanding
+                        // it to the Rust tuple would discard a std::pair target.
+                        let expected_tuple_cpp = expected_alias
+                            .map(|ty| self.map_type(ty))
+                            .unwrap_or_else(|| self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone())));
                         return format!("{}{{{}}}", expected_tuple_cpp, elems.join(", "));
                     }
                     return format!("std::make_tuple({})", elems.join(", "));
@@ -13928,9 +14290,12 @@ impl CodeGen {
                     return "this->operator*()".to_string();
                 }
                 if self.is_option_none_path(&path.path) {
+                    if let Some(owner) = expected_ty.and_then(|ty| self.explicit_nullable_owner_type(ty)) {
+                        return format!("{}(nullptr)", self.map_type(&owner));
+                    }
                     if let Some(expected) = expected_ty
                         && let Some(callback_cpp) =
-                            self.try_map_transparent_nullable_callback_type(expected)
+                            self.try_map_transparent_nullable_owner_type(expected)
                     {
                         return format!("{}{{}}", callback_cpp);
                     }
@@ -13993,6 +14358,20 @@ impl CodeGen {
                 }
             }
             syn::Expr::Closure(closure) => {
+                let boxed_callback = expected_ty.and_then(|expected| {
+                    self.owned_boxed_callback_trait_object_type(expected).or_else(|| {
+                        if matches!(expected, syn::Type::TraitObject(_)) {
+                            let boxed: syn::Type = syn::parse_quote!(::std::boxed::Box<#expected>);
+                            self.owned_boxed_callback_trait_object_type(&boxed)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                let void_callback = boxed_callback.as_ref().is_some_and(|ty| {
+                    self.extract_callable_return_type_from_type(ty)
+                        .is_none_or(|output| self.is_explicit_unit_type(&output))
+                });
                 // Propagate expected return type to closure body emission.
                 // The expected type (e.g. Result<T, E> for get_or_try_init) must be
                 // pushed AFTER the closure's own output hint so it takes precedence
@@ -14036,11 +14415,12 @@ impl CodeGen {
                 };
                 let expected_rt = expected_body_ty
                     .map(|t| syn::ReturnType::Type(Default::default(), Box::new(t)));
-                inner.emit_closure_to_string_with_param_scopes(
+                inner.emit_closure_with_param_scopes_and_void_result(
                     closure,
                     None,
                     None,
                     expected_rt.as_ref(),
+                    void_callback,
                 )
             }
             _ => self.emit_expr_to_string(expr),
@@ -14780,7 +15160,26 @@ impl CodeGen {
         if owner_seg.ident != expected_last.as_str() {
             return None;
         }
-        let mut owner_cpp = self.map_type(expected_ty);
+        // A contextual return type may have lost its module qualification
+        // while inferring an impl's `Self`. It can fill omitted type arguments,
+        // but cannot retarget a proven local constructor to a runtime namesake.
+        let mut contextual_owner = expected_ty.clone();
+        if self.standard_path_root_is_local_module(func_path) {
+            let mut source_owner = func_path.clone();
+            source_owner.segments.pop();
+            if let Some(last) = source_owner.segments.last_mut()
+                && matches!(last.arguments, syn::PathArguments::None)
+                && let syn::Type::Path(expected_path) = self.peel_paren_group_type(expected_ty)
+                && let Some(expected_last) = expected_path.path.segments.last()
+            {
+                last.arguments = expected_last.arguments.clone();
+            }
+            contextual_owner = syn::Type::Path(syn::TypePath {
+                qself: None,
+                path: source_owner,
+            });
+        }
+        let mut owner_cpp = self.map_type(&contextual_owner);
         if !owner_cpp.contains('<') {
             return None;
         }
@@ -14849,6 +15248,30 @@ impl CodeGen {
             && !self.bare_std_named_type_suppression_applies("Arc")
         {
             method = "make".to_string();
+        }
+        let mut source_owner_path = func_path.clone();
+        source_owner_path.segments.pop();
+        let source_owner_cpp = self.map_type(&syn::Type::Path(syn::TypePath {
+            qself: None, path: source_owner_path,
+        }));
+        // Standard cell/lock constructors consume their payload. A same-named
+        // `new(&Config)` on an unrelated local owner must not supply their
+        // argument pass style through the leaf-name fallback below.
+        if matches!(rust_method_name.as_str(), "new" | "new_")
+            && call.args.len() == 1
+            && source_owner_cpp.split('<').next() == owner_cpp.split('<').next()
+            && matches!(owner_cpp.split('<').next(),
+                Some("rusty::Mutex" | "rusty::SpinMutex" | "rusty::RwLock"
+                    | "rusty::Cell" | "rusty::RefCell"))
+            && let syn::Type::Path(expected_path) = expected_ty
+            && let Some(expected_owner) = expected_path.path.segments.last()
+            && let syn::PathArguments::AngleBracketed(arguments) = &expected_owner.arguments
+            && let Some(syn::GenericArgument::Type(payload)) = arguments.args.first()
+        {
+            let value = self.emit_call_arg_with_pass_style(
+                &call.args[0], Some(ArgPassStyle::Value), Some(payload), false, None,
+            );
+            return Some(format!("{}::{}({})", owner_cpp, method, value));
         }
         if self.owner_cpp_has_unusable_template_args(&owner_cpp)
             && matches!(owner_seg.arguments, syn::PathArguments::None)
@@ -17866,7 +18289,9 @@ impl CodeGen {
         }
         // Keep the argument's own expected type exactly what the Box wraps
         // (the `dyn Fn…` trait object), matching the make_box path below.
-        let inner_expected: Option<syn::Type> = direct.as_ref().and_then(|_| {
+        let inner_expected: Option<syn::Type> = self
+            .owned_boxed_callback_trait_object_type(expected)
+            .or_else(|| direct.as_ref().and_then(|_| {
             match self.peel_reference_paren_group_type(expected) {
                 syn::Type::Path(tp) => tp
                     .path
@@ -17883,7 +18308,7 @@ impl CodeGen {
                     }),
                 _ => None,
             }
-        });
+        }));
         let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
             &call.args[0],
             inner_expected.as_ref(),
@@ -17933,6 +18358,7 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let Some(mapped) = self.try_emit_standard_future_call(call, expected_ty) { return mapped; }
         let emitted = self.emit_call_expr_to_string_lowered(call, expected_ty);
         // C11 family (checkpoint contract 11): the hand-written runtime
         // facades have no such static member — collapse the emitted call onto
@@ -20033,6 +20459,9 @@ impl CodeGen {
                 }
             }
         }
+        if let Some(emitted) = self.try_emit_standard_any_call(call, expected_ty) {
+            return emitted;
+        }
         if let Some(emitted) = self.try_emit_arc_from_assoc_call(call, expected_ty) {
             return emitted;
         }
@@ -21299,6 +21728,11 @@ impl CodeGen {
                 | "std::option::Option::Some"
         ) && call.args.len() == 1
         {
+            if let Some(owner) = expected_ty.and_then(|ty| self.explicit_nullable_owner_type(ty)) {
+                return self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &call.args[0], Some(&owner),
+                );
+            }
             if let Some(expected) = expected_ty
                 && self
                     .try_map_transparent_nullable_callback_type(expected)
@@ -21600,6 +22034,9 @@ impl CodeGen {
                 .cloned()
                 .or_else(|| self.infer_default_call_expected_type_from_in_progress_local_name())
             {
+                if let Some(owner) = self.explicit_nullable_owner_type(&expected) {
+                    return format!("{}(nullptr)", self.map_type(&owner));
+                }
                 if let Some(callback_cpp) =
                     self.try_map_transparent_nullable_callback_type(&expected)
                 {
@@ -22426,6 +22863,20 @@ impl CodeGen {
             func
         };
         let func = Self::collapse_constructor_like_call_path(&func);
+        // Rust callable syntax auto-dereferences a lock/borrow guard to its
+        // protected callable. C++ has no corresponding implicit operator*.
+        let guarded_callable = self.infer_simple_expr_type(&call.func)
+            .or_else(|| self.infer_local_binding_type_from_initializer(&call.func))
+            .is_some_and(|ty| {
+                let ty = self.peel_reference_paren_group_type(&ty);
+                matches!(self.map_type(ty).split('<').next(),
+                    Some("rusty::MutexGuard" | "rusty::SpinMutexGuard"
+                        | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard"
+                        | "rusty::Ref" | "rusty::RefMut"))
+            });
+        if guarded_callable {
+            return format!("(*{})({})", func, args.join(", "));
+        }
         format!("{}({})", func, args.join(", "))
     }
 
@@ -23918,6 +24369,7 @@ impl CodeGen {
     }
 
     pub(super) fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
+        if let Some(mapped) = self.try_emit_standard_future_pending(expr, None) { return mapped; }
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
             syn::Expr::Path(path) => {
@@ -24273,8 +24725,9 @@ impl CodeGen {
                 if let syn::Expr::Unary(un) = ref_inner {
                     if matches!(un.op, syn::UnOp::Deref(_)) {
                         let operand = self.peel_paren_group_expr(&un.expr);
-                        // Collapse &*expr reborrow for simple single-deref cases:
-                        // - `&*r` where r is a simple path variable → just `r`
+                        // Collapse a reference reborrow for simple paths.
+                        // Owning pointers and guards still need operator* to
+                        // reach their payload, including if-let bindings.
                         // Do NOT collapse for:
                         // - Raw pointers (`*p` is a real dereference)
                         // - ManuallyDrop types (`*md` calls operator* for unwrapping)
@@ -24282,6 +24735,8 @@ impl CodeGen {
                         if matches!(operand, syn::Expr::Path(_) | syn::Expr::Field(_))
                             && !self.is_expr_raw_pointer_like(&un.expr)
                             && !self.method_receiver_is_manually_drop_expr(&un.expr)
+                            && !self.infer_simple_expr_type(&un.expr).as_ref()
+                                .is_some_and(|ty| self.type_is_deref_owner_or_guard_type(ty))
                         {
                             return self.emit_expr_to_string(&un.expr);
                         }
@@ -26381,6 +26836,40 @@ impl CodeGen {
         Some(emitted_segs.join("::"))
     }
 
+    fn capture_type_is_known_copy(&self, ty: &syn::Type, depth: usize) -> bool {
+        if depth >= 16 {
+            return false;
+        }
+        let ty = self.peel_paren_group_type(ty);
+        if let Some(resolved) = self.resolve_type_alias_once(ty)
+            && &resolved != ty
+        {
+            return self.capture_type_is_known_copy(&resolved, depth + 1);
+        }
+        if self.is_known_scalar_like_type(ty) {
+            return true;
+        }
+        match ty {
+            syn::Type::Ptr(_) | syn::Type::BareFn(_) => true,
+            syn::Type::Reference(reference) => reference.mutability.is_none(),
+            syn::Type::Array(array) => self.capture_type_is_known_copy(&array.elem, depth + 1),
+            syn::Type::Tuple(tuple) => tuple.elems.iter()
+                .all(|element| self.capture_type_is_known_copy(element, depth + 1)),
+            syn::Type::Path(path) if path.qself.is_none()
+                && path.path.segments.iter().all(|segment| {
+                    matches!(segment.arguments, syn::PathArguments::None)
+                }) => {
+                let key = path.path.segments.iter().map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>().join("::");
+                // Only declarations in the actual lexical scope establish
+                // Copy. An unrelated qualified leaf cannot borrow this fact,
+                // and a generic derive alone does not prove its arguments Copy.
+                self.copy_derived_types.contains(&self.scoped_type_key(&key))
+            }
+            _ => false,
+        }
+    }
+
     /// Emit an expression, wrapping local variable paths in std::move().
     /// In Rust, passing a non-Copy variable by value moves it. In C++, we need
     /// explicit std::move() to get move semantics. For Copy types, std::move()
@@ -26468,6 +26957,47 @@ impl CodeGen {
         char_predicate_param_scope: Option<HashSet<String>>,
         expected_return_type: Option<&syn::ReturnType>,
     ) -> String {
+        self.emit_closure_with_param_scopes_and_void_result(
+            closure, map_param_scope, char_predicate_param_scope, expected_return_type, false,
+        )
+    }
+
+    fn emit_closure_with_param_scopes_and_void_result(
+        &self,
+        closure: &syn::ExprClosure,
+        map_param_scope: Option<HashSet<String>>,
+        char_predicate_param_scope: Option<HashSet<String>>,
+        expected_return_type: Option<&syn::ReturnType>,
+        void_callback: bool,
+    ) -> String {
+        // A boxed Fn returning () has the C++ signature void(...). Preserve
+        // evaluation before explicit unit returns, then emit the body in a
+        // void context. Nested closures keep their own return conventions.
+        let normalized;
+        let (closure, expected_return_type) = if void_callback {
+            struct UnitReturns;
+            impl syn::visit_mut::VisitMut for UnitReturns {
+                fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+                    if matches!(expr, syn::Expr::Closure(_) | syn::Expr::Async(_)) {
+                        return;
+                    }
+                    syn::visit_mut::visit_expr_mut(self, expr);
+                    if let syn::Expr::Return(ret) = expr
+                        && let Some(value) = ret.expr.take()
+                    {
+                        *expr = syn::parse_quote!({ #value; return; });
+                    }
+                }
+                fn visit_item_mut(&mut self, _: &mut syn::Item) {}
+            }
+            let mut value = closure.clone();
+            value.output = syn::ReturnType::Default;
+            syn::visit_mut::VisitMut::visit_expr_mut(&mut UnitReturns, &mut value.body);
+            normalized = value;
+            (&normalized, None)
+        } else {
+            (closure, expected_return_type)
+        };
         let untyped_param_scope = self.collect_untyped_closure_param_names_for_scope(closure);
         let is_move_closure = closure.capture.is_some();
         let outer_captures = self.collect_move_closure_capture_cpp_names(closure);
@@ -26556,6 +27086,7 @@ impl CodeGen {
         let all_captures_are_raw_pointers = outer_captures.iter().all(|cpp_name| {
                 self.lookup_rust_binding_name_for_cpp_name(cpp_name)
                     .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
+                    .or_else(|| self.lookup_local_binding_type(cpp_name))
                     .is_some_and(|ty| matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_)))
         });
         let body_reassigns_a_capture = {
@@ -26595,6 +27126,7 @@ impl CodeGen {
                     !self
                         .lookup_rust_binding_name_for_cpp_name(cpp_name)
                         .and_then(|rust_name| self.lookup_local_binding_type(&rust_name))
+                        .or_else(|| self.lookup_local_binding_type(cpp_name))
                         .is_some_and(|ty| {
                             matches!(self.peel_paren_group_type(&ty), syn::Type::Ptr(_))
                                 || self.type_is_non_mutating_handle_type(&ty)
@@ -26622,9 +27154,18 @@ impl CodeGen {
                 self.collect_value_call_argument_locals_in_stmt(stmt, &mut consumed);
             }
             outer_captures.iter().any(|cpp_name| {
-                self.lookup_rust_binding_name_for_cpp_name(cpp_name)
-                    .is_some_and(|rust_name| consumed.contains(&rust_name))
-                    || consumed.contains(cpp_name)
+                let rust_name = self.lookup_rust_binding_name_for_cpp_name(cpp_name);
+                let consumed_here = rust_name.as_ref().is_some_and(|name| consumed.contains(name))
+                    || consumed.contains(cpp_name);
+                let capture_ty = rust_name.as_ref()
+                    .and_then(|name| self.lookup_local_binding_type(name))
+                    .or_else(|| self.lookup_local_binding_type(cpp_name));
+                // Passing Copy data by value copies it in Rust. A const C++
+                // capture remains usable even when its argument is move-cast.
+                // Reassignment and mutable methods are checked separately.
+                consumed_here && !capture_ty.as_ref().is_some_and(|ty| {
+                    self.capture_type_is_known_copy(ty, 0)
+                })
             })
         };
         let no_capture_is_mutated = !body_reassigns_a_capture
@@ -26868,7 +27409,11 @@ impl CodeGen {
         // attribute is ill-formed in a lambda trailing-return-type. Strip it —
         // the diverging body still deduces `void`. (It stays valid on real
         // function declarations, which go through a different emit path.)
-        let lambda_return_annotation = lambda_return_annotation.replace("[[noreturn]] ", "");
+        let lambda_return_annotation = if void_callback {
+            " -> void".to_string()
+        } else {
+            lambda_return_annotation.replace("[[noreturn]] ", "")
+        };
         // `.map(|(event, _mark)| event)` in a fn returning Result<&Event>:
         // an un-annotated lambda's auto deduction DECAYS the reference slot
         // (deleted Event copy; the map deduces Result<Event> where
@@ -26898,7 +27443,7 @@ impl CodeGen {
                 // behavior local to the lambda body.
                 inner.return_value_scopes.clear();
                 inner.return_type_hints.clear();
-                inner.push_return_value_scope("auto");
+                inner.push_return_value_scope(if void_callback { "void" } else { "auto" });
                 if inner.should_push_return_type_hint_for_closure(&resolved_closure_output) {
                     inner.push_return_type_hint(&resolved_closure_output);
                 }
@@ -26956,7 +27501,9 @@ impl CodeGen {
                 inner.return_type_hints.clear();
                 inner.emit_macro_stmt(&mac_expr.mac);
                 let mut body_str = inner.into_output();
-                body_str.push_str("return std::make_tuple();\n");
+                if !void_callback {
+                    body_str.push_str("return std::make_tuple();\n");
+                }
                 if !closure_param_prelude.is_empty() {
                     let mut prelude_str = String::new();
                     for stmt in &closure_param_prelude {
@@ -27002,7 +27549,7 @@ impl CodeGen {
                 );
                 let body_diverging = inner.is_expr_diverging(&closure.body);
                 if closure_param_prelude.is_empty() {
-                    if body_diverging {
+                    if body_diverging || void_callback {
                         format!(
                             "[{}]({}){}{} {{ {}; }}",
                             capture, params_str, lambda_mutability, lambda_return_annotation, body
@@ -27019,7 +27566,7 @@ impl CodeGen {
                         prelude_str.push_str(stmt);
                         prelude_str.push('\n');
                     }
-                    if body_diverging {
+                    if body_diverging || void_callback {
                         format!(
                             "[{}]({}){}{} {{\n{}{};\n}}",
                             capture,

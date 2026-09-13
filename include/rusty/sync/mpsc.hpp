@@ -289,16 +289,25 @@ public:
         }
     }
 
-    // Receive a value (blocking)
+    // Keep the existing mutable overload for C++ callers.
     Result<T, RecvError> recv() {
+        return static_cast<const Receiver&>(*this).recv();
+    }
+
+    // Rust's Receiver::recv takes &self; mutable state belongs to the channel.
+    Result<T, RecvError> recv() const {
         if (!state_) {
             return Result<T, RecvError>::Err(RecvError::Disconnected);
         }
         return state_->recv();
     }
 
-    // Try to receive a value (non-blocking)
     Result<T, TryRecvError> try_recv() {
+        return static_cast<const Receiver&>(*this).try_recv();
+    }
+
+    // Rust's Receiver::try_recv likewise takes &self.
+    Result<T, TryRecvError> try_recv() const {
         if (!state_) {
             return Result<T, TryRecvError>::Err(TryRecvError::Disconnected);
         }

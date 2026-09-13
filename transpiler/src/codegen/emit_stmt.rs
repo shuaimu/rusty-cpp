@@ -152,6 +152,7 @@ impl CodeGen {
                     &qualified_self_cpp,
                     &assoc_pairs,
                     &[],
+                    &[],
                 );
             }
             if anon_adapter {
@@ -222,7 +223,7 @@ impl CodeGen {
             if self.try_emit_let_match_return_statement_level(local) {
                 return;
             }
-            // `let x = { …; tail }` whose block contains `?`/`return`: an
+            // `let x = { …; tail }` whose block transfers control outward: an
             // IIFE lowering binds those to the lambda (wrong fn exit, and
             // return-type deduction clashes with the tail). Declare the
             // local, inline the block, assign the tail.
@@ -231,7 +232,8 @@ impl CodeGen {
                 && let Some(init) = &local.init
                 && init.diverge.is_none()
                 && let syn::Expr::Block(block_expr) = self.peel_paren_group_expr(&init.expr)
-                && self.expr_contains_early_return_or_try(&init.expr)
+                && (self.expr_contains_early_return_or_try(&init.expr)
+                    || self.block_has_escaping_loop_control(&block_expr.block))
                 && block_expr.block.stmts.len() > 1
                 && let Some(syn::Stmt::Expr(tail, None)) = block_expr.block.stmts.last()
                 && !self.is_expr_diverging(tail)
@@ -242,16 +244,49 @@ impl CodeGen {
                     && tail_cpp != "auto"
                     && !type_string_has_auto_placeholder(&tail_cpp)
                 {
-                    let rust_name = pat_ident.ident.to_string();
-                    let cpp_name = self.allocate_local_cpp_name(&rust_name);
-                    self.writeln(&format!("{} {};", tail_cpp, cpp_name));
-                    self.register_local_binding(rust_name.clone(), Some(tail_ty));
+                    // The Rust binding is not visible in its initializer.
+                    // Use a sink absent from the block, including macro tokens,
+                    // so a prefix binding cannot capture the tail assignment.
+                    fn contains_ident(tokens: proc_macro2::TokenStream, name: &str) -> bool {
+                        tokens.into_iter().any(|token| match token {
+                            proc_macro2::TokenTree::Ident(ident) => ident == name,
+                            proc_macro2::TokenTree::Group(group) => contains_ident(group.stream(), name),
+                            _ => false,
+                        })
+                    }
+                    let cpp_name = loop {
+                        let name = self.reserve_synthetic_cpp_name("_let_block_value");
+                        if !contains_ident(block_expr.block.to_token_stream(), &name) {
+                            break name;
+                        }
+                    };
+                    let pointer_storage = (!self.reference_type_lowers_to_value_cpp(&tail_ty))
+                        .then(|| self.map_reference_type_to_pointer_cpp_type(&tail_ty)).flatten();
+                    if let Some(pointer_type) = &pointer_storage {
+                        self.writeln(&format!("{} {};", pointer_type, cpp_name));
+                    } else if self.should_use_optional_delayed_init_storage(&tail_ty)
+                        || self.reference_type_lowers_to_value_cpp(&tail_ty)
+                    {
+                        self.mark_delayed_init_local(&cpp_name);
+                        self.writeln(&format!("std::optional<{}> {};", tail_cpp, cpp_name));
+                    } else {
+                        self.writeln(&format!("{} {};", tail_cpp, cpp_name));
+                    }
+                    self.push_transient_statement_scope();
+                    self.register_local_binding(cpp_name.clone(), Some(tail_ty.clone()));
+                    self.local_cpp_bindings.last_mut().unwrap()
+                        .insert(cpp_name.clone(), cpp_name.clone());
+                    if pointer_storage.is_some() {
+                        self.record_local_const_binding(&cpp_name, false);
+                        self.record_local_reference_binding(&cpp_name, true);
+                        self.record_rebind_reference_pointer_binding(&cpp_name);
+                    }
                     let mut rewritten = block_expr.block.clone();
                     if let Some(syn::Stmt::Expr(tail_expr, semi @ None)) =
                         rewritten.stmts.last_mut()
                     {
-                        let target: syn::Expr = syn::parse_str(&rust_name)
-                            .unwrap_or_else(|_| parse_quote!(__let_block_target));
+                        let target: syn::Expr = syn::parse_str(&cpp_name)
+                            .expect("synthetic block sink is an identifier");
                         *tail_expr = syn::Expr::Assign(syn::ExprAssign {
                             attrs: Vec::new(),
                             left: Box::new(target),
@@ -260,7 +295,22 @@ impl CodeGen {
                         });
                         *semi = Some(Default::default());
                     }
+                    // The initializer's locals must die before the next outer
+                    // statement, including lock guards and owned captures.
+                    self.writeln("{");
+                    self.indent += 1;
                     self.emit_block(&rewritten);
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.pop_transient_statement_scope();
+                    let rust_name = pat_ident.ident.to_string();
+                    self.register_local_binding(rust_name.clone(), Some(tail_ty));
+                    self.record_local_const_binding(&rust_name, false);
+                    self.record_local_reference_binding(&rust_name, pointer_storage.is_some());
+                    if pointer_storage.is_some() {
+                        self.record_rebind_reference_pointer_binding(&rust_name);
+                    }
+                    self.local_cpp_bindings.last_mut().unwrap().insert(rust_name, cpp_name);
                     return;
                 }
             }
@@ -791,61 +841,14 @@ impl CodeGen {
         Some(format!(" -> std::tuple<{}>", slots?.join(", ")))
     }
 
-    /// The type of a let-block's tail using only the BLOCK's own lets:
-    /// `let total = { let mut seq = SeqAccess(…); …?; seq.len }` — outer
-    /// inference can't see `seq`, but the block's own `let` initializer
-    /// types it and the struct-field table gives `.len`.
+    /// Resolve the tail in the initializer's lexical scope, after its prefix
+    /// declarations. An outer namesake cannot determine an inner shadow's type.
     fn infer_let_block_tail_type(
         &self,
         block: &syn::Block,
-        tail: &syn::Expr,
+        _tail: &syn::Expr,
     ) -> Option<syn::Type> {
-        if let Some(ty) = self
-            .infer_simple_expr_type(tail)
-            .or_else(|| self.infer_local_binding_type_from_initializer(tail))
-        {
-            return Some(ty);
-        }
-        let mut env: HashMap<String, syn::Type> = HashMap::new();
-        for stmt in &block.stmts {
-            let syn::Stmt::Local(local) = stmt else { continue };
-            let syn::Pat::Ident(pi) = &local.pat else { continue };
-            let Some(init) = &local.init else { continue };
-            if let Some(ty) = self
-                .infer_simple_expr_type(&init.expr)
-                .or_else(|| self.infer_local_binding_type_from_initializer(&init.expr))
-            {
-                env.insert(pi.ident.to_string(), ty);
-            }
-        }
-        match self.peel_paren_group_expr(tail) {
-            syn::Expr::Path(p) if p.path.segments.len() == 1 => {
-                env.get(&p.path.segments[0].ident.to_string()).cloned()
-            }
-            syn::Expr::Field(f) => {
-                let syn::Expr::Path(base) = self.peel_paren_group_expr(&f.base) else {
-                    return None;
-                };
-                if base.path.segments.len() != 1 {
-                    return None;
-                }
-                let base_ty = env.get(&base.path.segments[0].ident.to_string())?;
-                let peeled = self.peel_reference_paren_group_type(base_ty);
-                let syn::Type::Path(tp) = peeled else { return None };
-                let owner = tp.path.segments.last()?.ident.to_string();
-                let syn::Member::Named(field) = &f.member else { return None };
-                let fields = self.struct_field_types.get(&owner).or_else(|| {
-                    // Module-scoped keys (`de::SeqAccess`).
-                    let suffix = format!("::{}", owner);
-                    self.struct_field_types
-                        .iter()
-                        .find(|(key, _)| key.ends_with(&suffix))
-                        .map(|(_, fields)| fields)
-                })?;
-                fields.get(&field.to_string()).cloned()
-            }
-            _ => None,
-        }
+        self.infer_lexical_block_tail_type(block)
     }
 
     /// Names bound by `let` statements anywhere inside an arm body —
@@ -2357,7 +2360,7 @@ impl CodeGen {
             _ => return false,
         };
 
-        let (callback_option_ty, init_decl, init_name, init_expr, slot_expr, mutable_slot) =
+        let (callback_option_ty, init_decl, init_name, init_expr, slot_expr, mutable_slot, borrowed_slot) =
             match self.peel_paren_group_expr(&let_expr.expr) {
                 syn::Expr::Reference(reference) => {
                     let inferred = self
@@ -2366,7 +2369,7 @@ impl CodeGen {
                             self.infer_local_binding_type_from_initializer(&reference.expr)
                         });
                     let Some(inferred) = inferred.filter(|ty| {
-                        self.try_map_transparent_nullable_callback_type(ty).is_some()
+                        self.try_map_transparent_nullable_owner_type(ty).is_some()
                     }) else {
                         return false;
                     };
@@ -2378,6 +2381,7 @@ impl CodeGen {
                         self.emit_expr_to_string(&reference.expr),
                         "_iflet_callback_slot".to_string(),
                         mutable,
+                        true,
                     )
                 }
                 syn::Expr::MethodCall(method)
@@ -2389,7 +2393,11 @@ impl CodeGen {
                             self.infer_local_binding_type_from_initializer(&method.receiver)
                         });
                     let Some(option_ty) = receiver_ty.as_ref().and_then(|ty| {
-                        self.transparent_nullable_callback_in_refmut(ty)
+                        self.transparent_nullable_callback_in_refmut(ty).or_else(|| {
+                            self.transparent_nullable_owner_receiver(ty)
+                                .filter(|(_, guard)| *guard)
+                                .map(|(option, _)| option)
+                        })
                     }) else {
                         return false;
                     };
@@ -2400,6 +2408,7 @@ impl CodeGen {
                         self.emit_expr_to_string(&method.receiver),
                         "rusty::detail::deref_if_pointer_like(_iflet_callback_guard)".to_string(),
                         true,
+                        true,
                     )
                 }
                 other => {
@@ -2407,29 +2416,41 @@ impl CodeGen {
                         .infer_simple_expr_type(other)
                         .or_else(|| self.infer_local_binding_type_from_initializer(other));
                     let Some(inferred) = inferred.filter(|ty| {
-                        self.try_map_transparent_nullable_callback_type(ty).is_some()
+                        self.try_map_transparent_nullable_owner_type(ty).is_some()
                     }) else {
                         return false;
                     };
-                    // A by-value scrutinee consumes its expression (Rust moves
-                    // the whole Option into the pattern), so materialize it in
-                    // the slot local. A non-place expression (`slot.take()`)
-                    // is already a prvalue; a place expression must be moved
-                    // explicitly or the move-only carrier would be copied —
-                    // sound because Rust proved the place dead afterwards.
-                    let raw_init = self.emit_expr_to_string(other);
-                    let by_value_init = if Self::struct_update_base_is_place_expr(other) {
-                        format!("std::move({})", raw_init)
-                    } else {
-                        raw_init
+                    // Match ergonomics borrow a reference-typed scrutinee;
+                    // spelling the borrow in a parameter rather than in this
+                    // expression must not move its owner or clone an Arc.
+                    // `ref`, `_`, and None patterns likewise do not consume
+                    // the matched payload from a value-typed place.
+                    let reference_mutability = match self.peel_paren_group_type(&inferred) {
+                        syn::Type::Reference(reference) => Some(reference.mutability.is_some()),
+                        _ => None,
                     };
+                    let pattern_ref_mutability = match binding_pat {
+                        Some(syn::Pat::Ident(ident)) if ident.by_ref.is_some() => Some(ident.mutability.is_some()),
+                        _ => None,
+                    };
+                    let pattern_does_not_bind_payload = !expect_some
+                        || matches!(binding_pat, Some(syn::Pat::Wild(_)));
+                    let borrowed = reference_mutability.is_some()
+                        || pattern_ref_mutability.is_some() || pattern_does_not_bind_payload;
+                    let mutable = reference_mutability
+                        .or(pattern_ref_mutability).unwrap_or(true);
+                    let raw_init = self.emit_expr_to_string(other);
+                    let init = if !borrowed && Self::struct_update_base_is_place_expr(other) {
+                        format!("std::move({})", raw_init)
+                    } else { raw_init };
                     (
                         inferred,
-                        "auto",
+                        if borrowed { if mutable { "auto&&" } else { "const auto&" } } else { "auto" },
                         "_iflet_callback_slot",
-                        by_value_init,
+                        init,
                         "_iflet_callback_slot".to_string(),
-                        true,
+                        mutable,
+                        borrowed,
                     )
                 }
             };
@@ -2460,15 +2481,24 @@ impl CodeGen {
                 syn::Pat::Wild(_) => {}
                 syn::Pat::Ident(ident) if ident.subpat.is_none() => {
                     let rust_name = ident.ident.to_string();
-                    let cpp_name = self
+                    let mut cpp_name = self
                         .lookup_local_binding_cpp_name(&rust_name)
                         .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                    if self.is_delayed_init_local(&cpp_name) {
+                        cpp_name = self.reserve_synthetic_cpp_name(&format!("{}_iflet", cpp_name));
+                    }
                     let binding_decl = if mutable_slot { "auto&" } else { "const auto&" };
                     self.writeln(&format!(
                         "{} {} = {};",
                         binding_decl, cpp_name, slot_expr
                     ));
-                    binding_type = self.transparent_nullable_callback_box_type(&callback_option_ty);
+                    binding_type = self.transparent_nullable_owner_type(&callback_option_ty)
+                        .map(|owner| {
+                            if borrowed_slot {
+                                if mutable_slot { syn::parse_quote!(&mut #owner) }
+                                else { syn::parse_quote!(&#owner) }
+                            } else { owner }
+                        });
                     binding_map.insert(rust_name, cpp_name);
                 }
                 _ => {
@@ -2488,11 +2518,14 @@ impl CodeGen {
                 local_types.insert(rust_name.clone(), binding_type.clone());
                 local_consts.insert(rust_name.clone(), false);
             }
+            let reference_bindings = if borrowed_slot {
+                binding_map.keys().cloned().collect()
+            } else { HashSet::new() };
             self.local_cpp_bindings.push(binding_map);
             self.local_bindings.push(local_types);
             self.local_shadowed_binding_types.push(HashMap::new());
             self.local_const_bindings.push(local_consts);
-            self.local_reference_bindings.push(HashSet::new());
+            self.local_reference_bindings.push(reference_bindings);
             self.rebind_reference_pointer_bindings.push(HashSet::new());
             self.emit_block(then_branch);
             self.rebind_reference_pointer_bindings.pop();
@@ -2515,6 +2548,7 @@ impl CodeGen {
         else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
         first: bool,
     ) {
+        if self.try_emit_standard_poll_if_let(let_expr, then_branch, else_branch, first) { return; }
         if self.try_emit_transparent_nullable_callback_if_let(
             let_expr,
             then_branch,
@@ -2844,12 +2878,10 @@ impl CodeGen {
         })
     }
 
-    /// For `if let Some(name) = SCRUTINEE` where SCRUTINEE is `Option<fn ptr>` /
-    /// `Result<fn ptr, _>`, the fn-pointer payload type — so the bound `name` is
-    /// typed and a later `name(args)` call can detect an `unsafe fn` and lower it
-    /// to `.call_unsafe(args)`. Returns None for non-fn-pointer payloads (which
-    /// stay untyped, preserving prior behavior).
-    fn if_let_some_binding_fn_pointer_type(
+    /// Preserve pointer payload types in a simple Some/Ok binding. Function
+    /// pointers need their call convention, and owning pointers need Rust's
+    /// receiver autoderef when a method is called on the bound value.
+    fn if_let_some_binding_pointer_type(
         &self,
         binding_pat: Option<&syn::Pat>,
         scrutinee_expr: &syn::Expr,
@@ -2865,10 +2897,10 @@ impl CodeGen {
         }
         let scrutinee_ty = self.infer_simple_expr_type(scrutinee_expr)?;
         let payload = self.option_or_result_ok_payload_type(&scrutinee_ty)?;
-        matches!(
+        (matches!(
             self.peel_reference_paren_group_type(&payload),
             syn::Type::BareFn(_)
-        )
+        ) || self.type_is_pointer_like_owner_type(&payload))
         .then_some(payload)
     }
 
@@ -2995,9 +3027,15 @@ impl CodeGen {
             };
 
             if let Some(rust_name) = simple_ident {
-                let cpp_name = self
+                let mut cpp_name = self
                     .lookup_local_binding_cpp_name(&rust_name)
                     .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                if self.is_delayed_init_local(&cpp_name) {
+                    // The payload is a new Rust binding, not the outer
+                    // optional storage. Give it a distinct C++ identity so
+                    // neither its initializer nor body inherits .value().
+                    cpp_name = self.reserve_synthetic_cpp_name(&format!("{}_iflet", cpp_name));
+                }
                 binding_map.insert(rust_name, cpp_name.clone());
                 if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
                     self.writeln(&format!("auto&& _iflet_take = {};", scrutinee));
@@ -3108,12 +3146,10 @@ impl CodeGen {
             let mut local_types = HashMap::new();
             let mut local_consts = HashMap::new();
             for rust_name in binding_map.keys() {
-                // Register the Some/Ok payload type for fn-pointer if-let bindings
-                // (rare) so a later `binding(args)` call can detect an `unsafe fn`
-                // (→ rusty::UnsafeFn) and lower it to `.call_unsafe(args)`. Other
-                // bindings stay untyped, exactly as before.
+                // Calls through function and owning pointers require the
+                // payload type after the pattern has unpacked the option.
                 let ty =
-                    self.if_let_some_binding_fn_pointer_type(binding_pat, scrutinee_expr, rust_name);
+                    self.if_let_some_binding_pointer_type(binding_pat, scrutinee_expr, rust_name);
                 local_types.insert(rust_name.clone(), ty);
                 local_consts.insert(rust_name.clone(), false);
             }
@@ -4280,8 +4316,21 @@ impl CodeGen {
                         _ => false,
                     }
                 });
+                let init_is_nullable_callback_borrow = local.init.as_ref().is_some_and(|init| {
+                    let expression = peel_to_tail_expr(&init.expr)
+                        .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr));
+                    let syn::Expr::MethodCall(method) = expression else { return false; };
+                    matches!(method.method.to_string().as_str(), "as_ref" | "as_mut")
+                        && method.args.is_empty()
+                        && self.infer_simple_expr_type(&method.receiver)
+                            .or_else(|| self.infer_local_binding_type_from_initializer(&method.receiver))
+                            .as_ref()
+                            .and_then(|ty| self.transparent_nullable_owner_receiver(ty))
+                            .is_some()
+                });
                 let init_returns_reference_binding = (init_returns_reference
                     || init_returns_reference_by_shape)
+                    && !init_is_nullable_callback_borrow
                     && !local.init.as_ref().is_some_and(|init| {
                         !self.is_ref_init(&init.expr)
                             && self.is_rvalue_expr(&init.expr)
@@ -4357,48 +4406,11 @@ impl CodeGen {
                 // binding is ill-formed. TYPE-GATED via
                 // impl_method_receiver_kinds (kind 2/3 = by-value self) —
                 // name-only marking regressed btree generics (#58).
-                let by_value_method_receiver = self
-                    .by_value_method_call_pairs
-                    .get(&name_str)
-                    .is_some_and(|methods| {
-                        // Type tail: from the inferred binding type, or —
-                        // tuple-struct ctor initializers (`let w = W(7);`)
-                        // infer to None — from the ctor path itself.
-                        let type_tail = inferred_binding_ty
-                            .as_ref()
-                            .and_then(|ty| match self.peel_reference_paren_group_type(ty) {
-                                syn::Type::Path(tp) => tp
-                                    .path
-                                    .segments
-                                    .last()
-                                    .map(|seg| seg.ident.to_string()),
-                                _ => None,
-                            })
-                            .or_else(|| {
-                                let init = local.init.as_ref()?;
-                                let syn::Expr::Call(call) =
-                                    self.peel_paren_group_expr(&init.expr)
-                                else {
-                                    return None;
-                                };
-                                let syn::Expr::Path(fp) = call.func.as_ref() else {
-                                    return None;
-                                };
-                                let tail = fp.path.segments.last()?.ident.to_string();
-                                self.tuple_struct_arities
-                                    .contains_key(&tail)
-                                    .then_some(tail)
-                            });
-                        type_tail.is_some_and(|tail| {
-                            self.impl_method_receiver_kinds.get(&tail).is_some_and(
-                                |kinds| {
-                                    methods.iter().any(|m| {
-                                        kinds.get(m).is_some_and(|kind| matches!(kind, 2 | 3))
-                                    })
-                                },
-                            )
-                        })
-                    });
+                let by_value_method_receiver = self.local_has_declared_consuming_receiver(
+                    &name_str,
+                    inferred_binding_ty.as_ref(),
+                    local.init.as_ref().map(|init| init.expr.as_ref()),
+                );
                 // Soft-consuming combinators (unwrap_or/flatten/transpose/
                 // …) take self by value: a SINGLE-USE local must be
                 // non-const so the emitted move fires (a const binding
@@ -4420,6 +4432,12 @@ impl CodeGen {
                     || soft_consumed_single_use
                     || for_consumed_iterable
                     || by_value_method_receiver
+                    // A profiled owner must remain movable even when an
+                    // imported callable's argument signature is unavailable.
+                    || inferred_binding_ty.as_ref().is_some_and(|ty| {
+                        !matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
+                            && self.explicit_nullable_owner_type(ty).is_some()
+                    })
                     || init_is_move_closure
                     || init_is_ptr_read
                     || local.init.as_ref().is_some_and(|init| {
@@ -5851,25 +5869,17 @@ impl CodeGen {
                             methods.iter().any(|m| is_soft_consuming_method_name(m))
                         })
                         && !self.multi_use_vars.contains(&name_str);
-                    let by_value_method_receiver = self
-                        .by_value_method_call_pairs
-                        .get(&name_str)
-                        .is_some_and(|methods| {
-                            matches!(
-                                self.peel_reference_paren_group_type(&resolved_ty),
-                                syn::Type::Path(tp) if tp.path.segments.last().is_some_and(|seg| {
-                                    self.impl_method_receiver_kinds
-                                        .get(&seg.ident.to_string())
-                                        .is_some_and(|kinds| methods.iter().any(|m| {
-                                            kinds.get(m).is_some_and(|kind| matches!(kind, 2 | 3))
-                                        }))
-                                })
-                            )
-                        });
+                    let by_value_method_receiver = self.local_has_declared_consuming_receiver(
+                        &name_str,
+                        Some(&resolved_ty),
+                        None,
+                    );
                     let qualifier = if is_mut
                         || is_consumed
                         || soft_consumed_single_use
                         || by_value_method_receiver
+                        || (!matches!(self.peel_paren_group_type(&resolved_ty), syn::Type::Reference(_))
+                            && self.explicit_nullable_owner_type(&resolved_ty).is_some())
                         || self.mutable_pointer_aliased_vars.contains(&name_str)
                         || resolved_mut_reference_binding
                         || ty.trim_start().starts_with("const ")

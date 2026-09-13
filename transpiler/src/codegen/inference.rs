@@ -3951,6 +3951,7 @@ impl CodeGen {
                                 RuntimeMatchEnumKind::Option => "Option",
                                 RuntimeMatchEnumKind::Result => "Result",
                                 RuntimeMatchEnumKind::Entry => "Entry",
+                            RuntimeMatchEnumKind::Poll => "std::task::Poll",
                             };
                             return Some(VariantTypeContext {
                                 enum_name: enum_name.to_string(),
@@ -4045,6 +4046,7 @@ impl CodeGen {
                                 RuntimeMatchEnumKind::Option => "Option",
                                 RuntimeMatchEnumKind::Result => "Result",
                                 RuntimeMatchEnumKind::Entry => "Entry",
+                            RuntimeMatchEnumKind::Poll => "std::task::Poll",
                             };
                             return Some(VariantTypeContext {
                                 enum_name: enum_name.to_string(),
@@ -4092,6 +4094,7 @@ impl CodeGen {
                             RuntimeMatchEnumKind::Option => "Option",
                             RuntimeMatchEnumKind::Result => "Result",
                             RuntimeMatchEnumKind::Entry => "Entry",
+                            RuntimeMatchEnumKind::Poll => "std::task::Poll",
                         };
                         return Some(VariantTypeContext {
                             enum_name: enum_name.to_string(),
@@ -5138,11 +5141,22 @@ impl CodeGen {
             && segs[segs.len() - 1] == "new"
             && matches!(
                 segs[segs.len() - 2].as_str(),
-                "Box" | "Rc" | "Arc" | "RefCell" | "Cell"
+                "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Mutex" | "RwLock"
             )
             && call.args.len() == 1
         {
             let owner = segs[segs.len() - 2].clone();
+            if matches!(owner.as_str(), "Mutex" | "RwLock") {
+                let mut owner_path = p.path.clone();
+                owner_path.segments.pop();
+                let mapped = self.map_type(&syn::Type::Path(syn::TypePath {
+                    qself: None,
+                    path: owner_path,
+                }));
+                if !matches!(mapped.split('<').next(), Some("rusty::Mutex" | "rusty::RwLock")) {
+                    return None;
+                }
+            }
             let inner = self
                 .infer_simple_expr_type(&call.args[0])
                 .or_else(|| self.infer_local_binding_type_from_initializer(&call.args[0]))?;
@@ -5424,6 +5438,9 @@ impl CodeGen {
                 }))
             }
             syn::Expr::Call(call) => {
+                if let Some(ty) = self.infer_standard_future_call(call) {
+                    return Some(ty);
+                }
                 if let Some(ptr_ty) = self.infer_pointer_type_from_call_expr(call) {
                     return Some(ptr_ty);
                 }
@@ -5501,6 +5518,24 @@ impl CodeGen {
                         if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
                             return Some(arg_ty);
                         }
+                    }
+                    // A deferred assignment from mem::take owns the pointee
+                    // type. Preserve it before generic call fallback so the
+                    // declaration remains outside the assignment's scope.
+                    if call.args.len() == 1
+                        && matches!(joined.as_str(), "std::mem::take" | "core::mem::take")
+                        && (path_expr.path.leading_colon.is_some()
+                            || self.resolve_scope_import_binding_path(
+                                &path_expr.path.segments[0].ident.to_string(),
+                            ).is_none_or(|binding| {
+                                binding.trim_start_matches("::")
+                                    == path_expr.path.segments[0].ident.to_string()
+                            }))
+                        && !self.standard_path_root_is_local_module(&path_expr.path)
+                        && let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0])
+                        && let syn::Type::Reference(reference) = self.peel_paren_group_type(&arg_ty)
+                    {
+                        return Some((*reference.elem).clone());
                     }
                     if matches!(
                         joined.as_str(),
@@ -6410,6 +6445,40 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
     ) -> Option<syn::Type> {
         let method = mc.method.to_string();
+        if let Some(ty) = self.infer_standard_future_method(mc) {
+            return Some(ty);
+        }
+        if matches!(method.as_str(), "as_ref" | "as_mut" | "unwrap" | "take" | "clone" | "replace")
+            && let Some(receiver) = self.infer_simple_expr_type(&mc.receiver)
+            && let Some((option, _)) = self.transparent_nullable_owner_receiver(&receiver)
+            && let Some(owner) = self.transparent_nullable_owner_type(&option)
+        {
+            match method.as_str() {
+                "as_ref" if mc.args.is_empty() => return Some(parse_quote!(Option<&#owner>)),
+                "as_mut" if mc.args.is_empty() => return Some(parse_quote!(Option<&mut #owner>)),
+                "unwrap" if mc.args.is_empty() => return Some(owner),
+                "take" | "clone" if mc.args.is_empty() => return Some(option),
+                "replace" if mc.args.len() == 1 => return Some(option),
+                _ => {}
+            }
+        }
+        // RefCell::replace returns its stored Option by value. Keep the
+        // source type so an inferred local still uses nullable-callback
+        // operations after the Option has become a C++ Function.
+        if method == "replace" && mc.args.len() == 1
+            && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+            && let Some(callback_ty) = self.transparent_nullable_callback_in_refcell(&receiver_ty)
+        {
+            return Some(callback_ty);
+        }
+        if method == "upgrade" && mc.args.is_empty()
+            && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+            && let Some(upgraded) = self.infer_weak_upgrade_result_type(&receiver_ty)
+        {
+            return Some(upgraded);
+        }
         if let Some(receiver_ty) = self
             .infer_simple_expr_type(&mc.receiver)
             .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
@@ -6528,8 +6597,31 @@ impl CodeGen {
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
             {
-                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-                if let syn::Type::Path(tp) = receiver_ty
+                let mut receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                // Standard Arc/Rc transparently dereference to their lock.
+                // Preserve that result type so both unwrap and subsequent
+                // guard method calls can use the protected payload type.
+                for _ in 0..8 {
+                    if let Some(resolved) = self.resolve_type_alias_once(&receiver_ty)
+                        && resolved != receiver_ty
+                    {
+                        receiver_ty = resolved;
+                        continue;
+                    }
+                    let mapped = self.map_type(&receiver_ty);
+                    if !matches!(mapped.split('<').next(), Some("rusty::Arc" | "rusty::Rc" | "rusty::rc::Rc")) {
+                        break;
+                    }
+                    let syn::Type::Path(tp) = &receiver_ty else { break; };
+                    let Some(last) = tp.path.segments.last() else { break; };
+                    let syn::PathArguments::AngleBracketed(args) = &last.arguments else { break; };
+                    let Some(inner) = args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                        _ => None,
+                    }) else { break; };
+                    receiver_ty = self.peel_reference_paren_group_type(&inner).clone();
+                }
+                if let syn::Type::Path(tp) = &receiver_ty
                     && let Some(last) = tp.path.segments.last()
                     && let syn::PathArguments::AngleBracketed(args) = &last.arguments
                     && let Some(inner_ty) = args.args.iter().find_map(|arg| match arg {
@@ -6576,10 +6668,15 @@ impl CodeGen {
             }
         }
 
-        if method == "take" && mc.args.is_empty() {
+        if (method == "take" && mc.args.is_empty())
+            || (method == "replace" && mc.args.len() == 1)
+        {
             if let Some(receiver_ty) = self
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+                && (method == "take"
+                    || self.map_type(&self.peel_guard_wrapper_for_method_routing(&receiver_ty))
+                        .starts_with("rusty::Option<"))
                 && let Some((owner, type_args)) = self.option_or_result_type_args(&receiver_ty)
                 && owner == "Option"
                 && let Some(inner_ty) = type_args.first().cloned()
@@ -6599,6 +6696,32 @@ impl CodeGen {
                 {
                     return Some(parse_quote!(Option<#elem_ty>));
                 }
+            }
+        }
+
+        // VecDeque removals own an Option<T>, including through a lock or
+        // cell guard. Retain T so fields of an inferred `.unwrap()` local
+        // still use their declared types, such as nullable callback aliases.
+        if matches!(method.as_str(), "pop_front" | "pop_back") && mc.args.is_empty()
+            && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+        {
+            let mut receiver_ty = self.peel_guard_wrapper_for_method_routing(&receiver_ty).into_owned();
+            for _ in 0..16 {
+                let Some(resolved) = self.resolve_type_alias_once(&receiver_ty) else { break; };
+                if resolved == receiver_ty { break; }
+                receiver_ty = self.peel_guard_wrapper_for_method_routing(&resolved).into_owned();
+            }
+            if self.map_type(&receiver_ty).starts_with("rusty::VecDeque<")
+                && let syn::Type::Path(path) = &receiver_ty
+                && let Some(segment) = path.path.segments.last()
+                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(elem_ty) = args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(ty) => Some(ty),
+                    _ => None,
+                })
+            {
+                return Some(parse_quote!(Option<#elem_ty>));
             }
         }
 
@@ -6847,6 +6970,16 @@ impl CodeGen {
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
             {
                 let peeled = self.peel_reference_paren_group_type(&ty);
+                // Cloning a standard sum value behind a guard clones its
+                // payload owner, not the guard. Retain that complete type for
+                // a later unwrap and its receiver's auto-deref routing.
+                let protected = self.peel_guard_wrapper_for_method_routing(&ty);
+                let protected_cpp = self.map_type(&protected);
+                if protected_cpp.starts_with("rusty::Option<")
+                    || protected_cpp.starts_with("rusty::Result<")
+                {
+                    return Some(protected.into_owned());
+                }
                 if let syn::Type::Path(tp) = peeled
                     && tp.qself.is_none()
                     && tp.path.segments.len() == 1
@@ -7020,6 +7153,16 @@ impl CodeGen {
             }
         }
 
+        // A sibling method's result resolves in its declaring Rust module.
+        // Keep that proven owner through wrappers such as Some(method()), so
+        // branch and lambda inference can name the complete Option payload.
+        if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+            && let syn::Type::Path(owner) = self.peel_reference_paren_group_type(&receiver_ty)
+            && let Some(ret_ty) = self.flat_imported_method_owned_return_type(&owner.path, &method)
+        {
+            return Some(ret_ty);
+        }
+
         if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
             && let Some(ret_ty) =
                 self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, &method)
@@ -7045,6 +7188,35 @@ impl CodeGen {
         }
 
         None
+    }
+
+    fn infer_weak_upgrade_result_type(&self, receiver_ty: &syn::Type) -> Option<syn::Type> {
+        let mut receiver_ty = self.peel_reference_paren_group_type(receiver_ty).clone();
+        for _ in 0..8 {
+            let Some(next) = self.resolve_type_alias_once(&receiver_ty) else { break; };
+            if next == receiver_ty { break; }
+            receiver_ty = next;
+        }
+        let syn::Type::Path(path) = self.peel_reference_paren_group_type(&receiver_ty) else {
+            return None;
+        };
+        let syn::PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
+            return None;
+        };
+        let inner = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })?;
+        // Follow the same resolved runtime family as type emission. User
+        // methods named upgrade do not acquire smart-pointer return types.
+        let mapped = self.map_type(&receiver_ty);
+        match mapped.trim_start_matches("::").split('<').next()? {
+            "rusty::sync::Weak" => Some(parse_quote!(Option<std::sync::Arc<#inner>>)),
+            "rusty::rc::Weak" | "rusty::port::rc::Weak" => {
+                Some(parse_quote!(Option<std::rc::Rc<#inner>>))
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn infer_unwrap_like_method_return_type_from_receiver_type(
@@ -7809,7 +7981,9 @@ impl CodeGen {
             syn::Expr::Field(field) => {
                 let field_name = match &field.member {
                     syn::Member::Named(ident) => ident.to_string(),
-                    syn::Member::Unnamed(index) => index.index.to_string(),
+                    // Tuple-struct metadata uses emitted `_N` field names.
+                    // Plain tuple indexing is handled separately below.
+                    syn::Member::Unnamed(index) => format!("_{}", index.index),
                 };
                 let base_ty = self.infer_simple_expr_type(&field.base)?;
                 let mut struct_ty = self
@@ -8109,34 +8283,22 @@ impl CodeGen {
     }
 
     pub(super) fn resolve_tuple_type_from_type(&self, ty: &syn::Type) -> Option<syn::TypeTuple> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Tuple(tuple_ty) => Some(tuple_ty.clone()),
-            syn::Type::Path(tp) => {
-                let joined = tp
-                    .path
-                    .segments
-                    .iter()
-                    .map(|seg| seg.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                let elems = if let Some(elems) = self.tuple_type_alias_elem_types.get(&joined) {
-                    Some(elems.clone())
-                } else {
-                    let last = tp.path.segments.last()?.ident.to_string();
-                    self.tuple_type_alias_elem_types.get(&last).cloned()
-                }?;
-                let mut punctuated = syn::punctuated::Punctuated::new();
-                for elem in elems {
-                    punctuated.push(elem);
-                }
-                Some(syn::TypeTuple {
-                    paren_token: syn::token::Paren::default(),
-                    elems: punctuated,
-                })
+        let mut current = self.peel_reference_paren_group_type(ty).clone();
+        // Alias substitution also resolves generic tuple aliases. Bound the
+        // walk so malformed cyclic aliases cannot recurse indefinitely.
+        for _ in 0..16 {
+            if let syn::Type::Tuple(tuple) = self.peel_reference_paren_group_type(&current) {
+                return Some(tuple.clone());
             }
-            _ => None,
+            let Some(next) = self.resolve_type_alias_once(&current) else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = next;
         }
+        None
     }
 
     pub(super) fn infer_range_expr_type(&self, range: &syn::ExprRange) -> Option<syn::Type> {
@@ -9551,14 +9713,6 @@ impl CodeGen {
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
             return Some(resolved);
         };
-        let params = self
-            .declared_type_params
-            .get(&alias_key)
-            .or_else(|| self.declared_type_params.get(&alias_name))?;
-        let param_kinds = self
-            .declared_type_param_kinds
-            .get(&alias_key)
-            .or_else(|| self.declared_type_param_kinds.get(&alias_name));
         let provided_type_args: Vec<syn::Type> = args
             .args
             .iter()
@@ -9570,6 +9724,14 @@ impl CodeGen {
         if provided_type_args.is_empty() {
             return Some(resolved);
         }
+        let params = self
+            .declared_type_params
+            .get(&alias_key)
+            .or_else(|| self.declared_type_params.get(&alias_name))?;
+        let param_kinds = self
+            .declared_type_param_kinds
+            .get(&alias_key)
+            .or_else(|| self.declared_type_param_kinds.get(&alias_name));
         let mut substitutions = HashMap::new();
         let mut provided_iter = provided_type_args.into_iter();
         for (idx, param) in params.iter().enumerate() {
@@ -10361,6 +10523,13 @@ impl CodeGen {
                     }
                     "Box" | "NonNull" | "ConstNonNull" | "Ptr" | "MutPtr" | "Unique"
                     | "reference_wrapper" => first_type_arg(),
+                    "Ref" | "RefMut" | "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard"
+                        if matches!(self.map_type(ty).split('<').next(),
+                            Some("rusty::Ref" | "rusty::RefMut" | "rusty::MutexGuard"
+                                | "rusty::RwLockReadGuard" | "rusty::RwLockWriteGuard")) =>
+                    {
+                        first_type_arg()
+                    }
                     _ => None,
                 }
             }
@@ -10910,6 +11079,72 @@ impl CodeGen {
         Some(out)
     }
 
+    /// Resolve an imported alias only through its exact crate-preflight proof.
+    /// The sibling alias table deliberately contains only unique declarations;
+    /// a matching tail alone cannot authorize a consumer's local type.
+    pub(super) fn authorized_cross_file_type_alias(&self, ty: &syn::Type)
+        -> Option<&crate::cpp_abi::FlatImportTypeAuthorization>
+    {
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.leading_colon.is_some() {
+            return None;
+        }
+        let leaf = tp.path.segments.last()?;
+        if !matches!(leaf.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let leaf_name = leaf.ident.to_string();
+        let path: Vec<String> = tp.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+        let bare_target = (path.len() == 1).then(|| {
+            self.resolve_flat_import_type_authorization_for_exact_scope(
+                &self.module_stack.join("::"), &leaf_name,
+            )
+        }).flatten();
+        self.flat_import_type_authorizations.iter().find(|authorization| {
+            authorization.consumer_physical_module == self.current_physical_module
+                && authorization.consumer_lexical_module.0 == self.module_stack
+                && authorization.provider_kind == crate::cpp_abi::FlatImportTypeProviderKind::TypeAlias
+                && authorization.leaf == leaf_name
+                && match authorization.reference_kind {
+                    crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse => {
+                        path.len() == 1 && bare_target.as_deref() == Some(
+                            format!("::{}::{}", authorization.cpp_namespace, authorization.leaf).as_str(),
+                        )
+                    }
+                    crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath => {
+                        path.len() == 3 && path[0] == "crate"
+                            && authorization.provider_physical_module.0 == [path[1].clone()]
+                    }
+                }
+        })
+    }
+
+    pub(super) fn resolve_authorized_cross_file_type_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let authorization = self.authorized_cross_file_type_alias(ty)?;
+        let alias = self.cross_file_auto_trait_aliases.get(&authorization.leaf)?;
+        if !alias.generics.params.is_empty() || alias.generics.where_clause.is_some() {
+            return None;
+        }
+        Some((*alias.ty).clone())
+    }
+
+    pub(super) fn resolve_authorized_cross_file_nullable_owner_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        // Keep the same exact binding and unique declaration checks as
+        // ordinary imported alias inference, but never interpret its raw RHS
+        // in the consumer's scope for representation-changing profiles.
+        self.resolve_authorized_cross_file_type_alias(ty)?;
+        let proof = self.authorized_cross_file_type_alias(ty)?;
+        syn::parse_str(proof.nullable_owner_alias_source.as_deref()?).ok()
+    }
+
+    pub(super) fn resolve_authorized_cross_file_nullable_callback_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        self.resolve_authorized_cross_file_type_alias(ty)?;
+        let proof = self.authorized_cross_file_type_alias(ty)?;
+        syn::parse_str(proof.nullable_callback_alias_source.as_deref()?).ok()
+    }
+
     pub(super) fn infer_owner_first_type_arg_from_expr(
         &self,
         owner_name: &str,
@@ -10918,7 +11153,25 @@ impl CodeGen {
         let arg_ty = self
             .infer_hint_type_from_expr(expr)
             .or_else(|| self.infer_simple_expr_type(expr))?;
+        let mut arg_ty = self.peel_reference_paren_group_type(&arg_ty).clone();
+        for _ in 0..8 {
+            let Some(resolved) = self.resolve_type_alias_once(&arg_ty)
+                .or_else(|| self.resolve_authorized_cross_file_type_alias(&arg_ty))
+            else { break; };
+            if resolved == arg_ty { break; }
+            arg_ty = resolved;
+        }
         let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+        // An imported transparent alias may have only a C++ type-map entry
+        // in this module. Recover its wrapper argument from that complete
+        // spelling as well, and keep smart-pointer dyn-trait mapping intact.
+        let mapped = self.map_type(arg_ty);
+        if mapped.split('<').next()?.rsplit("::").next()? == owner_name
+            && let Some(args) = Self::cpp_type_template_args(&mapped)
+            && let Some(first) = args.first()
+        {
+            return Some(first.clone());
+        }
         let syn::Type::Path(tp) = arg_ty else {
             return None;
         };
@@ -11732,6 +11985,7 @@ impl CodeGen {
                     && matches!(
                         method_name,
                         "clone"
+                            | "as_ptr"
                             | "ptr_eq"
                             | "strong_count"
                             | "weak_count"

@@ -3149,6 +3149,12 @@ impl CodeGen {
                         &self.declared_item_names,
                         &self.local_declared_types,
                     );
+                    if tp.path.segments.iter().all(|segment|
+                        matches!(segment.arguments, syn::PathArguments::None))
+                        && let Some(marker) = self.concrete_positive_auto_trait_impl(impl_block, module_path)
+                    {
+                        self.concrete_positive_auto_trait_types.insert((type_name.clone(), marker.into()));
+                    }
 
                     let trait_path = impl_block.trait_.as_ref().map(|(_, path, _)| path);
                     let trait_name = trait_path
@@ -7085,41 +7091,6 @@ impl CodeGen {
                             _ => None,
                         })
                         .collect();
-                    let foreign_adapter_partial_spec_compatible = impl_block
-                        .generics
-                        .params
-                        .iter()
-                        .all(|param| match param {
-                            syn::GenericParam::Lifetime(_) => true,
-                            syn::GenericParam::Type(type_param) => {
-                                type_param.attrs.is_empty()
-                                    // `Default` is the one erased Rust bound
-                                    // needed by SRPC's legacy container
-                                    // deserializers.  Their historical C++
-                                    // templates were likewise structurally
-                                    // available for every element spelling and
-                                    // failed only when a body requiring default
-                                    // construction was instantiated.  Preserve
-                                    // that surface while keeping every other
-                                    // trait/lifetime bound fail-closed.
-                                    && type_param.bounds.iter().all(|bound| {
-                                        matches!(bound, syn::TypeParamBound::Trait(trait_bound)
-                                            if self.is_authenticated_std_default_bound(
-                                                trait_bound,
-                                                module_path,
-                                            ))
-                                    })
-                                    && type_param.default.is_none()
-                            }
-                            syn::GenericParam::Const(_) => false,
-                        })
-                        && (impl_generic_names.is_empty()
-                            || impl_block.generics.where_clause.is_none());
-                    let foreign_adapter_has_non_lifetime_generics = impl_block
-                        .generics
-                        .params
-                        .iter()
-                        .any(|param| !matches!(param, syn::GenericParam::Lifetime(_)));
                     let entry = self
                         .extension_trait_impl_methods
                         .entry(trait_scoped_key)
@@ -7170,8 +7141,7 @@ impl CodeGen {
                             callable_param_metadata,
                             associated_type_bindings: associated_type_bindings.clone(),
                             impl_generic_names: impl_generic_names.clone(),
-                            foreign_adapter_partial_spec_compatible,
-                            foreign_adapter_has_non_lifetime_generics,
+                            foreign_adapter_generics: Some((impl_block.generics.clone(), module_path.to_vec())),
                             self_is_template_param: false,
                             extra_template_requires: None,
                         });
@@ -11067,6 +11037,99 @@ impl CodeGen {
         result
     }
 
+    /// Const qualification needs the receiver's declared ownership, including
+    /// values inferred from a sibling method's return type. Keep this separate
+    /// from the name-based consumption set, which also changes move emission.
+    pub(super) fn local_has_declared_consuming_receiver(
+        &self,
+        name: &str,
+        inferred_type: Option<&syn::Type>,
+        initializer: Option<&syn::Expr>,
+    ) -> bool {
+        let Some(methods) = self.by_value_method_call_pairs.get(name) else { return false; };
+        let consumes = |ty: &syn::Type| {
+            if methods.iter().any(|method| self.standard_future_method_consumes_receiver(ty, method)) {
+                return true;
+            }
+            let syn::Type::Path(owner) = self.peel_reference_paren_group_type(ty) else {
+                return false;
+            };
+            let Some(tail) = owner.path.segments.last() else { return false; };
+            methods.iter().any(|method| {
+                self.impl_method_receiver_kinds.get(&tail.ident.to_string())
+                    .and_then(|kinds| kinds.get(method))
+                    .is_some_and(|kind| matches!(kind, 2 | 3))
+                    || self.flat_imported_method_consumes_receiver(&owner.path, method)
+            })
+        };
+        if inferred_type.is_some_and(consumes) {
+            return true;
+        }
+        initializer.and_then(|expr| self.infer_consuming_receiver_initializer_type(expr))
+            .as_ref().is_some_and(consumes)
+    }
+
+    /// Infer a block tail after each prefix declaration has entered its Rust
+    /// scope. An initializer sees earlier declarations and its previous shadow;
+    /// the tail sees the final declarations, including explicitly typed lets.
+    pub(super) fn infer_lexical_block_tail_type(&self, block: &syn::Block) -> Option<syn::Type> {
+        let tail = self.extract_tail_expr_from_block(block)?;
+        let mut inner = self.new_inner_for_block();
+        inner.local_bindings.push(HashMap::new());
+        inner.local_shadowed_binding_types.push(HashMap::new());
+        for stmt in block.stmts.iter().take(block.stmts.len().saturating_sub(1)) {
+            if let syn::Stmt::Local(local) = stmt {
+                let (pattern, annotation) = match &local.pat {
+                    syn::Pat::Type(typed) => (typed.pat.as_ref(), Some((*typed.ty).clone())),
+                    pattern => (pattern, None),
+                };
+                let ty = annotation.or_else(|| local.init.as_ref()
+                    .and_then(|init| inner.infer_consuming_receiver_initializer_type(&init.expr)));
+                let mut names = HashSet::new();
+                inner.collect_closure_param_names_from_pat(pattern, &mut names);
+                // Even an unknown inner declaration hides an outer type.
+                for name in names {
+                    inner.register_local_binding(name, None);
+                }
+                if let Some(ty) = ty {
+                    let mut bindings = HashMap::new();
+                    inner.bind_pattern_types_into_env(pattern, &ty, &mut bindings);
+                    for (name, ty) in bindings {
+                        inner.register_local_binding(name, Some(ty));
+                    }
+                }
+            }
+        }
+        inner.infer_consuming_receiver_initializer_type(tail)
+    }
+
+    fn infer_consuming_receiver_initializer_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Block(block) => return self.infer_lexical_block_tail_type(&block.block),
+            syn::Expr::Unsafe(block) => return self.infer_lexical_block_tail_type(&block.block),
+            _ => {}
+        }
+        if let syn::Expr::MethodCall(call) = expr
+            && let Some(receiver) = self.infer_simple_expr_type(&call.receiver)
+            && let syn::Type::Path(owner) = self.peel_reference_paren_group_type(&receiver)
+            && let Some(return_type) = self.flat_imported_method_owned_return_type(
+                &owner.path, &call.method.to_string(),
+            )
+        {
+            return Some(return_type);
+        }
+        self.infer_local_binding_type_from_initializer(expr)
+            .or_else(|| self.infer_simple_expr_type(expr))
+            .or_else(|| {
+                let syn::Expr::Call(call) = expr else { return None; };
+                let syn::Expr::Path(path) = call.func.as_ref() else { return None; };
+                let tail = path.path.segments.last()?;
+                self.tuple_struct_arities.contains_key(&tail.ident.to_string())
+                    .then(|| syn::Type::Path(syn::TypePath { qself: None, path: path.path.clone() }))
+            })
+    }
+
     /// Bare single-segment locals iterated by a `for` loop (`for x in v`).
     /// Rust moves the iterable; the emit-side qualifier decision combines
     /// this NAME set with a crate-Iterator/IntoIterator TYPE gate so plain
@@ -13932,26 +13995,119 @@ impl CodeGen {
         }
     }
 
-    pub(super) fn collect_move_closure_capture_cpp_names(&self, closure: &syn::ExprClosure) -> Vec<String> {
-        let mut referenced_names = HashSet::new();
-        self.collect_path_local_names_for_move_capture(&closure.body, &mut referenced_names);
-
-        let mut param_names = HashSet::new();
-        for input in &closure.inputs {
-            self.collect_closure_param_names_from_pat(input, &mut param_names);
+    /// Names used from outside the closure, resolved at each expression's
+    /// lexical scope. A pattern binding shadows only its branch/body, and a
+    /// let initializer still sees the previous binding of the same name.
+    fn collect_closure_free_rust_names(&self, closure: &syn::ExprClosure) -> HashSet<String> {
+        use syn::visit::Visit;
+        struct FreeNames<'a> {
+            cg: &'a CodeGen,
+            scopes: Vec<HashSet<String>>,
+            free: HashSet<String>,
         }
+        impl FreeNames<'_> {
+            fn bind(&mut self, pattern: &syn::Pat) {
+                self.cg.collect_closure_param_names_from_pat(pattern, self.scopes.last_mut().unwrap());
+            }
+            fn push(&mut self) { self.scopes.push(HashSet::new()); }
+            fn pop(&mut self) { self.scopes.pop(); }
+        }
+        impl<'ast> Visit<'ast> for FreeNames<'_> {
+            fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                if path.qself.is_none() && path.path.leading_colon.is_none()
+                    && let Some(ident) = path.path.get_ident()
+                {
+                    let name = ident.to_string();
+                    if !self.scopes.iter().rev().any(|scope| scope.contains(&name)) {
+                        self.free.insert(name);
+                    }
+                }
+            }
+            fn visit_block(&mut self, block: &'ast syn::Block) {
+                self.push();
+                // Local items have block scope even before their declaration.
+                for statement in &block.stmts {
+                    let syn::Stmt::Item(item) = statement else { continue; };
+                    let ident = match item {
+                        syn::Item::Fn(item) => Some(&item.sig.ident),
+                        syn::Item::Const(item) => Some(&item.ident),
+                        syn::Item::Static(item) => Some(&item.ident),
+                        syn::Item::Struct(item) => Some(&item.ident),
+                        _ => None,
+                    };
+                    if let Some(ident) = ident { self.scopes.last_mut().unwrap().insert(ident.to_string()); }
+                }
+                for statement in &block.stmts { self.visit_stmt(statement); }
+                self.pop();
+            }
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if let Some(initializer) = &local.init {
+                    self.visit_expr(&initializer.expr);
+                    if let Some((_, diverge)) = &initializer.diverge { self.visit_expr(diverge); }
+                }
+                self.bind(&local.pat);
+            }
+            fn visit_expr_let(&mut self, expr: &'ast syn::ExprLet) {
+                self.visit_expr(&expr.expr);
+                self.bind(&expr.pat);
+            }
+            fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
+                self.push();
+                self.visit_expr(&expr.cond);
+                self.visit_block(&expr.then_branch);
+                self.pop();
+                if let Some((_, branch)) = &expr.else_branch { self.visit_expr(branch); }
+            }
+            fn visit_expr_while(&mut self, expr: &'ast syn::ExprWhile) {
+                self.push();
+                self.visit_expr(&expr.cond);
+                self.visit_block(&expr.body);
+                self.pop();
+            }
+            fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
+                self.visit_expr(&expr.expr);
+                self.push();
+                self.bind(&expr.pat);
+                self.visit_block(&expr.body);
+                self.pop();
+            }
+            fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+                self.visit_expr(&expr.expr);
+                for arm in &expr.arms {
+                    self.push();
+                    self.bind(&arm.pat);
+                    if let Some((_, guard)) = &arm.guard { self.visit_expr(guard); }
+                    self.visit_expr(&arm.body);
+                    self.pop();
+                }
+            }
+            fn visit_expr_closure(&mut self, expr: &'ast syn::ExprClosure) {
+                self.push();
+                for input in &expr.inputs { self.bind(input); }
+                self.visit_expr(&expr.body);
+                self.pop();
+            }
+            fn visit_item(&mut self, _: &'ast syn::Item) {
+                // A local function or const cannot capture its enclosing locals.
+            }
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                if let Ok(args) = mac.parse_body_with(
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                ) {
+                    for argument in &args { self.visit_expr(argument); }
+                }
+            }
+        }
+        let mut visitor = FreeNames { cg: self, scopes: Vec::new(), free: HashSet::new() };
+        visitor.visit_expr_closure(closure);
+        visitor.free
+    }
 
-        let mut local_binding_names = HashSet::new();
-        self.collect_local_binding_names_in_expr_for_move_capture(
-            &closure.body,
-            &mut local_binding_names,
-        );
+    pub(super) fn collect_move_closure_capture_cpp_names(&self, closure: &syn::ExprClosure) -> Vec<String> {
+        let referenced_names = self.collect_closure_free_rust_names(closure);
 
         let mut cpp_names = Vec::new();
         for rust_name in referenced_names {
-            if param_names.contains(&rust_name) || local_binding_names.contains(&rust_name) {
-                continue;
-            }
             if rust_name == "self"
                 && self.current_self_path_override().is_none()
                 && !self.self_receiver_ref_scopes.is_empty()
@@ -13989,344 +14145,9 @@ impl CodeGen {
         &self,
         closure: &syn::ExprClosure,
     ) -> HashSet<String> {
-        let mut referenced = HashSet::new();
-        self.collect_path_local_names_for_move_capture(&closure.body, &mut referenced);
-        let mut params = HashSet::new();
-        for input in &closure.inputs {
-            self.collect_closure_param_names_from_pat(input, &mut params);
-        }
-        let mut inner_lets = HashSet::new();
-        self.collect_local_binding_names_in_expr_for_move_capture(&closure.body, &mut inner_lets);
-        referenced.retain(|n| !params.contains(n) && !inner_lets.contains(n) && n != "self");
+        let mut referenced = self.collect_closure_free_rust_names(closure);
+        referenced.remove("self");
         referenced
-    }
-
-    pub(super) fn collect_path_local_names_for_move_capture(
-        &self,
-        expr: &syn::Expr,
-        out: &mut HashSet<String>,
-    ) {
-        let expr = self.peel_paren_group_expr(expr);
-        match expr {
-            syn::Expr::Path(path_expr) => {
-                if path_expr.path.segments.len() == 1 {
-                    out.insert(path_expr.path.segments[0].ident.to_string());
-                }
-            }
-            syn::Expr::Call(call) => {
-                self.collect_path_local_names_for_move_capture(&call.func, out);
-                for arg in &call.args {
-                    self.collect_path_local_names_for_move_capture(arg, out);
-                }
-            }
-            syn::Expr::MethodCall(method_call) => {
-                self.collect_path_local_names_for_move_capture(&method_call.receiver, out);
-                for arg in &method_call.args {
-                    self.collect_path_local_names_for_move_capture(arg, out);
-                }
-            }
-            syn::Expr::Binary(bin) => {
-                self.collect_path_local_names_for_move_capture(&bin.left, out);
-                self.collect_path_local_names_for_move_capture(&bin.right, out);
-            }
-            syn::Expr::Unary(unary) => {
-                self.collect_path_local_names_for_move_capture(&unary.expr, out);
-            }
-            syn::Expr::Reference(reference) => {
-                self.collect_path_local_names_for_move_capture(&reference.expr, out);
-            }
-            syn::Expr::Assign(assign) => {
-                self.collect_path_local_names_for_move_capture(&assign.left, out);
-                self.collect_path_local_names_for_move_capture(&assign.right, out);
-            }
-            syn::Expr::Let(let_expr) => {
-                self.collect_path_local_names_for_move_capture(&let_expr.expr, out);
-            }
-            syn::Expr::Field(field) => {
-                self.collect_path_local_names_for_move_capture(&field.base, out);
-            }
-            syn::Expr::Index(index) => {
-                self.collect_path_local_names_for_move_capture(&index.expr, out);
-                self.collect_path_local_names_for_move_capture(&index.index, out);
-            }
-            syn::Expr::Cast(cast_expr) => {
-                self.collect_path_local_names_for_move_capture(&cast_expr.expr, out);
-            }
-            syn::Expr::Try(try_expr) => {
-                self.collect_path_local_names_for_move_capture(&try_expr.expr, out);
-            }
-            syn::Expr::Await(await_expr) => {
-                self.collect_path_local_names_for_move_capture(&await_expr.base, out);
-            }
-            syn::Expr::Block(block) => {
-                for stmt in &block.block.stmts {
-                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::If(if_expr) => {
-                self.collect_path_local_names_for_move_capture(&if_expr.cond, out);
-                for stmt in &if_expr.then_branch.stmts {
-                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
-                }
-                if let Some((_, else_expr)) = &if_expr.else_branch {
-                    self.collect_path_local_names_for_move_capture(else_expr, out);
-                }
-            }
-            syn::Expr::Match(match_expr) => {
-                self.collect_path_local_names_for_move_capture(&match_expr.expr, out);
-                for arm in &match_expr.arms {
-                    if let Some((_, guard)) = &arm.guard {
-                        self.collect_path_local_names_for_move_capture(guard, out);
-                    }
-                    self.collect_path_local_names_for_move_capture(&arm.body, out);
-                }
-            }
-            syn::Expr::While(while_expr) => {
-                self.collect_path_local_names_for_move_capture(&while_expr.cond, out);
-                for stmt in &while_expr.body.stmts {
-                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::Loop(loop_expr) => {
-                for stmt in &loop_expr.body.stmts {
-                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::ForLoop(for_loop) => {
-                self.collect_path_local_names_for_move_capture(&for_loop.expr, out);
-                for stmt in &for_loop.body.stmts {
-                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::Tuple(tuple) => {
-                for elem in &tuple.elems {
-                    self.collect_path_local_names_for_move_capture(elem, out);
-                }
-            }
-            syn::Expr::Array(array) => {
-                for elem in &array.elems {
-                    self.collect_path_local_names_for_move_capture(elem, out);
-                }
-            }
-            syn::Expr::Struct(struct_expr) => {
-                for field in &struct_expr.fields {
-                    self.collect_path_local_names_for_move_capture(&field.expr, out);
-                }
-                if let Some(rest) = &struct_expr.rest {
-                    self.collect_path_local_names_for_move_capture(rest, out);
-                }
-            }
-            syn::Expr::Break(brk) => {
-                if let Some(value) = &brk.expr {
-                    self.collect_path_local_names_for_move_capture(value, out);
-                }
-            }
-            syn::Expr::Return(ret) => {
-                if let Some(value) = &ret.expr {
-                    self.collect_path_local_names_for_move_capture(value, out);
-                }
-            }
-            syn::Expr::Closure(closure) => {
-                self.collect_path_local_names_for_move_capture(&closure.body, out);
-            }
-            syn::Expr::Unsafe(unsafe_expr) => {
-                for stmt in &unsafe_expr.block.stmts {
-                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            // Macro args are opaque to the AST walk, but a `move ||
-            // println!("{}", s)` closure genuinely references `s` — without
-            // scanning the tokens the capture emitted `[=]` (copying a
-            // move-only String) instead of `[s = std::move(s)]`. Re-parse the
-            // comma-separated args as exprs and recurse.
-            syn::Expr::Macro(mac_expr) => {
-                use syn::punctuated::Punctuated;
-                if let Ok(args) = mac_expr.mac.parse_body_with(
-                    Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
-                ) {
-                    for arg in &args {
-                        self.collect_path_local_names_for_move_capture(arg, out);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn collect_path_local_names_in_stmt_for_move_capture(
-        &self,
-        stmt: &syn::Stmt,
-        out: &mut HashSet<String>,
-    ) {
-        match stmt {
-            syn::Stmt::Local(local) => {
-                if let Some(init) = &local.init {
-                    self.collect_path_local_names_for_move_capture(&init.expr, out);
-                }
-            }
-            syn::Stmt::Expr(expr, _) => self.collect_path_local_names_for_move_capture(expr, out),
-            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
-        }
-    }
-
-    pub(super) fn collect_local_binding_names_in_expr_for_move_capture(
-        &self,
-        expr: &syn::Expr,
-        out: &mut HashSet<String>,
-    ) {
-        let expr = self.peel_paren_group_expr(expr);
-        match expr {
-            syn::Expr::Let(let_expr) => {
-                self.collect_closure_param_names_from_pat(&let_expr.pat, out);
-                self.collect_local_binding_names_in_expr_for_move_capture(&let_expr.expr, out);
-            }
-            syn::Expr::Block(block) => {
-                for stmt in &block.block.stmts {
-                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::If(if_expr) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&if_expr.cond, out);
-                for stmt in &if_expr.then_branch.stmts {
-                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
-                }
-                if let Some((_, else_expr)) = &if_expr.else_branch {
-                    self.collect_local_binding_names_in_expr_for_move_capture(else_expr, out);
-                }
-            }
-            syn::Expr::Match(match_expr) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&match_expr.expr, out);
-                for arm in &match_expr.arms {
-                    self.collect_closure_param_names_from_pat(&arm.pat, out);
-                    if let Some((_, guard)) = &arm.guard {
-                        self.collect_local_binding_names_in_expr_for_move_capture(guard, out);
-                    }
-                    self.collect_local_binding_names_in_expr_for_move_capture(&arm.body, out);
-                }
-            }
-            syn::Expr::While(while_expr) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&while_expr.cond, out);
-                for stmt in &while_expr.body.stmts {
-                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::Loop(loop_expr) => {
-                for stmt in &loop_expr.body.stmts {
-                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::ForLoop(for_loop) => {
-                self.collect_closure_param_names_from_pat(&for_loop.pat, out);
-                self.collect_local_binding_names_in_expr_for_move_capture(&for_loop.expr, out);
-                for stmt in &for_loop.body.stmts {
-                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            syn::Expr::Closure(closure) => {
-                for input in &closure.inputs {
-                    self.collect_closure_param_names_from_pat(input, out);
-                }
-                self.collect_local_binding_names_in_expr_for_move_capture(&closure.body, out);
-            }
-            syn::Expr::Call(call) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&call.func, out);
-                for arg in &call.args {
-                    self.collect_local_binding_names_in_expr_for_move_capture(arg, out);
-                }
-            }
-            syn::Expr::MethodCall(method_call) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(
-                    &method_call.receiver,
-                    out,
-                );
-                for arg in &method_call.args {
-                    self.collect_local_binding_names_in_expr_for_move_capture(arg, out);
-                }
-            }
-            syn::Expr::Binary(bin) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&bin.left, out);
-                self.collect_local_binding_names_in_expr_for_move_capture(&bin.right, out);
-            }
-            syn::Expr::Unary(unary) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&unary.expr, out);
-            }
-            syn::Expr::Reference(reference) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&reference.expr, out);
-            }
-            syn::Expr::Assign(assign) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&assign.left, out);
-                self.collect_local_binding_names_in_expr_for_move_capture(&assign.right, out);
-            }
-            syn::Expr::Field(field) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&field.base, out);
-            }
-            syn::Expr::Index(index) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&index.expr, out);
-                self.collect_local_binding_names_in_expr_for_move_capture(&index.index, out);
-            }
-            syn::Expr::Cast(cast_expr) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&cast_expr.expr, out);
-            }
-            syn::Expr::Try(try_expr) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&try_expr.expr, out);
-            }
-            syn::Expr::Await(await_expr) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&await_expr.base, out);
-            }
-            syn::Expr::Tuple(tuple) => {
-                for elem in &tuple.elems {
-                    self.collect_local_binding_names_in_expr_for_move_capture(elem, out);
-                }
-            }
-            syn::Expr::Array(array) => {
-                for elem in &array.elems {
-                    self.collect_local_binding_names_in_expr_for_move_capture(elem, out);
-                }
-            }
-            syn::Expr::Struct(struct_expr) => {
-                for field in &struct_expr.fields {
-                    self.collect_local_binding_names_in_expr_for_move_capture(&field.expr, out);
-                }
-                if let Some(rest) = &struct_expr.rest {
-                    self.collect_local_binding_names_in_expr_for_move_capture(rest, out);
-                }
-            }
-            syn::Expr::Break(brk) => {
-                if let Some(value) = &brk.expr {
-                    self.collect_local_binding_names_in_expr_for_move_capture(value, out);
-                }
-            }
-            syn::Expr::Return(ret) => {
-                if let Some(value) = &ret.expr {
-                    self.collect_local_binding_names_in_expr_for_move_capture(value, out);
-                }
-            }
-            syn::Expr::Unsafe(unsafe_expr) => {
-                for stmt in &unsafe_expr.block.stmts {
-                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn collect_local_binding_names_in_stmt_for_move_capture(
-        &self,
-        stmt: &syn::Stmt,
-        out: &mut HashSet<String>,
-    ) {
-        match stmt {
-            syn::Stmt::Local(local) => {
-                self.collect_closure_param_names_from_pat(&local.pat, out);
-                if let Some(init) = &local.init {
-                    self.collect_local_binding_names_in_expr_for_move_capture(&init.expr, out);
-                }
-            }
-            syn::Stmt::Expr(expr, _) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(expr, out);
-            }
-            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
-        }
     }
 
     pub(super) fn collect_closure_param_names_for_scope(&self, closure: &syn::ExprClosure) -> HashSet<String> {
@@ -14373,6 +14194,7 @@ impl CodeGen {
                 if pi.ident != "_" {
                     out.insert(pi.ident.to_string());
                 }
+                if let Some((_, pattern)) = &pi.subpat { self.collect_closure_param_names_from_pat(pattern, out); }
             }
             syn::Pat::Type(pt) => self.collect_closure_param_names_from_pat(&pt.pat, out),
             syn::Pat::Reference(pr) => self.collect_closure_param_names_from_pat(&pr.pat, out),
@@ -14381,6 +14203,18 @@ impl CodeGen {
                 for elem in &tuple_pat.elems {
                     self.collect_closure_param_names_from_pat(elem, out);
                 }
+            }
+            syn::Pat::TupleStruct(pattern) => {
+                for element in &pattern.elems { self.collect_closure_param_names_from_pat(element, out); }
+            }
+            syn::Pat::Struct(pattern) => {
+                for field in &pattern.fields { self.collect_closure_param_names_from_pat(&field.pat, out); }
+            }
+            syn::Pat::Slice(pattern) => {
+                for element in &pattern.elems { self.collect_closure_param_names_from_pat(element, out); }
+            }
+            syn::Pat::Or(pattern) => {
+                if let Some(case) = pattern.cases.first() { self.collect_closure_param_names_from_pat(case, out); }
             }
             _ => {}
         }
@@ -14515,8 +14349,8 @@ impl CodeGen {
 
     /// Fn-bound ARG types per fn-generic (`F: FnOnce(&mut [Bucket<K, V>])`
     /// → F ↦ [&mut [Bucket<K, V>]]) — the invocation-side sibling of the
-    /// return map below. Conflicting bounds drop the entry. SLICE-carrying
-    /// signatures only (see fn_bound_inputs_mention_slice).
+    /// return map below. Conflicting bounds drop the entry. Call-site typing
+    /// selects the argument forms whose reference representation is known.
     pub(super) fn collect_callable_type_param_arg_map(
         generics: &syn::Generics,
     ) -> HashMap<String, Vec<syn::Type>> {
@@ -14540,7 +14374,6 @@ impl CodeGen {
             for bound in &tp.bounds {
                 if let Some((arg_tys, _)) =
                     Self::callable_bound_return_signature_from_type_param_bound(bound)
-                    && Self::fn_bound_inputs_mention_slice(bound)
                 {
                     record(tp.ident.to_string(), arg_tys);
                 }
@@ -14560,7 +14393,6 @@ impl CodeGen {
                 for bound in &type_pred.bounds {
                     if let Some((arg_tys, _)) =
                         Self::callable_bound_return_signature_from_type_param_bound(bound)
-                        && Self::fn_bound_inputs_mention_slice(bound)
                     {
                         record(type_path.path.segments[0].ident.to_string(), arg_tys);
                     }

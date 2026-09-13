@@ -11,6 +11,7 @@ mod codegen;
 mod cpp_abi;
 mod cpp_default_args;
 mod cpp_name;
+mod cpp_native_types;
 mod inline_rust;
 mod metadata;
 mod slots;
@@ -124,7 +125,7 @@ struct Cli {
     )]
     consumer_rust_module: Option<String>,
 
-    /// Versioned TOML sidecar containing per-module global-fragment includes
+    /// Versioned TOML sidecar containing per-module global-fragment and exported epilogue includes
     #[arg(long, value_name = "PATH", conflicts_with = "cmake")]
     module_preamble: Option<PathBuf>,
 
@@ -2786,7 +2787,11 @@ fn transpile_crate_to_output_with_context(
         let mut expanded_options = if let Some(manifest) = module_preamble {
             let selected = manifest.select_for_modules([crate_name.as_str()])?;
             let mut opts = transpile_options.clone();
-            opts.explicit_gmf_includes = selected.get(crate_name).cloned().unwrap_or_default();
+            selected
+                .get(crate_name)
+                .cloned()
+                .unwrap_or_default()
+                .apply_to_options(&mut opts);
             opts
         } else {
             transpile_options.clone()
@@ -2842,8 +2847,19 @@ fn transpile_crate_to_output_with_context(
 
 struct PreparedCrateCodegen {
     extension_method_hints: HashSet<String>,
-    module_preambles: BTreeMap<String, Vec<transpile::GmfIncludeSpec>>,
+    module_preambles: BTreeMap<String, transpile::ModuleIncludeSpec>,
+    impl_blocks_by_source: BTreeMap<PathBuf, Vec<syn::ItemImpl>>,
     options: transpile::TranspileOptions,
+}
+
+impl PreparedCrateCodegen {
+    fn foreign_impl_blocks(&self, source: &Path) -> Vec<syn::ItemImpl> {
+        self.impl_blocks_by_source
+            .iter()
+            .filter(|(path, _)| path.as_path() != source)
+            .flat_map(|(_, blocks)| blocks.iter().cloned())
+            .collect()
+    }
 }
 
 fn prepare_crate_codegen(
@@ -2855,16 +2871,37 @@ fn prepare_crate_codegen(
 ) -> Result<PreparedCrateCodegen, String> {
     let mut extension_method_hints = HashSet::new();
     let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
-    let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
+    let mut impl_blocks_by_source = BTreeMap::new();
     let mut cross_file_traits: Vec<syn::ItemTrait> = Vec::new();
     let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
+    let mut cross_file_struct_qualified_paths = BTreeSet::new();
     let mut cross_file_type_aliases: Vec<syn::ItemType> = Vec::new();
-    for (_, source) in source_units {
+    for (path, source) in source_units {
         extension_method_hints.extend(transpile::collect_extension_method_hints(source));
         cross_file_enums.extend(transpile::collect_crate_enum_decls(source));
-        cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(source));
+        impl_blocks_by_source.insert(path.clone(), transpile::collect_crate_impl_blocks(source));
         cross_file_traits.extend(transpile::collect_crate_trait_decls(source));
         cross_file_structs.extend(transpile::collect_crate_struct_decls(source));
+        // A module-only anchor or a transparent local alias does not carry a
+        // cpp_import_namespace type binding. Retain the exact physical host
+        // identity independently so Rust UFCS can still find its receiver.
+        // Nested, private, and conditional declarations need their own proof.
+        let module = cmake::map_rs_to_cppm(path, crate_name).1;
+        let module_path = module.split('.').skip(1).map(str::to_string).collect::<Vec<_>>();
+        if let Ok(file) = syn::parse_file(source) {
+            for item in file.items {
+                if let syn::Item::Struct(item) = item
+                    && matches!(item.vis, syn::Visibility::Public(_))
+                    && !item.attrs.iter().any(|attribute|
+                        attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
+                {
+                    let mut provider = vec!["crate".to_string()];
+                    provider.extend(module_path.iter().cloned());
+                    provider.push(item.ident.to_string());
+                    cross_file_struct_qualified_paths.insert(provider);
+                }
+            }
+        }
         cross_file_type_aliases.extend(transpile::collect_crate_type_aliases(source));
     }
 
@@ -2879,17 +2916,21 @@ fn prepare_crate_codegen(
     };
     let mut options = transpile_options.clone();
     options.cross_file_enums = cross_file_enums;
-    options.cross_file_impl_blocks = cross_file_impl_blocks;
+    // Same-file impls are lowered with their source. Injecting their original
+    // bodies again would undo ABI lowering and collide with the adapted methods.
+    options.cross_file_impl_blocks.clear();
     options.cross_file_traits = cross_file_traits;
     // B: the crate-wide audited-name map, so a caller in one file emits the
     // owner's C++ identity for a renamed sibling item.
     options.cross_file_cpp_name_targets = crate::cpp_name::crate_wide_function_targets(source_units);
     options.cross_file_structs = cross_file_structs;
+    options.cross_file_struct_qualified_paths = cross_file_struct_qualified_paths;
     options.cross_file_type_aliases = cross_file_type_aliases;
     options.crate_module_names = crate_module_names;
     Ok(PreparedCrateCodegen {
         extension_method_hints,
         module_preambles,
+        impl_blocks_by_source,
         options,
     })
 }
@@ -2960,7 +3001,7 @@ fn preflight_cpp_name_crate_sources_exact(
         transpile_options,
         module_preamble,
     )?;
-    let mut crate_options = prepared.options;
+    let mut crate_options = prepared.options.clone();
     // A preflight is observational. Even if a library caller supplied an
     // emission path, proving cpp_name must never write a UFCS sidecar.
     crate_options.emit_ufcs_trait_manifest_path = None;
@@ -2973,11 +3014,13 @@ fn preflight_cpp_name_crate_sources_exact(
         }
         let (_, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
         let mut module_options = crate_options.clone();
-        module_options.explicit_gmf_includes = prepared
+        module_options.cross_file_impl_blocks = prepared.foreign_impl_blocks(rs_path);
+        prepared
             .module_preambles
             .get(&module_name)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .apply_to_options(&mut module_options);
         transpile::transpile_with_type_map_and_extension_hints_and_options(
             source,
             Some(&module_name),
@@ -3755,19 +3798,20 @@ fn preflight_crate_codegen_without_output(
             let includes = prepared
                 .module_preambles
                 .get(&module_name)
-                .map(Vec::as_slice)
+                .map(|headers| headers.includes.as_slice())
                 .unwrap_or_default();
             cpp_default_args::validate_required_gmf_includes(&file, includes)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
         }
     }
-    let mut prepared_options = prepared.options;
+    let mut prepared_options = prepared.options.clone();
     // This pass is observational even when a library caller requested a UFCS
     // manifest for final emission.
     prepared_options.emit_ufcs_trait_manifest_path = None;
     for (path, source) in &source_units {
         let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
         let mut module_options = prepared_options.clone();
+        module_options.cross_file_impl_blocks = prepared.foreign_impl_blocks(path);
         module_options.flat_import_type_authorizations = cpp_abi_preflight
             .flat_import_type_authorizations
             .iter()
@@ -3776,11 +3820,12 @@ fn preflight_crate_codegen_without_output(
             })
             .cloned()
             .collect();
-        module_options.explicit_gmf_includes = prepared
+        prepared
             .module_preambles
             .get(&module_name)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .apply_to_options(&mut module_options);
         transpile::transpile_with_type_map_and_extension_hints_and_options(
             source,
             Some(&module_name),
@@ -4021,7 +4066,7 @@ fn transpile_crate_impl(
             let includes = prepared
                 .module_preambles
                 .get(&module_name)
-                .map(Vec::as_slice)
+                .map(|headers| headers.includes.as_slice())
                 .unwrap_or_default();
             cpp_default_args::validate_required_gmf_includes(&file, includes)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -4036,6 +4081,7 @@ fn transpile_crate_impl(
         for (path, source) in &source_units {
             let (_, module_name) = cmake::map_rs_to_cppm(path, crate_name);
             let mut module_options = prepared.options.clone();
+            module_options.cross_file_impl_blocks = prepared.foreign_impl_blocks(path);
             module_options.flat_import_type_authorizations = cpp_abi_preflight
                 .flat_import_type_authorizations
                 .iter()
@@ -4044,11 +4090,12 @@ fn transpile_crate_impl(
                 })
                 .cloned()
                 .collect();
-            module_options.explicit_gmf_includes = prepared
+            prepared
                 .module_preambles
                 .get(&module_name)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .apply_to_options(&mut module_options);
             let output = transpile::transpile_with_type_map_and_extension_hints_and_options(
                 source,
                 Some(&module_name),
@@ -4203,8 +4250,11 @@ fn transpile_crate_impl(
                 let expanded_options = if let Some(manifest) = module_preamble {
                     let selected = manifest.select_for_modules([crate_name.as_str()])?;
                     let mut opts = transpile_options.clone();
-                    opts.explicit_gmf_includes =
-                        selected.get(crate_name).cloned().unwrap_or_default();
+                    selected
+                        .get(crate_name)
+                        .cloned()
+                        .unwrap_or_default()
+                        .apply_to_options(&mut opts);
                     opts
                 } else {
                     transpile_options.clone()
@@ -4273,6 +4323,7 @@ fn transpile_crate_impl(
         let full_cppm_path = output_dir.join(&cppm_path);
 
         let mut module_options = prepared_codegen.options.clone();
+        module_options.cross_file_impl_blocks = prepared_codegen.foreign_impl_blocks(rs_path);
         module_options.flat_import_type_authorizations = cpp_abi_preflight
             .flat_import_type_authorizations
             .iter()
@@ -4281,11 +4332,12 @@ fn transpile_crate_impl(
             })
             .cloned()
             .collect();
-        module_options.explicit_gmf_includes = prepared_codegen
+        prepared_codegen
             .module_preambles
             .get(&module_name)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .apply_to_options(&mut module_options);
 
         let transpile_result = match &prepared_contract_outputs {
             Some(outputs) => Ok(std::borrow::Cow::Borrowed(outputs[source_index].as_str())),
@@ -4658,6 +4710,115 @@ fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crate_impl_collection_excludes_only_the_current_source() {
+        use quote::ToTokens;
+        let own = PathBuf::from("src/host.rs");
+        let sibling = PathBuf::from("src/extension.rs");
+        let matching_sibling = PathBuf::from("src/other.rs");
+        let source = r#"
+            pub struct Host {}
+            impl Host {
+                #[cfg_attr(any(), cpp_abi(returns(std_string_bytes)))]
+                pub fn label() -> Vec<u8> { vec![65u8, 66u8] }
+            }
+        "#;
+        let external = "impl Host { pub fn answer(&self) -> i32 { 42 } }";
+        let units = vec![
+            (own.clone(), source.to_string()),
+            (sibling.clone(), external.to_string()),
+            // Identical tokens in another source still have different ownership.
+            (matching_sibling.clone(), source.to_string()),
+        ];
+        let paths = units.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+        let prepared = prepare_crate_codegen(
+            &paths, &units, "sample", &transpile::TranspileOptions::default(), None,
+        ).unwrap();
+        let foreign = prepared.foreign_impl_blocks(&own);
+        assert_eq!(foreign.len(), 2);
+        assert_eq!(foreign[0].to_token_stream().to_string(),
+            transpile::collect_crate_impl_blocks(external)[0].to_token_stream().to_string());
+        assert_eq!(foreign[1].to_token_stream().to_string(),
+            transpile::collect_crate_impl_blocks(source)[0].to_token_stream().to_string());
+
+        let units = units[..2].to_vec();
+        let prepared = prepare_crate_codegen(
+            &paths[..2], &units, "sample", &transpile::TranspileOptions::default(), None,
+        ).unwrap();
+        let mut options = prepared.options.clone();
+        options.cross_file_impl_blocks = prepared.foreign_impl_blocks(&own);
+        let output = transpile::transpile_full_with_options(
+            source, Some("sample.host"), &types::UserTypeMap::default(),
+            &HashSet::new(), None, &options,
+        ).unwrap();
+        assert!(output.contains("std::string label()"), "{output}");
+        assert!(output.contains("answer() const"), "{output}");
+        assert!(!output.contains("rusty::Vec<uint8_t> label()"), "{output}");
+    }
+
+    #[test]
+    fn prepared_flat_alias_inherent_ufcs_preserves_receiver_and_static_calls() {
+        let consumer = r#"
+            use crate::provider as _;
+            use std::sync::Arc;
+            type Worker = crate::provider::Worker;
+            pub fn direct(value: &Worker) -> i32 { Worker::read(value) }
+            pub fn shared(value: &Option<Arc<Worker>>) -> i32 {
+                if let Some(worker) = value.as_ref() {
+                    crate::provider::Worker::read(&**worker)
+                } else { 0 }
+            }
+            pub fn static_call(value: &Worker) -> i32 {
+                crate::provider::Worker::inspect(value, 7)
+            }
+            pub mod current_worker {
+                use std::rc::Rc;
+                pub fn implicit(worker: Option<Rc<crate::provider::Worker>>) -> i32 {
+                    if let Some(worker) = worker { worker.read() } else { 0 }
+                }
+                pub fn explicit(worker: Option<Rc<crate::provider::Worker>>) -> i32 {
+                    if let Some(worker) = worker {
+                        crate::provider::Worker::read(&*worker)
+                    } else { 0 }
+                }
+            }
+        "#;
+        let units = vec![
+            (PathBuf::from("src/lib.rs"), "pub mod provider; pub mod consumer;".into()),
+            (PathBuf::from("src/provider.rs"), r#"
+                pub struct Worker { value: i32 }
+                impl Worker {
+                    pub fn read(&self) -> i32 { self.value }
+                    pub fn inspect(value: &Worker, amount: i32) -> i32 { value.value + amount }
+                }
+            "#.into()),
+            (PathBuf::from("src/consumer.rs"), consumer.into()),
+        ];
+        let paths = units.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+        let audited = cpp_abi::preflight_crate_plan_with_cxx_namespace(
+            &units, Some("example"), Some("example"),
+        ).unwrap();
+        let mut options = transpile::TranspileOptions::default();
+        options.cxx_namespace = Some("example".into());
+        options.flat_import_namespace = Some("example".into());
+        options.flat_import_type_authorizations = audited.flat_import_type_authorizations;
+        let prepared = prepare_crate_codegen(&paths, &units, "example", &options, None).unwrap();
+        let mut options = prepared.options.clone();
+        options.cross_file_impl_blocks = prepared.foreign_impl_blocks(&paths[2]);
+        let output = transpile::transpile_full_with_options(
+            consumer, Some("example.consumer"), &types::UserTypeMap::default(),
+            &prepared.extension_method_hints, Some("example"), &options,
+        ).unwrap();
+        assert!(output.contains("value.read()"), "{output}");
+        assert!(!output.contains("Worker::read("), "{output}");
+        assert!(!output.contains("__rusty_alias_"), "{output}");
+        assert!(output.contains("::example::Worker::inspect("), "{output}");
+        assert!(!output.contains("value.inspect("), "{output}");
+        assert!(output.contains("worker->read()"), "{output}");
+        assert!(output.contains("(rusty::detail::deref_if_pointer_like(worker)).read()"), "{output}");
+        assert!(!output.contains("(worker).read()"), "{output}");
+    }
 
     fn write_closure_fixture(root: &Path, relative: &str, contents: &str) {
         let path = root.join(relative);
@@ -11085,6 +11246,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: args.import_std,
         explicit_gmf_includes: Vec::new(),
+        explicit_epilogue_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -11097,6 +11259,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_traits: Vec::new(),
         cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
+        cross_file_struct_qualified_paths: BTreeSet::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
@@ -11798,6 +11961,7 @@ fn main() {
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: false,
         explicit_gmf_includes: Vec::new(),
+        explicit_epilogue_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -11810,6 +11974,7 @@ fn main() {
         cross_file_traits: Vec::new(),
         cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
+        cross_file_struct_qualified_paths: BTreeSet::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
@@ -12008,8 +12173,11 @@ fn main() {
                 process::exit(1);
             }
         };
-        single_transpile_options.explicit_gmf_includes =
-            selected.get(module_name).cloned().unwrap_or_default();
+        selected
+            .get(module_name)
+            .cloned()
+            .unwrap_or_default()
+            .apply_to_options(&mut single_transpile_options);
     }
 
     let cpp_output = match transpile::transpile_full_with_options(

@@ -19,7 +19,7 @@ private:
     Weak(typename rusty::Arc<T>::ControlBlock* p, bool add_ref)
         : ptr(p) {
         if (ptr && add_ref) {
-            ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+            rusty::Arc<T>::increment_weak(ptr);
         }
     }
 
@@ -37,10 +37,10 @@ public:
     // the inner @unsafe block.
     explicit Weak(const rusty::Arc<T>& arc)
         : ptr(arc.ptr) {
-        // @unsafe { raw ControlBlock* deref + std::atomic::fetch_add }
+        // @unsafe { Arc<T>::increment_weak coordinates with uniqueness checks }
         {
             if (ptr) {
-                ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+                rusty::Arc<T>::increment_weak(ptr);
             }
         }
     }
@@ -48,10 +48,10 @@ public:
     // @safe - Copy ctor: share control block + bump weak_count.
     Weak(const Weak& other)
         : ptr(other.ptr) {
-        // @unsafe { raw ControlBlock* deref + std::atomic::fetch_add }
+        // @unsafe { Arc<T>::increment_weak coordinates with uniqueness checks }
         {
             if (ptr) {
-                ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+                rusty::Arc<T>::increment_weak(ptr);
             }
         }
     }
@@ -72,10 +72,10 @@ public:
         if (this != &other) {
             reset();
             ptr = other.ptr;
-            // @unsafe { raw ControlBlock* deref + std::atomic::fetch_add }
+            // @unsafe { Arc<T>::increment_weak coordinates with uniqueness checks }
             {
                 if (ptr) {
-                    ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+                    rusty::Arc<T>::increment_weak(ptr);
                 }
             }
         }
@@ -96,10 +96,10 @@ public:
     Weak& operator=(const rusty::Arc<T>& arc) {
         reset();
         ptr = arc.ptr;
-        // @unsafe { raw ControlBlock* deref + std::atomic::fetch_add }
+        // @unsafe { Arc<T>::increment_weak coordinates with uniqueness checks }
         {
             if (ptr) {
-                ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+                rusty::Arc<T>::increment_weak(ptr);
             }
         }
         return *this;
@@ -155,7 +155,8 @@ public:
         }
     }
 
-    // @safe - One atomic load + count correction (self doesn't count).
+    // @safe - Approximate explicit weak count while a strong owner exists.
+    // Empty, expired and not-yet-published cyclic allocations report zero.
     size_t weak_count() const {
         if (!ptr) {
             return 0;
@@ -163,7 +164,10 @@ public:
         // @unsafe { raw ControlBlock* deref + std::atomic::load }
         {
             size_t count = ptr->weak_count.load(std::memory_order_acquire);
-            return count > 0 ? count - 1 : 0;
+            size_t strong = ptr->strong_count.load(std::memory_order_relaxed);
+            // Reading a live strong count after the weak count proves the
+            // latter still included the implicit weak owned by the strong set.
+            return strong == 0 ? 0 : count - 1;
         }
     }
 

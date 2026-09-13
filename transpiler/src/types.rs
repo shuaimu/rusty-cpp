@@ -179,6 +179,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "String" | "std::string::String" | "alloc::string::String" => {
             Some(("rusty::String", false))
         }
+        "net::TcpListener" | "std::net::TcpListener" => Some(("rusty::net::TcpListener", false)),
+        "std::os::fd::OwnedFd" | "std::os::unix::io::OwnedFd" => Some(("rusty::os::fd::OwnedFd", false)),
         "net::TcpStream" | "std::net::TcpStream" => Some(("rusty::net::TcpStream", false)),
         "net::IpAddr" | "std::net::IpAddr" => Some(("rusty::net::IpAddr", false)),
         "net::Ipv4Addr" | "std::net::Ipv4Addr" => Some(("rusty::net::Ipv4Addr", false)),
@@ -186,6 +188,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "net::SocketAddr" | "std::net::SocketAddr" => Some(("rusty::net::SocketAddr", false)),
         "net::SocketAddrV4" | "std::net::SocketAddrV4" => Some(("rusty::net::SocketAddrV4", false)),
         "net::SocketAddrV6" | "std::net::SocketAddrV6" => Some(("rusty::net::SocketAddrV6", false)),
+        "net::AddrParseError" | "std::net::AddrParseError" => Some(("rusty::net::AddrParseError", false)),
 
         // Error handling
         "Option" | "std::option::Option" => Some(("rusty::Option", true)),
@@ -199,6 +202,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
         "Once" | "std::sync::Once" => Some(("rusty::Once", false)),
+        "std::sync::mpsc::Sender" => Some(("rusty::sync::mpsc::Sender", true)),
+        "std::sync::mpsc::Receiver" => Some(("rusty::sync::mpsc::Receiver", true)),
         "std::thread::Thread" => Some(("rusty::thread::Thread", false)),
         "std::thread::LocalKey" => Some(("rusty::thread::LocalKey", true)),
         "std::sync::atomic::AtomicBool" | "core::sync::atomic::AtomicBool" => {
@@ -251,6 +256,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "AtomicPtr" | "atomic::AtomicPtr" => Some(("rusty::sync::atomic::AtomicPtr", true)),
         "std::sync::atomic::Ordering" | "core::sync::atomic::Ordering" => {
             Some(("rusty::sync::atomic::Ordering", false))
+        }
+        "core::panic::Location" | "std::panic::Location" => {
+            Some(("std::source_location", false))
         }
         "core::task::Poll" | "std::task::Poll" => Some(("rusty::Poll", true)),
         "core::task::Context" | "std::task::Context" => Some(("rusty::Context", false)),
@@ -449,7 +457,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "io::Cursor" | "std::io::Cursor" => Some(("rusty::io::Cursor", true)),
         "io::Bytes" | "std::io::Bytes" => Some(("rusty::io::Bytes", true)),
         "io::Error" | "std::io::Error" => Some(("rusty::io::Error", false)),
-        "io::ErrorKind" | "std::io::ErrorKind" => Some(("rusty::io::ErrorKind", false)),
+        "io::ErrorKind" | "std::io::ErrorKind" => Some(("rusty::io::Error::Kind", false)),
         "io::SeekFrom" | "std::io::SeekFrom" => Some(("rusty::io::SeekFrom", false)),
         "io::Stdin" | "std::io::Stdin" => Some(("rusty::io::Stdin", false)),
         "io::Stdout" | "std::io::Stdout" => Some(("rusty::io::Stdout", false)),
@@ -535,6 +543,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "thread::current" | "std::thread::current" => Some("rusty::thread::current"),
         "thread::park" | "std::thread::park" => Some("rusty::thread::park"),
         "thread::yield_now" | "std::thread::yield_now" => Some("rusty::thread::yield_now"),
+        "std::sync::mpsc::channel" => Some("rusty::sync::mpsc::channel"),
         "std::sync::atomic::fence" | "core::sync::atomic::fence" => {
             Some("rusty::sync::atomic::fence")
         }
@@ -716,14 +725,19 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "ManuallyDrop::new" | "std::mem::ManuallyDrop::new" | "mem::ManuallyDrop::new" => {
             Some("rusty::mem::manually_drop_new")
         }
-        "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
-        "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind"),
+        "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind_std"),
+        "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind_std"),
+        "std::panic::panic_any" | "panic::panic_any" => Some("rusty::panic::panic_any"),
         "std::panic::AssertUnwindSafe" | "panic::AssertUnwindSafe" => {
             Some("rusty::panic::AssertUnwindSafe")
         }
         "std::rt::begin_panic" | "rt::begin_panic" => Some("rusty::panic::begin_panic"),
         "std::rt::panic_fmt" | "rt::panic_fmt" => Some("rusty::panicking::panic_fmt"),
+        "core::panic::Location::caller" | "std::panic::Location::caller" => {
+            Some("std::source_location::current")
+        }
         "std::process::abort" => Some("std::abort"),
+        "std::process::id" => Some("rusty::process::id"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "Add::add" | "core::ops::Add::add" | "std::ops::Add::add" => Some("rusty::ops::add_fn"),
         "cmp::min" | "core::cmp::min" | "std::cmp::min" => Some("rusty::cmp::min"),
@@ -1248,7 +1262,7 @@ mod tests {
         );
         assert_eq!(
             map_function_path("std::panic::catch_unwind"),
-            Some("rusty::panic::catch_unwind")
+            Some("rusty::panic::catch_unwind_std")
         );
         assert_eq!(
             map_function_path("std::ptr::read"),
@@ -1359,7 +1373,7 @@ mod tests {
         );
         assert_eq!(
             map_function_path("panic::resume_unwind"),
-            Some("rusty::panic::resume_unwind")
+            Some("rusty::panic::resume_unwind_std")
         );
         assert_eq!(
             map_function_path("std::rt::begin_panic"),

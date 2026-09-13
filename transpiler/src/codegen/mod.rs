@@ -35,17 +35,10 @@ pub(crate) struct ExtensionImplMethod {
     /// fail-closed C++ partial specialization when every parameter is
     /// structurally recoverable from the implementing Self type.
     impl_generic_names: Vec<String>,
-    /// Whether an impl's generic surface belongs to the deliberately narrow
-    /// foreign-Adapter lane: lifetimes (erased as before) plus default-free
-    /// type parameters that are either unconstrained or carry only the legacy
-    /// `Default` bound, with no where-clause. Const generics and every other
-    /// constrained type parameter require C++ constraint lowering and remain a
-    /// hand slot instead of producing an over-broad partial specialization.
-    foreign_adapter_partial_spec_compatible: bool,
-    /// True when the impl declares at least one type or const parameter. This
-    /// is separate from `impl_generic_names`: const parameters are purposely
-    /// excluded from that vector because this lane cannot emit them yet.
-    foreign_adapter_has_non_lifetime_generics: bool,
+    /// Original impl generics and lexical scope. Adapter partial specializations
+    /// lower their own bounds after trait declarations are available, separately
+    /// from method generics merged into `method` for extension-function emission.
+    foreign_adapter_generics: Option<(syn::Generics, Vec<String>)>,
     /// UFCS Fix A part 2 (§ 3.2.4): an extra `requires`-clause to inject after
     /// the template parameter list — used to CONSTRAIN a multi-owner default
     /// method's template (`requires requires(const Self_& s){ Tr_::__ufcs_impls(s); }`)
@@ -143,6 +136,7 @@ enum RuntimeMatchEnumKind {
     Option,
     Result,
     Entry,
+    Poll,
 }
 
 /// Recognize the storage marker surface exactly. The ordinary direct
@@ -2017,6 +2011,7 @@ pub struct CodeGen {
     /// symbols) from the type's own inherent surface, which the incumbent
     /// manifest DOES own.
     pub(crate) impl_method_source_trait: HashMap<String, HashMap<String, String>>,
+    standard_wake_methods: HashMap<String, HashSet<String>>,
     /// Fully scoped Rust paths of traits explicitly lowered as non-inheriting
     /// C++ marker registries.  Bounds on only these traits become C++
     /// `requires Registry<..., T>::value` predicates; ordinary user-trait
@@ -2114,6 +2109,8 @@ pub struct CodeGen {
     /// that path has to prepend the crate namespace itself.
     pub(crate) pending_explicit_auto_trait_specializations:
         std::collections::BTreeSet<(String, String)>,
+    /// Exact local concrete positive auto-trait impls, before item emission.
+    pub(crate) concrete_positive_auto_trait_types: HashSet<(String, String)>,
     /// Declared generic parameter kinds keyed by local type name (scoped and unscoped).
     /// Mirrors `declared_type_params` indexing (Type vs Const) so omitted-arg
     /// recovery does not substitute mismatched kind positions.
@@ -2332,6 +2329,12 @@ pub struct CodeGen {
     /// Rust's Send/Sync derivation has to see through it to decide the
     /// type that CONTAINS it.
     pub(crate) cross_file_struct_field_types: HashMap<String, Vec<syn::Type>>,
+    /// Direct physical provider identities retained by the crate pre-pass.
+    pub(crate) cross_file_struct_qualified_paths: BTreeSet<Vec<String>>,
+    /// Defining parameters retained for structural auto-trait substitution.
+    pub(crate) cross_file_auto_trait_generics: HashMap<String, syn::Generics>,
+    /// Full sibling aliases, including callable bounds erased by C++ aliases.
+    pub(crate) cross_file_auto_trait_aliases: HashMap<String, syn::ItemType>,
     /// Inherent method names emitted as free functions for C-like enums.
     /// Used as a fallback when local type inference cannot recover enum types
     /// at method-call sites (for example values extracted inside `std::visit`).
@@ -3259,6 +3262,9 @@ pub struct CodeGen {
     /// interface class in the sibling module's purview, so an owning
     /// `Box<dyn Trait>` keeps its target instead of erasing to `void*`.
     pub(crate) cross_file_trait_tails: HashSet<String>,
+    /// Crate trait declarations that explicitly require structural C++ member
+    /// dispatch. Their foreign impl methods must remain on the host type.
+    pub(crate) cross_file_member_dispatch_trait_tails: HashSet<String>,
     /// B: audited cpp_name identities owned by OTHER files of this crate. A
     /// call to one of them emits the owner's C++ identity (C++ overload
     /// resolution then picks the member of the owner's overload set); the
@@ -3328,6 +3334,7 @@ pub struct CodeGen {
     /// Validated source-owned ABI facades for this file. Empty for the exact
     /// ordinary-code fast path.
     pub(crate) cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan,
+    native_cpp_type_names: HashSet<String>,
     /// First fatal diagnostic recorded during emission. A producer records the
     /// error and suppresses unsafe/incorrect output; the transpile entry point
     /// propagates it instead of returning a partial translation.
@@ -3453,6 +3460,7 @@ impl CodeGen {
             ufcs_emitting_internal_linkage_trait: false,
             ufcs_internal_linkage_traits: HashSet::new(),
             impl_method_source_trait: HashMap::new(),
+            standard_wake_methods: HashMap::new(),
             cpp_marker_trait_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             trait_method_receiver_kind: std::rc::Rc::new(HashMap::new()),
@@ -3469,6 +3477,7 @@ impl CodeGen {
             method_structural_decompositions: HashMap::new(),
             pending_template_args_specializations: HashSet::new(),
             pending_explicit_auto_trait_specializations: std::collections::BTreeSet::new(),
+            concrete_positive_auto_trait_types: HashSet::new(),
             declared_type_param_kinds: HashMap::new(),
             declared_type_param_defaults: HashMap::new(),
             numeric_type_aliases: HashMap::new(),
@@ -3512,6 +3521,9 @@ impl CodeGen {
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
             cross_file_struct_field_types: HashMap::new(),
+            cross_file_struct_qualified_paths: BTreeSet::new(),
+            cross_file_auto_trait_generics: HashMap::new(),
+            cross_file_auto_trait_aliases: HashMap::new(),
             c_like_enum_inherent_method_names: HashSet::new(),
             forward_emitted_c_like_enums: HashSet::new(),
             forward_emitted_consts: HashSet::new(),
@@ -3742,6 +3754,7 @@ impl CodeGen {
             auto_cross_module_by_value_rewrite_fields: HashSet::new(),
             cross_file_enums: Vec::new(),
             cross_file_trait_tails: HashSet::new(),
+            cross_file_member_dispatch_trait_tails: HashSet::new(),
             cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             crate_module_names: HashSet::new(),
             sibling_modules_imported: HashSet::new(),
@@ -3754,6 +3767,7 @@ impl CodeGen {
             flat_import_type_authorizations: BTreeSet::new(),
             current_physical_module: crate::cpp_abi::ModulePath(Vec::new()),
             cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan::default(),
+            native_cpp_type_names: HashSet::new(),
             codegen_error: None,
         }
     }
@@ -6360,6 +6374,9 @@ impl CodeGen {
 
     pub fn set_cross_file_traits(&mut self, traits: &[syn::ItemTrait]) {
         self.cross_file_trait_tails = traits.iter().map(|t| t.ident.to_string()).collect();
+        self.cross_file_member_dispatch_trait_tails = traits.iter()
+            .filter(|t| Self::has_exact_inactive_cpp_trait_member_dispatch_attr(&t.attrs))
+            .map(|t| t.ident.to_string()).collect();
         // `dyn Trait` is Send/Sync exactly when the trait's supertraits say
         // so. `collect_trait_static_default_methods` records that, but only
         // for traits declared in the file being emitted -- so a field typed
@@ -6476,6 +6493,20 @@ impl CodeGen {
                 )
             })
             .collect();
+        self.cross_file_auto_trait_generics = structs
+            .iter()
+            .map(|s| (s.ident.to_string(), s.generics.clone()))
+            .collect();
+        // This pre-pass supplies leaf names. An ambiguous leaf cannot prove
+        // a field's ownership constraints without its defining module path.
+        let mut seen = HashSet::new();
+        for item in &structs {
+            let name = item.ident.to_string();
+            if !seen.insert(name.clone()) {
+                self.cross_file_struct_field_types.remove(&name);
+                self.cross_file_auto_trait_generics.remove(&name);
+            }
+        }
         // `PhantomPinned` structs from sibling files: their literals and
         // smart-pointer constructions in THIS file must still know the
         // emitted C++ type is non-movable (deleted move operations).
@@ -6536,6 +6567,16 @@ impl CodeGen {
     /// `NodeRef`'s struct body alongside the methods that directly
     /// targeted `NodeRef`.
     pub fn set_cross_file_type_aliases(&mut self, aliases: Vec<syn::ItemType>) {
+        self.cross_file_auto_trait_aliases.clear();
+        let mut seen = HashSet::new();
+        for alias in &aliases {
+            let name = alias.ident.to_string();
+            if seen.insert(name.clone()) {
+                self.cross_file_auto_trait_aliases.insert(name, alias.clone());
+            } else {
+                self.cross_file_auto_trait_aliases.remove(&name);
+            }
+        }
         let mut map = HashMap::new();
         for a in aliases {
             let alias_name = a.ident.to_string();
@@ -7745,6 +7786,7 @@ impl CodeGen {
         self.types_with_user_clone.clear();
         self.types_with_phantom_pinned.clear();
         self.pending_explicit_auto_trait_specializations.clear();
+        self.concrete_positive_auto_trait_types.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
         self.expanded_test_marker_should_panic.clear();
@@ -7758,6 +7800,7 @@ impl CodeGen {
         self.scope_import_bindings.clear();
         self.canonical_std_hash_map_import_bindings.clear();
         self.rust_item_import_bindings.clear();
+        self.native_cpp_type_names.clear();
         self.name_resolver.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -8031,6 +8074,8 @@ impl CodeGen {
                 .extend(targets.iter().cloned());
         }
         self.trait_declared_paths = crate::transpile::collect_declared_trait_paths(&file.items);
+        let normalized_tasks = self.normalize_standard_task_receivers(file);
+        let file = &normalized_tasks;
         // H1 (checkpoint contract 1): the authenticated namespace-placement
         // contract. Collected before any emission pass so the forward-decl
         // phase already places its declarations; with no marker in the source
@@ -8155,8 +8200,43 @@ impl CodeGen {
         // (See `emit_impl_block`'s fallback for the matching suppression
         // on the orphan-impl-file side.)
         if !self.cross_file_impl_blocks.is_empty() {
+            fn collect_physical_hosts(items: &[syn::Item], hosts: &mut HashSet<String>) {
+                for item in items {
+                    match item {
+                        syn::Item::Struct(item) => { hosts.insert(item.ident.to_string()); }
+                        syn::Item::Enum(item) => { hosts.insert(item.ident.to_string()); }
+                        syn::Item::Union(item) => { hosts.insert(item.ident.to_string()); }
+                        syn::Item::Mod(item) => {
+                            if let Some((_, items)) = &item.content {
+                                collect_physical_hosts(items, hosts);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut physical_hosts = HashSet::new();
+            collect_physical_hosts(&file.items, &mut physical_hosts);
             let foreign_impls = std::mem::take(&mut self.cross_file_impl_blocks);
             for imp in &foreign_impls {
+                // Ordinary crate traits keep their implementation in the
+                // module that owns the impl, as extension functions and
+                // interface adapters. Injecting those methods into the host
+                // struct adds dependencies on the trait module's argument
+                // types and can create an import cycle. Only an explicit
+                // inheritance contract requires those virtual members on the
+                // host itself. Inherent orphans still need host members.
+                if let Some((_, trait_path, _)) = &imp.trait_
+                    && trait_path.segments.last().is_some_and(|segment|
+                        self.cross_file_trait_tails.contains(&segment.ident.to_string())
+                            && !self.cross_file_member_dispatch_trait_tails.contains(&segment.ident.to_string()))
+                    && !trait_path.segments.first().is_some_and(|segment|
+                        matches!(segment.ident.to_string().as_str(), "std" | "core" | "alloc")
+                            && self.authenticated_sysroot_roots.contains(&segment.ident.to_string()))
+                    && !self.has_cpp_inherit_attr(&imp.attrs, &[])
+                {
+                    continue;
+                }
                 let Some(host_tail) =
                     Self::impl_self_type_path(imp.self_ty.as_ref())
                         .and_then(|tp| {
@@ -8174,7 +8254,7 @@ impl CodeGen {
                 // struct — each cross-file impl is absorbed exactly once
                 // (by the host's file). Skip if the resolution still leaves
                 // us pointing at a non-local tail.
-                if !self.declared_item_names.contains(&resolved_tail) {
+                if !physical_hosts.contains(&resolved_tail) {
                     continue;
                 }
                 // If the impl targets a type alias, rewrite the self_ty's
@@ -8536,7 +8616,7 @@ impl CodeGen {
                 // A concrete positive Send/Sync impl has no methods for the
                 // host struct to drain. Let its dedicated lowering record the
                 // required global-scope trait specialization.
-                if Self::concrete_positive_auto_trait_impl(i).is_some() {
+                if self.concrete_positive_auto_trait_impl(i, &self.module_stack).is_some() {
                     self.emit_item(item);
                     self.newline();
                     continue;
@@ -11358,15 +11438,20 @@ impl CodeGen {
             }
         }
 
-        // Kahn's algorithm: take nodes with indegree 0, then decrement.
-        let mut queue: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
+        // Keep source order among independent traits. A LIFO ready list
+        // reverses them and can move an interface past a cpp_inherit class
+        // that already followed its complete base in the Rust source.
+        let mut queue: BinaryHeap<Reverse<usize>> = (0..n)
+            .filter(|&i| indegree[i] == 0)
+            .map(Reverse)
+            .collect();
         let mut sorted_positions: Vec<usize> = Vec::with_capacity(n);
-        while let Some(p) = queue.pop() {
+        while let Some(Reverse(p)) = queue.pop() {
             sorted_positions.push(p);
             for &dep in &outgoing[p] {
                 indegree[dep] -= 1;
                 if indegree[dep] == 0 {
-                    queue.push(dep);
+                    queue.push(Reverse(dep));
                 }
             }
         }
@@ -13788,6 +13873,21 @@ impl CodeGen {
         for item in ordered_items.iter().copied() {
             match item {
                 syn::Item::Struct(s) => {
+                    if crate::cpp_native_types::has_marker(&s.attrs) {
+                        let rust_name = s.ident.to_string();
+                        let ident = &s.ident;
+                        let target = self.map_type(&syn::parse_quote!(#ident));
+                        let name = escape_cpp_keyword(&rust_name);
+                        let export = if self.should_export_item_at_module_depth(
+                            &s.vis, module_depth, &rust_name,
+                        ) { "export " } else { "" };
+                        self.writeln(&format!("{}using {} = {};", export, name, target));
+                        self.defined_types.insert(rust_name);
+                        self.native_cpp_type_names
+                            .insert(target.trim_start_matches("::").to_string());
+                        emitted_any = true;
+                        continue;
+                    }
                     let name = self.named_module_root_type_decl_cpp_name_at_depth(
                         &s.ident.to_string(),
                         module_depth,
@@ -14619,6 +14719,11 @@ impl CodeGen {
     fn forward_decl_type_spelling_has_unresolved_scoped_path(&self, spelling: &str) -> bool {
         for token in Self::extract_cpp_scoped_path_tokens(spelling) {
             let normalized = token.trim_start_matches("::");
+            // A native header has already declared this explicitly mapped C
+            // identifier; a leading :: does not make it a Rust module path.
+            if self.native_cpp_type_names.contains(normalized) {
+                continue;
+            }
             if normalized.is_empty() {
                 continue;
             }
@@ -14995,6 +15100,11 @@ impl CodeGen {
                 if let Some(ref ident) = m.ident {
                     // macro_rules! name { ... } → compile-time only, skip
                     self.writeln(&format!("// macro_rules! {} {{ ... }}", ident));
+                } else if m.mac.path.is_ident("thread_local") {
+                    // thread_local! { static X: T = init; } → per-thread
+                    // rusty::LocalKey storage; access sites (`X.with(|v| …)`)
+                    // lower through the ordinary method-call path.
+                    self.emit_thread_local_macro(&m.mac);
                 } else {
                     // Unnamed macro invocation at top level
                     self.emit_macro_stmt(&m.mac);
@@ -16244,6 +16354,15 @@ impl CodeGen {
                         }
                     }
                 }
+                syn::Type::TraitObject(object) => {
+                    for bound in &mut object.bounds {
+                        if let syn::TypeParamBound::Trait(bound) = bound {
+                            let mut path_ty = syn::Type::Path(syn::TypePath { qself: None, path: bound.path.clone() });
+                            recurse(&mut path_ty, substitutions);
+                            if let syn::Type::Path(path) = path_ty { bound.path = path.path; }
+                        }
+                    }
+                }
                 syn::Type::Reference(r) => recurse(&mut r.elem, substitutions),
                 syn::Type::Ptr(p) => recurse(&mut p.elem, substitutions),
                 syn::Type::Slice(s) => recurse(&mut s.elem, substitutions),
@@ -17243,6 +17362,11 @@ impl CodeGen {
                 callable_bound_arg_intent,
                 Some(CallableArgPassIntent::SharedRef | CallableArgPassIntent::MutRef)
             ) {
+                if let Some(expected) = effective_expected_ty
+                    && matches!(self.peel_paren_group_type(expected), syn::Type::Reference(_))
+                {
+                    return self.emit_expr_to_string_with_expected(arg, Some(expected));
+                }
                 // Preserve explicit borrow shape for callable-bound callbacks
                 // (for example `F: FnOnce(&mut Self)`), so closure params that
                 // dereference their argument keep pointer-like call semantics.
@@ -17257,7 +17381,9 @@ impl CodeGen {
             }
             if style.is_none()
                 && effective_expected_ty
-                    .is_some_and(|expected| self.type_is_bare_generic_param_like(expected))
+                    .is_some_and(|expected|
+                        !matches!(self.peel_paren_group_type(expected), syn::Type::Reference(_))
+                            && self.type_is_bare_generic_param_like(expected))
                 && self.is_stable_reference_lvalue_expr(&r.expr)
             {
                 return self.emit_explicit_reference_call_arg(r, effective_expected_ty);
@@ -20462,8 +20588,7 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: associated_type_bindings.clone(),
                 impl_generic_names: impl_generic_names.clone(),
-                foreign_adapter_partial_spec_compatible: false,
-                foreign_adapter_has_non_lifetime_generics: false,
+                foreign_adapter_generics: None,
                 self_is_template_param: false,
                 extra_template_requires: None,
             });
@@ -20998,8 +21123,7 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: HashMap::new(),
                 impl_generic_names: impl_generic_names.clone(),
-                foreign_adapter_partial_spec_compatible: false,
-                foreign_adapter_has_non_lifetime_generics: false,
+                foreign_adapter_generics: None,
                 self_is_template_param: true,
                 extra_template_requires: None,
             });
@@ -21482,6 +21606,7 @@ impl CodeGen {
         self_cpp: &str,
         assoc_pairs: &[(String, String)],
         impl_generic_names: &[String],
+        constraints: &[String],
     ) {
         if assoc_pairs.is_empty() {
             return;
@@ -21497,6 +21622,9 @@ impl CodeGen {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        if !constraints.is_empty() {
+            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
         }
         self.writeln(&format!(
             "struct {}Traits<{}> {{",
@@ -21527,6 +21655,7 @@ impl CodeGen {
         trait_name: &str,
         trait_args: &[String],
         impl_generic_names: &[String],
+        constraints: &[String],
         suffix: &str,
         self_cpp: &str,
         kind: AdapterStorageKind,
@@ -21591,6 +21720,9 @@ impl CodeGen {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        if !constraints.is_empty() {
+            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
         }
         self.writeln(&format!(
             "class {}{}<{}> final : public {} {{",
@@ -24793,7 +24925,7 @@ impl CodeGen {
             if !alias_is_module_like {
                 return None;
             }
-            let escaped_alias = escape_cpp_keyword(alias);
+            let escaped_alias = self.module_import_alias_cpp_name(alias);
             if self.matches_declared_module_path(target) {
                 let escaped_target = self.escape_and_rename_qualified_name(target);
                 return Some(format!("namespace {} = ::{};", escaped_alias, escaped_target));
@@ -24854,11 +24986,26 @@ impl CodeGen {
         {
             return None;
         }
-        let alias = escape_cpp_keyword(last);
+        let alias = self.module_import_alias_cpp_name(last);
         let target = self.escape_and_rename_qualified_name(normalized);
         Some(format!("namespace {} = ::{};", alias, target))
     }
 
+    fn module_import_alias_cpp_name(&self, alias: &str) -> String {
+        // A Rust namespace import needs the same collision avoidance as a
+        // module declaration. `namespace std = ...` would also redirect the
+        // backend's ordinary std::move/type-trait calls into the user's module.
+        self.module_namespace_renames
+            .get(&self.scoped_type_key(alias))
+            .cloned()
+            .unwrap_or_else(|| {
+                if Self::module_name_conflicts_with_global_symbol(alias) {
+                    format!("{}_mod", escape_cpp_keyword(alias))
+                } else {
+                    escape_cpp_keyword(alias)
+                }
+            })
+    }
 
     fn matches_declared_module_path(&self, normalized_path: &str) -> bool {
         if self.declared_module_paths.contains(normalized_path) {
@@ -24875,7 +25022,9 @@ impl CodeGen {
         if trimmed.is_empty() {
             return;
         }
-        let alias = escape_cpp_keyword(trimmed.rsplit("::").next().unwrap_or(trimmed));
+        let alias = self.module_import_alias_cpp_name(
+            trimmed.rsplit("::").next().unwrap_or(trimmed),
+        );
         self.declared_item_names.insert(alias.clone());
         self.import_alias_names.insert(alias.clone());
         let target = self.escape_and_rename_qualified_name(trimmed);
@@ -32016,6 +32165,7 @@ impl CodeGen {
             "Option" => Some(RuntimeMatchEnumKind::Option),
             "Result" => Some(RuntimeMatchEnumKind::Result),
             "Entry" | "EntryImpl" => Some(RuntimeMatchEnumKind::Entry),
+            "Poll" if syn::parse_str::<syn::Path>(enum_name).ok().is_some_and(|path| self.standard_future_path_is(&path, "std::task::Poll")) => Some(RuntimeMatchEnumKind::Poll),
             _ => None,
         }
     }
@@ -32036,6 +32186,7 @@ impl CodeGen {
         path: &syn::Path,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<RuntimeMatchEnumKind> {
+        if self.standard_poll_variant(path).is_some() { return Some(RuntimeMatchEnumKind::Poll); }
         if path.segments.len() >= 2 {
             let enum_name = path.segments.iter().nth_back(1)?.ident.to_string();
             if let Some(kind) = self.runtime_match_enum_kind_by_name(&enum_name) {
@@ -32140,6 +32291,7 @@ impl CodeGen {
             .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "Some") => Some(("is_some", "unwrap")),
+            (RuntimeMatchEnumKind::Poll, "Ready") => Some(("is_ready", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Ok") => Some(("is_ok", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Err") => Some(("is_err", "unwrap_err")),
             (RuntimeMatchEnumKind::Entry, "Vacant") => Some(("is_vacant", "vacant_entry")),
@@ -32159,6 +32311,7 @@ impl CodeGen {
             .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+            (RuntimeMatchEnumKind::Poll, "Pending") => Some("is_pending"),
             (RuntimeMatchEnumKind::Entry, "Vacant") => Some("is_vacant"),
             (RuntimeMatchEnumKind::Entry, "Occupied") => Some("is_occupied"),
             _ => None,
@@ -32173,12 +32326,18 @@ impl CodeGen {
         if ident.by_ref.is_some() || ident.mutability.is_some() || ident.subpat.is_some() {
             return None;
         }
+        let source_path: syn::Path = syn::parse_quote!(#ident);
+        if self.standard_poll_variant(&source_path).as_deref() == Some("Pending") {
+            return Some("is_pending");
+        }
         let variant_name = self
             .canonical_variant_name(&ident.ident.to_string())
             .to_string();
         let pair = |kind: RuntimeMatchEnumKind| -> Option<&'static str> {
             match (kind, variant_name.as_str()) {
                 (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+                (RuntimeMatchEnumKind::Poll, "Pending") => Some("is_pending"),
+                (RuntimeMatchEnumKind::Poll, "Ready") => Some("is_ready"),
                 (RuntimeMatchEnumKind::Option, "Some") => Some("is_some"),
                 (RuntimeMatchEnumKind::Result, "Ok") => Some("is_ok"),
                 (RuntimeMatchEnumKind::Result, "Err") => Some("is_err"),
@@ -34971,7 +35130,39 @@ impl CodeGen {
         // and we'll inject the loop var names into it afterwards.
         let loop_var_names: Vec<String> = loop_binding_names.into_iter().collect();
         let mut loop_var_types = Vec::new();
-        if let Some(item_ty) = self.infer_iter_item_type_from_expr(&for_expr.expr) {
+        let loop_item_type = self.infer_iter_item_type_from_expr(&for_expr.expr).or_else(|| {
+            // `for pair in map` uses owned IntoIterator just like
+            // `map.into_iter()`. Recover both key and value metadata before
+            // typing the pattern, including Arc receivers inside tuple values.
+            // Keep this fallback specific to an authenticated std HashMap;
+            // a local same-named collection may have a different Item type.
+            if iter_is_borrowed {
+                return None;
+            }
+            let mut owner = self.infer_simple_expr_type(&for_expr.expr)?;
+            if !self.type_is_canonical_std_hash_map(&owner) {
+                return None;
+            }
+            for _ in 0..32 {
+                let Some(next) = self.resolve_type_alias_once(&owner) else { break; };
+                if next == owner { break; }
+                owner = next;
+            }
+            let syn::Type::Path(path) = self.peel_reference_paren_group_type(&owner) else {
+                return None;
+            };
+            let syn::PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments else {
+                return None;
+            };
+            let mut types = arguments.args.iter().filter_map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            });
+            let key = types.next()?;
+            let value = types.next()?;
+            Some(parse_quote!((#key, #value)))
+        });
+        if let Some(item_ty) = loop_item_type {
             match for_expr.pat.as_ref() {
                 syn::Pat::Ident(pat_ident) if pat_ident.ident != "_" => {
                     loop_var_types.push((pat_ident.ident.to_string(), item_ty));
@@ -45249,6 +45440,25 @@ impl CodeGen {
             rendered.push(seg_text);
         }
         let mut emitted = rendered.join("::");
+        if self.standard_path_root_is_local_module(&owner_path)
+            && let Some((method, owners)) = rendered.split_last()
+            && let Some(specialized_owner) = owners.last()
+        {
+            // Recovery determines template arguments, not the owner's module.
+            // Re-rendering raw Rust prefixes here would undo the lexical path
+            // mapping, for example local `std` -> C++ `std_mod`.
+            let mut bare_owner_path = owner_path.clone();
+            if let Some(last) = bare_owner_path.segments.last_mut() {
+                last.arguments = syn::PathArguments::None;
+            }
+            let canonical_owner = self.map_type(&syn::Type::Path(syn::TypePath {
+                qself: None,
+                path: bare_owner_path,
+            }));
+            let arguments = specialized_owner.find('<')
+                .map(|index| &specialized_owner[index..]).unwrap_or("");
+            emitted = format!("{}{}::{}", canonical_owner, arguments, method);
+        }
         let mut force_leading_colon = path.leading_colon.is_some();
         if !force_leading_colon
             && !rendered.is_empty()
@@ -46213,6 +46423,17 @@ impl CodeGen {
         }
 
         let method_name = func_path.segments.last()?.ident.to_string();
+        // A borrowed byte slice is an argument to this standard associated
+        // function, not a receiver for a trait method on the slice.
+        if method_name == "from_utf8_lossy"
+            && trait_segment == "String"
+            && let Some(owner_path) = Self::path_without_last_segment(func_path)
+        {
+            let owner = syn::Type::Path(syn::TypePath { qself: None, path: owner_path });
+            if matches!(self.map_type(&owner).as_str(), "rusty::String" | "std::string") {
+                return None;
+            }
+        }
         if method_name
             .chars()
             .next()
@@ -50999,8 +51220,65 @@ impl CodeGen {
         ))
     }
 
-    /// Best-effort lowering of a Rust block used in expression position.
-    /// Emits an IIFE that preserves simple local bindings and tail-expression return.
+    /// Whether a block transfers control to a loop or label outside itself.
+    /// Inner loops and closures retain their own break/continue targets.
+    fn block_has_escaping_loop_control(&self, block: &syn::Block) -> bool {
+        struct Scan {
+            loop_depth: usize,
+            labels: Vec<String>,
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan {
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+
+            fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+                let (label, is_loop) = match expr {
+                    syn::Expr::Closure(_) | syn::Expr::Async(_) | syn::Expr::Const(_) => return,
+                    syn::Expr::Break(value) => {
+                        self.found |= value.label.as_ref().map_or(self.loop_depth == 0, |label| {
+                            !self.labels.contains(&label.ident.to_string())
+                        });
+                        syn::visit::visit_expr(self, expr);
+                        return;
+                    }
+                    syn::Expr::Continue(value) => {
+                        self.found |= value.label.as_ref().map_or(self.loop_depth == 0, |label| {
+                            !self.labels.contains(&label.ident.to_string())
+                        });
+                        return;
+                    }
+                    syn::Expr::Loop(value) => (value.label.as_ref(), true),
+                    syn::Expr::While(value) => (value.label.as_ref(), true),
+                    syn::Expr::ForLoop(value) => {
+                        // Rust evaluates the iterable before entering the new
+                        // loop's control-flow scope, including its label.
+                        self.visit_expr(&value.expr);
+                        (value.label.as_ref(), true)
+                    }
+                    syn::Expr::Block(value) => (value.label.as_ref(), false),
+                    _ => (None, false),
+                };
+                if let Some(label) = label {
+                    self.labels.push(label.name.ident.to_string());
+                }
+                self.loop_depth += usize::from(is_loop);
+                if let syn::Expr::ForLoop(value) = expr {
+                    self.visit_block(&value.body);
+                } else {
+                    syn::visit::visit_expr(self, expr);
+                }
+                self.loop_depth -= usize::from(is_loop);
+                if label.is_some() {
+                    self.labels.pop();
+                }
+            }
+        }
+        let mut scan = Scan { loop_depth: 0, labels: Vec::new(), found: false };
+        syn::visit::Visit::visit_block(&mut scan, block);
+        scan.found
+    }
+
+    /// Lower a value block without introducing a new function or loop scope.
     fn block_expr_to_statement_expr_string(
         &self,
         block: &syn::Block,
@@ -51053,13 +51331,33 @@ impl CodeGen {
             return Some("std::make_tuple()".to_string());
         }
 
-        // `return`/`?` inside expression blocks must escape the enclosing function.
-        // Lambda IIFEs trap these returns, so use GNU statement-expression lowering.
-        if self.block_contains_early_return_or_try(block) {
+        // A lambda cannot transfer control to the enclosing function or loop.
+        // Let initializers use statement lowering where their type is known;
+        // other value positions share the existing statement-expression path.
+        if self.block_contains_early_return_or_try(block)
+            || self.block_has_escaping_loop_control(block)
+        {
             return self.block_expr_to_statement_expr_string(block, expected_ty);
         }
 
         let mut inner = self.new_inner_for_block();
+        // `Some(value)` and `None` have distinct constructor types in C++.
+        // Infer their common Option type using the block's prefix bindings,
+        // then use that type for both lambda returns and constructor lowering.
+        let inferred_option_return = if expected_ty.is_none() {
+            block.stmts.split_last().and_then(|(tail, prefix)| {
+                let syn::Stmt::Expr(syn::Expr::If(tail), None) = tail else { return None };
+                let mut inference = self.new_inner_for_block();
+                let bindings = inference.collect_pre_scan_known_local_type_hints(prefix);
+                inference.local_bindings.push(bindings.into_iter()
+                    .map(|(name, ty)| (name, Some(ty))).collect());
+                inference.infer_common_value_type_from_if(tail)
+                    .filter(|ty| inference.is_option_like_syn_type(ty))
+            })
+        } else {
+            None
+        };
+        let expected_ty = expected_ty.or(inferred_option_return.as_ref());
         let expected_return_hint = expected_ty
             .cloned()
             .map(|ty| syn::ReturnType::Type(Default::default(), Box::new(ty)));
@@ -66316,7 +66614,19 @@ mod paths;
 mod predicates;
 mod symbol_category;
 mod type_mapping;
+mod standard_any;
+mod standard_future;
+#[cfg(test)]
+mod standard_future_tests;
 mod type_solver;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod auto_trait_generics_tests;
+#[cfg(test)]
+mod owned_map_iteration_tests;
+#[cfg(test)]
+mod qualified_std_constructor_tests;
+#[cfg(test)]
+mod imported_guard_coercion_tests;

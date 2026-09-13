@@ -19,8 +19,8 @@ pub(crate) enum CppDefaultArgument {
 impl CppDefaultArgument {
     fn source_type_description(self) -> &'static str {
         match self {
-            Self::SourceLocation => "&::rusty::SourceLocation",
-            Self::Stderr => "*mut ::rusty::CFile",
+            Self::SourceLocation => "&::core::panic::Location<'_>, &::std::panic::Location<'_>, or &::rusty::SourceLocation",
+            Self::Stderr => "a mutable pointer to an explicitly native-mapped FILE binding (or *mut ::rusty::CFile)",
         }
     }
 
@@ -173,6 +173,37 @@ fn exact_path_type(ty: &Type, expected: &[&str]) -> bool {
             })
 }
 
+// The absolute standard-library path cannot resolve to a local lookalike.
+// Location only accepts its source-file lifetime, never a type argument.
+fn standard_location_path(ty: &Type) -> Option<&'static str> {
+    let Type::Path(path) = ty else { return None; };
+    if path.qself.is_some() || path.path.leading_colon.is_none()
+        || path.path.segments.len() != 3 {
+        return None;
+    }
+    let mut segments = path.path.segments.iter();
+    let root = segments.next()?;
+    let module = segments.next()?;
+    let name = segments.next()?;
+    if !matches!(root.arguments, syn::PathArguments::None)
+        || module.ident != "panic" || !matches!(module.arguments, syn::PathArguments::None)
+        || name.ident != "Location" {
+        return None;
+    }
+    let lifetimes_only = match &name.arguments {
+        syn::PathArguments::None => true,
+        syn::PathArguments::AngleBracketed(args) => args.args.len() == 1
+            && matches!(args.args.first(), Some(syn::GenericArgument::Lifetime(_))),
+        _ => false,
+    };
+    if !lifetimes_only { return None; }
+    match root.ident.to_string().as_str() {
+        "core" => Some("core::panic::Location"),
+        "std" => Some("std::panic::Location"),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct DefaultFacadeTypeVisitor {
     found: bool,
@@ -199,7 +230,8 @@ fn source_type_matches(kind: CppDefaultArgument, ty: &Type) -> bool {
         (CppDefaultArgument::SourceLocation, Type::Reference(reference)) => {
             reference.mutability.is_none()
                 && reference.lifetime.is_none()
-                && exact_path_type(&reference.elem, &["rusty", "SourceLocation"])
+                && (exact_path_type(&reference.elem, &["rusty", "SourceLocation"])
+                    || standard_location_path(&reference.elem).is_some())
         }
         (CppDefaultArgument::Stderr, Type::Ptr(pointer)) => {
             pointer.mutability.is_some()
@@ -224,20 +256,32 @@ fn parameter_pattern_is_plain_ident(arg: &syn::PatType) -> bool {
     )
 }
 
-fn validate_mapping(kind: CppDefaultArgument, type_map: &UserTypeMap) -> Result<(), String> {
-    let (rust_type, expected_cpp) = kind.required_mapping();
+fn validate_mapping(kind: CppDefaultArgument, type_map: &UserTypeMap, ty: &Type) -> Result<(), String> {
+    let standard = match (kind, ty) {
+        (CppDefaultArgument::SourceLocation, Type::Reference(reference)) =>
+            standard_location_path(&reference.elem),
+        _ => None,
+    };
+    let (rust_type, expected_cpp) = standard
+        .map(|path| (path, "std::source_location"))
+        .unwrap_or_else(|| kind.required_mapping());
     match type_map.lookup(rust_type) {
         Some(actual) if actual == expected_cpp => Ok(()),
         Some(actual) => Err(format!(
             "{MARKER} requires type map {rust_type} = \"{expected_cpp}\", found \"{actual}\""
         )),
+        None if standard.is_some() => Ok(()),
         None => Err(format!(
             "{MARKER} requires type map {rust_type} = \"{expected_cpp}\""
         )),
     }
 }
 
-fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Result<usize, String> {
+fn validate_function(
+    function: &ItemFn,
+    type_map: Option<&UserTypeMap>,
+    native_types: &crate::cpp_native_types::NativeTypes,
+) -> Result<usize, String> {
     let mut kinds = Vec::with_capacity(function.sig.inputs.len());
     for input in &function.sig.inputs {
         let kind = match input {
@@ -315,7 +359,9 @@ fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Resul
                 function.sig.ident
             ));
         }
-        if !source_type_matches(kind, &arg.ty) {
+        let native_file = kind == CppDefaultArgument::Stderr
+            && native_types.mapped_file_pointer(&arg.ty);
+        if !source_type_matches(kind, &arg.ty) && !native_file {
             return Err(format!(
                 "{MARKER}({}) requires exact Rust parameter type {}",
                 match kind {
@@ -325,18 +371,22 @@ fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Resul
                 kind.source_type_description()
             ));
         }
-        if let Some(type_map) = type_map {
-            validate_mapping(kind, type_map)?;
+        if !native_file && let Some(type_map) = type_map {
+            validate_mapping(kind, type_map, &arg.ty)?;
         }
     }
     Ok(marker_count)
 }
 
-fn validate_items(items: &[Item], type_map: Option<&UserTypeMap>) -> Result<usize, String> {
+fn validate_items(
+    items: &[Item],
+    type_map: Option<&UserTypeMap>,
+    native_types: &crate::cpp_native_types::NativeTypes,
+) -> Result<usize, String> {
     let mut marker_count = 0;
     for item in items {
         match item {
-            Item::Fn(function) => marker_count += validate_function(function, type_map)?,
+            Item::Fn(function) => marker_count += validate_function(function, type_map, native_types)?,
             _ => {}
         }
     }
@@ -348,6 +398,8 @@ fn validate_file_impl(
     type_map: Option<&UserTypeMap>,
     strict_signature_closure: bool,
 ) -> Result<bool, String> {
+    let production = crate::cpp_abi::production_contract_file(file);
+    let file = &production;
     let mentioned = token_stream_marker_count(file.to_token_stream());
     if mentioned == 0 {
         return Ok(false);
@@ -362,7 +414,10 @@ fn validate_file_impl(
                 .as_ref()
                 .map(|(_, name)| name)
                 .unwrap_or(&item.ident);
-            if ident_text(bound) == "rusty" {
+            if ident_text(bound) == "rusty"
+                || matches!(ident_text(bound).as_str(), "std" | "core")
+                    && ident_text(&item.ident) != ident_text(bound)
+            {
                 self.found = true;
             }
         }
@@ -371,7 +426,7 @@ fn validate_file_impl(
     facade_alias.visit_file(file);
     if facade_alias.found {
         return Err(format!(
-            "{MARKER} reserves absolute ::rusty facade paths; source-defined extern-crate aliases named rusty are unsupported"
+            "{MARKER} reserves absolute runtime and standard-library paths; source-defined extern-crate aliases named rusty, std, or core are unsupported"
         ));
     }
     for attr in &file.attrs {
@@ -385,7 +440,8 @@ fn validate_file_impl(
             ));
         }
     }
-    let validated = validate_items(&file.items, type_map)?;
+    let native_types = crate::cpp_native_types::collect(file, type_map)?;
+    let validated = validate_items(&file.items, type_map, &native_types)?;
     if validated != mentioned {
         return Err(format!(
             "reserved {MARKER} marker is allowed only in the exact inert attribute on a trailing parameter of a public free function"
@@ -854,6 +910,13 @@ fn validate_binding_macro_surfaces(
             continue;
         }
         if let Item::Macro(item_macro) = item {
+            // `thread_local!` is not opaque: its fixed grammar generates
+            // exactly the parsed statics, which carry no attribute surface
+            // (the parser rejects attributed entries), so there is nothing
+            // here for this validator to miss.
+            if crate::cpp_abi::parse_thread_local_statics(&item_macro.mac).is_some() {
+                continue;
+            }
             return Err(format!(
                 "{MARKER} cannot prove item macro `{}` is free of macro-generated bindings in module `{}`",
                 item_macro.mac.path.to_token_stream(),
@@ -1065,6 +1128,17 @@ fn collect_signature_type_model(
     model: &mut DefaultSignatureTypes,
 ) -> Result<(), String> {
     for item in items {
+        // Items removed by a verification-only cfg (`#[cfg(verus)]`, `any()`)
+        // are not part of the transpiled program, so they must not seed the
+        // signature type model. In particular a `#[cfg(verus)] use vstd::..::*;`
+        // glob would otherwise mark this module as macro-tainted (via
+        // `module_has_potential_macro_import`) and block the audit of its real,
+        // transpiled items. This mirrors the guard in the attribute-audit loop.
+        // Note this only skips *definitely*-false cfgs: target-dependent
+        // constants behind mutually-exclusive cfgs are not removed here.
+        if item_is_cfg_removed(item) {
+            continue;
+        }
         match item {
             Item::Type(alias) => {
                 let name = ident_text(&alias.ident);
@@ -2534,7 +2608,7 @@ fn validate_crate_default_signature_types(inputs: &[(PathBuf, String)]) -> Resul
                 path.display()
             )
         })?;
-        files.push((module, file));
+        files.push((module, crate::cpp_abi::production_contract_file(&file)));
     }
     let borrowed = files
         .iter()
@@ -2668,6 +2742,40 @@ mod tests {
             .mappings
             .insert("rusty::CFile".to_string(), "FILE".to_string());
         type_map
+    }
+
+    #[test]
+    fn standard_locations_need_no_facade_mapping() {
+        for root in ["core", "std"] {
+            let source = format!("pub fn locate(#[cfg_attr(any(), cpp_default_argument(source_location))] location: &::{root}::panic::Location<'_>) -> u32 {{ location.line() }}");
+            let file = syn::parse_file(&source).unwrap();
+            assert!(validate_file(&file, &UserTypeMap::default()).unwrap());
+            let mut wrong = UserTypeMap::default();
+            wrong.mappings.insert(format!("{root}::panic::Location"), "Unrelated".into());
+            assert!(validate_file(&file, &wrong).is_err());
+        }
+        let rebound = syn::parse_file("extern crate dependency as core; pub fn locate(#[cfg_attr(any(), cpp_default_argument(source_location))] location: &::core::panic::Location<'_>) {}").unwrap();
+        assert!(validate_file(&rebound, &UserTypeMap::default()).is_err());
+        for ty in ["&core::panic::Location<'_>", "&mut ::core::panic::Location<'_>", "&::core::panic::Location<u32>"] {
+            let source = format!("pub fn locate(#[cfg_attr(any(), cpp_default_argument(source_location))] location: {ty}) {{}}");
+            assert!(validate_file(&syn::parse_file(&source).unwrap(), &UserTypeMap::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn crate_contracts_ignore_test_modules_in_default_argument_audits() {
+        let inputs = vec![
+            (PathBuf::from("src/lib.rs"), "pub mod api;".to_string()),
+            (PathBuf::from("src/api.rs"), r#"
+                pub fn trace(
+                    #[cfg_attr(any(), cpp_default_argument(stderr))] stream: *mut ::rusty::CFile,
+                ) {}
+                #[cfg(test)] mod tests { opaque_test_macro!(); }
+            "#.to_string()),
+        ];
+        let accepted = preflight_crate_sources_syntax(&inputs);
+        assert!(accepted.is_ok(), "{accepted:?}");
+        assert!(preflight_crate_sources(&inputs, &exact_type_map()).unwrap());
     }
 
     #[test]

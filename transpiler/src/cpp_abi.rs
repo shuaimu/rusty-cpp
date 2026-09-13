@@ -117,6 +117,12 @@ pub(crate) struct FlatImportTypeAuthorization {
     pub(crate) provider_physical_module: ModulePath,
     pub(crate) provider_kind: FlatImportTypeProviderKind,
     pub(crate) reference_kind: FlatImportTypeReferenceKind,
+    /// Standard owner identities proved in the provider's lexical scope.
+    /// None forbids nullable-owner profile expansion through this binding.
+    pub(crate) nullable_owner_alias_source: Option<String>,
+    /// Fully normalized nullable Box<dyn Fn*> with provider-proven standard
+    /// bounds and signature types that cannot rebind in a consumer.
+    pub(crate) nullable_callback_alias_source: Option<String>,
 }
 
 /// Out-of-band instructions consumed by code generation after the semantic
@@ -601,6 +607,35 @@ fn parse_flat_import_contract_shape(
     })
 }
 
+/// Match production emission by removing exact `#[cfg(test)]` inline modules.
+/// Other conditional attributes remain subject to the contract graph audit.
+/// Filtering the parsed tree keeps test macros and bindings out of every
+/// ownership pass, including nested test modules.
+pub(crate) fn production_contract_file(file: &syn::File) -> syn::File {
+    struct ProductionModules;
+    impl VisitMut for ProductionModules {
+        fn visit_item_mod_mut(&mut self, item: &mut syn::ItemMod) {
+            if let Some((_, items)) = &mut item.content {
+                strip(items);
+            }
+            syn::visit_mut::visit_item_mod_mut(self, item);
+        }
+    }
+    fn strip(items: &mut Vec<Item>) {
+        items.retain(|item| {
+            let Item::Mod(module) = item else { return true; };
+            !module.attrs.iter().any(|attr| {
+                attr.path().is_ident("cfg")
+                    && attr.parse_args::<syn::Path>().is_ok_and(|path| path.is_ident("test"))
+            })
+        });
+    }
+    let mut production = file.clone();
+    strip(&mut production.items);
+    ProductionModules.visit_file_mut(&mut production);
+    production
+}
+
 /// Collect and validate all ABI contracts in a Rust file.
 ///
 /// The only recognized spellings are inert stable-Rust attributes of the form
@@ -612,6 +647,7 @@ pub(crate) fn collect(
     file: &syn::File,
     flat_import_inference: Option<&str>,
 ) -> Result<CppAbiContracts, String> {
+    let file = production_contract_file(file);
     reject_marker_attrs(&file.attrs, "crate-level inner attribute")?;
     let mut contracts = CppAbiContracts::default();
     collect_module(
@@ -1815,6 +1851,8 @@ pub(crate) fn lower(
     file: &syn::File,
     flat_import_inference: Option<&str>,
 ) -> Result<Option<(syn::File, CppAbiEmissionPlan)>, String> {
+    let production = production_contract_file(file);
+    let file = &production;
     let contracts = collect(file, flat_import_inference)?;
     if contracts.callables.is_empty() && contracts.flat_imports.is_empty() {
         return Ok(None);
@@ -2080,7 +2118,18 @@ fn use_tree_contains_glob(tree: &syn::UseTree) -> bool {
 }
 
 fn audited_compiler_macro_name(name: &str) -> bool {
-    matches!(canonical_name(name).as_str(), "assert" | "format")
+    matches!(canonical_name(name).as_str(), "assert" | "format" | "file" | "line" | "vec")
+}
+
+/// These compiler macros contain no bindings or expressions. Their names are
+/// reserved alongside assert/format so a user macro cannot impersonate them.
+fn is_admitted_source_location_macro(mac: &syn::Macro) -> bool {
+    mac.path.leading_colon.is_none()
+        && mac.path.segments.len() == 1
+        && matches!(ident_key(&mac.path.segments[0].ident).as_str(), "file" | "line")
+        && matches!(mac.path.segments[0].arguments, syn::PathArguments::None)
+        && matches!(mac.delimiter, syn::MacroDelimiter::Paren(_))
+        && mac.tokens.is_empty()
 }
 
 fn use_tree_introduces_audited_compiler_macro(tree: &syn::UseTree) -> Option<String> {
@@ -2231,6 +2280,22 @@ fn parse_admitted_assert_expression(mac: &syn::Macro) -> Option<Expr> {
 /// admitted: implicit captures and named/dynamic width arguments can create
 /// identifier references from inside the otherwise opaque format literal.
 /// Every explicit argument is returned for ordinary scoped reference audit.
+fn parse_admitted_vec_expressions(mac: &syn::Macro) -> Option<Vec<Expr>> {
+    if mac.path.leading_colon.is_some()
+        || mac.path.segments.len() != 1
+        || !mac.path.is_ident("vec")
+        || !matches!(mac.delimiter, syn::MacroDelimiter::Bracket(_))
+    {
+        return None;
+    }
+    let tokens = &mac.tokens;
+    match syn::parse2::<Expr>(quote::quote!([#tokens])).ok()? {
+        Expr::Array(array) => Some(array.elems.into_iter().collect()),
+        Expr::Repeat(repeat) => Some(vec![*repeat.expr, *repeat.len]),
+        _ => None,
+    }
+}
+
 fn parse_admitted_format_expressions(mac: &syn::Macro) -> Option<Vec<Expr>> {
     fn literal_has_only_explicit_positional_fields(literal: &str) -> bool {
         let chars = literal.chars().collect::<Vec<_>>();
@@ -2393,6 +2458,15 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
         if self.error.is_some() {
             return;
         }
+        if is_admitted_source_location_macro(mac) {
+            return;
+        }
+        if let Some(expressions) = parse_admitted_vec_expressions(mac) {
+            for expression in &expressions {
+                self.visit_expr(expression);
+            }
+            return;
+        }
         if !self.inside_assert_expression
             && let Some(expression) = parse_admitted_assert_expression(mac)
         {
@@ -2409,6 +2483,14 @@ impl<'ast> Visit<'ast> for CrateOpaqueSurfaceAudit {
                 self.visit_expr(expression);
             }
             self.inside_assert_expression = false;
+            return;
+        }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // Not opaque: the fixed grammar's bindings are exactly these
+            // statics -- scan them like ordinary items.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
             return;
         }
         self.error = Some(format!(
@@ -3015,6 +3097,15 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
         if self.error.is_some() {
             return;
         }
+        if is_admitted_source_location_macro(mac) {
+            return;
+        }
+        if let Some(expressions) = parse_admitted_vec_expressions(mac) {
+            for expression in &expressions {
+                self.visit_expr(expression);
+            }
+            return;
+        }
         if !self.inside_assert_expression
             && let Some(expression) = parse_admitted_assert_expression(mac)
         {
@@ -3031,6 +3122,16 @@ impl<'ast> Visit<'ast> for ScopedCrossFileAudit<'_> {
                 self.visit_expr(expression);
             }
             self.inside_assert_expression = false;
+            return;
+        }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // `thread_local!` has a fixed grammar the emitter lowers item by
+            // item, so its bindings are exactly these statics -- visit them
+            // as ordinary items so reserved-identifier scanning still covers
+            // their names, types and initializers.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
             return;
         }
         self.fail(format!(
@@ -3331,7 +3432,8 @@ fn flat_import_exact_inert_no_fieldwise_ctor(attr: &Attribute) -> bool {
 }
 
 fn flat_import_type_attr_supported(attr: &Attribute, allow_no_fieldwise_ctor: bool) -> bool {
-    if is_cpp_abi_doc_or_lint_attr(attr) || attr.path().is_ident("repr") {
+    if (is_cpp_abi_doc_or_lint_attr(attr) && !attr.path().is_ident("cfg_attr"))
+        || attr.path().is_ident("repr") {
         return true;
     }
     if attr.path().is_ident("derive") {
@@ -3366,8 +3468,9 @@ fn flat_import_trait_members_supported(item: &syn::ItemTrait) -> bool {
         let syn::TraitItem::Fn(method) = member else {
             return false;
         };
-        method.default.is_none()
-            && method.attrs.iter().all(is_cpp_abi_doc_or_lint_attr)
+        // Default bodies are ordinary canonical Rust. The crate-reference
+        // audits visit them with the same scope rules as inherent methods.
+        method.attrs.iter().all(is_cpp_abi_doc_or_lint_attr)
             && method.sig.generics.params.is_empty()
             && method.sig.generics.where_clause.is_none()
             && method.sig.constness.is_none()
@@ -3377,36 +3480,61 @@ fn flat_import_trait_members_supported(item: &syn::ItemTrait) -> bool {
     })
 }
 
-fn flat_import_trait_safety_contract_supported(item: &syn::ItemTrait) -> bool {
-    if item.supertraits.is_empty() {
-        return item.unsafety.is_none();
+fn exact_inert_trait_marker(attr: &Attribute, name: &str) -> bool {
+    if !attr.path().is_ident("cfg_attr") { return false; }
+    let Meta::List(list) = &attr.meta else { return false; };
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    let Ok(parts) = parser.parse2(list.tokens.clone()) else { return false; };
+    parts.len() == 2
+        && matches!(&parts[0], Meta::List(predicate) if predicate.path.is_ident("any") && predicate.tokens.is_empty())
+        && matches!(&parts[1], Meta::Path(path) if path.is_ident(name))
+}
+
+fn local_empty_marker_traits(items: &[Item]) -> BTreeSet<String> {
+    fn walk(items: &[Item], path: &mut Vec<String>, out: &mut BTreeSet<String>) {
+        for item in items {
+            match item {
+                Item::Mod(module) if module.attrs.iter().all(is_cpp_abi_doc_or_lint_attr) => {
+                    if let Some((_, nested)) = &module.content {
+                        path.push(ident_key(&module.ident));
+                        walk(nested, path, out);
+                        path.pop();
+                    }
+                }
+                Item::Trait(marker)
+                    if marker.items.is_empty() && marker.supertraits.is_empty()
+                        && marker.unsafety.is_none() && marker.auto_token.is_none()
+                        && marker.generics.params.is_empty() && marker.generics.where_clause.is_none()
+                        && marker.attrs.iter().filter(|attr| exact_inert_trait_marker(attr, "cpp_marker_trait")).count() == 1
+                        && marker.attrs.iter().all(|attr| is_cpp_abi_doc_or_lint_attr(attr) || exact_inert_trait_marker(attr, "cpp_marker_trait")) => {
+                    path.push(ident_key(&marker.ident));
+                    out.insert(path.join("::"));
+                    path.pop();
+                }
+                _ => {}
+            }
+        }
     }
-    let expected = if item.unsafety.is_some() {
-        BTreeSet::from(["Send".to_string(), "Sync".to_string()])
-    } else {
-        BTreeSet::from(["Send".to_string()])
-    };
-    if item.supertraits.len() != expected.len() {
-        return false;
-    }
-    let mut markers = BTreeSet::new();
+    let mut out = BTreeSet::new();
+    walk(items, &mut Vec::new(), &mut out);
+    out
+}
+
+fn flat_import_trait_safety_contract_supported(item: &syn::ItemTrait, local_markers: &BTreeSet<String>) -> bool {
+    let mut seen = BTreeSet::new();
     for bound in &item.supertraits {
-        let syn::TypeParamBound::Trait(bound) = bound else {
-            return false;
-        };
+        let syn::TypeParamBound::Trait(bound) = bound else { return false; };
         if !matches!(bound.modifier, syn::TraitBoundModifier::None)
-            || bound.lifetimes.is_some()
-            || bound.path.leading_colon.is_some()
-            || bound.path.segments.len() != 1
-        {
+            || bound.lifetimes.is_some() || bound.path.leading_colon.is_some()
+            || bound.path.segments.iter().any(|segment| !matches!(segment.arguments, PathArguments::None)) {
             return false;
         }
-        let marker = bound.path.segments[0].ident.to_string();
-        if !matches!(marker.as_str(), "Send" | "Sync") || !markers.insert(marker) {
+        let name = bound.path.segments.iter().map(|segment| ident_key(&segment.ident)).collect::<Vec<_>>().join("::");
+        if (!matches!(name.as_str(), "Send" | "Sync") && !local_markers.contains(&name)) || !seen.insert(name) {
             return false;
         }
     }
-    markers == expected
+    true
 }
 
 fn flat_import_namespace_i32_literal(expr: &syn::Expr) -> bool {
@@ -3422,6 +3550,42 @@ fn flat_import_namespace_i32_literal(expr: &syn::Expr) -> bool {
         }) => flat_import_namespace_i32_literal(expr),
         _ => false,
     }
+}
+
+// A flat imported value must exist on every supported target. Keep the
+// original target guards and admit two declarations only when their supported
+// predicates are exact complements, with the same audited i32 literal type.
+fn flat_import_const_provider_supported(items: &[(&Item, &str)]) -> bool {
+    let mut predicates = Vec::new();
+    for (item, _) in items {
+        let Item::Const(item) = item else { return false; };
+        if !matches!(item.vis, syn::Visibility::Public(_))
+            || !item.generics.params.is_empty() || item.generics.where_clause.is_some()
+            || !matches!(item.ty.as_ref(), Type::Path(path)
+                if path.qself.is_none() && path.path.is_ident("i32"))
+            || !flat_import_namespace_i32_literal(&item.expr)
+            || item.attrs.iter().any(|attribute|
+                !is_cpp_abi_doc_or_lint_attr(attribute) && !attribute.path().is_ident("cfg"))
+        {
+            return false;
+        }
+        let cfgs = item.attrs.iter().filter(|attribute| attribute.path().is_ident("cfg")).collect::<Vec<_>>();
+        if items.len() == 1 { return cfgs.is_empty(); }
+        if items.len() != 2 || cfgs.len() != 1
+            || crate::codegen::CodeGen::unsupported_cfg_cpp_attr(&item.attrs).is_some()
+            || crate::codegen::CodeGen::cfg_cpp_guard(&item.attrs).is_none()
+        {
+            return false;
+        }
+        let Ok(predicate) = cfgs[0].parse_args::<Meta>() else { return false; };
+        predicates.push(predicate);
+    }
+    fn negates(left: &Meta, right: &Meta) -> bool {
+        let Meta::List(list) = left else { return false; };
+        list.path.is_ident("not") && list.parse_args::<Meta>().ok().as_ref() == Some(right)
+    }
+    predicates.len() == 2
+        && (negates(&predicates[0], &predicates[1]) || negates(&predicates[1], &predicates[0]))
 }
 
 fn flat_import_namespace_module_supported(item: &syn::ItemMod) -> bool {
@@ -3451,13 +3615,39 @@ fn validate_flat_import_type_provider(
     item: &Item,
     rust_child: &str,
     leaf: &str,
+    provider_items: &[Item],
 ) -> Result<(), String> {
+    let local_markers = local_empty_marker_traits(provider_items);
+    if let Item::Trait(trait_item) = item {
+        for method in &trait_item.items {
+            if let syn::TraitItem::Fn(method) = method
+                && let Some(body) = &method.default
+            {
+                let mut audit = CrateOpaqueSurfaceAudit::default();
+                audit.visit_block(body);
+                if let Some(error) = audit.error {
+                    return Err(format!(
+                        "cpp_import_namespace default method `crate::{rust_child}::{leaf}::{}`: {error}",
+                        method.sig.ident,
+                    ));
+                }
+            }
+        }
+    }
     let allow_no_fieldwise_ctor = matches!(item, Item::Struct(_));
     let (visibility, attrs, ordinary, kind) = match item {
         Item::Struct(item) => (
             &item.vis,
             &item.attrs,
-            item.generics.params.is_empty() && item.generics.where_clause.is_none(),
+            // An unbounded type parameter changes the C++ template argument
+            // list, not the declaration's namespace identity. Codegen already
+            // preserves those arguments on imported struct references.
+            item.generics.where_clause.is_none()
+                && item.generics.params.iter().all(|parameter| matches!(parameter,
+                    syn::GenericParam::Type(parameter)
+                        if parameter.attrs.is_empty()
+                            && parameter.bounds.is_empty()
+                            && parameter.default.is_none())),
             "struct",
         ),
         Item::Enum(item) => (
@@ -3472,7 +3662,7 @@ fn validate_flat_import_type_provider(
             item.generics.params.is_empty()
                 && item.generics.where_clause.is_none()
                 && item.auto_token.is_none()
-                && flat_import_trait_safety_contract_supported(item)
+                && flat_import_trait_safety_contract_supported(item, &local_markers)
                 && flat_import_trait_members_supported(item),
             "trait",
         ),
@@ -3497,12 +3687,18 @@ fn validate_flat_import_type_provider(
     }
     let unsupported_attrs = attrs
         .iter()
-        .filter(|attr| !flat_import_type_attr_supported(attr, allow_no_fieldwise_ctor))
+        .filter(|attr| !flat_import_type_attr_supported(attr, allow_no_fieldwise_ctor)
+            && !(matches!(item, Item::Trait(_)) && exact_inert_trait_marker(attr, "cpp_trait_member_dispatch")))
         .map(|attr| attr.path().to_token_stream().to_string())
         .collect::<Vec<_>>();
     if !ordinary || !unsupported_attrs.is_empty() {
+        let required_shape = if matches!(item, Item::Struct(_)) {
+            "supported struct with only unconstrained type parameters".to_string()
+        } else {
+            format!("non-generic supported {kind}")
+        };
         return Err(format!(
-            "cpp_import_namespace leaf `crate::{rust_child}::{leaf}` must be an unconditional, non-generic supported {kind}; unsupported attributes: {}",
+            "cpp_import_namespace leaf `crate::{rust_child}::{leaf}` must be an unconditional, {required_shape}; unsupported attributes: {}",
             if unsupported_attrs.is_empty() {
                 "none".to_string()
             } else {
@@ -3511,6 +3707,229 @@ fn validate_flat_import_type_provider(
         ));
     }
     Ok(())
+}
+
+/// Preserve standard owner identities before an alias leaves its provider.
+/// Only direct provider aliases and exact standard imports are supported.
+fn nullable_owner_alias_source(items: &[Item], leaf: &str) -> Option<String> {
+    use crate::transpile::{collect_rust_item_import_bindings, resolve_external_rust_item_path};
+    let bindings = collect_rust_item_import_bindings(items);
+    let declarations = items.iter().filter_map(flat_import_direct_item_name)
+        .map(|(name, _)| ident_key(name)).collect::<std::collections::HashSet<_>>();
+    fn has_glob(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Glob(_) => true,
+            syn::UseTree::Path(path) => has_glob(&path.tree),
+            syn::UseTree::Group(group) => group.items.iter().any(has_glob),
+            _ => false,
+        }
+    }
+    let uncertain_bindings = items.iter().any(|item| match item {
+        Item::Use(item) => has_glob(&item.tree),
+        Item::Macro(_) => true,
+        _ => false,
+    });
+    fn alias<'a>(items: &'a [Item], path: &syn::Path) -> Option<&'a syn::ItemType> {
+        if path.leading_colon.is_some() { return None; }
+        let segments = path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
+        let name = match segments.as_slice() {
+            [name] => name,
+            [prefix, name] if prefix == "self" => name,
+            _ => return None,
+        };
+        let mut candidates = items.iter().filter_map(|item| match item {
+            Item::Type(item) if item.ident == name.as_str() => Some(item), _ => None,
+        });
+        let found = candidates.next()?;
+        (candidates.next().is_none() && found.generics.params.is_empty()
+            && found.generics.where_clause.is_none()
+            && !found.attrs.iter().any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr")))
+            .then_some(found)
+    }
+    fn normalize(
+        ty: &Type, items: &[Item], declarations: &std::collections::HashSet<String>,
+        bindings: &crate::transpile::RustItemImportBindings, uncertain: bool, depth: usize,
+    ) -> Option<Type> {
+        if depth == 0 { return None; }
+        let ty = match ty {
+            Type::Paren(value) => return normalize(&value.elem, items, declarations, bindings, uncertain, depth - 1),
+            Type::Group(value) => return normalize(&value.elem, items, declarations, bindings, uncertain, depth - 1),
+            Type::Path(value) if value.qself.is_none() => value,
+            _ => return None,
+        };
+        if let Some(target) = alias(items, &ty.path) {
+            return normalize(&target.ty, items, declarations, bindings, uncertain, depth - 1);
+        }
+        let first = ty.path.segments.first()?.ident.to_string();
+        let spelling = if ty.path.leading_colon.is_none() {
+            if declarations.contains(&first) { return None; }
+            if ty.path.segments.len() == 1 && !bindings.contains_key(&(String::new(), first.clone())) {
+                if uncertain { return None; }
+                match first.as_str() {
+                    "Option" => "core::option::Option".to_string(),
+                    "Box" => "std::boxed::Box".to_string(),
+                    _ => return None,
+                }
+            } else {
+                resolve_external_rust_item_path(&ty.path, &[], declarations, bindings)?
+            }
+        } else {
+            ty.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>().join("::")
+        };
+        let canonical = match spelling.as_str() {
+            "std::option::Option" | "core::option::Option" => "::core::option::Option",
+            "std::boxed::Box" | "alloc::boxed::Box" => "::std::boxed::Box",
+            "std::sync::Arc" | "alloc::sync::Arc" => "::std::sync::Arc",
+            _ => return None,
+        };
+        let PathArguments::AngleBracketed(arguments) = &ty.path.segments.last()?.arguments else { return None; };
+        if arguments.args.len() != 1 { return None; }
+        let GenericArgument::Type(inner) = arguments.args.first()? else { return None; };
+        let inner = if canonical == "::core::option::Option" {
+            let proven = normalize(inner, items, declarations, bindings, uncertain, depth - 1)?;
+            let Type::Path(owner) = &proven else { return None; };
+            if !owner.path.segments.last().is_some_and(|part| part.ident == "Box" || part.ident == "Arc") {
+                return None;
+            }
+            // Keep an owner alias for the consumer's separately authenticated
+            // C++ alias mapping, after proving its definition in this scope.
+            if let Type::Path(source) = inner
+                && let Some(owner_alias) = alias(items, &source.path)
+            {
+                let ident = &owner_alias.ident;
+                syn::parse_quote!(#ident)
+            } else { proven }
+        } else { inner.clone() };
+        let path: syn::Path = syn::parse_str(canonical).ok()?;
+        Some(syn::parse_quote!(#path<#inner>))
+    }
+    let path: syn::Path = syn::parse_str(leaf).ok()?;
+    let source = alias(items, &path)?;
+    normalize(&source.ty, items, &declarations, &bindings, uncertain_bindings, 16)
+        .map(|ty| ty.to_token_stream().to_string())
+}
+
+/// Prove callback transparency independently of an explicit owner profile.
+/// Provider-local signature names are intentionally unsupported until their
+/// exact identities can be carried through the consumer's import contract.
+fn nullable_callback_alias_source(items: &[Item], leaf: &str) -> Option<String> {
+    use crate::transpile::{collect_rust_item_import_bindings, resolve_external_rust_item_path};
+    let bindings = collect_rust_item_import_bindings(items);
+    let declarations = items.iter().filter_map(flat_import_direct_item_name)
+        .map(|(name, _)| ident_key(name)).collect::<std::collections::HashSet<_>>();
+    fn has_glob(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Glob(_) => true,
+            syn::UseTree::Path(path) => has_glob(&path.tree),
+            syn::UseTree::Group(group) => group.items.iter().any(has_glob),
+            _ => false,
+        }
+    }
+    let uncertain_bindings = items.iter().any(|item| match item {
+        Item::Use(item) => has_glob(&item.tree),
+        Item::Macro(_) => true,
+        _ => false,
+    });
+    let external_path = |path: &syn::Path| -> Option<String> {
+        let first = path.segments.first()?.ident.to_string();
+        if path.leading_colon.is_none() && declarations.contains(&first) { return None; }
+        if path.leading_colon.is_none() && path.segments.len() == 1
+            && !bindings.contains_key(&(String::new(), first.clone()))
+            && uncertain_bindings
+        { return None; }
+        resolve_external_rust_item_path(path, &[], &declarations, &bindings)
+    };
+    fn stable_signature_type(
+        ty: &Type, external: &impl Fn(&syn::Path) -> Option<String>, depth: usize,
+    ) -> Option<Type> {
+        if depth == 0 { return None; }
+        match ty {
+            Type::Paren(value) => stable_signature_type(&value.elem, external, depth - 1),
+            Type::Group(value) => stable_signature_type(&value.elem, external, depth - 1),
+            Type::Tuple(value) if value.elems.is_empty() => Some(ty.clone()),
+            Type::Reference(value) if value.lifetime.as_ref().is_none_or(|lifetime| lifetime.ident == "static") => {
+                let mut value = value.clone();
+                value.elem = Box::new(stable_signature_type(&value.elem, external, depth - 1)?);
+                Some(Type::Reference(value))
+            }
+            Type::Path(value) if value.qself.is_none()
+                && value.path.segments.iter().all(|part| matches!(part.arguments, PathArguments::None)) => {
+                let spelling = external(&value.path)?;
+                let segments = spelling.split("::").collect::<Vec<_>>();
+                let primitive = match segments.as_slice() {
+                    [name] => *name,
+                    [root, "primitive", name] if matches!(*root, "core" | "std") => *name,
+                    _ => return None,
+                };
+                if !matches!(primitive, "bool" | "char" | "str" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                    | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
+                { return None; }
+                syn::parse_str(&format!("::core::primitive::{primitive}")).ok()
+            }
+            _ => None,
+        }
+    }
+    fn inner_type(ty: &Type, name: &str) -> Option<Type> {
+        let Type::Path(path) = ty else { return None; };
+        let last = path.path.segments.last()?;
+        if last.ident != name { return None; }
+        let PathArguments::AngleBracketed(arguments) = &last.arguments else { return None; };
+        if arguments.args.len() != 1 { return None; }
+        match arguments.args.first()? { GenericArgument::Type(ty) => Some(ty.clone()), _ => None }
+    }
+    let option: Type = syn::parse_str(&nullable_owner_alias_source(items, leaf)?).ok()?;
+    let mut owner = inner_type(&option, "Option")?;
+    if let Type::Path(path) = &owner
+        && path.path.leading_colon.is_none() && path.path.segments.len() == 1
+        && matches!(path.path.segments[0].arguments, PathArguments::None)
+    {
+        owner = syn::parse_str(&nullable_owner_alias_source(items, &path.path.segments[0].ident.to_string())?).ok()?;
+    }
+    let Type::TraitObject(mut object) = inner_type(&owner, "Box")? else { return None; };
+    let mut saw_callable = false;
+    let mut markers = BTreeSet::new();
+    let mut saw_lifetime = false;
+    for bound in &mut object.bounds {
+        match bound {
+            syn::TypeParamBound::Lifetime(lifetime) if lifetime.ident == "static" && !saw_lifetime => {
+                saw_lifetime = true;
+            }
+            syn::TypeParamBound::Trait(bound) if bound.lifetimes.is_none()
+                && matches!(bound.modifier, syn::TraitBoundModifier::None) => {
+                let spelling = external_path(&bound.path)?;
+                let parts = spelling.split("::").collect::<Vec<_>>();
+                let name = match parts.as_slice() {
+                    [name] => *name,
+                    [root, family, name] if matches!(*root, "std" | "core")
+                        && ((*family == "ops" && matches!(*name, "Fn" | "FnMut" | "FnOnce"))
+                            || (*family == "marker" && matches!(*name, "Send" | "Sync"))) => *name,
+                    _ => return None,
+                };
+                let canonical = if matches!(name, "Fn" | "FnMut" | "FnOnce") && !saw_callable {
+                    let PathArguments::Parenthesized(arguments) = &mut bound.path.segments.last_mut()?.arguments else { return None; };
+                    for input in &mut arguments.inputs {
+                        *input = stable_signature_type(input, &external_path, 16)?;
+                    }
+                    if let syn::ReturnType::Type(_, output) = &mut arguments.output {
+                        **output = stable_signature_type(output, &external_path, 16)?;
+                    }
+                    saw_callable = true;
+                    format!("::core::ops::{name}")
+                } else if matches!(name, "Send" | "Sync") && markers.insert(name.to_string())
+                    && matches!(bound.path.segments.last()?.arguments, PathArguments::None)
+                {
+                    format!("::core::marker::{name}")
+                } else { return None; };
+                let mut normalized: syn::Path = syn::parse_str(&canonical).ok()?;
+                normalized.segments.last_mut()?.arguments = bound.path.segments.last()?.arguments.clone();
+                bound.path = normalized;
+            }
+            _ => return None,
+        }
+    }
+    if !saw_callable { return None; }
+    let normalized: Type = syn::parse_quote!(::core::option::Option<::std::boxed::Box<#object>>);
+    Some(normalized.to_token_stream().to_string())
 }
 
 /// Crate-wide facts that are safe to hand to per-file code generation only
@@ -3543,6 +3962,7 @@ pub(crate) fn validate_source_contract_module_graph(
                 path.display()
             )
         })?;
+        let file = production_contract_file(&file);
         validate_cpp_abi_file_attrs(
             &file.attrs,
             &format!("crate source file `{}`", path.display()),
@@ -3652,6 +4072,7 @@ fn preflight_crate_sources_impl(
                 path.display()
             )
         })?;
+        let file = production_contract_file(&file);
         let contracts = collect(&file, flat_import_inference)
             .map_err(|error| format!("cpp_abi crate preflight {}: {error}", path.display()))?;
         units.push(Unit {
@@ -3722,8 +4143,9 @@ fn preflight_crate_sources_impl(
     // re-exports do not have an independently importable C++ named module.
     // The leaf itself must be either the direct public, ordinary,
     // non-generic free function from the original slice or one direct public,
-    // non-generic nominal type/trait/type alias, or a narrowly audited direct
-    // inline module containing only public i32 literal constants. Re-exports
+    // supported nominal type/trait/type alias, an audited public i32 literal
+    // constant binding, or a narrowly audited direct inline module containing
+    // only public i32 literal constants. Re-exports
     // and other nested items are intentionally not C++ named-module providers.
     let mut flat_import_type_authorizations = BTreeSet::new();
     for consumer in &units {
@@ -3755,6 +4177,17 @@ fn preflight_crate_sources_impl(
                         })
                     })
                     .collect::<Vec<_>>();
+                if !direct.is_empty() && direct.iter().all(|(item, _)| matches!(item, Item::Const(_))) {
+                    if flat_import_const_provider_supported(&direct) {
+                        // One value binding on every C++ target. The emitter
+                        // retains both guarded declarations; no host pruning.
+                        continue;
+                    }
+                    return Err(format!(
+                        "cpp_import_namespace leaf `crate::{}::{leaf}` has an unsupported direct root-level const provider; expected one public i32 literal or an exact complementary supported cfg pair",
+                        contract.key.rust_child,
+                    ));
+                }
                 if direct.len() != 1 {
                     return Err(format!(
                         "cpp_import_namespace leaf `crate::{}::{leaf}` must be exactly one direct root-level free function or supported type declaration (or supported namespace module) in {}; found {}",
@@ -3827,6 +4260,7 @@ fn preflight_crate_sources_impl(
                             type_item,
                             &contract.key.rust_child,
                             leaf,
+                            &provider.file.items,
                         )?;
                         let provider_kind = match type_item {
                             Item::Struct(_) => FlatImportTypeProviderKind::Struct,
@@ -3848,6 +4282,8 @@ fn preflight_crate_sources_impl(
                                 provider_physical_module: provider_module.clone(),
                                 provider_kind,
                                 reference_kind: FlatImportTypeReferenceKind::MarkedUse,
+                                nullable_owner_alias_source: nullable_owner_alias_source(&provider.file.items, leaf),
+                                nullable_callback_alias_source: nullable_callback_alias_source(&provider.file.items, leaf),
                             },
                         );
                     }
@@ -3911,7 +4347,7 @@ fn preflight_crate_sources_impl(
         .collect::<FlatImportTypeBindings>();
     let mut qualified_type_provider_templates = BTreeMap::<
         (Vec<String>, String),
-        (String, FlatImportTypeProviderKind),
+        (String, FlatImportTypeProviderKind, Option<String>, Option<String>),
     >::new();
     for authorization in &flat_import_type_authorizations {
         let key = (
@@ -3921,6 +4357,8 @@ fn preflight_crate_sources_impl(
         let value = (
             authorization.cpp_namespace.clone(),
             authorization.provider_kind.clone(),
+            authorization.nullable_owner_alias_source.clone(),
+            authorization.nullable_callback_alias_source.clone(),
         );
         if let Some(previous) = qualified_type_provider_templates.insert(key.clone(), value.clone())
             && previous != value
@@ -3980,7 +4418,7 @@ fn preflight_crate_sources_impl(
         )
         .map_err(|error| format!("{error} in {}", unit.path.display()))?;
         for (provider, leaf, consumer_lexical_module) in qualified_type_references {
-            let (cpp_namespace, provider_kind) = qualified_type_provider_templates
+            let (cpp_namespace, provider_kind, nullable_owner_alias_source, nullable_callback_alias_source) = qualified_type_provider_templates
                 .get(&(provider.clone(), leaf.clone()))
                 .expect("qualified flat type reference has an audited provider template")
                 .clone();
@@ -3999,6 +4437,8 @@ fn preflight_crate_sources_impl(
                 provider_physical_module: ModulePath(provider),
                 provider_kind,
                 reference_kind: FlatImportTypeReferenceKind::QualifiedProviderPath,
+                nullable_owner_alias_source,
+                nullable_callback_alias_source,
             });
         }
         let external = global_contracts.external_for(index);
@@ -5445,6 +5885,10 @@ impl FlatImportCrateReferenceAudit<'_> {
     fn is_exact_provider_leaf_item(&self, item: &Item) -> bool {
         let name = match item {
             Item::Fn(item) => ident_key(&item.sig.ident),
+            // Const groups have already passed the direct provider proof,
+            // including exact complementary cfg coverage when conditional.
+            // Only that same module's binding is exempt from collisions.
+            Item::Const(item) => ident_key(&item.ident),
             Item::Struct(item) => ident_key(&item.ident),
             Item::Enum(item) => ident_key(&item.ident),
             Item::Trait(item) => ident_key(&item.ident),
@@ -5769,6 +6213,18 @@ impl<'ast> Visit<'ast> for FlatImportCrateReferenceAudit<'_> {
             self.visit_attribute(attr);
         }
         if self.error.is_some() {
+            return;
+        }
+        if self.flat_import_inference.is_some() && is_flat_import_underscore_anchor(item) {
+            let syn::UseTree::Path(root) = &item.tree else { unreachable!() };
+            let syn::UseTree::Rename(child) = root.tree.as_ref() else { unreachable!() };
+            if matches!(item.vis, syn::Visibility::Inherited)
+                && item.attrs.iter().all(is_cpp_abi_doc_or_lint_attr)
+                && self.rust_namespaces.modules.contains(&vec![ident_key(&child.ident)]) {
+                // A checked dependency anchor introduces no Rust or C++ name.
+                return;
+            }
+            self.fail(format!("invalid dependency-only module anchor: `{}`", item.to_token_stream()));
             return;
         }
         if use_tree_aliases_relative_module_root(&item.tree) {
@@ -6163,6 +6619,14 @@ impl<'ast> Visit<'ast> for FlatImportCrateReferenceAudit<'_> {
         if self.error.is_some() {
             return;
         }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // Not opaque: leaf mentions inside the fixed grammar's statics
+            // are ordinary type/expr references, visited as items.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
+            return;
+        }
         let leaves = self.opaque_leaf_names();
         if mac
             .path
@@ -6257,6 +6721,12 @@ impl<'ast> Visit<'ast> for FlatImportBindingAudit<'_> {
             return;
         }
         if let Item::Use(item_use) = item {
+            // A cfg-absent `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is
+            // not part of the transpiled program, so it cannot shadow an
+            // imported leaf. Same guard the other two `use` visitors apply.
+            if flat_import_attrs_presence(&item_use.attrs) == FlatImportPresence::Absent {
+                return;
+            }
             if parse_flat_import_use(item_use, self.module, self.flat_import_inference)
                 .ok()
                 .flatten()
@@ -6440,6 +6910,16 @@ impl<'ast> Visit<'ast> for FlatImportOpaqueAudit<'_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.error.is_some() {
+            return;
+        }
+        if let Some(statics) = parse_thread_local_statics(mac) {
+            // Not opaque: the fixed grammar's bindings are exactly these
+            // statics, so leaf mentions inside them are ordinary type/expr
+            // references -- visit them as items instead of failing on the
+            // raw token scan.
+            for item_static in &statics {
+                syn::visit::visit_item_static(self, item_static);
+            }
             return;
         }
         if mac
@@ -7341,6 +7821,12 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
     }
 
     fn visit_item_use(&mut self, item_use: &'ast syn::ItemUse) {
+        // A cfg-absent `use` (e.g. `#[cfg(verus)] use vstd::prelude::*;`) is not
+        // part of the transpiled program, so it can neither introduce nor alias
+        // a cpp_abi name. Same guard the other `use` visitors apply.
+        if flat_import_attrs_presence(&item_use.attrs) == FlatImportPresence::Absent {
+            return;
+        }
         for attr in &item_use.attrs {
             self.visit_attribute(attr);
         }
@@ -7367,6 +7853,15 @@ impl<'ast> Visit<'ast> for ReservedImportMacroAudit<'_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.error.is_some() {
+            return;
+        }
+        if is_admitted_source_location_macro(mac) {
+            return;
+        }
+        if let Some(expressions) = parse_admitted_vec_expressions(mac) {
+            for expression in &expressions {
+                self.visit_expr(expression);
+            }
             return;
         }
         if !self.inside_assert_expression
@@ -9778,6 +10273,434 @@ mod tests {
     }
 
     #[test]
+    fn crate_contracts_ignore_test_modules_but_reject_conditional_providers() {
+        let provider = r#"
+            #[cfg_attr(any(), cpp_abi(returns(std_string_bytes)))]
+            pub fn adapted() -> Vec<u8> { Vec::new() }
+            #[cfg(test)] mod tests { use super::*; opaque_test_macro!(); }
+            pub mod nested { #[cfg(test)] mod tests { another_test_macro!(); } }
+        "#;
+        let inputs = crate_units(&[("src/lib.rs", "pub mod api;"), ("src/api.rs", provider)]);
+        let accepted = preflight_crate_sources(&inputs);
+        assert!(accepted.is_ok(), "{accepted:?}");
+        lower(&syn::parse_file(provider).unwrap(), None).unwrap();
+        for condition in ["feature = \"runtime\"", "not(test)", "all(test)"] {
+            let conditional = provider.replace("#[cfg(test)] mod tests", &format!("#[cfg({condition})] mod tests"));
+            let inputs = crate_units(&[("src/lib.rs", "pub mod api;"), ("src/api.rs", &conditional)]);
+            assert!(preflight_crate_sources(&inputs).is_err(), "accepted {condition}");
+        }
+    }
+
+    #[test]
+    fn inferred_dependency_anchors_bind_no_flat_names() {
+        let check = |anchor: &str| preflight_crate_sources_with_cxx_namespace(&crate_units(&[
+            ("src/lib.rs", "pub mod api; pub mod one; pub mod two;"),
+            ("src/api.rs", "pub struct Target;"),
+            ("src/one.rs", "use crate::api::Target; pub fn consume(_: &Target) {}"),
+            ("src/two.rs", anchor),
+        ]), Some("example"), Some("example"));
+        assert!(check("#[allow(unused_imports)] use crate::api as _;").is_ok());
+        for anchor in ["use crate::api as renamed;", "pub use crate::api as _;", "#[cfg(feature = \"optional\")] use crate::api as _;", "use crate::missing as _;"] {
+            assert!(check(anchor).is_err(), "accepted {anchor}");
+        }
+    }
+
+    #[test]
+    fn flat_trait_imports_accept_auto_traits_and_resolved_empty_sealing_markers() {
+        for declaration in ["pub trait Target: Send + Sync {}", "pub trait Target: Sync {}", "pub unsafe trait Target {}", "pub unsafe trait Target: Send {}"] {
+            let item = syn::parse_str::<Item>(declaration).unwrap();
+            validate_flat_import_type_provider(&item, "api", "Target", &[]).unwrap();
+        }
+        let file = syn::parse_file(r#"
+            mod sealed { #[cfg_attr(any(), cpp_marker_trait)] pub trait Token {} }
+            pub trait Target: sealed::Token { fn size(&self) -> usize; }
+        "#).unwrap();
+        validate_flat_import_type_provider(&file.items[1], "api", "Target", &file.items).unwrap();
+        for marker in ["pub trait Token {}", "#[cfg_attr(any(), cpp_marker_trait)] pub trait Token { fn hidden(&self); }", "#[cfg(test)] #[cfg_attr(any(), cpp_marker_trait)] pub trait Token {}"] {
+            let file = syn::parse_file(&format!("mod sealed {{ {marker} }} pub trait Target: sealed::Token {{}} ")).unwrap();
+            assert!(validate_flat_import_type_provider(&file.items[1], "api", "Target", &file.items).is_err());
+        }
+    }
+
+    #[test]
+    fn flat_trait_default_method_keeps_its_body_and_reference_audit() {
+        let provider = r#"
+            pub trait ChannelConnectionBase: Send + Sync {
+                fn flush(&self);
+                fn set_keepalive(&self, _enabled: bool, _idle: i32, _interval: i32, _count: i32) -> bool { false }
+            }
+        "#;
+        let consumer = r#"
+            #[cfg_attr(any(), cpp_import_namespace(example))]
+            use crate::channel::ChannelConnectionBase;
+            pub fn configure(value: &dyn ChannelConnectionBase) -> bool {
+                value.set_keepalive(true, 10, 2, 3)
+            }
+        "#;
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod channel; pub mod consumer;"),
+            ("src/channel.rs", provider), ("src/consumer.rs", consumer),
+        ]);
+        let audited = preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None).unwrap();
+        assert!(audited.flat_import_type_authorizations.iter().any(|authorization|
+            authorization.leaf == "ChannelConnectionBase"
+                && authorization.provider_kind == FlatImportTypeProviderKind::Trait));
+        let mut cg = crate::codegen::CodeGen::new();
+        cg.set_interface_traits(true);
+        cg.emit_file(&syn::parse_file(provider).unwrap(), None);
+        assert!(cg.take_codegen_error().is_none());
+        let output = cg.into_output();
+        assert!(output.contains("virtual bool set_keepalive("), "{output}");
+        assert!(output.contains("const { return false; }"), "{output}");
+        let temp = tempfile::tempdir().unwrap();
+        let cpp = temp.path().join("default.cc");
+        std::fs::write(&cpp, format!("{output}\nstruct Local final : ChannelConnectionBase {{ void flush() const override {{}} }};\nint main() {{ Local value; const ChannelConnectionBase& base = value; return base.set_keepalive(true, 10, 2, 3) ? 1 : 0; }}")).unwrap();
+        let executable = temp.path().join("default");
+        let compiler = std::env::var("CXX").unwrap_or_else(|_| "clang++".into());
+        let result = std::process::Command::new(compiler)
+            .args(["-std=c++23", "-stdlib=libc++"])
+            .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+            .arg(&cpp).arg("-o").arg(&executable).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert!(std::process::Command::new(executable).status().unwrap().success());
+
+        let opaque = provider.replace("{ false }", "{ hidden!(ChannelConnectionBase) }");
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod channel; pub mod consumer;"),
+            ("src/channel.rs", &opaque), ("src/consumer.rs", consumer),
+        ]);
+        let error = preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None).unwrap_err();
+        assert!(error.contains("opaque macro"), "{error}");
+    }
+
+    #[test]
+    fn flat_constant_import_preserves_complementary_target_guards() {
+        let provider = r#"
+            #[cfg(target_os = "macos")]
+            pub const EXPIRED: i32 = 60;
+            #[cfg(not(target_os = "macos"))]
+            pub const EXPIRED: i32 = 110;
+        "#;
+        let consumer = r#"
+            #[cfg_attr(any(), cpp_import_namespace(example))]
+            use crate::errors::EXPIRED;
+            pub fn code() -> i32 { EXPIRED }
+        "#;
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod errors; pub mod consumer;"),
+            ("src/errors.rs", &provider), ("src/consumer.rs", consumer),
+        ]);
+        preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None).unwrap();
+        let mut cg = crate::codegen::CodeGen::new();
+        cg.emit_file(&syn::parse_file(&provider).unwrap(), None);
+        assert!(cg.take_codegen_error().is_none());
+        let output = cg.into_output();
+        assert!(output.contains("#if defined(__APPLE__)"), "{output}");
+        assert!(output.contains("#if !(defined(__APPLE__))"), "{output}");
+        assert_eq!(output.matches("constexpr int32_t EXPIRED").count(), 2, "{output}");
+        let temp = tempfile::tempdir().unwrap();
+        for (define, expected) in [("#define __APPLE__ 1", 60), ("#undef __APPLE__", 110)] {
+            // Select the target after host headers have been parsed, so this
+            // tests both emitted guards without asking Linux libc for an SDK.
+            let selected = output.replacen("#if defined(__APPLE__)", &format!("{define}\n#if defined(__APPLE__)"), 1);
+            let cpp = temp.path().join(format!("constant-{expected}.cc"));
+            std::fs::write(&cpp, format!("{selected}\nstatic_assert(EXPIRED == {expected});\n")).unwrap();
+            let compiler = std::env::var("CXX").unwrap_or_else(|_| "clang++".into());
+            let result = std::process::Command::new(compiler)
+                .args(["-std=c++23", "-stdlib=libc++", "-fsyntax-only"])
+                .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+                .arg(cpp).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        }
+    }
+
+    #[test]
+    fn flat_constant_import_rejects_unproved_presence_and_initializers() {
+        let check = |provider: &str| preflight_crate_plan_with_cxx_namespace(&crate_units(&[
+            ("src/lib.rs", "pub mod errors; pub mod consumer;"),
+            ("src/errors.rs", provider),
+            ("src/consumer.rs", "#[cfg_attr(any(), cpp_import_namespace(example))] use crate::errors::CODE; pub fn code() -> i32 { CODE }"),
+        ]), Some("example"), None);
+        assert!(check("pub const CODE: i32 = 9;").is_ok());
+        for provider in [
+            "#[cfg(target_os = \"macos\")] pub const CODE: i32 = 1;",
+            "#[cfg(target_os = \"macos\")] pub const CODE: i32 = 1; #[cfg(target_os = \"macos\")] pub const CODE: i32 = 2;",
+            "#[cfg(target_os = \"macos\")] pub const CODE: i32 = 1; #[cfg(target_os = \"linux\")] pub const CODE: i32 = 2;",
+            "#[cfg(feature = \"mode\")] pub const CODE: i32 = 1; #[cfg(not(feature = \"mode\"))] pub const CODE: i32 = 2;",
+            "#[cfg(target_os = \"macos\")] pub const CODE: i32 = 1; #[cfg(not(target_os = \"macos\"))] pub const CODE: i64 = 2;",
+            "#[cfg(target_os = \"macos\")] pub const CODE: i32 = 1; #[cfg(not(target_os = \"macos\"))] const CODE: i32 = 2;",
+            "#[cfg(target_os = \"macos\")] #[cfg(target_arch = \"x86_64\")] pub const CODE: i32 = 1; #[cfg(not(target_os = \"macos\"))] pub const CODE: i32 = 2;",
+            "pub const CODE: i32 = hidden!();",
+        ] {
+            assert!(check(provider).is_err(), "accepted {provider}");
+        }
+        let unrelated = crate_units(&[
+            ("src/lib.rs", "pub mod errors; pub mod consumer; pub mod unrelated;"),
+            ("src/errors.rs", "pub const CODE: i32 = 9;"),
+            ("src/consumer.rs", "#[cfg_attr(any(), cpp_import_namespace(example))] use crate::errors::CODE; pub fn code() -> i32 { CODE }"),
+            ("src/unrelated.rs", "pub const CODE: i32 = 12;"),
+        ]);
+        let error = preflight_crate_plan_with_cxx_namespace(&unrelated, Some("example"), None).unwrap_err();
+        assert!(error.contains("namespace-emitted const") && error.contains("src/unrelated.rs"), "{error}");
+    }
+
+    #[test]
+    fn flat_generic_struct_import_preserves_type_arguments() {
+        let consumer = r#"
+            #[cfg_attr(any(), cpp_import_namespace(example))]
+            use crate::threading::SharedCell;
+            pub fn inspect(value: &SharedCell<u64>) -> u64 { value.get() }
+        "#;
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod threading; pub mod consumer;"),
+            ("src/threading.rs", r#"
+                pub struct SharedCell<T> { value: std::sync::Mutex<T> }
+                impl<T: Clone> SharedCell<T> {
+                    pub fn get(&self) -> T { self.value.lock().unwrap().clone() }
+                }
+            "#),
+            ("src/consumer.rs", consumer),
+        ]);
+        let audited = preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None)
+            .expect("unbounded generic struct has one exact provider identity");
+        assert!(audited.flat_import_type_authorizations.iter().any(|authorization|
+            authorization.leaf == "SharedCell"
+                && authorization.provider_kind == FlatImportTypeProviderKind::Struct));
+        let source = syn::parse_file(consumer).unwrap();
+        let (lowered, plan) = lower(&source, None).unwrap().unwrap();
+        let mut cg = crate::codegen::CodeGen::new();
+        cg.set_crate_name("example");
+        cg.set_crate_module_names(vec!["example.threading".into(), "example.consumer".into()]);
+        cg.set_cxx_namespace(Some("example".into()));
+        cg.set_cpp_abi_plan(plan);
+        cg.set_flat_import_type_authorizations(audited.flat_import_type_authorizations);
+        cg.emit_file(&lowered, Some("example.consumer"));
+        assert!(cg.take_codegen_error().is_none());
+        let output = cg.into_output();
+        assert!(output.contains("import example.threading;"), "{output}");
+        assert!(output.contains("::example::SharedCell<uint64_t>"), "{output}");
+        assert!(!output.contains("::threading::SharedCell"), "{output}");
+    }
+
+    #[test]
+    fn flat_imported_arc_alias_preserves_pointee_for_associated_as_ptr() {
+        let consumer = r#"
+            #[cfg_attr(any(), cpp_import_namespace(example))]
+            use crate::provider::{Payload, Proxy};
+            use std::sync::Arc;
+            pub struct Envelope { inner: Option<Proxy> }
+            impl Envelope {
+                pub fn pointer(&self) -> *const dyn Payload {
+                    Arc::as_ptr(self.inner.as_ref().unwrap())
+                }
+                pub fn maybe_pointer(&self) -> Option<*const dyn Payload> {
+                    Some(Arc::as_ptr(self.inner.as_ref()?))
+                }
+            }
+            pub fn qualified(value: &crate::provider::Proxy) -> *const dyn Payload {
+                Arc::as_ptr(value)
+            }
+        "#;
+        let provider = r#"
+            pub trait Payload { fn value(&self) -> i32; }
+            pub type Proxy = std::sync::Arc<dyn Payload>;
+        "#;
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod provider; pub mod consumer;"),
+            ("src/provider.rs", provider),
+            ("src/consumer.rs", consumer),
+        ]);
+        let audited = preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None)
+            .expect("imported alias and qualified path each have an exact provider proof");
+        let source = syn::parse_file(consumer).unwrap();
+        let (lowered, plan) = lower(&source, None).unwrap().unwrap();
+        let aliases = syn::parse_file(provider).unwrap().items.into_iter().filter_map(|item| {
+            if let Item::Type(alias) = item { Some(alias) } else { None }
+        }).collect();
+        let mut cg = crate::codegen::CodeGen::new();
+        cg.set_crate_name("example");
+        cg.set_crate_module_names(vec!["example.provider".into(), "example.consumer".into()]);
+        cg.set_cxx_namespace(Some("example".into()));
+        cg.set_cpp_abi_plan(plan);
+        cg.set_flat_import_type_authorizations(audited.flat_import_type_authorizations);
+        cg.set_cross_file_type_aliases(aliases);
+        cg.emit_file(&lowered, Some("example.consumer"));
+        assert!(cg.take_codegen_error().is_none());
+        let output = cg.into_output();
+        assert!(output.contains("rusty::Option<::example::Proxy> inner;"), "{output}");
+        assert!(output.contains("Arc<Payload>::as_ptr(this->inner.as_ref().unwrap())"), "{output}");
+        assert!(output.contains("Arc<Payload>::as_ptr(RUSTY_TRY_OPT(this->inner.as_ref()))"), "{output}");
+        assert!(output.contains("Arc<Payload>::as_ptr(value)"), "{output}");
+        assert!(!output.contains("Arc<std::remove_cvref_t<decltype"), "{output}");
+        assert!(!output.contains("Arc<::example::Proxy>::as_ptr"), "{output}");
+    }
+
+    #[test]
+    fn flat_imported_box_alias_preserves_payload_reborrow() {
+        let consumer = r#"
+            #[cfg_attr(any(), cpp_import_namespace(example))]
+            use crate::provider::{Payload, Proxy};
+            pub fn borrow(value: Proxy) {
+                let receiver: &dyn Payload = &*value;
+                let _ = receiver.value();
+            }
+        "#;
+        let provider = r#"
+            pub trait Payload { fn value(&self) -> i32; }
+            pub type Proxy = Box<dyn Payload>;
+        "#;
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod provider; pub mod consumer;"),
+            ("src/provider.rs", provider), ("src/consumer.rs", consumer),
+        ]);
+        let audited = preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None).unwrap();
+        let (lowered, plan) = lower(&syn::parse_file(consumer).unwrap(), None).unwrap().unwrap();
+        let mut cg = crate::codegen::CodeGen::new();
+        cg.set_crate_name("example");
+        cg.set_crate_module_names(vec!["example.provider".into(), "example.consumer".into()]);
+        cg.set_cxx_namespace(Some("example".into()));
+        cg.set_cpp_abi_plan(plan);
+        cg.set_flat_import_type_authorizations(audited.flat_import_type_authorizations);
+        cg.set_cross_file_type_aliases(syn::parse_file(provider).unwrap().items.into_iter().filter_map(|item| {
+            if let Item::Type(alias) = item { Some(alias) } else { None }
+        }).collect());
+        cg.emit_file(&lowered, Some("example.consumer"));
+        assert!(cg.take_codegen_error().is_none());
+        let output = cg.into_output();
+        assert!(output.contains("const Payload& receiver = rusty::detail::deref_if_pointer_like(value);"), "{output}");
+        assert!(!output.contains("const Payload& receiver = value;"), "{output}");
+    }
+
+    #[test]
+    fn flat_imported_inherent_ufcs_uses_member_receiver_and_keeps_static_calls() {
+        let consumer = r#"
+            #[cfg_attr(any(), cpp_import_namespace(example))]
+            use crate::provider::Worker;
+            use std::sync::Arc;
+            type Handle = crate::provider::Worker;
+            pub fn direct(value: &Handle) -> i32 { Handle::read(value) }
+            pub fn shared(value: &Option<Arc<Handle>>) -> i32 {
+                if let Some(worker) = value.as_ref() {
+                    crate::provider::Worker::read(&**worker)
+                } else { 0 }
+            }
+            pub fn static_call(value: &Handle) -> i32 {
+                crate::provider::Worker::inspect(value, 7)
+            }
+        "#;
+        let provider = r#"
+            pub struct Worker { value: i32 }
+            impl Worker {
+                pub fn read(&self) -> i32 { self.value }
+                pub fn inspect(value: &Worker, amount: i32) -> i32 { value.value + amount }
+            }
+        "#;
+        let units = crate_units(&[
+            ("src/lib.rs", "pub mod provider; pub mod consumer;"),
+            ("src/provider.rs", provider),
+            ("src/consumer.rs", consumer),
+        ]);
+        let audited = preflight_crate_plan_with_cxx_namespace(&units, Some("example"), None)
+            .expect("inherent calls retain exact imported host authorization");
+        let source = syn::parse_file(consumer).unwrap();
+        let (lowered, plan) = lower(&source, None).unwrap().unwrap();
+        let provider_ast = syn::parse_file(provider).unwrap();
+        let mut cg = crate::codegen::CodeGen::new();
+        cg.set_crate_name("example");
+        cg.set_crate_module_names(vec!["example.provider".into(), "example.consumer".into()]);
+        cg.set_cxx_namespace(Some("example".into()));
+        cg.set_cpp_abi_plan(plan);
+        cg.set_flat_import_type_authorizations(audited.flat_import_type_authorizations);
+        cg.set_cross_file_structs(provider_ast.items.iter().filter_map(|item| {
+            if let Item::Struct(item) = item { Some(item.clone()) } else { None }
+        }).collect());
+        cg.set_cross_file_impl_blocks(provider_ast.items.into_iter().filter_map(|item| {
+            if let Item::Impl(item) = item { Some(item) } else { None }
+        }).collect());
+        cg.emit_file(&lowered, Some("example.consumer"));
+        assert!(cg.take_codegen_error().is_none());
+        let output = cg.into_output();
+        assert!(output.contains("value.read()"), "{output}");
+        assert!(!output.contains("::Worker::read("), "{output}");
+        assert!(!output.contains("Handle::read("), "{output}");
+        assert!(!output.contains("__rusty_alias_"), "{output}");
+        assert!(output.contains("::example::Worker::inspect("), "static method must keep its first explicit parameter: {output}");
+        assert!(!output.contains("value.inspect("), "{output}");
+    }
+
+    #[test]
+    fn flat_generic_struct_import_rejects_unsupported_parameter_shapes() {
+        for declaration in [
+            "pub struct Target<T: Clone>(T);",
+            "pub struct Target<T> where T: Clone { value: T }",
+            "pub struct Target<T = u64>(T);",
+            "pub struct Target<'a, T>(&'a T);",
+            "pub struct Target<const N: usize>([u8; N]);",
+            "pub struct Target<#[cfg(feature = \"optional\")] T>(T);",
+            "#[cfg(feature = \"optional\")] pub struct Target<T>(T);",
+            "#[cfg_attr(any(), spoof::cpp_no_fieldwise_ctor)] pub struct Target<T>(T);",
+            "pub(crate) struct Target<T>(T);",
+        ] {
+            let item = syn::parse_str::<Item>(declaration).unwrap();
+            assert!(validate_flat_import_type_provider(&item, "api", "Target", &[]).is_err(),
+                "accepted unsupported generic provider: {declaration}");
+        }
+        for declaration in [
+            "pub struct Target<T>(T);",
+            "pub struct Target<K, V> { key: K, value: V }",
+        ] {
+            let item = syn::parse_str::<Item>(declaration).unwrap();
+            validate_flat_import_type_provider(&item, "api", "Target", &[]).unwrap();
+        }
+    }
+
+    #[test]
+    fn crate_preflight_audits_vec_elements_and_repeat_lengths() {
+        let check = |consumer: &str| preflight_crate_sources(&crate_units(&[
+            ("src/lib.rs", "pub mod api; pub mod consumer;"),
+            ("src/api.rs", r#"#[cfg_attr(any(), cpp_abi(returns(std_string_bytes)))] pub fn adapted() -> Vec<u8> { Vec::new() }"#),
+            ("src/consumer.rs", consumer),
+        ]));
+        for source in ["pub fn f() { let _ = vec![0u8; 16]; }", "pub fn f() { let _ = vec![vec![1], vec![2, 3]]; }"] {
+            assert!(check(source).is_ok(), "{source}");
+        }
+        for source in [
+            "pub fn f() { let _ = vec![crate::api::adapted()]; }",
+            "pub fn f() { let _ = vec![0u8; crate::api::adapted().len()]; }",
+            "pub fn f() { let _ = vec![opaque!()]; }",
+            "macro_rules! vec { ($($t:tt)*) => { 0 }; } pub fn f() { vec![0]; }",
+            "use external::values as vec; pub fn f() { vec![0]; }",
+        ] { assert!(check(source).is_err(), "accepted {source}"); }
+    }
+
+    #[test]
+    fn crate_preflight_admits_source_location_macros_and_rejects_impostors() {
+        let provider = r#"
+            #[cfg_attr(any(), cpp_abi(returns(std_string_bytes)))]
+            pub fn adapted() -> Vec<u8> { Vec::new() }
+        "#;
+        let check = |consumer: &str| {
+            preflight_crate_sources(&crate_units(&[
+                ("src/lib.rs", "pub mod api; pub mod consumer;"),
+                ("src/api.rs", provider),
+                ("src/consumer.rs", consumer),
+            ]))
+        };
+        let accepted = check("pub fn location() -> (&'static str, u32) { (file!(), line!()) }");
+        assert!(accepted.is_ok(), "{accepted:?}");
+        for consumer in [
+            "pub fn location() -> &'static str { file!(42) }",
+            "pub fn location() -> u32 { line![42] }",
+            "pub fn location() -> u32 { custom::line!() }",
+            "macro_rules! file { () => { \"fake\" }; } pub fn f() { file!(); }",
+            "pub fn f() { macro_rules! line { () => { 0 }; } line!(); }",
+            "use external::location as line; pub fn f() { line!(); }",
+        ] {
+            assert!(check(consumer).is_err(), "accepted {consumer}");
+        }
+    }
+
+    #[test]
     fn crate_preflight_accepts_attached_public_allow_and_nested_providers() {
         let simple = crate_units(&[
             ("src/lib.rs", "#[allow(dead_code)] pub mod api;"),
@@ -10142,9 +11065,9 @@ mod tests {
                 "exact public type alias",
             ),
             (
-                "generic struct provider",
-                "pub struct Target<T>(pub T);",
-                "non-generic supported struct",
+                "constrained generic struct provider",
+                "pub struct Target<T: Clone>(pub T);",
+                "supported struct with only unconstrained type parameters",
             ),
             (
                 "generic enum provider",
@@ -10174,7 +11097,7 @@ mod tests {
             (
                 "conditionally present type",
                 "#[cfg(target_os = \"linux\")] pub struct Target;",
-                "unconditional, non-generic supported struct",
+                "unconditional, supported struct with only unconstrained type parameters",
             ),
             (
                 "custom derive provider",
@@ -10227,13 +11150,8 @@ mod tests {
                 "non-generic supported trait",
             ),
             (
-                "trait default method",
-                "pub trait Target { fn value(&self) -> usize { 0 } }",
-                "non-generic supported trait",
-            ),
-            (
-                "safe Sync-only trait",
-                "pub trait Target: Sync {}",
+                "generic trait default method",
+                "pub trait Target { fn value<T>(&self) -> usize { 0 } }",
                 "non-generic supported trait",
             ),
             (
@@ -10247,16 +11165,6 @@ mod tests {
                 "non-generic supported trait",
             ),
             (
-                "unsafe trait",
-                "pub unsafe trait Target {}",
-                "non-generic supported trait",
-            ),
-            (
-                "unsafe Send-only trait",
-                "pub unsafe trait Target: Send {}",
-                "non-generic supported trait",
-            ),
-            (
                 "unsafe qualified marker trait",
                 "pub unsafe trait Target: core::marker::Send + Sync {}",
                 "non-generic supported trait",
@@ -10264,11 +11172,6 @@ mod tests {
             (
                 "unsafe extra supertrait",
                 "pub unsafe trait Target: Send + Sync + Clone {}",
-                "non-generic supported trait",
-            ),
-            (
-                "safe Send Sync trait",
-                "pub trait Target: Send + Sync {}",
                 "non-generic supported trait",
             ),
             (
@@ -10353,7 +11256,7 @@ mod tests {
                 pub const NO_CHANGE: i32 = -1_i32;
             }
         };
-        validate_flat_import_type_provider(&positive, "epoll_wrapper", "PollMode")
+        validate_flat_import_type_provider(&positive, "epoll_wrapper", "PollMode", &[])
             .expect("exact constant namespace carrier");
 
         for (label, item) in [
@@ -10383,7 +11286,7 @@ mod tests {
                 syn::parse_quote!(#[cfg(target_os = "linux")] pub mod PollMode { pub const READ: i32 = 1; }),
             ),
         ] {
-            let error = validate_flat_import_type_provider(&item, "epoll_wrapper", "PollMode")
+            let error = validate_flat_import_type_provider(&item, "epoll_wrapper", "PollMode", &[])
                 .expect_err(label);
             assert!(
                 error.contains("unconditional, non-generic supported namespace module"),
@@ -10394,7 +11297,7 @@ mod tests {
         let enum_carrier: Item = syn::parse_quote! {
             pub enum PollMode { READ, WRITE }
         };
-        validate_flat_import_type_provider(&enum_carrier, "epoll_wrapper", "PollMode")
+        validate_flat_import_type_provider(&enum_carrier, "epoll_wrapper", "PollMode", &[])
             .expect("ordinary enum remains an independently supported provider kind");
     }
 
@@ -13274,3 +14177,34 @@ int main() {
         assert!(!cpp.contains("#include <vector>"));
     }
 }
+
+/// Parse `thread_local! { static X: T = init; ... }` into its static items.
+///
+/// Returns `None` unless the macro is exactly the std `thread_local!`
+/// invocation whose body syn can parse as a sequence of attribute-free
+/// `static` items -- the one shape the emitter lowers to
+/// `thread_local rusty::LocalKey<T>`.  Anything else stays opaque and keeps
+/// failing closed in the callers.
+pub(crate) fn parse_thread_local_statics(mac: &syn::Macro) -> Option<Vec<syn::ItemStatic>> {
+    if !mac.path.is_ident("thread_local") {
+        return None;
+    }
+    let parsed: syn::File = syn::parse2(mac.tokens.clone()).ok()?;
+    if parsed.items.is_empty() {
+        return None;
+    }
+    let mut statics = Vec::new();
+    for item in parsed.items {
+        match item {
+            syn::Item::Static(item_static) if item_static.attrs.is_empty() => {
+                statics.push(item_static)
+            }
+            _ => return None,
+        }
+    }
+    Some(statics)
+}
+
+#[cfg(test)]
+#[path = "cpp_abi_nullable_callback_provenance_tests.rs"]
+mod nullable_callback_provenance_tests;

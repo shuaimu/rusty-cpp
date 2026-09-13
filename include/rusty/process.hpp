@@ -2,6 +2,7 @@
 #define RUSTY_PROCESS_HPP
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 #include <utility>
 #if defined(_WIN32)
 #  include <direct.h>
+#  include <process.h>
 #else
 #  include <limits.h>
 #  include <unistd.h>
@@ -189,6 +191,15 @@ inline rusty::Result<path::PathBuf, rusty::String> current_exe() {
 } // namespace env
 
 namespace process {
+
+// @safe - Rust's std::process::id returns the current PID as u32.
+inline std::uint32_t id() noexcept {
+#if defined(_WIN32)
+    return static_cast<std::uint32_t>(::_getpid());
+#else
+    return static_cast<std::uint32_t>(::getpid());
+#endif
+}
 
 class ExitStatus {
 private:
