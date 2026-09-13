@@ -3572,10 +3572,6 @@ fn validate_cpp_declaration_markers(file: &syn::File) -> Result<(), String> {
                             syn::Visibility::Public(_)
                         ) {
                             Some("non-public functions")
-                        } else if !function.sig.generics.params.is_empty()
-                            || function.sig.generics.where_clause.is_some()
-                        {
-                            Some("generic functions")
                         } else if function.sig.constness.is_some() {
                             Some("const functions")
                         } else if function.sig.asyncness.is_some() {
@@ -5350,6 +5346,25 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
     }
 
     #[test]
+    fn test_cpp_declaration_preserves_generic_signatures_without_emitting_bodies() {
+        let output = transpile(
+            r#"
+                pub trait Field { fn visit(&self); }
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn forward<T: Field + ?Sized>(value: &T) { value.visit(); }
+                #[cfg_attr(any(), cpp_declaration)]
+                pub fn identity<T, const N: usize>(value: [T; N]) -> [T; N] { value }
+            "#,
+            Some("marker.generic"),
+        ).expect("fully typed generic declarations are supported");
+        assert!(output.contains("void forward(const T& value);"), "{output}");
+        assert!(output.contains("identity(std::array<T, N> value);"), "{output}");
+        assert!(!output.contains("forward(const T& value) {"), "{output}");
+        assert!(!output.contains("identity(std::array<T, N> value) {"), "{output}");
+        assert!(!output.contains("value.visit"), "{output}");
+    }
+
+    #[test]
     fn test_cpp_declaration_accepts_concrete_array_const_expressions() {
         let output = transpile(
             r#"
@@ -5388,7 +5403,6 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
     #[test]
     fn test_cpp_declaration_rejects_other_unsupported_forms() {
         let cases = [
-            ("#[cfg_attr(any(), cpp_declaration)] pub fn f<T>(x: T) {}", "generic functions"),
             ("#[cfg_attr(any(), cpp_declaration)] pub const fn f() {}", "const functions"),
             ("#[cfg_attr(any(), cpp_declaration)] pub async fn f() {}", "async functions"),
             ("#[cfg_attr(any(), cpp_declaration)] pub extern \"C\" fn f() {}", "explicit ABI"),
