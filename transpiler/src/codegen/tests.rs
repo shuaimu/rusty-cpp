@@ -48313,3 +48313,22 @@ fn explicit_tuple_alias_profile_preserves_generic_construction_and_fields() {
     assert!(out.contains("using OrdinaryPair = std::tuple<First, Second>;"), "{out}");
     assert!(out.contains("return OrdinaryPair<int32_t, int64_t>{"), "{out}");
 }
+
+#[test]
+fn independent_trait_order_keeps_complete_base_before_generic_inheritance() {
+    let out = transpile_str(r#"
+        pub trait Sink { fn write(&mut self, value: i32); }
+        pub trait Source { fn read(&mut self) -> i32; }
+        pub struct BorrowedSink<T: Sink> { pub pointer: *mut T }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl<T: Sink> Sink for BorrowedSink<T> {
+            fn write(&mut self, value: i32) { unsafe { (*self.pointer).write(value) }; }
+        }
+        pub trait Later { fn finish(&mut self); }
+    "#);
+    let sink = out.find("class Sink {").expect(&out);
+    let source = out.find("class Source {").expect(&out);
+    let wrapper = out.find("struct BorrowedSink : public Sink {").expect(&out);
+    let later = out.find("class Later {").expect(&out);
+    assert!(sink < source && source < wrapper && wrapper < later, "{out}");
+}

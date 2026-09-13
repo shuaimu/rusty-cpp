@@ -11438,15 +11438,20 @@ impl CodeGen {
             }
         }
 
-        // Kahn's algorithm: take nodes with indegree 0, then decrement.
-        let mut queue: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
+        // Keep source order among independent traits. A LIFO ready list
+        // reverses them and can move an interface past a cpp_inherit class
+        // that already followed its complete base in the Rust source.
+        let mut queue: BinaryHeap<Reverse<usize>> = (0..n)
+            .filter(|&i| indegree[i] == 0)
+            .map(Reverse)
+            .collect();
         let mut sorted_positions: Vec<usize> = Vec::with_capacity(n);
-        while let Some(p) = queue.pop() {
+        while let Some(Reverse(p)) = queue.pop() {
             sorted_positions.push(p);
             for &dep in &outgoing[p] {
                 indegree[dep] -= 1;
                 if indegree[dep] == 0 {
-                    queue.push(dep);
+                    queue.push(Reverse(dep));
                 }
             }
         }
