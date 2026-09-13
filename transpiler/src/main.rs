@@ -124,7 +124,7 @@ struct Cli {
     )]
     consumer_rust_module: Option<String>,
 
-    /// Versioned TOML sidecar containing per-module global-fragment includes
+    /// Versioned TOML sidecar containing per-module global-fragment and exported epilogue includes
     #[arg(long, value_name = "PATH", conflicts_with = "cmake")]
     module_preamble: Option<PathBuf>,
 
@@ -2786,7 +2786,11 @@ fn transpile_crate_to_output_with_context(
         let mut expanded_options = if let Some(manifest) = module_preamble {
             let selected = manifest.select_for_modules([crate_name.as_str()])?;
             let mut opts = transpile_options.clone();
-            opts.explicit_gmf_includes = selected.get(crate_name).cloned().unwrap_or_default();
+            selected
+                .get(crate_name)
+                .cloned()
+                .unwrap_or_default()
+                .apply_to_options(&mut opts);
             opts
         } else {
             transpile_options.clone()
@@ -2842,7 +2846,7 @@ fn transpile_crate_to_output_with_context(
 
 struct PreparedCrateCodegen {
     extension_method_hints: HashSet<String>,
-    module_preambles: BTreeMap<String, Vec<transpile::GmfIncludeSpec>>,
+    module_preambles: BTreeMap<String, transpile::ModuleIncludeSpec>,
     impl_blocks_by_source: BTreeMap<PathBuf, Vec<syn::ItemImpl>>,
     options: transpile::TranspileOptions,
 }
@@ -3010,11 +3014,12 @@ fn preflight_cpp_name_crate_sources_exact(
         let (_, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
         let mut module_options = crate_options.clone();
         module_options.cross_file_impl_blocks = prepared.foreign_impl_blocks(rs_path);
-        module_options.explicit_gmf_includes = prepared
+        prepared
             .module_preambles
             .get(&module_name)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .apply_to_options(&mut module_options);
         transpile::transpile_with_type_map_and_extension_hints_and_options(
             source,
             Some(&module_name),
@@ -3792,7 +3797,7 @@ fn preflight_crate_codegen_without_output(
             let includes = prepared
                 .module_preambles
                 .get(&module_name)
-                .map(Vec::as_slice)
+                .map(|headers| headers.includes.as_slice())
                 .unwrap_or_default();
             cpp_default_args::validate_required_gmf_includes(&file, includes)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -3814,11 +3819,12 @@ fn preflight_crate_codegen_without_output(
             })
             .cloned()
             .collect();
-        module_options.explicit_gmf_includes = prepared
+        prepared
             .module_preambles
             .get(&module_name)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .apply_to_options(&mut module_options);
         transpile::transpile_with_type_map_and_extension_hints_and_options(
             source,
             Some(&module_name),
@@ -4059,7 +4065,7 @@ fn transpile_crate_impl(
             let includes = prepared
                 .module_preambles
                 .get(&module_name)
-                .map(Vec::as_slice)
+                .map(|headers| headers.includes.as_slice())
                 .unwrap_or_default();
             cpp_default_args::validate_required_gmf_includes(&file, includes)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -4083,11 +4089,12 @@ fn transpile_crate_impl(
                 })
                 .cloned()
                 .collect();
-            module_options.explicit_gmf_includes = prepared
+            prepared
                 .module_preambles
                 .get(&module_name)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .apply_to_options(&mut module_options);
             let output = transpile::transpile_with_type_map_and_extension_hints_and_options(
                 source,
                 Some(&module_name),
@@ -4242,8 +4249,11 @@ fn transpile_crate_impl(
                 let expanded_options = if let Some(manifest) = module_preamble {
                     let selected = manifest.select_for_modules([crate_name.as_str()])?;
                     let mut opts = transpile_options.clone();
-                    opts.explicit_gmf_includes =
-                        selected.get(crate_name).cloned().unwrap_or_default();
+                    selected
+                        .get(crate_name)
+                        .cloned()
+                        .unwrap_or_default()
+                        .apply_to_options(&mut opts);
                     opts
                 } else {
                     transpile_options.clone()
@@ -4321,11 +4331,12 @@ fn transpile_crate_impl(
             })
             .cloned()
             .collect();
-        module_options.explicit_gmf_includes = prepared_codegen
+        prepared_codegen
             .module_preambles
             .get(&module_name)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .apply_to_options(&mut module_options);
 
         let transpile_result = match &prepared_contract_outputs {
             Some(outputs) => Ok(std::borrow::Cow::Borrowed(outputs[source_index].as_str())),
@@ -11234,6 +11245,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: args.import_std,
         explicit_gmf_includes: Vec::new(),
+        explicit_epilogue_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -11948,6 +11960,7 @@ fn main() {
         dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: false,
         explicit_gmf_includes: Vec::new(),
+        explicit_epilogue_includes: Vec::new(),
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
         // for backwards-compatibility with existing scripts.
@@ -12159,8 +12172,11 @@ fn main() {
                 process::exit(1);
             }
         };
-        single_transpile_options.explicit_gmf_includes =
-            selected.get(module_name).cloned().unwrap_or_default();
+        selected
+            .get(module_name)
+            .cloned()
+            .unwrap_or_default()
+            .apply_to_options(&mut single_transpile_options);
     }
 
     let cpp_output = match transpile::transpile_full_with_options(

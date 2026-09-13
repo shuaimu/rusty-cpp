@@ -502,6 +502,8 @@ struct ModulePreambleFileRow {
     name: String,
     #[serde(default)]
     includes: Vec<GmfIncludeFileSpec>,
+    #[serde(default)]
+    epilogue_includes: Vec<GmfIncludeFileSpec>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -526,12 +528,26 @@ struct GmfIncludeFileCondition {
     target_os: Vec<String>,
 }
 
-/// A loaded, target-filtered module-preamble sidecar.  Selection is separate
-/// from loading so crate mode can reject rows that no emitted module collected.
+/// Ordered headers before and after the generated declarations of one module.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModuleIncludeSpec {
+    pub includes: Vec<GmfIncludeSpec>,
+    pub epilogue_includes: Vec<GmfIncludeSpec>,
+}
+
+impl ModuleIncludeSpec {
+    pub fn apply_to_options(&self, options: &mut TranspileOptions) {
+        options.explicit_gmf_includes = self.includes.clone();
+        options.explicit_epilogue_includes = self.epilogue_includes.clone();
+    }
+}
+
+/// A loaded, target-filtered module-preamble sidecar. Selection is separate
+/// from loading so crate mode rejects rows for modules that were not emitted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModulePreambleManifest {
     source: PathBuf,
-    modules: BTreeMap<String, Vec<GmfIncludeSpec>>,
+    modules: BTreeMap<String, ModuleIncludeSpec>,
 }
 
 impl ModulePreambleManifest {
@@ -542,7 +558,7 @@ impl ModulePreambleManifest {
     pub fn select_for_modules<'a, I>(
         &self,
         emitted_modules: I,
-    ) -> Result<BTreeMap<String, Vec<GmfIncludeSpec>>, String>
+    ) -> Result<BTreeMap<String, ModuleIncludeSpec>, String>
     where
         I: IntoIterator<Item = &'a str>,
     {
@@ -718,7 +734,7 @@ pub fn load_module_preamble_file(
     let has_condition = file
         .modules
         .iter()
-        .flat_map(|row| &row.includes)
+        .flat_map(|row| row.includes.iter().chain(&row.epilogue_includes))
         .any(|include| include.when.is_some());
     if has_condition && target_os.is_none() {
         return Err(format!(
@@ -731,7 +747,7 @@ pub fn load_module_preamble_file(
     for row in file.modules {
         validate_module_preamble_name(&row.name)
             .map_err(|e| format!("{} in {}", e, path.display()))?;
-        if row.includes.is_empty() {
+        if row.includes.is_empty() && row.epilogue_includes.is_empty() {
             return Err(format!(
                 "Module preamble {} row {:?} has no includes",
                 path.display(),
@@ -739,9 +755,10 @@ pub fn load_module_preamble_file(
             ));
         }
 
-        let mut unfiltered = Vec::with_capacity(row.includes.len());
-        let mut conditions = Vec::with_capacity(row.includes.len());
-        for include in row.includes {
+        let gmf_count = row.includes.len();
+        let mut unfiltered = Vec::new();
+        let mut conditions = Vec::new();
+        for include in row.includes.into_iter().chain(row.epilogue_includes) {
             if let Some(condition) = &include.when {
                 if condition.target_os.is_empty() {
                     return Err(format!(
@@ -777,17 +794,20 @@ pub fn load_module_preamble_file(
         validate_explicit_gmf_includes(&unfiltered)
             .map_err(|e| format!("{} in module {:?} of {}", e, row.name, path.display()))?;
 
-        let selected = unfiltered
-            .into_iter()
-            .zip(conditions)
-            .filter_map(|(include, condition)| {
-                let enabled = condition.as_ref().is_none_or(|condition| {
-                    let target_os = target_os.expect("conditions require target_os above");
-                    condition.target_os.iter().any(|value| value == target_os)
-                });
-                enabled.then_some(include)
-            })
-            .collect::<Vec<_>>();
+        let mut selected = ModuleIncludeSpec::default();
+        for (index, (include, condition)) in unfiltered.into_iter().zip(conditions).enumerate() {
+            let enabled = condition.as_ref().is_none_or(|condition| {
+                let target_os = target_os.expect("conditions require target_os above");
+                condition.target_os.iter().any(|value| value == target_os)
+            });
+            if enabled {
+                if index < gmf_count {
+                    selected.includes.push(include);
+                } else {
+                    selected.epilogue_includes.push(include);
+                }
+            }
+        }
         if modules.insert(row.name.clone(), selected).is_some() {
             return Err(format!(
                 "Module preamble {} repeats [[module]] name {:?}",
@@ -920,6 +940,11 @@ pub struct TranspileOptions {
     /// fragment.  Rejected for non-module output and validated before parsing
     /// or code generation.  Empty preserves the historical output byte-for-byte.
     pub explicit_gmf_includes: Vec<GmfIncludeSpec>,
+    /// Ordered headers included in an export block after every generated module
+    /// declaration. Headers may define compatibility adapters that depend on
+    /// generated declarations. Their system dependencies belong in the GMF.
+    /// Rejected for non-module output; an empty list preserves existing output.
+    pub explicit_epilogue_includes: Vec<GmfIncludeSpec>,
     /// Prefer `rusty::Unit` alias spelling for Rust `()` in generated
     /// output. Defaults to `true` (see `impl Default`) — the two C++
     /// types are identical via `using Unit = std::tuple<>;` but the
@@ -2421,6 +2446,7 @@ impl Default for TranspileOptions {
             dependency_ufcs_trait_manifests: Vec::new(),
             use_import_std_in_modules: false,
             explicit_gmf_includes: Vec::new(),
+            explicit_epilogue_includes: Vec::new(),
             // Default to the `rusty::Unit` alias spelling (replacing
             // `std::tuple<>` post-emission). The two C++ types are
             // identical via `using Unit = std::tuple<>;`, but the alias
@@ -3022,6 +3048,11 @@ fn transpile_full_with_options_impl(
     prepared_cpp_abi: Option<(syn::File, crate::cpp_abi::CppAbiEmissionPlan)>,
 ) -> Result<String, String> {
     validate_explicit_gmf_includes(&options.explicit_gmf_includes)?;
+    validate_explicit_gmf_includes(&options.explicit_epilogue_includes)
+        .map_err(|error| format!("Module epilogue: {error}"))?;
+    if module_name.is_none() && !options.explicit_epilogue_includes.is_empty() {
+        return Err("Explicit module epilogue includes require named C++ module output".into());
+    }
     if module_name.is_none() && !options.explicit_gmf_includes.is_empty() {
         return Err(
             "Explicit GMF includes require module output (provide a C++ module name)".to_string(),
@@ -3362,6 +3393,14 @@ fn transpile_full_with_options_impl(
         }
         out
     };
+    if !options.explicit_epilogue_includes.is_empty() {
+        output_str.push_str("\nexport {\n");
+        for include in &options.explicit_epilogue_includes {
+            output_str.push_str(&include.render());
+            output_str.push('\n');
+        }
+        output_str.push_str("}\n");
+    }
     Ok(output_str)
 }
 
@@ -5061,7 +5100,7 @@ includes = [
             "an emitted module without a sidecar row must remain valid and empty"
         );
         assert_eq!(
-            selected["demo.net"],
+            selected["demo.net"].includes,
             vec![
                 GmfIncludeSpec {
                     path: "sys/epoll.h".to_string(),
@@ -5076,7 +5115,7 @@ includes = [
 
         let windows = load_module_preamble_file(&path, Some("windows")).unwrap();
         assert_eq!(
-            windows.select_for_modules(["demo.net"]).unwrap()["demo.net"],
+            windows.select_for_modules(["demo.net"]).unwrap()["demo.net"].includes,
             vec![GmfIncludeSpec {
                 path: "demo/net.hpp".to_string(),
                 form: GmfIncludeForm::Quote,
@@ -5086,6 +5125,53 @@ includes = [
         let stale = linux.select_for_modules(["demo"]).unwrap_err();
         assert!(stale.contains("stale/uncollected"), "{stale}");
         assert!(stale.contains("demo.net"), "{stale}");
+    }
+
+    #[test]
+    fn test_module_epilogue_headers_are_exported_after_generated_declarations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("module-preamble.toml");
+        std::fs::write(&path, r#"
+version = 1
+[[module]]
+name = "demo.adapters"
+epilogue_includes = [
+    { path = "demo/first.hpp", form = "quote" },
+    { path = "demo/linux.hpp", form = "angle", when = { target_os = ["linux"] } },
+]
+"#).unwrap();
+        assert!(load_module_preamble_file(&path, None).unwrap_err().contains("--preamble-target-os"));
+        let manifest = load_module_preamble_file(&path, Some("linux")).unwrap();
+        let selected = manifest.select_for_modules(["demo.adapters"]).unwrap();
+        assert!(selected["demo.adapters"].includes.is_empty());
+        let mut options = TranspileOptions::default();
+        selected["demo.adapters"].apply_to_options(&mut options);
+        let source = "pub fn answer() -> i32 { 42 }";
+        let cpp = transpile_full_with_options(source, Some("demo.adapters"), &UserTypeMap::default(),
+            &HashSet::new(), None, &options).unwrap();
+        assert!(cpp.ends_with("\nexport {\n#include \"demo/first.hpp\"\n#include <demo/linux.hpp>\n}\n"), "{cpp}");
+        assert!(cpp.rfind("answer(").unwrap() < cpp.find("#include \"demo/first.hpp\"").unwrap());
+        let moduleless = transpile_full_with_options(source, None, &UserTypeMap::default(),
+            &HashSet::new(), None, &options).unwrap_err();
+        assert!(moduleless.contains("epilogue includes require named C++ module output"));
+        let windows = load_module_preamble_file(&path, Some("windows")).unwrap();
+        assert_eq!(windows.select_for_modules(["demo.adapters"]).unwrap()["demo.adapters"].epilogue_includes.len(), 1);
+    }
+
+    #[test]
+    fn test_module_epilogue_rejects_unvalidated_and_duplicate_headers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("module-preamble.toml");
+        for field in [
+            r#"epilogue_includes = [{ path = "../escape.hpp", form = "quote" }]"#,
+            r#"epilogue_includes = [{ path = "demo.hpp", form = "quote", code = "int x;" }]"#,
+            r#"epilogue_includes = [{ path = "demo.hpp", form = "quote" }, { path = "demo.hpp", form = "quote" }]"#,
+            r#"includes = [{ path = "demo.hpp", form = "quote" }]
+epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
+        ] {
+            std::fs::write(&path, format!("version = 1\n[[module]]\nname = \"demo\"\n{field}\n")).unwrap();
+            assert!(load_module_preamble_file(&path, None).is_err(), "accepted {field}");
+        }
     }
 
     #[test]

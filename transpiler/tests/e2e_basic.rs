@@ -295,6 +295,7 @@ includes = [
     { path = "demo/local.hpp", form = "quote" },
     { path = "sys/types.h", form = "angle" },
 ]
+epilogue_includes = [{ path = "demo/adapters.hpp", form = "quote" }]
 "#,
     )
     .unwrap();
@@ -321,6 +322,8 @@ includes = [
     let system = cpp.find("#include <sys/types.h>").unwrap();
     let module_decl = cpp.find("export module demo;").unwrap();
     assert!(module_fragment < local && local < system && system < module_decl);
+    assert!(cpp.ends_with("\nexport {\n#include \"demo/adapters.hpp\"\n}\n"), "{cpp}");
+    assert!(cpp.find("void hello()").unwrap() < cpp.find("demo/adapters.hpp").unwrap());
 }
 
 #[test]
