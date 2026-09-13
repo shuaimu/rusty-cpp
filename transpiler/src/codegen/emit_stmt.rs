@@ -4289,8 +4289,21 @@ impl CodeGen {
                         _ => false,
                     }
                 });
+                let init_is_nullable_callback_borrow = local.init.as_ref().is_some_and(|init| {
+                    let expression = peel_to_tail_expr(&init.expr)
+                        .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr));
+                    let syn::Expr::MethodCall(method) = expression else { return false; };
+                    matches!(method.method.to_string().as_str(), "as_ref" | "as_mut")
+                        && method.args.is_empty()
+                        && self.infer_simple_expr_type(&method.receiver)
+                            .or_else(|| self.infer_local_binding_type_from_initializer(&method.receiver))
+                            .as_ref()
+                            .and_then(|ty| self.transparent_nullable_callback_receiver(ty))
+                            .is_some()
+                });
                 let init_returns_reference_binding = (init_returns_reference
                     || init_returns_reference_by_shape)
+                    && !init_is_nullable_callback_borrow
                     && !local.init.as_ref().is_some_and(|init| {
                         !self.is_ref_init(&init.expr)
                             && self.is_rvalue_expr(&init.expr)

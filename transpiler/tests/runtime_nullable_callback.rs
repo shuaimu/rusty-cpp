@@ -194,6 +194,32 @@ pub fn check_nullable() -> i32 {
     } else {
         return 9;
     }
+    if shared.as_ref().unwrap()(10) != 11 { return 10; }
+    let borrowed = shared.as_ref();
+    if borrowed.unwrap()(11) != 12 { return 11; }
+    if shared.is_none() { return 12; }
+    let mut mutable: Option<Box<dyn FnMut() -> i32 + Send>> = Some(Box::new({
+        let mut count = 0;
+        move || { count += 1; count }
+    }));
+    if mutable.as_mut().unwrap()() != 1 { return 13; }
+    {
+        let borrowed = mutable.as_mut();
+        if borrowed.unwrap()() != 2 { return 14; }
+    }
+    if let Some(callback) = mutable.as_mut() {
+        if callback() != 3 { return 15; }
+    }
+    let empty: Option<Box<dyn Fn() -> i32>> = None;
+    if empty.as_ref().is_some() { return 16; }
+    let missing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        empty.as_ref().unwrap()()
+    }));
+    if missing.is_ok() { return 17; }
+    let mutex = std::sync::Mutex::new(mutable);
+    let mut guard = mutex.lock().unwrap();
+    if !guard.is_some() { return 18; }
+    if guard.as_mut().unwrap()() != 4 { return 19; }
     0
 }
 "#;

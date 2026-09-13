@@ -2434,6 +2434,42 @@ impl CodeGen {
         self.transparent_nullable_callback_in_cell_wrapper(ty, "RefCell")
     }
 
+    /// Recognize the value exposed by standard references and borrow guards.
+    /// Arbitrary user wrappers do not participate in this representation.
+    pub(super) fn transparent_nullable_callback_receiver(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<(syn::Type, bool)> {
+        let mut current = self.resolve_transparent_nullable_callback_aliases(ty);
+        while let syn::Type::Reference(reference) = current {
+            current = self.resolve_transparent_nullable_callback_aliases(&reference.elem);
+        }
+        if self.try_map_transparent_nullable_callback_type(&current).is_some() {
+            return Some((current, false));
+        }
+        let syn::Type::Path(path) = &current else { return None; };
+        if path.qself.is_some() { return None; }
+        let segment = path.path.segments.last()?;
+        let name = segment.ident.to_string();
+        let family = match name.as_str() {
+            "Ref" | "RefMut" => "cell",
+            "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" => "sync",
+            _ => return None,
+        };
+        if !self.transparent_nullable_callback_path_is_canonical(
+            &path.path, &name, &[&["std", family, &name], &["core", family, &name]],
+        ) { return None; }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        let inner = arguments.args.iter().find_map(|argument| match argument {
+            syn::GenericArgument::Type(inner) => Some(inner),
+            _ => None,
+        })?;
+        self.try_map_transparent_nullable_callback_type(inner)?;
+        Some((inner.clone(), true))
+    }
+
     /// Lower a canonical nullable boxed callback to `rusty::Function`'s
     /// existing empty state. Accept the same lifetime and Send/Sync bounds
     /// as an ordinary boxed callback, without accepting unrelated traits or
