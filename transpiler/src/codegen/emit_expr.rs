@@ -6623,6 +6623,67 @@ impl CodeGen {
         Self::emitted_pointer_add_or_offset_call(&raw_receiver)
     }
 
+    /// Select the standard SocketAddr-returning TCP methods only when the
+    /// source receiver resolves to std::net. Existing runtime IPv4 methods
+    /// remain available to hand-written C++ and explicitly mapped facades.
+    fn std_net_receiver_type(&self, ty: &syn::Type) -> Option<&'static str> {
+        let mut current = ty.clone();
+        for _ in 0..16 {
+            let peeled = self.peel_reference_paren_group_type(&current);
+            let syn::Type::Path(tp) = peeled else {
+                return None;
+            };
+            if tp.qself.is_some() {
+                return None;
+            }
+            if let Some(resolved) = self.resolve_type_alias_once(peeled) {
+                if !Self::types_equivalent_by_tokens(peeled, &resolved) {
+                    current = resolved;
+                    continue;
+                }
+            }
+            if self.standard_path_root_is_local_module(&tp.path) {
+                return None;
+            }
+            let path = crate::transpile::resolve_external_rust_item_path(
+                &tp.path,
+                &self.module_stack,
+                &self.trait_declared_paths,
+                &self.rust_item_import_bindings,
+            )?;
+            let kind = match path.as_str() {
+                "std::net::TcpListener" => Some("TcpListener"),
+                "std::net::TcpStream" => Some("TcpStream"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Some(kind);
+            }
+            let is_wrapper = matches!(
+                path.as_str(),
+                "std::sync::Arc"
+                    | "alloc::sync::Arc"
+                    | "std::boxed::Box"
+                    | "alloc::boxed::Box"
+                    | "std::rc::Rc"
+                    | "alloc::rc::Rc"
+            ) || (path == "Box"
+                && !self.bare_std_named_type_suppression_applies("Box"));
+            if !is_wrapper {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &tp.path.segments.last()?.arguments
+            else {
+                return None;
+            };
+            current = args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })?;
+        }
+        None
+    }
+
     pub(super) fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
@@ -6638,6 +6699,25 @@ impl CodeGen {
             return format!("std::string_view({}.file_name())", receiver);
         }
         if let Some(mapped) = self.try_emit_standard_future_method(mc) { return mapped; }
+        if mc.args.is_empty()
+            && mc.turbofish.is_none()
+            && matches!(
+                mc.method.to_string().as_str(),
+                "accept" | "local_addr" | "peer_addr"
+            )
+            && let Some(ty) = self.infer_simple_expr_type(&mc.receiver)
+            && let Some(kind) = self.std_net_receiver_type(&ty)
+        {
+            let method = match (kind, mc.method.to_string().as_str()) {
+                ("TcpListener", "accept") => Some("accept_socket_addr"),
+                (_, "local_addr") => Some("local_socket_addr"),
+                ("TcpStream", "peer_addr") => Some("peer_socket_addr"),
+                _ => None,
+            };
+            if let Some(method) = method {
+                return self.emit_receiver_member_call(&mc.receiver, method, None, &[], None);
+            }
+        }
         // `.map(third)` / `.map(util::third)` — a GENERIC free fn passed as
         // the callable: C++ can't bind a raw template name to the adapter's
         // deduced F. Wrap it in a forwarding lambda (the path emission also

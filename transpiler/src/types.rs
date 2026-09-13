@@ -179,6 +179,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "String" | "std::string::String" | "alloc::string::String" => {
             Some(("rusty::String", false))
         }
+        "net::TcpListener" | "std::net::TcpListener" => Some(("rusty::net::TcpListener", false)),
+        "std::os::fd::OwnedFd" | "std::os::unix::io::OwnedFd" => Some(("rusty::os::fd::OwnedFd", false)),
         "net::TcpStream" | "std::net::TcpStream" => Some(("rusty::net::TcpStream", false)),
         "net::IpAddr" | "std::net::IpAddr" => Some(("rusty::net::IpAddr", false)),
         "net::Ipv4Addr" | "std::net::Ipv4Addr" => Some(("rusty::net::Ipv4Addr", false)),
@@ -454,7 +456,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "io::Cursor" | "std::io::Cursor" => Some(("rusty::io::Cursor", true)),
         "io::Bytes" | "std::io::Bytes" => Some(("rusty::io::Bytes", true)),
         "io::Error" | "std::io::Error" => Some(("rusty::io::Error", false)),
-        "io::ErrorKind" | "std::io::ErrorKind" => Some(("rusty::io::ErrorKind", false)),
+        "io::ErrorKind" | "std::io::ErrorKind" => Some(("rusty::io::Error::Kind", false)),
         "io::SeekFrom" | "std::io::SeekFrom" => Some(("rusty::io::SeekFrom", false)),
         "io::Stdin" | "std::io::Stdin" => Some(("rusty::io::Stdin", false)),
         "io::Stdout" | "std::io::Stdout" => Some(("rusty::io::Stdout", false)),
