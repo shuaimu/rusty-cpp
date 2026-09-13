@@ -31,7 +31,7 @@ fn standard_future_alias_outputs_and_poll_patterns() {
     );
     assert!(cpp.contains("rusty::Task<int32_t> boxed()"), "{cpp}");
     assert!(
-        cpp.contains("rusty::future::pin<int32_t>(::work())"),
+        cpp.contains("rusty::future::pin(::work())"),
         "{cpp}"
     );
     assert!(cpp.contains("rusty::Poll<void>::ready_with()"), "{cpp}");
@@ -143,4 +143,19 @@ fn standard_future_imported_poll_variants_and_core_waker() {
     assert!(cpp.contains("rusty::Poll<int32_t>::pending()"), "{cpp}");
     assert!(cpp.contains(".is_pending()"), "{cpp}");
     assert!(cpp.contains("rusty::Waker(w)"), "{cpp}");
+}
+
+#[test]
+fn standard_future_output_keeps_the_function_template_parameter() {
+    let cpp = translate(r#"
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        fn complete<T, F: FnMut(T)>(mut task: Pin<Box<dyn Future<Output = T>>>,
+                                   mut callback: F, cx: &mut Context<'_>) {
+            if let Poll::Ready(value) = task.as_mut().poll(cx) { callback(value); }
+        }
+    "#);
+    assert!(cpp.contains("template<typename T, typename F>\nvoid complete(rusty::Task<T> task, F callback, rusty::Context& cx) {"), "{cpp}");
+    assert!(cpp.contains("callback(std::move(value))"), "{cpp}");
 }

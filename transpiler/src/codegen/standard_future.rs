@@ -475,11 +475,7 @@ impl CodeGen {
                 return None;
             }
             let arg = self.emit_expr_maybe_move(&call.args[0]);
-            let output = expected.and_then(|ty| self.standard_pinned_future_output(ty));
-            let template = output
-                .map(|ty| format!("<{}>", self.standard_future_output_cpp(&ty)))
-                .unwrap_or_default();
-            return Some(format!("rusty::future::pin{template}({arg})"));
+            return Some(format!("rusty::future::pin({arg})"));
         }
         if self.standard_call_owner(&path.path, "std::task::Context", "from_waker")
             && call.args.len() == 1

@@ -330,6 +330,20 @@ Task<T> pin(F future) {
         co_await std::suspend_always{};
     }
 }
+
+template<typename PollType> struct poll_output;
+template<typename T> struct poll_output<Poll<T>> { using type = T; };
+
+// Derive Output from the concrete pollable when Rust inferred Box::pin's
+// type through a generic call. A caller's generic parameter names are not
+// necessarily in scope where that expression is emitted.
+template<typename F>
+auto pin(F future) -> Task<typename poll_output<decltype(
+    std::declval<F&>().poll(std::declval<Context&>()))>::type> {
+    using Output = typename poll_output<decltype(
+        std::declval<F&>().poll(std::declval<Context&>()))>::type;
+    return pin<Output, F>(std::move(future));
+}
 } // namespace future
 
 // Block current thread until a poll-based future completes.

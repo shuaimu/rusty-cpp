@@ -132,6 +132,9 @@ impl Future for Deferred {
 }
 pub async fn immediate() -> i32 { 7 }
 pub fn boxed_immediate() -> BoxFuture<i32> { Box::pin(immediate()) }
+pub fn complete<T, F: FnMut(T)>(mut task: Pin<Box<dyn Future<Output = T>>>, mut callback: F, cx: &mut Context<'_>) {
+    if let Poll::Ready(value) = task.as_mut().poll(cx) { callback(value); }
+}
 pub fn check_future() -> i32 {
     let signal = Arc::new(Signal { count: AtomicUsize::new(0) });
     let waker = Waker::from(signal.clone());
@@ -156,6 +159,10 @@ pub fn check_future() -> i32 {
         Poll::Ready(value) => { if value != 7 { return 15; } },
         Poll::Pending => return 16,
     }
+    let mut result = 0;
+    complete(Box::pin(Deferred { polled: true, retained: Arc::new(RefCell::new(None)) }),
+        |value| { result = *value; }, &mut context);
+    if result != 42 { return 17; }
     0
 }
 pub fn take<T>(poll: Poll<T>) -> Option<T> {

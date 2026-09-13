@@ -5104,6 +5104,12 @@ impl CodeGen {
     }
 
     pub(super) fn type_mentions_named_type_param(&self, ty: &syn::Type, name: &str) -> bool {
+        // The supported owning Future spelling emits Task<Output>. Output is
+        // therefore a deducible signature parameter even when it occurs only
+        // in a dyn-trait associated-type binding in the Rust AST.
+        if let Some(output) = self.standard_pinned_future_output(ty) {
+            return self.type_mentions_named_type_param(&output, name);
+        }
         match ty {
             syn::Type::Path(tp) => {
                 if tp.qself.is_none()
