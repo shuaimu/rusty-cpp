@@ -3216,6 +3216,7 @@ fn transpile_full_with_options_impl(
         );
     }
     log_profile("cpp_abi_lower");
+    crate::cpp_native_types::collect(&file, Some(type_map))?;
     validate_cpp_declaration_markers(&file)?;
     log_profile("validate_cpp_declaration_markers");
     validate_reserved_cpp_marker_names(&file)?;
@@ -3427,6 +3428,7 @@ const KNOWN_CPP_MARKER_NAMES: &[&str] = &[
     "cpp_marker_impl",
     "cpp_marker_trait",
     "cpp_name",
+    "cpp_native_type",
     "cpp_namespace",
     "cpp_no_auto_traits",
     "cpp_noexcept",

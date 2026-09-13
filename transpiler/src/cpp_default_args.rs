@@ -20,7 +20,7 @@ impl CppDefaultArgument {
     fn source_type_description(self) -> &'static str {
         match self {
             Self::SourceLocation => "&::core::panic::Location<'_>, &::std::panic::Location<'_>, or &::rusty::SourceLocation",
-            Self::Stderr => "*mut ::rusty::CFile",
+            Self::Stderr => "a mutable pointer to an explicitly native-mapped FILE binding (or *mut ::rusty::CFile)",
         }
     }
 
@@ -277,7 +277,11 @@ fn validate_mapping(kind: CppDefaultArgument, type_map: &UserTypeMap, ty: &Type)
     }
 }
 
-fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Result<usize, String> {
+fn validate_function(
+    function: &ItemFn,
+    type_map: Option<&UserTypeMap>,
+    native_types: &crate::cpp_native_types::NativeTypes,
+) -> Result<usize, String> {
     let mut kinds = Vec::with_capacity(function.sig.inputs.len());
     for input in &function.sig.inputs {
         let kind = match input {
@@ -355,7 +359,9 @@ fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Resul
                 function.sig.ident
             ));
         }
-        if !source_type_matches(kind, &arg.ty) {
+        let native_file = kind == CppDefaultArgument::Stderr
+            && native_types.mapped_file_pointer(&arg.ty);
+        if !source_type_matches(kind, &arg.ty) && !native_file {
             return Err(format!(
                 "{MARKER}({}) requires exact Rust parameter type {}",
                 match kind {
@@ -365,18 +371,22 @@ fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Resul
                 kind.source_type_description()
             ));
         }
-        if let Some(type_map) = type_map {
+        if !native_file && let Some(type_map) = type_map {
             validate_mapping(kind, type_map, &arg.ty)?;
         }
     }
     Ok(marker_count)
 }
 
-fn validate_items(items: &[Item], type_map: Option<&UserTypeMap>) -> Result<usize, String> {
+fn validate_items(
+    items: &[Item],
+    type_map: Option<&UserTypeMap>,
+    native_types: &crate::cpp_native_types::NativeTypes,
+) -> Result<usize, String> {
     let mut marker_count = 0;
     for item in items {
         match item {
-            Item::Fn(function) => marker_count += validate_function(function, type_map)?,
+            Item::Fn(function) => marker_count += validate_function(function, type_map, native_types)?,
             _ => {}
         }
     }
@@ -430,7 +440,8 @@ fn validate_file_impl(
             ));
         }
     }
-    let validated = validate_items(&file.items, type_map)?;
+    let native_types = crate::cpp_native_types::collect(file, type_map)?;
+    let validated = validate_items(&file.items, type_map, &native_types)?;
     if validated != mentioned {
         return Err(format!(
             "reserved {MARKER} marker is allowed only in the exact inert attribute on a trailing parameter of a public free function"

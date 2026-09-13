@@ -3334,6 +3334,7 @@ pub struct CodeGen {
     /// Validated source-owned ABI facades for this file. Empty for the exact
     /// ordinary-code fast path.
     pub(crate) cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan,
+    native_cpp_type_names: HashSet<String>,
     /// First fatal diagnostic recorded during emission. A producer records the
     /// error and suppresses unsafe/incorrect output; the transpile entry point
     /// propagates it instead of returning a partial translation.
@@ -3766,6 +3767,7 @@ impl CodeGen {
             flat_import_type_authorizations: BTreeSet::new(),
             current_physical_module: crate::cpp_abi::ModulePath(Vec::new()),
             cpp_abi_plan: crate::cpp_abi::CppAbiEmissionPlan::default(),
+            native_cpp_type_names: HashSet::new(),
             codegen_error: None,
         }
     }
@@ -7798,6 +7800,7 @@ impl CodeGen {
         self.scope_import_bindings.clear();
         self.canonical_std_hash_map_import_bindings.clear();
         self.rust_item_import_bindings.clear();
+        self.native_cpp_type_names.clear();
         self.name_resolver.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -13865,6 +13868,21 @@ impl CodeGen {
         for item in ordered_items.iter().copied() {
             match item {
                 syn::Item::Struct(s) => {
+                    if crate::cpp_native_types::has_marker(&s.attrs) {
+                        let rust_name = s.ident.to_string();
+                        let ident = &s.ident;
+                        let target = self.map_type(&syn::parse_quote!(#ident));
+                        let name = escape_cpp_keyword(&rust_name);
+                        let export = if self.should_export_item_at_module_depth(
+                            &s.vis, module_depth, &rust_name,
+                        ) { "export " } else { "" };
+                        self.writeln(&format!("{}using {} = {};", export, name, target));
+                        self.defined_types.insert(rust_name);
+                        self.native_cpp_type_names
+                            .insert(target.trim_start_matches("::").to_string());
+                        emitted_any = true;
+                        continue;
+                    }
                     let name = self.named_module_root_type_decl_cpp_name_at_depth(
                         &s.ident.to_string(),
                         module_depth,
@@ -14696,6 +14714,11 @@ impl CodeGen {
     fn forward_decl_type_spelling_has_unresolved_scoped_path(&self, spelling: &str) -> bool {
         for token in Self::extract_cpp_scoped_path_tokens(spelling) {
             let normalized = token.trim_start_matches("::");
+            // A native header has already declared this explicitly mapped C
+            // identifier; a leading :: does not make it a Rust module path.
+            if self.native_cpp_type_names.contains(normalized) {
+                continue;
+            }
             if normalized.is_empty() {
                 continue;
             }

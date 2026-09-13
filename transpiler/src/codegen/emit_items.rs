@@ -2103,6 +2103,10 @@ impl CodeGen {
     }
 
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
+        // The owning native header already declares this checked C binding.
+        if crate::cpp_native_types::has_marker(&s.attrs) {
+            return;
+        }
         // Drain pending nested-fn hoists for THIS namespace before the
         // struct's text: its in-class member bodies look the names up
         // immediately (WriterFormatter::write_ → io_error). emit_struct is
