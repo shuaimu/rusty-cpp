@@ -19467,6 +19467,7 @@ fn consuming_receiver_import_fixture() -> CodeGen {
         provider_physical_module: crate::cpp_abi::ModulePath(vec!["queue".into()]),
         provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::Struct,
         reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse,
+        nullable_owner_alias_source: None,
     });
     cg.local_bindings.push(HashMap::from([
         ("queue".into(), Some(syn::parse_quote!(Queue))),
@@ -19881,6 +19882,7 @@ fn exact_qualified_flat_type_path_imports_and_rewrites_its_proven_provider() {
         provider_physical_module: crate::cpp_abi::ModulePath(vec!["channel".to_string()]),
         provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::Struct,
         reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath,
+        nullable_owner_alias_source: None,
     };
 
     let mut cg = CodeGen::new();
@@ -47786,6 +47788,7 @@ fn flat_alias_resolution_requires_exact_proof_and_respects_shadowing() {
         provider_physical_module: crate::cpp_abi::ModulePath(vec!["provider".into()]),
         provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::TypeAlias,
         reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse,
+        nullable_owner_alias_source: None,
     });
     assert!(cg.resolve_authorized_cross_file_type_alias(&proxy).is_some());
     assert!(cg.type_is_pointer_like_owner_type(&proxy));
@@ -48071,6 +48074,7 @@ fn imported_inherent_receiver_shape_requires_proven_unique_host() {
         provider_physical_module: crate::cpp_abi::ModulePath(vec!["provider".into()]),
         provider_kind: crate::cpp_abi::FlatImportTypeProviderKind::Struct,
         reference_kind: crate::cpp_abi::FlatImportTypeReferenceKind::QualifiedProviderPath,
+        nullable_owner_alias_source: None,
     });
     assert_eq!(cg.lookup_owner_method_has_receiver_from_owner_path(Some(&owner), "Worker", "read"), Some(true));
     assert_eq!(cg.lookup_owner_method_has_receiver_from_owner_path(Some(&owner), "Worker", "inspect"), Some(false));

@@ -2312,8 +2312,7 @@ impl CodeGen {
             if !matches!(current, syn::Type::Path(_)) {
                 break;
             }
-            let Some(next) = self.resolve_type_alias_once(&current)
-                .or_else(|| self.resolve_authorized_cross_file_type_alias(&current)) else {
+            let Some(next) = self.resolve_type_alias_once(&current) else {
                 break;
             };
             if next == current {
@@ -2365,6 +2364,41 @@ impl CodeGen {
         Some(box_ty)
     }
 
+    fn resolve_explicit_nullable_owner_alias_once(&self, ty: &syn::Type) -> Option<syn::Type> {
+        // An imported binding takes precedence over the local alias helper's
+        // suffix lookup, which can otherwise select an unrelated nested alias.
+        let imported_binding = match self.peel_reference_paren_group_type(ty) {
+            syn::Type::Path(path) if path.qself.is_none() && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1 => {
+                self.flat_import_type_authorizations.iter().any(|proof|
+                    proof.consumer_physical_module == self.current_physical_module
+                        && proof.consumer_lexical_module.0 == self.module_stack
+                        && proof.reference_kind == crate::cpp_abi::FlatImportTypeReferenceKind::MarkedUse
+                        && path.path.segments[0].ident == proof.leaf)
+            }
+            _ => false,
+        };
+        if imported_binding || self.authorized_cross_file_type_alias(ty).is_some() {
+            self.resolve_authorized_cross_file_nullable_owner_alias(ty)
+        } else {
+            self.resolve_type_alias_once(ty)
+        }
+    }
+
+    fn resolve_explicit_nullable_owner_aliases(&self, ty: &syn::Type) -> syn::Type {
+        let mut current = self.peel_paren_group_type(ty).clone();
+        let mut seen = HashSet::new();
+        for _ in 0..8 {
+            if !matches!(current, syn::Type::Path(_))
+                || !seen.insert(current.to_token_stream().to_string())
+            { break; }
+            let Some(next) = self.resolve_explicit_nullable_owner_alias_once(&current)
+            else { break; };
+            current = self.peel_paren_group_type(&next).clone();
+        }
+        current
+    }
+
     /// An explicit alias profile may preserve the nullable C++ Arc/Box
     /// representation at a boundary. The Rust type remains Option<Owner>.
     /// Ordinary Option<Arc/Box> types do not opt in, even for the same payload.
@@ -2376,9 +2410,8 @@ impl CodeGen {
         let target = self.user_type_map.lookup(&name).filter(|mapped| !mapped.is_empty())?;
         // Requiring a real Rust alias excludes user mappings of unrelated
         // nominal owners and of std::option::Option itself.
-        self.resolve_type_alias_once(ty)
-            .or_else(|| self.resolve_authorized_cross_file_type_alias(ty))?;
-        let resolved = self.resolve_transparent_nullable_callback_aliases(ty);
+        self.resolve_explicit_nullable_owner_alias_once(ty)?;
+        let resolved = self.resolve_explicit_nullable_owner_aliases(ty);
         let syn::Type::Path(option) = resolved else { return None; };
         if !self.transparent_nullable_callback_path_is_canonical(
             &option.path, "Option",
@@ -2390,7 +2423,7 @@ impl CodeGen {
         if args.args.len() != 1 { return None; }
         let syn::GenericArgument::Type(owner) = args.args.first()? else { return None; };
         let source_owner_cpp = self.map_type(owner);
-        let owner = self.resolve_transparent_nullable_callback_aliases(owner);
+        let owner = self.resolve_explicit_nullable_owner_aliases(owner);
         let syn::Type::Path(owner_path) = &owner else { return None; };
         let is_box = self.transparent_nullable_callback_path_is_canonical(
             &owner_path.path, "Box", &[&["std", "boxed", "Box"], &["alloc", "boxed", "Box"]],
@@ -2422,7 +2455,7 @@ impl CodeGen {
         {
             for argument in &mut arguments.args {
                 if let syn::GenericArgument::Type(payload) = argument {
-                    *payload = self.resolve_transparent_nullable_callback_aliases(payload);
+                    *payload = self.resolve_explicit_nullable_owner_aliases(payload);
                 }
             }
         }

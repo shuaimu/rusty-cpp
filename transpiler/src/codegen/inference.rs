@@ -11053,7 +11053,9 @@ impl CodeGen {
     /// Resolve an imported alias only through its exact crate-preflight proof.
     /// The sibling alias table deliberately contains only unique declarations;
     /// a matching tail alone cannot authorize a consumer's local type.
-    pub(super) fn resolve_authorized_cross_file_type_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+    pub(super) fn authorized_cross_file_type_alias(&self, ty: &syn::Type)
+        -> Option<&crate::cpp_abi::FlatImportTypeAuthorization>
+    {
         let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
             return None;
         };
@@ -11071,7 +11073,7 @@ impl CodeGen {
                 &self.module_stack.join("::"), &leaf_name,
             )
         }).flatten();
-        let authorized = self.flat_import_type_authorizations.iter().any(|authorization| {
+        self.flat_import_type_authorizations.iter().find(|authorization| {
             authorization.consumer_physical_module == self.current_physical_module
                 && authorization.consumer_lexical_module.0 == self.module_stack
                 && authorization.provider_kind == crate::cpp_abi::FlatImportTypeProviderKind::TypeAlias
@@ -11087,13 +11089,25 @@ impl CodeGen {
                             && authorization.provider_physical_module.0 == [path[1].clone()]
                     }
                 }
-        });
-        if !authorized { return None; }
-        let alias = self.cross_file_auto_trait_aliases.get(&leaf_name)?;
+        })
+    }
+
+    pub(super) fn resolve_authorized_cross_file_type_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let authorization = self.authorized_cross_file_type_alias(ty)?;
+        let alias = self.cross_file_auto_trait_aliases.get(&authorization.leaf)?;
         if !alias.generics.params.is_empty() || alias.generics.where_clause.is_some() {
             return None;
         }
         Some((*alias.ty).clone())
+    }
+
+    pub(super) fn resolve_authorized_cross_file_nullable_owner_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        // Keep the same exact binding and unique declaration checks as
+        // ordinary imported alias inference, but never interpret its raw RHS
+        // in the consumer's scope for representation-changing profiles.
+        self.resolve_authorized_cross_file_type_alias(ty)?;
+        let proof = self.authorized_cross_file_type_alias(ty)?;
+        syn::parse_str(proof.nullable_owner_alias_source.as_deref()?).ok()
     }
 
     pub(super) fn infer_owner_first_type_arg_from_expr(

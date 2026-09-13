@@ -117,6 +117,9 @@ pub(crate) struct FlatImportTypeAuthorization {
     pub(crate) provider_physical_module: ModulePath,
     pub(crate) provider_kind: FlatImportTypeProviderKind,
     pub(crate) reference_kind: FlatImportTypeReferenceKind,
+    /// Standard owner identities proved in the provider's lexical scope.
+    /// None forbids nullable-owner profile expansion through this binding.
+    pub(crate) nullable_owner_alias_source: Option<String>,
 }
 
 /// Out-of-band instructions consumed by code generation after the semantic
@@ -3703,6 +3706,106 @@ fn validate_flat_import_type_provider(
     Ok(())
 }
 
+/// Preserve standard owner identities before an alias leaves its provider.
+/// Only direct provider aliases and exact standard imports are supported.
+fn nullable_owner_alias_source(items: &[Item], leaf: &str) -> Option<String> {
+    use crate::transpile::{collect_rust_item_import_bindings, resolve_external_rust_item_path};
+    let bindings = collect_rust_item_import_bindings(items);
+    let declarations = items.iter().filter_map(flat_import_direct_item_name)
+        .map(|(name, _)| ident_key(name)).collect::<std::collections::HashSet<_>>();
+    fn has_glob(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Glob(_) => true,
+            syn::UseTree::Path(path) => has_glob(&path.tree),
+            syn::UseTree::Group(group) => group.items.iter().any(has_glob),
+            _ => false,
+        }
+    }
+    let uncertain_bindings = items.iter().any(|item| match item {
+        Item::Use(item) => has_glob(&item.tree),
+        Item::Macro(_) => true,
+        _ => false,
+    });
+    fn alias<'a>(items: &'a [Item], path: &syn::Path) -> Option<&'a syn::ItemType> {
+        if path.leading_colon.is_some() { return None; }
+        let segments = path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
+        let name = match segments.as_slice() {
+            [name] => name,
+            [prefix, name] if prefix == "self" => name,
+            _ => return None,
+        };
+        let mut candidates = items.iter().filter_map(|item| match item {
+            Item::Type(item) if item.ident == name.as_str() => Some(item), _ => None,
+        });
+        let found = candidates.next()?;
+        (candidates.next().is_none() && found.generics.params.is_empty()
+            && found.generics.where_clause.is_none()
+            && !found.attrs.iter().any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr")))
+            .then_some(found)
+    }
+    fn normalize(
+        ty: &Type, items: &[Item], declarations: &std::collections::HashSet<String>,
+        bindings: &crate::transpile::RustItemImportBindings, uncertain: bool, depth: usize,
+    ) -> Option<Type> {
+        if depth == 0 { return None; }
+        let ty = match ty {
+            Type::Paren(value) => return normalize(&value.elem, items, declarations, bindings, uncertain, depth - 1),
+            Type::Group(value) => return normalize(&value.elem, items, declarations, bindings, uncertain, depth - 1),
+            Type::Path(value) if value.qself.is_none() => value,
+            _ => return None,
+        };
+        if let Some(target) = alias(items, &ty.path) {
+            return normalize(&target.ty, items, declarations, bindings, uncertain, depth - 1);
+        }
+        let first = ty.path.segments.first()?.ident.to_string();
+        let spelling = if ty.path.leading_colon.is_none() {
+            if declarations.contains(&first) { return None; }
+            if ty.path.segments.len() == 1 && !bindings.contains_key(&(String::new(), first.clone())) {
+                if uncertain { return None; }
+                match first.as_str() {
+                    "Option" => "core::option::Option".to_string(),
+                    "Box" => "std::boxed::Box".to_string(),
+                    _ => return None,
+                }
+            } else {
+                resolve_external_rust_item_path(&ty.path, &[], declarations, bindings)?
+            }
+        } else {
+            ty.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>().join("::")
+        };
+        let canonical = match spelling.as_str() {
+            "std::option::Option" | "core::option::Option" => "::core::option::Option",
+            "std::boxed::Box" | "alloc::boxed::Box" => "::std::boxed::Box",
+            "std::sync::Arc" | "alloc::sync::Arc" => "::std::sync::Arc",
+            _ => return None,
+        };
+        let PathArguments::AngleBracketed(arguments) = &ty.path.segments.last()?.arguments else { return None; };
+        if arguments.args.len() != 1 { return None; }
+        let GenericArgument::Type(inner) = arguments.args.first()? else { return None; };
+        let inner = if canonical == "::core::option::Option" {
+            let proven = normalize(inner, items, declarations, bindings, uncertain, depth - 1)?;
+            let Type::Path(owner) = &proven else { return None; };
+            if !owner.path.segments.last().is_some_and(|part| part.ident == "Box" || part.ident == "Arc") {
+                return None;
+            }
+            // Keep an owner alias for the consumer's separately authenticated
+            // C++ alias mapping, after proving its definition in this scope.
+            if let Type::Path(source) = inner
+                && let Some(owner_alias) = alias(items, &source.path)
+            {
+                let ident = &owner_alias.ident;
+                syn::parse_quote!(#ident)
+            } else { proven }
+        } else { inner.clone() };
+        let path: syn::Path = syn::parse_str(canonical).ok()?;
+        Some(syn::parse_quote!(#path<#inner>))
+    }
+    let path: syn::Path = syn::parse_str(leaf).ok()?;
+    let source = alias(items, &path)?;
+    normalize(&source.ty, items, &declarations, &bindings, uncertain_bindings, 16)
+        .map(|ty| ty.to_token_stream().to_string())
+}
+
 /// Crate-wide facts that are safe to hand to per-file code generation only
 /// after the complete conventional module graph has passed preflight.
 #[derive(Clone, Debug, Default)]
@@ -4053,6 +4156,7 @@ fn preflight_crate_sources_impl(
                                 provider_physical_module: provider_module.clone(),
                                 provider_kind,
                                 reference_kind: FlatImportTypeReferenceKind::MarkedUse,
+                                nullable_owner_alias_source: nullable_owner_alias_source(&provider.file.items, leaf),
                             },
                         );
                     }
@@ -4116,7 +4220,7 @@ fn preflight_crate_sources_impl(
         .collect::<FlatImportTypeBindings>();
     let mut qualified_type_provider_templates = BTreeMap::<
         (Vec<String>, String),
-        (String, FlatImportTypeProviderKind),
+        (String, FlatImportTypeProviderKind, Option<String>),
     >::new();
     for authorization in &flat_import_type_authorizations {
         let key = (
@@ -4126,6 +4230,7 @@ fn preflight_crate_sources_impl(
         let value = (
             authorization.cpp_namespace.clone(),
             authorization.provider_kind.clone(),
+            authorization.nullable_owner_alias_source.clone(),
         );
         if let Some(previous) = qualified_type_provider_templates.insert(key.clone(), value.clone())
             && previous != value
@@ -4185,7 +4290,7 @@ fn preflight_crate_sources_impl(
         )
         .map_err(|error| format!("{error} in {}", unit.path.display()))?;
         for (provider, leaf, consumer_lexical_module) in qualified_type_references {
-            let (cpp_namespace, provider_kind) = qualified_type_provider_templates
+            let (cpp_namespace, provider_kind, nullable_owner_alias_source) = qualified_type_provider_templates
                 .get(&(provider.clone(), leaf.clone()))
                 .expect("qualified flat type reference has an audited provider template")
                 .clone();
@@ -4204,6 +4309,7 @@ fn preflight_crate_sources_impl(
                 provider_physical_module: ModulePath(provider),
                 provider_kind,
                 reference_kind: FlatImportTypeReferenceKind::QualifiedProviderPath,
+                nullable_owner_alias_source,
             });
         }
         let external = global_contracts.external_for(index);
