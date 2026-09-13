@@ -11,9 +11,10 @@ fn imported_callback_construction_borrow_and_dispatch_run_in_rust_and_cpp() {
     std::fs::write(root.join("src/provider.rs"), r#"
 use std::ops::Fn as Predicate;
 pub type EventTestFn = Option<Box<dyn Predicate(i32) -> bool + Send + Sync>>;
+pub type FiberFn = Option<Box<dyn FnMut()>>;
 "#).unwrap();
     std::fs::write(root.join("src/consumer.rs"), r#"
-use crate::provider::EventTestFn;
+use crate::provider::{EventTestFn, FiberFn};
 pub fn absent() -> EventTestFn { None }
 pub fn check() -> bool {
     let mut predicate: EventTestFn = Some(Box::new(|value: i32| value == 7));
@@ -21,7 +22,17 @@ pub fn check() -> bool {
     if !predicate.as_ref().unwrap()(7) || predicate.as_ref().unwrap()(8) { return false; }
     let taken = predicate.take();
     if predicate.is_some() { return false; }
-    taken.unwrap()(7)
+    if !taken.unwrap()(7) { return false; }
+    let mut calls = 0_i32;
+    let mut job: FiberFn = Some(Box::new(move || {
+        calls += 1;
+        assert!(calls <= 2);
+    }));
+    job.as_mut().unwrap()();
+    let taken = job.take();
+    if job.is_some() { return false; }
+    taken.unwrap()();
+    true
 }
 "#).unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
