@@ -6636,6 +6636,7 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("std::string_view({}.file_name())", receiver);
         }
+        if let Some(mapped) = self.try_emit_standard_future_method(mc) { return mapped; }
         // `.map(third)` / `.map(util::third)` — a GENERIC free fn passed as
         // the callable: C++ can't bind a raw template name to the adapter's
         // deduced F. Wrap it in a forwarding lambda (the path emission also
@@ -13458,6 +13459,7 @@ impl CodeGen {
         expr: &syn::Expr,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
         if self.expected_type_is_string_view(expected_ty)
             && matches!(self.peel_paren_group_expr(expr), syn::Expr::Field(_))
         {
@@ -18222,6 +18224,7 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let Some(mapped) = self.try_emit_standard_future_call(call, expected_ty) { return mapped; }
         let emitted = self.emit_call_expr_to_string_lowered(call, expected_ty);
         // C11 family (checkpoint contract 11): the hand-written runtime
         // facades have no such static member — collapse the emitted call onto
@@ -24221,6 +24224,7 @@ impl CodeGen {
     }
 
     pub(super) fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
+        if let Some(mapped) = self.try_emit_standard_future_pending(expr, None) { return mapped; }
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
             syn::Expr::Path(path) => {

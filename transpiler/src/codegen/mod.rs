@@ -136,6 +136,7 @@ enum RuntimeMatchEnumKind {
     Option,
     Result,
     Entry,
+    Poll,
 }
 
 /// Recognize the storage marker surface exactly. The ordinary direct
@@ -2010,6 +2011,7 @@ pub struct CodeGen {
     /// symbols) from the type's own inherent surface, which the incumbent
     /// manifest DOES own.
     pub(crate) impl_method_source_trait: HashMap<String, HashMap<String, String>>,
+    standard_wake_methods: HashMap<String, HashSet<String>>,
     /// Fully scoped Rust paths of traits explicitly lowered as non-inheriting
     /// C++ marker registries.  Bounds on only these traits become C++
     /// `requires Registry<..., T>::value` predicates; ordinary user-trait
@@ -3457,6 +3459,7 @@ impl CodeGen {
             ufcs_emitting_internal_linkage_trait: false,
             ufcs_internal_linkage_traits: HashSet::new(),
             impl_method_source_trait: HashMap::new(),
+            standard_wake_methods: HashMap::new(),
             cpp_marker_trait_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             trait_method_receiver_kind: std::rc::Rc::new(HashMap::new()),
@@ -8068,6 +8071,8 @@ impl CodeGen {
                 .extend(targets.iter().cloned());
         }
         self.trait_declared_paths = crate::transpile::collect_declared_trait_paths(&file.items);
+        let normalized_tasks = self.normalize_standard_task_receivers(file);
+        let file = &normalized_tasks;
         // H1 (checkpoint contract 1): the authenticated namespace-placement
         // contract. Collected before any emission pass so the forward-decl
         // phase already places its declarations; with no marker in the source
@@ -16318,6 +16323,15 @@ impl CodeGen {
                                     _ => {}
                                 }
                             }
+                        }
+                    }
+                }
+                syn::Type::TraitObject(object) => {
+                    for bound in &mut object.bounds {
+                        if let syn::TypeParamBound::Trait(bound) = bound {
+                            let mut path_ty = syn::Type::Path(syn::TypePath { qself: None, path: bound.path.clone() });
+                            recurse(&mut path_ty, substitutions);
+                            if let syn::Type::Path(path) = path_ty { bound.path = path.path; }
                         }
                     }
                 }
@@ -32123,6 +32137,7 @@ impl CodeGen {
             "Option" => Some(RuntimeMatchEnumKind::Option),
             "Result" => Some(RuntimeMatchEnumKind::Result),
             "Entry" | "EntryImpl" => Some(RuntimeMatchEnumKind::Entry),
+            "Poll" if syn::parse_str::<syn::Path>(enum_name).ok().is_some_and(|path| self.standard_future_path_is(&path, "std::task::Poll")) => Some(RuntimeMatchEnumKind::Poll),
             _ => None,
         }
     }
@@ -32143,6 +32158,7 @@ impl CodeGen {
         path: &syn::Path,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<RuntimeMatchEnumKind> {
+        if self.standard_poll_variant(path).is_some() { return Some(RuntimeMatchEnumKind::Poll); }
         if path.segments.len() >= 2 {
             let enum_name = path.segments.iter().nth_back(1)?.ident.to_string();
             if let Some(kind) = self.runtime_match_enum_kind_by_name(&enum_name) {
@@ -32247,6 +32263,7 @@ impl CodeGen {
             .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "Some") => Some(("is_some", "unwrap")),
+            (RuntimeMatchEnumKind::Poll, "Ready") => Some(("is_ready", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Ok") => Some(("is_ok", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Err") => Some(("is_err", "unwrap_err")),
             (RuntimeMatchEnumKind::Entry, "Vacant") => Some(("is_vacant", "vacant_entry")),
@@ -32266,6 +32283,7 @@ impl CodeGen {
             .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+            (RuntimeMatchEnumKind::Poll, "Pending") => Some("is_pending"),
             (RuntimeMatchEnumKind::Entry, "Vacant") => Some("is_vacant"),
             (RuntimeMatchEnumKind::Entry, "Occupied") => Some("is_occupied"),
             _ => None,
@@ -32280,12 +32298,18 @@ impl CodeGen {
         if ident.by_ref.is_some() || ident.mutability.is_some() || ident.subpat.is_some() {
             return None;
         }
+        let source_path: syn::Path = syn::parse_quote!(#ident);
+        if self.standard_poll_variant(&source_path).as_deref() == Some("Pending") {
+            return Some("is_pending");
+        }
         let variant_name = self
             .canonical_variant_name(&ident.ident.to_string())
             .to_string();
         let pair = |kind: RuntimeMatchEnumKind| -> Option<&'static str> {
             match (kind, variant_name.as_str()) {
                 (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+                (RuntimeMatchEnumKind::Poll, "Pending") => Some("is_pending"),
+                (RuntimeMatchEnumKind::Poll, "Ready") => Some("is_ready"),
                 (RuntimeMatchEnumKind::Option, "Some") => Some("is_some"),
                 (RuntimeMatchEnumKind::Result, "Ok") => Some("is_ok"),
                 (RuntimeMatchEnumKind::Result, "Err") => Some("is_err"),
@@ -66562,6 +66586,9 @@ mod paths;
 mod predicates;
 mod symbol_category;
 mod type_mapping;
+mod standard_future;
+#[cfg(test)]
+mod standard_future_tests;
 mod type_solver;
 
 #[cfg(test)]

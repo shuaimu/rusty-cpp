@@ -3951,6 +3951,7 @@ impl CodeGen {
                                 RuntimeMatchEnumKind::Option => "Option",
                                 RuntimeMatchEnumKind::Result => "Result",
                                 RuntimeMatchEnumKind::Entry => "Entry",
+                            RuntimeMatchEnumKind::Poll => "std::task::Poll",
                             };
                             return Some(VariantTypeContext {
                                 enum_name: enum_name.to_string(),
@@ -4045,6 +4046,7 @@ impl CodeGen {
                                 RuntimeMatchEnumKind::Option => "Option",
                                 RuntimeMatchEnumKind::Result => "Result",
                                 RuntimeMatchEnumKind::Entry => "Entry",
+                            RuntimeMatchEnumKind::Poll => "std::task::Poll",
                             };
                             return Some(VariantTypeContext {
                                 enum_name: enum_name.to_string(),
@@ -4092,6 +4094,7 @@ impl CodeGen {
                             RuntimeMatchEnumKind::Option => "Option",
                             RuntimeMatchEnumKind::Result => "Result",
                             RuntimeMatchEnumKind::Entry => "Entry",
+                            RuntimeMatchEnumKind::Poll => "std::task::Poll",
                         };
                         return Some(VariantTypeContext {
                             enum_name: enum_name.to_string(),
@@ -6439,6 +6442,9 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
     ) -> Option<syn::Type> {
         let method = mc.method.to_string();
+        if let Some(ty) = self.infer_standard_future_method(mc) {
+            return Some(ty);
+        }
         // RefCell::replace returns its stored Option by value. Keep the
         // source type so an inferred local still uses nullable-callback
         // operations after the Option has become a C++ Function.

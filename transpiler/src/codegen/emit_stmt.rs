@@ -2521,6 +2521,7 @@ impl CodeGen {
         else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
         first: bool,
     ) {
+        if self.try_emit_standard_poll_if_let(let_expr, then_branch, else_branch, first) { return; }
         if self.try_emit_transparent_nullable_callback_if_let(
             let_expr,
             then_branch,
