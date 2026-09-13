@@ -1108,27 +1108,8 @@ impl CodeGen {
     }
 
     pub(super) fn type_resolves_to_tuple_alias(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return false;
-        };
-        if tp.path.segments.is_empty() {
-            return false;
-        }
-        let joined = tp
-            .path
-            .segments
-            .iter()
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if self.tuple_type_aliases.contains_key(&joined) {
-            return true;
-        }
-        tp.path
-            .segments
-            .last()
-            .is_some_and(|seg| self.tuple_type_aliases.contains_key(&seg.ident.to_string()))
+        matches!(self.peel_reference_paren_group_type(ty), syn::Type::Path(_))
+            && self.resolve_tuple_type_from_type(ty).is_some()
     }
 
     pub(super) fn type_is_range_with_private_end_field(&self, ty: &syn::Type) -> bool {

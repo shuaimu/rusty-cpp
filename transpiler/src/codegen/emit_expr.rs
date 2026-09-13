@@ -14148,9 +14148,17 @@ impl CodeGen {
                             )
                         })
                         .collect();
-                    if self.tuple_expected_needs_typed_constructor(&expected_tuple_ty) {
-                        let expected_tuple_cpp =
-                            self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+                    let expected_alias = expected_ty
+                        .map(|ty| self.peel_reference_paren_group_type(ty))
+                        .filter(|ty| matches!(ty, syn::Type::Path(_)));
+                    if expected_alias.is_some()
+                        || self.tuple_expected_needs_typed_constructor(&expected_tuple_ty)
+                    {
+                        // Preserve the alias profile at construction. Expanding
+                        // it to the Rust tuple would discard a std::pair target.
+                        let expected_tuple_cpp = expected_alias
+                            .map(|ty| self.map_type(ty))
+                            .unwrap_or_else(|| self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone())));
                         return format!("{}{{{}}}", expected_tuple_cpp, elems.join(", "));
                     }
                     return format!("std::make_tuple({})", elems.join(", "));

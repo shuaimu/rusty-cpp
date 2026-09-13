@@ -47275,8 +47275,7 @@ fn test_concrete_alias_parameters_keep_their_nominal_type() {
 /// honors its authenticated type-map target instead of re-mapping the Rust
 /// right-hand side. `SrcFileCStr` was `std::string_view` at its declaration
 /// while every parameter use lowered to the mapped `const char*` — one name,
-/// two C++ types. A PRIVATE alias is internal spelling the map does not
-/// govern and is left alone.
+/// two C++ types. Private aliases obey the same explicit profile.
 #[test]
 fn test_exported_alias_honors_its_authenticated_type_map() {
     let mut type_map = types::UserTypeMap::default();
@@ -47309,8 +47308,8 @@ fn test_exported_alias_honors_its_authenticated_type_map() {
          contract 8 forbids is the two DISAGREEING): {out}"
     );
     assert!(
-        out.contains("using LegacyStdString = rusty::String;"),
-        "a private alias keeps its right-hand-side lowering: {out}"
+        out.contains("using LegacyStdString = std::string;"),
+        "a private alias honors the same profile as its uses: {out}"
     );
 }
 
@@ -48287,4 +48286,30 @@ fn local_standard_module_alias_keeps_cpp_runtime_namespace_available() {
     let output = transpile_str(source);
     assert!(!output.contains("namespace std ="), "{output}");
     run_rust_and_cpp_runtime_probe(source, "assert_eq!(exercise(), 29);", &output, "return exercise() == 29 ? 0 : 1;");
+}
+
+#[test]
+fn explicit_tuple_alias_profile_preserves_generic_construction_and_fields() {
+    let mut type_map = types::UserTypeMap::default();
+    type_map.mappings.insert("PromisePair".into(), "std::pair".into());
+    type_map.mappings.insert("FrameBytes".into(), "std::vector<uint8_t>".into());
+    let file: syn::File = syn::parse_quote! {
+        type FrameBytes = Vec<u8>;
+        pub type PromisePair<First, Second> = (First, Second);
+        pub type OrdinaryPair<First, Second> = (First, Second);
+        pub fn promise_pair<First, Second>(first: First, second: Second) -> PromisePair<First, Second> {
+            (first, second)
+        }
+        pub fn first(pair: &PromisePair<i32, i64>) -> i32 { pair.0 }
+        pub fn plain(first: i32, second: i64) -> OrdinaryPair<i32, i64> { (first, second) }
+    };
+    let mut cg = CodeGen::with_type_map(type_map);
+    cg.emit_file(&file, Some("tuple_profile"));
+    let out = cg.into_output();
+    assert!(out.contains("using FrameBytes = std::vector<uint8_t>;"), "{out}");
+    assert!(out.contains("using PromisePair = std::pair<First, Second>;"), "{out}");
+    assert!(out.contains("return std::pair<First, Second>{"), "{out}");
+    assert!(out.contains("std::get<0>(pair)"), "{out}");
+    assert!(out.contains("using OrdinaryPair = std::tuple<First, Second>;"), "{out}");
+    assert!(out.contains("return OrdinaryPair<int32_t, int64_t>{"), "{out}");
 }

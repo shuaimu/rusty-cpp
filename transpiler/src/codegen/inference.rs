@@ -8240,34 +8240,22 @@ impl CodeGen {
     }
 
     pub(super) fn resolve_tuple_type_from_type(&self, ty: &syn::Type) -> Option<syn::TypeTuple> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Tuple(tuple_ty) => Some(tuple_ty.clone()),
-            syn::Type::Path(tp) => {
-                let joined = tp
-                    .path
-                    .segments
-                    .iter()
-                    .map(|seg| seg.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                let elems = if let Some(elems) = self.tuple_type_alias_elem_types.get(&joined) {
-                    Some(elems.clone())
-                } else {
-                    let last = tp.path.segments.last()?.ident.to_string();
-                    self.tuple_type_alias_elem_types.get(&last).cloned()
-                }?;
-                let mut punctuated = syn::punctuated::Punctuated::new();
-                for elem in elems {
-                    punctuated.push(elem);
-                }
-                Some(syn::TypeTuple {
-                    paren_token: syn::token::Paren::default(),
-                    elems: punctuated,
-                })
+        let mut current = self.peel_reference_paren_group_type(ty).clone();
+        // Alias substitution also resolves generic tuple aliases. Bound the
+        // walk so malformed cyclic aliases cannot recurse indefinitely.
+        for _ in 0..16 {
+            if let syn::Type::Tuple(tuple) = self.peel_reference_paren_group_type(&current) {
+                return Some(tuple.clone());
             }
-            _ => None,
+            let Some(next) = self.resolve_type_alias_once(&current) else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = next;
         }
+        None
     }
 
     pub(super) fn infer_range_expr_type(&self, range: &syn::ExprRange) -> Option<syn::Type> {

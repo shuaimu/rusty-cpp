@@ -4998,28 +4998,20 @@ impl CodeGen {
             .alias(&self.module_stack, &alias_rust_name)
             .is_some();
         self.push_type_param_scope(&t.generics);
+        // An explicit alias profile governs its declaration and uses alike,
+        // including private aliases and generic aliases. Map an instantiated
+        // self path so ordinary generic-argument lowering applies to the target.
         let mut target = if cpp_abi_alias {
             "std::vector<double>".to_string()
+        } else if self.user_type_map.lookup(&alias_rust_name).is_some_and(|mapped| !mapped.is_empty()) {
+            let ident = &t.ident;
+            let (_, arguments, _) = t.generics.split_for_impl();
+            let alias_type: syn::Type = syn::parse_quote!(#ident #arguments);
+            self.map_type(&alias_type)
         } else {
             self.map_type(&t.ty)
         };
         self.pop_type_param_scope();
-        // C8 (checkpoint contract 8): an EXPORTED alias is part of the
-        // module's public C++ surface, which is exactly what an authenticated
-        // type map governs — so the alias DECLARATION honors its own target,
-        // not just its uses. `SrcFileCStr` is mapped to `const char*` and its
-        // parameter uses already lower that way, while the alias itself was
-        // emitted from the Rust right-hand side (`&'static str` →
-        // `std::string_view`), i.e. one name with two C++ types.
-        // Deliberately scoped to exported, non-generic aliases: a private
-        // alias is module-internal spelling that the map does not govern.
-        if should_export_alias
-            && t.generics.params.is_empty()
-            && let Some(mapped) = self.user_type_map.lookup(&alias_rust_name)
-            && !mapped.is_empty()
-        {
-            target = mapped.to_string();
-        }
         target = Self::rewrite_private_keyword_namespace_in_type_path(&target);
         if self.block_depth > 0 {
             self.emit_template_prefix(&t.generics);
