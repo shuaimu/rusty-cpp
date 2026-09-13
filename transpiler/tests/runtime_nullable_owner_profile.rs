@@ -8,7 +8,7 @@ fn explicit_nullable_owner_aliases_preserve_presence_ownership_and_plain_options
     let cpp_path = directory.path().join("nullable_owner.cpp");
     let map_path = directory.path().join("types.toml");
     std::fs::write(&rust_path, SOURCE).unwrap();
-    std::fs::write(&map_path, "MaybeArc = \"rusty::Arc\"\nMaybeBox = \"rusty::Box\"\nMaybeOwned = \"OwnedThing\"\n").unwrap();
+    std::fs::write(&map_path, "MaybeArc = \"rusty::Arc\"\nMaybeBox = \"rusty::Box\"\nMaybeOwned = \"OwnedThing\"\nMaybeCounter = \"rusty::Arc<rusty::sync::atomic::AtomicI32>\"\n").unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
         .arg(&rust_path).arg("--type-map").arg(&map_path)
         .arg("-o").arg(&cpp_path).output().unwrap();
@@ -42,6 +42,20 @@ pub type MaybeArc<T> = Option<Arc<T>>;
 pub type MaybeBox<T> = Option<Box<T>>;
 pub type OwnedThing = Box<i32>;
 pub type MaybeOwned = Option<OwnedThing>;
+type Counter = std::sync::atomic::AtomicI32;
+type MaybeCounter = Option<Arc<Counter>>;
+struct Holder { value: i32 }
+impl Holder {
+    fn inspect(&self, counter: &MaybeCounter) -> i32 {
+        if let Some(counter) = counter { counter.load(std::sync::atomic::Ordering::Relaxed) } else { self.value }
+    }
+    fn inspect_box(&self, value: MaybeOwned) -> i32 {
+        if let Some(value) = value { *value } else { self.value }
+    }
+}
+struct Callback<F> { function: F }
+impl<F> Callback<F> { fn callable(&self) -> &F { &self.function } }
+
 
 pub fn inspect_box(value: MaybeBox<i32>) -> i32 {
     if let Some(value) = value { *value } else { 0 }
@@ -91,6 +105,54 @@ pub fn check() -> i32 {
     let mut separate = present_box.clone();
     if let Some(value) = separate.as_mut() { **value += 1; }
     if *present_box.unwrap() != 18 || *separate.unwrap() != 19 { return 18; }
+    let holder = Holder { value: 19 };
+    if holder.inspect(&Some(Arc::new(Counter::new(20)))) != 20 { return 19; }
+    if holder.inspect_box(Some(Box::new(21))) != 21 { return 20; }
+    let wrapped: Callback<Box<dyn Fn(MaybeOwned) -> i32>> = Callback { function: Box::new(|value: MaybeOwned| holder.inspect_box(value)) as Box<dyn Fn(MaybeOwned) -> i32> };
+    if (wrapped.callable())(Some(Box::new(22))) != 22 { return 21; }
     0
 }
 "#;
+
+#[test]
+fn imported_nullable_profiles_reach_function_arguments_and_typed_callback_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"nullable_imports\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[lib]\npath = \"src/lib.rs\"\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub mod wrapper;\npub mod model;\npub mod consumer;\n").unwrap();
+    std::fs::write(root.join("src/wrapper.rs"), r#"
+pub struct Wrapper<F> { pub function: F }
+impl<F> Wrapper<F> { pub fn callable(&self) -> &F { &self.function } }
+"#).unwrap();
+    std::fs::write(root.join("src/model.rs"), r#"
+pub type OwnedThing = Box<i32>;
+pub type MaybeOwned = Option<OwnedThing>;
+pub type Callback = crate::wrapper::Wrapper<Box<dyn Fn(self::MaybeOwned) -> i32>>;
+"#).unwrap();
+    std::fs::write(root.join("src/consumer.rs"), r#"
+use crate::model::{OwnedThing, MaybeOwned, Callback};
+pub fn inspect(value: MaybeOwned) -> i32 {
+    if let Some(value) = value { *value } else { 0 }
+}
+pub fn check(callback: &Callback) -> i32 {
+    let connection: MaybeOwned = Some(Box::new(3));
+    inspect(Some(Box::new(4))) + (callback.callable())(connection)
+}
+"#).unwrap();
+    let map = root.join("types.toml");
+    std::fs::write(&map, "MaybeOwned = \"::probe::OwnedThing\"\n").unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .arg("--crate").arg(root.join("Cargo.toml"))
+        .arg("--output-dir").arg(root.join("out"))
+        .args(["--cxx-namespace", "probe", "--flat-import-namespace", "probe"])
+        .arg("--type-map").arg(map).output().unwrap();
+    assert!(generated.status.success(), "{}\n{}", String::from_utf8_lossy(&generated.stdout), String::from_utf8_lossy(&generated.stderr));
+    let cpp = std::fs::read_to_string(root.join("out/nullable_imports.consumer.cppm")).unwrap();
+    assert!(!cpp.contains("rusty::Option<"), "profile arguments must construct the nullable owner directly: {cpp}");
+    assert!(!cpp.contains(".is_some()"), "profile patterns must inspect owner presence: {cpp}");
+    assert!(cpp.contains("std::move(connection)"), "callback dispatch must move the profiled Box: {cpp}");
+    let native = Command::new("rustc").args(["--edition=2024", "--crate-type=lib"])
+        .arg(root.join("src/lib.rs")).arg("-o").arg(root.join("native.rlib")).output().unwrap();
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+}

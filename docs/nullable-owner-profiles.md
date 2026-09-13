@@ -23,3 +23,8 @@ The profile supports `Some`, `None`, `Default::default`, presence checks,
 payload bindings. Rust checks whether the owner can be cloned. Unsupported
 Option methods produce an explicit diagnostic. Empty profiled owners use the
 runtime's null-pointer constructor; no allocation or payload is fabricated.
+
+Borrowed alias parameters and aliases imported through a validated flat-module
+binding retain the same profile. For callback signatures returned through an
+imported generic wrapper, give a constructed argument an explicit alias type
+before dispatch when the callback's parameter type cannot be inferred.

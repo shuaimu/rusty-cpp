@@ -2312,7 +2312,8 @@ impl CodeGen {
             if !matches!(current, syn::Type::Path(_)) {
                 break;
             }
-            let Some(next) = self.resolve_type_alias_once(&current) else {
+            let Some(next) = self.resolve_type_alias_once(&current)
+                .or_else(|| self.resolve_authorized_cross_file_type_alias(&current)) else {
                 break;
             };
             if next == current {
@@ -2368,14 +2369,15 @@ impl CodeGen {
     /// representation at a boundary. The Rust type remains Option<Owner>.
     /// Ordinary Option<Arc/Box> types do not opt in, even for the same payload.
     pub(super) fn explicit_nullable_owner_type(&self, ty: &syn::Type) -> Option<syn::Type> {
-        let ty = self.peel_paren_group_type(ty);
+        let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(path) = ty else { return None; };
         if path.qself.is_some() { return None; }
         let name = path.path.segments.last()?.ident.to_string();
-        self.user_type_map.lookup(&name).filter(|mapped| !mapped.is_empty())?;
+        let target = self.user_type_map.lookup(&name).filter(|mapped| !mapped.is_empty())?;
         // Requiring a real Rust alias excludes user mappings of unrelated
         // nominal owners and of std::option::Option itself.
-        self.resolve_type_alias_once(ty)?;
+        self.resolve_type_alias_once(ty)
+            .or_else(|| self.resolve_authorized_cross_file_type_alias(ty))?;
         let resolved = self.resolve_transparent_nullable_callback_aliases(ty);
         let syn::Type::Path(option) = resolved else { return None; };
         if !self.transparent_nullable_callback_path_is_canonical(
@@ -2396,12 +2398,37 @@ impl CodeGen {
         let is_arc = self.transparent_nullable_callback_path_is_canonical(
             &owner_path.path, "Arc", &[&["std", "sync", "Arc"], &["alloc", "sync", "Arc"]],
         );
-        let alias_cpp = self.map_type(ty);
-        if !(is_box || is_arc)
-            || (alias_cpp != source_owner_cpp && alias_cpp != self.map_type(&owner))
+        if !(is_box || is_arc) { return None; }
+        // Imported aliases retain their exported C++ alias name in map_type.
+        // Compare the configured representation itself, with Rust generic
+        // arguments applied, against the proven source owner representation.
+        let mut alias_cpp = target.to_string();
+        if !target.contains('<')
+            && let syn::PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments
         {
-            return None;
+            let arguments: Vec<_> = arguments.args.iter().filter_map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                syn::GenericArgument::Const(value) => Some(self.emit_expr_to_string(value)),
+                _ => None,
+            }).collect();
+            if !arguments.is_empty() { alias_cpp = format!("{}<{}>", target, arguments.join(", ")); }
         }
+        // The payload can itself be a Rust alias, such as Arc<Counter> with
+        // Counter = AtomicI32. This is still the identical owner type.
+        let mut resolved_payload_owner = owner.clone();
+        if let syn::Type::Path(path) = &mut resolved_payload_owner
+            && let Some(segment) = path.path.segments.last_mut()
+            && let syn::PathArguments::AngleBracketed(arguments) = &mut segment.arguments
+        {
+            for argument in &mut arguments.args {
+                if let syn::GenericArgument::Type(payload) = argument {
+                    *payload = self.resolve_transparent_nullable_callback_aliases(payload);
+                }
+            }
+        }
+        if alias_cpp != source_owner_cpp && alias_cpp != self.map_type(&owner)
+            && alias_cpp != self.map_type(&resolved_payload_owner)
+        { return None; }
         Some(owner)
     }
 
