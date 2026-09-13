@@ -1373,7 +1373,7 @@ mod tests {
         );
         assert_eq!(
             map_function_path("panic::resume_unwind"),
-            Some("rusty::panic::resume_unwind")
+            Some("rusty::panic::resume_unwind_std")
         );
         assert_eq!(
             map_function_path("std::rt::begin_panic"),

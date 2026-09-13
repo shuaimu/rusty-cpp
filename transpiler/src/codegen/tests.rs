@@ -10914,7 +10914,7 @@ fn test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda() {
         "#,
     );
     assert!(
-        out.contains("rusty::panic::catch_unwind([=, v = std::move(v)]() mutable {"),
+        out.contains("rusty::panic::catch_unwind_std([=, v = std::move(v)]() mutable {"),
         "{out}"
     );
     // Push arg may be bare `1` or wrapped in `static_cast<int32_t>(1)`.
