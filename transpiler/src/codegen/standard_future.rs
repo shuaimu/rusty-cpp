@@ -425,6 +425,35 @@ impl CodeGen {
             && self.standard_future_path_is(path, &format!("{owner}::{method}"))
     }
 
+    pub(super) fn infer_standard_future_call(&self, call: &syn::ExprCall) -> Option<syn::Type> {
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(&call.func) else {
+            return None;
+        };
+        if path.qself.is_none()
+            && call.args.len() == 1
+            && self.standard_call_owner(&path.path, "std::task::Waker", "from")
+        {
+            return Some(syn::parse_quote!(::std::task::Waker));
+        }
+        None
+    }
+
+    /// A consuming standard Waker call must keep its local receiver movable.
+    /// Resolve aliases and imports before assigning this ownership contract.
+    pub(super) fn standard_future_method_consumes_receiver(
+        &self,
+        ty: &syn::Type,
+        method: &str,
+    ) -> bool {
+        if method != "wake" {
+            return false;
+        }
+        let syn::Type::Path(owner) = self.standard_future_resolve_alias(ty) else {
+            return false;
+        };
+        owner.qself.is_none() && self.standard_future_path_is(&owner.path, "std::task::Waker")
+    }
+
     pub(super) fn try_emit_standard_future_pending(
         &self,
         expr: &syn::Expr,

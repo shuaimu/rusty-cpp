@@ -11048,6 +11048,9 @@ impl CodeGen {
     ) -> bool {
         let Some(methods) = self.by_value_method_call_pairs.get(name) else { return false; };
         let consumes = |ty: &syn::Type| {
+            if methods.iter().any(|method| self.standard_future_method_consumes_receiver(ty, method)) {
+                return true;
+            }
             let syn::Type::Path(owner) = self.peel_reference_paren_group_type(ty) else {
                 return false;
             };

@@ -83,6 +83,91 @@ fn standard_future_wake_receivers_retain_the_arc_parameter() {
 }
 
 #[test]
+fn standard_future_inferred_waker_clones_remain_consumable() {
+    let cpp = translate(r#"
+        use std::task::Waker;
+        fn consume(signal: std::sync::Arc<Signal>) {
+            let waker = Waker::from(signal);
+            let clone = waker.clone();
+            let second = clone.clone();
+            clone.wake();
+            second.wake();
+            waker.wake_by_ref();
+        }
+        struct Signal;
+        impl std::task::Wake for Signal {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+    "#);
+    assert!(cpp.contains("const auto waker = rusty::Waker::from_arc(std::move(signal))"), "{cpp}");
+    assert!(cpp.contains("auto clone = rusty::Waker(waker)"), "{cpp}");
+    assert!(cpp.contains("auto second = rusty::Waker(clone)"), "{cpp}");
+    assert!(!cpp.contains("const auto clone") && !cpp.contains("const auto second"), "{cpp}");
+    assert!(cpp.contains("std::move(clone).wake()"), "{cpp}");
+    assert!(cpp.contains("std::move(second).wake()"), "{cpp}");
+    assert!(cpp.contains("(waker).wake_by_ref()"), "{cpp}");
+}
+
+#[test]
+fn standard_future_waker_constructor_imports_preserve_ownership() {
+    let cpp = translate(r#"
+        use std::task::Waker as Notify;
+        type Retained = std::task::Waker;
+        struct Signal;
+        impl std::task::Wake for Signal {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        fn consume(signal: std::sync::Arc<Signal>) {
+            let renamed = Notify::from(signal.clone());
+            renamed.wake();
+            let qualified = ::std::task::Waker::from(signal.clone());
+            qualified.wake();
+            let typed: Retained = ::core::task::Waker::from(signal);
+            typed.wake();
+        }
+    "#);
+    for name in ["renamed", "qualified", "typed"] {
+        assert!(cpp.contains(&format!("std::move({name}).wake()")), "{cpp}");
+        assert!(!cpp.contains(&format!("const auto {name}")), "{cpp}");
+        assert!(!cpp.contains(&format!("const Retained {name}")), "{cpp}");
+    }
+    assert_eq!(cpp.matches("rusty::Waker::from_arc(").count(), 3, "{cpp}");
+}
+
+#[test]
+fn standard_future_local_waker_constructors_keep_their_declared_contract() {
+    let cpp = translate(r#"
+        struct Waker;
+        impl Waker {
+            fn from(value: i32) -> Self { Self }
+            fn clone(&self) -> Self { Self }
+            fn wake(&self) {}
+        }
+        mod std {
+            pub mod task {
+                pub struct Waker;
+                impl Waker {
+                    pub fn from(value: i32) -> Self { Self }
+                    pub fn wake(&self) {}
+                }
+            }
+        }
+        fn local() {
+            let waker = Waker::from(1);
+            let clone = waker.clone();
+            clone.wake();
+            let qualified = std::task::Waker::from(2);
+            qualified.wake();
+        }
+    "#);
+    assert!(!cpp.contains("rusty::Waker"), "{cpp}");
+    assert!(!cpp.contains("std::move(clone).wake()"), "{cpp}");
+    assert!(!cpp.contains("std::move(qualified).wake()"), "{cpp}");
+    assert!(cpp.contains("const auto clone"), "{cpp}");
+    assert!(cpp.contains("const auto qualified"), "{cpp}");
+}
+
+#[test]
 fn standard_future_local_task_names_do_not_acquire_runtime_lowering() {
     let cpp = translate(
         r#"

@@ -5438,6 +5438,9 @@ impl CodeGen {
                 }))
             }
             syn::Expr::Call(call) => {
+                if let Some(ty) = self.infer_standard_future_call(call) {
+                    return Some(ty);
+                }
                 if let Some(ptr_ty) = self.infer_pointer_type_from_call_expr(call) {
                     return Some(ptr_ty);
                 }
