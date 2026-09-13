@@ -6448,7 +6448,7 @@ impl CodeGen {
         if matches!(method.as_str(), "as_ref" | "as_mut" | "unwrap" | "take" | "clone" | "replace")
             && let Some(receiver) = self.infer_simple_expr_type(&mc.receiver)
             && let Some((option, _)) = self.transparent_nullable_owner_receiver(&receiver)
-            && let Some(owner) = self.explicit_nullable_owner_type(&option)
+            && let Some(owner) = self.transparent_nullable_owner_type(&option)
         {
             match method.as_str() {
                 "as_ref" if mc.args.is_empty() => return Some(parse_quote!(Option<&#owner>)),
@@ -6693,6 +6693,32 @@ impl CodeGen {
                 {
                     return Some(parse_quote!(Option<#elem_ty>));
                 }
+            }
+        }
+
+        // VecDeque removals own an Option<T>, including through a lock or
+        // cell guard. Retain T so fields of an inferred `.unwrap()` local
+        // still use their declared types, such as nullable callback aliases.
+        if matches!(method.as_str(), "pop_front" | "pop_back") && mc.args.is_empty()
+            && let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+        {
+            let mut receiver_ty = self.peel_guard_wrapper_for_method_routing(&receiver_ty).into_owned();
+            for _ in 0..16 {
+                let Some(resolved) = self.resolve_type_alias_once(&receiver_ty) else { break; };
+                if resolved == receiver_ty { break; }
+                receiver_ty = self.peel_guard_wrapper_for_method_routing(&resolved).into_owned();
+            }
+            if self.map_type(&receiver_ty).starts_with("rusty::VecDeque<")
+                && let syn::Type::Path(path) = &receiver_ty
+                && let Some(segment) = path.path.segments.last()
+                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(elem_ty) = args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(ty) => Some(ty),
+                    _ => None,
+                })
+            {
+                return Some(parse_quote!(Option<#elem_ty>));
             }
         }
 
