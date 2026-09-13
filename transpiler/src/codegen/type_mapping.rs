@@ -2331,9 +2331,13 @@ impl CodeGen {
                 break;
             }
             let normalized = self.normalize_local_nullable_alias_path(&current);
-            let Some(next) = self.resolve_type_alias_once(normalized.as_ref().unwrap_or(&current)) else {
-                break;
-            };
+            let query = normalized.as_ref().unwrap_or(&current);
+            let next = if self.nullable_alias_has_imported_binding(query)
+                || self.authorized_cross_file_type_alias(query).is_some()
+            {
+                self.resolve_authorized_cross_file_nullable_callback_alias(query)
+            } else { self.resolve_type_alias_once(query) };
+            let Some(next) = next else { break; };
             if next == current {
                 break;
             }
@@ -2383,12 +2387,8 @@ impl CodeGen {
         Some(box_ty)
     }
 
-    fn resolve_explicit_nullable_owner_alias_once(&self, ty: &syn::Type) -> Option<syn::Type> {
-        let normalized = self.normalize_local_nullable_alias_path(ty);
-        let ty = normalized.as_ref().unwrap_or(ty);
-        // An imported binding takes precedence over the local alias helper's
-        // suffix lookup, which can otherwise select an unrelated nested alias.
-        let imported_binding = match self.peel_reference_paren_group_type(ty) {
+    fn nullable_alias_has_imported_binding(&self, ty: &syn::Type) -> bool {
+        match self.peel_reference_paren_group_type(ty) {
             syn::Type::Path(path) if path.qself.is_none() && path.path.leading_colon.is_none()
                 && path.path.segments.len() == 1 => {
                 self.flat_import_type_authorizations.iter().any(|proof|
@@ -2398,8 +2398,15 @@ impl CodeGen {
                         && path.path.segments[0].ident == proof.leaf)
             }
             _ => false,
-        };
-        if imported_binding || self.authorized_cross_file_type_alias(ty).is_some() {
+        }
+    }
+
+    fn resolve_explicit_nullable_owner_alias_once(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let normalized = self.normalize_local_nullable_alias_path(ty);
+        let ty = normalized.as_ref().unwrap_or(ty);
+        // An imported binding takes precedence over the local alias helper's
+        // suffix lookup, which can otherwise select an unrelated nested alias.
+        if self.nullable_alias_has_imported_binding(ty) || self.authorized_cross_file_type_alias(ty).is_some() {
             self.resolve_authorized_cross_file_nullable_owner_alias(ty)
         } else {
             self.resolve_type_alias_once(ty)

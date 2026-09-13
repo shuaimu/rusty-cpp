@@ -11110,6 +11110,12 @@ impl CodeGen {
         syn::parse_str(proof.nullable_owner_alias_source.as_deref()?).ok()
     }
 
+    pub(super) fn resolve_authorized_cross_file_nullable_callback_alias(&self, ty: &syn::Type) -> Option<syn::Type> {
+        self.resolve_authorized_cross_file_type_alias(ty)?;
+        let proof = self.authorized_cross_file_type_alias(ty)?;
+        syn::parse_str(proof.nullable_callback_alias_source.as_deref()?).ok()
+    }
+
     pub(super) fn infer_owner_first_type_arg_from_expr(
         &self,
         owner_name: &str,
