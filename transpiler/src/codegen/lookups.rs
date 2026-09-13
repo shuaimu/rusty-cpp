@@ -1595,6 +1595,11 @@ impl CodeGen {
         for candidate in self.call_path_candidates(&path_expr.path) {
             let mapped = types::map_function_path(&candidate).unwrap_or(candidate.as_str());
             let style = match mapped {
+                // The standard wrapper owns its argument. A move closure
+                // constructing it must keep a non-Copy capture movable.
+                "rusty::panic::AssertUnwindSafe" => {
+                    (arg_idx == 0).then_some(ArgPassStyle::Value)
+                }
                 "rusty::ptr::read" => (arg_idx == 0).then_some(ArgPassStyle::Pointer),
                 "rusty::ptr::write" => match arg_idx {
                     0 => Some(ArgPassStyle::Pointer),

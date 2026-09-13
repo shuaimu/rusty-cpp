@@ -256,7 +256,11 @@ pub fn check_nullable() -> i32 {
     if calls != 13 { return 23; }
     let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = completed.clone();
+    let unique = Box::new(7);
+    let (sender, receiver) = std::sync::mpsc::channel::<i32>();
+    sender.send(25).unwrap();
     let thread = spawn_unit(move || {
+        if *unique + receiver.recv().unwrap() != 32 { std::process::abort(); }
         observed.store(true, std::sync::atomic::Ordering::Release);
     });
     if thread.join().is_err() { return 24; }
