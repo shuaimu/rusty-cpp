@@ -636,7 +636,9 @@ impl CodeGen {
             // Invoking a CALLABLE PARAM (`f(&mut self.entries)` where
             // `f: F, F: FnOnce(&mut [Bucket<K, V>])`): the arg expected
             // types are the Fn bound's parenthesized inputs.
-            None => match self.callable_param_invocation_arg_expected_type(call, arg_idx) {
+            None => match self.boxed_callback_invocation_arg_expected_type(call, arg_idx)
+                .or_else(|| self.callable_param_invocation_arg_expected_type(call, arg_idx))
+            {
                 Some(expected) => expected,
                 None => self.ufcs_serde_reference_arg_expected_type(call, arg_idx)?,
             },
@@ -647,6 +649,39 @@ impl CodeGen {
             }
             _ => Some(expected),
         }
+    }
+
+    fn boxed_callback_invocation_arg_expected_type(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let callable = self.infer_simple_expr_type(&call.func)
+            .and_then(|ty| self.owned_boxed_callback_trait_object_type(
+                self.peel_reference_paren_group_type(&ty),
+            ))
+            .or_else(|| {
+                let syn::Expr::MethodCall(unwrap) = self.peel_paren_group_expr(&call.func) else {
+                    return None;
+                };
+                if unwrap.method != "unwrap" || !unwrap.args.is_empty() {
+                    return None;
+                }
+                let receiver = match self.peel_paren_group_expr(&unwrap.receiver) {
+                    syn::Expr::MethodCall(borrow)
+                        if matches!(borrow.method.to_string().as_str(), "as_ref" | "as_mut")
+                            && borrow.args.is_empty() => &borrow.receiver,
+                    _ => &unwrap.receiver,
+                };
+                let ty = self.infer_simple_expr_type(receiver)?;
+                let (option_ty, _) = self.transparent_nullable_callback_receiver(&ty)?;
+                let boxed = self.transparent_nullable_callback_box_type(&option_ty)?;
+                self.owned_boxed_callback_trait_object_type(&boxed)
+            })?;
+        let params = self.extract_callable_param_types_from_type(&callable)?;
+        let parameter = params.get(arg_idx)?;
+        matches!(self.peel_paren_group_type(parameter), syn::Type::Reference(_))
+            .then(|| parameter.clone())
     }
 
     /// UFCS serde trait dispatch (`Serialize_::serialize(x, ar)`,

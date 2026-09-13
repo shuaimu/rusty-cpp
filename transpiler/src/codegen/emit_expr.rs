@@ -14336,6 +14336,20 @@ impl CodeGen {
                 }
             }
             syn::Expr::Closure(closure) => {
+                let boxed_callback = expected_ty.and_then(|expected| {
+                    self.owned_boxed_callback_trait_object_type(expected).or_else(|| {
+                        if matches!(expected, syn::Type::TraitObject(_)) {
+                            let boxed: syn::Type = syn::parse_quote!(::std::boxed::Box<#expected>);
+                            self.owned_boxed_callback_trait_object_type(&boxed)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                let void_callback = boxed_callback.as_ref().is_some_and(|ty| {
+                    self.extract_callable_return_type_from_type(ty)
+                        .is_none_or(|output| self.is_explicit_unit_type(&output))
+                });
                 // Propagate expected return type to closure body emission.
                 // The expected type (e.g. Result<T, E> for get_or_try_init) must be
                 // pushed AFTER the closure's own output hint so it takes precedence
@@ -14379,11 +14393,12 @@ impl CodeGen {
                 };
                 let expected_rt = expected_body_ty
                     .map(|t| syn::ReturnType::Type(Default::default(), Box::new(t)));
-                inner.emit_closure_to_string_with_param_scopes(
+                inner.emit_closure_with_param_scopes_and_void_result(
                     closure,
                     None,
                     None,
                     expected_rt.as_ref(),
+                    void_callback,
                 )
             }
             _ => self.emit_expr_to_string(expr),
@@ -18252,7 +18267,9 @@ impl CodeGen {
         }
         // Keep the argument's own expected type exactly what the Box wraps
         // (the `dyn Fn…` trait object), matching the make_box path below.
-        let inner_expected: Option<syn::Type> = direct.as_ref().and_then(|_| {
+        let inner_expected: Option<syn::Type> = self
+            .owned_boxed_callback_trait_object_type(expected)
+            .or_else(|| direct.as_ref().and_then(|_| {
             match self.peel_reference_paren_group_type(expected) {
                 syn::Type::Path(tp) => tp
                     .path
@@ -18269,7 +18286,7 @@ impl CodeGen {
                     }),
                 _ => None,
             }
-        });
+        }));
         let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
             &call.args[0],
             inner_expected.as_ref(),
@@ -26907,6 +26924,47 @@ impl CodeGen {
         char_predicate_param_scope: Option<HashSet<String>>,
         expected_return_type: Option<&syn::ReturnType>,
     ) -> String {
+        self.emit_closure_with_param_scopes_and_void_result(
+            closure, map_param_scope, char_predicate_param_scope, expected_return_type, false,
+        )
+    }
+
+    fn emit_closure_with_param_scopes_and_void_result(
+        &self,
+        closure: &syn::ExprClosure,
+        map_param_scope: Option<HashSet<String>>,
+        char_predicate_param_scope: Option<HashSet<String>>,
+        expected_return_type: Option<&syn::ReturnType>,
+        void_callback: bool,
+    ) -> String {
+        // A boxed Fn returning () has the C++ signature void(...). Preserve
+        // evaluation before explicit unit returns, then emit the body in a
+        // void context. Nested closures keep their own return conventions.
+        let normalized;
+        let (closure, expected_return_type) = if void_callback {
+            struct UnitReturns;
+            impl syn::visit_mut::VisitMut for UnitReturns {
+                fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+                    if matches!(expr, syn::Expr::Closure(_) | syn::Expr::Async(_)) {
+                        return;
+                    }
+                    syn::visit_mut::visit_expr_mut(self, expr);
+                    if let syn::Expr::Return(ret) = expr
+                        && let Some(value) = ret.expr.take()
+                    {
+                        *expr = syn::parse_quote!({ #value; return; });
+                    }
+                }
+                fn visit_item_mut(&mut self, _: &mut syn::Item) {}
+            }
+            let mut value = closure.clone();
+            value.output = syn::ReturnType::Default;
+            syn::visit_mut::VisitMut::visit_expr_mut(&mut UnitReturns, &mut value.body);
+            normalized = value;
+            (&normalized, None)
+        } else {
+            (closure, expected_return_type)
+        };
         let untyped_param_scope = self.collect_untyped_closure_param_names_for_scope(closure);
         let is_move_closure = closure.capture.is_some();
         let outer_captures = self.collect_move_closure_capture_cpp_names(closure);
@@ -27318,7 +27376,11 @@ impl CodeGen {
         // attribute is ill-formed in a lambda trailing-return-type. Strip it —
         // the diverging body still deduces `void`. (It stays valid on real
         // function declarations, which go through a different emit path.)
-        let lambda_return_annotation = lambda_return_annotation.replace("[[noreturn]] ", "");
+        let lambda_return_annotation = if void_callback {
+            " -> void".to_string()
+        } else {
+            lambda_return_annotation.replace("[[noreturn]] ", "")
+        };
         // `.map(|(event, _mark)| event)` in a fn returning Result<&Event>:
         // an un-annotated lambda's auto deduction DECAYS the reference slot
         // (deleted Event copy; the map deduces Result<Event> where
@@ -27348,7 +27410,7 @@ impl CodeGen {
                 // behavior local to the lambda body.
                 inner.return_value_scopes.clear();
                 inner.return_type_hints.clear();
-                inner.push_return_value_scope("auto");
+                inner.push_return_value_scope(if void_callback { "void" } else { "auto" });
                 if inner.should_push_return_type_hint_for_closure(&resolved_closure_output) {
                     inner.push_return_type_hint(&resolved_closure_output);
                 }
@@ -27406,7 +27468,9 @@ impl CodeGen {
                 inner.return_type_hints.clear();
                 inner.emit_macro_stmt(&mac_expr.mac);
                 let mut body_str = inner.into_output();
-                body_str.push_str("return std::make_tuple();\n");
+                if !void_callback {
+                    body_str.push_str("return std::make_tuple();\n");
+                }
                 if !closure_param_prelude.is_empty() {
                     let mut prelude_str = String::new();
                     for stmt in &closure_param_prelude {
@@ -27452,7 +27516,7 @@ impl CodeGen {
                 );
                 let body_diverging = inner.is_expr_diverging(&closure.body);
                 if closure_param_prelude.is_empty() {
-                    if body_diverging {
+                    if body_diverging || void_callback {
                         format!(
                             "[{}]({}){}{} {{ {}; }}",
                             capture, params_str, lambda_mutability, lambda_return_annotation, body
@@ -27469,7 +27533,7 @@ impl CodeGen {
                         prelude_str.push_str(stmt);
                         prelude_str.push('\n');
                     }
-                    if body_diverging {
+                    if body_diverging || void_callback {
                         format!(
                             "[{}]({}){}{} {{\n{}{};\n}}",
                             capture,

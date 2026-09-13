@@ -11043,6 +11043,22 @@ fn test_nullable_callback_references_keep_reference_and_const_shape() {
 }
 
 #[test]
+fn test_nullable_callback_unit_output_uses_void_return_context() {
+    let out = transpile_str(r#"
+        type Callback = Option<Box<dyn FnMut(&mut i32)>>;
+        unsafe fn change(value: *mut i32) { unsafe { *value += 1; } }
+        fn make() -> Callback {
+            Some(Box::new(move |value: &mut i32| {
+                unsafe { change(value as *mut i32); }
+            }))
+        }
+    "#);
+    assert!(out.contains("(int32_t& value) -> void"), "{out}");
+    assert!(!out.contains("-> rusty::Unit"), "{out}");
+    assert!(!out.contains("return std::make_tuple()"), "{out}");
+}
+
+#[test]
 fn test_nullable_callbacks_accept_canonical_auto_traits_and_borrowed_arguments() {
     let out = transpile_str(
         r#"

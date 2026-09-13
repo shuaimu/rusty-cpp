@@ -40,6 +40,7 @@ fn compile_and_run_cpp(source: &str, test_name: &str) {
     let compile = Command::new(&compiler)
         .arg("-std=c++23")
         .arg("-DRUSTY_PORTABLE_INTRINSICS=1")
+        .arg("-pthread")
         .arg("-I")
         .arg(project_include_dir())
         .arg(&source_path)
@@ -133,6 +134,17 @@ fn nullable_callbacks_with_auto_traits_translate_and_run_in_both_languages() {
 use std::cell::RefCell;
 
 type Callback = Box<dyn FnMut(&mut i32) + Send + Sync>;
+type MaybeCallback = Option<Box<dyn FnMut(&mut i32)>>;
+
+unsafe fn bump(value: *mut i32) { unsafe { *value += 1; } }
+
+fn spawn_unit<F>(body: F) -> std::thread::JoinHandle<()>
+where F: FnOnce() + Send + 'static {
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        if result.is_err() { std::process::abort(); }
+    })
+}
 
 struct Holder {
     callback: RefCell<Option<Callback>>,
@@ -220,6 +232,35 @@ pub fn check_nullable() -> i32 {
     let mut guard = mutex.lock().unwrap();
     if !guard.is_some() { return 18; }
     if guard.as_mut().unwrap()() != 4 { return 19; }
+    let mut callback: MaybeCallback = Some(Box::new(move |value: &mut i32| {
+        unsafe {
+            let pointer = value as *mut i32;
+            bump(pointer);
+        }
+    }));
+    let mut calls = 0;
+    callback.as_mut().unwrap()(&mut calls);
+    if calls != 1 { return 20; }
+    let mut explicit: Callback = Box::new(|value: &mut i32| -> () {
+        if *value == 1 { return unsafe { bump(value as *mut i32) }; }
+        *value += 10;
+    });
+    explicit(&mut calls);
+    explicit(&mut calls);
+    if calls != 12 { return 21; }
+    let mut expression: MaybeCallback = Some(Box::new(|value: &mut i32| *value += 1));
+    expression.as_mut().unwrap()(&mut calls);
+    if calls != 13 { return 22; }
+    let mut empty: MaybeCallback = Some(Box::new(|_value: &mut i32| ()));
+    empty.as_mut().unwrap()(&mut calls);
+    if calls != 13 { return 23; }
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = completed.clone();
+    let thread = spawn_unit(move || {
+        observed.store(true, std::sync::atomic::Ordering::Release);
+    });
+    if thread.join().is_err() { return 24; }
+    if !completed.load(std::sync::atomic::Ordering::Acquire) { return 25; }
     0
 }
 "#;
