@@ -188,6 +188,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "net::SocketAddr" | "std::net::SocketAddr" => Some(("rusty::net::SocketAddr", false)),
         "net::SocketAddrV4" | "std::net::SocketAddrV4" => Some(("rusty::net::SocketAddrV4", false)),
         "net::SocketAddrV6" | "std::net::SocketAddrV6" => Some(("rusty::net::SocketAddrV6", false)),
+        "net::AddrParseError" | "std::net::AddrParseError" => Some(("rusty::net::AddrParseError", false)),
 
         // Error handling
         "Option" | "std::option::Option" => Some(("rusty::Option", true)),

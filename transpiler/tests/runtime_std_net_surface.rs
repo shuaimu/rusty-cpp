@@ -193,3 +193,86 @@ int main() {
 "#,
     );
 }
+
+#[test]
+fn socket_addr_v4_parse_and_display_match_rust_std() {
+    let cpp = transpile(
+        r#"
+pub fn parse(text: &str) -> Result<std::net::SocketAddrV4, std::net::AddrParseError> {
+    text.parse::<std::net::SocketAddrV4>()
+}
+pub fn display(address: &std::net::SocketAddrV4) -> String { address.to_string() }
+"#,
+    );
+    let mut cases = vec![
+        "".to_owned(),
+        "127.0.0.1".into(),
+        "127.0.0.1:".into(),
+        "127.0.0.1:+1".into(),
+        "127.0.0.1:-0".into(),
+        "127.0.0.1: 1".into(),
+        "127.0.0.1:1 ".into(),
+        " 127.0.0.1:1".into(),
+        "127.0.0.1:1\n".into(),
+        "127.0.0.1:1\0junk".into(),
+        "127.0.0.1\0junk:1".into(),
+        "127.0.0.1:１".into(),
+        "１２７.0.0.1:1".into(),
+        "[::1]:1".into(),
+        "127..0.1:1".into(),
+        "127.0.1:1".into(),
+        "127.0.0.1.1:1".into(),
+        "127.0.0.1:1:1".into(),
+        "0xff.0.0.1:1".into(),
+    ];
+    for octet in 0..=300 {
+        cases.push(format!("{octet}.0.255.1:65535"));
+        cases.push(format!("127.0.0.{octet}:0"));
+    }
+    for octet in [
+        "00",
+        "01",
+        "001",
+        "0255",
+        "256",
+        "99999999999999",
+        "+1",
+        "-0",
+    ] {
+        cases.push(format!("127.0.{octet}.1:7"));
+    }
+    for port in [
+        "0",
+        "1",
+        "65535",
+        "65536",
+        "9999999999999999999",
+        "0000000000000000000000000000000000001",
+        "00065535",
+        "00065536",
+    ] {
+        cases.push(format!("1.2.3.4:{port}"));
+    }
+    let mut main = String::from("\n#include <cassert>\nint main() {\n");
+    for case in cases {
+        let bytes = case
+            .bytes()
+            .map(|b| format!("static_cast<char>({b})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        main.push_str(&format!("{{ const char input[] = {{{bytes}{}}}; auto parsed = parse(std::string_view(input, {}));\n", if bytes.is_empty() { "0" } else { "" }, case.len()));
+        match case.parse::<std::net::SocketAddrV4>() {
+            Ok(address) => main.push_str(&format!(
+                "assert(parsed.is_ok()); assert(display(parsed.unwrap()) == {:?});\n",
+                address.to_string()
+            )),
+            Err(error) => main.push_str(&format!(
+                "assert(parsed.is_err()); assert(parsed.unwrap_err().to_string() == {:?});\n",
+                error.to_string()
+            )),
+        }
+        main.push_str("}\n");
+    }
+    main.push_str("}\n");
+    compile_run(&format!("{cpp}\n{main}"));
+}
