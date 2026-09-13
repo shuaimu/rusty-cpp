@@ -19,7 +19,7 @@ pub fn check() -> bool {
     let mut predicate: EventTestFn = Some(Box::new(|value: i32| value == 7));
     if predicate.is_none() || absent().is_some() { return false; }
     if !predicate.as_ref().unwrap()(7) || predicate.as_ref().unwrap()(8) { return false; }
-    let taken: EventTestFn = predicate.take();
+    let taken = predicate.take();
     if predicate.is_some() { return false; }
     taken.unwrap()(7)
 }
