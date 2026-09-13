@@ -2369,7 +2369,7 @@ impl CodeGen {
                             self.infer_local_binding_type_from_initializer(&reference.expr)
                         });
                     let Some(inferred) = inferred.filter(|ty| {
-                        self.try_map_transparent_nullable_callback_type(ty).is_some()
+                        self.try_map_transparent_nullable_owner_type(ty).is_some()
                     }) else {
                         return false;
                     };
@@ -2392,7 +2392,11 @@ impl CodeGen {
                             self.infer_local_binding_type_from_initializer(&method.receiver)
                         });
                     let Some(option_ty) = receiver_ty.as_ref().and_then(|ty| {
-                        self.transparent_nullable_callback_in_refmut(ty)
+                        self.transparent_nullable_callback_in_refmut(ty).or_else(|| {
+                            self.transparent_nullable_owner_receiver(ty)
+                                .filter(|(_, guard)| *guard)
+                                .map(|(option, _)| option)
+                        })
                     }) else {
                         return false;
                     };
@@ -2410,7 +2414,7 @@ impl CodeGen {
                         .infer_simple_expr_type(other)
                         .or_else(|| self.infer_local_binding_type_from_initializer(other));
                     let Some(inferred) = inferred.filter(|ty| {
-                        self.try_map_transparent_nullable_callback_type(ty).is_some()
+                        self.try_map_transparent_nullable_owner_type(ty).is_some()
                     }) else {
                         return false;
                     };
@@ -2474,7 +2478,7 @@ impl CodeGen {
                         "{} {} = {};",
                         binding_decl, cpp_name, slot_expr
                     ));
-                    binding_type = self.transparent_nullable_callback_box_type(&callback_option_ty);
+                    binding_type = self.transparent_nullable_owner_type(&callback_option_ty);
                     binding_map.insert(rust_name, cpp_name);
                 }
                 _ => {
@@ -4298,7 +4302,7 @@ impl CodeGen {
                         && self.infer_simple_expr_type(&method.receiver)
                             .or_else(|| self.infer_local_binding_type_from_initializer(&method.receiver))
                             .as_ref()
-                            .and_then(|ty| self.transparent_nullable_callback_receiver(ty))
+                            .and_then(|ty| self.transparent_nullable_owner_receiver(ty))
                             .is_some()
                 });
                 let init_returns_reference_binding = (init_returns_reference

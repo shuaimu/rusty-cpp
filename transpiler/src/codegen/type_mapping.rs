@@ -2364,6 +2364,88 @@ impl CodeGen {
         Some(box_ty)
     }
 
+    /// An explicit alias profile may preserve the nullable C++ Arc/Box
+    /// representation at a boundary. The Rust type remains Option<Owner>.
+    /// Ordinary Option<Arc/Box> types do not opt in, even for the same payload.
+    pub(super) fn explicit_nullable_owner_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_paren_group_type(ty);
+        let syn::Type::Path(path) = ty else { return None; };
+        if path.qself.is_some() { return None; }
+        let name = path.path.segments.last()?.ident.to_string();
+        self.user_type_map.lookup(&name).filter(|mapped| !mapped.is_empty())?;
+        // Requiring a real Rust alias excludes user mappings of unrelated
+        // nominal owners and of std::option::Option itself.
+        self.resolve_type_alias_once(ty)?;
+        let resolved = self.resolve_transparent_nullable_callback_aliases(ty);
+        let syn::Type::Path(option) = resolved else { return None; };
+        if !self.transparent_nullable_callback_path_is_canonical(
+            &option.path, "Option",
+            &[&["std", "option", "Option"], &["core", "option", "Option"]],
+        ) { return None; }
+        let syn::PathArguments::AngleBracketed(args) = &option.path.segments.last()?.arguments else {
+            return None;
+        };
+        if args.args.len() != 1 { return None; }
+        let syn::GenericArgument::Type(owner) = args.args.first()? else { return None; };
+        let source_owner_cpp = self.map_type(owner);
+        let owner = self.resolve_transparent_nullable_callback_aliases(owner);
+        let syn::Type::Path(owner_path) = &owner else { return None; };
+        let is_box = self.transparent_nullable_callback_path_is_canonical(
+            &owner_path.path, "Box", &[&["std", "boxed", "Box"], &["alloc", "boxed", "Box"]],
+        );
+        let is_arc = self.transparent_nullable_callback_path_is_canonical(
+            &owner_path.path, "Arc", &[&["std", "sync", "Arc"], &["alloc", "sync", "Arc"]],
+        );
+        let alias_cpp = self.map_type(ty);
+        if !(is_box || is_arc)
+            || (alias_cpp != source_owner_cpp && alias_cpp != self.map_type(&owner))
+        {
+            return None;
+        }
+        Some(owner)
+    }
+
+    pub(super) fn transparent_nullable_owner_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        self.explicit_nullable_owner_type(ty).or_else(|| {
+            self.try_map_transparent_nullable_callback_type(ty)?;
+            self.transparent_nullable_callback_box_type(ty)
+        })
+    }
+
+    pub(super) fn try_map_transparent_nullable_owner_type(&self, ty: &syn::Type) -> Option<String> {
+        self.explicit_nullable_owner_type(ty)
+            .map(|owner| self.map_type(&owner))
+            .or_else(|| self.try_map_transparent_nullable_callback_type(ty))
+    }
+
+    pub(super) fn transparent_nullable_owner_receiver(&self, ty: &syn::Type) -> Option<(syn::Type, bool)> {
+        if let Some(callback) = self.transparent_nullable_callback_receiver(ty) {
+            return Some(callback);
+        }
+        let ty = self.peel_reference_paren_group_type(ty);
+        if self.explicit_nullable_owner_type(ty).is_some() {
+            return Some((ty.clone(), false));
+        }
+        let resolved = self.resolve_transparent_nullable_callback_aliases(ty);
+        let syn::Type::Path(path) = resolved else { return None; };
+        let segment = path.path.segments.last()?;
+        let name = segment.ident.to_string();
+        let family = match name.as_str() {
+            "Ref" | "RefMut" => "cell",
+            "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" => "sync",
+            _ => return None,
+        };
+        if !self.transparent_nullable_callback_path_is_canonical(
+            &path.path, &name, &[&["std", family, &name], &["core", family, &name]],
+        ) { return None; }
+        let syn::PathArguments::AngleBracketed(args) = &segment.arguments else { return None; };
+        let inner = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(inner) => Some(inner), _ => None,
+        })?;
+        self.explicit_nullable_owner_type(inner)?;
+        Some((inner.clone(), true))
+    }
+
     fn transparent_nullable_callback_in_cell_wrapper(
         &self,
         ty: &syn::Type,

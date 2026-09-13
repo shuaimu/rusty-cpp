@@ -6445,6 +6445,20 @@ impl CodeGen {
         if let Some(ty) = self.infer_standard_future_method(mc) {
             return Some(ty);
         }
+        if matches!(method.as_str(), "as_ref" | "as_mut" | "unwrap" | "take" | "clone" | "replace")
+            && let Some(receiver) = self.infer_simple_expr_type(&mc.receiver)
+            && let Some((option, _)) = self.transparent_nullable_owner_receiver(&receiver)
+            && let Some(owner) = self.explicit_nullable_owner_type(&option)
+        {
+            match method.as_str() {
+                "as_ref" if mc.args.is_empty() => return Some(parse_quote!(Option<&#owner>)),
+                "as_mut" if mc.args.is_empty() => return Some(parse_quote!(Option<&mut #owner>)),
+                "unwrap" if mc.args.is_empty() => return Some(owner),
+                "take" | "clone" if mc.args.is_empty() => return Some(option),
+                "replace" if mc.args.len() == 1 => return Some(option),
+                _ => {}
+            }
+        }
         // RefCell::replace returns its stored Option by value. Keep the
         // source type so an inferred local still uses nullable-callback
         // operations after the Option has become a C++ Function.

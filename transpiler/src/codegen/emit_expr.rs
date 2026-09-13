@@ -9318,17 +9318,16 @@ impl CodeGen {
         let transparent_callback_receiver_ty = self
             .infer_simple_expr_type(&mc.receiver)
             .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver));
-        if let Some((_, guard)) = transparent_callback_receiver_ty.as_ref()
-            .and_then(|ty| self.transparent_nullable_callback_receiver(ty))
+        if let Some((option_ty, guard)) = transparent_callback_receiver_ty.as_ref()
+            .and_then(|ty| self.transparent_nullable_owner_receiver(ty))
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if guard {
                 format!("rusty::detail::deref_if_pointer_like({})", receiver)
             } else { receiver };
-            // The transparent carrier folds `Option<Box<dyn Fn*>>` into
-            // rusty::Function's own nullable state, so the Option surface
-            // must be lowered by hand. Each supported operation mirrors the
-            // Rust semantics exactly; everything else stays fail-closed.
+            // The selected carrier represents Option with its own empty
+            // state. Preserve Rust's operations on that representation;
+            // unsupported operations remain explicit errors.
             match (mc.method.to_string().as_str(), mc.args.len()) {
                 ("as_ref" | "as_mut", 0) => {
                     let qualifier = if mc.method == "as_ref" { "const " } else { "" };
@@ -9339,6 +9338,9 @@ impl CodeGen {
                 // `take()` moves the callback out and leaves the empty (None)
                 // state behind — exactly rusty::mem::take on the carrier.
                 ("take", 0) => {
+                    if let Some(owner) = self.explicit_nullable_owner_type(&option_ty) {
+                        return format!("std::exchange({}, {}(nullptr))", receiver, self.map_type(&owner));
+                    }
                     return format!("rusty::mem::take({})", receiver);
                 }
                 ("is_some", 0) => {
@@ -9356,6 +9358,23 @@ impl CodeGen {
                         receiver
                     );
                 }
+                ("clone", 0) if self.explicit_nullable_owner_type(&option_ty).is_some() => {
+                    return format!(
+                        "([](const auto& __owner) {{ using Owner = std::remove_cvref_t<decltype(__owner)>; return static_cast<bool>(__owner) ? rusty::clone(__owner) : Owner(nullptr); }})({})",
+                        receiver
+                    );
+                }
+                ("replace", 1) if self.explicit_nullable_owner_type(&option_ty).is_some() => {
+                    let owner = self.explicit_nullable_owner_type(&option_ty).unwrap();
+                    let value = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &mc.args[0], Some(&owner),
+                    );
+                    return format!("std::exchange({}, {})", receiver, value);
+                }
+                _ if self.explicit_nullable_owner_type(&option_ty).is_some() => panic!(
+                    "unsupported Option operation `{}` on an explicit nullable owner profile",
+                    mc.method
+                ),
                 _ => panic!(
                     "unsupported Option operation `{}` on transparent Option<Box<dyn Fn*>>",
                     mc.method
@@ -14271,9 +14290,12 @@ impl CodeGen {
                     return "this->operator*()".to_string();
                 }
                 if self.is_option_none_path(&path.path) {
+                    if let Some(owner) = expected_ty.and_then(|ty| self.explicit_nullable_owner_type(ty)) {
+                        return format!("{}(nullptr)", self.map_type(&owner));
+                    }
                     if let Some(expected) = expected_ty
                         && let Some(callback_cpp) =
-                            self.try_map_transparent_nullable_callback_type(expected)
+                            self.try_map_transparent_nullable_owner_type(expected)
                     {
                         return format!("{}{{}}", callback_cpp);
                     }
@@ -21703,6 +21725,11 @@ impl CodeGen {
                 | "std::option::Option::Some"
         ) && call.args.len() == 1
         {
+            if let Some(owner) = expected_ty.and_then(|ty| self.explicit_nullable_owner_type(ty)) {
+                return self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &call.args[0], Some(&owner),
+                );
+            }
             if let Some(expected) = expected_ty
                 && self
                     .try_map_transparent_nullable_callback_type(expected)
@@ -22004,6 +22031,9 @@ impl CodeGen {
                 .cloned()
                 .or_else(|| self.infer_default_call_expected_type_from_in_progress_local_name())
             {
+                if let Some(owner) = self.explicit_nullable_owner_type(&expected) {
+                    return format!("{}(nullptr)", self.map_type(&owner));
+                }
                 if let Some(callback_cpp) =
                     self.try_map_transparent_nullable_callback_type(&expected)
                 {

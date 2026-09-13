@@ -680,7 +680,8 @@ impl CodeGen {
             })?;
         let params = self.extract_callable_param_types_from_type(&callable)?;
         let parameter = params.get(arg_idx)?;
-        matches!(self.peel_paren_group_type(parameter), syn::Type::Reference(_))
+        (matches!(self.peel_paren_group_type(parameter), syn::Type::Reference(_))
+            || self.explicit_nullable_owner_type(parameter).is_some())
             .then(|| parameter.clone())
     }
 
