@@ -24,6 +24,8 @@ fn standard_future_source_runs_with_rust_and_cpp_ownership() {
         cpp.contains("static void wake(rusty::Arc<Signal> _wake_self)"),
         "{cpp}"
     );
+    assert!(cpp.contains("std::move(clone).wake()"), "{cpp}");
+    assert!(cpp.contains("std::move(second).wake()"), "{cpp}");
     cpp.push_str("\nint main() { return check_waker() + check_future() + check_patterns(); }\n");
     std::fs::write(&generated, cpp).unwrap();
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "clang++".to_string());
@@ -103,11 +105,16 @@ pub fn check_waker() -> i32 {
     if Arc::strong_count(&signal) != 2 { return 1; }
     let clone = waker.clone();
     if Arc::strong_count(&signal) != 3 { return 2; }
+    let second = waker.clone();
+    if Arc::strong_count(&signal) != 4 { return 8; }
     clone.wake();
-    if signal.count.load(Ordering::Relaxed) != 3 { return 3; }
-    if Arc::strong_count(&signal) != 2 { return 4; }
+    if signal.count.load(Ordering::Relaxed) != 4 { return 3; }
+    if Arc::strong_count(&signal) != 3 { return 4; }
+    second.wake();
+    if signal.count.load(Ordering::Relaxed) != 7 { return 9; }
+    if Arc::strong_count(&signal) != 2 { return 10; }
     waker.wake_by_ref();
-    if signal.count.load(Ordering::Relaxed) != 13 { return 5; }
+    if signal.count.load(Ordering::Relaxed) != 17 { return 5; }
     drop(waker);
     if Arc::strong_count(&signal) != 1 { return 6; }
     let forwarded = Arc::new(ForwardSignal { count: AtomicUsize::new(0) });

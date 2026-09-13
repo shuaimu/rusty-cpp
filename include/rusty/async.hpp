@@ -137,10 +137,20 @@ struct Waker {
         };
     }
     Waker clone() const { return *this; }
-    void wake() const { if (wake_fn) wake_fn(); }
+    // Existing C++ callers reuse lvalue wakers. Rust's consuming Waker::wake
+    // selects the rvalue overload and releases this copy's owner immediately.
+    void wake() const & { wake_by_ref(); }
+    void wake() && {
+        auto callback = std::exchange(wake_fn, {});
+        wake_by_ref_fn = {};
+        if (callback) callback();
+    }
     void wake_by_ref() const {
+        // Moving a std::function need not empty its source; in particular the
+        // stateless dispatch bridge can survive a move of an owning callback.
+        if (!wake_fn) return;
         if (wake_by_ref_fn) wake_by_ref_fn(wake_fn);
-        else wake();
+        else wake_fn();
     }
 };
 

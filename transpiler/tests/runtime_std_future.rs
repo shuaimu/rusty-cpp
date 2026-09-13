@@ -39,6 +39,9 @@ const SOURCE: &str = r#"
 #include <cassert>
 #include <optional>
 #include <memory>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 struct Value {
     static inline int live = 0;
@@ -109,6 +112,20 @@ struct DefaultWake {
         assert(owner.strong_count() >= 1);
         ++calls;
     }
+};
+struct ConcurrentWake {
+    static inline std::atomic<int> borrowed{0};
+    static inline std::atomic<int> consumed{0};
+    static inline std::atomic<int> destroyed{0};
+    static void wake(rusty::Arc<ConcurrentWake> owner) {
+        assert(owner.strong_count() >= 1);
+        ++consumed;
+    }
+    static void wake_by_ref(const rusty::Arc<ConcurrentWake>& owner) {
+        assert(owner.strong_count() >= 1);
+        ++borrowed;
+    }
+    ~ConcurrentWake() { ++destroyed; }
 };
 
 int main() {
@@ -182,12 +199,23 @@ int main() {
         assert(owner.strong_count() == 2);
         auto copy = waker.clone();
         assert(owner.strong_count() == 3);
+        auto other = waker.clone();
+        assert(owner.strong_count() == 4);
         copy.wake_by_ref();
-        assert(owner.strong_count() == 3 && WakeTarget::borrowed == 1);
+        assert(owner.strong_count() == 4 && WakeTarget::borrowed == 1);
         copy.wake();
-        assert(owner.strong_count() == 2 && WakeTarget::consumed == 1);
+        copy.wake();
+        assert(owner.strong_count() == 4 && WakeTarget::borrowed == 3);
+        std::move(copy).wake();
+        assert(owner.strong_count() == 3 && WakeTarget::consumed == 1);
+        std::move(copy).wake(); // A consumed C++ wrapper is safely empty.
+        copy.wake_by_ref();
+        auto moved = std::move(other);
+        other.wake(); // Its dispatch bridge may outlive the moved callback.
+        std::move(moved).wake();
+        assert(owner.strong_count() == 2 && WakeTarget::consumed == 2);
         waker.wake_by_ref();
-        assert(WakeTarget::borrowed == 2);
+        assert(WakeTarget::borrowed == 4);
     }
     assert(WakeTarget::destroyed == 1);
     {
@@ -196,7 +224,65 @@ int main() {
         waker.wake_by_ref();
         assert(owner.strong_count() == 2 && DefaultWake::calls == 1);
         waker.wake();
-        assert(owner.strong_count() == 1 && DefaultWake::calls == 2);
+        waker.wake();
+        assert(owner.strong_count() == 2 && DefaultWake::calls == 3);
+        std::move(waker).wake();
+        assert(owner.strong_count() == 1 && DefaultWake::calls == 4);
     }
+    {
+        int calls = 0;
+        auto waker = rusty::Waker::from_callable([&] { ++calls; });
+        waker.wake();
+        waker.wake();
+        std::move(waker).wake();
+        assert(calls == 3);
+        // Small-buffer std::function moves can leave a callable source.
+        std::move(waker).wake();
+        waker.wake();
+        assert(calls == 3);
+        rusty::Waker empty;
+        empty.wake();
+        std::move(empty).wake();
+    }
+    {
+        auto owner = rusty::Arc<ConcurrentWake>::make();
+        const auto waker = rusty::Waker::from_arc(owner.clone());
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 4; ++i) {
+            threads.emplace_back([&waker] {
+                for (int j = 0; j < 10000; ++j) waker.wake();
+            });
+        }
+        for (auto& thread : threads) thread.join();
+        assert(ConcurrentWake::borrowed == 40000);
+        assert(owner.strong_count() == 2);
+        threads.clear();
+        for (int i = 0; i < 4; ++i) {
+            threads.emplace_back([copy = waker.clone()]() mutable {
+                std::move(copy).wake();
+            });
+        }
+        for (auto& thread : threads) thread.join();
+        assert(ConcurrentWake::consumed == 4);
+        assert(owner.strong_count() == 2);
+        waker.wake();
+        assert(ConcurrentWake::borrowed == 40001);
+    }
+    assert(ConcurrentWake::destroyed == 1);
+    {
+        auto owner = rusty::Arc<WakeTarget>::make();
+        auto waker = rusty::Waker::from_arc(owner.clone());
+        rusty::Context cx{&waker};
+        auto task = parent();
+        assert(task.poll(cx).is_pending());
+        // Cancellation destroys the promise's owned context and invokes the
+        // suspended awaiter. Its separately retained clone remains usable.
+    }
+    assert(WakeTarget::destroyed == 1);
+    retained.wake();
+    retained.wake();
+    std::move(retained).wake();
+    assert(WakeTarget::destroyed == 2);
+    assert(Value::live == 0);
 }
 "#;
