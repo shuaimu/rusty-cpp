@@ -135,6 +135,13 @@ use std::cell::RefCell;
 
 type Callback = Box<dyn FnMut(&mut i32) + Send + Sync>;
 type MaybeCallback = Option<Box<dyn FnMut(&mut i32)>>;
+type QueueCallback = Option<Box<dyn FnMut(i32)>>;
+
+fn invoke_queued(mut callback: self::QueueCallback, error: i32) {
+    if callback.is_some() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || callback.as_mut().unwrap()(error)));
+    }
+}
 
 unsafe fn bump(value: *mut i32) { unsafe { *value += 1; } }
 
@@ -265,6 +272,11 @@ pub fn check_nullable() -> i32 {
     });
     if thread.join().is_err() { return 24; }
     if !completed.load(std::sync::atomic::Ordering::Acquire) { return 25; }
+    let queued = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let observed = queued.clone();
+    invoke_queued(Some(Box::new(move |value: i32| observed.store(value, std::sync::atomic::Ordering::Release))), 26);
+    invoke_queued(None, 27);
+    if queued.load(std::sync::atomic::Ordering::Acquire) != 26 { return 26; }
     0
 }
 "#;

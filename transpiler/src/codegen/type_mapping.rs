@@ -2282,6 +2282,24 @@ impl CodeGen {
             })
     }
 
+    fn normalize_local_nullable_alias_path(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::Path(path) = self.peel_paren_group_type(ty) else { return None; };
+        if path.qself.is_some() || path.path.leading_colon.is_some()
+            || path.path.segments.len() < 2
+            || path.path.segments.first()?.ident != "self"
+        { return None; }
+        // self:: is relative to this Rust lexical module. In crate mode the
+        // physical file's root is already the local alias table's root.
+        let mut normalized = path.clone();
+        let mut segments = syn::punctuated::Punctuated::new();
+        for module in &self.module_stack {
+            segments.push(syn::PathSegment::from(syn::Ident::new(module, proc_macro2::Span::call_site())));
+        }
+        segments.extend(path.path.segments.iter().skip(1).cloned());
+        normalized.path.segments = segments;
+        Some(syn::Type::Path(normalized))
+    }
+
     /// Resolve only declared Rust type aliases, with a hard depth bound and
     /// cycle detection.  Nullable-callback transparency must never be inferred
     /// from a C++ spelling or a same-named user type: it is a source-type ABI
@@ -2312,7 +2330,8 @@ impl CodeGen {
             if !matches!(current, syn::Type::Path(_)) {
                 break;
             }
-            let Some(next) = self.resolve_type_alias_once(&current) else {
+            let normalized = self.normalize_local_nullable_alias_path(&current);
+            let Some(next) = self.resolve_type_alias_once(normalized.as_ref().unwrap_or(&current)) else {
                 break;
             };
             if next == current {
@@ -2365,6 +2384,8 @@ impl CodeGen {
     }
 
     fn resolve_explicit_nullable_owner_alias_once(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let normalized = self.normalize_local_nullable_alias_path(ty);
+        let ty = normalized.as_ref().unwrap_or(ty);
         // An imported binding takes precedence over the local alias helper's
         // suffix lookup, which can otherwise select an unrelated nested alias.
         let imported_binding = match self.peel_reference_paren_group_type(ty) {
