@@ -6627,6 +6627,15 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if mc.method == "file" && mc.args.is_empty()
+            && self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
+                self.map_type(ty).trim_start_matches("const ").trim_end_matches('&')
+                    == "std::source_location"
+            })
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("std::string_view({}.file_name())", receiver);
+        }
         // `.map(third)` / `.map(util::third)` — a GENERIC free fn passed as
         // the callable: C++ can't bind a raw template name to the adapter's
         // deduced F. Wrap it in a forwarding lambda (the path emission also

@@ -19,7 +19,7 @@ pub(crate) enum CppDefaultArgument {
 impl CppDefaultArgument {
     fn source_type_description(self) -> &'static str {
         match self {
-            Self::SourceLocation => "&::rusty::SourceLocation",
+            Self::SourceLocation => "&::core::panic::Location<'_>, &::std::panic::Location<'_>, or &::rusty::SourceLocation",
             Self::Stderr => "*mut ::rusty::CFile",
         }
     }
@@ -173,6 +173,37 @@ fn exact_path_type(ty: &Type, expected: &[&str]) -> bool {
             })
 }
 
+// The absolute standard-library path cannot resolve to a local lookalike.
+// Location only accepts its source-file lifetime, never a type argument.
+fn standard_location_path(ty: &Type) -> Option<&'static str> {
+    let Type::Path(path) = ty else { return None; };
+    if path.qself.is_some() || path.path.leading_colon.is_none()
+        || path.path.segments.len() != 3 {
+        return None;
+    }
+    let mut segments = path.path.segments.iter();
+    let root = segments.next()?;
+    let module = segments.next()?;
+    let name = segments.next()?;
+    if !matches!(root.arguments, syn::PathArguments::None)
+        || module.ident != "panic" || !matches!(module.arguments, syn::PathArguments::None)
+        || name.ident != "Location" {
+        return None;
+    }
+    let lifetimes_only = match &name.arguments {
+        syn::PathArguments::None => true,
+        syn::PathArguments::AngleBracketed(args) => args.args.len() == 1
+            && matches!(args.args.first(), Some(syn::GenericArgument::Lifetime(_))),
+        _ => false,
+    };
+    if !lifetimes_only { return None; }
+    match root.ident.to_string().as_str() {
+        "core" => Some("core::panic::Location"),
+        "std" => Some("std::panic::Location"),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct DefaultFacadeTypeVisitor {
     found: bool,
@@ -199,7 +230,8 @@ fn source_type_matches(kind: CppDefaultArgument, ty: &Type) -> bool {
         (CppDefaultArgument::SourceLocation, Type::Reference(reference)) => {
             reference.mutability.is_none()
                 && reference.lifetime.is_none()
-                && exact_path_type(&reference.elem, &["rusty", "SourceLocation"])
+                && (exact_path_type(&reference.elem, &["rusty", "SourceLocation"])
+                    || standard_location_path(&reference.elem).is_some())
         }
         (CppDefaultArgument::Stderr, Type::Ptr(pointer)) => {
             pointer.mutability.is_some()
@@ -224,13 +256,21 @@ fn parameter_pattern_is_plain_ident(arg: &syn::PatType) -> bool {
     )
 }
 
-fn validate_mapping(kind: CppDefaultArgument, type_map: &UserTypeMap) -> Result<(), String> {
-    let (rust_type, expected_cpp) = kind.required_mapping();
+fn validate_mapping(kind: CppDefaultArgument, type_map: &UserTypeMap, ty: &Type) -> Result<(), String> {
+    let standard = match (kind, ty) {
+        (CppDefaultArgument::SourceLocation, Type::Reference(reference)) =>
+            standard_location_path(&reference.elem),
+        _ => None,
+    };
+    let (rust_type, expected_cpp) = standard
+        .map(|path| (path, "std::source_location"))
+        .unwrap_or_else(|| kind.required_mapping());
     match type_map.lookup(rust_type) {
         Some(actual) if actual == expected_cpp => Ok(()),
         Some(actual) => Err(format!(
             "{MARKER} requires type map {rust_type} = \"{expected_cpp}\", found \"{actual}\""
         )),
+        None if standard.is_some() => Ok(()),
         None => Err(format!(
             "{MARKER} requires type map {rust_type} = \"{expected_cpp}\""
         )),
@@ -326,7 +366,7 @@ fn validate_function(function: &ItemFn, type_map: Option<&UserTypeMap>) -> Resul
             ));
         }
         if let Some(type_map) = type_map {
-            validate_mapping(kind, type_map)?;
+            validate_mapping(kind, type_map, &arg.ty)?;
         }
     }
     Ok(marker_count)
@@ -364,7 +404,10 @@ fn validate_file_impl(
                 .as_ref()
                 .map(|(_, name)| name)
                 .unwrap_or(&item.ident);
-            if ident_text(bound) == "rusty" {
+            if ident_text(bound) == "rusty"
+                || matches!(ident_text(bound).as_str(), "std" | "core")
+                    && ident_text(&item.ident) != ident_text(bound)
+            {
                 self.found = true;
             }
         }
@@ -373,7 +416,7 @@ fn validate_file_impl(
     facade_alias.visit_file(file);
     if facade_alias.found {
         return Err(format!(
-            "{MARKER} reserves absolute ::rusty facade paths; source-defined extern-crate aliases named rusty are unsupported"
+            "{MARKER} reserves absolute runtime and standard-library paths; source-defined extern-crate aliases named rusty, std, or core are unsupported"
         ));
     }
     for attr in &file.attrs {
@@ -2688,6 +2731,24 @@ mod tests {
             .mappings
             .insert("rusty::CFile".to_string(), "FILE".to_string());
         type_map
+    }
+
+    #[test]
+    fn standard_locations_need_no_facade_mapping() {
+        for root in ["core", "std"] {
+            let source = format!("pub fn locate(#[cfg_attr(any(), cpp_default_argument(source_location))] location: &::{root}::panic::Location<'_>) -> u32 {{ location.line() }}");
+            let file = syn::parse_file(&source).unwrap();
+            assert!(validate_file(&file, &UserTypeMap::default()).unwrap());
+            let mut wrong = UserTypeMap::default();
+            wrong.mappings.insert(format!("{root}::panic::Location"), "Unrelated".into());
+            assert!(validate_file(&file, &wrong).is_err());
+        }
+        let rebound = syn::parse_file("extern crate dependency as core; pub fn locate(#[cfg_attr(any(), cpp_default_argument(source_location))] location: &::core::panic::Location<'_>) {}").unwrap();
+        assert!(validate_file(&rebound, &UserTypeMap::default()).is_err());
+        for ty in ["&core::panic::Location<'_>", "&mut ::core::panic::Location<'_>", "&::core::panic::Location<u32>"] {
+            let source = format!("pub fn locate(#[cfg_attr(any(), cpp_default_argument(source_location))] location: {ty}) {{}}");
+            assert!(validate_file(&syn::parse_file(&source).unwrap(), &UserTypeMap::default()).is_err());
+        }
     }
 
     #[test]

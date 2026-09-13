@@ -12,6 +12,19 @@ fn source_location_macros_lower_to_cpp_call_site() {
     assert!(!cpp.contains("/* line!"), "{cpp}");
 }
 
+#[test]
+fn standard_source_locations_lower_without_a_facade_type() {
+    let cpp = transpile_str(r#"
+        pub fn file(location: &::core::panic::Location<'_>) -> &'static str { location.file() }
+        pub fn line(location: &::std::panic::Location<'_>) -> u32 { location.line() }
+        pub fn caller_line() -> u32 { ::core::panic::Location::caller().line() }
+    "#);
+    assert!(cpp.contains("const std::source_location& location"), "{cpp}");
+    assert!(cpp.contains("std::string_view(location.file_name())"), "{cpp}");
+    assert!(cpp.contains("std::source_location::current().line()"), "{cpp}");
+    assert!(!cpp.contains("rusty::SourceLocation"), "{cpp}");
+}
+
 fn transpile_str(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
     let mut cg = CodeGen::new();

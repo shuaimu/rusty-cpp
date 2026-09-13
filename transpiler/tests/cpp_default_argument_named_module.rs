@@ -39,15 +39,22 @@ fn assert_success(output: &Output, context: &str) {
 
 #[test]
 fn typed_cpp_defaults_compile_and_capture_the_importer_call_site() {
+    check_typed_cpp_defaults(false);
+}
+
+#[test]
+fn standard_locations_compile_and_capture_the_importer_call_site() {
+    check_typed_cpp_defaults(true);
+}
+
+fn check_typed_cpp_defaults(standard_location: bool) {
     let Some(clang) = find_clang() else {
         eprintln!("skipping default-argument module gate: no clang++ available");
         return;
     };
     let temp = tempfile::tempdir().expect("create temp dir");
     let rust = temp.path().join("default_argument_fixture.rs");
-    std::fs::write(
-        &rust,
-        r#"
+    let source = r#"
 pub fn observed_line(
     #[cfg_attr(any(), cpp_default_argument(source_location))]
     location: &::rusty::SourceLocation,
@@ -77,9 +84,24 @@ mod core {}
 
 #[allow(unsafe_code)]
 unsafe extern "C" { fn srpc_stderr() -> *mut rusty::CFile; }
-"#,
-    )
-    .expect("write Rust fixture");
+"#;
+    let source = if standard_location {
+        source.replace("&::rusty::SourceLocation", "&::core::panic::Location<'_>")
+            .replace("    location.line()", "    if location.file().is_empty() { 0 } else { location.line() }")
+    } else {
+        source.to_string()
+    };
+    if standard_location {
+        let rust_program = temp.path().join("native_location.rs");
+        let rust_binary = temp.path().join("native_location");
+        let function = source.split("pub unsafe fn").next().unwrap();
+        std::fs::write(&rust_program, format!("{function}\nfn main() {{ let location = ::core::panic::Location::caller(); assert_eq!(observed_line(location), location.line()); }}\n")).unwrap();
+        let compiled = Command::new("rustc").arg("--edition=2021")
+            .arg(&rust_program).arg("-o").arg(&rust_binary).output().unwrap();
+        assert_success(&compiled, "native Rust source location compile");
+        assert_success(&Command::new(&rust_binary).output().unwrap(), "native Rust source location run");
+    }
+    std::fs::write(&rust, source).expect("write Rust fixture");
     let type_map = temp.path().join("type-map.toml");
     std::fs::write(
         &type_map,

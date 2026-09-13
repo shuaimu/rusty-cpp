@@ -254,6 +254,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "std::sync::atomic::Ordering" | "core::sync::atomic::Ordering" => {
             Some(("rusty::sync::atomic::Ordering", false))
         }
+        "core::panic::Location" | "std::panic::Location" => {
+            Some(("std::source_location", false))
+        }
         "core::task::Poll" | "std::task::Poll" => Some(("rusty::Poll", true)),
         "core::task::Context" | "std::task::Context" => Some(("rusty::Context", false)),
         "core::task::Waker" | "std::task::Waker" => Some(("rusty::Waker", false)),
@@ -726,6 +729,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         }
         "std::rt::begin_panic" | "rt::begin_panic" => Some("rusty::panic::begin_panic"),
         "std::rt::panic_fmt" | "rt::panic_fmt" => Some("rusty::panicking::panic_fmt"),
+        "core::panic::Location::caller" | "std::panic::Location::caller" => {
+            Some("std::source_location::current")
+        }
         "std::process::abort" => Some("std::abort"),
         "std::process::id" => Some("rusty::process::id"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
