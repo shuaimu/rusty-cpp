@@ -1058,6 +1058,10 @@ pub struct TranspileOptions {
     /// dev-dependency) are harmless — so a transpile-time panic there is a
     /// false failure. The backstop still fires for the crate under test.
     pub is_dependency: bool,
+    /// `--verus-exec`: erase Verus `verus! { }` blocks (and evaluate the
+    /// Verus driver cfgs as false) in every crate source before any pass
+    /// reads it. Disabled by default; see `crate::verus_exec`.
+    pub verus_exec: crate::verus_exec::VerusExecConfig,
 }
 
 /// Classification of a method *name* across the whole crate, used by the UFCS
@@ -2472,6 +2476,7 @@ impl Default for TranspileOptions {
             cxx_namespace: None,
             flat_import_namespace: None,
             auto_namespace: false,
+            verus_exec: crate::verus_exec::VerusExecConfig::default(),
         }
     }
 }

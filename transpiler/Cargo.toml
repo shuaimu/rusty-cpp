@@ -23,6 +23,10 @@ sha2 = "0.10"
 # flock(2) for the shared module-cache build lock (already in the tree
 # transitively; pinning it directly for the one syscall).
 libc = "0.2"
+# --verus-exec: Verus's own EraseAll erasure (vendored in ../verus-erase) and a
+# deterministic printer for the erased source handed to every later pass.
+verus-erase = { path = "../verus-erase" }
+prettyplease = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

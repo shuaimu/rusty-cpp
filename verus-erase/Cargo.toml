@@ -1,0 +1,37 @@
+[package]
+name = "verus-erase"
+version = "0.1.0"
+# Edition 2018 on purpose: the vendored modules are Verus's own
+# `builtin_macros` sources, which upstream compiles as edition 2018.
+edition = "2018"
+description = "Verus's EraseAll ghost-code erasure (vendored from verus_builtin_macros) as a plain library"
+# The vendored modules are MIT (see LICENSE-MIT, copied verbatim from
+# verus-lang/verus@db81a74); the rusty-cpp glue in src/lib.rs is offered
+# under the same MIT terms.
+license = "MIT"
+publish = false
+
+[lib]
+name = "verus_erase"
+path = "src/lib.rs"
+# The vendored module docs contain Verus-syntax code fences, which are not
+# Rust doctests (upstream is a proc-macro crate and never runs them).
+doctest = false
+
+[dependencies]
+proc-macro2 = "1.0.39"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "visit", "visit-mut", "extra-traits"] }
+# Exactly the packages Lion's lockfile resolves for its `vstd` git dependency:
+# `git+https://github.com/verus-lang/verus?rev=db81a74#db81a7496bfffeef3da8b30c306600ea51d2b0fa`.
+# The crates.io releases that carry the same version string
+# (0.0.0-2025-11-10-1957) are NOT byte-identical to that revision
+# (verus_syn's `WithSpecOnFn` parser and builtin_macros' proof-fn closure
+# typing differ), so they are deliberately not used. See README.md.
+verus_syn = { git = "https://github.com/verus-lang/verus", rev = "db81a74", features = ["full", "visit", "visit-mut", "extra-traits"] }
+verus_prettyplease = { git = "https://github.com/verus-lang/verus", rev = "db81a74" }
+
+[lints.rust]
+# Upstream's own declaration: the vendored modules keep their
+# `#[cfg(verus_keep_ghost)]` arms verbatim; this crate never sets that cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }

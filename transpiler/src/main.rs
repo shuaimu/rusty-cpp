@@ -17,6 +17,7 @@ mod metadata;
 mod slots;
 mod transpile;
 mod types;
+mod verus_exec;
 
 /// Count distinct .cppm files represented in a slot list. Used only
 /// for the end-of-crate-mode summary line; the manifest does its own
@@ -184,6 +185,24 @@ struct Cli {
     /// in the parity matrix; off by default keeps their emission unchanged.
     #[arg(long = "crate-namespace-wrap")]
     crate_namespace_wrap: bool,
+
+    /// Transpile the executable code inside Verus `verus! { }` blocks.
+    ///
+    /// Before any other pass reads a crate source, every item-level `verus!`
+    /// invocation is replaced by exactly the items plain rustc compiles from
+    /// it: Verus's own `EraseGhost::EraseAll` rewrite, vendored from
+    /// `verus_builtin_macros` (see `verus-erase/`). `cfg(verus_keep_ghost)`
+    /// and `cfg(verus_keep_ghost_body)` evaluate to false throughout. Any other
+    /// Verus macro is a hard error. Off by default; with it off, sources are
+    /// read exactly as before.
+    #[arg(long = "verus-exec", conflicts_with = "expand")]
+    verus_exec: bool,
+
+    /// With --verus-exec: write every crate source unit, exactly as handed to
+    /// the transpiler after the pre-pass, to <DIR>/<crate name>/<source path>
+    /// (single-file mode: <DIR>/<file name>).
+    #[arg(long = "dump-verus-erasure", value_name = "DIR", requires = "verus_exec")]
+    dump_verus_erasure: Option<PathBuf>,
 
     /// This crate is INSIDE the `rusty` umbrella module's re-export closure —
     /// i.e. `include/rusty/rusty.cppm` `export import`s it (directly or through
@@ -419,8 +438,18 @@ fn source_mentions_cpp_source_contract(source: &str) -> bool {
 /// Identity and content diverge only for a module the crate root remaps with
 /// `#[path]`: bytes come from the remapped file, while the module keeps its
 /// conventional `src/...` spelling everywhere downstream.
+///
+/// This is crate mode's source chokepoint: both the output path
+/// (`transpile_crate_impl`) and the output-free dependency preflight
+/// (`preflight_crate_codegen_without_output`) take their `source_units` from
+/// here, and every contract preflight, cross-file collector and codegen call
+/// downstream consumes those strings rather than re-reading disk. Under
+/// `--verus-exec` the text is the Verus-erased source (`prepare_crate_source`);
+/// the closure preflights' own marker scans go through the same helper.
 fn read_crate_source_units(
     project_dir: &Path,
+    crate_name: &str,
+    verus_exec: &verus_exec::VerusExecConfig,
 ) -> Result<(Vec<PathBuf>, Vec<(PathBuf, String)>), String> {
     let crate_sources = cmake::collect_crate_sources(project_dir)?;
     if crate_sources.is_empty() {
@@ -432,10 +461,23 @@ fn read_crate_source_units(
         let full = project_dir.join(&crate_source.content);
         let source = std::fs::read_to_string(&full)
             .map_err(|error| format!("Error reading {}: {error}", full.display()))?;
+        let source = prepare_crate_source(&full, source, verus_exec)?;
+        verus_exec::dump_source(verus_exec, crate_name, &crate_source.identity, &source)?;
         source_units.push((crate_source.identity.clone(), source));
         sources.push(crate_source.identity);
     }
     Ok((sources, source_units))
+}
+
+/// Turn one crate source's bytes into the Rust text every pass sees: the
+/// bytes themselves, or under `--verus-exec` their Verus erasure.
+fn prepare_crate_source(
+    full: &Path,
+    source: String,
+    verus_exec: &verus_exec::VerusExecConfig,
+) -> Result<String, String> {
+    verus_exec::prepare_source(verus_exec, source)
+        .map_err(|error| format!("{}: {error}", full.display()))
 }
 
 fn reject_cpp_abi_in_nonconventional_target_roots(
@@ -537,6 +579,9 @@ struct CppAbiClosureReport {
 
 struct CppAbiClosurePreflight<'a> {
     expand: bool,
+    /// `--verus-exec` erasure for the sources this closure reads (never dumps;
+    /// the codegen read owns `--dump-verus-erasure`).
+    verus_exec: verus_exec::VerusExecConfig,
     effective_dependencies: Option<&'a metadata::EffectiveLocalNormalDependencyGraph>,
     root_package_filter: Option<String>,
     cargo_flags: Vec<String>,
@@ -573,6 +618,7 @@ impl<'a> CppAbiClosurePreflight<'a> {
     fn new(expand: bool) -> Self {
         Self {
             expand,
+            verus_exec: verus_exec::VerusExecConfig::default(),
             effective_dependencies: None,
             root_package_filter: None,
             cargo_flags: Vec::new(),
@@ -591,6 +637,7 @@ impl<'a> CppAbiClosurePreflight<'a> {
     ) -> Self {
         Self {
             expand,
+            verus_exec: verus_exec::VerusExecConfig::default(),
             effective_dependencies: Some(effective_dependencies),
             root_package_filter: root_package_filter.map(ToString::to_string),
             cargo_flags: cargo_flags.to_vec(),
@@ -608,6 +655,7 @@ impl<'a> CppAbiClosurePreflight<'a> {
     ) -> Self {
         Self {
             expand,
+            verus_exec: verus_exec::VerusExecConfig::default(),
             effective_dependencies: None,
             root_package_filter: root_package_filter.map(ToString::to_string),
             cargo_flags: cargo_flags.to_vec(),
@@ -616,6 +664,14 @@ impl<'a> CppAbiClosurePreflight<'a> {
             visited: BTreeSet::new(),
             active: Vec::new(),
         }
+    }
+
+    fn with_verus_exec(mut self, verus_exec: &verus_exec::VerusExecConfig) -> Self {
+        self.verus_exec = verus_exec::VerusExecConfig {
+            enabled: verus_exec.enabled,
+            dump_dir: None,
+        };
+        self
     }
 
     fn manifest_key(path: &Path) -> PathBuf {
@@ -806,6 +862,19 @@ impl<'a> CppAbiClosurePreflight<'a> {
             let full = project_dir.join(&source.content);
             match std::fs::read_to_string(&full) {
                 Ok(text) => {
+                    let text = if self.verus_exec.enabled {
+                        match prepare_crate_source(&full, text.clone(), &self.verus_exec) {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                // Keep the raw text for the marker scan; the
+                                // codegen read fails hard on the same error.
+                                self.issue(error);
+                                text
+                            }
+                        }
+                    } else {
+                        text
+                    };
                     if source_mentions_cpp_source_contract(&text) {
                         self.note_source_contract(cargo_toml_path);
                     }
@@ -1085,7 +1154,13 @@ fn preflight_cpp_abi_whole_dependency_closure(
     cargo_toml_path: &Path,
     expand: bool,
 ) -> Result<bool, String> {
-    preflight_cpp_abi_whole_dependency_closure_with_context(cargo_toml_path, expand, None, &[])
+    preflight_cpp_abi_whole_dependency_closure_with_context(
+        cargo_toml_path,
+        expand,
+        None,
+        &[],
+        &verus_exec::VerusExecConfig::default(),
+    )
 }
 
 fn preflight_cpp_abi_whole_dependency_closure_with_context(
@@ -1093,9 +1168,11 @@ fn preflight_cpp_abi_whole_dependency_closure_with_context(
     expand: bool,
     package_filter: Option<&str>,
     cargo_flags: &[String],
+    verus_exec: &verus_exec::VerusExecConfig,
 ) -> Result<bool, String> {
     let mut preflight =
-        CppAbiClosurePreflight::with_context(expand, package_filter, cargo_flags);
+        CppAbiClosurePreflight::with_context(expand, package_filter, cargo_flags)
+            .with_verus_exec(verus_exec);
     preflight.root_manifest = Some(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
     preflight.visit_manifest(cargo_toml_path);
     preflight.finish()
@@ -1107,6 +1184,7 @@ fn preflight_cpp_source_contract_effective_dependency_closure(
     graph: &metadata::EffectiveLocalNormalDependencyGraph,
     package_filter: Option<&str>,
     cargo_flags: &[String],
+    verus_exec: &verus_exec::VerusExecConfig,
 ) -> Result<bool, String> {
     let requested = CppAbiClosurePreflight::manifest_key(cargo_toml_path);
     if requested != graph.root_manifest() {
@@ -1121,7 +1199,8 @@ fn preflight_cpp_source_contract_effective_dependency_closure(
         graph,
         package_filter,
         cargo_flags,
-    );
+    )
+    .with_verus_exec(verus_exec);
     preflight.root_manifest = Some(requested);
     preflight.visit_manifest(cargo_toml_path);
     preflight.finish()
@@ -2390,6 +2469,7 @@ fn transpile_crate_with_context(
                         false,
                         package_filter,
                         cargo_flags,
+                        &transpile_options.verus_exec,
                     )?;
                     return Err(error);
                 }
@@ -2408,6 +2488,7 @@ fn transpile_crate_with_context(
                         false,
                         package_filter,
                         cargo_flags,
+                        &transpile_options.verus_exec,
                     )?;
                     return Err(error);
                 }
@@ -2558,6 +2639,7 @@ fn transpile_crate_to_output_with_context(
         expand,
         package_filter,
         cargo_flags,
+        &transpile_options.verus_exec,
     )?;
     let (_, cargo_targets) =
         metadata::discover_targets_with_context(cargo_toml_path, package_filter, cargo_flags)?;
@@ -2595,7 +2677,8 @@ fn transpile_crate_to_output_with_context(
     // Source-owned ABI contracts need a crate-wide view before any output or
     // dependency directory can be created. Read every source exactly once;
     // marker-free crates continue through the ordinary per-file path below.
-    let (sources, source_units) = read_crate_source_units(project_dir)?;
+    let (sources, source_units) =
+        read_crate_source_units(project_dir, crate_name, &transpile_options.verus_exec)?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
         &source_units,
@@ -3135,7 +3218,24 @@ impl<'a> CppNameClosurePreflight<'a> {
         for source in &sources {
             let full = project_dir.join(&source.content);
             match std::fs::read_to_string(&full) {
-                Ok(text) => source_units.push((source.identity.clone(), text)),
+                Ok(text) => {
+                    let options: &'a transpile::TranspileOptions = self.transpile_options;
+                    let verus_exec = &options.verus_exec;
+                    let text = if verus_exec.enabled {
+                        match prepare_crate_source(&full, text.clone(), verus_exec) {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                // Keep the raw text for the marker scan; the
+                                // codegen read fails hard on the same error.
+                                self.issue(error);
+                                text
+                            }
+                        }
+                    } else {
+                        text
+                    };
+                    source_units.push((source.identity.clone(), text))
+                }
                 Err(error) => self.issue(format!(
                     "could not read Rust source {}: {error}",
                     full.display()
@@ -3758,7 +3858,8 @@ fn preflight_crate_codegen_without_output(
         transpile_options,
     )?;
     let transpile_options = &authenticated_transpile_options;
-    let (sources, source_units) = read_crate_source_units(project_dir)?;
+    let (sources, source_units) =
+        read_crate_source_units(project_dir, crate_name, &transpile_options.verus_exec)?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
@@ -3949,6 +4050,7 @@ fn transpile_crate_impl(
                     graph,
                     package_filter,
                     cargo_flags,
+                    &transpile_options.verus_exec,
                 )?;
             // cpp_name's marker-free behavior deliberately retains Cargo's
             // exact graph when its over-approximation found only an unselected
@@ -3979,6 +4081,7 @@ fn transpile_crate_impl(
                     expand,
                     package_filter,
                     cargo_flags,
+                    &transpile_options.verus_exec,
                 )?,
                 None,
             )
@@ -4005,7 +4108,8 @@ fn transpile_crate_impl(
     // Source-owned ABI contracts need a crate-wide view before any output or
     // dependency directory can be created. Read every source exactly once;
     // marker-free crates continue through the ordinary per-file path below.
-    let (sources, source_units) = read_crate_source_units(project_dir)?;
+    let (sources, source_units) =
+        read_crate_source_units(project_dir, crate_name, &transpile_options.verus_exec)?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
@@ -11272,6 +11376,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // `--in-umbrella-closure` instead; this path never does.
         in_umbrella_closure: false,
         auto_namespace: false,
+        // parity-test transpiles `cargo expand` output, in which `verus!` is
+        // already expanded by rustc; the --verus-exec pre-pass does not apply.
+        verus_exec: verus_exec::VerusExecConfig::default(),
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -11983,6 +12090,10 @@ fn main() {
         crate_namespace_wrap: cli.crate_namespace_wrap,
         in_umbrella_closure: cli.in_umbrella_closure,
         auto_namespace: cli.auto_namespace,
+        verus_exec: verus_exec::VerusExecConfig {
+            enabled: cli.verus_exec,
+            dump_dir: cli.dump_verus_erasure.clone(),
+        },
     };
 
     // Handle --crate: transpile entire crate
@@ -12083,6 +12194,20 @@ fn main() {
                 eprintln!("Error reading '{}': {}", input_path.display(), e);
                 process::exit(1);
             }
+        }
+    };
+    // --verus-exec: the single input file goes through the same pre-pass as a
+    // crate source (identity when the flag is off).
+    let source = match prepare_crate_source(input_path, source, &transpile_options.verus_exec)
+        .and_then(|prepared| {
+            let name = input_path.file_name().map(PathBuf::from).unwrap_or_default();
+            verus_exec::dump_source(&transpile_options.verus_exec, "", &name, &prepared)
+                .map(|()| prepared)
+        }) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            process::exit(1);
         }
     };
 

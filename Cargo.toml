@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "transpiler"]
+members = [".", "transpiler", "verus-erase"]
 exclude = [
     "tests/transpile_tests/either",
     "tests/transpile_tests/tap",
