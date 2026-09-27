@@ -1966,6 +1966,11 @@ impl CodeGen {
     /// ctrl group was misaligned both ways. rusty::detail::zero_length_array
     /// is truly empty and alignas(T)-qualified.
     fn zero_len_array_field_type_override(&mut self, ty: &syn::Type) -> Option<String> {
+        // `--verus-exec` ghost state (`rusty::Ghost`, the lowering of vstd's
+        // `Ghost<T>`/`Tracked<T>`) is an empty tag: take no storage.
+        if super::type_mapping::is_verus_ghost_marker_type(ty) {
+            return Some("[[no_unique_address]] rusty::Ghost".to_string());
+        }
         if let syn::Type::Array(arr) = ty
             && let syn::Expr::Lit(l) = &arr.len
             && let syn::Lit::Int(i) = &l.lit

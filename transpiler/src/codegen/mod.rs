@@ -66618,6 +66618,8 @@ mod standard_any;
 mod standard_future;
 #[cfg(test)]
 mod standard_future_tests;
+#[cfg(test)]
+mod verus_ghost_tests;
 mod type_solver;
 
 #[cfg(test)]

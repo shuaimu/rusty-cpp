@@ -18,6 +18,7 @@ mod slots;
 mod transpile;
 mod types;
 mod verus_exec;
+mod verus_lower;
 
 /// Count distinct .cppm files represented in a slot list. Used only
 /// for the end-of-crate-mode summary line; the manifest does its own
@@ -457,8 +458,10 @@ fn source_mentions_cpp_source_contract(source: &str) -> bool {
 /// (`preflight_crate_codegen_without_output`) take their `source_units` from
 /// here, and every contract preflight, cross-file collector and codegen call
 /// downstream consumes those strings rather than re-reading disk. Under
-/// `--verus-exec` the text is the Verus-erased source (`prepare_crate_source`);
-/// the closure preflights' own marker scans go through the same helper.
+/// `--verus-exec` the text is the Verus-erased source (`prepare_crate_source`)
+/// with its ghost residue lowered crate-wide (`verus_exec::lower_crate_units`,
+/// stage 2); the closure preflights' own marker scans go through the same
+/// stage-1 helper.
 fn read_crate_source_units(
     project_dir: &Path,
     crate_name: &str,
@@ -470,14 +473,28 @@ fn read_crate_source_units(
     }
     let mut sources = Vec::with_capacity(crate_sources.len());
     let mut source_units = Vec::with_capacity(crate_sources.len());
+    // `--verus-exec` only: each unit's text before stage 1, for stage 2.
+    let mut originals = Vec::new();
+    let mut erased_any_block = false;
     for crate_source in crate_sources {
         let full = project_dir.join(&crate_source.content);
         let source = std::fs::read_to_string(&full)
             .map_err(|error| format!("Error reading {}: {error}", full.display()))?;
-        let source = prepare_crate_source(&full, source, verus_exec)?;
-        verus_exec::dump_source(verus_exec, crate_name, &crate_source.identity, &source)?;
+        let source = if verus_exec.enabled {
+            let (prepared, erased) =
+                prepare_crate_source_reporting(&full, source.clone(), verus_exec)?;
+            erased_any_block |= erased;
+            originals.push(source);
+            prepared
+        } else {
+            source
+        };
         source_units.push((crate_source.identity.clone(), source));
         sources.push(crate_source.identity);
+    }
+    verus_exec::lower_crate_units(crate_name, &mut source_units, &originals, erased_any_block)?;
+    for (identity, source) in &source_units {
+        verus_exec::dump_source(verus_exec, crate_name, identity, source)?;
     }
     Ok((sources, source_units))
 }
@@ -490,6 +507,17 @@ fn prepare_crate_source(
     verus_exec: &verus_exec::VerusExecConfig,
 ) -> Result<String, String> {
     verus_exec::prepare_source(verus_exec, source)
+        .map_err(|error| format!("{}: {error}", full.display()))
+}
+
+/// [`prepare_crate_source`], also reporting whether stage 1 erased a
+/// `verus!` block in it.
+fn prepare_crate_source_reporting(
+    full: &Path,
+    source: String,
+    verus_exec: &verus_exec::VerusExecConfig,
+) -> Result<(String, bool), String> {
+    verus_exec::prepare_source_reporting(verus_exec, source)
         .map_err(|error| format!("{}: {error}", full.display()))
 }
 
@@ -12218,13 +12246,30 @@ fn main() {
         }
     };
     // --verus-exec: the single input file goes through the same pre-pass as a
-    // crate source (identity when the flag is off).
-    let source = match prepare_crate_source(input_path, source, &transpile_options.verus_exec)
-        .and_then(|prepared| {
-            let name = input_path.file_name().map(PathBuf::from).unwrap_or_default();
-            verus_exec::dump_source(&transpile_options.verus_exec, "", &name, &prepared)
-                .map(|()| prepared)
-        }) {
+    // crate source, stage 2 included (identity when the flag is off).
+    let original = transpile_options
+        .verus_exec
+        .enabled
+        .then(|| source.clone());
+    let source = match prepare_crate_source_reporting(
+        input_path,
+        source,
+        &transpile_options.verus_exec,
+    )
+    .and_then(|(prepared, erased)| {
+        let name = input_path.file_name().map(PathBuf::from).unwrap_or_default();
+        let mut units = vec![(name.clone(), prepared)];
+        let originals = original.into_iter().collect::<Vec<_>>();
+        verus_exec::lower_crate_units(
+            &name.display().to_string(),
+            &mut units,
+            &originals,
+            erased,
+        )?;
+        let prepared = units.remove(0).1;
+        verus_exec::dump_source(&transpile_options.verus_exec, "", &name, &prepared)
+            .map(|()| prepared)
+    }) {
         Ok(source) => source,
         Err(e) => {
             eprintln!("Error: {}", e);

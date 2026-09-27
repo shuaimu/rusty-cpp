@@ -2651,6 +2651,11 @@ impl CodeGen {
     }
 
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
+        // `--verus-exec` ghost marker (see `crate::verus_lower`): always the
+        // empty tag, whatever scope the codegen thinks it is in.
+        if is_verus_ghost_marker_type(ty) {
+            return "rusty::Ghost".to_string();
+        }
         if let Some(mapped) = self.try_map_standard_any_type(ty) { return mapped; }
         if let Some(mapped) = self.try_map_standard_future_type(ty) { return mapped; }
         if let Some(callback) = self.try_map_transparent_nullable_callback_type(ty) {
@@ -5451,4 +5456,18 @@ impl CodeGen {
         }
         Ok(params.join(", "))
     }
+}
+
+/// The `--verus-exec` ghost marker type (`crate::verus_lower::GHOST_MARKER`,
+/// the lowering of vstd's `Ghost<T>` / `Tracked<T>`).
+pub(super) fn is_verus_ghost_marker_type(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path)
+        if path.qself.is_none() && path.path.is_ident(crate::verus_lower::GHOST_MARKER))
+}
+
+/// The `--verus-exec` ghost marker value (`crate::verus_lower::GHOST_MARKER`,
+/// the lowering of `Ghost::assume_new*` / `Tracked::assume_new*`).
+pub(super) fn is_verus_ghost_marker_expr(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Path(path)
+        if path.qself.is_none() && path.path.is_ident(crate::verus_lower::GHOST_MARKER))
 }

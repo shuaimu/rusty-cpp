@@ -26,8 +26,10 @@
 //!
 //! What it does not do is lower the ghost residue that survives erasure
 //! (`use vstd::prelude::*`, `View` impls, `Ghost<T>` values, vstd executable
-//! methods). That is the next stage's job; this stage only guarantees that
-//! downstream passes see the Rust rustc sees.
+//! methods). That is stage 2's job (`crate::verus_lower`), which runs
+//! crate-wide on the erased units of any crate in which this stage erased a
+//! `verus!` block; this stage only guarantees that downstream passes see the
+//! Rust rustc sees.
 //!
 //! Fail-closed rules:
 //! - a file that cannot be parsed, or a `verus!` block Verus's own rewrite
@@ -98,15 +100,55 @@ pub struct VerusExecConfig {
     pub helper: Option<PathBuf>,
 }
 
-/// Apply `--verus-exec` to one source text (identity when disabled).
+/// Apply `--verus-exec` stage 1 to one source text (identity when disabled).
 pub fn prepare_source(config: &VerusExecConfig, source: String) -> Result<String, String> {
+    prepare_source_reporting(config, source).map(|(prepared, _)| prepared)
+}
+
+/// [`prepare_source`], also reporting whether the text contained an
+/// item-level `verus!` block (which is what makes its crate a Verus crate for
+/// stage 2, `crate::verus_lower`).
+pub fn prepare_source_reporting(
+    config: &VerusExecConfig,
+    source: String,
+) -> Result<(String, bool), String> {
     if !config.enabled {
-        return Ok(source);
+        return Ok((source, false));
     }
-    match erase_source(config, &source)? {
-        Cow::Borrowed(_) => Ok(source),
-        Cow::Owned(erased) => Ok(erased),
+    match erase_source_reporting(config, &source)? {
+        (Cow::Borrowed(_), erased) => Ok((source, erased)),
+        (Cow::Owned(prepared), erased) => Ok((prepared, erased)),
     }
+}
+
+/// Stage 2 over one crate's prepared units: lower the ghost residue
+/// (`crate::verus_lower`) when stage 1 erased a `verus!` block in any of
+/// them; otherwise leave every unit as it is. `originals` are the unit texts
+/// before stage 1, in the same order.
+pub fn lower_crate_units(
+    crate_name: &str,
+    units: &mut [(PathBuf, String)],
+    originals: &[String],
+    erased_any_block: bool,
+) -> Result<(), String> {
+    if !erased_any_block {
+        return Ok(());
+    }
+    let mut lowered = units
+        .iter_mut()
+        .zip(originals)
+        .map(|((identity, prepared), original)| crate::verus_lower::LowerUnit {
+            identity,
+            original,
+            prepared: std::mem::take(prepared),
+        })
+        .collect::<Vec<_>>();
+    let result = crate::verus_lower::lower_crate(crate_name, &mut lowered);
+    let texts = lowered.into_iter().map(|unit| unit.prepared).collect::<Vec<_>>();
+    for ((_, prepared), text) in units.iter_mut().zip(texts) {
+        *prepared = text;
+    }
+    result
 }
 
 /// Write one prepared source unit to the `--dump-verus-erasure` directory.
@@ -131,7 +173,16 @@ pub fn dump_source(
 /// Erase every item-level `verus!` block in `source` and evaluate the Verus
 /// driver cfgs as false. Returns the input unchanged (borrowed) when there is
 /// nothing to do.
+#[cfg(test)]
 pub fn erase_source<'a>(config: &VerusExecConfig, source: &'a str) -> Result<Cow<'a, str>, String> {
+    erase_source_reporting(config, source).map(|(erased, _)| erased)
+}
+
+/// [`erase_source`], also reporting whether any `verus!` block was erased.
+fn erase_source_reporting<'a>(
+    config: &VerusExecConfig,
+    source: &'a str,
+) -> Result<(Cow<'a, str>, bool), String> {
     // Cheap screen: every construct this pass acts on or rejects spells one
     // of these names. A file that merely mentions one (a comment, a
     // same-named user item) is parsed and audited, then returned unchanged.
@@ -141,7 +192,7 @@ pub fn erase_source<'a>(config: &VerusExecConfig, source: &'a str) -> Result<Cow
         .chain(VERUS_MACRO_CRATES)
         .any(|name| source.contains(name))
     {
-        return Ok(Cow::Borrowed(source));
+        return Ok((Cow::Borrowed(source), false));
     }
     let mut file = syn::parse_file(source)
         .map_err(|error| format!("--verus-exec could not parse the source: {error}"))?;
@@ -163,10 +214,11 @@ pub fn erase_source<'a>(config: &VerusExecConfig, source: &'a str) -> Result<Cow
         return Err(audit.errors.join("; "));
     }
 
+    let erased_any_block = eraser.erased > 0;
     if changed {
-        Ok(Cow::Owned(prettyplease::unparse(&file)))
+        Ok((Cow::Owned(prettyplease::unparse(&file)), erased_any_block))
     } else {
-        Ok(Cow::Borrowed(source))
+        Ok((Cow::Borrowed(source), erased_any_block))
     }
 }
 
@@ -273,6 +325,8 @@ struct Eraser<'a> {
     config: &'a VerusExecConfig,
     /// Results keyed by the block's token text, in request order.
     ready: BTreeMap<String, VecDeque<Result<String, String>>>,
+    /// Blocks handed out by `erase`.
+    erased: usize,
 }
 
 impl<'a> Eraser<'a> {
@@ -282,6 +336,7 @@ impl<'a> Eraser<'a> {
         let mut eraser = Eraser {
             config,
             ready: BTreeMap::new(),
+            erased: 0,
         };
         if !blocks.is_empty() {
             let results = run_helper(config, &blocks)?;
@@ -296,6 +351,7 @@ impl<'a> Eraser<'a> {
     /// token text, `Ok(Err(message))` when Verus rejects the block, `Err` when
     /// the helper itself could not be run.
     fn erase(&mut self, tokens: &TokenStream) -> Result<Result<String, String>, String> {
+        self.erased += 1;
         let text = tokens.to_string();
         if let Some(result) = self.ready.get_mut(&text).and_then(VecDeque::pop_front) {
             return Ok(result);

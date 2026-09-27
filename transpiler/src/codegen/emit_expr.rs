@@ -13577,6 +13577,9 @@ impl CodeGen {
             let inner = self.emit_expr_to_string(expr);
             return format!("rusty::String::from({})", inner);
         }
+        if super::type_mapping::is_verus_ghost_marker_expr(expr) {
+            return "rusty::Ghost{}".to_string();
+        }
         match expr {
             syn::Expr::Path(path_expr)
                 if path_expr
@@ -24399,6 +24402,10 @@ impl CodeGen {
                 }
                 if let Some(lambda) = self.try_emit_method_reference_lambda(&path.path) {
                     return lambda;
+                }
+                // `--verus-exec` ghost marker value: the empty tag, constructed.
+                if super::type_mapping::is_verus_ghost_marker_expr(expr) {
+                    return "rusty::Ghost{}".to_string();
                 }
                 // `PhantomData` as a VALUE expression (no expected type to drive
                 // the element — e.g. a UFCS member-fallback shim arg whose lambda

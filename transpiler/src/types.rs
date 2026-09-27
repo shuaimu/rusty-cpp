@@ -424,6 +424,10 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "PhantomData" | "std::marker::PhantomData" | "core::marker::PhantomData" => {
             Some(("rusty::PhantomData", true))
         }
+        // `--verus-exec`: vstd's `Ghost<T>` / `Tracked<T>`, which the
+        // pre-pass rewrites to this reserved marker (`verus_lower::GHOST_MARKER`)
+        // with `T` dropped. The C++ side is one empty tag type.
+        "RustyVerusGhost" => Some(("rusty::Ghost", false)),
         "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
         "std::future::Ready" | "core::future::Ready" => Some(("rusty::future::Ready", true)),
         "std::time::Instant" => Some(("rusty::time::Instant", false)),

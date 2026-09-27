@@ -1,6 +1,11 @@
 #ifndef RUSTY_MARKER_HPP
 #define RUSTY_MARKER_HPP
 
+#include <compare>
+#include <cstddef>
+#include <functional>
+#include <string>
+
 namespace rusty {
 
 // Zero-sized marker used to carry type/lifetime information in transpiled code.
@@ -13,6 +18,28 @@ struct PhantomData {
 
     template<typename U>
     constexpr PhantomData(const PhantomData<U>&) noexcept {}
+};
+
+// Erased Verus ghost state. `rusty-cpp-transpiler --verus-exec` lowers
+// vstd's `Ghost<T>` and `Tracked<T>` (plain-rustc `PhantomData` wrappers whose
+// `T` is a spec type such as `int` or a ghost log) and their executable
+// constructors (`Ghost::assume_new()`, `Ghost::assume_new_fallback(..)`, the
+// `Tracked` twins) to this one empty tag; `T` is never emitted. It keeps the
+// slot, so tuple arity and patterns are as written, and fields of this type
+// are emitted `[[no_unique_address]]`, so the slot takes no storage.
+//
+// The tag is trivially copyable and supports `==`, `<=>`, hashing and debug
+// printing, so structs that hold ghost fields still derive
+// Clone/Copy/PartialEq/PartialOrd/Hash/Debug through it. All tags compare
+// equal (a ghost value has no executable content), hash to 0, and print as
+// nothing, which is what vstd's `Tracked<T>` `Debug` impl writes.
+struct Ghost {
+    constexpr Ghost clone() const noexcept { return {}; }
+    friend constexpr bool operator==(Ghost, Ghost) noexcept { return true; }
+    friend constexpr std::strong_ordering operator<=>(Ghost, Ghost) noexcept {
+        return std::strong_ordering::equal;
+    }
+    std::string rusty_debug_string() const { return std::string(); }
 };
 
 namespace convert {
@@ -49,5 +76,10 @@ using PhantomData = ::rusty::PhantomData<T>;
 } // namespace marker
 
 } // namespace rusty
+
+template<>
+struct std::hash<rusty::Ghost> {
+    std::size_t operator()(rusty::Ghost) const noexcept { return 0; }
+};
 
 #endif // RUSTY_MARKER_HPP
