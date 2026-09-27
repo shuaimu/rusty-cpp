@@ -1,8 +1,10 @@
 // Runtime surface Lion's reactor and executor lower to (--crate-graph):
 // io::Result over a type without a default constructor, LocalKey::try_with,
 // RefCell::try_borrow{,_mut}, OnceLock, Option::map with a unit callback,
-// Option<T&>::is_some_and, and the raw-pointer dispatch helpers codegen emits
-// for closure parameters of unknown type.
+// Option<T&>::is_some_and, the raw-pointer dispatch helpers codegen emits
+// for closure parameters of unknown type, Pin projections, Poll<()>'s two
+// spellings, Mutex::into_inner and PoisonError::into_inner as a value,
+// env::var, thread::available_parallelism and JoinHandle::thread.
 
 #include "../include/rusty/io.hpp"
 #include "../include/rusty/local_key.hpp"
@@ -10,6 +12,11 @@
 #include "../include/rusty/option.hpp"
 #include "../include/rusty/ptr.hpp"
 #include "../include/rusty/refcell.hpp"
+#include "../include/rusty/async.hpp"
+#include "../include/rusty/mutex.hpp"
+#include "../include/rusty/pin.hpp"
+#include "../include/rusty/process.hpp"
+#include "../include/rusty/thread.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -118,6 +125,69 @@ void test_pointer_dispatch() {
     assert(rusty::ptr::detail::integer_or_address_cast<std::size_t>(std::int32_t{12}) == 12u);
 }
 
+struct Inner {
+    int v = 1;
+    int poll() { return ++v; }
+};
+
+struct Projected {
+    Inner _0;
+    // `self.map_unchecked_mut(|s| &mut s.0).poll(cx)` in a
+    // `self: Pin<&mut Self>` method.
+    int poll() { return rusty::pin_place::map_unchecked_mut(this, [](auto&& s) { return &s._0; }).poll(); }
+    Projected& get() { return rusty::pin_place::get_unchecked_mut(this); }
+};
+
+void test_pin_place() {
+    Projected p;
+    assert(p.poll() == 2);
+    assert(&p.get() == &p);
+    Inner i;
+    assert(&rusty::pin_place::get_mut(i) == &i);
+}
+
+void test_poll_unit_spellings() {
+    rusty::Poll<std::tuple<>> ready = rusty::Poll<void>::ready_with();
+    rusty::Poll<std::tuple<>> pending = rusty::Poll<void>::pending();
+    assert(ready.is_ready());
+    assert(pending.is_pending());
+}
+
+void test_mutex_into_inner_and_poison() {
+    rusty::Mutex<int> m(5);
+    // `m.lock().unwrap_or_else(PoisonError::into_inner)`.
+    auto guard = m.lock().unwrap_or_else(rusty::sync::poison_into_inner);
+    assert(*guard == 5);
+    rusty::Mutex<std::string> owned(std::string("payload"));
+    assert(owned.into_inner().unwrap_or_else(rusty::sync::poison_into_inner) == "payload");
+}
+
+void test_env_var() {
+    ::setenv("RUSTY_RUNTIME_SURFACE_TEST", "42", 1);
+    auto set = rusty::env::var("RUSTY_RUNTIME_SURFACE_TEST");
+    assert(set.is_ok());
+    assert(std::string_view(set.unwrap()) == "42");
+    ::unsetenv("RUSTY_RUNTIME_SURFACE_TEST");
+    assert(rusty::env::var("RUSTY_RUNTIME_SURFACE_TEST").is_err());
+}
+
+void test_thread_handle_and_parallelism() {
+    assert(rusty::thread::available_parallelism().map([](auto n) { return n.get(); }).unwrap_or(0) >= 1);
+    std::atomic<bool> go{false};
+    auto handle = rusty::thread::spawn([&go]() {
+        // Parks until the spawner unparks it through JoinHandle::thread().
+        while (!go.load()) {
+            rusty::thread::park();
+        }
+        return 7;
+    });
+    rusty::thread::Thread t = handle.thread().clone();
+    assert(t.id() == handle.thread().id());
+    go.store(true);
+    t.unpark();
+    assert(handle.join().unwrap() == 7);
+}
+
 }  // namespace
 
 int main() {
@@ -127,6 +197,11 @@ int main() {
     test_once_lock();
     test_option_map_unit_and_is_some_and();
     test_pointer_dispatch();
+    test_pin_place();
+    test_poll_unit_spellings();
+    test_mutex_into_inner_and_poison();
+    test_env_var();
+    test_thread_handle_and_parallelism();
     std::printf("rusty_runtime_surface_test: all passed\n");
     return 0;
 }

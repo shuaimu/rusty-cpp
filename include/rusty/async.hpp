@@ -106,6 +106,13 @@ struct Poll<void> {
     std::tuple<> unwrap_mut() const { return unwrap(); }
     Poll as_mut() const { return *this; }
     Poll as_ref() const { return *this; }
+    // Rust's `Poll<()>` is spelled `Poll<void>` natively and `Poll<Unit>`
+    // where a generic `Poll<T>` is instantiated at `T = ()` (another crate's
+    // `impl<T> From<Poll<T>>`); they are the same value.
+    operator Poll<std::tuple<>>() const {
+        return ready ? Poll<std::tuple<>>::ready_with(std::tuple<>{})
+                     : Poll<std::tuple<>>::pending();
+    }
 };
 
 struct Waker {

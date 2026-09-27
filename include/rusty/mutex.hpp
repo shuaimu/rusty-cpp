@@ -88,6 +88,19 @@ public:
 template<typename T>
 using LockResult = Result<MutexGuard<T>, PoisonError<T>>;
 
+namespace sync {
+// Rust `PoisonError::into_inner` used as a function VALUE
+// (`m.lock().unwrap_or_else(PoisonError::into_inner)`) or called
+// (`PoisonError::into_inner(e)`): the guard the error carries. A function
+// object, so it passes where Rust passes the generic associated fn.
+inline constexpr struct PoisonIntoInner {
+    template<typename E>
+    auto operator()(E&& error) const {
+        return std::move(error).into_inner();
+    }
+} poison_into_inner{};
+} // namespace sync
+
 // @safe - MutexGuard - RAII lock guard for Mutex<T>
 // Standalone template class to enable template deduction in Condvar
 template<typename T>
@@ -201,6 +214,19 @@ public:
     // hand-written Mutex matches the `new_` convention used by Cell/SpinMutex
     // and the transpiled container ports.
     static Mutex new_(T value) { return Mutex(std::move(value)); }
+
+    // Rust `Mutex::into_inner(self) -> LockResult<T>`: the value. Never
+    // poisoned here (no poisoning in C++), so always Ok; the error type
+    // carries the value like Rust's `PoisonError<T>`.
+    struct PoisonedValue {
+        T value;
+        T into_inner() && { return std::move(value); }
+    };
+    // Consuming in Rust, so the value is moved out whether the C++ receiver
+    // is an rvalue or a (dead-after-this) lvalue binding.
+    Result<T, PoisonedValue> into_inner() {
+        return Result<T, PoisonedValue>::Ok(std::move(data_));
+    }
 
     static Mutex default_()
     requires (requires { T::default_(); } || std::is_default_constructible_v<T>) {

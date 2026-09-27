@@ -9408,7 +9408,15 @@ impl CodeGen {
                             && !self.type_contains_unresolved_placeholder_like(ty)
                     })
             });
-            *self.pending_map_closure_input_type.borrow_mut() = input_ty;
+            // Tagged with the closure it is for: a copy of this codegen made
+            // before the closure consumed it (a fragment renderer) must not
+            // hand it to an unrelated later closure.
+            let closure_key = match self.peel_paren_group_expr(&mc.args[0]) {
+                syn::Expr::Closure(closure) => closure as *const syn::ExprClosure as usize,
+                _ => 0,
+            };
+            *self.pending_map_closure_input_type.borrow_mut() =
+                input_ty.map(|ty| (closure_key, ty));
             // RETURN-side: the map call's own expected Option/Result payload
             // is the closure's return. Threaded only for REFERENCE payloads
             // (`Option<&mut V>`) — an unannotated lambda's deduced return
@@ -11375,6 +11383,32 @@ impl CodeGen {
                 let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
                 return format!("rusty::ptr::read_unaligned({})", receiver);
             }
+        }
+        // `Pin<&mut T>` / `Pin<&T>` is modelled by the pinned place itself, so
+        // Pin's projections are free functions over it (rusty::pin_place,
+        // include/rusty/pin.hpp):
+        // `self.get_unchecked_mut()` / `self.map_unchecked_mut(|s| &mut s.0)`
+        // in a `self: Pin<&mut Self>` method, or on a pinned local.
+        let receiver_is_pinned_self = matches!(
+            method_name.as_str(),
+            "get_unchecked_mut" | "map_unchecked_mut" | "map_unchecked"
+        ) && matches!(self.peel_paren_group_expr(&mc.receiver),
+            syn::Expr::Path(p) if p.path.is_ident("self"));
+        if matches!(
+            method_name.as_str(),
+            "get_unchecked_mut" | "get_mut" | "get_ref" | "into_ref" | "map_unchecked_mut"
+                | "map_unchecked"
+        ) && (receiver_is_pinned_self
+            || self.infer_simple_expr_type(&mc.receiver).is_some_and(|ty| {
+                matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Path(tp)
+                    if tp.qself.is_none()
+                        && tp.path.segments.last().is_some_and(|seg| seg.ident == "Pin"))
+            }))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let mut call_args = vec![receiver];
+            call_args.extend(mc.args.iter().map(|arg| self.emit_expr_to_string(arg)));
+            return format!("rusty::pin_place::{}({})", method_name, call_args.join(", "));
         }
         // Rust `<*mut T>::as_mut()` / `<*const T>::as_ref()` -> Option of a
         // reference (None for null).
@@ -15018,6 +15052,37 @@ impl CodeGen {
             // Tuple-struct constructors and same-name local value constructors
             // should stay as direct constructor calls (`Type(...)`), not
             // re-bound to `Type::Type(...)`.
+            return None;
+        }
+        // A bare name a `use` binds to something other than a variant of the
+        // expected owner (`use std::panic::AssertUnwindSafe;` then
+        // `AssertUnwindSafe(|| ..)` in a fn returning `Poll<()>`) is that
+        // import's own constructor.
+        if path.segments.len() == 1
+            && let Some(bound) = self.resolve_scope_import_binding_path(&variant_name)
+            && bound
+                .trim_start_matches("::")
+                .rsplit("::")
+                .nth(1)
+                .is_some_and(|parent| parent != owner_tail)
+        {
+            return None;
+        }
+        // A runtime-mapped std enum has a fixed variant set: `Err(e)` whose
+        // expected type is the enclosing fn's `Poll<()>` is Result's Err, never
+        // `Poll::Err`.
+        let std_enum_variants: Option<&[&str]> = match owner_tail.as_str() {
+            "Poll" => Some(&["Ready", "Pending"]),
+            "Cow" => Some(&["Borrowed", "Owned"]),
+            "Ordering" => Some(&["Less", "Equal", "Greater"]),
+            "Bound" => Some(&["Included", "Excluded", "Unbounded"]),
+            "ControlFlow" => Some(&["Continue", "Break"]),
+            _ => None,
+        };
+        if let Some(variants) = std_enum_variants
+            && mapped_owner.starts_with("rusty::")
+            && !variants.contains(&variant_name.as_str())
+        {
             return None;
         }
         if self.is_type_param_in_scope(&owner_tail) {

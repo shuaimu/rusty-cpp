@@ -1702,6 +1702,11 @@ pub struct CodeGen {
     /// `emit_trait_dyn_adapter`). Off everywhere else, which keeps other
     /// output byte-identical.
     pub(crate) emit_dyn_adapters: bool,
+    /// This crate is emitted under `--crate-graph` (root or dependency):
+    /// enables the lowerings that rely on every dependency being a
+    /// namespace-wrapped module with a manifest (see
+    /// `unique_dependency_type_path`). Off everywhere else.
+    pub(crate) crate_graph_mode: bool,
     /// Declarations emitted after the whole purview, at global scope, and
     /// spelled with fully qualified names: `#[derive(Hash)]` std::hash
     /// specializations (a specialization of `std::hash` cannot be declared
@@ -2635,7 +2640,8 @@ pub struct CodeGen {
     /// Lets a destructured closure param (`|(event, mark)|` on
     /// `Result<(&Event, Mark)>`) type its bindings (`event: &Event`), so tuple
     /// returns preserve references instead of decaying via `make_tuple`.
-    pub(crate) pending_map_closure_input_type: std::cell::RefCell<Option<syn::Type>>,
+    /// With the address of the `syn::ExprClosure` it was recorded for.
+    pub(crate) pending_map_closure_input_type: std::cell::RefCell<Option<(usize, syn::Type)>>,
     /// Param types for the closure ABOUT to emit, extracted from a declared
     /// impl-Fn expected type (`with_entries<F: FnOnce(&mut [Bucket<K,V>])>`'s
     /// closure arg) — consumed by bind_closure_params_for_emission so the
@@ -3429,6 +3435,7 @@ impl CodeGen {
             is_sub_codegen: false,
             is_dependency_module: false,
             emit_dyn_adapters: false,
+            crate_graph_mode: false,
             deferred_global_scope_items: Vec::new(),
             deferred_purview_tail_items: Vec::new(),
             ufcs_method_classes: HashMap::new(),
@@ -5333,6 +5340,10 @@ impl CodeGen {
         self.emit_dyn_adapters = enabled;
     }
 
+    pub fn set_crate_graph_mode(&mut self, enabled: bool) {
+        self.crate_graph_mode = enabled;
+    }
+
     pub fn set_is_dependency_module(&mut self, is_dependency: bool) {
         self.is_dependency_module = is_dependency;
     }
@@ -5792,6 +5803,16 @@ impl CodeGen {
                     format!("::{}::{}", dt.module_path, dt.name),
                     qualified.clone(),
                 ));
+                // Under --crate-graph a crate-relative spelling may name a
+                // NESTED local module of the same name (`reactor::ReactorGuard`
+                // inside `mod types`, which declares `mod reactor`, beside the
+                // dependency's top-level `reactor`): leave it alone.
+                let suffix = format!("::{}", dt.module_path);
+                if self.crate_graph_mode
+                    && local_modules.iter().any(|local| local.ends_with(&suffix))
+                {
+                    continue;
+                }
                 // The same reference comes out CRATE-RELATIVE
                 // (`de::value::StrDeserializer`) when an import-derived
                 // spelling loses the dep head; boundary_replace_path rejects
@@ -14808,6 +14829,38 @@ impl CodeGen {
 
 
 
+    /// `<dep>::rest` where `<dep>` is a namespace-wrapped dependency crate
+    /// whose manifest records `rest`: a root re-export (`InterruptHandle`),
+    /// a declared type at its module path (`types::PollResult`), or a path
+    /// through one of its declared modules.
+    fn dependency_manifest_declares_path(&self, path: &str) -> bool {
+        let Some((root, rest)) = path.split_once("::") else {
+            return false;
+        };
+        if rest.is_empty() {
+            return false;
+        }
+        self.dependency_ufcs_trait_manifests.iter().any(|m| {
+            if m.module != root || !crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                return false;
+            }
+            match rest.rsplit_once("::") {
+                None => {
+                    m.root_exported_names.iter().any(|n| n == rest)
+                        || m.declared_types
+                            .iter()
+                            .any(|dt| dt.module_path.is_empty() && dt.name == rest)
+                }
+                Some((module_path, name)) => {
+                    m.declared_types
+                        .iter()
+                        .any(|dt| dt.module_path == module_path && dt.name == name)
+                        || m.declared_modules.iter().any(|dm| dm == module_path)
+                }
+            }
+        })
+    }
+
     fn forward_decl_type_spelling_has_unresolved_scoped_path(&self, spelling: &str) -> bool {
         for token in Self::extract_cpp_scoped_path_tokens(spelling) {
             let normalized = token.trim_start_matches("::");
@@ -14854,6 +14907,15 @@ impl CodeGen {
                         .forward_decl_scope_import_local_names()
                         .contains(tail))
             {
+                continue;
+            }
+            // A namespace-wrapped dependency crate's own path
+            // (`lion_reactor::InterruptHandle`, `dep::types::PollResult`):
+            // its module is imported ahead of this purview, so the name is
+            // complete wherever a forward declaration can appear. Only names
+            // its manifest records (a root re-export, a declared type at that
+            // module path, or a path through a declared module).
+            if first_is_namespace_like && self.dependency_manifest_declares_path(normalized) {
                 continue;
             }
             if first_is_namespace_like
@@ -15274,6 +15336,24 @@ impl CodeGen {
             normalized_scope_target
         };
         let target_path = normalized_scope_target.trim();
+        // Bindings are crate-rooted: a relative path into a CHILD module of
+        // the importing module (`pub(crate) use waker::create_waker;` inside
+        // `mod types`, which declares `mod waker`) names `types::waker::…`,
+        // and a use site elsewhere (`types::create_waker()` at the crate root)
+        // must not re-read it relative to its own scope.
+        let child_rooted_target = if !module_path.is_empty()
+            && !target_path.starts_with("::")
+            && let Some((first, _)) = target_path.split_once("::")
+            && !self.declared_module_paths.contains(first)
+            && self
+                .declared_module_paths
+                .contains(&format!("{}::{}", module_path.join("::"), first))
+        {
+            Some(format!("{}::{}", module_path.join("::"), target_path))
+        } else {
+            None
+        };
+        let target_path = child_rooted_target.as_deref().unwrap_or(target_path);
         if local_name.is_empty()
             || target_path.is_empty()
             || local_name == "_"
@@ -18640,6 +18720,23 @@ impl CodeGen {
         let segments: Vec<&str> = path_body.split("::").collect();
         let mut result: Vec<String> = Vec::new();
         let mut prefix_parts: Vec<String> = Vec::new();
+        // A relative path rooted at a RENAMED child module of the current
+        // module (`mpsc_queue::MpscSender` inside `mod collections`, whose
+        // `mpsc_queue` is renamed away from the function it re-exports):
+        // look the renames up under the current module.
+        // (A leading `::` does not rule it out: make_using_path_cpp_legal
+        // roots every qualified use-path; only a real crate-root module of
+        // the same name does.)
+        if segments.len() > 1
+            && !self.module_stack.is_empty()
+            && let Some(first) = segments.first().map(|seg| seg.trim())
+            && (prefix.is_empty() || !self.declared_module_paths.contains(first))
+            && self
+                .module_namespace_renames
+                .contains_key(&format!("{}::{}", self.module_stack.join("::"), first))
+        {
+            prefix_parts = self.module_stack.clone();
+        }
         for seg in &segments {
             let clean_seg = seg.trim();
             if clean_seg.is_empty() {
@@ -24650,7 +24747,23 @@ impl CodeGen {
         // member's target `libyaml::emitter` into `(libyaml::error)::
         // emitter` — the rename shadows the real module for EXPRESSION
         // paths, but never for use-targets.
-        let names_real_module_path = {
+        // Uniform paths also resolve a use-target against the CURRENT module:
+        // `pub use mpsc_queue::{mpsc_queue, MpscSender};` inside `mod
+        // collections` names its child module `mpsc_queue` (the type/module
+        // namespace), not the function the same statement imports.
+        let root_is_child_module = !current_scope.is_empty()
+            && lookup_path.split_once("::").is_some_and(|(root, _)| {
+                let child = format!("{}::{}", current_scope, root);
+                self.declared_module_paths.iter().any(|m| {
+                    *m == child
+                        || m.split("::")
+                            .map(escape_cpp_keyword)
+                            .collect::<Vec<_>>()
+                            .join("::")
+                            == child
+                })
+            });
+        let names_real_module_path = root_is_child_module || {
             let matches_declared = |candidate: &str| {
                 candidate == lookup_path
                     || (lookup_path.starts_with(candidate)
@@ -25173,9 +25286,28 @@ impl CodeGen {
         let root_is_private_like =
             matches!(root, "private" | "private_") || root.starts_with("__private");
         let normalized_variants = self.owner_key_spelling_variants(normalized);
+        // A path through a child module RENAMED for colliding with the very
+        // function it re-exports (`mpsc_queue_tests::mpsc_queue` for
+        // `pub use mpsc_queue::mpsc_queue;` in `mod collections`) names that
+        // function under the module's Rust path.
+        let scope = self.module_stack.join("::");
+        let renamed_root_function_path = normalized.split_once("::").and_then(|(first, rest)| {
+            self.module_namespace_renames.iter().find_map(|(original, renamed)| {
+                (renamed == first
+                    && original
+                        .rsplit_once("::")
+                        .map(|(parent, _)| parent)
+                        .unwrap_or("")
+                        == scope)
+                    .then(|| format!("{}::{}", original, rest))
+            })
+        });
         let is_known_function_path = normalized_variants
             .iter()
-            .any(|candidate| self.is_known_free_function_path(candidate));
+            .any(|candidate| self.is_known_free_function_path(candidate))
+            || renamed_root_function_path
+                .as_deref()
+                .is_some_and(|path| self.is_known_free_function_path(path));
         let matches_tail_declared_module = self
             .declared_module_paths
             .iter()
@@ -46965,8 +47097,11 @@ impl CodeGen {
         {
             return format!("rusty::ptr::detail::integer_or_address_cast<{}>({})", ty, expr);
         }
+        // `Arc::as_ptr(&a) as usize` (an integer target only: pointer-to-
+        // pointer casts of such calls keep their existing lowering).
         let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&cast.expr)
-            || self.expr_is_raw_pointer_cast_local(&cast.expr);
+            || self.expr_is_raw_pointer_cast_local(&cast.expr)
+            || (target_is_numeric_scalar && self.expr_is_raw_pointer_ctor_call(&cast.expr));
         let source_is_explicit_reference = matches!(
             self.peel_paren_group_expr(&cast.expr),
             syn::Expr::Reference(_)
@@ -50552,7 +50687,12 @@ impl CodeGen {
         // destructured tuple param types its bindings (`|(event, mark)|` on
         // `Result<(&Event, Mark)>` → `event: &Event`).
         let map_input_ty = if closure.inputs.len() == 1 {
-            self.pending_map_closure_input_type.borrow_mut().take()
+            let closure_key = closure as *const syn::ExprClosure as usize;
+            self.pending_map_closure_input_type
+                .borrow_mut()
+                .take()
+                .filter(|(key, _)| *key == closure_key)
+                .map(|(_, ty)| ty)
         } else {
             *self.pending_map_closure_input_type.borrow_mut() = None;
             None

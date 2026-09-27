@@ -878,6 +878,42 @@ impl CodeGen {
         mapped
     }
 
+    /// A crate type path whose module the C++ renames
+    /// (`collections::mpsc_queue::MpscReceiver<T>` ->
+    /// `collections::mpsc_queue_tests::MpscReceiver<T>`, the module renamed
+    /// away from the fn `mpsc_queue` it re-exports). Only the module head
+    /// before any template argument list is rewritten; paths through no
+    /// renamed module are returned unchanged.
+    pub(super) fn rename_modules_in_type_path_head(&self, path: &str) -> String {
+        if self.module_namespace_renames.is_empty() || !path.contains("::") {
+            return path.to_string();
+        }
+        let (head, tail) = match path.find('<') {
+            Some(idx) => (&path[..idx], &path[idx..]),
+            None => (path, ""),
+        };
+        let (global, body) = match head.strip_prefix("::") {
+            Some(rest) => ("::", rest),
+            None => ("", head),
+        };
+        let mut prefix: Vec<&str> = Vec::new();
+        let mut renamed_any = false;
+        let mut out: Vec<String> = Vec::new();
+        for seg in body.split("::") {
+            prefix.push(seg);
+            if let Some(renamed) = self.module_namespace_renames.get(&prefix.join("::")) {
+                out.push(renamed.clone());
+                renamed_any = true;
+            } else {
+                out.push(seg.to_string());
+            }
+        }
+        if !renamed_any {
+            return path.to_string();
+        }
+        format!("{}{}{}", global, out.join("::"), tail)
+    }
+
     pub(super) fn type_is_reference_like(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Reference(_) => true,
@@ -3605,7 +3641,7 @@ impl CodeGen {
                             && let Some(reexport_target) =
                                 self.resolve_type_reexport_path_via_scope_binding(&path_str)
                         {
-                            path_str = reexport_target;
+                            path_str = self.rename_modules_in_type_path_head(&reexport_target);
                         }
                         if !path_str.starts_with("::") {
                             let root = path_str.split("::").next().unwrap_or("");
@@ -4156,6 +4192,7 @@ impl CodeGen {
                     {
                         path_str = reexport_target;
                     }
+                    path_str = self.rename_modules_in_type_path_head(&path_str);
                     path_str =
                         self.maybe_force_global_for_shadowed_module_root_in_type_path(&path_str);
                     return self.maybe_prefix_typename_for_dependent_type_path(tp, path_str);

@@ -1,12 +1,14 @@
 #[cfg(feature = "extra")]
 mod extra;
 pub mod backend;
+pub mod sched;
 pub mod spec;
 pub mod widget;
 
 pub use backend::{with_backend, Backend};
 pub use spec::inv;
 pub use widget::Widget;
+pub use sched::sched_total;
 
 pub fn total(widget: &Widget) -> u32 {
     widget.value() + bonus()

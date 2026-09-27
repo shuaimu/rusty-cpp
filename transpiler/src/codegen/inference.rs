@@ -991,7 +991,10 @@ impl CodeGen {
                     escaped_target = escaped_target.trim_start_matches("::").to_string();
                 }
             }
-            Some(escaped_target)
+            // Through a module the C++ renames (`collections::mpsc_queue` ->
+            // `mpsc_queue_tests`, beside the fn it re-exports): bindings are
+            // recorded before the renames are known.
+            Some(self.rename_modules_in_type_path_head(&escaped_target))
         }
     }
 
@@ -14211,9 +14214,48 @@ impl CodeGen {
         if scoped_matches.len() != 1 {
             return None;
         }
+        // The scope's own import of the name wins over the crate's unique
+        // same-named declaration: `use lion_reactor::Reactor;` at the root of a
+        // crate that also declares `types::reactor::Reactor`. Defer to the
+        // scope-binding resolution (resolve_unique_nonlocal_type_path).
+        let scope_key = self.module_stack.join("::");
+        if let Some(bound) = self.resolve_scope_import_binding_path_for_scope(&scope_key, name) {
+            let bound = bound.trim().trim_start_matches("::");
+            let bound = bound.strip_prefix("crate::").unwrap_or(bound);
+            if bound != scoped_matches[0] {
+                return None;
+            }
+        }
 
         let escaped = self.escape_and_rename_qualified_name(scoped_matches[0]);
         Some(format!("::{}", escaped))
+    }
+
+    /// `::<dep>[::<module>]::<name>` for the one namespace-wrapped dependency
+    /// crate whose manifest declares a type `name` (graph mode only).
+    pub(super) fn unique_dependency_type_path(&self, name: &str) -> Option<String> {
+        if !self.crate_graph_mode {
+            return None;
+        }
+        let mut found: Vec<String> = Vec::new();
+        for manifest in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&manifest.module) {
+                continue;
+            }
+            for declared in &manifest.declared_types {
+                if declared.name != name {
+                    continue;
+                }
+                found.push(if declared.module_path.is_empty() {
+                    format!("::{}::{}", manifest.module, name)
+                } else {
+                    format!("::{}::{}::{}", manifest.module, declared.module_path, name)
+                });
+            }
+        }
+        found.sort();
+        found.dedup();
+        (found.len() == 1).then(|| found.remove(0))
     }
 
     pub(super) fn resolve_unique_nonlocal_type_path(&self, name: &str) -> Option<String> {
@@ -14342,7 +14384,12 @@ impl CodeGen {
             })
             .collect();
         if scoped_matches.is_empty() {
-            return None;
+            // Under --crate-graph, a bare name no local declaration or
+            // in-scope import binds may still be a dependency crate's type the
+            // AUTHORING scope imported (a method merged into its struct from
+            // another module: `use crate::types::PollResult;` in
+            // `executor/poll_task.rs`, declared inside `executor`'s class).
+            return self.unique_dependency_type_path(name);
         }
 
         let current_scoped = if self.module_stack.is_empty() {

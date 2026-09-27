@@ -440,3 +440,104 @@ pub fn wipe(cell: &RefCell<HashMap<u64, u8>>) {
         "{cpp}"
     );
 }
+
+// ---- lion-executor name resolution and runtime surface --------------------
+
+#[test]
+fn std_path_resolves_under_a_glob_import() {
+    // A glob-imported `std` beside the prelude `std` would be an ambiguity
+    // error, so under a glob `Context::from_waker` is still std's.
+    let cpp = translate(
+        r#"
+pub mod waker {
+    pub fn helper() -> u8 { 1 }
+}
+pub mod ext {
+    use std::task::{Context, Waker};
+    use super::waker::*;
+    pub fn make(w: &Waker) -> u8 {
+        let cx = Context::from_waker(w);
+        let _ = cx;
+        helper()
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("auto cx = rusty::Context{std::addressof(w)};"), "{cpp}");
+}
+
+#[test]
+fn pinned_send_future_field_and_reexported_field_type_derive_send() {
+    let cpp = translate(
+        r#"
+pub mod types {
+    mod boxed {
+        use std::future::Future;
+        use std::pin::Pin;
+        pub struct Boxed {
+            pub inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+        }
+    }
+    mod task {
+        use super::Boxed;
+        pub struct Task {
+            pub id: u64,
+            pub future: Boxed,
+        }
+    }
+    pub use boxed::Boxed;
+    pub use task::Task;
+}
+"#,
+    );
+    let task = cpp.split("export struct Task {").nth(1).expect(&cpp);
+    let task = &task[..task.find("};").expect(&cpp)];
+    assert!(task.contains("static constexpr bool is_send = true;"), "{cpp}");
+    let boxed = cpp.split("export struct Boxed {").nth(1).expect(&cpp);
+    let boxed = &boxed[..boxed.find("};").expect(&cpp)];
+    assert!(boxed.contains("static constexpr bool is_send = true;"), "{cpp}");
+}
+
+#[test]
+fn arc_as_ptr_address_and_poison_into_inner_value() {
+    let cpp = translate(
+        r#"
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+pub fn id(a: &Arc<u64>) -> usize {
+    Arc::as_ptr(a) as usize
+}
+pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+"#,
+    );
+    assert!(
+        cpp.contains("static_cast<size_t>(reinterpret_cast<std::uintptr_t>(Arc<uint64_t>::as_ptr(a)))"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("m.lock().unwrap_or_else(rusty::sync::poison_into_inner)"), "{cpp}");
+}
+
+#[test]
+fn imported_constructors_and_result_ctors_are_not_variants_of_a_poll_return() {
+    let cpp = translate(
+        r#"
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::task::Poll;
+pub fn run(f: fn() -> u8) -> Poll<u8> {
+    let value = match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_) => return Poll::Pending,
+    };
+    Poll::Ready(value)
+}
+pub fn pick(x: bool) -> Poll<Result<u8, u8>> {
+    let r = if x { Err(1) } else { Ok(2) };
+    Poll::Ready(r)
+}
+"#,
+    );
+    assert!(cpp.contains("catch_unwind_std(AssertUnwindSafe(std::move(f)))"), "{cpp}");
+    assert!(!cpp.contains("Poll<uint8_t>::AssertUnwindSafe"), "{cpp}");
+    assert!(!cpp.contains("rusty::Poll<rusty::Result<uint8_t, uint8_t>>::Err"), "{cpp}");
+}

@@ -7202,6 +7202,60 @@ impl CodeGen {
     /// If `tree` is a glob path (`crate::private::*`, `self::foo::*`) rooted at THIS crate,
     /// return the escaped C++ namespace it globs (`private_`). Returns None for non-glob,
     /// external-crate, or `super::` paths (the latter needs relative resolution we skip).
+    /// `P::Assoc` / `<P as Trait>::Assoc` where `P` is a type parameter in
+    /// scope and `Assoc` is one of the standard associated types the runtime
+    /// probes (`Output`, `Item`, `Error`, `Target`).
+    pub(super) fn type_param_std_assoc_projection(&self, ty: &syn::Type) -> Option<(String, String)> {
+        let syn::Type::Path(tp) = self.peel_paren_group_type(ty) else {
+            return None;
+        };
+        let assoc = tp.path.segments.last()?;
+        if !matches!(assoc.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let assoc_name = assoc.ident.to_string();
+        if !matches!(assoc_name.as_str(), "Output" | "Item" | "Error" | "Target") {
+            return None;
+        }
+        let param = match &tp.qself {
+            Some(qself) => {
+                let syn::Type::Path(param_path) = self.peel_paren_group_type(&qself.ty) else {
+                    return None;
+                };
+                param_path.path.get_ident()?.to_string()
+            }
+            None => {
+                if tp.path.segments.len() != 2
+                    || !matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                {
+                    return None;
+                }
+                tp.path.segments[0].ident.to_string()
+            }
+        };
+        self.is_type_param_in_scope(&param)
+            .then(|| (escape_cpp_keyword(&param), assoc_name))
+    }
+
+    /// A module whose only item is a public glob re-export
+    /// (`pub mod log { pub use dep::events::*; }`), which emit_mod lowers to a
+    /// namespace alias in a namespace-wrapped crate.
+    pub(super) fn mod_is_glob_only_alias(&self, m: &syn::ItemMod) -> bool {
+        if self
+            .crate_name
+            .as_deref()
+            .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
+            && let Some((_, items)) = &m.content
+            && items.len() == 1
+            && let syn::Item::Use(u) = &items[0]
+            && matches!(u.vis, syn::Visibility::Public(_))
+            && let Some(target) = self.glob_use_target_namespace(&u.tree)
+        {
+            return target != escape_cpp_keyword(&m.ident.to_string());
+        }
+        false
+    }
+
     pub(super) fn glob_use_target_namespace(&self, tree: &syn::UseTree) -> Option<String> {
         let mut segs: Vec<String> = Vec::new();
         let mut cur = tree;
@@ -7398,6 +7452,10 @@ impl CodeGen {
                 let mut nested_mod_names: Vec<String> = items
                     .iter()
                     .filter_map(|item| match item {
+                        // A glob-only module is emitted as a namespace ALIAS
+                        // (emit_mod); an empty namespace skeleton of the same
+                        // name would be a redefinition of it.
+                        syn::Item::Mod(nested) if self.mod_is_glob_only_alias(nested) => None,
                         syn::Item::Mod(nested) => Some(nested.ident.to_string()),
                         _ => None,
                     })
@@ -7481,6 +7539,10 @@ impl CodeGen {
                 let mut nested_mod_names: Vec<String> = items
                     .iter()
                     .filter_map(|item| match item {
+                        // A glob-only module is emitted as a namespace ALIAS
+                        // (emit_mod); an empty namespace skeleton of the same
+                        // name would be a redefinition of it.
+                        syn::Item::Mod(nested) if self.mod_is_glob_only_alias(nested) => None,
                         syn::Item::Mod(nested) => Some(nested.ident.to_string()),
                         _ => None,
                     })
@@ -7586,12 +7648,25 @@ impl CodeGen {
             return path.to_string();
         };
         // A module THIS crate declares (its own top-level `de`) keeps resolving in place.
-        let declared_locally = self.declared_module_paths.iter().any(|p| {
-            p.split("::")
-                .map(escape_cpp_keyword)
+        // So does one the current module declares: a relative path resolves
+        // against the current module first (`pub(crate) use reactor::X;` inside
+        // `mod types`, which declares `mod reactor`, names `types::reactor`,
+        // never a dependency's top-level `reactor`).
+        let scoped_module = (!self.module_stack.is_empty()).then(|| {
+            self.module_stack
+                .iter()
+                .map(|segment| escape_cpp_keyword(segment))
+                .chain(std::iter::once(module.to_string()))
                 .collect::<Vec<_>>()
                 .join("::")
-                == module
+        });
+        let declared_locally = self.declared_module_paths.iter().any(|p| {
+            let escaped = p
+                .split("::")
+                .map(escape_cpp_keyword)
+                .collect::<Vec<_>>()
+                .join("::");
+            escaped == module || scoped_module.as_deref() == Some(escaped.as_str())
         });
         if declared_locally {
             return path.to_string();
@@ -8454,6 +8529,25 @@ impl CodeGen {
                             // Genuine c2rust variant re-exports resolve to a LOCAL
                             // sibling-module path, never a runtime/std root.
                             None
+                        } else if using_path.contains(" = ")
+                            || self.declared_item_names.contains(variant)
+                            || self.local_declared_types.iter().any(|decl| {
+                                decl.rsplit("::").next() == Some(variant)
+                            })
+                            || using_segments.first().is_some_and(|root| {
+                                self.name_resolver
+                                    .external_crate_target(root.trim_start_matches("::"))
+                                    .is_some()
+                            })
+                        {
+                            // Nor is an import that names an ITEM: a renamed
+                            // import (`use dep::Reactor as LionReactor;`), a
+                            // leaf this crate declares as a type/fn/const
+                            // (`pub(crate) use task::Task;` beside
+                            // `enum WakeSource { Reactor, Task }`), or a path
+                            // into another crate, whose variants this crate's
+                            // c-like-enum table never holds.
+                            None
                         } else {
                             self.unique_c_like_enum_owner_for_variant_name(variant)
                         }
@@ -9309,6 +9403,24 @@ impl CodeGen {
                 }
             }
             syn::ImplItem::Type(t) => {
+                // Under --crate-graph, a projection of a type parameter's
+                // standard associated type (`type Output = F::Output;`) is
+                // spelled through a probe that is well-formed for every `F`
+                // (include/rusty/traits.hpp), so the class template stays
+                // instantiable where `typename F::Output` would not be.
+                if self.crate_graph_mode
+                    && self.should_soften_dependent_assoc_mode()
+                    && let Some((param, assoc)) = self.type_param_std_assoc_projection(&t.ty)
+                {
+                    let name = escape_cpp_keyword(&t.ident.to_string());
+                    if self.mark_emitted_non_method_member_name(&name) {
+                        self.writeln(&format!(
+                            "using {} = typename rusty::detail::assoc_{}<{}>::type;",
+                            name, assoc, param
+                        ));
+                    }
+                    return;
+                }
                 if self.should_soften_dependent_assoc_mode()
                     && self.type_contains_dependent_assoc(&t.ty)
                 {

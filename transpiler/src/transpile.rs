@@ -1608,12 +1608,13 @@ fn resolve_rust_import_target(
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    resolve_relative_rust_path(
+    resolve_relative_rust_path_in(
         &segments,
         binding_scope,
         declared_trait_paths,
         bindings,
         visiting,
+        true,
     )
 }
 
@@ -1689,6 +1690,26 @@ fn resolve_relative_rust_path(
     bindings: &RustItemImportBindings,
     visiting: &mut std::collections::HashSet<(String, String)>,
 ) -> Option<ResolvedRustItemPath> {
+    resolve_relative_rust_path_in(
+        segments,
+        module_path,
+        declared_trait_paths,
+        bindings,
+        visiting,
+        false,
+    )
+}
+
+/// `import_target`: `segments` is the target of a `use` declaration (see the
+/// glob rule below).
+fn resolve_relative_rust_path_in(
+    segments: &[String],
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+    import_target: bool,
+) -> Option<ResolvedRustItemPath> {
     let head = segments.first()?;
     let tail = &segments[1..];
     let candidates = [
@@ -1718,7 +1739,14 @@ fn resolve_relative_rust_path(
         bindings,
     );
     let Some(best_depth) = best_depth else {
-        if glob_depth.is_some() {
+        // A glob could supply the name — except the first segment of a `use`
+        // target naming an extern-prelude crate: an import whose `std` is
+        // also glob-supplied is rejected by rustc's import resolution as
+        // ambiguous, so in a compiling crate `use std::…` beside a glob
+        // import names the crate. (Direct paths keep failing closed.)
+        if glob_depth.is_some()
+            && !(import_target && matches!(head.as_str(), "std" | "core" | "alloc"))
+        {
             return None;
         }
         return Some(ResolvedRustItemPath::External(segments.to_vec()));
@@ -3308,6 +3336,7 @@ fn transpile_full_with_options_impl(
             .as_ref()
             .is_some_and(|graph| graph.dependency),
     );
+    codegen.set_crate_graph_mode(options.crate_graph.is_some());
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_authenticated_cpp_inherit_roots(
         options.authenticated_cpp_inherit_roots.clone(),

@@ -3,6 +3,9 @@
 //!
 //! - `graph-root` depends on `dep-core` with `default-features = false` and
 //!   on `dep-unused`, which it never names;
+//! - `dep-core` depends on `dep-base`, whose top-level `reactor` module and
+//!   `Reactor` type recur nested in `dep-core`'s executor-shaped `sched`
+//!   module (see its doc comment for the name-resolution shapes);
 //! - `dep-core` gates `mod extra;` and one of two `bonus` definitions on its
 //!   default `extra` feature, keeps its executable code in a `verus!` block with a ghost
 //!   field, has a ghost-only `spec` module (a spec fn and a glob re-export of
@@ -13,9 +16,10 @@
 //!
 //! The emitted C++ is compiled and run, and must agree with the Rust value of
 //! `graph_root::run()` for the selected features: 4 + 0 + 5 * 2 from the
-//! widget and the backend, plus 3722 from `dep_core::scan`, which reuses a
+//! widget and the backend, 3722 from `dep_core::scan`, which reuses a
 //! `Copy` `Option<u64>` after passing it by value and compares copies of a
-//! `derive(Hash, Copy)` newtype.
+//! `derive(Hash, Copy)` newtype, and 230 from `dep_core::sched_total`
+//! (rustc on `sched.rs` with `dep-base`: 230).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -131,7 +135,9 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
         serde_json::from_str(&std::fs::read_to_string(out.join("crate-graph.json")).unwrap()).unwrap();
     assert_eq!(manifest["ghost_only"], serde_json::json!(["dep-spec"]));
     assert_eq!(manifest["unused"], serde_json::json!(["dep-unused"]));
-    assert_eq!(manifest["crates"][0]["module"], "dep_core");
+    assert_eq!(manifest["crates"][0]["module"], "dep_base");
+    assert_eq!(manifest["crates"][1]["module"], "dep_core");
+    let dep_base = out.join("dep-base/dep_base.cppm");
 
     let core = std::fs::read_to_string(&dep_core).unwrap();
     assert!(core.contains("export module dep_core;"), "{core}");
@@ -150,6 +156,19 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
             && core.contains("return rusty::detail::hash_fields(v._0);"),
         "{core}"
     );
+    // Executor-shaped name resolution (sched.rs): a relative re-export out of
+    // the child `reactor` stays the crate's, not dep-base's `reactor`; an
+    // imported item that shares a name with an enum variant stays an item;
+    // the glob-only nested `log` is a namespace alias only; the same-named
+    // child module and function it re-exports stay apart.
+    assert!(core.contains("using reactor::IDLE_MS;"), "{core}");
+    assert!(!core.contains("dep_base::reactor::IDLE_MS"), "{core}");
+    assert!(!core.contains("constexpr auto Reactor ="), "{core}");
+    assert!(!core.contains("constexpr auto Task ="), "{core}");
+    assert!(core.contains("export namespace log = ") && !core.contains("namespace log {}"), "{core}");
+    assert!(core.contains("using channel_tests::channel;"), "{core}");
+    assert!(core.contains("using Output = typename rusty::detail::assoc_Output<F>::type;"), "{core}");
+    assert!(core.contains("rusty::pin_place::map_unchecked_mut((*this),"), "{core}");
     // A consumer crate's implementor reaches the trait through its generic adapter.
     assert!(
         core.contains("template <class U> using rusty_dyn_adapter = BackendDynAdapter<U>;"),
@@ -178,7 +197,11 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     std::fs::create_dir_all(&bmi_dir).unwrap();
     let prebuilt = format!("-fprebuilt-module-path={}", bmi_dir.display());
     let mut objects = Vec::new();
-    for (module, source) in [("dep_core", dep_core.clone()), ("graph_root", out.join("graph_root.cppm"))] {
+    for (module, source) in [
+        ("dep_base", dep_base.clone()),
+        ("dep_core", dep_core.clone()),
+        ("graph_root", out.join("graph_root.cppm")),
+    ] {
         let pcm = bmi_dir.join(format!("{module}.pcm"));
         let precompiled = Command::new(&clang)
             .args(flags)
@@ -220,7 +243,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "3736\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "3966\n");
 }
 
 #[test]

@@ -212,6 +212,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // Concurrency
         "Mutex" | "std::sync::Mutex" => Some(("rusty::Mutex", true)),
+        "PoisonError" | "std::sync::PoisonError" => Some(("rusty::PoisonError", true)),
         "OnceLock" | "std::sync::OnceLock" => Some(("rusty::OnceLock", true)),
         "RwLock" | "std::sync::RwLock" => Some(("rusty::RwLock", true)),
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
@@ -805,6 +806,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         }
         "core::fmt::Formatter::debug_struct_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_struct_field1_finish")
+        }
+        "PoisonError::into_inner" | "std::sync::PoisonError::into_inner" => {
+            Some("rusty::sync::poison_into_inner")
         }
         "Pin::new_unchecked" | "std::pin::Pin::new_unchecked" | "core::pin::Pin::new_unchecked" => {
             Some("rusty::pin::new_unchecked")

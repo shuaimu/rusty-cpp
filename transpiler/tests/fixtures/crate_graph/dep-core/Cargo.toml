@@ -8,4 +8,5 @@ default = ["extra"]
 extra = []
 
 [dependencies]
+dep-base = { path = "../dep-base" }
 dep-spec = { path = "../dep-spec" }

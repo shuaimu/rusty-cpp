@@ -1235,6 +1235,21 @@ impl CodeGen {
                         out,
                     );
                 }
+                // A `thread_local!` static is defined (and initialised) where
+                // its module is emitted: its value type must be complete there
+                // (`RefCell<VecDeque<TaskId>>` needs the crate's VecDeque).
+                syn::Item::Macro(m) if m.mac.path.is_ident("thread_local") => {
+                    for s in crate::cpp_abi::parse_thread_local_statics(&m.mac).unwrap_or_default() {
+                        self.collect_type_module_dependencies_strict(
+                            &s.ty,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            true,
+                            out,
+                        );
+                    }
+                }
                 syn::Item::Fn(f) => {
                     // Signature positions only need the type NAMEABLE: the
                     // per-module pre-pass forward-declares structs and emits
@@ -3897,8 +3912,26 @@ impl CodeGen {
                         }
                         let path = normalized.trim().trim_start_matches("::");
                         if let Some((prefix, name)) = path.rsplit_once("::") {
-                            self.crate_reexports
-                                .insert(name.to_string(), prefix.to_string());
+                            // A relative path in a nested module resolves
+                            // against that module first (`pub(crate) use
+                            // waker::create_waker;` inside `mod types` is
+                            // `types::waker::create_waker`); record it
+                            // crate-rooted.
+                            let prefix = match prefix.split("::").next() {
+                                Some(first)
+                                    if !module_path.is_empty()
+                                        && self.declared_module_paths.contains(&format!(
+                                            "{}::{}",
+                                            module_path.join("::"),
+                                            first
+                                        ))
+                                        && !self.declared_module_paths.contains(first) =>
+                                {
+                                    format!("{}::{}", module_path.join("::"), prefix)
+                                }
+                                _ => prefix.to_string(),
+                            };
+                            self.crate_reexports.insert(name.to_string(), prefix.clone());
                             self.crate_pub_reexport_targets
                                 .insert(format!("{}::{}", prefix, name));
                         }
