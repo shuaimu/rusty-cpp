@@ -1014,32 +1014,61 @@ impl<'a> CppAbiClosurePreflight<'a> {
     ) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
         let sources = self.collect_rs_files(project_dir);
         let mut units = Vec::with_capacity(sources.len());
+        // `--verus-exec`: each unit's text before stage 1, for stage 2.
+        let mut originals = Vec::new();
+        let mut erased_any_block = false;
+        let mut stage_one_failed = false;
         for source in &sources {
             let full = project_dir.join(&source.content);
             match std::fs::read_to_string(&full) {
                 Ok(text) => {
                     let text = if self.verus_exec.enabled {
-                        match prepare_crate_source(&full, text.clone(), &self.verus_exec) {
-                            Ok(prepared) => prepared,
+                        match prepare_crate_source_reporting(&full, text.clone(), &self.verus_exec)
+                        {
+                            Ok((prepared, erased)) => {
+                                erased_any_block |= erased;
+                                originals.push(text);
+                                prepared
+                            }
                             Err(error) => {
                                 // Keep the raw text for the marker scan; the
                                 // codegen read fails hard on the same error.
                                 self.issue(error);
+                                stage_one_failed = true;
+                                originals.push(text.clone());
                                 text
                             }
                         }
                     } else {
                         text
                     };
-                    if source_mentions_cpp_source_contract(&text) {
-                        self.note_source_contract(cargo_toml_path);
-                    }
                     units.push((source.identity.clone(), text));
                 }
                 Err(error) => self.issue(format!(
                     "could not read Rust source {}: {error}",
                     full.display()
                 )),
+            }
+        }
+        // Stage 2 too, as the codegen read does: the contract audits see the
+        // program that is transpiled (no `use vstd::prelude::*;`, no ghost
+        // items), never the Verus surface of the crate.
+        if self.verus_exec.enabled
+            && !stage_one_failed
+            && originals.len() == units.len()
+            && let Ok(cargo) = cmake::parse_cargo_toml(cargo_toml_path)
+        {
+            let crate_name = cargo.package.name.replace('-', "_");
+            if let Err(error) =
+                verus_exec::lower_crate_units(&crate_name, &mut units, &originals, erased_any_block)
+            {
+                self.issue(format!("{}: {error}", cargo_toml_path.display()));
+            }
+        }
+        for (_, text) in &units {
+            if source_mentions_cpp_source_contract(text) {
+                self.note_source_contract(cargo_toml_path);
+                break;
             }
         }
         (

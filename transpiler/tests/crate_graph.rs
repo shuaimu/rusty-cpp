@@ -259,3 +259,64 @@ fn crate_graph_evaluates_default_features_like_cargo() {
     assert!(core.contains("extra::BONUS"), "{core}");
     assert!(!core.contains("return static_cast<uint32_t>(0);"), "{core}");
 }
+
+/// A root that has a C++ ABI adapter, is itself a Verus crate and depends on
+/// Verus crates (SRPC's shape once it depends on lion-reactor): the adapter
+/// crate's opaque-surface audit runs on its ERASED source (no `verus!`, no
+/// `use vstd::prelude::*`), and only on that crate — the dependencies' `verus!`
+/// blocks and glob imports are not audited.
+const ADAPTER_ROOT: &str = r#"//! A C++ ABI adapter crate that is also a Verus crate.
+use vstd::prelude::*;
+
+verus! {
+
+pub fn doubled(x: u32) -> (r: u32)
+    requires
+        x < 1000,
+    ensures
+        r == 2 * x,
+{
+    x * 2
+}
+
+} // verus!
+
+#[cfg_attr(any(), cpp_abi(param(bytes, std_string_bytes), returns(std_string_bytes)))]
+pub fn adapted(bytes: Vec<u8>) -> Vec<u8> {
+    bytes
+}
+
+pub fn run() -> u32 {
+    doubled(dep_core::total(&dep_core::Widget::new(3)))
+}
+"#;
+
+#[test]
+fn crate_graph_audits_an_adapter_root_after_verus_erasure_and_per_crate() {
+    let directory = fixture(false);
+    let root = directory.path().join("root");
+    std::fs::write(root.join("src/lib.rs"), ADAPTER_ROOT).unwrap();
+    let out = directory.path().join("cpp");
+    let transpiled = transpile(&root, &out);
+    assert_success(&transpiled, "--crate-graph transpilation of an adapter root");
+    let emitted = std::fs::read_to_string(out.join("graph_root.cppm")).unwrap();
+    assert!(emitted.contains("export std::string adapted(std::string bytes);"), "{emitted}");
+    assert!(emitted.contains("export uint32_t doubled(uint32_t x);"), "{emitted}");
+    assert!(!emitted.contains("vstd") && !emitted.contains("verus"), "{emitted}");
+    assert!(out.join("dep-core/dep_core.cppm").is_file());
+
+    // Without --verus-exec the same root still reads `verus!` and the vstd
+    // glob, and the adapter audit rejects them before any output.
+    let raw_out = directory.path().join("cpp-raw");
+    let raw = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .arg("--crate")
+        .arg(root.join("Cargo.toml"))
+        .args(["--locked", "--offline", "--output-dir"])
+        .arg(&raw_out)
+        .output()
+        .unwrap();
+    assert!(!raw.status.success(), "the unerased adapter root was accepted");
+    let stderr = String::from_utf8_lossy(&raw.stderr);
+    assert!(stderr.contains("vstd :: prelude :: *"), "{stderr}");
+    assert!(!raw_out.join("graph_root.cppm").exists());
+}
