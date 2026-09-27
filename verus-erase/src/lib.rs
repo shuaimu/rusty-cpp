@@ -58,6 +58,7 @@ macro_rules! parse_macro_input {
 
 #[macro_use]
 mod syntax;
+pub mod protocol;
 mod contrib;
 mod enum_synthesize;
 mod rustdoc;

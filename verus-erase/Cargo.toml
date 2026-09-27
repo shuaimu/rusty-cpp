@@ -18,6 +18,17 @@ path = "src/lib.rs"
 # Rust doctests (upstream is a proc-macro crate and never runs them).
 doctest = false
 
+# The helper process `rusty-cpp-transpiler --verus-exec` spawns (see
+# src/protocol.rs). It lives in this package, not the transpiler's, because
+# verus_syn turns on proc-macro2's `span-locations` feature for everything
+# built in the same Cargo invocation. Build it separately:
+#   cargo build --release -p verus-erase
+# (never together with the transpiler, e.g. `-p rusty-cpp-transpiler -p
+# verus-erase` or `--workspace`, which unifies the feature back in).
+[[bin]]
+name = "rusty-cpp-verus-erase"
+path = "src/bin/rusty-cpp-verus-erase.rs"
+
 [dependencies]
 proc-macro2 = "1.0.39"
 quote = "1.0"

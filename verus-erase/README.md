@@ -20,6 +20,35 @@ that let them run outside a procedural-macro invocation. Any `compile_error!`
 the rewrite emits (a parse error, or one of Verus's syntax diagnostics) comes
 back as `Err`, so callers fail closed.
 
+## The helper binary
+
+The transpiler does not link this crate. `verus_syn` depends on proc-macro2
+with the `span-locations` feature, and Cargo's feature unification would turn
+that on for the transpiler's own proc-macro2 as well: on SRPC's crate, with
+`--verus-exec` off, peak RSS went from 84 to 173 MB and CPU time from 56 to
+72 s. Instead the package builds a small helper, `rusty-cpp-verus-erase`,
+which `rusty-cpp-transpiler --verus-exec` spawns once per source file that
+contains a `verus!` block. `src/protocol.rs` defines the stdin/stdout format;
+every response repeats `VERUS_BUILTIN_MACROS_VERSION` and `VERUS_GIT_REV`, and
+the transpiler refuses a helper that reports a different revision than the
+one it was built against (`rusty-cpp-transpiler --verus-build-info` prints it).
+
+Build the helper in its own Cargo invocation, never in the same one as the
+transpiler (`-p rusty-cpp-transpiler -p verus-erase` or `--workspace` would
+unify the feature back into the transpiler):
+
+```sh
+cargo build --release -p rusty-cpp-transpiler
+cargo build --release -p verus-erase        # target/release/rusty-cpp-verus-erase
+```
+
+The transpiler looks for it via `--verus-erase-helper PATH`, then
+`$RUSTY_CPP_VERUS_ERASE`, then next to its own executable (and, for Cargo test
+binaries in `target/<profile>/deps/`, one directory up). Without a helper,
+`--verus-exec` fails on the first file that needs it; files without Verus
+constructs never spawn it. The transpiler's unit tests build their own copy
+into `target/verus-erase-test-helper/`.
+
 ## Provenance
 
 | | |
@@ -70,6 +99,8 @@ there whenever a Lion crate has been built) or network access.
 `proc_macro::TokenStream`, which panics outside a macro invocation), fixes
 `vstd_kind()` to `Imported` (upstream reads `VSTD_KIND` / `CARGO_PKG_NAME`
 from the expanding process's environment), and exposes the API.
+`protocol.rs` (the helper's wire format) and `bin/rusty-cpp-verus-erase.rs`
+are new too; neither is vendored.
 
 Not vendored: every other `#[proc_macro]` entry point, `contrib/exec_spec.rs`,
 `struct_decl_inv.rs`, `atomic_ghost.rs`, `calc_macro.rs`, `attr_rewrite.rs`,
@@ -111,5 +142,8 @@ resolves, from Lion's `Cargo.lock`):
 4. Compare upstream `lib.rs` with the verbatim block in `src/lib.rs`
    (`EraseGhost`, `VstdKind`), and check whether `rewrite_items` now reaches a
    module that is not vendored (`cargo build -p verus-erase` fails if it does).
-5. Run `upstream-diff.sh`, `cargo test -p verus-erase`, and the transpiler's
+5. Update `VERUS_BUILTIN_MACROS_VERSION` / `VERUS_GIT_REV` in the
+   transpiler's `src/verus_exec.rs` to match (its unit test
+   `transpiler_and_helper_crate_agree_on_the_vendored_revision` checks this).
+6. Run `upstream-diff.sh`, `cargo test -p verus-erase`, and the transpiler's
    differential check against `cargo expand` of the Lion crates.

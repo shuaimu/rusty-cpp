@@ -38,6 +38,13 @@ struct Cli {
     #[arg(long)]
     build_info: bool,
 
+    /// Print, as one-line JSON, the Verus revision whose `verus!` erasure
+    /// `--verus-exec` runs (`verus_builtin_macros_version`, `verus_git_rev`),
+    /// and exit. The `rusty-cpp-verus-erase` helper must report the same
+    /// revision at run time.
+    #[arg(long = "verus-build-info")]
+    verus_build_info: bool,
+
     /// Input Rust source file (.rs) — not needed with --crate or subcommands
     input: Option<PathBuf>,
 
@@ -203,6 +210,12 @@ struct Cli {
     /// (single-file mode: <DIR>/<file name>).
     #[arg(long = "dump-verus-erasure", value_name = "DIR", requires = "verus_exec")]
     dump_verus_erasure: Option<PathBuf>,
+
+    /// With --verus-exec: the `rusty-cpp-verus-erase` helper executable that
+    /// runs Verus's erasure out of process. Default: $RUSTY_CPP_VERUS_ERASE,
+    /// else next to this executable.
+    #[arg(long = "verus-erase-helper", value_name = "PATH", requires = "verus_exec")]
+    verus_erase_helper: Option<PathBuf>,
 
     /// This crate is INSIDE the `rusty` umbrella module's re-export closure —
     /// i.e. `include/rusty/rusty.cppm` `export import`s it (directly or through
@@ -670,6 +683,7 @@ impl<'a> CppAbiClosurePreflight<'a> {
         self.verus_exec = verus_exec::VerusExecConfig {
             enabled: verus_exec.enabled,
             dump_dir: None,
+            helper: verus_exec.helper.clone(),
         };
         self
     }
@@ -11921,7 +11935,9 @@ fn find_rusty_include_dir() -> PathBuf {
 fn main() {
     let cli = Cli::parse();
 
-    if cli.module_preamble.is_some() && (cli.build_info || cli.command.is_some()) {
+    if cli.module_preamble.is_some()
+        && (cli.build_info || cli.verus_build_info || cli.command.is_some())
+    {
         eprintln!("Error: --module-preamble requires module output");
         process::exit(1);
     }
@@ -11932,6 +11948,10 @@ fn main() {
             env!("RUSTY_CPP_GIT_HASH"),
             env!("RUSTY_CPP_GIT_DIRTY")
         );
+        return;
+    }
+    if cli.verus_build_info {
+        println!("{}", verus_exec::build_info_json());
         return;
     }
 
@@ -12093,6 +12113,7 @@ fn main() {
         verus_exec: verus_exec::VerusExecConfig {
             enabled: cli.verus_exec,
             dump_dir: cli.dump_verus_erasure.clone(),
+            helper: cli.verus_erase_helper.clone(),
         },
     };
 

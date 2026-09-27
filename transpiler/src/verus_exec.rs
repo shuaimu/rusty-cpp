@@ -10,6 +10,15 @@
 //! (`verus_erase`, vendored from `verus_builtin_macros`) on every item-level
 //! `verus!` invocation and splicing the resulting items in its place.
 //!
+//! The erasure runs out of process, in the `rusty-cpp-verus-erase` helper
+//! (`verus-erase/src/protocol.rs` has the wire format and the reason: linking
+//! `verus_syn` would turn on proc-macro2 `span-locations` for the whole
+//! transpiler). A file is sent to the helper only if it contains a `verus!`
+//! block; one spawn carries every block of the file. The helper is found via
+//! `--verus-erase-helper`, else `$RUSTY_CPP_VERUS_ERASE`, else next to this
+//! executable, and it must report exactly the Verus revision this transpiler
+//! was built against (`VERUS_GIT_REV`), or the run fails.
+//!
 //! It then evaluates the two cfgs the Verus driver sets and plain rustc never
 //! does, `verus_keep_ghost` and `verus_keep_ghost_body`, as false everywhere
 //! in the file (Lion uses `#![cfg_attr(verus_keep_ghost, verus::trusted)]`
@@ -32,7 +41,11 @@
 //! A file without any of these constructs is returned byte for byte.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::str::FromStr;
 
 use proc_macro2::{TokenStream, TokenTree};
 use syn::punctuated::Punctuated;
@@ -40,12 +53,33 @@ use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{Attribute, Item, Meta, Token};
 
-/// The Verus `builtin_macros` revision whose erasure this build runs.
-#[allow(dead_code)]
-pub const VERUS_BUILTIN_MACROS_VERSION: &str = verus_erase::VERUS_BUILTIN_MACROS_VERSION;
-/// The verus-lang/verus commit that revision was vendored from.
-#[allow(dead_code)]
-pub const VERUS_GIT_REV: &str = verus_erase::VERUS_GIT_REV;
+/// The `verus_builtin_macros` version whose erasure `--verus-exec` runs. It
+/// must equal `verus_erase::VERUS_BUILTIN_MACROS_VERSION`; the helper repeats
+/// it in every response and a mismatch fails the run.
+pub const VERUS_BUILTIN_MACROS_VERSION: &str = "0.0.0-2025-11-10-1957";
+/// The verus-lang/verus commit that erasure was vendored from, spelled the way
+/// Cargo records a git source's resolved commit in `Cargo.lock` (so a consumer
+/// can compare it with its own `vstd` source). Must equal
+/// `verus_erase::VERUS_GIT_REV`; checked against every helper response.
+pub const VERUS_GIT_REV: &str = "db81a7496bfffeef3da8b30c306600ea51d2b0fa";
+
+/// First line of every helper request and response
+/// (`verus_erase::protocol::PROTOCOL`).
+const HELPER_PROTOCOL: &str = "rusty-cpp-verus-erase/1";
+/// File name of the helper executable.
+const HELPER_NAME: &str = "rusty-cpp-verus-erase";
+/// Environment variable naming the helper executable.
+pub const HELPER_ENV: &str = "RUSTY_CPP_VERUS_ERASE";
+
+/// `--verus-build-info`: the Verus revision this transpiler expects, as one
+/// line of JSON. A separate flag rather than extra `--build-info` keys because
+/// consumers (SRPC's gate) require `--build-info` to carry exactly
+/// `git_hash` and `git_dirty`.
+pub fn build_info_json() -> String {
+    format!(
+        r#"{{"verus_builtin_macros_version":"{VERUS_BUILTIN_MACROS_VERSION}","verus_git_rev":"{VERUS_GIT_REV}"}}"#
+    )
+}
 
 /// cfg names the Verus driver sets and plain rustc never does.
 const VERUS_DRIVER_CFGS: &[&str] = &["verus_keep_ghost", "verus_keep_ghost_body"];
@@ -58,6 +92,10 @@ pub struct VerusExecConfig {
     /// `--dump-verus-erasure`: write each source unit, as handed downstream,
     /// to `<dir>/<crate name>/<source identity>`.
     pub dump_dir: Option<PathBuf>,
+    /// `--verus-erase-helper`: the `rusty-cpp-verus-erase` executable. When
+    /// absent, `$RUSTY_CPP_VERUS_ERASE`, then the directory of the running
+    /// executable (and its parent, for Cargo's `deps/` test binaries).
+    pub helper: Option<PathBuf>,
 }
 
 /// Apply `--verus-exec` to one source text (identity when disabled).
@@ -65,7 +103,7 @@ pub fn prepare_source(config: &VerusExecConfig, source: String) -> Result<String
     if !config.enabled {
         return Ok(source);
     }
-    match erase_source(&source)? {
+    match erase_source(config, &source)? {
         Cow::Borrowed(_) => Ok(source),
         Cow::Owned(erased) => Ok(erased),
     }
@@ -93,7 +131,7 @@ pub fn dump_source(
 /// Erase every item-level `verus!` block in `source` and evaluate the Verus
 /// driver cfgs as false. Returns the input unchanged (borrowed) when there is
 /// nothing to do.
-pub fn erase_source(source: &str) -> Result<Cow<'_, str>, String> {
+pub fn erase_source<'a>(config: &VerusExecConfig, source: &'a str) -> Result<Cow<'a, str>, String> {
     // Cheap screen: every construct this pass acts on or rejects spells one
     // of these names. A file that merely mentions one (a comment, a
     // same-named user item) is parsed and audited, then returned unchanged.
@@ -109,7 +147,8 @@ pub fn erase_source(source: &str) -> Result<Cow<'_, str>, String> {
         .map_err(|error| format!("--verus-exec could not parse the source: {error}"))?;
     let mut changed = false;
 
-    changed |= erase_items(&mut file.items, "crate")?;
+    let mut eraser = Eraser::prefetch(config, &file)?;
+    changed |= erase_items(&mut file.items, "crate", &mut eraser)?;
 
     let mut cfg = DriverCfgPass::default();
     cfg.visit_file_mut(&mut file);
@@ -158,7 +197,7 @@ fn is_verus_items_macro(path: &syn::Path) -> bool {
 /// Replace every `verus! { ... }` in `items` (and in inline `mod` bodies) with
 /// the items Verus's EraseAll rewrite produces. Returns whether anything
 /// changed.
-fn erase_items(items: &mut Vec<Item>, scope: &str) -> Result<bool, String> {
+fn erase_items(items: &mut Vec<Item>, scope: &str, eraser: &mut Eraser<'_>) -> Result<bool, String> {
     let mut changed = false;
     let mut index = 0;
     while index < items.len() {
@@ -171,9 +210,14 @@ fn erase_items(items: &mut Vec<Item>, scope: &str) -> Result<bool, String> {
                         "--verus-exec: attributes on a `verus!` invocation in `{scope}` are unsupported"
                     ));
                 }
-                let erased = verus_erase::erase_items(item_macro.mac.tokens.clone()).map_err(
-                    |error| format!("--verus-exec: Verus rejected a `verus!` block in `{scope}`: {error}"),
-                )?;
+                let erased = eraser.erase(&item_macro.mac.tokens)?.map_err(|error| {
+                    format!("--verus-exec: Verus rejected a `verus!` block in `{scope}`: {error}")
+                })?;
+                let erased = TokenStream::from_str(&erased).map_err(|error| {
+                    format!(
+                        "--verus-exec: the erasure of a `verus!` block in `{scope}` does not lex: {error}"
+                    )
+                })?;
                 let erased: syn::File = syn::parse2(erased).map_err(|error| {
                     format!(
                         "--verus-exec: the erasure of a `verus!` block in `{scope}` is not Rust syn can parse: {error}"
@@ -198,7 +242,7 @@ fn erase_items(items: &mut Vec<Item>, scope: &str) -> Result<bool, String> {
                     if let Item::Mod(module) = &mut items[index] {
                         let name = format!("{scope}::{}", module.ident);
                         if let Some((_, content)) = &mut module.content {
-                            changed |= erase_items(content, &name)?;
+                            changed |= erase_items(content, &name, eraser)?;
                         }
                     }
                     index += 1;
@@ -208,7 +252,7 @@ fn erase_items(items: &mut Vec<Item>, scope: &str) -> Result<bool, String> {
             Item::Mod(module) => {
                 let name = format!("{scope}::{}", module.ident);
                 if let Some((_, content)) = &mut module.content {
-                    changed |= erase_items(content, &name)?;
+                    changed |= erase_items(content, &name, eraser)?;
                 }
             }
             _ => {}
@@ -216,6 +260,210 @@ fn erase_items(items: &mut Vec<Item>, scope: &str) -> Result<bool, String> {
         index += 1;
     }
     Ok(changed)
+}
+
+// ---------------------------------------------------------------------------
+// the rusty-cpp-verus-erase helper
+
+/// Erases `verus!` block bodies through the helper process. Every block that
+/// is visible in the file before erasure goes to the helper in one request
+/// (`prefetch`); a block that only appears inside another block's erasure (a
+/// `verus!` nested in an inline module) costs one more request.
+struct Eraser<'a> {
+    config: &'a VerusExecConfig,
+    /// Results keyed by the block's token text, in request order.
+    ready: BTreeMap<String, VecDeque<Result<String, String>>>,
+}
+
+impl<'a> Eraser<'a> {
+    fn prefetch(config: &'a VerusExecConfig, file: &syn::File) -> Result<Self, String> {
+        let mut blocks = Vec::new();
+        collect_verus_blocks(&file.items, &mut blocks);
+        let mut eraser = Eraser {
+            config,
+            ready: BTreeMap::new(),
+        };
+        if !blocks.is_empty() {
+            let results = run_helper(config, &blocks)?;
+            for (block, result) in blocks.into_iter().zip(results) {
+                eraser.ready.entry(block).or_default().push_back(result);
+            }
+        }
+        Ok(eraser)
+    }
+
+    /// The erasure of one block body: `Ok(Ok(text))` for the erased items as
+    /// token text, `Ok(Err(message))` when Verus rejects the block, `Err` when
+    /// the helper itself could not be run.
+    fn erase(&mut self, tokens: &TokenStream) -> Result<Result<String, String>, String> {
+        let text = tokens.to_string();
+        if let Some(result) = self.ready.get_mut(&text).and_then(VecDeque::pop_front) {
+            return Ok(result);
+        }
+        Ok(run_helper(self.config, std::slice::from_ref(&text))?.remove(0))
+    }
+}
+
+fn collect_verus_blocks(items: &[Item], out: &mut Vec<String>) {
+    for item in items {
+        match item {
+            Item::Macro(item_macro)
+                if item_macro.ident.is_none() && is_verus_items_macro(&item_macro.mac.path) =>
+            {
+                out.push(item_macro.mac.tokens.to_string());
+            }
+            Item::Mod(module) => {
+                if let Some((_, content)) = &module.content {
+                    collect_verus_blocks(content, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Locate the helper executable (see `VerusExecConfig::helper`).
+fn helper_path(config: &VerusExecConfig) -> Result<PathBuf, String> {
+    if let Some(path) = &config.helper {
+        return Ok(path.clone());
+    }
+    if let Some(path) = std::env::var_os(HELPER_ENV).filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let file_name = format!("{HELPER_NAME}{}", std::env::consts::EXE_SUFFIX);
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let mut candidates = vec![dir.join(&file_name)];
+        // Cargo test binaries run from `target/<profile>/deps/`.
+        if dir.file_name().is_some_and(|name| name == "deps")
+            && let Some(profile_dir) = dir.parent()
+        {
+            candidates.push(profile_dir.join(&file_name));
+        }
+        if let Some(found) = candidates.into_iter().find(|candidate| candidate.is_file()) {
+            return Ok(found);
+        }
+    }
+    Err(format!(
+        "--verus-exec runs Verus's erasure in the `{HELPER_NAME}` helper, and none was found \
+         next to this executable. Build it in its own Cargo invocation \
+         (`cargo build --release -p verus-erase`; building it together with the \
+         transpiler turns proc-macro2 `span-locations` on for the transpiler), then \
+         place it next to rusty-cpp-transpiler, set {HELPER_ENV}, or pass \
+         --verus-erase-helper PATH"
+    ))
+}
+
+fn push_line(out: &mut Vec<u8>, line: &str) {
+    out.extend_from_slice(line.as_bytes());
+    out.push(b'\n');
+}
+
+fn encode_request(blocks: &[String]) -> Vec<u8> {
+    let mut request = Vec::new();
+    push_line(&mut request, HELPER_PROTOCOL);
+    push_line(&mut request, &format!("blocks {}", blocks.len()));
+    for block in blocks {
+        push_line(&mut request, &block.len().to_string());
+        request.extend_from_slice(block.as_bytes());
+        request.push(b'\n');
+    }
+    request
+}
+
+/// Decode a helper response carrying `expected` results, checking that the
+/// helper vendors exactly the Verus revision this transpiler expects.
+fn decode_response(
+    response: &[u8],
+    expected: usize,
+) -> Result<Vec<Result<String, String>>, String> {
+    let mut at = 0usize;
+    let line = |at: &mut usize| -> Result<String, String> {
+        let rest = &response[*at..];
+        let end = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or("truncated response")?;
+        *at += end + 1;
+        String::from_utf8(rest[..end].to_vec()).map_err(|_| "response line is not UTF-8".to_string())
+    };
+    let magic = line(&mut at)?;
+    if magic != HELPER_PROTOCOL {
+        return Err(format!("expected `{HELPER_PROTOCOL}`, got `{magic}`"));
+    }
+    let version = line(&mut at)?;
+    let rev = line(&mut at)?;
+    let want_version = format!("verus_builtin_macros {VERUS_BUILTIN_MACROS_VERSION}");
+    let want_rev = format!("verus_git_rev {VERUS_GIT_REV}");
+    if version != want_version || rev != want_rev {
+        return Err(format!(
+            "the helper vendors a different Verus erasure (`{version}`, `{rev}`) than this \
+             transpiler expects (`{want_version}`, `{want_rev}`)"
+        ));
+    }
+    if line(&mut at)? != format!("blocks {expected}") {
+        return Err(format!("expected `blocks {expected}`"));
+    }
+    let mut results = Vec::with_capacity(expected);
+    for _ in 0..expected {
+        let header = line(&mut at)?;
+        let (tag, len) = header
+            .split_once(' ')
+            .and_then(|(tag, len)| Some((tag, len.parse::<usize>().ok()?)))
+            .ok_or_else(|| format!("malformed result header `{header}`"))?;
+        let rest = &response[at..];
+        if rest.len() < len + 1 || rest[len] != b'\n' {
+            return Err("truncated result payload".to_string());
+        }
+        let payload = String::from_utf8(rest[..len].to_vec())
+            .map_err(|_| "result payload is not UTF-8".to_string())?;
+        at += len + 1;
+        results.push(match tag {
+            "ok" => Ok(payload),
+            "err" => Err(payload),
+            _ => return Err(format!("unknown result tag `{tag}`")),
+        });
+    }
+    if at != response.len() {
+        return Err("trailing bytes after the last result".to_string());
+    }
+    Ok(results)
+}
+
+/// Erase `blocks` (each the token text of one `verus!` body) in one helper
+/// process.
+fn run_helper(
+    config: &VerusExecConfig,
+    blocks: &[String],
+) -> Result<Vec<Result<String, String>>, String> {
+    let helper = helper_path(config)?;
+    let failure = |what: String| format!("--verus-exec: helper `{}` {what}", helper.display());
+    let mut child = Command::new(&helper)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| failure(format!("could not be started: {error}")))?;
+    let request = encode_request(blocks);
+    let mut stdin = child.stdin.take().expect("helper stdin is piped");
+    // Write from another thread so a large response cannot block the helper
+    // while this thread is still writing the request.
+    let writer = std::thread::spawn(move || stdin.write_all(&request));
+    let output = child
+        .wait_with_output()
+        .map_err(|error| failure(format!("could not be waited for: {error}")))?;
+    let written = writer.join().expect("helper stdin writer does not panic");
+    if !output.status.success() {
+        return Err(failure(format!(
+            "failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    written.map_err(|error| failure(format!("did not accept the request: {error}")))?;
+    decode_response(&output.stdout, blocks.len())
+        .map_err(|error| failure(format!("returned an unusable response: {error}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -690,9 +938,68 @@ impl<'ast> Visit<'ast> for ResidueAudit {
     }
 }
 
+/// Test support: the helper executable, built once per test process.
+#[cfg(test)]
+pub(crate) mod test_helper {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    /// `$RUSTY_CPP_VERUS_ERASE` when set; otherwise `cargo build` of the
+    /// helper into its own target directory under the workspace's `target/`
+    /// (a separate directory, so the build neither waits on the lock of the
+    /// `cargo test` running this binary nor unifies features with it).
+    pub(crate) fn path() -> PathBuf {
+        static HELPER: OnceLock<PathBuf> = OnceLock::new();
+        HELPER
+            .get_or_init(|| {
+                if let Some(path) = std::env::var_os(super::HELPER_ENV).filter(|v| !v.is_empty()) {
+                    return PathBuf::from(path);
+                }
+                let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .expect("transpiler/ has a parent")
+                    .to_path_buf();
+                let target_dir = workspace.join("target").join("verus-erase-test-helper");
+                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+                let status = std::process::Command::new(cargo)
+                    .current_dir(&workspace)
+                    .args([
+                        "build",
+                        "--release",
+                        "--locked",
+                        "-p",
+                        "verus-erase",
+                        "--bin",
+                        super::HELPER_NAME,
+                        "--target-dir",
+                    ])
+                    .arg(&target_dir)
+                    .status()
+                    .expect("cargo runs");
+                assert!(status.success(), "building the verus-erase helper failed");
+                target_dir
+                    .join("release")
+                    .join(format!("{}{}", super::HELPER_NAME, std::env::consts::EXE_SUFFIX))
+            })
+            .clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config() -> VerusExecConfig {
+        VerusExecConfig {
+            enabled: true,
+            dump_dir: None,
+            helper: Some(test_helper::path()),
+        }
+    }
+
+    fn erase_source(source: &str) -> Result<Cow<'_, str>, String> {
+        super::erase_source(&config(), source)
+    }
 
     fn erase(source: &str) -> String {
         erase_source(source).expect("erasure succeeds").into_owned()
@@ -884,11 +1191,86 @@ pub struct S {
         let config = VerusExecConfig {
             enabled: true,
             dump_dir: Some(dir.path().to_path_buf()),
+            helper: Some(test_helper::path()),
         };
         let prepared = prepare_source(&config, "verus! { fn f() ensures true {} }".to_string())
             .unwrap();
         dump_source(&config, "demo", Path::new("src/lib.rs"), &prepared).unwrap();
         let dumped = std::fs::read_to_string(dir.path().join("demo/src/lib.rs")).unwrap();
         assert_eq!(dumped, pretty("fn f() {}"));
+    }
+
+    #[test]
+    fn one_helper_request_carries_every_block_of_a_file() {
+        // Two blocks plus one inside an inline module: all three are in the
+        // prefetch batch, so erasing them needs no further request.
+        let file = syn::parse_file(
+            "verus! { fn a() {} } mod m { verus! { fn b() ensures true {} } } verus! { spec fn s() -> int { 0 } }",
+        )
+        .unwrap();
+        let config = config();
+        let mut eraser = Eraser::prefetch(&config, &file).unwrap();
+        assert_eq!(eraser.ready.values().map(VecDeque::len).sum::<usize>(), 3);
+        let erased = erase(
+            "verus! { fn a() {} } mod m { verus! { fn b() ensures true {} } } verus! { spec fn s() -> int { 0 } }",
+        );
+        assert_eq!(erased, pretty("fn a() {} mod m { fn b() {} }"));
+        // The prefetched results serve the erasure without a second request.
+        for body in ["fn a() {}", "fn b() ensures true {}", "spec fn s() -> int { 0 }"] {
+            let tokens = TokenStream::from_str(body).unwrap();
+            assert!(eraser.ready.contains_key(&tokens.to_string()), "{body}");
+            assert!(eraser.erase(&tokens).unwrap().is_ok(), "{body}");
+        }
+        assert!(eraser.ready.values().all(VecDeque::is_empty));
+    }
+
+    #[test]
+    fn helper_must_vendor_the_expected_verus_revision() {
+        let good = format!(
+            "{HELPER_PROTOCOL}\nverus_builtin_macros {VERUS_BUILTIN_MACROS_VERSION}\nverus_git_rev {VERUS_GIT_REV}\nblocks 1\nok 2\nab\n"
+        );
+        assert_eq!(decode_response(good.as_bytes(), 1).unwrap(), vec![Ok("ab".to_string())]);
+        let other_rev = good.replace(VERUS_GIT_REV, "0000000000000000000000000000000000000000");
+        let error = decode_response(other_rev.as_bytes(), 1).unwrap_err();
+        assert!(error.contains("different Verus erasure"), "{error}");
+        assert!(decode_response(good.as_bytes(), 2).is_err());
+        assert!(decode_response(&good.as_bytes()[..good.len() - 1], 1).is_err());
+    }
+
+    #[test]
+    fn missing_helper_fails_closed_with_build_instructions() {
+        let config = VerusExecConfig {
+            enabled: true,
+            dump_dir: None,
+            helper: Some(PathBuf::from("/nonexistent/rusty-cpp-verus-erase")),
+        };
+        let error = super::erase_source(&config, "verus! { fn f() {} }").unwrap_err();
+        assert!(error.contains("could not be started"), "{error}");
+        // A file without Verus constructs never needs the helper.
+        assert!(matches!(
+            super::erase_source(&config, "fn f() {}").unwrap(),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn transpiler_and_helper_crate_agree_on_the_vendored_revision() {
+        let lib = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../verus-erase/src/lib.rs"),
+        )
+        .unwrap();
+        assert!(lib.contains(&format!(
+            "pub const VERUS_BUILTIN_MACROS_VERSION: &str = \"{VERUS_BUILTIN_MACROS_VERSION}\";"
+        )));
+        assert!(lib.contains(&format!("pub const VERUS_GIT_REV: &str = \"{VERUS_GIT_REV}\";")));
+        let protocol = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../verus-erase/src/protocol.rs"),
+        )
+        .unwrap();
+        assert!(protocol.contains(&format!("pub const PROTOCOL: &str = \"{HELPER_PROTOCOL}\";")));
+        let output = Command::new(test_helper::path()).arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let version = String::from_utf8(output.stdout).unwrap();
+        assert!(version.contains(VERUS_GIT_REV) && version.contains(VERUS_BUILTIN_MACROS_VERSION), "{version}");
     }
 }
