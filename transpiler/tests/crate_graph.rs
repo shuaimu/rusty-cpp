@@ -12,7 +12,10 @@
 //!   `Box<dyn dep_core::Backend>` back to `dep-core`.
 //!
 //! The emitted C++ is compiled and run, and must agree with the Rust value of
-//! `graph_root::run()` for the selected features (4 + 0 + 5 * 2).
+//! `graph_root::run()` for the selected features: 4 + 0 + 5 * 2 from the
+//! widget and the backend, plus 3722 from `dep_core::scan`, which reuses a
+//! `Copy` `Option<u64>` after passing it by value and compares copies of a
+//! `derive(Hash, Copy)` newtype.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -139,8 +142,14 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert!(core.contains("return static_cast<uint32_t>(0);"), "{core}");
     // Ghost state lowered, ghost-only module and its re-exports gone.
     assert!(core.contains("[[no_unique_address]] rusty::Ghost log;"), "{core}");
-    assert!(!core.contains("namespace spec") && !core.contains("inv"), "{core}");
+    assert!(!core.contains("namespace spec") && !core.contains(" inv("), "{core}");
     assert!(!core.contains("TODO") && !core.contains("dep_spec"), "{core}");
+    // derive(Hash) hashes the fields, at global scope, fully qualified.
+    assert!(
+        core.contains("struct std::hash<::dep_core::Id> {")
+            && core.contains("return rusty::detail::hash_fields(v._0);"),
+        "{core}"
+    );
     // A consumer crate's implementor reaches the trait through its generic adapter.
     assert!(
         core.contains("template <class U> using rusty_dyn_adapter = BackendDynAdapter<U>;"),
@@ -211,7 +220,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "14\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "3736\n");
 }
 
 #[test]

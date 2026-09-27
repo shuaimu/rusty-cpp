@@ -1,6 +1,7 @@
 //! Codegen fixtures for shapes `--crate-graph` output depends on: a crate's
-//! Rust modules emitted as nested namespaces of ONE module, and dyn traits
-//! named across those namespaces and implemented across crates.
+//! Rust modules emitted as nested namespaces of ONE module, dyn traits named
+//! across those namespaces and across crates, and the lowering gaps Lion's
+//! runtime crates surfaced.
 use super::*;
 
 fn translate(source: &str) -> String {
@@ -15,6 +16,30 @@ fn translate_dependency(source: &str) -> String {
     generator.set_emit_dyn_adapters(true);
     generator.emit_file(&syn::parse_str(source).unwrap(), Some("demo"));
     generator.into_output()
+}
+
+#[test]
+fn owner_constructor_local_is_typed_by_its_struct_field_consumption() {
+    // `let inner = Slab::new(); R { inner }`: the field's declared type pins
+    // the generic owner (Rust infers `Slab<u32>` backwards). Before, the
+    // initializer emitted `Slab<auto>::new_()` (a hard emit-time failure).
+    let cpp = translate(
+        r#"
+pub mod m {
+    pub struct Slab<V> { v: Vec<V> }
+    impl<V> Slab<V> { pub fn new() -> Self { Slab { v: Vec::new() } } }
+}
+pub struct R { pub inner: m::Slab<u32> }
+impl R {
+    pub fn new() -> Self {
+        let inner = m::Slab::new();
+        let r = R { inner };
+        r
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("auto inner = ::m::Slab<uint32_t>::new_();"), "{cpp}");
 }
 
 #[test]
@@ -77,4 +102,69 @@ pub trait OsBackend: Send {
     // Generic traits keep only the explicit-specialization adapters.
     let generic = translate_dependency("pub trait Sink<T> { fn put(&mut self, value: T); }");
     assert!(!generic.contains("DynAdapter"), "{generic}");
+}
+
+#[test]
+fn renamed_poll_import_is_an_alias_template() {
+    let cpp = translate(
+        r#"
+use std::task::Poll as StdPoll;
+pub fn ready(v: u8) -> StdPoll<u8> { StdPoll::Ready(v) }
+"#,
+    );
+    assert!(cpp.contains("template<typename T0> using StdPoll = rusty::Poll<T0>;"), "{cpp}");
+}
+
+#[test]
+fn hash_map_value_views_map_to_the_std_port() {
+    let cpp = translate(
+        r#"
+use std::collections::HashMap;
+use std::collections::hash_map::Values;
+pub struct Slab<V> { pub inner: HashMap<u64, V> }
+impl<V> Slab<V> {
+    pub fn values(&self) -> Values<'_, u64, V> { self.inner.values() }
+}
+"#,
+    );
+    assert!(
+        cpp.contains("::std_port::collections::hash::map::Values<uint64_t, V> values() const"),
+        "{cpp}"
+    );
+}
+
+#[test]
+fn derive_copy_and_hash_lower_without_slots() {
+    let cpp = translate(
+        r#"
+pub mod wheel {
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct WheelPos { pub level: u8, pub slot: u8, pub idx: u64 }
+    #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+    pub struct Id(pub u64);
+    #[derive(Hash)]
+    pub struct Tagged<T> { pub tag: T }
+}
+"#,
+    );
+    // Copy is the aggregate's implicit copy: no TODO slot.
+    assert!(!cpp.contains("TODO"), "{cpp}");
+    assert!(cpp.contains("// derive(Copy): implicit member-wise copy"), "{cpp}");
+    // Hash combines every field, as a global-scope std::hash specialization
+    // spelled with the type's qualified name.
+    assert!(
+        cpp.contains(
+            "template<>\nstruct std::hash<::wheel::WheelPos> {\n    size_t operator()(const ::wheel::WheelPos& v) const { return rusty::detail::hash_fields(v.level, v.slot, v.idx); }\n};"
+        ),
+        "{cpp}"
+    );
+    assert!(cpp.contains("return rusty::detail::hash_fields(v._0);"), "{cpp}");
+    assert!(
+        cpp.contains("template<typename T>\nstruct std::hash<::wheel::Tagged<T>> {"),
+        "{cpp}"
+    );
+    // At namespace scope 0 (unindented), after the module's namespaces.
+    let hash_at = cpp.find("\ntemplate<>\nstruct std::hash<::wheel::WheelPos> {").unwrap();
+    let struct_at = cpp.find("struct Tagged {").unwrap();
+    assert!(hash_at > struct_at, "{cpp}");
 }

@@ -3658,6 +3658,13 @@ impl CodeGen {
                             // `HashMap<auto, auto>::new_()`. See Ch.
                             // 13 of `docs/rusty-cpp-transpiler.md`.
                             || self.bare_owner_should_yield_to_specialized_hint(ty, &placeholder_ty)
+                            // `let inner = Slab::new(); S { inner }`: the
+                            // struct field pinned the owner's full type
+                            // (`Slab<V>`). The initializer alone can only say
+                            // bare `Slab` or the callee's unsubstituted `Self`.
+                            || local.init.as_ref().is_some_and(|init| {
+                                Self::owner_call_pinned_by_full_hint(&init.expr, &placeholder_ty)
+                            })
                     });
                     if should_override_inferred {
                         inferred_binding_ty = Some(placeholder_ty);

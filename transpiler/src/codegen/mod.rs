@@ -62516,7 +62516,14 @@ fn alias_target_requires_template_alias(target: &str) -> bool {
     let base = normalized.split('<').next().unwrap_or(normalized);
     matches!(
         base,
-        "rusty::Option" | "rusty::Weak" | "rusty::rc::Weak" | "rusty::sync::Weak"
+        "rusty::Option"
+            | "rusty::Weak"
+            | "rusty::rc::Weak"
+            | "rusty::sync::Weak"
+            // `use std::task::Poll as StdPoll;` — `rusty::Poll<T>` is a class
+            // template (include/rusty/async.hpp), so the rename is an alias
+            // template, not `using StdPoll = rusty::Poll;`.
+            | "rusty::Poll"
     )
 }
 
@@ -62524,7 +62531,8 @@ fn alias_target_template_arity(target: &str) -> Option<usize> {
     let normalized = target.trim().trim_start_matches("::");
     let base = normalized.split('<').next().unwrap_or(normalized);
     match base {
-        "rusty::Option" | "rusty::Weak" | "rusty::rc::Weak" | "rusty::sync::Weak" => Some(1),
+        "rusty::Option" | "rusty::Weak" | "rusty::rc::Weak" | "rusty::sync::Weak"
+        | "rusty::Poll" => Some(1),
         _ => None,
     }
 }

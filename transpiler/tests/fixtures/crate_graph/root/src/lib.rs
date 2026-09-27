@@ -14,5 +14,6 @@ pub fn run() -> u32 {
     let mut widget = dep_core::Widget::new(3);
     widget.bump();
     let backend: Box<dyn dep_core::Backend> = Box::new(RootBackend { k: 5 });
-    dep_core::total(&widget) + dep_core::with_backend(backend)
+    let ids = [dep_core::Id(1), dep_core::Id(2), dep_core::Id(1)];
+    dep_core::total(&widget) + dep_core::with_backend(backend) + dep_core::scan(&ids)
 }

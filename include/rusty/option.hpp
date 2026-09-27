@@ -159,8 +159,13 @@ public:
     Option(Option&& other) noexcept : has_value(other.has_value) {
         if (has_value) {
             new (&value) T(std::move(other.value));
-            other.value.~T();
-            other.has_value = false;
+            // A trivially copyable payload models a Rust `Copy` Option
+            // (`Option<u64>`): Rust copies it, and the source stays usable
+            // (`let c1 = f(c0); g(c0);`), so moving must not empty it.
+            if constexpr (!std::is_trivially_copyable_v<T>) {
+                other.value.~T();
+                other.has_value = false;
+            }
         }
     }
 
@@ -197,8 +202,10 @@ public:
             if (has_value) {
                 new (&value) T(std::move(other.value));
                 // Destroy the moved-from payload — see the move ctor's comment.
-                other.value.~T();
-                other.has_value = false;
+                if constexpr (!std::is_trivially_copyable_v<T>) {
+                    other.value.~T();
+                    other.has_value = false;
+                }
             }
         }
         return *this;

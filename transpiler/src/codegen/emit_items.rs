@@ -3620,6 +3620,12 @@ impl CodeGen {
                     // Hash is emitted after the struct as a specialization
                     // (handled below)
                 }
+                "Copy" => {
+                    // Rust `Copy` is C++'s implicit member-wise copy, which
+                    // the emitted aggregate already has. (Declaring copy
+                    // members would also make it a non-aggregate.)
+                    self.writeln("// derive(Copy): implicit member-wise copy");
+                }
                 _ => {
                     self.writeln(&format!("// TODO: derive({})", derive));
                 }
@@ -3851,18 +3857,66 @@ impl CodeGen {
         // accessors — see `emit_impl_item` — which initialize on first use, so
         // there is nothing left to defer and nothing left to order.)
 
-        // Post-struct derives (Hash specialization)
-        if derives.contains(&"Hash".to_string()) {
-            self.newline();
-            self.writeln("template<>");
-            self.writeln(&format!("struct std::hash<{}> {{", name));
-            self.indent += 1;
-            self.writeln(&format!(
-                "size_t operator()(const {}& v) const {{ return 0; /* TODO: hash fields */ }}",
-                name
+        // Post-struct derives: `#[derive(Hash)]` hashes every field in order
+        // (Rust's derive), as a std::hash specialization so std-hashed
+        // containers and rusty's hash dispatch find it. Deferred to global
+        // scope (see `deferred_global_scope_items`) and spelled with the
+        // type's fully qualified name. A block-local type cannot be named
+        // there and keeps the dispatch's byte-hash fallback; so does a type
+        // with const generics.
+        if derives.contains(&"Hash".to_string())
+            && self.block_depth == 0
+            && s.generics
+                .params
+                .iter()
+                .all(|param| !matches!(param, syn::GenericParam::Const(_)))
+        {
+            let base = self.global_scope_qualified_name(&name);
+            let type_params: Vec<String> = s
+                .generics
+                .type_params()
+                .map(|param| escape_cpp_keyword(&param.ident.to_string()))
+                .collect();
+            let qualified = if type_params.is_empty() {
+                base
+            } else {
+                format!("{}<{}>", base, type_params.join(", "))
+            };
+            let fields: Vec<String> = match &s.fields {
+                syn::Fields::Named(fields) => fields
+                    .named
+                    .iter()
+                    .filter_map(|field| field.ident.as_ref())
+                    .map(|ident| {
+                        let rust_name = ident.to_string();
+                        let cpp_name = named_field_cpp_names
+                            .get(&rust_name)
+                            .cloned()
+                            .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                        format!("v.{}", cpp_name)
+                    })
+                    .collect(),
+                syn::Fields::Unnamed(fields) => {
+                    (0..fields.unnamed.len()).map(|idx| format!("v._{}", idx)).collect()
+                }
+                syn::Fields::Unit => Vec::new(),
+            };
+            let head = if type_params.is_empty() {
+                "template<>".to_string()
+            } else {
+                format!(
+                    "template<{}>",
+                    type_params
+                        .iter()
+                        .map(|param| format!("typename {}", param))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            self.deferred_global_scope_items.push(format!(
+                "{head}\nstruct std::hash<{qualified}> {{\n    size_t operator()(const {qualified}& v) const {{ return rusty::detail::hash_fields({}); }}\n}};\n",
+                fields.join(", ")
             ));
-            self.indent -= 1;
-            self.writeln("};");
         }
         self.emitting_class_template_param_stack.pop();
         self.pop_type_param_scope();

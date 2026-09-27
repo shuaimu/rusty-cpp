@@ -15838,7 +15838,10 @@ fn test_derive_debug() {
 #[test]
 fn test_derive_hash() {
     let out = transpile_str("#[derive(Hash)] struct S { x: i32 }");
-    assert!(out.contains("struct std::hash<S>"));
+    // Qualified from the global scope, where the specialization is emitted,
+    // and hashing the fields rather than returning 0.
+    assert!(out.contains("struct std::hash<::S>"), "{out}");
+    assert!(out.contains("return rusty::detail::hash_fields(v.x);"), "{out}");
 }
 
 #[test]

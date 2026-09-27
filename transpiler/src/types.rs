@@ -139,6 +139,20 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "BTreeSet" | "std::collections::BTreeSet" => Some(("rusty::BTreeSet", true)),
         "VecDeque" | "std::collections::VecDeque" => Some(("rusty::VecDeque", true)),
         "std::collections::hash_map::DefaultHasher" => Some(("DefaultHasher", false)),
+        // The borrowing views a `HashMap` hands out (`map.values()` /
+        // `keys()` / `values_mut()`) are the std port's own iterator structs
+        // (transpiled/std_port: `collections::hash::map::Values<K, V>` ...);
+        // Rust's leading lifetime argument is dropped like every other one.
+        // Qualified spellings only: a bare `Values` is too common to claim.
+        "std::collections::hash_map::Values" | "collections::hash_map::Values" => {
+            Some(("::std_port::collections::hash::map::Values", true))
+        }
+        "std::collections::hash_map::ValuesMut" | "collections::hash_map::ValuesMut" => {
+            Some(("::std_port::collections::hash::map::ValuesMut", true))
+        }
+        "std::collections::hash_map::Keys" | "collections::hash_map::Keys" => {
+            Some(("::std_port::collections::hash::map::Keys", true))
+        }
         // BinaryHeap and LinkedList previously fell back to rusty::Vec as a
         // "deterministic compile surface in expanded serde-style targets"
         // before either had a dedicated transpiled port. Both now have one:

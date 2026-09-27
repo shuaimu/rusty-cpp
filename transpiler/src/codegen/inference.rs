@@ -4681,6 +4681,31 @@ impl CodeGen {
             return None;
         }
 
+        // Backward-inferred owner type (the constructor-call arm of
+        // `augment_collect_local_type_hints_from_struct_literal_consumption`):
+        // `let inner = Owner::new(); S { inner }` with `S::inner: Owner<A>`.
+        // The hint is the owner's full type; pass it through when the init
+        // is an associated call on that same owner written without type
+        // arguments.
+        if let syn::Type::Path(hint_tp) = hint
+            && hint_tp.qself.is_none()
+            && let Some(hint_last) = hint_tp.path.segments.last()
+            && matches!(hint_last.arguments, syn::PathArguments::AngleBracketed(_))
+            && let syn::Expr::Call(call) = init_expr
+            && let syn::Expr::Path(init_path) = call.func.as_ref()
+            && init_path.qself.is_none()
+            && init_path.path.segments.len() >= 2
+            && let Some(init_owner_seg) = init_path.path.segments.iter().nth_back(1)
+            && init_owner_seg.ident == hint_last.ident
+            && matches!(init_owner_seg.arguments, syn::PathArguments::None)
+            && !matches!(
+                hint_last.ident.to_string().as_str(),
+                "Vec" | "Cell" | "OnceCell" | "OnceBox" | "Lazy" | "ArrayBuilder" | "ArrayVec"
+                    | "Option" | "Box" | "SmallVec" | "ArrayString" | "ByteArray"
+            )
+        {
+            return Some(hint.clone());
+        }
         // Backward-inferred collect target: `let x = <iter>....collect()` /
         // `collect::<Vec<_>>()`. The consumption-scan pass
         // (`augment_collect_local_type_hints_from_struct_literal_consumption`)
@@ -5038,6 +5063,40 @@ impl CodeGen {
     /// Cell::new(0); v.push(DropCounter(&cell));` shape where the
     /// pre-this-fix flow correctly inferred `Cell<int32_t>` from
     /// the literal arg.
+    /// `init` is an associated-function call on a generic owner written
+    /// without type arguments (`Slab::new()`, `lion_slab::Slab::new()`) and
+    /// `hint` is that owner's full type with arguments (`Slab<V>`).
+    pub(super) fn owner_call_pinned_by_full_hint(init: &syn::Expr, hint: &syn::Type) -> bool {
+        // Built-in placeholder owners (`Vec`, `Cell`, ...) have their own
+        // element-type hints, which this full-type shape must not override.
+        if call_owner_placeholder_target(init).is_some() {
+            return false;
+        }
+        let mut init = init;
+        while let syn::Expr::Paren(inner) = init {
+            init = &inner.expr;
+        }
+        let syn::Expr::Call(call) = init else {
+            return false;
+        };
+        let syn::Expr::Path(func) = call.func.as_ref() else {
+            return false;
+        };
+        let syn::Type::Path(hint_tp) = hint else {
+            return false;
+        };
+        func.qself.is_none()
+            && hint_tp.qself.is_none()
+            && func.path.segments.len() >= 2
+            && func.path.segments.iter().nth_back(1).is_some_and(|owner| {
+                matches!(owner.arguments, syn::PathArguments::None)
+                    && hint_tp.path.segments.last().is_some_and(|last| {
+                        last.ident == owner.ident
+                            && matches!(last.arguments, syn::PathArguments::AngleBracketed(_))
+                    })
+            })
+    }
+
     pub(super) fn bare_owner_should_yield_to_specialized_hint(
         &self,
         inferred: &syn::Type,
@@ -13387,6 +13446,12 @@ impl CodeGen {
         hints: &mut HashMap<String, syn::Type>,
     ) {
         let mut candidate_counts: HashMap<String, usize> = HashMap::new();
+        // Locals initialised by an associated-function call on a generic
+        // owner written without type arguments (`let inner = Slab::new();`,
+        // `lion_slab::Slab::new()`), keyed to that owner's name. Rust types
+        // such a local from its consumption: a struct field of declared type
+        // `Owner<Args>` pins it to exactly that type.
+        let mut owner_calls: HashMap<String, String> = HashMap::new();
         for stmt in stmts {
             let syn::Stmt::Local(local) = stmt else {
                 continue;
@@ -13404,6 +13469,32 @@ impl CodeGen {
             let Some(init) = local.init.as_ref() else {
                 continue;
             };
+            if let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr)
+                // Owners the placeholder pipeline already types from their
+                // own usage (`Vec`, `Cell`, `HashMap`, ...) keep that path;
+                // it stores their element type, not the full owner type.
+                && call_owner_placeholder_target(&init.expr).is_none()
+                && let syn::Expr::Path(func) = call.func.as_ref()
+                && func.qself.is_none()
+                && func.path.segments.len() >= 2
+                && let Some(owner) = func.path.segments.iter().nth_back(1)
+                && matches!(owner.arguments, syn::PathArguments::None)
+                && func
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|method| matches!(method.arguments, syn::PathArguments::None))
+                && owner
+                    .ident
+                    .to_string()
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
+                owner_calls.insert(name.clone(), owner.ident.to_string());
+                *candidate_counts.entry(name).or_insert(0) += 1;
+                continue;
+            }
             let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&init.expr) else {
                 continue;
             };
@@ -13433,6 +13524,7 @@ impl CodeGen {
         struct Scan<'g> {
             cg: &'g CodeGen,
             names: HashSet<String>,
+            owner_calls: HashMap<String, String>,
             // None = poisoned by conflicting consumptions.
             found: HashMap<String, Option<syn::Type>>,
         }
@@ -13479,6 +13571,24 @@ impl CodeGen {
                     ) else {
                         continue;
                     };
+                    if let Some(owner) = self.owner_calls.get(&local_name) {
+                        // Only the owner's own full type pins the local, and
+                        // only when it carries the type arguments the call
+                        // omitted.
+                        let pins = !via_into_iter
+                            && matches!(&field_ty, syn::Type::Path(tp)
+                                if tp.qself.is_none()
+                                    && tp.path.segments.last().is_some_and(|last| {
+                                        last.ident == owner
+                                            && matches!(
+                                                last.arguments,
+                                                syn::PathArguments::AngleBracketed(_)
+                                            )
+                                    }));
+                        if !pins {
+                            continue;
+                        }
+                    }
                     let candidate: syn::Type = if via_into_iter {
                         let peeled = self.cg.peel_reference_paren_group_type(&field_ty);
                         let Some(elem) = vec_into_iter_element_type(peeled) else {
@@ -13516,6 +13626,7 @@ impl CodeGen {
         let mut scan = Scan {
             cg: self,
             names,
+            owner_calls,
             found: HashMap::new(),
         };
         for stmt in stmts {
