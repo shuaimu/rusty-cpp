@@ -1062,6 +1062,10 @@ pub struct TranspileOptions {
     /// Verus driver cfgs as false) in every crate source before any pass
     /// reads it. Disabled by default; see `crate::verus_exec`.
     pub verus_exec: crate::verus_exec::VerusExecConfig,
+    /// `--crate-graph`: this crate's resolved features and its dependencies'
+    /// surfaces (see `crate::crate_graph`). `None` outside graph mode, which
+    /// leaves every crate-mode path exactly as before.
+    pub crate_graph: Option<crate::crate_graph::GraphCrateContext>,
 }
 
 /// Classification of a method *name* across the whole crate, used by the UFCS
@@ -2477,6 +2481,7 @@ impl Default for TranspileOptions {
             flat_import_namespace: None,
             auto_namespace: false,
             verus_exec: crate::verus_exec::VerusExecConfig::default(),
+            crate_graph: None,
         }
     }
 }
@@ -3297,6 +3302,12 @@ fn transpile_full_with_options_impl(
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
+    codegen.set_emit_dyn_adapters(
+        options
+            .crate_graph
+            .as_ref()
+            .is_some_and(|graph| graph.dependency),
+    );
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_authenticated_cpp_inherit_roots(
         options.authenticated_cpp_inherit_roots.clone(),

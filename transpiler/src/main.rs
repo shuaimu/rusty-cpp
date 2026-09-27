@@ -12,6 +12,7 @@ mod cpp_abi;
 mod cpp_default_args;
 mod cpp_name;
 mod cpp_native_types;
+mod crate_graph;
 mod inline_rust;
 mod metadata;
 mod slots;
@@ -205,6 +206,18 @@ struct Cli {
     /// read exactly as before.
     #[arg(long = "verus-exec", conflicts_with = "expand")]
     verus_exec: bool,
+
+    /// With --crate: transpile the Cargo-selected local path-dependency graph
+    /// as one build. Every dependency crate is emitted exactly once, leaves
+    /// first, into <output-dir>/<package>/ as ONE named C++ module per crate
+    /// (named after its extern root, e.g. `lion_reactor`) whose purview is
+    /// wrapped in `namespace <crate>`; its Rust modules become nested
+    /// namespaces. The root crate keeps its per-file layout and imports the
+    /// dependency modules it names. `#[cfg(feature = ...)]` is evaluated per
+    /// crate against Cargo's resolved features; under --verus-exec, modules
+    /// and crates left without executable content emit nothing.
+    #[arg(long = "crate-graph", requires = "crate_")]
+    crate_graph: bool,
 
     /// With --verus-exec: write every crate source unit, exactly as handed to
     /// the transpiler after the pre-pass, to <DIR>/<crate name>/<source path>
@@ -467,15 +480,76 @@ fn read_crate_source_units(
     crate_name: &str,
     verus_exec: &verus_exec::VerusExecConfig,
 ) -> Result<(Vec<PathBuf>, Vec<(PathBuf, String)>), String> {
+    read_crate_source_units_in_graph(project_dir, crate_name, verus_exec, None)
+        .map(|(sources, units, _)| (sources, units))
+}
+
+/// [`read_crate_source_units`] under `--crate-graph` when `graph` is given:
+/// after stage 1, every feature cfg is evaluated against the crate's resolved
+/// features; stage 2 is seeded with the dependencies' pruned spec datatypes;
+/// then `crate_graph::prune_crate_units` drops the module files a feature cfg
+/// compiled out, the imports of removed modules / ghost-only dependencies,
+/// and (for an erased crate) every module left without executable content.
+/// Also returns the crate's surface for its dependents.
+fn read_crate_source_units_in_graph(
+    project_dir: &Path,
+    crate_name: &str,
+    verus_exec: &verus_exec::VerusExecConfig,
+    graph: Option<&crate_graph::GraphCrateContext>,
+) -> Result<
+    (
+        Vec<PathBuf>,
+        Vec<(PathBuf, String)>,
+        Option<crate_graph::CrateSurface>,
+    ),
+    String,
+> {
+    let lowered = lower_crate_source_units(project_dir, crate_name, verus_exec, graph)?;
+    let (source_units, surface) = match graph {
+        Some(graph) => {
+            let pruned_crate = prune_lowered_crate(crate_name, lowered, graph)?;
+            (pruned_crate.units, Some(pruned_crate.surface))
+        }
+        None => (lowered.units, None),
+    };
+    for (identity, source) in &source_units {
+        verus_exec::dump_source(verus_exec, crate_name, identity, source)?;
+    }
+    let sources = source_units
+        .iter()
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    Ok((sources, source_units, surface))
+}
+
+/// One crate's source units after stage 1, the feature cfgs (graph mode) and
+/// stage 2; the input of `crate_graph::prune_crate_units`.
+#[derive(Clone)]
+struct LoweredCrateUnits {
+    units: Vec<(PathBuf, String)>,
+    /// Units whose inner `#![cfg(feature ...)]` was false.
+    disabled: BTreeSet<PathBuf>,
+    /// Stage 1 erased a `verus!` block.
+    erased: bool,
+    /// Stage 2's pruned spec datatypes (external seeds included).
+    pruned: BTreeSet<String>,
+}
+
+fn lower_crate_source_units(
+    project_dir: &Path,
+    crate_name: &str,
+    verus_exec: &verus_exec::VerusExecConfig,
+    graph: Option<&crate_graph::GraphCrateContext>,
+) -> Result<LoweredCrateUnits, String> {
     let crate_sources = cmake::collect_crate_sources(project_dir)?;
     if crate_sources.is_empty() {
         return Err("No .rs source files found in src/".to_string());
     }
-    let mut sources = Vec::with_capacity(crate_sources.len());
     let mut source_units = Vec::with_capacity(crate_sources.len());
     // `--verus-exec` only: each unit's text before stage 1, for stage 2.
     let mut originals = Vec::new();
     let mut erased_any_block = false;
+    let mut disabled = BTreeSet::new();
     for crate_source in crate_sources {
         let full = project_dir.join(&crate_source.content);
         let source = std::fs::read_to_string(&full)
@@ -489,14 +563,54 @@ fn read_crate_source_units(
         } else {
             source
         };
-        source_units.push((crate_source.identity.clone(), source));
-        sources.push(crate_source.identity);
+        let source = match graph {
+            Some(graph) => match crate_graph::apply_feature_cfgs(&source, &graph.features)
+                .map_err(|error| format!("--crate-graph: {}: {error}", full.display()))?
+            {
+                Some((evaluated, module_disabled)) => {
+                    if module_disabled {
+                        disabled.insert(crate_source.identity.clone());
+                    }
+                    evaluated
+                }
+                None => source,
+            },
+            None => source,
+        };
+        source_units.push((crate_source.identity, source));
     }
-    verus_exec::lower_crate_units(crate_name, &mut source_units, &originals, erased_any_block)?;
-    for (identity, source) in &source_units {
-        verus_exec::dump_source(verus_exec, crate_name, identity, source)?;
-    }
-    Ok((sources, source_units))
+    let external_pruned = graph
+        .map(crate_graph::GraphCrateContext::external_pruned)
+        .unwrap_or_default();
+    let pruned = verus_exec::lower_crate_units_with_external(
+        crate_name,
+        &mut source_units,
+        &originals,
+        erased_any_block,
+        &external_pruned,
+    )?;
+    Ok(LoweredCrateUnits {
+        units: source_units,
+        disabled,
+        erased: erased_any_block,
+        pruned,
+    })
+}
+
+fn prune_lowered_crate(
+    crate_name: &str,
+    lowered: LoweredCrateUnits,
+    graph: &crate_graph::GraphCrateContext,
+) -> Result<crate_graph::PrunedCrate, String> {
+    let context = crate_graph::PruneContext {
+        crate_label: crate_name,
+        crate_ident: &graph.crate_ident,
+        erased: lowered.erased,
+        disabled: &lowered.disabled,
+        dependencies: &graph.dependencies,
+        pruned: &lowered.pruned,
+    };
+    crate_graph::prune_crate_units(lowered.units, &context)
 }
 
 /// Turn one crate source's bytes into the Rust text every pass sees: the
@@ -2720,7 +2834,13 @@ fn transpile_crate_to_output_with_context(
     // dependency directory can be created. Read every source exactly once;
     // marker-free crates continue through the ordinary per-file path below.
     let (sources, source_units) =
-        read_crate_source_units(project_dir, crate_name, &transpile_options.verus_exec)?;
+        read_crate_source_units_in_graph(
+            project_dir,
+            crate_name,
+            &transpile_options.verus_exec,
+            transpile_options.crate_graph.as_ref(),
+        )
+        .map(|(sources, units, _)| (sources, units))?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let has_cpp_abi = cpp_abi::preflight_crate_sources_with_cxx_namespace(
         &source_units,
@@ -3901,7 +4021,13 @@ fn preflight_crate_codegen_without_output(
     )?;
     let transpile_options = &authenticated_transpile_options;
     let (sources, source_units) =
-        read_crate_source_units(project_dir, crate_name, &transpile_options.verus_exec)?;
+        read_crate_source_units_in_graph(
+            project_dir,
+            crate_name,
+            &transpile_options.verus_exec,
+            transpile_options.crate_graph.as_ref(),
+        )
+        .map(|(sources, units, _)| (sources, units))?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
@@ -3996,6 +4122,449 @@ fn preflight_crate_codegen_without_output(
     )
 }
 
+/// One dependency crate emitted by `--crate-graph`, for the root's CMake and
+/// the `crate-graph.json` manifest.
+struct GraphEmittedCrate {
+    package: String,
+    module: String,
+    /// Relative to the output directory.
+    cppm: PathBuf,
+    /// Modules of other graph crates this module imports.
+    imports: Vec<String>,
+}
+
+/// `--crate-graph` (see `crate_graph`): emit every dependency crate of Cargo's
+/// target-normal local graph once, leaves first, as one named module per
+/// crate, then the root crate in its own layout.
+fn transpile_crate_graph(
+    cargo_toml_path: &Path,
+    output_dir: &Path,
+    type_map: &types::UserTypeMap,
+    verify: bool,
+    transpile_options: &transpile::TranspileOptions,
+    module_preamble: Option<&transpile::ModulePreambleManifest>,
+    package_filter: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<(), String> {
+    let manifest = std::fs::canonicalize(cargo_toml_path).map_err(|error| {
+        format!(
+            "Failed to resolve Cargo manifest {}: {error}",
+            cargo_toml_path.display()
+        )
+    })?;
+    let graph = metadata::resolve_effective_local_normal_dependency_graph_with_context(
+        &manifest,
+        package_filter,
+        cargo_flags,
+    )
+    .map_err(|error| {
+        format!("--crate-graph requires Cargo's target-selected normal local-dependency graph: {error}")
+    })?;
+    let root_manifest = graph.root_manifest().to_path_buf();
+
+    // Dependencies first (post-order); Cargo rejects cycles among normal
+    // dependencies, so this is a topological order.
+    fn visit(
+        graph: &metadata::EffectiveLocalNormalDependencyGraph,
+        manifest: &Path,
+        visited: &mut BTreeSet<PathBuf>,
+        order: &mut Vec<PathBuf>,
+    ) {
+        for dependency in graph.direct_dependencies(manifest).unwrap_or_default() {
+            if visited.insert(dependency.manifest_path.clone()) {
+                visit(graph, &dependency.manifest_path, visited, order);
+                order.push(dependency.manifest_path.clone());
+            }
+        }
+    }
+    let mut order = Vec::new();
+    visit(&graph, &root_manifest, &mut BTreeSet::new(), &mut order);
+
+    let context_for = |manifest_path: &Path,
+                       features: &[String],
+                       crate_ident: String,
+                       surfaces: &BTreeMap<PathBuf, crate_graph::CrateSurface>|
+     -> Result<crate_graph::GraphCrateContext, String> {
+        let mut dependencies = BTreeMap::new();
+        let mut root_to_module_import = BTreeMap::new();
+        for dependency in graph.direct_dependencies(manifest_path).unwrap_or_default() {
+            let surface = surfaces.get(&dependency.manifest_path).ok_or_else(|| {
+                format!(
+                    "--crate-graph: dependency {} of {} was not processed first",
+                    dependency.manifest_path.display(),
+                    manifest_path.display()
+                )
+            })?;
+            let root = dependency.dependency_key.replace('-', "_");
+            if !surface.ghost {
+                root_to_module_import.insert(root.clone(), surface.crate_ident.clone());
+            }
+            dependencies.insert(root, surface.clone());
+        }
+        Ok(crate_graph::GraphCrateContext {
+            features: features.iter().cloned().collect(),
+            dependencies,
+            root_to_module_import,
+            crate_ident,
+            dependency: manifest_path != root_manifest.as_path(),
+        })
+    };
+
+    std::fs::create_dir_all(output_dir)
+        .map_err(|error| format!("Failed to create output dir: {error}"))?;
+
+    struct GraphCrate {
+        package: String,
+        crate_ident: String,
+        features: Vec<String>,
+        project_dir: PathBuf,
+        lowered: LoweredCrateUnits,
+    }
+    let mut crates = BTreeMap::<PathBuf, GraphCrate>::new();
+
+    // Pass 1, leaves first: erase, evaluate features, lower, prune ghost-only
+    // modules, and record what each crate's surviving code uses.
+    let mut surfaces = BTreeMap::<PathBuf, crate_graph::CrateSurface>::new();
+    let mut usage = BTreeMap::<PathBuf, crate_graph::CrateUsage>::new();
+    let mut provides = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    for dependency_manifest in &order {
+        let cargo = cmake::parse_cargo_toml(dependency_manifest)?;
+        let package = cargo.package.name.clone();
+        let crate_ident = cargo
+            .lib
+            .as_ref()
+            .and_then(|lib| lib.name.clone())
+            .unwrap_or_else(|| package.replace('-', "_"));
+        let features = graph
+            .resolved_features_for_manifest(dependency_manifest)
+            .ok_or_else(|| {
+                format!(
+                    "--crate-graph: Cargo's graph omitted the feature set of {}",
+                    dependency_manifest.display()
+                )
+            })?
+            .to_vec();
+        let context = context_for(dependency_manifest, &features, crate_ident.clone(), &surfaces)?;
+        let project_dir = dependency_manifest
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let lowered =
+            lower_crate_source_units(&project_dir, &package, &transpile_options.verus_exec, Some(&context))
+                .map_err(|error| format!("--crate-graph: dependency '{package}': {error}"))?;
+        let pruned = prune_lowered_crate(&package, lowered.clone(), &context)
+            .map_err(|error| format!("--crate-graph: dependency '{package}': {error}"))?;
+        usage.insert(
+            dependency_manifest.clone(),
+            crate_graph::crate_usage(&pruned.units, &context.dependencies)?,
+        );
+        provides.insert(dependency_manifest.clone(), pruned.surface.provides.clone());
+        surfaces.insert(dependency_manifest.clone(), pruned.surface);
+        crates.insert(
+            dependency_manifest.clone(),
+            GraphCrate {
+                package,
+                crate_ident,
+                features,
+                project_dir,
+                lowered,
+            },
+        );
+    }
+    let root_cargo = cmake::parse_cargo_toml(&root_manifest)?;
+    let root_package = root_cargo.package.name.clone();
+    let root_ident = root_cargo
+        .lib
+        .as_ref()
+        .and_then(|lib| lib.name.clone())
+        .unwrap_or_else(|| root_package.replace('-', "_"));
+    let root_features = graph.root_resolved_features().unwrap_or_default().to_vec();
+    {
+        let context = context_for(&root_manifest, &root_features, root_ident.clone(), &surfaces)?;
+        let root_dir = root_manifest.parent().unwrap_or(Path::new("."));
+        let (_, units, _) = read_crate_source_units_in_graph(
+            root_dir,
+            &root_package,
+            &verus_exec::VerusExecConfig {
+                dump_dir: None,
+                ..transpile_options.verus_exec.clone()
+            },
+            Some(&context),
+        )?;
+        usage.insert(
+            root_manifest.clone(),
+            crate_graph::crate_usage(&units, &context.dependencies)?,
+        );
+    }
+
+    // Which dependency crates the root needs at all.
+    let dependencies_of = |manifest: &PathBuf| -> Vec<(String, PathBuf)> {
+        graph
+            .direct_dependencies(manifest)
+            .unwrap_or_default()
+            .iter()
+            .map(|dependency| {
+                (
+                    dependency.dependency_key.replace('-', "_"),
+                    dependency.manifest_path.clone(),
+                )
+            })
+            .collect()
+    };
+    let live = crate_graph::live_dependencies(&root_manifest, &dependencies_of, &usage, &provides);
+
+    // Pass 2, leaves first: a crate nothing needs is treated like a ghost-only
+    // one, so its dependents drop their imports and re-exports of it; every
+    // other crate is emitted as one module.
+    let pass_one_surfaces = std::mem::take(&mut surfaces);
+    let mut emitted = Vec::<GraphEmittedCrate>::new();
+    let mut unused = Vec::<String>::new();
+    let mut ghost_only = Vec::<String>::new();
+    let mut ufcs_manifests = Vec::<PathBuf>::new();
+    println!("\nCrate graph ({} dependency crate(s)):", order.len());
+    for dependency_manifest in &order {
+        let graph_crate = &crates[dependency_manifest];
+        let package = graph_crate.package.clone();
+        let crate_ident = graph_crate.crate_ident.clone();
+        let features = graph_crate.features.clone();
+        if !live.contains(dependency_manifest) && !pass_one_surfaces[dependency_manifest].ghost {
+            println!(
+                "  {package} (features: {features:?}) — nothing the root needs names it; no module emitted"
+            );
+            unused.push(package.clone());
+            let mut surface = pass_one_surfaces[dependency_manifest].clone();
+            surface.ghost = true;
+            surfaces.insert(dependency_manifest.clone(), surface);
+            continue;
+        }
+        let context = context_for(dependency_manifest, &features, crate_ident.clone(), &surfaces)?;
+        let pruned = prune_lowered_crate(&package, graph_crate.lowered.clone(), &context)
+            .map_err(|error| format!("--crate-graph: dependency '{package}': {error}"))?;
+        for (identity, source) in &pruned.units {
+            verus_exec::dump_source(&transpile_options.verus_exec, &package, identity, source)?;
+        }
+        if pruned.surface.ghost {
+            println!(
+                "  {package} (features: {features:?}) — no executable content after Verus erasure; no module emitted"
+            );
+            ghost_only.push(package.clone());
+            surfaces.insert(dependency_manifest.clone(), pruned.surface);
+            continue;
+        }
+        let units = pruned.units;
+        let merged = crate_graph::merge_crate_units(&package, &units)?;
+        let (cpp_inherit_roots, sysroot_roots) = crate_graph_authenticated_roots(
+            &graph,
+            dependency_manifest,
+            &graph_crate.project_dir,
+            &package,
+        )?;
+        let mut options = transpile_options.clone();
+        options.cxx_namespace = None;
+        options.flat_import_namespace = None;
+        options.auto_namespace = false;
+        options.crate_namespace_wrap = false;
+        options.external_crate_module_aliases = context
+            .root_to_module_import
+            .iter()
+            .map(|(root, module)| (root.clone(), module.clone()))
+            .collect();
+        options.authenticated_cpp_inherit_roots = cpp_inherit_roots;
+        options.authenticated_sysroot_roots = sysroot_roots;
+        let dependency_dir = output_dir.join(&package);
+        std::fs::create_dir_all(&dependency_dir).map_err(|error| {
+            format!("Failed to create {}: {error}", dependency_dir.display())
+        })?;
+        let ufcs_manifest = dependency_dir.join("ufcs-traits.json");
+        options.emit_ufcs_trait_manifest_path = Some(ufcs_manifest.clone());
+        options.dependency_ufcs_trait_manifests = ufcs_manifests.clone();
+        options.crate_graph = Some(context.clone());
+        let hints = transpile::collect_extension_method_hints(&merged);
+        let cpp = transpile::transpile_full_with_options(
+            &merged,
+            Some(&crate_ident),
+            type_map,
+            &hints,
+            Some(&crate_ident),
+            &options,
+        )
+        .map_err(|error| format!("--crate-graph: dependency '{package}': {error}"))?;
+        let root_to_module_import = context
+            .root_to_module_import
+            .iter()
+            .map(|(root, module)| (root.clone(), module.clone()))
+            .collect::<HashMap<_, _>>();
+        let imports =
+            collect_required_named_module_imports(&merged, &crate_ident, &root_to_module_import);
+        let cpp = inject_named_module_imports(&cpp, &imports);
+        let cppm_relative = PathBuf::from(&package).join(format!("{crate_ident}.cppm"));
+        let cppm_path = output_dir.join(&cppm_relative);
+        ensure_no_external_crate_todos(&format!("dependency '{package}'"), &cpp, &cppm_path)?;
+        std::fs::write(&cppm_path, &cpp)
+            .map_err(|error| format!("Failed to write {}: {error}", cppm_path.display()))?;
+        let label = format!("{crate_ident}.cppm");
+        let slots = slots::detect_slots(&label, &cpp);
+        std::fs::write(
+            dependency_dir.join("rusty_hand_slots.md"),
+            slots::format_manifest(&slots),
+        )
+        .map_err(|error| format!("Failed to write slot manifest for {package}: {error}"))?;
+        std::fs::write(
+            dependency_dir.join("CMakeLists.txt"),
+            crate_graph_dependency_cmake(&package, &crate_ident, &imports),
+        )
+        .map_err(|error| format!("Failed to write CMakeLists.txt for {package}: {error}"))?;
+        if ufcs_manifest.exists() {
+            ufcs_manifests.push(ufcs_manifest);
+        }
+        println!(
+            "  {package} (features: {features:?}) → {} (module: {crate_ident}, {} slot(s))",
+            cppm_relative.display(),
+            slots.len()
+        );
+        emitted.push(GraphEmittedCrate {
+            package: package.clone(),
+            module: crate_ident.clone(),
+            cppm: cppm_relative,
+            imports,
+        });
+        surfaces.insert(dependency_manifest.clone(), pruned.surface);
+    }
+
+    let root_context = context_for(&root_manifest, &root_features, root_ident, &surfaces)?;
+    let mut root_options = transpile_options.clone();
+    root_options.external_crate_module_aliases.extend(
+        root_context
+            .root_to_module_import
+            .iter()
+            .map(|(root, module)| (root.clone(), module.clone())),
+    );
+    root_options.dependency_ufcs_trait_manifests = ufcs_manifests;
+    root_options.crate_graph = Some(root_context);
+    transpile_crate_with_context(
+        cargo_toml_path,
+        output_dir,
+        type_map,
+        false,
+        verify,
+        &root_options,
+        module_preamble,
+        package_filter,
+        cargo_flags,
+    )?;
+
+    // Build order and imports for a consumer build system, and the root's
+    // CMake hook.
+    let manifest_json = serde_json::json!({
+        "crates": emitted.iter().map(|crate_| serde_json::json!({
+            "package": crate_.package,
+            "module": crate_.module,
+            "cppm": crate_.cppm.to_string_lossy(),
+            "imports": crate_.imports,
+        })).collect::<Vec<_>>(),
+        "ghost_only": ghost_only,
+        "unused": unused,
+    });
+    std::fs::write(
+        output_dir.join("crate-graph.json"),
+        serde_json::to_string_pretty(&manifest_json).expect("json") + "\n",
+    )
+    .map_err(|error| format!("Failed to write crate-graph.json: {error}"))?;
+    let root_cmake = output_dir.join("CMakeLists.txt");
+    let mut cmake_text = std::fs::read_to_string(&root_cmake).unwrap_or_default();
+    if !emitted.is_empty() {
+        cmake_text.push_str("# --crate-graph dependency crates, dependencies first\n");
+        for crate_ in &emitted {
+            cmake_text.push_str(&format!("add_subdirectory({})\n", crate_.package));
+        }
+        cmake_text.push('\n');
+    }
+    std::fs::write(&root_cmake, cmake_text)
+        .map_err(|error| format!("Failed to write {}: {error}", root_cmake.display()))?;
+    Ok(())
+}
+
+/// Compiler-owned root authentication for a `--crate-graph` dependency, from
+/// the ROOT's resolved graph rather than a standalone `cargo metadata` of the
+/// dependency manifest: a path dependency builds under the root's lockfile and
+/// feature resolution, and need not have a lockfile of its own. Mirrors
+/// `authenticated_sysroot_roots_for_compilation` (a selected normal edge that
+/// occupies `std`/`core` withdraws it; `#![no_std]` without
+/// `extern crate std;` withdraws `std`). A dependency on the rusty runtime
+/// crate is not supported in graph mode.
+fn crate_graph_authenticated_roots(
+    graph: &metadata::EffectiveLocalNormalDependencyGraph,
+    manifest: &Path,
+    project_dir: &Path,
+    package: &str,
+) -> Result<(HashSet<String>, HashSet<String>), String> {
+    let externs = graph.extern_dependencies(manifest);
+    if externs
+        .iter()
+        .any(|dependency| dependency.package_name == RUSTY_RUNTIME_CRATE_NAME)
+    {
+        return Err(format!(
+            "--crate-graph: dependency '{package}' depends on the rusty runtime crate; only the root crate may"
+        ));
+    }
+    let occupied = externs
+        .iter()
+        .map(|dependency| dependency.extern_crate_root.clone())
+        .collect::<HashSet<_>>();
+    let mut sysroot = HashSet::from(["std".to_string(), "core".to_string()]);
+    sysroot.retain(|root| !occupied.contains(root));
+    let lib_root = project_dir.join("src/lib.rs");
+    if let Ok(source) = fs::read_to_string(&lib_root) {
+        let file = syn::parse_file(&source).map_err(|error| {
+            format!(
+                "could not parse {} while authenticating sysroot crates: {error}",
+                lib_root.display()
+            )
+        })?;
+        let no_std = file.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("no_std")
+                || (attribute.path().is_ident("cfg_attr")
+                    && match &attribute.meta {
+                        syn::Meta::List(list) => list.tokens.to_string().contains("no_std"),
+                        _ => false,
+                    })
+        });
+        let links_std = file.items.iter().any(|item| {
+            matches!(item, syn::Item::ExternCrate(item_extern)
+                if item_extern.ident == "std"
+                    && !item_extern.attrs.iter().any(|attribute| {
+                        attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+                    }))
+        });
+        if no_std && !occupied.contains("std") && !links_std {
+            sysroot.remove("std");
+        }
+    }
+    Ok((HashSet::new(), sysroot))
+}
+
+/// The CMakeLists.txt of one `--crate-graph` dependency crate: a static
+/// library whose single module unit is the crate, linked to the graph crates
+/// it imports. The consumer supplies the rusty runtime targets and flags.
+fn crate_graph_dependency_cmake(package: &str, module: &str, imports: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str("# Auto-generated by rusty-cpp-transpiler --crate-graph\n");
+    out.push_str("# Do not edit manually.\n\n");
+    out.push_str(&format!("# Rust package `{package}`: one named module, `{module}`.\n"));
+    out.push_str(&format!("add_library({module} STATIC)\n"));
+    out.push_str(&format!(
+        "target_sources({module} PUBLIC FILE_SET CXX_MODULES FILES {module}.cppm)\n"
+    ));
+    out.push_str(&format!("target_compile_features({module} PUBLIC cxx_std_23)\n"));
+    for import in imports {
+        out.push_str(&format!("target_link_libraries({module} PUBLIC {import})\n"));
+    }
+    out.push_str(&format!(
+        "if(TARGET rusty)\n  target_link_libraries({module} PUBLIC rusty)\nendif()\n"
+    ));
+    out
+}
+
 fn transpile_crate(
     cargo_toml_path: &Path,
     output_dir: &Path,
@@ -4034,7 +4603,15 @@ fn transpile_crate_impl(
     // Step 1: Parse Cargo.toml and discover source files
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
-    let crate_name = &cargo.package.name;
+    // --crate-graph: a C++ module name is dot-separated identifiers, so the
+    // root's modules are named after its extern root (`lion_harness.x`), as
+    // the dependency crates' modules are. Plain crate mode keeps the package
+    // spelling it always used.
+    let graph_module_crate_name = transpile_options
+        .crate_graph
+        .as_ref()
+        .map(|_| cargo.package.name.replace('-', "_"));
+    let crate_name = graph_module_crate_name.as_ref().unwrap_or(&cargo.package.name);
     let deps = cmake::extract_dependencies(&cargo);
     let runtime_validation = validate_rustc_only_runtime_dependencies_with_context(
         cargo_toml_path,
@@ -4151,7 +4728,13 @@ fn transpile_crate_impl(
     // dependency directory can be created. Read every source exactly once;
     // marker-free crates continue through the ordinary per-file path below.
     let (sources, source_units) =
-        read_crate_source_units(project_dir, crate_name, &transpile_options.verus_exec)?;
+        read_crate_source_units_in_graph(
+            project_dir,
+            crate_name,
+            &transpile_options.verus_exec,
+            transpile_options.crate_graph.as_ref(),
+        )
+        .map(|(sources, units, _)| (sources, units))?;
     reject_cpp_abi_in_nonconventional_target_roots(&cargo, project_dir)?;
     let cpp_abi_preflight = cpp_abi::preflight_crate_plan_with_cxx_namespace(
         &source_units,
@@ -4261,7 +4844,12 @@ fn transpile_crate_impl(
     } else {
         None
     };
-    if closure_has_any_contract && !inherited_atomic_dependency_errors {
+    // Under --crate-graph every dependency was already generated (and failed
+    // closed) by the graph driver before this root ran.
+    if closure_has_any_contract
+        && !inherited_atomic_dependency_errors
+        && transpile_options.crate_graph.is_none()
+    {
         let mut visited = BTreeSet::new();
         visited.insert(CppAbiClosurePreflight::manifest_key(cargo_toml_path));
         preflight_local_dependency_codegen_without_output(
@@ -4291,7 +4879,9 @@ fn transpile_crate_impl(
         .iter()
         .filter(|dependency| dependency.target.is_none())
         .collect::<Vec<_>>();
-    if !unconditional_dependencies.is_empty() {
+    if transpile_options.crate_graph.is_some() {
+        // --crate-graph: the graph driver emitted every dependency once.
+    } else if !unconditional_dependencies.is_empty() {
         println!("\nDependencies:");
         for dep in unconditional_dependencies {
             if runtime_validation.runtime_provided.contains(&dep.name) {
@@ -4495,6 +5085,23 @@ fn transpile_crate_impl(
                 &module_options,
             )
             .map(std::borrow::Cow::Owned),
+        };
+        // --crate-graph: import the dependency crate modules this unit names.
+        let transpile_result = match (transpile_result, transpile_options.crate_graph.as_ref()) {
+            (Ok(cpp_output), Some(graph)) => {
+                let root_to_module_import = graph
+                    .root_to_module_import
+                    .iter()
+                    .map(|(root, module)| (root.clone(), module.clone()))
+                    .collect::<HashMap<_, _>>();
+                let required =
+                    collect_required_named_module_imports(source, &module_name, &root_to_module_import);
+                Ok(std::borrow::Cow::Owned(inject_named_module_imports(
+                    &cpp_output,
+                    &required,
+                )))
+            }
+            (other, _) => other,
         };
         match transpile_result {
             Ok(cpp_output) => {
@@ -11421,6 +12028,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // parity-test transpiles `cargo expand` output, in which `verus!` is
         // already expanded by rustc; the --verus-exec pre-pass does not apply.
         verus_exec: verus_exec::VerusExecConfig::default(),
+        crate_graph: None,
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -12143,9 +12751,32 @@ fn main() {
             dump_dir: cli.dump_verus_erasure.clone(),
             helper: cli.verus_erase_helper.clone(),
         },
+        crate_graph: None,
     };
 
     // Handle --crate: transpile entire crate
+    if let Some(ref cargo_toml_path) = cli.crate_
+        && cli.crate_graph
+    {
+        if cli.expand {
+            eprintln!("Error: --crate-graph does not support --expand");
+            process::exit(1);
+        }
+        if let Err(e) = transpile_crate_graph(
+            cargo_toml_path,
+            &cli.output_dir,
+            &type_map,
+            cli.verify,
+            &transpile_options,
+            module_preamble_manifest.as_ref(),
+            cli.package.as_deref(),
+            &cargo_flags,
+        ) {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+        return;
+    }
     if let Some(ref cargo_toml_path) = cli.crate_ {
         match transpile_crate_with_context(
             cargo_toml_path,

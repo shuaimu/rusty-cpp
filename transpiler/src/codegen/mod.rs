@@ -1696,6 +1696,19 @@ pub struct CodeGen {
     /// and leaks in dependencies that aren't compiled are harmless — so a
     /// transpile-time panic there would be a false failure.
     pub(crate) is_dependency_module: bool,
+    /// `--crate-graph` dependency crate: its traits may be implemented by a
+    /// consumer crate it never sees, so each trait interface also gets the
+    /// generic owning adapter `<Trait>DynAdapter<U>` (see
+    /// `emit_trait_dyn_adapter`). Off everywhere else, which keeps other
+    /// output byte-identical.
+    pub(crate) emit_dyn_adapters: bool,
+    /// Declarations emitted after the whole purview, at global scope, and
+    /// spelled with fully qualified names: `#[derive(Hash)]` std::hash
+    /// specializations (a specialization of `std::hash` cannot be declared
+    /// inside the crate or module namespace its type lives in) and the
+    /// out-of-line member definitions of `<Trait>DynAdapter` (which need every
+    /// type in the crate complete).
+    pub(crate) deferred_global_scope_items: Vec<String>,
     /// UFCS Phase 3: per-method-name class (Inherent / TraitOnly / Both) over
     /// the whole file, populated in `emit_file`. Drives
     /// call-site lowering (trait-only crate methods → free call). Empty
@@ -3402,6 +3415,8 @@ impl CodeGen {
             cf_loop_id: std::rc::Rc::new(std::cell::Cell::new(0)),
             is_sub_codegen: false,
             is_dependency_module: false,
+            emit_dyn_adapters: false,
+            deferred_global_scope_items: Vec::new(),
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
@@ -4846,6 +4861,13 @@ impl CodeGen {
             self.wrap_module_purview_in_crate_namespace(crate_name.clone());
         }
 
+        if !self.is_sub_codegen && !self.deferred_global_scope_items.is_empty() {
+            self.output.push('\n');
+            for item in std::mem::take(&mut self.deferred_global_scope_items) {
+                self.output.push_str(&item);
+            }
+        }
+
         if self.prefer_rusty_view_aliases {
             self.output = self.output.replace("std::string_view", "rusty::StrView");
             self.output = self.output.replace("std::span<", "rusty::Span<");
@@ -5279,6 +5301,10 @@ impl CodeGen {
     /// Diagnostic only — never changes the emitted C++.
     pub fn set_print_inference(&mut self, enabled: bool) {
         self.print_inference = enabled;
+    }
+
+    pub fn set_emit_dyn_adapters(&mut self, enabled: bool) {
+        self.emit_dyn_adapters = enabled;
     }
 
     pub fn set_is_dependency_module(&mut self, is_dependency: bool) {
@@ -17574,11 +17600,85 @@ impl CodeGen {
     /// it was spelled through the alias or directly: the `PollCommand`
     /// variant field and its factory took `void*`, losing the ownership,
     /// destructor, type identity and calling ABI of `rusty::Box`.
+    /// The interface-class spelling of a `dyn` trait path (without its
+    /// generic arguments). A trait declared in this crate is named by its
+    /// declaring module from the crate root (`::os::OsBackend`, requalified to
+    /// `::<crate>::os::OsBackend` by the crate wrap) when that module is not
+    /// the one being emitted: a `use crate::os::OsBackend;` import is Rust-only
+    /// (trait imports emit nothing), so the bare name does not resolve in a
+    /// sibling module's namespace. A trait of a dependency crate is named
+    /// through that crate's module namespace (`lion_reactor::OsBackend`).
+    fn qualified_interface_trait_name(&self, path: &syn::Path) -> String {
+        let Some(last) = path.segments.last() else {
+            return String::new();
+        };
+        let ident = last.ident.to_string();
+        if let Some(external) = self.dependency_trait_cpp_path(path) {
+            return external;
+        }
+        let key = self.resolve_trait_scoped_key_for_impl(path, &self.module_stack);
+        if !self.trait_declared_paths.contains(&key) {
+            return ident;
+        }
+        let declaring_module = key.rsplit_once("::").map(|(module, _)| module).unwrap_or("");
+        if declaring_module == self.module_stack.join("::") {
+            return ident;
+        }
+        if declaring_module.is_empty() {
+            return match self.crate_name.as_deref() {
+                Some(crate_name) => format!("::{}::{}", crate_name, escape_cpp_keyword(&ident)),
+                None => format!("::{}", escape_cpp_keyword(&ident)),
+            };
+        }
+        format!("::{}", self.escape_and_rename_qualified_name(&key))
+    }
+
+    /// `lion_reactor::os::OsBackend` / `lion_reactor::OsBackend` (or a bare
+    /// name imported from such a path) naming a trait a transpiled dependency
+    /// crate declares (its UFCS manifest), spelled through the dependency's
+    /// module namespace.
+    fn dependency_trait_cpp_path(&self, path: &syn::Path) -> Option<String> {
+        let tail = path.segments.last()?.ident.to_string();
+        let mut segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if segments.len() == 1 {
+            let bound = self.resolve_scope_import_binding_path(&tail)?;
+            segments = bound
+                .trim_start_matches("::")
+                .split("::")
+                .map(str::to_string)
+                .collect();
+            if segments.len() < 2 {
+                return None;
+            }
+        }
+        let root = segments.first()?;
+        let mapped = self
+            .name_resolver
+            .external_crate_target(root)
+            .filter(|mapped| !mapped.is_empty())?;
+        let declares = self.dependency_ufcs_trait_manifests.iter().any(|manifest| {
+            manifest.module == *mapped && manifest.declared_traits.iter().any(|name| *name == tail)
+        });
+        if !declares {
+            return None;
+        }
+        let mut spelled = vec![mapped.clone()];
+        spelled.extend(segments[1..].iter().map(|segment| escape_cpp_keyword(segment)));
+        Some(spelled.join("::"))
+    }
+
     fn trait_object_target_is_expressible(&self, path: &syn::Path) -> bool {
         let Some(tail) = path.segments.last().map(|s| s.ident.to_string()) else {
             return false;
         };
         if path.segments.len() == 1 && self.ufcs_declared_trait_names.contains(&tail) {
+            return true;
+        }
+        if self.dependency_trait_cpp_path(path).is_some() {
             return true;
         }
         // A crate trait imported into this module: the name is in scope here
@@ -17677,7 +17777,7 @@ impl CodeGen {
         let Some(last) = path.segments.last() else {
             return String::new();
         };
-        let ident = last.ident.to_string();
+        let ident = self.qualified_interface_trait_name(path);
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
             return ident;
         };
@@ -18161,6 +18261,30 @@ impl CodeGen {
             return Self::prefixed_named_module_root_type_name(module_name, type_name);
         }
         escape_cpp_keyword(type_name)
+    }
+
+    /// `name` declared in the current scope, spelled from the global scope:
+    /// the `--cxx-namespace` wrap, the crate namespace wrap and the Rust
+    /// module path, as a declaration emitted after the purview must name it.
+    pub(crate) fn global_scope_qualified_name(&self, name: &str) -> String {
+        let mut qualifier = Vec::new();
+        if self.module_name.is_some()
+            && let Some(ns) = self.cxx_namespace.as_deref()
+        {
+            qualifier.push(ns.to_string());
+        }
+        if let Some(crate_name) = self
+            .crate_name
+            .as_deref()
+            .filter(|crate_name| crate::transpile::crate_is_namespace_wrapped(crate_name))
+        {
+            qualifier.push(crate_name.to_string());
+        }
+        if !self.module_stack.is_empty() {
+            qualifier.push(self.escape_and_rename_qualified_name(&self.module_stack.join("::")));
+        }
+        qualifier.push(name.to_string());
+        format!("::{}", qualifier.join("::"))
     }
 
     fn named_module_root_type_decl_cpp_name(&self, type_name: &str) -> String {
@@ -50701,6 +50825,8 @@ impl CodeGen {
         // top-level `into_output` so any `<auto>` leak is reported with an
         // accurate full-module line number rather than a fragment-relative one.
         inner.is_sub_codegen = true;
+        // The parent flushes its own deferred global-scope items.
+        inner.deferred_global_scope_items.clear();
         inner
     }
 
@@ -53786,19 +53912,37 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
                 // Two forms to match:
                 //   1. Non-generic trait: rusty::Box<Container>::new_(arg)
                 //   2. Generic trait:     rusty::Box<Container<int32_t>>::new_(arg)
-                // The needle prefix (`rusty::{owner}<{trait_name}`) is
-                // shared by both. We look at the character right after
-                // {trait_name} to decide.
-                let needle_prefix = format!("rusty::{}<{}", owner, trait_name);
-                if !result.contains(&needle_prefix) {
+                // The trait may be spelled with a namespace qualifier
+                // (`rusty::Box<::krate::os::Container>`) when it is declared in
+                // another module than the construction site; the adapter lives
+                // beside the trait, so the qualifier carries over to it.
+                let owner_prefix = format!("rusty::{}<", owner);
+                if !result.contains(&owner_prefix) || !result.contains(trait_name.as_str()) {
                     continue;
                 }
                 let suffix = format!(">::{}(", method);
                 let mut acc = String::with_capacity(result.len());
                 let mut rest = result.as_str();
-                while let Some(pos) = rest.find(&needle_prefix) {
+                while let Some(pos) = rest.find(&owner_prefix) {
                     acc.push_str(&rest[..pos]);
-                    let after_prefix = &rest[pos + needle_prefix.len()..];
+                    let after_owner = &rest[pos + owner_prefix.len()..];
+                    // The (possibly qualified) name right after `rusty::Box<`.
+                    let name_len = after_owner
+                        .char_indices()
+                        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == ':'))
+                        .map(|(index, _)| index)
+                        .unwrap_or(after_owner.len());
+                    let qualified = &after_owner[..name_len];
+                    let qualifier = match qualified.strip_suffix(trait_name.as_str()) {
+                        Some(qualifier) if qualifier.is_empty() || qualifier.ends_with("::") => qualifier,
+                        _ => {
+                            acc.push_str(&owner_prefix);
+                            rest = after_owner;
+                            continue;
+                        }
+                    };
+                    let needle_prefix = format!("{}{}", owner_prefix, qualified);
+                    let after_prefix = &after_owner[name_len..];
                     // Identify which form this is:
                     //   - `>::method(...)` follows directly → non-generic trait
                     //   - `<...>::method(...)` → generic trait with args
@@ -53848,8 +53992,8 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
                             None => inner,
                         };
                         acc.push_str(&format!(
-                            "rusty::{}<{}Adapter<{}>>::{}(",
-                            owner, trait_name, adapter_args, method
+                            "rusty::{}<{}{}Adapter<{}>>::{}(",
+                            owner, qualifier, trait_name, adapter_args, method
                         ));
                     } else if !arg_already_adapter
                         && let Some(arg_len) = balanced_call_arg_len(after_open_paren)
@@ -53867,19 +54011,19 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
                             None => deduced,
                         };
                         acc.push_str(&format!(
-                            "rusty::{}<{}Adapter<{}>>::{}(",
-                            owner, trait_name, adapter_args, method
+                            "rusty::{}<{}{}Adapter<{}>>::{}(",
+                            owner, qualifier, trait_name, adapter_args, method
                         ));
                     } else {
                         // Empty or already-adapter arg — leave the original.
                         match trait_args {
                             Some(args) => acc.push_str(&format!(
-                                "rusty::{}<{}<{}>>::{}(",
-                                owner, trait_name, args, method
+                                "{}<{}>>::{}(",
+                                needle_prefix, args, method
                             )),
                             None => acc.push_str(&format!(
-                                "rusty::{}<{}>::{}(",
-                                owner, trait_name, method
+                                "{}>::{}(",
+                                needle_prefix, method
                             )),
                         }
                     }
@@ -66620,6 +66764,8 @@ mod standard_future;
 mod standard_future_tests;
 #[cfg(test)]
 mod verus_ghost_tests;
+#[cfg(test)]
+mod crate_graph_codegen_tests;
 mod type_solver;
 
 #[cfg(test)]

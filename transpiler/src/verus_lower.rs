@@ -277,6 +277,20 @@ pub struct LowerUnit<'a> {
 /// Lower the ghost residue of one crate (see the module docs). `crate_name`
 /// only labels messages.
 pub fn lower_crate(crate_name: &str, units: &mut [LowerUnit<'_>]) -> Result<(), String> {
+    lower_crate_with_external(crate_name, units, &BTreeSet::new()).map(|_| ())
+}
+
+/// [`lower_crate`] for a crate whose dependencies were lowered first
+/// (`--crate-graph`): `external_pruned` holds the spec-only datatype names
+/// pruned in those dependencies. A name this crate does not define itself is
+/// treated as pruned here too (rule 4 taints the datatypes that reach it,
+/// rule 5 drops its imports from a dependency, the audit rejects it in
+/// executable code). Returns every pruned name, the external ones included.
+pub fn lower_crate_with_external(
+    crate_name: &str,
+    units: &mut [LowerUnit<'_>],
+    external_pruned: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
     let mut files = Vec::with_capacity(units.len());
     for unit in units.iter() {
         files.push(syn::parse_file(&unit.prepared).map_err(|error| {
@@ -301,6 +315,11 @@ pub fn lower_crate(crate_name: &str, units: &mut [LowerUnit<'_>]) -> Result<(), 
         .collect::<Vec<_>>();
 
     let facts = CrateFacts::collect(&files, &originals, &labels)?;
+    let external = external_pruned
+        .iter()
+        .filter(|name| !facts.defined.contains(*name))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut changed = vec![false; files.len()];
     let mut errors = Vec::new();
 
@@ -324,7 +343,7 @@ pub fn lower_crate(crate_name: &str, units: &mut [LowerUnit<'_>]) -> Result<(), 
     }
 
     // Rule 4.
-    let pruned = prune_spec_datatypes(&mut files, &facts, &labels, &mut changed)?;
+    let pruned = prune_spec_datatypes(&mut files, &facts, &labels, &external, &mut changed)?;
 
     // Rule 5.
     let original_idents = originals.iter().map(idents_outside_uses).collect::<Vec<_>>();
@@ -334,6 +353,7 @@ pub fn lower_crate(crate_name: &str, units: &mut [LowerUnit<'_>]) -> Result<(), 
     for (index, file) in files.iter_mut().enumerate() {
         let context = ImportContext {
             pruned: &pruned,
+            external: &external,
             local_modules: &facts.local_modules,
             file_original: &original_idents[index],
             file_lowered: &lowered_idents[index],
@@ -368,7 +388,7 @@ pub fn lower_crate(crate_name: &str, units: &mut [LowerUnit<'_>]) -> Result<(), 
             unit.prepared = prettyplease::unparse(file);
         }
     }
-    Ok(())
+    Ok(pruned)
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,13 +1366,16 @@ fn prune_spec_datatypes(
     files: &mut [syn::File],
     facts: &CrateFacts,
     labels: &[String],
+    external: &BTreeSet<String>,
     changed: &mut [bool],
 ) -> Result<BTreeSet<String>, String> {
     let mut datatypes = Vec::new();
     for (unit, file) in files.iter().enumerate() {
         collect_datatypes(&file.items, unit, &mut datatypes);
     }
-    let mut tainted = BTreeSet::new();
+    // Spec-only datatypes of lowered dependencies that this crate does not
+    // shadow with a definition of its own.
+    let mut tainted = external.clone();
     loop {
         let before = tainted.len();
         for datatype in &datatypes {
@@ -1437,6 +1460,8 @@ fn prune_items(items: &mut Vec<Item>, tainted: &BTreeSet<String>) -> bool {
 
 struct ImportContext<'a> {
     pruned: &'a BTreeSet<String>,
+    /// The subset of `pruned` that dependencies pruned.
+    external: &'a BTreeSet<String>,
     local_modules: &'a BTreeSet<String>,
     file_original: &'a BTreeSet<String>,
     file_lowered: &'a BTreeSet<String>,
@@ -1451,6 +1476,13 @@ impl ImportContext<'_> {
         });
         let imported = if source == "self" { local } else { source };
         if crate_relative && self.pruned.contains(imported) {
+            return false;
+        }
+        // A dependency's spec-only datatype, imported from that dependency.
+        let from_dependency = path
+            .first()
+            .is_some_and(|root| !crate_relative && !matches!(root.as_str(), "std" | "core" | "alloc"));
+        if from_dependency && self.external.contains(imported) {
             return false;
         }
         // An import the lowering orphaned: used by the original outside

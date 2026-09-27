@@ -43,7 +43,7 @@
 //! A file without any of these constructs is returned byte for byte.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -131,8 +131,22 @@ pub fn lower_crate_units(
     originals: &[String],
     erased_any_block: bool,
 ) -> Result<(), String> {
+    lower_crate_units_with_external(crate_name, units, originals, erased_any_block, &BTreeSet::new())
+        .map(|_| ())
+}
+
+/// [`lower_crate_units`] seeded with the spec-only datatype names pruned in
+/// the crate's already-lowered dependencies (`--crate-graph`); returns every
+/// pruned name (empty when nothing was erased).
+pub fn lower_crate_units_with_external(
+    crate_name: &str,
+    units: &mut [(PathBuf, String)],
+    originals: &[String],
+    erased_any_block: bool,
+    external_pruned: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
     if !erased_any_block {
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
     let mut lowered = units
         .iter_mut()
@@ -143,7 +157,8 @@ pub fn lower_crate_units(
             prepared: std::mem::take(prepared),
         })
         .collect::<Vec<_>>();
-    let result = crate::verus_lower::lower_crate(crate_name, &mut lowered);
+    let result =
+        crate::verus_lower::lower_crate_with_external(crate_name, &mut lowered, external_pruned);
     let texts = lowered.into_iter().map(|unit| unit.prepared).collect::<Vec<_>>();
     for ((_, prepared), text) in units.iter_mut().zip(texts) {
         *prepared = text;

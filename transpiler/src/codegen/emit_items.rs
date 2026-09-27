@@ -5529,6 +5529,87 @@ impl CodeGen {
     /// Generic traits, associated types, default methods, by-value `self`,
     /// and static (no-receiver) methods are deferred to later phases and
     /// surface as `// TODO(interface_traits): ...` comments.
+    /// The generic owning adapter of a trait interface: owns a `U` (or a
+    /// smart pointer to one, for `Arc<U>` -> `Arc<dyn Trait>`) and forwards
+    /// every pure virtual to `U`'s member of the same name. A consumer crate's
+    /// `impl dep::Trait for Local` lowers its methods as `Local`'s members, so
+    /// this is the adapter for implementors outside the trait's crate, which
+    /// the trait's crate cannot write explicit `<Trait>Adapter`
+    /// specializations for.
+    fn emit_trait_dyn_adapter(
+        &mut self,
+        trait_name: &str,
+        cls_export: &str,
+        methods: &[(String, String, Vec<String>, &'static str)],
+    ) {
+        self.writeln(&format!(
+            "{}template <class U> class {}DynAdapter final : public {} {{",
+            cls_export, trait_name, trait_name
+        ));
+        self.indent += 1;
+        self.writeln("U value_;");
+        for constness in ["", " const"] {
+            self.writeln(&format!("decltype(auto) rusty_target(){} {{", constness));
+            self.indent += 1;
+            self.writeln(
+                "if constexpr (requires { value_.operator->(); *value_; }) { return (*value_); } else { return (value_); }",
+            );
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        self.indent -= 1;
+        self.writeln("public:");
+        self.indent += 1;
+        self.writeln(&format!(
+            "{}DynAdapter(U value) : value_(std::move(value)) {{}}",
+            trait_name
+        ));
+        // The interface deletes its copy/move (a trait object is unsized);
+        // the adapter is movable into its owning allocation all the same.
+        self.writeln(&format!(
+            "{}DynAdapter({}DynAdapter&& other) : value_(std::move(other.value_)) {{}}",
+            trait_name, trait_name
+        ));
+        // Declared here, defined after the purview: a method's parameter
+        // and return types may be declared later in the crate than the trait
+        // (and must be complete in a definition).
+        let adapter = self.global_scope_qualified_name(&format!("{}DynAdapter", trait_name));
+        for (return_type, method_name, params, const_suffix) in methods {
+            self.writeln(&format!(
+                "{} {}({}){} override;",
+                return_type,
+                method_name,
+                params.join(", "),
+                const_suffix
+            ));
+            let args = params
+                .iter()
+                .map(|param| {
+                    let (ty, name) = param.rsplit_once(' ').unwrap_or(("", param.as_str()));
+                    if ty.trim_end().ends_with('&') || ty.trim_end().ends_with('*') {
+                        name.to_string()
+                    } else {
+                        format!("std::move({})", name)
+                    }
+                })
+                .collect::<Vec<_>>();
+            // Names after the qualified declarator-id (parameters, trailing
+            // return type) resolve in the adapter's own namespace.
+            self.deferred_global_scope_items.push(format!(
+                "template <class U>\nauto {}<U>::{}({}){} -> {} {{ return this->rusty_target().{}({}); }}\n",
+                adapter,
+                method_name,
+                params.join(", "),
+                const_suffix,
+                return_type,
+                method_name,
+                args.join(", ")
+            ));
+        }
+        self.indent -= 1;
+        self.writeln("};");
+    }
+
     pub(super) fn emit_trait_interface_pattern(&mut self, t: &syn::ItemTrait) {
         let trait_name = &t.ident;
         let trait_name_str = trait_name.to_string();
@@ -5986,6 +6067,25 @@ impl CodeGen {
         } else {
             ""
         };
+        // The generic owning adapter (`<Trait>DynAdapter<U>`, below) serves an
+        // implementor this crate cannot see: a consumer crate implementing a
+        // dependency's trait. Only for a non-generic trait without local
+        // supertraits (the adapter must override every pure virtual).
+        // Only a `pub` trait can be implemented outside its crate (and a
+        // private one's anonymous namespace cannot take out-of-line member
+        // definitions from global scope).
+        let dyn_adapter_supported = self.emit_dyn_adapters
+            && !wrap_in_anon_ns
+            && self.block_depth == 0
+            && trait_template_prefix.is_empty()
+            && bases.is_empty();
+        let mut dyn_adapter_methods: Vec<(String, String, Vec<String>, &'static str)> = Vec::new();
+        if dyn_adapter_supported {
+            self.writeln(&format!(
+                "{}template <class U> class {}DynAdapter;",
+                cls_export, trait_name
+            ));
+        }
         if !trait_template_prefix.is_empty() {
             // Strip the trailing newline since writeln adds its own.
             self.writeln(&format!("{}{}", cls_export, trait_template_prefix.trim_end()));
@@ -6006,6 +6106,14 @@ impl CodeGen {
         // ("exception specification is not available until end of class
         // definition") when the class inherits from another local trait.
         self.writeln(&format!("virtual ~{}() noexcept(false) {{}}", trait_name));
+        if dyn_adapter_supported {
+            // rusty::Box<Trait> / rusty::Arc<Trait> unsize conversions from an
+            // unrelated implementor find their adapter here.
+            self.writeln(&format!(
+                "template <class U> using rusty_dyn_adapter = {}DynAdapter<U>;",
+                trait_name
+            ));
+        }
 
         // Emit one pure-virtual per trait method.
         for item in &t.items {
@@ -6155,6 +6263,12 @@ impl CodeGen {
                     params.join(", "),
                     const_suffix
                 ));
+                dyn_adapter_methods.push((
+                    return_type.clone(),
+                    method_name.clone(),
+                    params.clone(),
+                    const_suffix,
+                ));
             }
         }
 
@@ -6248,6 +6362,9 @@ impl CodeGen {
             "{}template <{}> class {}AdapterRefMut;",
             cls_export, adapter_template_args, trait_name
         ));
+        if dyn_adapter_supported {
+            self.emit_trait_dyn_adapter(&trait_name.to_string(), cls_export, &dyn_adapter_methods);
+        }
         if wrap_in_anon_ns {
             self.writeln("}");
         }
