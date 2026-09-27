@@ -7302,10 +7302,26 @@ impl CodeGen {
         }
         let (owner, args) = self.option_or_result_type_args(receiver_ty)?;
         match owner.as_str() {
-            "Option" if matches!(method, "unwrap" | "unwrap_unchecked" | "expect") => {
+            // `unwrap_or_else(f)` / `unwrap_or(v)` / `unwrap_or_default()` yield
+            // the payload too (`m.lock().unwrap_or_else(PoisonError::into_inner)`
+            // is the guard).
+            "Option"
+                if matches!(
+                    method,
+                    "unwrap" | "unwrap_unchecked" | "expect" | "unwrap_or_else" | "unwrap_or"
+                        | "unwrap_or_default"
+                ) =>
+            {
                 args.first().cloned()
             }
-            "Result" if matches!(method, "unwrap" | "expect") => args.first().cloned(),
+            "Result"
+                if matches!(
+                    method,
+                    "unwrap" | "expect" | "unwrap_or_else" | "unwrap_or" | "unwrap_or_default"
+                ) =>
+            {
+                args.first().cloned()
+            }
             "Result" if matches!(method, "unwrap_err" | "expect_err") => args.get(1).cloned(),
             _ => None,
         }

@@ -164,7 +164,9 @@ impl CodeGen {
         // it wraps (flow, not shape — doctrine rule 1).
         let peels_result = match method.as_str() {
             "unwrap" => mc.args.is_empty(),
-            "expect" => mc.args.len() == 1,
+            // `lock().unwrap_or_else(PoisonError::into_inner)` recovers the
+            // guard from the poison error: a guard either way.
+            "expect" | "unwrap_or_else" => mc.args.len() == 1,
             _ => false,
         };
         if peels_result {

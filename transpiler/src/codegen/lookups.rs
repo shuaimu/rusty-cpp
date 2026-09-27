@@ -2780,11 +2780,58 @@ impl CodeGen {
         let (owner, substitutions) = self.receiver_owner_name_and_type_substitutions(receiver)?;
         let expected =
             self.lookup_owner_method_arg_expected_type(&owner, method_name, arg_idx, arg_expr)?;
-        if substitutions.is_empty() {
-            Some(expected)
+        let expected = if substitutions.is_empty() {
+            expected
         } else {
-            Some(self.substitute_type_params_in_type(&expected, &substitutions))
+            self.substitute_type_params_in_type(&expected, &substitutions)
+        };
+        // The owner's own type parameters mean something only where they are
+        // in scope: `sender.finish(Err(e))` on a destructured
+        // `sender: JoinSender<R>` whose arguments were not inferred spelled
+        // `Result<T, JoinError>` with JoinSender's `T` undeclared. Give no
+        // expected type rather than one naming an out-of-scope parameter.
+        let owner_tail = owner.rsplit("::").next().unwrap_or(owner.as_str());
+        if let Some(params) = self
+            .declared_type_params
+            .get(&owner)
+            .or_else(|| self.declared_type_params.get(owner_tail))
+        {
+            let tokens = quote::quote!(#expected).to_string();
+            let mentions = |param: &str| {
+                tokens
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|token| token == param)
+            };
+            if params
+                .iter()
+                .any(|param| mentions(param) && !self.is_type_param_in_scope(param))
+            {
+                return None;
+            }
         }
+        Some(expected)
+    }
+
+    /// `ty` names a generic parameter some crate type declares
+    /// (`declared_type_params`) that is not in scope here and is not itself a
+    /// declared type.
+    pub(super) fn type_mentions_out_of_scope_owner_type_param(&self, ty: &syn::Type) -> bool {
+        let tokens = quote::quote!(#ty).to_string();
+        tokens
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|token| !token.is_empty())
+            .any(|token| {
+                !self.is_type_param_in_scope(token)
+                    && !self.local_declared_types.contains(token)
+                    && self
+                        .declared_type_params
+                        .values()
+                        .any(|params| params.iter().any(|param| param == token))
+                    && !self
+                        .local_declared_types
+                        .iter()
+                        .any(|decl| decl.rsplit("::").next() == Some(token))
+            })
     }
 
     /// Does the receiver's resolved owner type declare `method_name` as an

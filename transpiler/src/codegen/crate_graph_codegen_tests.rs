@@ -541,3 +541,56 @@ pub fn pick(x: bool) -> Poll<Result<u8, u8>> {
     assert!(!cpp.contains("Poll<uint8_t>::AssertUnwindSafe"), "{cpp}");
     assert!(!cpp.contains("rusty::Poll<rusty::Result<uint8_t, uint8_t>>::Err"), "{cpp}");
 }
+
+#[test]
+fn guard_recovered_from_a_poison_error_is_dereferenced() {
+    // `lock().unwrap_or_else(PoisonError::into_inner)` is the guard, as
+    // `lock().unwrap()` is: its methods are the protected value's.
+    let cpp = translate(
+        r#"
+use std::collections::VecDeque;
+use std::sync::{Mutex, PoisonError};
+pub struct Queue {
+    pub ids: Mutex<VecDeque<u64>>,
+}
+impl Queue {
+    pub fn push(&self, id: u64) {
+        self.ids.lock().unwrap_or_else(PoisonError::into_inner).push_back(id);
+    }
+}
+"#,
+    );
+    assert!(
+        cpp.contains(
+            "(*this->ids.lock().unwrap_or_else(rusty::sync::poison_into_inner)).push_back(std::move(id));"
+        ),
+        "{cpp}"
+    );
+}
+
+#[test]
+fn owner_parameter_hint_is_dropped_outside_the_owner() {
+    // `finish(self, r: Result<T, u8>)` of `Sender<T>`: on a destructured,
+    // untyped `s`, `T` is not in scope and must not be spelled.
+    let cpp = translate(
+        r#"
+pub struct Sender<T> {
+    pub v: Option<T>,
+}
+impl<T> Sender<T> {
+    pub fn finish(self, r: Result<T, u8>) -> bool {
+        r.is_ok()
+    }
+}
+pub fn make<T>() -> (u8, Sender<T>) {
+    (0, Sender { v: None })
+}
+pub fn go<R>() -> bool {
+    let (_a, s) = make::<R>();
+    s.finish(Err(1))
+}
+"#,
+    );
+    assert!(!cpp.contains("s.finish(rusty::Result<T,"), "{cpp}");
+    assert!(cpp.contains("return s.finish(rusty::Err(1));"), "{cpp}");
+}

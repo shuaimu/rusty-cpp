@@ -9513,7 +9513,13 @@ impl CodeGen {
                         None
                     }
                 });
-            let method_expected_ty = self.lookup_method_arg_expected_type(&method_name, idx);
+            // A by-name hint from a generic owner's impl (`fn finish(self, r:
+            // Result<T, JoinError>)` of `JoinSender<T>`) names that owner's
+            // parameter; outside the owner, with no receiver type to
+            // substitute it, it is no hint at all.
+            let method_expected_ty = self
+                .lookup_method_arg_expected_type(&method_name, idx)
+                .filter(|ty| !self.type_mentions_out_of_scope_owner_type_param(ty));
             let owner_expected_ty = self.lookup_method_arg_expected_type_from_receiver_owner(
                 &mc.receiver,
                 &method_name,
