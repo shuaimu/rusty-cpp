@@ -50,6 +50,13 @@ template<typename X>
 using option_result_err_t = typename std::remove_cvref_t<X>::err_type;
 
 // Tag types for Option variants
+namespace detail {
+// Rust's `()` where a C++ callable returns `void`: `opt.map(|x| side_effect(x))`
+// is an `Option<()>`, and `Option<void>` is not a type.
+template<typename T>
+using unit_if_void_t = std::conditional_t<std::is_void_v<T>, std::tuple<>, T>;
+} // namespace detail
+
 struct None_t {
     constexpr None_t() noexcept = default;
 };
@@ -402,10 +409,15 @@ public:
     // Map function over the value
     template<typename F>
     // @lifetime: owned
-    auto map(F&& f) -> Option<decltype(f(std::declval<T>()))> {
-        using U = decltype(f(std::declval<T>()));
+    auto map(F&& f) -> Option<detail::unit_if_void_t<decltype(f(std::declval<T>()))>> {
+        using U = detail::unit_if_void_t<decltype(f(std::declval<T>()))>;
         if (has_value) {
-            return Option<U>(f(std::move(value)));
+            if constexpr (std::is_void_v<decltype(f(std::move(value)))>) {
+                f(std::move(value));
+                return Option<U>(U{});
+            } else {
+                return Option<U>(f(std::move(value)));
+            }
         }
         return Option<U>(None);
     }
@@ -960,6 +972,11 @@ public:
 
     // Check if Option contains a value
     bool is_some() const { return ptr != nullptr; }
+    // Rust `Option<&T>::is_some_and(|x| ..)`: the predicate sees the reference.
+    template<typename Pred>
+    bool is_some_and(Pred&& pred) const {
+        return ptr != nullptr && std::forward<Pred>(pred)(*ptr);
+    }
     bool is_none() const { return !ptr; }
     bool is_ok() const { return ptr != nullptr; }
     bool is_err() const { return !ptr; }
@@ -1100,9 +1117,14 @@ public:
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
     auto map(F&& f) {
-        using U = decltype(f(*ptr));
+        using U = detail::unit_if_void_t<decltype(f(*ptr))>;
         if (ptr) {
-            return Option<U>(f(*ptr));
+            if constexpr (std::is_void_v<decltype(f(*ptr))>) {
+                f(*ptr);
+                return Option<U>(U{});
+            } else {
+                return Option<U>(f(*ptr));
+            }
         }
         return Option<U>(None);
     }
@@ -1159,9 +1181,14 @@ public:
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
     auto map(F&& f) const {
-        using U = decltype(f(*static_cast<const T*>(ptr)));
+        using U = detail::unit_if_void_t<decltype(f(*static_cast<const T*>(ptr)))>;
         if (ptr) {
-            return Option<U>(f(*static_cast<const T*>(ptr)));
+            if constexpr (std::is_void_v<decltype(f(*static_cast<const T*>(ptr)))>) {
+                f(*static_cast<const T*>(ptr));
+                return Option<U>(U{});
+            } else {
+                return Option<U>(f(*static_cast<const T*>(ptr)));
+            }
         }
         return Option<U>(None);
     }
@@ -1356,6 +1383,11 @@ public:
 
     // Check if Option contains a value
     bool is_some() const { return ptr != nullptr; }
+    // Rust `Option<&T>::is_some_and(|x| ..)`: the predicate sees the reference.
+    template<typename Pred>
+    bool is_some_and(Pred&& pred) const {
+        return ptr != nullptr && std::forward<Pred>(pred)(*ptr);
+    }
     bool is_none() const { return !ptr; }
     bool is_ok() const { return ptr != nullptr; }
     bool is_err() const { return !ptr; }
@@ -1445,10 +1477,15 @@ public:
     // Map function over the reference
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
-    auto map(F&& f) const -> Option<decltype(f(std::declval<const T&>()))> {
-        using U = decltype(f(std::declval<const T&>()));
+    auto map(F&& f) const -> Option<detail::unit_if_void_t<decltype(f(std::declval<const T&>()))>> {
+        using U = detail::unit_if_void_t<decltype(f(std::declval<const T&>()))>;
         if (ptr) {
-            return Option<U>(f(*ptr));
+            if constexpr (std::is_void_v<decltype(f(*ptr))>) {
+                f(*ptr);
+                return Option<U>(U{});
+            } else {
+                return Option<U>(f(*ptr));
+            }
         }
         return Option<U>(None);
     }

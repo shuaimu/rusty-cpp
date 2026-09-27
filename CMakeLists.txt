@@ -576,6 +576,10 @@ set(TEST_SOURCES
     # rusty_rc_test.cpp deleted — legacy rusty::Rc retired; rc_port::Rc
     # exercised via tests/rc_port_module_test.cpp instead.
     tests/rusty_refcell_test.cpp
+    # io::Result without a default-constructible T, LocalKey::try_with,
+    # RefCell::try_borrow, OnceLock, unit Option::map, pointer dispatch
+    # (the runtime surface --crate-graph's Lion crates lower to).
+    tests/rusty_runtime_surface_test.cpp
     tests/rusty_result_test.cpp
     tests/rusty_mem_test.cpp
     tests/rusty_vec_test.cpp

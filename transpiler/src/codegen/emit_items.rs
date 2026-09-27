@@ -5627,7 +5627,7 @@ impl CodeGen {
         // Declared here, defined after the purview: a method's parameter
         // and return types may be declared later in the crate than the trait
         // (and must be complete in a definition).
-        let adapter = self.global_scope_qualified_name(&format!("{}DynAdapter", trait_name));
+        let adapter = self.purview_scope_qualified_name(&format!("{}DynAdapter", trait_name));
         for (return_type, method_name, params, const_suffix) in methods {
             self.writeln(&format!(
                 "{} {}({}){} override;",
@@ -5649,7 +5649,7 @@ impl CodeGen {
                 .collect::<Vec<_>>();
             // Names after the qualified declarator-id (parameters, trailing
             // return type) resolve in the adapter's own namespace.
-            self.deferred_global_scope_items.push(format!(
+            self.deferred_purview_tail_items.push(format!(
                 "template <class U>\nauto {}<U>::{}({}){} -> {} {{ return this->rusty_target().{}({}); }}\n",
                 adapter,
                 method_name,
@@ -10710,11 +10710,17 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("}");
         }
+        // An `async fn` method is a coroutine like an async free fn: its
+        // returns are `co_return`s (its return type is the Task, see
+        // map_impl_method_return_type).
+        let prev_async = self.in_async;
+        self.in_async = method.sig.asyncness.is_some();
         if let Some(clone_return_stmt) = self.try_emit_fieldwise_clone_return_stmt(method) {
             self.writeln(&clone_return_stmt);
         } else {
             self.emit_block(block_for_emission);
         }
+        self.in_async = prev_async;
         self.pop_transient_statement_scope();
         self.pop_deref_mut_ref_fallback_scope();
         self.pop_deref_mut_method_scope();

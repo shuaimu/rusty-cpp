@@ -1705,10 +1705,14 @@ pub struct CodeGen {
     /// Declarations emitted after the whole purview, at global scope, and
     /// spelled with fully qualified names: `#[derive(Hash)]` std::hash
     /// specializations (a specialization of `std::hash` cannot be declared
-    /// inside the crate or module namespace its type lives in) and the
-    /// out-of-line member definitions of `<Trait>DynAdapter` (which need every
-    /// type in the crate complete).
+    /// inside the crate or module namespace its type lives in).
     pub(crate) deferred_global_scope_items: Vec<String>,
+    /// Definitions emitted after every module body but still inside the
+    /// crate namespace wrap (so the wrap requalifies their type spellings),
+    /// named from the purview's global scope: the out-of-line member
+    /// definitions of `<Trait>DynAdapter`, which need every type in the crate
+    /// complete.
+    pub(crate) deferred_purview_tail_items: Vec<String>,
     /// UFCS Phase 3: per-method-name class (Inherent / TraitOnly / Both) over
     /// the whole file, populated in `emit_file`. Drives
     /// call-site lowering (trait-only crate methods → free call). Empty
@@ -2498,6 +2502,15 @@ pub struct CodeGen {
     /// This preserves owner-specific signatures for associated-call fallback
     /// when method names are globally ambiguous (`from`, `new`, etc).
     pub(crate) owner_method_arg_expected_types: std::rc::Rc<HashMap<String, Vec<Option<syn::Type>>>>,
+    /// Per block: locals initialised by a cast to a raw pointer
+    /// (`let p = self as *mut T;`), for pointer-only lowerings (`p as usize`).
+    /// (`true`; `false` records a later non-pointer binding of the name).
+    pub(crate) raw_pointer_cast_locals: Vec<HashMap<String, bool>>,
+    /// `Trait::method` -> the method's declared parameter types, for calls
+    /// through a trait object (`Box<dyn Trait>`), which have no impl to take
+    /// them from. Consulted only for trait-object receivers.
+    pub(crate) trait_object_method_arg_expected_types:
+        std::rc::Rc<HashMap<String, Vec<Option<syn::Type>>>>,
     /// Raw owner-scoped method argument signatures keyed by `Owner::method`.
     /// Used when merged owner hints are ambiguous (`None`) so call-site shape
     /// can choose a compatible overload hint without losing type context.
@@ -3417,6 +3430,7 @@ impl CodeGen {
             is_dependency_module: false,
             emit_dyn_adapters: false,
             deferred_global_scope_items: Vec::new(),
+            deferred_purview_tail_items: Vec::new(),
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
@@ -3574,6 +3588,8 @@ impl CodeGen {
             method_arg_pass_styles: std::rc::Rc::new(HashMap::new()),
             method_arg_expected_types: std::rc::Rc::new(HashMap::new()),
             owner_method_arg_expected_types: std::rc::Rc::new(HashMap::new()),
+            trait_object_method_arg_expected_types: std::rc::Rc::new(HashMap::new()),
+            raw_pointer_cast_locals: Vec::new(),
             owner_method_arg_expected_type_variants: std::rc::Rc::new(HashMap::new()),
             owner_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             alias_inherent_owner_method_has_receiver: HashMap::new(),
@@ -4849,6 +4865,16 @@ impl CodeGen {
         // declarations, which clang rejects. Put them back in the preamble
         // before the wrap runs, so the wrap sees the real purview start.
         self.hoist_module_imports_into_preamble();
+
+        if !self.is_sub_codegen && !self.deferred_purview_tail_items.is_empty() {
+            if !self.output.ends_with('\n') {
+                self.output.push('\n');
+            }
+            self.output.push('\n');
+            for item in std::mem::take(&mut self.deferred_purview_tail_items) {
+                self.output.push_str(&item);
+            }
+        }
 
         // We insert `namespace <crate> {` immediately after the
         // module declaration's import block, and append the closing
@@ -7938,6 +7964,7 @@ impl CodeGen {
         std::rc::Rc::make_mut(&mut self.method_arg_pass_styles).clear();
         std::rc::Rc::make_mut(&mut self.method_arg_expected_types).clear();
         std::rc::Rc::make_mut(&mut self.owner_method_arg_expected_types).clear();
+        std::rc::Rc::make_mut(&mut self.trait_object_method_arg_expected_types).clear();
         std::rc::Rc::make_mut(&mut self.owner_method_arg_expected_type_variants).clear();
         std::rc::Rc::make_mut(&mut self.owner_method_has_receiver).clear();
         self.alias_inherent_owner_method_has_receiver.clear();
@@ -9644,7 +9671,46 @@ impl CodeGen {
                     matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
                         || matches!(item, syn::Item::Struct(st) if early_hoistable_data_enums.contains(&st.ident.to_string()))
                 });
-            let mut final_result = Vec::with_capacity(early_enums.len() + rest.len());
+            // A hoisted C-like enum's inherent methods are emitted with it, so
+            // their bodies must already see this scope's imports of names
+            // declared elsewhere (`use crate::types::Interest;` ->
+            // `Interest::READABLE`). Imports rooted outside this scope target
+            // declarations that precede the whole scope, so they can move
+            // ahead of the hoisted enums; `self::`/local-rooted ones (which
+            // may name the enums themselves) keep their place.
+            // Only when a hoisted enum carries inherent methods (the bodies
+            // that can name an import); otherwise the order stays as it was.
+            let hoisted_enum_has_methods = early_enums.iter().any(|item| {
+                let syn::Item::Enum(e) = item else {
+                    return false;
+                };
+                rest.iter().any(|other| {
+                    matches!(other, syn::Item::Impl(imp)
+                        if imp.trait_.is_none()
+                            && matches!(imp.self_ty.as_ref(), syn::Type::Path(tp)
+                                if tp.qself.is_none() && tp.path.is_ident(&e.ident)))
+                })
+            });
+            let (outer_uses, rest): (Vec<&syn::Item>, Vec<&syn::Item>) = if !hoisted_enum_has_methods {
+                (Vec::new(), rest)
+            } else {
+                rest.into_iter().partition(|item| {
+                    let syn::Item::Use(item_use) = item else {
+                        return false;
+                    };
+                    let root = match &item_use.tree {
+                        syn::UseTree::Path(path) => path.ident.to_string(),
+                        syn::UseTree::Name(name) => name.ident.to_string(),
+                        syn::UseTree::Rename(rename) => rename.ident.to_string(),
+                        _ => return false,
+                    };
+                    matches!(root.as_str(), "crate" | "super" | "std" | "core" | "alloc")
+                        || item_use.leading_colon.is_some()
+                })
+            };
+            let mut final_result =
+                Vec::with_capacity(outer_uses.len() + early_enums.len() + rest.len());
+            final_result.extend(outer_uses);
             final_result.extend(early_enums);
             final_result.extend(rest);
             self.delay_aggregate_typed_consts_after_aggregates(&mut final_result);
@@ -18261,6 +18327,23 @@ impl CodeGen {
             return Self::prefixed_named_module_root_type_name(module_name, type_name);
         }
         escape_cpp_keyword(type_name)
+    }
+
+    /// `name` declared in the current scope, spelled from the purview's
+    /// global scope before the crate namespace wrap (which requalifies it):
+    /// the `--cxx-namespace` wrap and the Rust module path.
+    pub(crate) fn purview_scope_qualified_name(&self, name: &str) -> String {
+        let mut qualifier = Vec::new();
+        if self.module_name.is_some()
+            && let Some(ns) = self.cxx_namespace.as_deref()
+        {
+            qualifier.push(ns.to_string());
+        }
+        if !self.module_stack.is_empty() {
+            qualifier.push(self.escape_and_rename_qualified_name(&self.module_stack.join("::")));
+        }
+        qualifier.push(name.to_string());
+        format!("::{}", qualifier.join("::"))
     }
 
     /// `name` declared in the current scope, spelled from the global scope:
@@ -28197,7 +28280,12 @@ impl CodeGen {
             let Some(init) = local.init.as_ref() else {
                 continue;
             };
-            if !matches!(self.peel_paren_group_expr(&init.expr), syn::Expr::If(_)) {
+            // `let x = if ..` / `let x = match ..`: the same typing
+            // argument holds for both (the arms' common type IS x's type).
+            if !matches!(
+                self.peel_paren_group_expr(&init.expr),
+                syn::Expr::If(_) | syn::Expr::Match(_)
+            ) {
                 continue;
             }
             let Some(name) = local_binding_name(local) else {
@@ -40798,6 +40886,67 @@ impl CodeGen {
 
 
 
+    /// A bare local bound by `let p = <expr> as *mut T;` in an enclosing block.
+    pub(super) fn expr_is_raw_pointer_cast_local(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        let Some(ident) = path.path.get_ident() else {
+            return false;
+        };
+        let name = ident.to_string();
+        // The innermost block that binds the name decides (shadowing).
+        self.raw_pointer_cast_locals
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name).copied())
+            .unwrap_or(false)
+    }
+
+    /// `dyn Tr` / `Box<dyn Tr>` / `Rc<dyn Tr>` / `Arc<dyn Tr>` (single
+    /// trait bound, auto-trait markers ignored): the trait's path.
+    pub(super) fn dyn_trait_object_owner_path(&self, ty: &syn::Type) -> Option<String> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let object = match ty {
+            syn::Type::TraitObject(object) => object,
+            syn::Type::Path(tp) if tp.qself.is_none() => {
+                let last = tp.path.segments.last()?;
+                if !matches!(last.ident.to_string().as_str(), "Box" | "Rc" | "Arc") {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                match args.args.first()? {
+                    syn::GenericArgument::Type(syn::Type::TraitObject(object)) => object,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let mut traits = object.bounds.iter().filter_map(|bound| match bound {
+            syn::TypeParamBound::Trait(bound)
+                if !bound.path.segments.last().is_some_and(|seg| {
+                    matches!(seg.ident.to_string().as_str(), "Send" | "Sync" | "Unpin")
+                }) =>
+            {
+                Some(&bound.path)
+            }
+            _ => None,
+        });
+        let path = traits.next()?;
+        if traits.next().is_some() {
+            return None;
+        }
+        Some(
+            path.segments
+                .iter()
+                .map(|seg| seg.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::"),
+        )
+    }
+
     fn receiver_owner_name_and_type_substitutions(
         &self,
         receiver: &syn::Expr,
@@ -46803,7 +46952,21 @@ impl CodeGen {
         );
         let target_normalized = ty.trim_start_matches("const ").trim_end_matches('&').trim();
         let target_is_numeric_scalar = is_numeric_cpp_scalar_type(target_normalized);
-        let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&cast.expr);
+        // `|p| p as usize` on an untyped closure parameter that may be a raw
+        // pointer (`opt_ptr.map(|p| p as usize)`): dispatch on the C++ type.
+        if matches!(
+            ty.as_str(),
+            "size_t" | "uintptr_t" | "std::uintptr_t" | "uint64_t" | "intptr_t" | "ptrdiff_t"
+                | "int64_t"
+        ) && let syn::Expr::Path(path) = self.peel_paren_group_expr(&cast.expr)
+            && let Some(ident) = path.path.get_ident()
+            && self.should_lower_untyped_closure_param_deref(&ident.to_string())
+            && self.infer_simple_expr_type(&cast.expr).is_none()
+        {
+            return format!("rusty::ptr::detail::integer_or_address_cast<{}>({})", ty, expr);
+        }
+        let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&cast.expr)
+            || self.expr_is_raw_pointer_cast_local(&cast.expr);
         let source_is_explicit_reference = matches!(
             self.peel_paren_group_expr(&cast.expr),
             syn::Expr::Reference(_)
@@ -50827,6 +50990,7 @@ impl CodeGen {
         inner.is_sub_codegen = true;
         // The parent flushes its own deferred global-scope items.
         inner.deferred_global_scope_items.clear();
+        inner.deferred_purview_tail_items.clear();
         inner
     }
 
@@ -53081,6 +53245,7 @@ impl CodeGen {
             return;
         }
         let mut defaulted_tail: Vec<String> = Vec::new();
+        let last_type_param = emitted.type_params().last().map(|tp| tp.ident.to_string());
         for param in emitted.params.iter_mut() {
             let syn::GenericParam::Type(tp) = param else {
                 continue;
@@ -53103,31 +53268,59 @@ impl CodeGen {
             if !emit_items::contains_whole_word(&value_param_text, bearer) {
                 continue;
             }
-            if bound_inputs.len() != 1 {
-                continue;
-            }
             // `&X::Item` where X is one of this function's own type params.
-            let syn::Type::Reference(r) = &bound_inputs[0] else {
-                continue;
+            let item_owner = match bound_inputs.as_slice() {
+                [syn::Type::Reference(r)] => match r.elem.as_ref() {
+                    syn::Type::Path(p)
+                        if p.qself.is_none()
+                            && p.path.segments.len() == 2
+                            && p.path.segments[1].ident == "Item"
+                            && param_names.contains(&p.path.segments[0].ident.to_string()) =>
+                    {
+                        Some(p.path.segments[0].ident.to_string())
+                    }
+                    _ => None,
+                },
+                _ => None,
             };
-            let syn::Type::Path(p) = r.elem.as_ref() else {
-                continue;
+            let default_text = if let Some(owner) = item_owner {
+                format!(
+                    "std::remove_cvref_t<std::invoke_result_t<{}&, \
+                     rusty::detail::associated_item_t<std::remove_reference_t<{}>>&>>",
+                    bearer, owner
+                )
+            } else {
+                // Any other argument list (`F: FnOnce(&mut Reactor) -> R`):
+                // the result of calling the bearer with the mapped argument
+                // types. Only for the LAST declared type param: the forward
+                // declaration keeps Rust's order, so a moved param would
+                // declare a different template. A placeholder cannot be
+                // spelled in a default.
+                if last_type_param.as_deref() != Some(name.as_str()) {
+                    continue;
+                }
+                let mut mapped = Vec::with_capacity(bound_inputs.len());
+                let mut expressible = true;
+                for input in bound_inputs {
+                    let cpp = self.map_type(input);
+                    if cpp.is_empty() || type_string_has_auto_placeholder(&cpp) {
+                        expressible = false;
+                        break;
+                    }
+                    mapped.push(cpp);
+                }
+                if !expressible {
+                    continue;
+                }
+                let mut invoke_args = vec![format!("{}&", bearer)];
+                invoke_args.extend(mapped);
+                // A closure returning `()` lowers to one returning void;
+                // Rust's `R` is then `()`.
+                format!(
+                    "rusty::detail::unit_if_void_t<std::remove_cvref_t<std::invoke_result_t<{}>>>",
+                    invoke_args.join(", ")
+                )
             };
-            if p.qself.is_some()
-                || p.path.segments.len() != 2
-                || p.path.segments[1].ident != "Item"
-            {
-                continue;
-            }
-            let owner = p.path.segments[0].ident.to_string();
-            if !param_names.contains(&owner) {
-                continue;
-            }
-            let default_text = format!(
-                "std::remove_cvref_t<std::invoke_result_t<{}&, \
-                 rusty::detail::associated_item_t<std::remove_reference_t<{}>>&>>",
-                bearer, owner
-            );
             if let Ok(tokens) = default_text.parse::<proc_macro2::TokenStream>() {
                 tp.default = Some(syn::Type::Verbatim(tokens));
                 defaulted_tail.push(name);

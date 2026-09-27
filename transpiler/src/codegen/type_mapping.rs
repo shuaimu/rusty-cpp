@@ -870,7 +870,12 @@ impl CodeGen {
         if self.impl_method_is_fmt_formatter_method(method) {
             return "rusty::fmt::Result".to_string();
         }
-        self.map_return_type(&method.sig.output)
+        let mapped = self.map_return_type(&method.sig.output);
+        // `async fn` methods return their future, as async free fns do.
+        if method.sig.asyncness.is_some() {
+            return format!("rusty::Task<{}>", mapped);
+        }
+        mapped
     }
 
     pub(super) fn type_is_reference_like(&self, ty: &syn::Type) -> bool {

@@ -212,6 +212,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // Concurrency
         "Mutex" | "std::sync::Mutex" => Some(("rusty::Mutex", true)),
+        "OnceLock" | "std::sync::OnceLock" => Some(("rusty::OnceLock", true)),
         "RwLock" | "std::sync::RwLock" => Some(("rusty::RwLock", true)),
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),

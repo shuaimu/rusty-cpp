@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include "platform/threading.hpp"
+#include "option.hpp"
 
 namespace rusty {
 
@@ -123,6 +124,38 @@ public:
             as_ptr()->~T();
         }
     }
+};
+
+
+// OnceLock<T> - Rust's `std::sync::OnceLock`: a thread-safe cell written at
+// most once, with Rust's API shape (`get` returns an Option of a reference;
+// `get_or_init` runs the initializer once). Built on OnceCell.
+template<typename T>
+class OnceLock {
+private:
+    OnceCell<T> cell_;
+
+public:
+    OnceLock() = default;
+
+    // `OnceLock::new()`. Returned as a prvalue, so the non-movable cell is
+    // constructed in place (`static OnceLock<T> X = OnceLock<T>::new_();`).
+    static OnceLock new_() { return OnceLock(); }
+
+    Option<const T&> get() const {
+        const T* value = cell_.get();
+        return value != nullptr ? Option<const T&>(*value) : Option<const T&>(None);
+    }
+
+    template<typename F>
+    const T& get_or_init(F&& init) {
+        return cell_.get_or_init(std::forward<F>(init));
+    }
+
+    OnceLock(const OnceLock&) = delete;
+    OnceLock& operator=(const OnceLock&) = delete;
+    OnceLock(OnceLock&&) = delete;
+    OnceLock& operator=(OnceLock&&) = delete;
 };
 
 } // namespace rusty

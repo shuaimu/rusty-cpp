@@ -785,6 +785,7 @@ impl CodeGen {
         self.collection_decltype_element_overrides
             .push(decltype_element_overrides);
         self.local_bindings.push(HashMap::new());
+        self.raw_pointer_cast_locals.push(HashMap::new());
         self.local_shadowed_binding_types.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
         self.local_cpp_names_used.push(HashSet::new());
@@ -1045,6 +1046,7 @@ impl CodeGen {
         self.block_depth -= 1;
         self.local_static_names.pop();
         self.local_bindings.pop();
+        self.raw_pointer_cast_locals.pop();
         self.local_shadowed_binding_types.pop();
         self.local_cpp_bindings.pop();
         self.local_cpp_names_used.pop();
@@ -11374,6 +11376,26 @@ impl CodeGen {
                 return format!("rusty::ptr::read_unaligned({})", receiver);
             }
         }
+        // Rust `<*mut T>::as_mut()` / `<*const T>::as_ref()` -> Option of a
+        // reference (None for null).
+        if matches!(method_name.as_str(), "as_mut" | "as_ref") && args.is_empty() {
+            if self.is_expr_raw_pointer_like(&mc.receiver) {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
+                return format!("rusty::ptr::{}({})", method_name, receiver);
+            }
+            // A closure parameter of unknown type may be a raw pointer
+            // (`opt_ptr.and_then(|p| unsafe { p.as_mut() })`): dispatch on
+            // the C++ type.
+            if let syn::Expr::Path(path) = self.peel_paren_group_expr(&mc.receiver)
+                && let Some(ident) = path.path.get_ident()
+                && self.should_lower_untyped_closure_param_deref(&ident.to_string())
+                && self.infer_simple_expr_type(&mc.receiver).is_none()
+            {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                return format!("rusty::ptr::{}_dispatch({})", method_name, raw_receiver);
+            }
+        }
         // Rust `ptr.is_null()` → C++ `ptr == nullptr`
         if method_name == "is_null" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -12154,6 +12176,15 @@ impl CodeGen {
             free_args.push(self_expr.to_string());
             free_args.extend(args.iter().cloned());
             let free_call = format!("{}({})", free_fn, free_args.join(", "));
+            // A guard or smart pointer (`RefMut<HashMap>`) reaches the member
+            // through its deref; the enum's free function never takes one.
+            if !receiver_is_self {
+                let deref_call = member_call.replacen(self_expr, "(*__self)", 1);
+                return format!(
+                    "([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                    member_call, member_call, deref_call, deref_call, free_call, receiver
+                );
+            }
             return format!(
                 "([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
                 member_call, member_call, free_call, receiver
@@ -14911,8 +14942,23 @@ impl CodeGen {
         // Fallback for externally-transpiled data enums where local enum metadata
         // is unavailable in this compilation unit. Prefer static variant
         // constructors on the expected owner type (`Type::Variant(...)`).
+        //
+        // A bare call to a type this crate declares is that type's own
+        // (tuple-struct) constructor, never a variant of the expected owner:
+        // `let id = ResourceId(raw);` in a fn returning `Vec<IoEvent>` became
+        // `rusty::Vec<IoEvent>::ResourceId(raw)`.
+        if path.segments.len() == 1
+            && (self.local_declared_types.contains(&variant_name)
+                || self.current_scope_declares_type_name(&variant_name))
+        {
+            return None;
+        }
         let expected_path = self.expected_type_path(expected_ty)?;
         let mut owner_tail = expected_path.segments.last()?.ident.to_string();
+        // The std collections declare no variants.
+        if Self::is_polymorphic_collection_name(&owner_tail) {
+            return None;
+        }
         if owner_tail == "Self" {
             owner_tail = self
                 .current_struct
@@ -27464,6 +27510,24 @@ impl CodeGen {
                         inner.push_return_type_hint(expected_rt);
                     }
                 }
+                // An un-annotated closure with an early `return` besides its
+                // tail deduces its C++ return type from the FIRST return
+                // statement, which may be a bare variant struct
+                // (`return IoResult::Ok(id)` -> `IoResult_Ok{id}`) while the
+                // tail yields the enum. Rust types the closure by the tail:
+                // annotate it with the tail's type when the tail names only
+                // parameters and captures.
+                let lambda_return_annotation = if lambda_return_annotation.is_empty()
+                    && matches!(&resolved_closure_output, syn::ReturnType::Default)
+                    && fallback_expected_return_ty.is_none()
+                    && !void_callback
+                {
+                    inner
+                        .closure_tail_decltype_return_annotation(&block.block)
+                        .unwrap_or(lambda_return_annotation)
+                } else {
+                    lambda_return_annotation
+                };
                 inner.emit_block(&block.block);
                 let mut body_str = inner.into_output();
                 let closure_expected_unit = expected_return_type
@@ -27597,6 +27661,75 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    /// ` -> std::remove_cvref_t<decltype(<tail>)>` for a closure block that
+    /// has a tail expression and an early `return`, when the tail names no
+    /// binding the block itself introduces (so it is valid in the lambda's
+    /// trailing return type). Emitted with a throwaway copy of the closure's
+    /// codegen state, which already binds the parameters.
+    pub(super) fn closure_tail_decltype_return_annotation(
+        &self,
+        block: &syn::Block,
+    ) -> Option<String> {
+        use syn::visit::Visit;
+        let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() else {
+            return None;
+        };
+        #[derive(Default)]
+        struct Scan {
+            has_return: bool,
+            bound: HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for Scan {
+            fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+                self.has_return = true;
+                syn::visit::visit_expr_return(self, node);
+            }
+            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.bound.insert(node.ident.to_string());
+                syn::visit::visit_pat_ident(self, node);
+            }
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+        }
+        let mut scan = Scan::default();
+        for stmt in &block.stmts[..block.stmts.len() - 1] {
+            scan.visit_stmt(stmt);
+        }
+        if !scan.has_return {
+            return None;
+        }
+        let mut tail_idents = HashSet::new();
+        fn collect(tokens: proc_macro2::TokenStream, out: &mut HashSet<String>) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        out.insert(ident.to_string());
+                    }
+                    proc_macro2::TokenTree::Group(group) => collect(group.stream(), out),
+                    _ => {}
+                }
+            }
+        }
+        collect(quote::quote!(#tail), &mut tail_idents);
+        if tail_idents.iter().any(|ident| scan.bound.contains(ident)) {
+            return None;
+        }
+        let probe = self.clone();
+        let tail_cpp = probe.emit_expr_to_string(tail);
+        // A brace-initialised tail (an enum variant written without its
+        // expected type, `IoResult_Ok{v}`) names the variant, not the enum.
+        if tail_cpp.trim().is_empty()
+            || tail_cpp.contains('{')
+            || tail_cpp.contains("[&")
+            || tail_cpp.contains("[=")
+            || tail_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&tail_cpp)
+        {
+            return None;
+        }
+        Some(format!(" -> std::remove_cvref_t<decltype({})>", tail_cpp))
     }
 
     /// Emit a single closure parameter.

@@ -33,6 +33,7 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 #include "mem.hpp"
@@ -508,6 +509,41 @@ inline Option<T&> as_mut(T* ptr) {
         return Option<T&>(None);
     }
     return Option<T&>(*ptr);
+}
+
+namespace detail {
+// `x as usize` whose source type the transpiler could not see (a closure
+// parameter): a raw pointer's address, or an ordinary integer conversion.
+template<typename To, typename From>
+To integer_or_address_cast(From&& from) {
+    using F = std::remove_cvref_t<From>;
+    if constexpr (std::is_pointer_v<F>) {
+        return static_cast<To>(reinterpret_cast<std::uintptr_t>(from));
+    } else {
+        return static_cast<To>(from);
+    }
+}
+} // namespace detail
+
+// `x.as_mut()` / `x.as_ref()` whose receiver type the transpiler could not
+// see (a closure parameter): the raw-pointer lowering above for a pointer,
+// the receiver's own method otherwise (Option, Box, Pin, ...).
+template<typename P>
+decltype(auto) as_mut_dispatch(P&& p) {
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<P>>) {
+        return as_mut(p);
+    } else {
+        return std::forward<P>(p).as_mut();
+    }
+}
+
+template<typename P>
+decltype(auto) as_ref_dispatch(P&& p) {
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<P>>) {
+        return as_ref(static_cast<const std::remove_pointer_t<std::remove_cvref_t<P>>*>(p));
+    } else {
+        return std::forward<P>(p).as_ref();
+    }
 }
 
 // Rust's `ptr::read` RELOCATES: it copies the bytes out and the source becomes

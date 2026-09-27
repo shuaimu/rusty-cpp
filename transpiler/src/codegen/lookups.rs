@@ -2757,6 +2757,26 @@ impl CodeGen {
         arg_idx: usize,
         arg_expr: Option<&syn::Expr>,
     ) -> Option<syn::Type> {
+        if let Some(receiver_ty) = self.infer_simple_expr_type(receiver)
+            && let Some(trait_path) = self.dyn_trait_object_owner_path(&receiver_ty)
+        {
+            let mut keys = vec![trait_path.clone()];
+            if let Some(tail) = trait_path.rsplit("::").next() {
+                keys.push(tail.to_string());
+            }
+            if !self.module_stack.is_empty() {
+                keys.push(format!("{}::{}", self.module_stack.join("::"), trait_path));
+            }
+            for key in keys {
+                if let Some(Some(ty)) = self
+                    .trait_object_method_arg_expected_types
+                    .get(&format!("{}::{}", key, method_name))
+                    .and_then(|types| types.get(arg_idx))
+                {
+                    return Some(ty.clone());
+                }
+            }
+        }
         let (owner, substitutions) = self.receiver_owner_name_and_type_substitutions(receiver)?;
         let expected =
             self.lookup_owner_method_arg_expected_type(&owner, method_name, arg_idx, arg_expr)?;

@@ -344,6 +344,13 @@ Task<T> pin(F future) {
 template<typename PollType> struct poll_output;
 template<typename T> struct poll_output<Poll<T>> { using type = T; };
 
+// Rust `std::future::poll_fn(f)`: a future whose `poll(cx)` is `f(cx)`.
+template<typename F>
+struct PollFn {
+    F f;
+    auto poll(Context& cx) { return f(cx); }
+};
+
 // Derive Output from the concrete pollable when Rust inferred Box::pin's
 // type through a generic call. A caller's generic parameter names are not
 // necessarily in scope where that expression is emitted.
@@ -353,6 +360,13 @@ auto pin(F future) -> Task<typename poll_output<decltype(
     using Output = typename poll_output<decltype(
         std::declval<F&>().poll(std::declval<Context&>()))>::type;
     return pin<Output, F>(std::move(future));
+}
+
+// `poll_fn(f).await` lowers to `co_await poll_fn(f)`: the pinned task polls
+// `f` with the awaiting task's context until it is ready.
+template<typename F>
+auto poll_fn(F f) {
+    return pin(PollFn<F>{std::move(f)});
 }
 } // namespace future
 

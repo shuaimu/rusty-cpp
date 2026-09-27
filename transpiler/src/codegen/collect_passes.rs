@@ -6440,6 +6440,26 @@ impl CodeGen {
                     self.record_function_return_type(&scoped_name, return_ty);
                 }
                 syn::Item::Trait(t) => {
+                    // A trait's declared method signatures, for calls through
+                    // a trait object (`Box<dyn Tr>`, `&mut dyn Tr`), which
+                    // have no impl to take them from.
+                    let mut owners = vec![t.ident.to_string()];
+                    if !module_path.is_empty() {
+                        owners.push(format!("{}::{}", module_path.join("::"), t.ident));
+                    }
+                    for trait_item in &t.items {
+                        let syn::TraitItem::Fn(method) = trait_item else {
+                            continue;
+                        };
+                        let method_name = method.sig.ident.to_string();
+                        let expected_types =
+                            self.collect_arg_expected_types_from_inputs(&method.sig.inputs, true);
+                        for owner in &owners {
+                            std::rc::Rc::make_mut(&mut self.trait_object_method_arg_expected_types)
+                                .entry(format!("{}::{}", owner, method_name))
+                                .or_insert_with(|| expected_types.clone());
+                        }
+                    }
                     // Checkpoint contract 4/7/10: a non-`pub` trait's C++ class
                     // is emitted inside an anonymous namespace, and everything
                     // synthesized FOR it must share that internal/vague linkage.
@@ -10818,6 +10838,59 @@ impl CodeGen {
                 let mut visitor = SigConsumed {
                     cg: self,
                     names: &self_rebinds,
+                    hits: HashSet::new(),
+                };
+                for stmt in stmts {
+                    visitor.visit_stmt(stmt);
+                }
+                result.extend(visitor.hits);
+            }
+        }
+        // A fresh local initialised by a call (`let w = slab.remove(k).unwrap();`)
+        // and then consumed by a user method taking `self` by value
+        // (`w.with_read_waker(waker)`): a `const auto` binding cannot call the
+        // (non-const) consuming member. Match/if/block initialisers are left
+        // out (their let-IIFE typing path is the one the general version
+        // above disturbed).
+        {
+            let mut call_inits: HashSet<String> = HashSet::new();
+            for stmt in stmts {
+                if let syn::Stmt::Local(local) = stmt
+                    && let Some(init) = &local.init
+                    && matches!(
+                        self.peel_paren_group_expr(&init.expr),
+                        syn::Expr::MethodCall(_) | syn::Expr::Call(_)
+                    )
+                    && let syn::Pat::Ident(pi) = &local.pat
+                    && pi.subpat.is_none()
+                {
+                    call_inits.insert(pi.ident.to_string());
+                }
+            }
+            if !call_inits.is_empty() {
+                struct CallInitConsumed<'a> {
+                    cg: &'a CodeGen,
+                    names: &'a HashSet<String>,
+                    hits: HashSet<String>,
+                }
+                impl<'a, 'ast> Visit<'ast> for CallInitConsumed<'a> {
+                    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                        if let syn::Expr::Path(p) = self.cg.peel_paren_group_expr(&mc.receiver)
+                            && let Some(ident) = p.path.get_ident()
+                            && self.names.contains(&ident.to_string())
+                            && self
+                                .cg
+                                .known_method_consumes_self_by_value(&mc.method.to_string())
+                        {
+                            self.hits.insert(ident.to_string());
+                        }
+                        visit::visit_expr_method_call(self, mc);
+                    }
+                    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+                }
+                let mut visitor = CallInitConsumed {
+                    cg: self,
+                    names: &call_inits,
                     hits: HashSet::new(),
                 };
                 for stmt in stmts {

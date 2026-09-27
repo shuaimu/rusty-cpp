@@ -3690,6 +3690,22 @@ impl CodeGen {
                         inferred_binding_ty = Some(field_ty);
                     }
                 }
+                // #180 for a bare generic owner: `let r = match .. { .. =>
+                // IoResult::Ok(id), .. }; r` infers only `IoResult` from its
+                // arms, while the return type it flows to is the full
+                // `IoResult<ResourceId>`.
+                if let Some(ty) = inferred_binding_ty.as_ref()
+                    && let Some(hint) = self
+                        .tail_returned_local_type_hints
+                        .last()
+                        .and_then(|frame| frame.get(&name_str))
+                        .cloned()
+                    && (self.bare_owner_specialized_by_field_hint(ty, &hint)
+                        || self.type_contains_infer(ty)
+                        || self.type_contains_unresolved_placeholder_like(ty))
+                {
+                    inferred_binding_ty = Some(hint);
+                }
                 let has_generic_ctor_init = local
                     .init
                     .as_ref()
@@ -3844,6 +3860,17 @@ impl CodeGen {
                 }
                 if let Some(ty) = inferred_binding_ty.clone() {
                     self.update_local_binding_type(name_str.clone(), ty);
+                }
+                // `let p = self as *mut T;` is a raw pointer for later
+                // pointer-only lowering (`p as usize`); the declaration and
+                // every other use keep their existing lowering.
+                let is_pointer_cast = local.init.as_ref().is_some_and(|init| {
+                    matches!(self.peel_paren_group_expr(&init.expr),
+                        syn::Expr::Cast(cast)
+                            if matches!(self.peel_paren_group_type(&cast.ty), syn::Type::Ptr(_)))
+                });
+                if let Some(scope) = self.raw_pointer_cast_locals.last_mut() {
+                    scope.insert(name_str.clone(), is_pointer_cast);
                 }
                 let uninitialized_inferred_ty = if local.init.is_none() {
                     inferred_binding_ty
