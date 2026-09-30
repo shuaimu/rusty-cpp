@@ -103,31 +103,63 @@ public:
         return *as_mut_ptr();
     }
 
-    // Rust's `MaybeUninit::assume_init_read(&self) -> T` — read a copy
-    // of the contained value without destroying the source. Caller must
-    // ensure (1) the value is initialized and (2) for non-Copy T the
-    // aliasing/double-drop hazards are avoided. For trivially-copyable
-    // T (the usual transpiled-btree usage: NonNull, sizes), this is a
-    // bitwise copy. Gated on `is_copy_constructible_v<T>` so that
-    // instantiating MaybeUninit<MoveOnlyT> does not eagerly require a
-    // copy ctor that won't exist (btree_port B4 — surfaces when a map
-    // is instantiated with a move-only value type like
-    // `std::pair<long, rusty::Function<void()>>`).
-    // @unsafe
+    // Rust's `MaybeUninit::assume_init_read(&self) -> T` is a `ptr::read`
+    // of the contained value, i.e. a bitwise RELOCATION: the value moves to
+    // the caller and the slot is thereafter logically uninitialized. Rust's
+    // contract is that nothing drops that slot again, and every transpiled
+    // caller relies on it — btree's `slice_remove` shifts the tail over the
+    // read slot, `split_leaf_data` / `bulk_steal_*` shrink the node's `len`
+    // past it, `into_key_val` reads out of a dying node that is freed
+    // without drops.
     //
-    // KNOWN DIVERGENCE (2026-07, tracked): Rust's `ptr::read` is a
-    // bitwise relocation; this COPIES for copyable T. Consequence:
-    // btree removal paths invoke the copy ctor once per extracted
-    // element (observable with instrumented types — CrashTestDummy's
-    // InDrop panic never travels because the copy resets it), and the
-    // abandoned source is destroyed by node teardown. Switching to
-    // relocation double-frees on the dying-IntoIter/append path whose
-    // teardown DOES destruct source slots — that teardown must learn
-    // dead-slot tracking before this can be Rust-faithful.
-    T assume_init_read() const noexcept(std::is_nothrow_copy_constructible_v<T>)
+    // So the lowering must hand the value out AND end the source's lifetime,
+    // exactly as `rusty::ptr::read` does (rationale at `read` in ptr.hpp).
+    // This overload used to return a COPY and leave the source alive, and
+    // since nothing ever destroys a slot the tree has forgotten, every
+    // extraction leaked one element: a strong reference per
+    // `BTreeMap::remove` of an `Rc` (SRPC's reactor measured
+    // `Rc<Fiber>::strong_count` 3 where 2 is expected), a clone per node
+    // split on plain inserts, and likewise through pop / entry / into_iter /
+    // extract_if / append / split_off. tests/btree_port_drop_balance_test.cpp
+    // pins each of those paths. (An older note here said relocation
+    // double-frees on the dying-IntoIter/append teardown. That predates
+    // `ptr::read`/`ptr::copy` relocating; under ASan the drop-balance test is
+    // clean, and the btree suite's only double frees are pre-existing
+    // extract_if ones that are identical with or without this change.)
+    //
+    // Relocating through the move ctor means an element type must survive
+    // the bitwise slot moves the port already does (MaybeUninit's own
+    // copy/move is a memcpy). Every Rust type does; libstdc++'s SSO
+    // `std::string` does not — see docs/KNOWN_LIMITATIONS.md.
+    //
+    // Trivially destructible T keeps the plain copy: there is no lifetime to
+    // end, it is observably a relocation, and it is what the pointer-shaped
+    // reads (btree's edge `NonNull`s) have always done.
+    //
+    // `const` only because Rust's receiver is `&self`. The storage read from
+    // is never a const object (node key/val/edge arrays), so ending the
+    // lifetime through a const_cast is sound.
+    //
+    // Gated on `is_copy_constructible_v<T>` only to stay disjoint from the
+    // move-only overload below: instantiating MaybeUninit<MoveOnlyT> must not
+    // require a copy ctor that won't exist (btree_port B4 — a map over a
+    // move-only value type like `std::pair<long, rusty::Function<void()>>`).
+    // @unsafe
+    T assume_init_read() const
+        noexcept(std::is_trivially_destructible_v<T>
+                     ? std::is_nothrow_copy_constructible_v<T>
+                     : (std::is_nothrow_move_constructible_v<T>
+                        && std::is_nothrow_destructible_v<T>))
         requires (std::is_copy_constructible_v<T>)
     {
-        return *as_ptr();
+        if constexpr (std::is_trivially_destructible_v<T>) {
+            return *as_ptr();
+        } else {
+            T* src = const_cast<MaybeUninit*>(this)->as_mut_ptr();
+            T out(std::move(*src));
+            src->~T();
+            return out;
+        }
     }
 
     // Move-only T overload — mirrors Rust's `ptr::read`, which is a

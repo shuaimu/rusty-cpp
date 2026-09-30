@@ -315,6 +315,24 @@ The string literal tracking is implemented in:
 - Try/catch blocks are ignored
 - Stack unwinding not modeled
 
+### btree_port elements must be bitwise-relocatable
+- The transpiled collections move elements between slots the way Rust does:
+  bitwise. `rusty::MaybeUninit<T>`'s copy/move is a memcpy, and btree's slice
+  shifts, splits and merges (`slice_insert`, `slice_remove`, `move_to_slice`,
+  `ptr::copy` over `MaybeUninit<T>` ranges) go through it. Every Rust type
+  tolerates that; a C++ type whose object points into itself does not.
+- libstdc++'s `std::string` is such a type (its SSO data pointer targets the
+  object's own buffer). Measured at rusty-cpp 758a6a86, a
+  `BTreeMap<std::string, int>` doing only `insert("b"); insert("a")` (the
+  second insert shifts `"b"` one slot right) then returns `None` from
+  `get("b")` and aborts in the destructor with `free(): invalid pointer`.
+  libc++'s `std::string` has no self-pointer, so it is not affected.
+- Use `rusty::String` (a malloc'd buffer — the translation of Rust's `String`)
+  or another bitwise-relocatable type for keys and values. The btree test
+  helper `IdBased` does. `test_string_keys_unstubbed` still uses
+  `std::string` keys but inserts them in sorted order, so nothing shifts; it is
+  latent, not a counterexample.
+
 ---
 
 *Last updated: December 2025*

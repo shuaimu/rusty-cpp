@@ -582,6 +582,9 @@ set(TEST_SOURCES
     tests/rusty_runtime_surface_test.cpp
     tests/rusty_result_test.cpp
     tests/rusty_mem_test.cpp
+    # MaybeUninit::assume_init_read / NonNull::read relocate (end the source's
+    # lifetime) like ptr::read — a copy leaked one element per read.
+    tests/rusty_relocating_read_test.cpp
     tests/rusty_vec_test.cpp
     tests/rusty_function_test.cpp
     tests/rusty_array_test.cpp
@@ -676,6 +679,9 @@ set(TEST_SOURCES
     # the loop in the test target section appends them conditionally.
     tests/btree_port_module_test.cpp
     tests/btree_port_set_module_test.cpp
+    # Every element the tree takes is destroyed exactly once — pins the
+    # MaybeUninit::assume_init_read copy-instead-of-relocate leak.
+    tests/btree_port_drop_balance_test.cpp
 
     # vec_port — transpiled rustc-stdlib Vec exposed as C++20 modules.
     # Smoke test imports vec_port.vec and exercises new_/push/pop/len.

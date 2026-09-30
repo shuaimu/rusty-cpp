@@ -122,7 +122,27 @@ public:
     constexpr NonNull() noexcept : ptr_(nullptr) {}
     constexpr NonNull<T> add(std::size_t n) const noexcept { return NonNull<T>(ptr_ + n); }
     constexpr NonNull<T> sub(std::size_t n) const noexcept { return NonNull<T>(ptr_ - n); }
-    constexpr T read() const noexcept { return *ptr_; }
+    // `NonNull::read` is `ptr::read`, so it RELOCATES — lowered exactly like
+    // `rusty::ptr::read` below (see the rationale there): trivially
+    // destructible T is copied, anything that owns something is moved out and
+    // its source lifetime ended. A plain copy here left the source alive in a
+    // slot nobody destroys again — one leaked element per read (Vec IntoIter's
+    // fold/try_fold, alloc's IntoIter::next and Box::take) — the same defect
+    // MaybeUninit::assume_init_read had in the btree port.
+    constexpr T read() const
+        noexcept(std::is_trivially_destructible_v<T>
+                     ? std::is_nothrow_copy_constructible_v<T>
+                     : (std::is_nothrow_move_constructible_v<T>
+                        && std::is_nothrow_destructible_v<T>))
+    {
+        if constexpr (std::is_trivially_destructible_v<T>) {
+            return *ptr_;
+        } else {
+            T out(std::move(*ptr_));
+            std::destroy_at(ptr_);
+            return out;
+        }
+    }
     constexpr std::size_t offset_from_unsigned(NonNull<T> origin) const noexcept {
         return static_cast<std::size_t>(ptr_ - origin.ptr_);
     }
