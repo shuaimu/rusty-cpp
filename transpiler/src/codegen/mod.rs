@@ -5959,6 +5959,20 @@ impl CodeGen {
         // alias like `using Error = ...` must keep its bare meaning), and
         // (b) the reference is a SCOPE PREFIX (follower `::`) — value/alias/
         // param positions are untouched.
+        //
+        // Purview only: the global module fragment's prelude spells its own
+        // types bare (rusty's time prelude defines `inline const Duration
+        // Duration::ZERO{..}`), and no dependency is visible there before its
+        // `import`. And a name the output binds with a using-declaration to
+        // something outside the dependency keeps that meaning: under
+        // `use std::time::Duration;` (`using rusty::time::Duration;`),
+        // `Duration::from_micros(..)` is std's, not a dependency's
+        // `types::time::Duration`.
+        let bare_scope_start = output
+            .find("\nexport module ")
+            .and_then(|idx| output[idx + 1..].find('\n').map(|rel| idx + 1 + rel + 1))
+            .unwrap_or(0);
+        let mut bare_scope = output.split_off(bare_scope_start);
         for m in &self.dependency_ufcs_trait_manifests {
             if !crate::transpile::crate_is_namespace_wrapped(&m.module) {
                 continue;
@@ -5971,15 +5985,17 @@ impl CodeGen {
                 {
                     continue;
                 }
-                if !output.contains(&format!("{}::", dt.name))
-                    || output.contains(&format!("using {} =", dt.name))
+                if !bare_scope.contains(&format!("{}::", dt.name))
+                    || bare_scope.contains(&format!("using {} =", dt.name))
+                    || Self::using_declaration_binds_outside(&bare_scope, &dt.name, &m.module)
                 {
                     continue;
                 }
                 let to = format!("::{}::{}::{}", m.module, dt.module_path, dt.name);
-                output = Self::boundary_replace_scope_prefix(&output, &dt.name, &to);
+                bare_scope = Self::boundary_replace_scope_prefix(&bare_scope, &dt.name, &to);
             }
         }
+        output.push_str(&bare_scope);
         // Global spelling pass: `typename Self_::X` is ill-formed wherever the
         // UFCS `Self_&&` receiver deduced to an lvalue reference (extension
         // free-fn BODIES construct `rusty::Result<..., typename Self_::Error>`
@@ -6068,6 +6084,29 @@ impl CodeGen {
         }
         out.push_str(&text[i..]);
         out
+    }
+
+    /// `text` has a using-declaration `using <path>::<name>;` (possibly
+    /// exported) whose path does not start at `dep_module`: the bare `name`
+    /// is bound to something other than that dependency's item.
+    fn using_declaration_binds_outside(text: &str, name: &str, dep_module: &str) -> bool {
+        let tail = format!("::{};", name);
+        text.lines().any(|line| {
+            let line = line.trim();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let Some(rest) = line.strip_prefix("using ") else {
+                return false;
+            };
+            if rest.starts_with("namespace ") || rest.contains('=') {
+                return false;
+            }
+            let Some(path) = rest.strip_suffix(&tail) else {
+                return false;
+            };
+            let path = path.trim().trim_start_matches("::");
+            let head = path.split("::").next().unwrap_or_default();
+            !path.is_empty() && head != dep_module
+        })
     }
 
     /// Replace bare `from` with `to` ONLY where it is used as a scope prefix:

@@ -18,8 +18,10 @@
 //! `graph_root::run()` for the selected features: 4 + 0 + 5 * 2 from the
 //! widget and the backend, 3722 from `dep_core::scan`, which reuses a
 //! `Copy` `Option<u64>` after passing it by value and compares copies of a
-//! `derive(Hash, Copy)` newtype, and 230 from `dep_core::sched_total`
-//! (rustc on `sched.rs` with `dep-base`: 230).
+//! `derive(Hash, Copy)` newtype, 230 from `dep_core::sched_total`
+//! (rustc on `sched.rs` with `dep-base`: 230), and 1500 + 7 from std's
+//! `Duration` in the root beside `dep_core::time::Duration` (rustc on
+//! `time.rs` and the root's `micros`: 1507).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -179,6 +181,12 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert!(root.contains("export module graph_root;"), "{root}");
     assert!(root.contains("export import dep_core;"), "{root}");
     assert!(root.contains("rusty::Box<dep_core::Backend>"), "{root}");
+    // A bare `Duration::` bound to std by `use std::time::Duration;` stays
+    // std's, and the global module fragment's time prelude is not
+    // requalified to the dependency's `time::Duration`.
+    assert!(root.contains("inline const Duration Duration::ZERO{"), "{root}");
+    assert!(root.contains("return static_cast<uint32_t>(Duration::from_micros("), "{root}");
+    assert!(!root.contains("dep_core::time::Duration::"), "{root}");
     for slots in [out.join("rusty_hand_slots.md"), out.join("dep-core/rusty_hand_slots.md")] {
         let text = std::fs::read_to_string(&slots).unwrap();
         assert!(text.contains("\n0 slot(s) requiring"), "{text}");
@@ -243,7 +251,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "3966\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "5473\n");
 }
 
 #[test]

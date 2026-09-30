@@ -1,5 +1,7 @@
 //! Root of the --crate-graph fixture: implements a dependency's dyn trait.
 
+use std::time::Duration;
+
 pub struct RootBackend {
     pub k: u32,
 }
@@ -19,4 +21,11 @@ pub fn run() -> u32 {
         + dep_core::with_backend(backend)
         + dep_core::scan(&ids) as u32
         + dep_core::sched_total() as u32
+        + micros()
+        + dep_core::tick_total() as u32
+}
+
+/// std's `Duration`, beside `dep_core::time::Duration`.
+pub fn micros() -> u32 {
+    Duration::from_micros(1500).as_micros() as u32
 }
