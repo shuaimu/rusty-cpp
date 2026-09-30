@@ -15060,17 +15060,18 @@ impl CodeGen {
             // re-bound to `Type::Type(...)`.
             return None;
         }
-        // A bare name a `use` binds to something other than a variant of the
-        // expected owner (`use std::panic::AssertUnwindSafe;` then
-        // `AssertUnwindSafe(|| ..)` in a fn returning `Poll<()>`) is that
-        // import's own constructor.
+        // A bare name a `use` binds to something other than an enum variant
+        // (`use std::panic::AssertUnwindSafe;` then `AssertUnwindSafe(|| ..)`
+        // in a fn returning `Poll<()>`) is that import's own constructor. A
+        // binding to a variant (`use super::Left;` of the root's
+        // `pub use crate::Either::{Left, Right};`) stays one: the expected
+        // owner is often spelled through an associated type
+        // (`Option<Self::Item>`), so its Rust tail (`Item`) is no test.
         if path.segments.len() == 1
             && let Some(bound) = self.resolve_scope_import_binding_path(&variant_name)
-            && bound
-                .trim_start_matches("::")
-                .rsplit("::")
-                .nth(1)
-                .is_some_and(|parent| parent != owner_tail)
+            && let Some(parent) = bound.trim_start_matches("::").rsplit("::").nth(1)
+            && parent != owner_tail
+            && !self.enum_name_owns_variant(parent, &variant_name)
         {
             return None;
         }

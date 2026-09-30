@@ -594,3 +594,38 @@ pub fn go<R>() -> bool {
     assert!(!cpp.contains("s.finish(rusty::Result<T,"), "{cpp}");
     assert!(cpp.contains("return s.finish(rusty::Err(1));"), "{cpp}");
 }
+
+#[test]
+fn reexported_variant_import_is_still_its_enums_variant() {
+    // either's shape: the root re-exports `Either::{Left, Right}` and a child
+    // module imports them through `super`; the expected owner is spelled
+    // through an associated type (`Option<Self::Item>`). The binding names a
+    // variant, so `Left(..)` is Either's (it had fallen through to the
+    // builtin `Alignment::Left`, a hard error in a template body).
+    let cpp = translate(
+        r#"
+pub enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+pub use crate::Either::{Left, Right};
+pub mod iterator {
+    use super::{Either, Left, Right};
+    pub struct IterEither<L, R> {
+        pub inner: Either<L, R>,
+    }
+    impl<L: Iterator, R: Iterator> Iterator for IterEither<L, R> {
+        type Item = Either<L::Item, R::Item>;
+        fn next(&mut self) -> Option<Self::Item> {
+            Some(match self.inner {
+                Left(ref mut inner) => Left(inner.next()?),
+                Right(ref mut inner) => Right(inner.next()?),
+            })
+        }
+    }
+}
+"#,
+    );
+    assert!(!cpp.contains("Alignment::"), "{cpp}");
+    assert!(cpp.contains("::Left(RUSTY_TRY_OPT(inner.next()))"), "{cpp}");
+}

@@ -34394,6 +34394,27 @@ impl CodeGen {
         ident.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && ident != "Self"
     }
 
+    /// `enum_name` (a bare or module-qualified tail) names an enum this crate
+    /// declares, or a runtime-mapped std enum, with a variant `variant_name`.
+    pub(super) fn enum_name_owns_variant(&self, enum_name: &str, variant_name: &str) -> bool {
+        let suffix = format!("::{enum_name}");
+        let std_variants: &[&str] = match enum_name {
+            "Option" => &["Some", "None"],
+            "Result" => &["Ok", "Err"],
+            "Poll" => &["Ready", "Pending"],
+            "Cow" => &["Borrowed", "Owned"],
+            "Ordering" => &["Less", "Equal", "Greater"],
+            "Bound" => &["Included", "Excluded", "Unbounded"],
+            "ControlFlow" => &["Continue", "Break"],
+            _ => &[],
+        };
+        std_variants.contains(&variant_name)
+            || self.data_enum_variants_by_enum.iter().any(|(owner, variants)| {
+                (owner == enum_name || owner.ends_with(&suffix)) && variants.contains(variant_name)
+            })
+            || self.path_matches_c_like_enum_const(enum_name, variant_name)
+    }
+
     fn path_matches_c_like_enum_const(&self, enum_name: &str, variant_name: &str) -> bool {
         if enum_name.is_empty() || variant_name.is_empty() {
             return false;
