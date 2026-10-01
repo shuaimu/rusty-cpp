@@ -965,6 +965,21 @@ impl Rewriter<'_> {
         }
     }
 
+    /// Rule 1 for an `impl Trait` / `dyn Trait` type: its `View`/`DeepView`
+    /// bounds go only when another trait bound is left. `impl View` or
+    /// `dyn View<V = T>` alone names the spec trait as the type itself; it is
+    /// left for the audit to reject, since stripping it would leave `impl` or
+    /// `dyn` with no trait, which is not Rust.
+    fn strip_view_bounds_of_type(&mut self, bounds: &mut Punctuated<TypeParamBound, Token![+]>) {
+        let other_traits = bounds
+            .iter()
+            .filter(|bound| matches!(bound, TypeParamBound::Trait(_)) && !self.is_view_bound(bound))
+            .count();
+        if other_traits > 0 {
+            self.strip_view_bounds(bounds);
+        }
+    }
+
     /// `Ghost<T>` / `Tracked<T>` as a type.
     fn is_ghost_wrapper_type(&self, ty: &Type) -> bool {
         let Type::Path(path) = ty else {
@@ -1229,12 +1244,12 @@ impl VisitMut for Rewriter<'_> {
     }
 
     fn visit_type_impl_trait_mut(&mut self, ty: &mut syn::TypeImplTrait) {
-        self.strip_view_bounds(&mut ty.bounds);
+        self.strip_view_bounds_of_type(&mut ty.bounds);
         visit_mut::visit_type_impl_trait_mut(self, ty);
     }
 
     fn visit_type_trait_object_mut(&mut self, ty: &mut syn::TypeTraitObject) {
-        self.strip_view_bounds(&mut ty.bounds);
+        self.strip_view_bounds_of_type(&mut ty.bounds);
         visit_mut::visit_type_trait_object_mut(self, ty);
     }
 
@@ -1956,6 +1971,7 @@ impl<V: View + Copy> Slab<V> where V: View, V: Clone + View {
     pub fn new() -> Self { Slab { inner: Vec::new() } }
 }
 pub trait Keyed: View { fn key(&self) -> u64; }
+pub fn take(_x: impl View + Copy, _y: &(dyn View<V = u64> + Send)) {}
 "#,
         )
         .unwrap();
@@ -1968,6 +1984,7 @@ impl<V: Copy> Slab<V> where V: Clone {
     pub fn new() -> Self { Slab { inner: Vec::new() } }
 }
 pub trait Keyed { fn key(&self) -> u64; }
+pub fn take(_x: impl Copy, _y: &(dyn Send)) {}
 "#
             )
         );
@@ -2274,6 +2291,16 @@ impl Bits {
                 "",
             ),
             ("use vstd::prelude::*; pub fn f(s: &str) -> usize { s.unicode_len() }", "has no C++ lowering"),
+            // `impl View` / `dyn View` alone: the spec trait is the type, not
+            // a bound to drop (dropping it left `impl ` / `dyn `, which is not Rust).
+            (
+                "use vstd::prelude::*; pub fn f(v: &dyn View<V = u64>) -> u64 { 0 }",
+                "the vstd spec trait `View` is used in executable code",
+            ),
+            (
+                "use vstd::prelude::*; pub fn f(v: impl DeepView) -> u64 { 0 }",
+                "the vstd spec trait `DeepView` is used in executable code",
+            ),
             (
                 "use vstd::prelude::*; pub fn f(w: &Wrapper) { w.get().set(0, 1); }",
                 "cannot tell whether `.set(..)`",
