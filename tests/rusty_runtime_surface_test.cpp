@@ -349,6 +349,34 @@ void test_waker_will_wake() {
     assert(a->woken == 1);
 }
 
+// A match arm's payload view of an owned scrutinee: mutable where the
+// scrutinee is (a `self`-by-value member is then callable on the binding),
+// const where it is not, and the scrutinee is never consumed.
+struct Guard {
+    int calls = 0;
+    int consume() { return ++calls; }
+};
+
+void test_peek_unwrap_views_an_owned_payload() {
+    rusty::io::Result<Guard> owned = rusty::io::Result<Guard>::ok(Guard{});
+    auto&& guard = rusty::detail::peek_unwrap(owned);
+    static_assert(std::is_same_v<decltype(guard), Guard&>);
+    assert(guard.consume() == 1);
+    assert(owned.unwrap_mut().calls == 1);
+    const rusty::io::Result<Guard> fixed = rusty::io::Result<Guard>::ok(Guard{});
+    auto&& viewed = rusty::detail::peek_unwrap(fixed);
+    static_assert(std::is_same_v<decltype(viewed), const Guard&>);
+    rusty::io::Result<Guard> failed =
+        rusty::io::Result<Guard>::err(rusty::io::Error::from(rusty::io::Error::Kind::WouldBlock));
+    auto&& error = rusty::detail::peek_unwrap_err(failed);
+    static_assert(std::is_same_v<decltype(error), rusty::io::Error&>);
+    assert(error.kind() == rusty::io::Error::Kind::WouldBlock);
+    assert(failed.is_err());
+    rusty::Option<Guard> some = rusty::Option<Guard>(Guard{});
+    assert(rusty::detail::peek_unwrap(some).consume() == 1);
+    assert(some.is_some() && some.unwrap_mut().calls == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -371,6 +399,7 @@ int main() {
     test_vecdeque_conversion_hook();
     test_task_awaits_a_pollable();
     test_waker_will_wake();
+    test_peek_unwrap_views_an_owned_payload();
     std::printf("rusty_runtime_surface_test: all passed\n");
     return 0;
 }

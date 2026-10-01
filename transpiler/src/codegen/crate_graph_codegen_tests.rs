@@ -1732,3 +1732,80 @@ pub fn run(guard: ReadyGuard) -> u32 {
         "{cpp}"
     );
 }
+
+#[test]
+fn owned_scrutinee_payload_an_arm_uses_is_bound_mutably() {
+    // SRPC's lion_fd_consume_ready: `match polled { Poll::Ready(Ok(ready)) =>
+    // ready.try_io(..) }`. The guard, an owned scrutinee's nested payload the
+    // arm uses by value (try_io takes `self`), was bound through
+    // `std::as_const`, where a `self`-by-value member has no viable call. The
+    // nested binding now peeks mutably (`rusty::detail::peek_unwrap`), and
+    // the scrutinee local stays mutable. With the forwarding overload above,
+    // compiled and run with a noop waker: 1084, as rustc prints.
+    let cpp = translate(
+        r#"
+use std::io;
+use std::task::{Context, Poll};
+pub type RawFd = i32;
+pub struct Fd {
+    pub fd: RawFd,
+    pub ready: std::cell::Cell<bool>,
+}
+pub struct ReadyGuard<'a> {
+    fd: &'a Fd,
+}
+impl<'a> ReadyGuard<'a> {
+    pub fn try_io<R>(self, f: impl FnOnce(RawFd) -> io::Result<R>) -> io::Result<R> {
+        let result = f(self.fd.fd);
+        if let Err(e) = &result {
+            if e.kind() == io::ErrorKind::WouldBlock {
+                self.fd.ready.set(false);
+            }
+        }
+        result
+    }
+}
+impl Fd {
+    pub fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<ReadyGuard<'_>>> {
+        if self.ready.get() {
+            Poll::Ready(Ok(ReadyGuard { fd: self }))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+pub fn consume_ready(fd: &Fd, cx: &mut Context<'_>) -> bool {
+    let polled = fd.poll_read_ready(cx);
+    match polled {
+        Poll::Ready(Ok(ready)) => {
+            let _cleared = ready.try_io(|_fd: RawFd| -> io::Result<()> {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            });
+            true
+        }
+        Poll::Ready(Err(_misuse)) => false,
+        Poll::Pending => false,
+    }
+}
+pub fn value_of(r: io::Result<u32>) -> u32 {
+    let polled = Poll::Ready(r);
+    match polled {
+        Poll::Ready(Ok(n)) => n + 1,
+        _ => 0,
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("    auto polled = fd.poll_read_ready(cx);"), "{cpp}");
+    assert!(
+        cpp.contains(
+            "auto&& ready_bind_tmp = rusty::detail::peek_unwrap(rusty::detail::deref_if_pointer(_mv0));"
+        ),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("ready_bind_tmp = std::as_const("), "{cpp}");
+    // A payload the arm only reads keeps its const view, and its local
+    // stays const.
+    assert!(cpp.contains("auto&& n_bind_tmp = std::as_const("), "{cpp}");
+    assert!(cpp.contains("const auto polled = rusty::Poll<"), "{cpp}");
+}

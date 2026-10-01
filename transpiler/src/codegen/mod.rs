@@ -33296,6 +33296,62 @@ impl CodeGen {
         out
     }
 
+    /// `std::as_const(X).unwrap()` / `.unwrap_err()` in a match arm's
+    /// payload binding statements -> `rusty::detail::peek_unwrap(X)` /
+    /// `peek_unwrap_err(X)`: a mutable view into an owned scrutinee where it
+    /// is mutable, the const accessor where it is not, never consuming it.
+    pub(super) fn rewrite_std_as_const_runtime_unwraps_to_peek(text: &str) -> String {
+        let prefix = "std::as_const(";
+        let mut out = String::new();
+        let mut cursor = 0usize;
+        while let Some(rel_pos) = text[cursor..].find(prefix) {
+            let start = cursor + rel_pos;
+            out.push_str(&text[cursor..start]);
+            let inner_start = start + prefix.len();
+            let mut depth = 1usize;
+            let mut close_idx = None;
+            for (idx, ch) in text[inner_start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            close_idx = Some(inner_start + idx);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close_idx) = close_idx else {
+                out.push_str(&text[start..]);
+                return out;
+            };
+            let rest = &text[close_idx + 1..];
+            let peek = if rest.starts_with(".unwrap()") {
+                Some(("rusty::detail::peek_unwrap", ".unwrap()".len()))
+            } else if rest.starts_with(".unwrap_err()") {
+                Some(("rusty::detail::peek_unwrap_err", ".unwrap_err()".len()))
+            } else {
+                None
+            };
+            if let Some((helper, skip)) = peek {
+                out.push_str(helper);
+                out.push('(');
+                out.push_str(&Self::rewrite_std_as_const_runtime_unwraps_to_peek(
+                    &text[inner_start..close_idx],
+                ));
+                out.push(')');
+                cursor = close_idx + 1 + skip;
+            } else {
+                out.push_str(prefix);
+                cursor = inner_start;
+            }
+        }
+        out.push_str(&text[cursor..]);
+        out
+    }
+
     fn allow_runtime_match_binding_payload_moves(
         bindings: &mut [String],
         binding_map: &mut HashMap<String, String>,
@@ -65133,6 +65189,75 @@ fn collect_consuming_method_receiver_vars(
 /// Simple local names passed bare (by value, not `&x`) as a call or
 /// method-call argument anywhere in `stmts` (`spawn_local(task)`,
 /// `builder.os_backend(backend)`).
+/// Whether `body` uses one of `names` BY VALUE as Rust sees it: as a method
+/// receiver (a `self`-by-value method moves it; the emitter cannot tell
+/// which kind a dependency's method is) or as a bare call argument.
+pub(crate) fn expr_uses_bindings_by_value(
+    body: &syn::Expr,
+    names: &std::collections::HashSet<String>,
+) -> bool {
+    struct Uses<'a> {
+        names: &'a std::collections::HashSet<String>,
+        hit: bool,
+    }
+    fn bare(expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Paren(p) => bare(&p.expr),
+            syn::Expr::Group(g) => bare(&g.expr),
+            syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+                Some(path.path.segments[0].ident.to_string())
+            }
+            _ => None,
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Uses<'_> {
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            if bare(&mc.receiver).is_some_and(|name| self.names.contains(&name))
+                || mc
+                    .args
+                    .iter()
+                    .any(|arg| bare(arg).is_some_and(|name| self.names.contains(&name)))
+            {
+                self.hit = true;
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if call
+                .args
+                .iter()
+                .any(|arg| bare(arg).is_some_and(|name| self.names.contains(&name)))
+            {
+                self.hit = true;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut uses = Uses { names, hit: false };
+    syn::visit::Visit::visit_expr(&mut uses, body);
+    uses.hit
+}
+
+/// The by-value (non-`ref`) binding names of a pattern; PascalCase idents
+/// are unit variants or constants, not bindings.
+fn pattern_by_value_binding_names(pat: &syn::Pat, out: &mut std::collections::HashSet<String>) {
+    struct Names<'a>(&'a mut std::collections::HashSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for Names<'_> {
+        fn visit_pat_ident(&mut self, pi: &'ast syn::PatIdent) {
+            let name = pi.ident.to_string();
+            if pi.by_ref.is_none()
+                && name != "_"
+                && !name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                self.0.insert(name);
+            }
+            syn::visit::visit_pat_ident(self, pi);
+        }
+    }
+    syn::visit::Visit::visit_pat(&mut Names(out), pat);
+}
+
 fn collect_bare_argument_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
     fn bare_local(expr: &syn::Expr) -> Option<String> {
         match expr {
@@ -67213,6 +67338,22 @@ fn collect_consuming_method_receivers_in_expr(
         }
         syn::Expr::Match(match_expr) => {
             collect_consuming_method_receivers_in_expr(&match_expr.expr, result);
+            // `match polled { Poll::Ready(Ok(ready)) => ready.try_io(..) }`:
+            // an arm that uses a by-value binding of a local scrutinee moves
+            // out of the local, which must stay mutable for the arm's payload
+            // view to be a mutable one.
+            if let Some(name) = extract_simple_local_ident(&match_expr.expr)
+                && match_expr.arms.iter().any(|arm| {
+                    if arm.guard.is_some() {
+                        return false;
+                    }
+                    let mut names = std::collections::HashSet::new();
+                    pattern_by_value_binding_names(&arm.pat, &mut names);
+                    !names.is_empty() && expr_uses_bindings_by_value(&arm.body, &names)
+                })
+            {
+                result.insert(name);
+            }
             for arm in &match_expr.arms {
                 if let Some((_, guard)) = &arm.guard {
                     collect_consuming_method_receivers_in_expr(guard, result);

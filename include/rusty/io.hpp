@@ -244,6 +244,18 @@ public:
         return *value_;
     }
 
+    // A mutable view of the value in place, as rusty::Result's: a match arm
+    // peeks at an owned scrutinee's payload without consuming it.
+    T& unwrap_mut() {
+        if (!ok_) rusty::panic::do_panic("io::Result::unwrap_mut on Err: " + error_.to_string());
+        return *value_;
+    }
+
+    Error& unwrap_err_mut() {
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err_mut on Ok");
+        return error_;
+    }
+
     Error& unwrap_err() {
         if (ok_) rusty::panic::do_panic("io::Result::unwrap_err on Ok");
         return error_;
@@ -345,6 +357,11 @@ public:
 
     Error& unwrap_err() {
         if (ok_) rusty::panic::do_panic("io::Result::unwrap_err on Ok");
+        return error_;
+    }
+
+    Error& unwrap_err_mut() {
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err_mut on Ok");
         return error_;
     }
 

@@ -1389,8 +1389,43 @@ impl CodeGen {
                                 &arm.body,
                                 &binding_map.keys().cloned().collect(),
                             );
+                        // An owned scrutinee whose unguarded arm uses a
+                        // by-value binding (Rust moves the payload there; a
+                        // dependency's `self`-by-value method is invisible
+                        // here) gets a mutable view where `_m` is mutable:
+                        // `rusty::detail::peek_unwrap`, at every level of a
+                        // nested pattern. `std::as_const` made the binding
+                        // const — lion-reactor's ready guard, whose
+                        // `try_io(self, ..)` a const lvalue cannot call.
+                        let arm_uses_owned_payload = !scrutinee_borrows_payload
+                            && !scrutinee_is_mut_borrow
+                            && arm.guard.is_none()
+                            && needs_payload_materialization
+                            && expr_uses_bindings_by_value(
+                                &arm.body,
+                                &binding_map.keys().cloned().collect(),
+                            );
                         let mut payload_bindings_are_refs = true;
-                        if needs_payload_materialization {
+                        if needs_payload_materialization
+                            && arm_uses_owned_payload
+                            && payload_match_condition.is_some()
+                            && !arm_consumes_payload
+                            && !arm_mutates_payload
+                        {
+                            // A nested sub-pattern can still fail, so `_m`
+                            // is peeked, not consumed; the bindings stay
+                            // owned (Rust moved them), so a use moves on.
+                            let peek = if unwrap_method == "unwrap_err" {
+                                "rusty::detail::peek_unwrap_err"
+                            } else {
+                                "rusty::detail::peek_unwrap"
+                            };
+                            out.push_str(&format!(
+                                "auto&& {} = {}(rusty::detail::deref_if_pointer(_m)); ",
+                                matched_value, peek
+                            ));
+                            payload_bindings_are_refs = false;
+                        } else if needs_payload_materialization {
                             let payload_value_source = if arm_consumes_payload
                                 || arm_mutates_payload
                                 || scrutinee_is_mut_borrow
@@ -1429,8 +1464,16 @@ impl CodeGen {
                         if let Some(cond) = &payload_match_condition {
                             out.push_str(&format!("if ({}) {{ ", cond));
                         }
+                        let peek_nested =
+                            arm_uses_owned_payload || arm_consumes_payload || arm_mutates_payload;
                         for stmt in binding_stmts {
-                            out.push_str(&stmt);
+                            if peek_nested {
+                                out.push_str(&Self::rewrite_std_as_const_runtime_unwraps_to_peek(
+                                    &stmt,
+                                ));
+                            } else {
+                                out.push_str(&stmt);
+                            }
                             out.push(' ');
                         }
                         let body = if let Some((arg0, arg1, arm_factory)) = &either_recovery

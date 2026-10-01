@@ -585,6 +585,33 @@ constexpr decltype(auto) deref_if_pointer(T&& value) {
     }
 }
 
+/// A match arm's payload accessor for an OWNED scrutinee whose arm uses a
+/// by-value binding (Rust moves the payload into it): a mutable peek into the
+/// scrutinee when the scrutinee is mutable, so the binding can be consumed
+/// through a `self`-by-value member (a const lvalue has none), and the const
+/// accessor otherwise. It never consumes the scrutinee, so a later arm still
+/// tests it when a nested sub-pattern fails.
+template<typename T>
+constexpr decltype(auto) peek_unwrap(T&& value) {
+    if constexpr (!std::is_const_v<std::remove_reference_t<T>>
+                  && requires { value.unwrap_mut(); }) {
+        return value.unwrap_mut();
+    } else {
+        return std::as_const(value).unwrap();
+    }
+}
+
+/// `peek_unwrap` for the `Err` payload.
+template<typename T>
+constexpr decltype(auto) peek_unwrap_err(T&& value) {
+    if constexpr (!std::is_const_v<std::remove_reference_t<T>>
+                  && requires { value.unwrap_err_mut(); }) {
+        return value.unwrap_err_mut();
+    } else {
+        return std::as_const(value).unwrap_err();
+    }
+}
+
 /// Rust's mem::forget suppresses the WHOLE drop glue — the value's own
 /// Drop impl AND every field's, recursively. Emitted structs call this
 /// per member from rusty_mark_forgotten(); members without the hook

@@ -1601,7 +1601,37 @@ impl CodeGen {
                             &arm.body,
                             &arm_binding_map.keys().cloned().collect(),
                         );
-                    if needs_payload_materialization {
+                    // See the emit_stmt twin: an owned scrutinee's unguarded
+                    // arm that uses a by-value binding views the payload
+                    // mutably (`rusty::detail::peek_unwrap`), at every level.
+                    let arm_uses_owned_payload = scrutinee_owns_payload
+                        && arm.guard.is_none()
+                        && needs_payload_materialization
+                        && expr_uses_bindings_by_value(
+                            &arm.body,
+                            &arm_binding_map.keys().cloned().collect(),
+                        );
+                    if arm_uses_owned_payload || arm_consumes_payload {
+                        binding_stmts = binding_stmts
+                            .iter()
+                            .map(|stmt| Self::rewrite_std_as_const_runtime_unwraps_to_peek(stmt))
+                            .collect();
+                    }
+                    if needs_payload_materialization
+                        && arm_uses_owned_payload
+                        && payload_condition.is_some()
+                        && !arm_consumes_payload
+                    {
+                        let peek = if unwrap_method == "unwrap_err" {
+                            "rusty::detail::peek_unwrap_err"
+                        } else {
+                            "rusty::detail::peek_unwrap"
+                        };
+                        arm_payload_setup_lines.push(format!(
+                            "auto&& {} = {}(rusty::detail::deref_if_pointer(_m));",
+                            matched_value, peek
+                        ));
+                    } else if needs_payload_materialization {
                         let payload_value_source = if (payload_condition.is_some()
                             || arm.guard.is_some())
                             && !scrutinee_is_mut_borrow
