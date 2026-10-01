@@ -6388,6 +6388,72 @@ impl CodeGen {
         ))
     }
 
+    /// A crate type's own method called through its path
+    /// (`SrpcEpollBackend::wait(self, &mut batch, timeout)`) is the method
+    /// call `self.wait(&mut batch, timeout)`: emitted as one, its arguments
+    /// are typed by the method's parameters (`&mut batch` binds the `Vec&`
+    /// parameter where it emitted as the pointer `&batch`, and `Some(3)`
+    /// takes the parameter's `Option<u64>`). Only for a receiver method of a
+    /// type the crate declares: other owners keep their own lowering.
+    fn try_emit_crate_type_ufcs_as_method_call(
+        &self,
+        call: &syn::ExprCall,
+        func_path: &syn::ExprPath,
+        owner_tail: &str,
+    ) -> Option<String> {
+        if func_path.qself.is_some() || call.args.is_empty() {
+            return None;
+        }
+        // `Self::m(self, ..)` names the impl's own type.
+        let self_tail;
+        let owner_tail = if owner_tail == "Self" {
+            self_tail = self
+                .current_struct
+                .as_deref()?
+                .rsplit("::")
+                .next()?
+                .to_string();
+            self_tail.as_str()
+        } else {
+            owner_tail
+        };
+        let owner_is_crate_type = self.local_declared_types.contains(owner_tail)
+            || self.declared_item_names.contains(owner_tail)
+            || self
+                .current_struct
+                .as_deref()
+                .is_some_and(|current| current.rsplit("::").next() == Some(owner_tail));
+        if !owner_is_crate_type
+            || self.data_enum_name_matches(owner_tail)
+            || self.module_runtime_helper_traits.contains(owner_tail)
+        {
+            return None;
+        }
+        let last = func_path.path.segments.last()?;
+        let method_name = last.ident.to_string();
+        if self.lookup_owner_method_has_receiver(owner_tail, &method_name) != Some(true) {
+            return None;
+        }
+        let turbofish = match &last.arguments {
+            syn::PathArguments::AngleBracketed(ab) => Some(ab.clone()),
+            _ => None,
+        };
+        let mut receiver = self.peel_paren_group_expr(&call.args[0]).clone();
+        if let syn::Expr::Reference(reference) = &receiver {
+            receiver = (*reference.expr).clone();
+        }
+        let method_call = syn::ExprMethodCall {
+            attrs: Vec::new(),
+            receiver: Box::new(receiver),
+            dot_token: Default::default(),
+            method: last.ident.clone(),
+            turbofish,
+            paren_token: Default::default(),
+            args: call.args.iter().skip(1).cloned().collect(),
+        };
+        Some(self.emit_expr_to_string(&syn::Expr::MethodCall(method_call)))
+    }
+
     pub(super) fn try_emit_deserialize_map_seed_rewrite(
         &self,
         mc: &syn::ExprMethodCall,
@@ -20020,6 +20086,15 @@ impl CodeGen {
         if let Some(trait_call) = self.try_emit_known_trait_ufcs_call(call) {
             return trait_call;
         }
+        if let syn::Expr::Path(func_path) = call.func.as_ref()
+            && func_path.path.segments.len() >= 2
+            && let Some(owner_tail) =
+                func_path.path.segments.iter().nth_back(1).map(|seg| seg.ident.to_string())
+            && let Some(lowered) =
+                self.try_emit_crate_type_ufcs_as_method_call(call, func_path, &owner_tail)
+        {
+            return lowered;
+        }
         if let Some(trait_call) = self.try_emit_trait_ufcs_by_value_receiver_call(call) {
             return trait_call;
         }
@@ -20380,6 +20455,11 @@ impl CodeGen {
                         return format!("{}({})", c_like_callee, ufcs_args.join(", "));
                     }
                     let receiver = &call.args[0];
+                    if let Some(lowered) =
+                        self.try_emit_crate_type_ufcs_as_method_call(call, func_path, &owner_tail)
+                    {
+                        return lowered;
+                    }
                     let member_args: Vec<String> = call
                         .args
                         .iter()
@@ -22750,6 +22830,11 @@ impl CodeGen {
                     // Keep helper UFCS calls in associated-call form to avoid
                     // rewriting `Trait::method(self)` into recursive member calls.
                 } else {
+                    if let Some(lowered) =
+                        self.try_emit_crate_type_ufcs_as_method_call(call, path_expr, &owner_tail)
+                    {
+                        return lowered;
+                    }
                     let method_template_args = self.emit_expr_path_template_args(&path_expr.path);
                     let member_args: Vec<String> = call
                         .args

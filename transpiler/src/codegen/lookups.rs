@@ -669,6 +669,14 @@ impl CodeGen {
         arg_idx: usize,
         substitutions: Option<&HashMap<String, syn::Type>>,
     ) -> Option<syn::Type> {
+        // `Owner::method(recv, a, b)` for a receiver method of a crate type:
+        // the method's recorded parameters have no receiver slot, so argument
+        // `i` is parameter `i - 1` (the receiver itself has none).
+        let arg_idx = match self.crate_type_ufcs_receiver_method(call) {
+            Some(()) if arg_idx == 0 => return None,
+            Some(()) => arg_idx - 1,
+            None => arg_idx,
+        };
         let expected = match self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx) {
             Some(expected) => expected.clone(),
             // Invoking a CALLABLE PARAM (`f(&mut self.entries)` where
@@ -687,6 +695,31 @@ impl CodeGen {
             }
             _ => Some(expected),
         }
+    }
+
+    /// `call` is `Owner::method(recv, ..)` (or `Self::method(recv, ..)`) naming
+    /// a receiver method of a type this crate declares.
+    pub(super) fn crate_type_ufcs_receiver_method(&self, call: &syn::ExprCall) -> Option<()> {
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.len() < 2 || call.args.is_empty() {
+            return None;
+        }
+        let segments = &path.path.segments;
+        let method = segments.last()?.ident.to_string();
+        let owner = segments[segments.len() - 2].ident.to_string();
+        let owner = if owner == "Self" {
+            self.current_struct.as_deref()?.rsplit("::").next()?.to_string()
+        } else {
+            owner
+        };
+        let crate_type = self.local_declared_types.contains(&owner)
+            || self.declared_item_names.contains(&owner);
+        (crate_type
+            && !self.data_enum_name_matches(&owner)
+            && self.lookup_owner_method_has_receiver(&owner, &method) == Some(true))
+        .then_some(())
     }
 
     fn boxed_callback_invocation_arg_expected_type(

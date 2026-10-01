@@ -41521,9 +41521,11 @@ fn test_self_ufcs_method_call_converted_to_dot_call() {
         }
         "#,
     );
+    // Emitted through the method-call path (the receiver method of a crate
+    // type called through its path is that method call): `this->bits()`.
     assert!(
-        out.contains("(*this).bits()"),
-        "Flags::bits(self) should become (*this).bits()\nGot: {out}"
+        out.contains("this->bits()"),
+        "Flags::bits(self) should become this->bits()\nGot: {out}"
     );
     assert!(
         !out.contains("Flags::bits((*this))"),
@@ -41549,8 +41551,8 @@ fn test_leaf5134_self_ufcs_rewrite_requires_self_like_argument() {
         "#,
     );
     assert!(
-        out.contains("(*this).bits()"),
-        "self-like UFCS call should still rewrite to dot-call\nGot: {out}"
+        out.contains("this->bits()"),
+        "self-like UFCS call should still rewrite to a member call\nGot: {out}"
     );
     // Arg may be bare or wrapped in `static_cast<uint8_t>(1)`.
     assert!(

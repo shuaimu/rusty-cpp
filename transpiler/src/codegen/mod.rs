@@ -38907,6 +38907,15 @@ impl CodeGen {
         if method == "get_mut" && matches!(owner.as_str(), "Arc" | "Rc") {
             return false;
         }
+        // A crate type's own associated fn whose signature is known answers
+        // for itself: `SrpcEpollBackend::wait(self, ..)` returns an
+        // `io::Result<()>` BY VALUE, whatever the OnceCell-style name
+        // heuristic below says (`auto&` could not bind the prvalue).
+        if (self.local_declared_types.contains(&owner) || self.declared_item_names.contains(&owner))
+            && let Some(ret) = self.lookup_associated_call_return_type(call)
+        {
+            return self.type_is_reference_like(&ret);
+        }
         matches!(
             method.as_str(),
             "as_ref"

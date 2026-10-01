@@ -1423,3 +1423,58 @@ pub fn from_local(c: Arc<Conn>) -> u64 {
     assert!(cpp.contains("const rusty::Arc<Conn>& arc = t.conn_;"), "{cpp}");
     assert!(cpp.contains("const Conn& lst = (*c);"), "{cpp}");
 }
+
+#[test]
+fn crate_type_method_called_through_its_path_is_a_typed_method_call() {
+    // SRPC's epoll backend: `SrpcEpollBackend::wait(self, &mut batch,
+    // timeout)` inside its `OsBackend` impl. The path call is the method call
+    // `self.wait(&mut batch, timeout)`, typed by the method's parameters: the
+    // `&mut` argument binds the `Vec&` parameter (it emitted the pointer
+    // `&batch`), `Some(3)` takes `Option<u64>`, and the argument positions skip
+    // the receiver (an untyped `Vec::new()` local was typed by the NEXT
+    // parameter). Its known by-value result binds by value, whatever the
+    // OnceCell-style `wait` name heuristic said (`auto&` on a prvalue).
+    // Compiled and run against rustc: 6 either way.
+    let cpp = translate(
+        r#"
+pub struct Backend {
+    pub n: u64,
+}
+impl Backend {
+    pub fn wait(&mut self, events: &mut Vec<u64>, timeout: Option<u64>) -> std::io::Result<()> {
+        events.push(timeout.unwrap_or(self.n));
+        Ok(())
+    }
+    pub fn force(&self) -> u64 {
+        self.n
+    }
+    pub fn inner(&mut self) -> usize {
+        let mut batch = Vec::new();
+        let _ = Backend::wait(self, &mut batch, Some(4));
+        let _ = Self::wait(self, &mut batch, None);
+        batch.len()
+    }
+}
+pub fn drive(b: &mut Backend) -> usize {
+    let mut batch = Vec::new();
+    let result = Backend::wait(b, &mut batch, Some(3));
+    let forced = Backend::force(b);
+    if result.is_ok() { batch.len() + forced as usize } else { 0 }
+}
+"#,
+    );
+    assert!(cpp.contains("auto batch = rusty::Vec<uint64_t>::new_();"), "{cpp}");
+    assert!(
+        cpp.contains(
+            "const auto result = b.wait(batch, rusty::Option<uint64_t>(static_cast<uint64_t>(3)));"
+        ),
+        "{cpp}"
+    );
+    assert!(cpp.contains("const auto forced = b.force();"), "{cpp}");
+    assert!(
+        cpp.contains("this->wait(batch, rusty::Option<uint64_t>(static_cast<uint64_t>(4)))"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("this->wait(batch, rusty::Option<uint64_t>{rusty::None})"), "{cpp}");
+    assert!(!cpp.contains("wait(&batch"), "{cpp}");
+}
