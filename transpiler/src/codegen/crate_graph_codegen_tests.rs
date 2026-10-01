@@ -660,7 +660,7 @@ pub fn drain() -> Option<u32> {
 "#,
     );
     assert!(cpp.contains("return queue->take_all();"), "{cpp}");
-    assert!(cpp.contains("return *c.borrow_mut() = rusty::Option<"), "{cpp}");
+    assert!(cpp.contains("*c.borrow_mut() = rusty::Option<"), "{cpp}");
     assert!(!cpp.contains("__mdisp_as_ref"), "{cpp}");
 }
 
@@ -1221,4 +1221,81 @@ pub fn run() -> u64 {
     );
     assert!(!cpp.contains("rusty::time::Duration idle_timeout"), "{cpp}");
     assert!(cpp.contains("::types::duration::Duration idle_timeout() const;"), "{cpp}");
+}
+
+#[test]
+fn closure_whose_body_is_an_assignment_returns_unit() {
+    // lion-executor's TaskCell::poll drops its future in place through
+    // `catch_unwind(AssertUnwindSafe(|| *future = None))`. An assignment is
+    // `()` in Rust; returning the C++ assignment's value made the lambda
+    // return a COPY of the assigned Option (a deleted copy for an
+    // `Option<rusty::Task<T>>`). Compiled and run against rustc: the slot is
+    // cleared either way.
+    let cpp = translate(
+        r#"
+use std::panic::{catch_unwind, AssertUnwindSafe};
+pub fn clear(slot: &mut Option<u64>) -> bool {
+    catch_unwind(AssertUnwindSafe(|| *slot = None)).is_ok()
+}
+pub fn bump(n: &mut u64) {
+    let mut add = |k: u64| *n += k;
+    add(2);
+}
+pub fn get(v: &Option<u64>) -> u64 {
+    let read = || v.unwrap_or(0);
+    read()
+}
+"#,
+    );
+    assert!(cpp.contains("AssertUnwindSafe([&]() { *slot_shadow1 = rusty::None; })"), "{cpp}");
+    assert!(!cpp.contains("return *slot_shadow1 = rusty::None;"), "{cpp}");
+    assert!(!cpp.contains("(uint64_t k) { return "), "{cpp}");
+    // A value body still returns its value.
+    assert!(cpp.contains("[&]() { return v.unwrap_or(0); }"), "{cpp}");
+}
+
+#[test]
+fn awaited_local_is_moved_and_an_awaited_match_scrutinee_is_hoisted() {
+    // lion-executor's `match handle.await { Ok(v) => v, Err(_) => 0 }`:
+    // `.await` consumes its operand, so the local is not `const` and moves
+    // into the awaiter (a JoinHandle is move-only). The value-position match
+    // lowers through a lambda, and a `co_await` inside a lambda made the
+    // LAMBDA the coroutine (ill-formed with its `return`s): the scrutinee is
+    // awaited first, in the enclosing coroutine. Compiled and run against
+    // rustc with a polled JoinHandle: 0 1 1 either way.
+    let cpp = translate(
+        r#"
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+pub struct JoinHandle<T> {
+    pub v: Option<T>,
+}
+impl<T> Unpin for JoinHandle<T> {}
+impl<T> Future for JoinHandle<T> {
+    type Output = Result<T, u32>;
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<T, u32>> {
+        match self.v.take() {
+            Some(v) => Poll::Ready(Ok(v)),
+            None => Poll::Ready(Err(1)),
+        }
+    }
+}
+pub fn handle(v: u64) -> JoinHandle<u64> {
+    JoinHandle { v: Some(v) }
+}
+pub async fn main_task() -> u64 {
+    let sent = handle(21);
+    let a = match sent.await {
+        Ok(v) => v,
+        Err(_) => 0,
+    };
+    a
+}
+"#,
+    );
+    assert!(cpp.contains("auto sent = ::handle(static_cast<uint64_t>(21));"), "{cpp}");
+    assert!(cpp.contains("auto __awaited_1 = co_await std::move(sent);"), "{cpp}");
+    assert!(cpp.contains("auto&& _m = __awaited_1;"), "{cpp}");
+    assert!(!cpp.contains("_m = co_await"), "{cpp}");
 }

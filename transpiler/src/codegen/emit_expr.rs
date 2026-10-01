@@ -591,7 +591,67 @@ impl CodeGen {
         }
     }
 
+    /// `match x.await { .. }` in value position lowers through a lambda, and a
+    /// `co_await` inside a lambda makes the LAMBDA the coroutine (ill-formed
+    /// with its `return`s). Await the scrutinee first, in the enclosing
+    /// coroutine: `let __awaited_N = x.await;` before the statement, which then
+    /// matches on `__awaited_N`. None when no statement needs it.
+    fn hoist_awaited_match_scrutinees(block: &syn::Block) -> Option<syn::Block> {
+        struct FindAwait(bool);
+        impl<'ast> syn::visit::Visit<'ast> for FindAwait {
+            fn visit_expr_await(&mut self, _: &'ast syn::ExprAwait) {
+                self.0 = true;
+            }
+            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+            fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+        }
+        fn awaits(expr: &syn::Expr) -> bool {
+            let mut finder = FindAwait(false);
+            syn::visit::Visit::visit_expr(&mut finder, expr);
+            finder.0
+        }
+        fn scrutinee_slot(stmt: &mut syn::Stmt) -> Option<&mut syn::Expr> {
+            let expr = match stmt {
+                syn::Stmt::Local(local) => &mut local.init.as_mut()?.expr,
+                syn::Stmt::Expr(expr, _) => expr,
+                _ => return None,
+            };
+            let mut expr: &mut syn::Expr = expr;
+            while let syn::Expr::Paren(_) | syn::Expr::Group(_) = expr {
+                expr = match expr {
+                    syn::Expr::Paren(p) => &mut p.expr,
+                    syn::Expr::Group(g) => &mut g.expr,
+                    _ => unreachable!(),
+                };
+            }
+            match expr {
+                syn::Expr::Match(m) if awaits(&m.expr) => Some(&mut m.expr),
+                _ => None,
+            }
+        }
+        let mut stmts = Vec::with_capacity(block.stmts.len() + 1);
+        let mut changed = false;
+        for (idx, stmt) in block.stmts.iter().enumerate() {
+            let mut stmt = stmt.clone();
+            if let Some(slot) = scrutinee_slot(&mut stmt) {
+                let name = syn::Ident::new(
+                    &format!("__awaited_{}", idx),
+                    proc_macro2::Span::call_site(),
+                );
+                let awaited = std::mem::replace(slot, syn::parse_quote!(#name));
+                stmts.push(syn::parse_quote!(let #name = #awaited;));
+                changed = true;
+            }
+            stmts.push(stmt);
+        }
+        changed.then(|| syn::Block { brace_token: block.brace_token, stmts })
+    }
+
     pub(super) fn emit_block(&mut self, block: &syn::Block) {
+        if let Some(hoisted) = Self::hoist_awaited_match_scrutinees(block) {
+            return self.emit_block(&hoisted);
+        }
         // Record this block's `static` items so a `return NAME;` over one does
         // not emit std::move (see return_expr_should_move_local).
         let block_static_names: std::collections::HashSet<String> = block
@@ -25282,7 +25342,30 @@ impl CodeGen {
             }
             syn::Expr::Await(aw) => {
                 let inner = self.emit_expr_to_string(&aw.base);
-                format!("co_await {}", inner)
+                // `.await` consumes its operand (`IntoFuture::into_future(self)`):
+                // a local future (a JoinHandle, a hand-written pollable) moves
+                // into the awaiter — the runtime pins a pollable by value
+                // (include/rusty/async.hpp, Task's await_transform). A
+                // reference binding is polled in place.
+                let consumed_local = match self.peel_paren_group_expr(&aw.base) {
+                    syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                        let name = p.path.segments[0].ident.to_string();
+                        self.lookup_local_binding_cpp_name(&name).is_some()
+                            && !self.is_local_reference_binding_in_scope(&name)
+                            && !self.lookup_local_binding_type(&name).is_some_and(|ty| {
+                                matches!(
+                                    self.peel_paren_group_type(&ty),
+                                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                                )
+                            })
+                    }
+                    _ => false,
+                };
+                if consumed_local && !inner.starts_with("std::move(") {
+                    format!("co_await std::move({})", inner)
+                } else {
+                    format!("co_await {}", inner)
+                }
             }
             syn::Expr::Assign(a) => {
                 let left_peeled = self.peel_paren_group_expr(&a.left);
@@ -27802,6 +27885,31 @@ impl CodeGen {
                     body_expected_ty,
                 );
                 let body_diverging = inner.is_expr_diverging(&closure.body);
+                // `|| *slot = None` / `|| n += 1`: an assignment is `()` in Rust.
+                // Returning the C++ assignment's value (`T&`, decayed by the
+                // lambda's deduced return) copied the assigned value — a
+                // deleted copy for a move-only one (lion-executor's
+                // TaskCell::poll drops its future through
+                // `catch_unwind(|| *future = None)`).
+                let body_is_unit_assignment = lambda_return_annotation.is_empty()
+                    && match inner.peel_paren_group_expr(&closure.body) {
+                        syn::Expr::Assign(_) => true,
+                        syn::Expr::Binary(b) => matches!(
+                            b.op,
+                            syn::BinOp::AddAssign(_)
+                                | syn::BinOp::SubAssign(_)
+                                | syn::BinOp::MulAssign(_)
+                                | syn::BinOp::DivAssign(_)
+                                | syn::BinOp::RemAssign(_)
+                                | syn::BinOp::BitXorAssign(_)
+                                | syn::BinOp::BitAndAssign(_)
+                                | syn::BinOp::BitOrAssign(_)
+                                | syn::BinOp::ShlAssign(_)
+                                | syn::BinOp::ShrAssign(_)
+                        ),
+                        _ => false,
+                    };
+                let body_diverging = body_diverging || body_is_unit_assignment;
                 if closure_param_prelude.is_empty() {
                     if body_diverging || void_callback {
                         format!(

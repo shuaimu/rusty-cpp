@@ -66976,6 +66976,10 @@ fn collect_consuming_method_receivers_in_expr(
             collect_consuming_method_receivers_in_expr(&cast_expr.expr, result)
         }
         syn::Expr::Await(await_expr) => {
+            // `.await` consumes its operand (`IntoFuture::into_future(self)`).
+            if let Some(name) = extract_simple_local_ident(&await_expr.base) {
+                result.insert(name);
+            }
             collect_consuming_method_receivers_in_expr(&await_expr.base, result)
         }
         syn::Expr::Try(try_expr) => {
