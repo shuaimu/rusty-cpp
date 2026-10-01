@@ -2187,6 +2187,13 @@ impl CodeGen {
                     "std::thread::JoinHandle" | "rusty::thread::JoinHandle" if args.len() == 1 => {
                         return Some("true".into());
                     }
+                    // std implements Send and Sync for Waker unconditionally:
+                    // a RawWakerVTable's functions must be thread-safe. (A
+                    // `Context` borrows one and is neither; it is never a
+                    // field.)
+                    "std::task::Waker" | "core::task::Waker" | "rusty::Waker" if args.is_empty() => {
+                        return Some("true".into());
+                    }
                     _ => {}
                 }
             }

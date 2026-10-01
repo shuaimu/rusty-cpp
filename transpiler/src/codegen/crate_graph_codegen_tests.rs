@@ -1972,3 +1972,29 @@ fn decltype_auto_scope_returns_a_bare_local_without_moving_it() {
     cg.push_return_value_scope("auto");
     assert_eq!(cg.decltype_auto_safe_return_value("std::move(e)".to_string()), "std::move(e)");
 }
+
+#[test]
+fn waker_field_keeps_its_holders_send_and_sync() {
+    // std::task::Waker is Send + Sync, but the auto-trait table had no row
+    // for it: SRPC's PollDriverWake (a Waker field) derived no `is_send` /
+    // `is_sync`, so PollThread, Client, ClientConnection and ClientPool lost
+    // both in C++ and SRPC's importer static_asserts failed.
+    let cpp = translate(
+        r#"
+use std::task::Waker;
+pub struct PollDriverWake {
+    pub waker: Waker,
+    pub id: u64,
+}
+pub struct Qualified {
+    pub waker: Option<std::task::Waker>,
+}
+"#,
+    );
+    assert_eq!(
+        cpp.matches("    static constexpr bool is_send = true;\n    static constexpr bool is_sync = true;")
+            .count(),
+        2,
+        "{cpp}"
+    );
+}

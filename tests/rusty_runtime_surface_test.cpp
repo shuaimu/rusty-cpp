@@ -20,6 +20,7 @@
 #include "../include/rusty/async.hpp"
 #include "../include/rusty/mutex.hpp"
 #include "../include/rusty/pin.hpp"
+#include "../include/rusty/send_impls.hpp"
 #include "../include/rusty/process.hpp"
 #include "../include/rusty/slice.hpp"
 #include "../include/rusty/thread.hpp"
@@ -376,6 +377,12 @@ void test_peek_unwrap_views_an_owned_payload() {
     assert(rusty::detail::peek_unwrap(some).consume() == 1);
     assert(some.is_some() && some.unwrap_mut().calls == 1);
 }
+
+// std::task::Waker is Send and Sync, and so is what holds one.
+static_assert(rusty::is_send<rusty::Waker>::value && rusty::is_sync<rusty::Waker>::value);
+static_assert(rusty::is_send<rusty::Mutex<rusty::Option<rusty::Waker>>>::value);
+static_assert(rusty::is_sync<rusty::Mutex<rusty::Option<rusty::Waker>>>::value);
+static_assert(rusty::is_send<rusty::Arc<rusty::Mutex<rusty::Option<rusty::Waker>>>>::value);
 
 }  // namespace
 

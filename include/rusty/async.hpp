@@ -116,6 +116,11 @@ struct Poll<void> {
 };
 
 struct Waker {
+    // std::task::Waker is Send and Sync: a RawWakerVTable's functions must be
+    // thread-safe, and a Waker crosses threads to wake its task. Structs and
+    // containers holding one derive theirs from this.
+    static constexpr bool is_send = true;
+    static constexpr bool is_sync = true;
     std::function<void()> wake_fn;
     std::function<void(const std::function<void()>&)> wake_by_ref_fn{};
     // The task this waker wakes, for `will_wake`: an Arc-built waker's
