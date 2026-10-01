@@ -2647,6 +2647,10 @@ pub struct CodeGen {
     /// closure arg) — consumed by bind_closure_params_for_emission so the
     /// body sees typed bindings (the sort/slice routings gate on them).
     pub(crate) pending_closure_param_types: std::cell::RefCell<Option<Vec<syn::Type>>>,
+    /// `let (tx, rx) = queue();` with `fn queue<T>() -> (Sender<T>,
+    /// Receiver<T>)`: template arguments C++ cannot deduce, solved from how
+    /// the bindings are used later in the block (keyed by the call's address).
+    pub(crate) generic_call_later_use_template_args: HashMap<usize, Vec<syn::Type>>,
     /// Expected RETURN type for the `.map(closure)` closure about to emit,
     /// from the map call's own expected Option/Result payload. Only set for
     /// REFERENCE payloads (`Option<&mut V>`): an unannotated lambda's
@@ -3629,6 +3633,7 @@ impl CodeGen {
             struct_field_usage_type_hints: Vec::new(),
             pending_map_closure_input_type: std::cell::RefCell::new(None),
             pending_closure_param_types: std::cell::RefCell::new(None),
+            generic_call_later_use_template_args: HashMap::new(),
             pending_map_closure_return_type: std::cell::RefCell::new(None),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),

@@ -970,3 +970,66 @@ pub fn poll_pinned<F: Future>(f: F, cx: &mut Context<'_>) -> Poll<F::Output> {
     assert!(cpp.contains("auto first = rusty::pin_place::as_mut(fut).poll(cx);"), "{cpp}");
     assert!(!cpp.contains("pin!("), "{cpp}");
 }
+
+#[test]
+fn generic_call_takes_template_arguments_from_its_bindings_later_use() {
+    // `let (tx, rx) = queue();` with `T` only in `queue`'s return type:
+    // Rust infers it from how the bindings are used later (lion-executor's
+    // `Executor::new(rx, ..)` taking `Receiver<Task>`, and std's `channel()`
+    // whose halves become fields typed `Sender<T>` / `Receiver<T>`); C++
+    // deduced nothing (`queue()` has no viable overload) or `std::tuple<>`
+    // (`channel()`). Compiled and run against rustc: 431 either way.
+    let cpp = translate(
+        r#"
+use std::sync::mpsc::{channel, Receiver, Sender};
+pub struct Tx<T> {
+    pub v: Option<T>,
+}
+pub struct Rx<T> {
+    pub v: Option<T>,
+}
+pub fn queue<T>() -> (Tx<T>, Rx<T>) {
+    (Tx { v: None }, Rx { v: None })
+}
+pub struct Task {
+    pub id: u64,
+}
+pub struct Exec {
+    pub rx: Rx<Task>,
+    pub n: u64,
+}
+impl Exec {
+    pub fn new(rx: Rx<Task>, n: u64) -> Exec {
+        Exec { rx, n }
+    }
+}
+pub fn build() -> (Exec, Tx<Task>) {
+    let (tx, rx) = queue();
+    let e = Exec::new(rx, 3);
+    (e, tx)
+}
+pub fn unused() -> u64 {
+    let (_tx, _rx) = queue::<u64>();
+    let (a, _b) = queue();
+    let _keep: Tx<u8> = a;
+    0
+}
+pub struct MpscSender<T> {
+    sender: Sender<T>,
+}
+pub struct MpscReceiver<T> {
+    receiver: Receiver<T>,
+}
+pub fn mpsc_queue<T>() -> (MpscSender<T>, MpscReceiver<T>) {
+    let (sender, receiver) = channel();
+    (MpscSender { sender }, MpscReceiver { receiver })
+}
+"#,
+    );
+    assert!(cpp.contains("::queue<Task>()"), "{cpp}");
+    assert!(cpp.contains("channel<T>()"), "{cpp}");
+    // Explicit arguments stay as written; a use the solver does not read
+    // (a typed `let`) leaves the call as it was.
+    assert!(cpp.contains("::queue<uint64_t>()"), "{cpp}");
+    assert_eq!(cpp.matches("::queue()").count(), 1, "{cpp}");
+}

@@ -651,6 +651,11 @@ impl CodeGen {
         block_profile_mark("collect_mutable_pointer_aliased_locals");
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
         block_profile_mark("collect_repeat_element_type_hints");
+        for (call_key, template_args) in
+            self.collect_generic_call_template_args_from_later_use(&block.stmts)
+        {
+            self.generic_call_later_use_template_args.insert(call_key, template_args);
+        }
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
         block_profile_mark("collect_local_generic_placeholder_hints");
         // Large expanded test functions can contain massive generated blocks.
@@ -23052,9 +23057,26 @@ impl CodeGen {
             let first = args[0].clone();
             args[0] = format!("rusty::detail::deref_if_pointer_like({})", first);
         }
+        let later_use_template_args = if call_has_explicit_type_args {
+            None
+        } else {
+            self.generic_call_later_use_template_args
+                .get(&(call as *const syn::ExprCall as usize))
+                .map(|args| args.iter().map(|ty| self.map_type(ty)).collect::<Vec<_>>())
+                .filter(|args| {
+                    args.iter().all(|arg| {
+                        !arg.is_empty()
+                            && arg != "auto"
+                            && !arg.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(arg)
+                    })
+                })
+        };
         let func = if let Some(template_args) = recovered_function_template_args {
             format!("{}<{}>", func, template_args.join(", "))
         } else if let Some(template_args) = fn_path_template_args {
+            format!("{}<{}>", func, template_args.join(", "))
+        } else if let Some(template_args) = later_use_template_args {
             format!("{}<{}>", func, template_args.join(", "))
         } else {
             func
