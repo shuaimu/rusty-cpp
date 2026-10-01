@@ -67441,6 +67441,26 @@ fn collect_consuming_method_receivers_in_expr(
         syn::Expr::Closure(closure) => {
             collect_consuming_method_receivers_in_expr(&closure.body, result)
         }
+        syn::Expr::Async(async_expr) => {
+            // `async move { .. }` moves every local it names into the
+            // coroutine's captures (`[x = std::move(x)]`); a const local
+            // would be copied there, which a move-only one cannot be.
+            if async_expr.capture.is_some() {
+                struct Named<'a>(&'a mut std::collections::HashSet<String>);
+                impl<'ast> syn::visit::Visit<'ast> for Named<'_> {
+                    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                        if path.qself.is_none() && path.path.segments.len() == 1 {
+                            self.0.insert(path.path.segments[0].ident.to_string());
+                        }
+                    }
+                    fn visit_item(&mut self, _: &'ast syn::Item) {}
+                }
+                syn::visit::Visit::visit_block(&mut Named(result), &async_expr.block);
+            }
+            for stmt in &async_expr.block.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+        }
         syn::Expr::Let(let_expr) => {
             collect_consuming_method_receivers_in_expr(&let_expr.expr, result)
         }

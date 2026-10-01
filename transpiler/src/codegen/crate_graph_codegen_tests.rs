@@ -1809,3 +1809,91 @@ pub fn value_of(r: io::Result<u32>) -> u32 {
     assert!(cpp.contains("auto&& n_bind_tmp = std::as_const("), "{cpp}");
     assert!(cpp.contains("const auto polled = rusty::Poll<"), "{cpp}");
 }
+
+#[test]
+fn async_block_is_an_invoked_coroutine_lambda_owning_its_captures() {
+    // `async move { .. }` / `async { .. }` had no lowering: the expression
+    // fell to the generic fallback, `rusty::intrinsics::unreachable_panic()`,
+    // and the slot manifest still said 0. It is an immediately-invoked
+    // coroutine lambda whose explicit object parameter takes the closure by
+    // value, so the frame owns the captures; `async move` moves what it
+    // names (the local stays mutable to be moved from), `async` borrows, and
+    // a unit block ends in `co_return;`. Compiled and run (also under ASan)
+    // with rusty::block_on: 42 35 10, as rustc prints.
+    let cpp = translate(
+        r#"
+use std::future::Future;
+pub async fn add(a: u64, b: u64) -> u64 {
+    a + b
+}
+pub fn make(x: u64) -> impl Future<Output = u64> {
+    let boxed = Box::new(x);
+    async move { add(*boxed, 1).await * 2 }
+}
+pub fn bump(counter: &std::cell::Cell<u64>) -> impl Future<Output = ()> + '_ {
+    async {
+        counter.set(counter.get() + 5);
+    }
+}
+pub async fn chain(x: u64) -> u64 {
+    let first = async move { add(x, 10).await };
+    let a = first.await;
+    let b = make(a).await;
+    a + b
+}
+"#,
+    );
+    assert!(cpp.contains("    auto boxed = rusty::Box<uint64_t>::new_(std::move(x));"), "{cpp}");
+    assert!(
+        cpp.contains("return [=, boxed = std::move(boxed)](this auto) -> rusty::Task<uint64_t> {"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("return [&](this auto) -> rusty::Task<void> {"), "{cpp}");
+    assert!(cpp.contains("counter.set(counter.get() + 5);\nco_return;\n}();"), "{cpp}");
+    assert!(
+        cpp.contains("auto first = [=, x = std::move(x)](this auto) -> rusty::Task<uint64_t> {"),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("unreachable_panic"), "{cpp}");
+}
+
+#[test]
+fn unlowered_expression_fails_closed_with_a_hand_slot() {
+    // An async block whose output nothing types, and an expression kind the
+    // emitter has no lowering for (a `loop` as a call argument), became a
+    // silent `unreachable_panic()`. Both now carry a `TODO transpiler` marker,
+    // which the slot manifest counts.
+    let cpp = translate(
+        r#"
+use std::future::Future;
+fn mystery<T: Default>() -> T {
+    T::default()
+}
+pub fn spawn_unknown() -> impl Future<Output = u32> {
+    let f = async { mystery() };
+    f
+}
+fn id(x: u32) -> u32 {
+    x
+}
+pub fn looped(n: u32) -> u32 {
+    let mut i = 0;
+    id(loop {
+        i += 1;
+        if i > n {
+            break i;
+        }
+    })
+}
+"#,
+    );
+    assert!(
+        cpp.contains("auto f = /* TODO transpiler: async block whose output type is unknown */"),
+        "{cpp}"
+    );
+    assert!(
+        cpp.contains("::id(/* TODO transpiler: unlowered loop expression */ rusty::intrinsics::unreachable_panic())"),
+        "{cpp}"
+    );
+    assert_eq!(crate::slots::detect_slots("t.cppm", &cpp).len(), 2, "{cpp}");
+}

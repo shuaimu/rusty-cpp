@@ -13886,6 +13886,9 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
+        if let syn::Expr::Async(async_expr) = self.peel_paren_group_expr(expr) {
+            return self.emit_async_block_to_string(async_expr, expected_ty);
+        }
         if self.expected_type_is_string_view(expected_ty)
             && matches!(self.peel_paren_group_expr(expr), syn::Expr::Field(_))
         {
@@ -25440,6 +25443,7 @@ impl CodeGen {
                 }
             }
             syn::Expr::Closure(closure) => self.emit_closure_to_string(closure),
+            syn::Expr::Async(async_expr) => self.emit_async_block_to_string(async_expr, None),
             syn::Expr::Return(ret) => {
                 let keyword = if self.in_async { "co_return" } else { "return" };
                 match &ret.expr {
@@ -25680,7 +25684,17 @@ impl CodeGen {
             syn::Expr::Const(_) => {
                 "/* const-block elided (Rust 2024 compile-time fence) */ (void)0".to_string()
             }
-            _ => self.match_expr_unreachable_fallback().to_string(),
+            // An expression kind with no lowering here (a value-position
+            // `loop`/`while`/`for`, a bare `let`, `yield`, a try block,
+            // verbatim tokens): fail closed. The placeholder still compiles
+            // where a value is needed, but the marker is a hand slot, so the
+            // slot manifest and the gates see it; it was a silent
+            // `unreachable_panic()`, a function that panics on reaching it.
+            other => format!(
+                "/* TODO transpiler: unlowered {} expression */ {}",
+                expr_kind_name(other),
+                self.match_expr_unreachable_fallback()
+            ),
         }
     }
 
@@ -27348,6 +27362,142 @@ impl CodeGen {
     /// - Complex expressions (a + b, foo()) — these produce temporaries
     /// - Type paths / constants (ALL_CAPS names)
     /// Emit a closure expression as a C++ lambda.
+    /// `async move { .. }` / `async { .. }`: an immediately-invoked coroutine
+    /// lambda, as an `async fn` is a coroutine function:
+    /// `[captures](this auto) -> rusty::Task<T> { .. co_return v; }()`. The
+    /// explicit object parameter takes the lambda BY VALUE, so the coroutine
+    /// frame holds the captures (an ordinary lambda's would die with the
+    /// temporary closure object at the end of the full-expression). Captures
+    /// follow the closure rules: `async move` moves what it names, `async`
+    /// borrows. `T` comes from the expected type (`impl Future<Output = T>`)
+    /// or the block's tail; when neither gives it the block fails closed with
+    /// a `TODO transpiler` marker (a hand slot) instead of the silent
+    /// `unreachable_panic()` every unhandled expression became.
+    pub(super) fn emit_async_block_to_string(
+        &self,
+        async_expr: &syn::ExprAsync,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let output = expected_ty
+            .and_then(|ty| self.future_output_of_expected_type(ty))
+            .or_else(|| match async_expr.block.stmts.last() {
+                None => Some(syn::parse_quote!(())),
+                Some(syn::Stmt::Expr(tail, None)) => {
+                    if self.is_expr_diverging(tail) {
+                        Some(syn::parse_quote!(()))
+                    } else if let syn::Expr::Await(awaited) = self.peel_paren_group_expr(tail) {
+                        // `f(..).await`: an `async fn` call types as its
+                        // declared output, a `-> impl Future<Output = T>` one
+                        // as that future.
+                        self.infer_simple_expr_type(&awaited.base).map(|base| {
+                            self.future_output_of_expected_type(&base).unwrap_or(base)
+                        })
+                    } else {
+                        self.infer_simple_expr_type(tail)
+                    }
+                }
+                Some(_) => Some(syn::parse_quote!(())),
+            })
+            .filter(|ty| !self.type_contains_infer(ty) && self.type_names_resolve_here(ty));
+        let unknown = "/* TODO transpiler: async block whose output type is unknown */ rusty::intrinsics::unreachable_panic()";
+        let Some(output) = output else {
+            return unknown.to_string();
+        };
+        let output_cpp = if self.is_explicit_unit_type(&output) {
+            "void".to_string()
+        } else {
+            self.map_type(&output)
+        };
+        if output_cpp.is_empty() || type_string_has_auto_placeholder(&output_cpp) {
+            return unknown.to_string();
+        }
+        let block = &async_expr.block;
+        let closure = syn::ExprClosure {
+            attrs: Vec::new(),
+            lifetimes: None,
+            constness: None,
+            movability: None,
+            asyncness: None,
+            capture: async_expr.capture,
+            or1_token: Default::default(),
+            inputs: syn::punctuated::Punctuated::new(),
+            or2_token: Default::default(),
+            output: if output_cpp == "void" {
+                syn::ReturnType::Default
+            } else {
+                syn::ReturnType::Type(Default::default(), Box::new(output.clone()))
+            },
+            body: Box::new(syn::parse_quote!(#block)),
+        };
+        self.emit_closure_with_param_scopes_void_result_and_async_output(
+            &closure,
+            None,
+            None,
+            None,
+            false,
+            Some(&output_cpp),
+        )
+    }
+
+    /// Every single-segment name in `ty` means something at this point: a
+    /// primitive or prelude type, a type parameter in scope, or a type or alias
+    /// this crate declares. An inferred type can carry a CALLEE's own type
+    /// parameter (`mystery::<T>()`'s declared `T`), which names nothing here.
+    fn type_names_resolve_here(&self, ty: &syn::Type) -> bool {
+        struct Names<'a> {
+            cg: &'a CodeGen,
+            ok: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Names<'_> {
+            fn visit_type_path(&mut self, tp: &'ast syn::TypePath) {
+                if tp.qself.is_none() && tp.path.segments.len() == 1 {
+                    let name = tp.path.segments[0].ident.to_string();
+                    let known = matches!(
+                        name.as_str(),
+                        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
+                            | "u64" | "u128" | "usize" | "f32" | "f64" | "bool" | "char" | "str"
+                            | "String" | "Vec" | "Option" | "Result" | "Box" | "Rc" | "Arc"
+                            | "Self"
+                    ) || self.cg.is_type_param_in_scope(&name)
+                        || self.cg.local_declared_types.contains(&name)
+                        || self.cg.type_alias_targets.contains_key(&name);
+                    if !known {
+                        self.ok = false;
+                    }
+                }
+                syn::visit::visit_type_path(self, tp);
+            }
+        }
+        let mut names = Names { cg: self, ok: true };
+        syn::visit::Visit::visit_type(&mut names, ty);
+        names.ok
+    }
+
+    /// `T` of an expected `impl Future<Output = T>` (or `impl IntoFuture`).
+    fn future_output_of_expected_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::ImplTrait(it) = self.peel_paren_group_type(ty) else {
+            return None;
+        };
+        it.bounds.iter().find_map(|bound| {
+            let syn::TypeParamBound::Trait(tb) = bound else {
+                return None;
+            };
+            let seg = tb.path.segments.last()?;
+            if !matches!(seg.ident.to_string().as_str(), "Future" | "IntoFuture") {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::AssocType(assoc) if assoc.ident == "Output" => {
+                    Some(assoc.ty.clone())
+                }
+                _ => None,
+            })
+        })
+    }
+
     pub(super) fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
         self.emit_closure_to_string_with_param_scopes(closure, None, None, None)
     }
@@ -27431,6 +27581,28 @@ impl CodeGen {
         char_predicate_param_scope: Option<HashSet<String>>,
         expected_return_type: Option<&syn::ReturnType>,
         void_callback: bool,
+    ) -> String {
+        self.emit_closure_with_param_scopes_void_result_and_async_output(
+            closure,
+            map_param_scope,
+            char_predicate_param_scope,
+            expected_return_type,
+            void_callback,
+            None,
+        )
+    }
+
+    /// `async_output`: the closure is an `async { .. }` block's body with that
+    /// output, lowered as an immediately-invoked coroutine lambda (see
+    /// `emit_async_block_to_string`).
+    fn emit_closure_with_param_scopes_void_result_and_async_output(
+        &self,
+        closure: &syn::ExprClosure,
+        map_param_scope: Option<HashSet<String>>,
+        char_predicate_param_scope: Option<HashSet<String>>,
+        expected_return_type: Option<&syn::ReturnType>,
+        void_callback: bool,
+        async_output: Option<&str>,
     ) -> String {
         // A boxed Fn returning () has the C++ signature void(...). Preserve
         // evaluation before explicit unit returns, then emit the body in a
@@ -27638,7 +27810,13 @@ impl CodeGen {
                 || (all_captures_are_raw_pointers
                     && !body_reassigns_a_capture
                     && !body_consumes_a_capture));
-        let lambda_mutability = if needs_mutable { " mutable" } else { "" };
+        // An explicit object parameter (an async block's `this auto`) takes
+        // the closure by value; `mutable` is ill-formed beside it.
+        let lambda_mutability = if needs_mutable && async_output.is_none() {
+            " mutable"
+        } else {
+            ""
+        };
 
         // A callable-shaped expected type means this closure IS the callable.
         // Type its params from the signature (so body casts see the real
@@ -27728,9 +27906,16 @@ impl CodeGen {
             })
             .collect();
 
-        let params_str = params.join(", ");
+        let params_str = if async_output.is_some() {
+            "this auto".to_string()
+        } else {
+            params.join(", ")
+        };
 
         let mut inner = self.new_inner_for_block();
+        if async_output.is_some() {
+            inner.in_async = true;
+        }
         // The `.map(closure)` input type was recorded on `self`; hand it to the
         // sub-codegen so it types the closure's destructured params.
         *inner.pending_map_closure_input_type.borrow_mut() =
@@ -27958,6 +28143,17 @@ impl CodeGen {
                         prelude_str.push('\n');
                     }
                     body_str = format!("{}{}", prelude_str, body_str);
+                }
+                if let Some(output) = async_output {
+                    // A body with no `co_await`/`co_return` is no coroutine:
+                    // end a unit block with `co_return;` so it always is.
+                    if output == "void" {
+                        body_str.push_str("co_return;\n");
+                    }
+                    return format!(
+                        "[{}]({}) -> rusty::Task<{}> {{\n{}}}()",
+                        capture, params_str, output, body_str
+                    );
                 }
                 format!(
                     "[{}]({}){}{} {{\n{}}}",
@@ -28635,5 +28831,20 @@ impl CodeGen {
                         .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
                 })
             })
+    }
+}
+
+/// The syn variant name of an expression, for a fail-closed marker.
+fn expr_kind_name(expr: &syn::Expr) -> &'static str {
+    match expr {
+        syn::Expr::ForLoop(_) => "for",
+        syn::Expr::Loop(_) => "loop",
+        syn::Expr::While(_) => "while",
+        syn::Expr::Let(_) => "let",
+        syn::Expr::Yield(_) => "yield",
+        syn::Expr::TryBlock(_) => "try-block",
+        syn::Expr::Infer(_) => "infer",
+        syn::Expr::Verbatim(_) => "verbatim",
+        _ => "other",
     }
 }
