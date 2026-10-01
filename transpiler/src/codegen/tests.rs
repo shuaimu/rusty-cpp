@@ -7877,7 +7877,9 @@ fn test_match_catch_all_binding() {
     // The catch-all binds the whole scrutinee and passes that enum onward.
     // Using the binding also prevents a missing or payload-only bind from
     // satisfying this test through an unrelated unused variable declaration.
-    assert!(out.contains("if (true) { const auto& other = _m;"), "{out}");
+    // `e` is owned, so the binding owns it too: non-const, so the move is a
+    // move (a const alias made `std::move(other)` a copy).
+    assert!(out.contains("if (true) { auto&& other = _m;"), "{out}");
     assert!(out.contains("return ::consume(std::move(other));"), "{out}");
 }
 

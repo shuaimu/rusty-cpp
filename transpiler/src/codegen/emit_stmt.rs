@@ -1886,6 +1886,13 @@ impl CodeGen {
                         // enclosing next().
                         let binder = if pi.by_ref.is_some() && pi.mutability.is_some() {
                             "auto&"
+                        } else if pi.by_ref.is_none() && !match_bindings_are_refs {
+                            // An OWNED scrutinee (`match self.repr { .., repr
+                            // => Err(JoinError { repr }) }`) is moved into the
+                            // catch-all binding: bind it non-const so the arm
+                            // can move it on (a const alias copies, and a
+                            // move-only payload has no copy).
+                            "auto&&"
                         } else {
                             "const auto&"
                         };

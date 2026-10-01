@@ -48372,6 +48372,22 @@ impl CodeGen {
         self.new_inner_with_try_style_binding_scope_with_ref_mode(binding_map, true)
     }
 
+    /// `push_local_cpp_binding_scope_with_types`, where the names in
+    /// `owned_payloads` bind values the arm owns (an owned scrutinee's
+    /// payload) rather than references into the scrutinee.
+    fn push_local_cpp_binding_scope_with_owned_payloads(
+        &mut self,
+        binding_map: &HashMap<String, String>,
+        binding_type_hints: Option<&HashMap<String, syn::Type>>,
+        owned_payloads: &HashSet<String>,
+    ) -> bool {
+        let pushed = self.push_local_cpp_binding_scope_with_types(binding_map, binding_type_hints);
+        if pushed && let Some(refs) = self.local_reference_bindings.last_mut() {
+            refs.retain(|name| !owned_payloads.contains(name));
+        }
+        pushed
+    }
+
     fn push_local_cpp_binding_scope_with_types(
         &mut self,
         binding_map: &HashMap<String, String>,

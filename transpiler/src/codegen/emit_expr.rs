@@ -1399,6 +1399,8 @@ impl CodeGen {
             self.peel_paren_group_expr(&match_expr.expr),
             syn::Expr::Reference(r) if r.mutability.is_some()
         );
+        let scrutinee_owns_payload = !scrutinee_is_mut_borrow
+            && !self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
         let payload_source = if self.runtime_match_scrutinee_borrows_payload(&match_expr.expr)
             && !scrutinee_is_mut_borrow
         {
@@ -1843,9 +1845,25 @@ impl CodeGen {
             for binding_line in arm_binding_lines {
                 self.writeln(&binding_line);
             }
-            let pushed_binding_scope = self.push_local_cpp_binding_scope_with_types(
+            // An OWNED scrutinee (`match self.slab.remove(id)`, `match task`)
+            // moves its payload into the arm's by-value bindings: they own
+            // their values and may be moved on (`Some(task) => f(Some(task))`),
+            // where a borrowed scrutinee's bindings stay references.
+            let owned_payload_bindings: HashSet<String> = if scrutinee_owns_payload {
+                let mut explicit_refs = HashSet::new();
+                self.collect_pattern_explicit_ref_binding_names(&arm.pat, &mut explicit_refs);
+                arm_binding_map
+                    .keys()
+                    .filter(|name| !explicit_refs.contains(*name))
+                    .cloned()
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let pushed_binding_scope = self.push_local_cpp_binding_scope_with_owned_payloads(
                 &arm_binding_map,
                 Some(&arm_binding_types),
+                &owned_payload_bindings,
             );
 
             if let Some((_, guard)) = &arm.guard {
@@ -5429,6 +5447,14 @@ impl CodeGen {
         }
 
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        // An OWNED scrutinee (`match backend { Some(backend) => f(backend) }`)
+        // moves its payload into the arms' by-value bindings, exactly as in
+        // try_emit_runtime_match_stmt: they may be moved on (a move-only
+        // Box passed by value), where a borrowed scrutinee's stay references.
+        let scrutinee_owns_payload = !matches!(
+            self.peel_paren_group_expr(&match_expr.expr),
+            syn::Expr::Reference(_)
+        ) && !self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
         let scrutinee_var = self.reserve_synthetic_cpp_name("_m");
         let match_scrutinee_ty = self
             .infer_simple_expr_type(&match_expr.expr)
@@ -5470,8 +5496,22 @@ impl CodeGen {
             for binding in bindings {
                 self.writeln(&binding);
             }
-            let pushed_binding_scope =
-                self.push_local_cpp_binding_scope_with_types(&binding_map, Some(&binding_types));
+            let owned_payload_bindings: HashSet<String> = if scrutinee_owns_payload {
+                let mut explicit_refs = HashSet::new();
+                self.collect_pattern_explicit_ref_binding_names(&arm.pat, &mut explicit_refs);
+                binding_map
+                    .keys()
+                    .filter(|name| !explicit_refs.contains(*name))
+                    .cloned()
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let pushed_binding_scope = self.push_local_cpp_binding_scope_with_owned_payloads(
+                &binding_map,
+                Some(&binding_types),
+                &owned_payload_bindings,
+            );
             if let Some((_, guard)) = &arm.guard {
                 let guard_condition = self.emit_expr_to_string(guard);
                 self.writeln(&format!("if ({}) {{", guard_condition));

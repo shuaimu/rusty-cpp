@@ -813,3 +813,85 @@ pub fn create(k: Option<u64>, ok: bool) -> Result<u64, u32> {
         "{cpp}"
     );
 }
+
+#[test]
+fn owned_scrutinee_payloads_move_on() {
+    // Rust MOVES an owned scrutinee's by-value payloads into the arm's
+    // bindings; passing one on by value is a move. The arm bodies copied
+    // them (a deleted copy for a move-only payload): lion-executor's
+    // `Some(task) => ..(Some(task))`, `other => ..(other)` and
+    // `Some(backend) => Reactor::with_backend(backend)` (a `?`-arm match).
+    // Compiled and run against rustc: 4057063 either way.
+    let cpp = translate(
+        r#"
+pub struct Payload {
+    pub v: Box<u64>,
+}
+pub fn keep(p: Option<Payload>) -> (u64, Option<Payload>) {
+    match p {
+        Some(x) => (*x.v, None),
+        None => (0, None),
+    }
+}
+pub struct Exec {
+    pub total: u64,
+}
+impl Exec {
+    pub fn step(&mut self, v: Option<Payload>) {
+        match v {
+            Some(task) => {
+                let (n, back) = keep(Some(task));
+                self.total += n;
+                let _ = back;
+            }
+            None => {}
+        }
+    }
+}
+pub enum Job {
+    Run(Box<u64>),
+    Stop,
+}
+pub fn consume(j: Job) -> u64 {
+    match j {
+        Job::Run(b) => *b,
+        Job::Stop => 1000,
+    }
+}
+pub fn route(j: Job) -> u64 {
+    match j {
+        Job::Stop => 7,
+        other => consume(other),
+    }
+}
+pub fn with_backend(b: Box<u64>) -> Result<u64, u32> {
+    Ok(*b + 1)
+}
+fn fallback(ok: bool) -> Result<Result<u64, u32>, u32> {
+    if ok { Ok(Ok(50)) } else { Err(77) }
+}
+pub fn create(backend: Option<Box<u64>>, ok: bool) -> Result<u64, u32> {
+    let created = match backend {
+        Some(backend) => with_backend(backend),
+        None => fallback(ok)?,
+    };
+    created
+}
+pub fn peek(backend: &Option<Box<u64>>, ok: bool) -> Result<u64, u32> {
+    let seen = match backend {
+        Some(b) => Ok(**b),
+        None => fallback(ok)?,
+    };
+    seen
+}
+"#,
+    );
+    assert!(cpp.contains("::keep(rusty::Option<Payload>(std::move(task)))"), "{cpp}");
+    assert!(
+        cpp.contains("if (true) { auto&& other = _m; return ::consume(std::move(other)); }"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("_let_match_value.emplace(::with_backend(std::move(backend)));"), "{cpp}");
+    // A borrowed scrutinee's payload stays a reference into it.
+    assert!(!cpp.contains("std::move(b)"), "{cpp}");
+}
