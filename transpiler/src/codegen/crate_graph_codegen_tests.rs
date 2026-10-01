@@ -1385,3 +1385,41 @@ pub fn drive(builder: &mut dep::Builder) -> u64 {
     );
     assert!(!cpp.contains("const auto task") && !cpp.contains("const rusty::Box<uint64_t> backend"), "{cpp}");
 }
+
+#[test]
+fn reference_to_a_smart_pointer_coerces_to_its_pointee() {
+    // SRPC's tcp_channel: `let conn: &TcpConnection = &t.conn_;` with
+    // `conn_: Arc<TcpConnection>` is Rust's deref coercion; the C++ reference
+    // binding needs the pointee (`Arc` does not convert to its target). A
+    // reference to the pointer itself stays the pointer.
+    let cpp = translate(
+        r#"
+use std::rc::Rc;
+use std::sync::Arc;
+pub struct Conn {
+    pub n: u64,
+}
+pub struct Transport {
+    pub conn_: Arc<Conn>,
+    pub local_: Rc<Conn>,
+    pub boxed_: Box<Conn>,
+}
+pub fn read(t: &Transport) -> u64 {
+    let conn: &Conn = &t.conn_;
+    let local: &Conn = &t.local_;
+    let boxed: &Conn = &t.boxed_;
+    let arc: &Arc<Conn> = &t.conn_;
+    conn.n + local.n + boxed.n + arc.n
+}
+pub fn from_local(c: Arc<Conn>) -> u64 {
+    let lst: &Conn = &c;
+    lst.n
+}
+"#,
+    );
+    assert!(cpp.contains("const Conn& conn = (*t.conn_);"), "{cpp}");
+    assert!(cpp.contains("const Conn& local = (*t.local_);"), "{cpp}");
+    assert!(cpp.contains("const Conn& boxed = (*t.boxed_);"), "{cpp}");
+    assert!(cpp.contains("const rusty::Arc<Conn>& arc = t.conn_;"), "{cpp}");
+    assert!(cpp.contains("const Conn& lst = (*c);"), "{cpp}");
+}

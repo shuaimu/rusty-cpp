@@ -13804,6 +13804,29 @@ impl CodeGen {
         if super::type_mapping::is_verus_ghost_marker_expr(expr) {
             return "rusty::Ghost{}".to_string();
         }
+        // `&arc` where a `&T` is expected (`let conn: &TcpConnection =
+        // &t.conn_;` with `conn_: Arc<TcpConnection>`): Rust's deref coercion
+        // through the smart pointer. The reference binding takes the pointee;
+        // the pointer itself does not convert to it.
+        if let Some(syn::Type::Reference(expected_ref)) =
+            expected_ty.map(|ty| self.peel_paren_group_type(ty))
+            && let syn::Expr::Reference(reference) = self.peel_paren_group_expr(expr)
+            && let Some(operand_ty) = self.infer_simple_expr_type(&reference.expr)
+            && let syn::Type::Path(operand_tp) = self.peel_reference_paren_group_type(&operand_ty)
+            && let Some(pointer_seg) = operand_tp.path.segments.last()
+            && matches!(pointer_seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+            && let syn::PathArguments::AngleBracketed(pointer_args) = &pointer_seg.arguments
+            && let Some(syn::GenericArgument::Type(pointee)) = pointer_args.args.first()
+        {
+            let expected_cpp = self.map_type(&expected_ref.elem);
+            if !expected_cpp.is_empty()
+                && !type_string_has_auto_placeholder(&expected_cpp)
+                && expected_cpp == self.map_type(pointee)
+                && expected_cpp != self.map_type(self.peel_reference_paren_group_type(&operand_ty))
+            {
+                return format!("(*{})", self.emit_expr_to_string(&reference.expr));
+            }
+        }
         match expr {
             syn::Expr::Path(path_expr)
                 if path_expr
