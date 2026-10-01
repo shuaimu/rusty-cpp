@@ -1654,9 +1654,143 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
+        if let Some(overload) = self.impl_trait_assoc_deduction_overload(f, &name, export_prefix) {
+            self.writeln(&overload);
+        }
         if let Some(cond) = &cfg_guard {
             self.writeln(&format!("#endif  // {}", cond));
         }
+    }
+
+    /// `fn spawn<T>(future: impl Future<Output = T>) -> JoinHandle<T>`: Rust
+    /// infers `T` from the argument's associated type; C++ cannot deduce it
+    /// through the abbreviated `auto` parameter, so `spawn(fut)` found no
+    /// viable function. A forwarding overload computes each such parameter
+    /// from its argument's type (`rusty::detail::assoc_Output<F>`) and calls
+    /// the primary with it spelled; an explicit `spawn<T>(..)` still selects
+    /// the primary (the overload's constraint fails for a non-future `T`).
+    /// Only when EVERY type parameter is such an associated-type output and
+    /// no other parameter names one.
+    fn impl_trait_assoc_deduction_overload(
+        &mut self,
+        f: &syn::ItemFn,
+        cpp_name: &str,
+        export_prefix: &str,
+    ) -> Option<String> {
+        use quote::ToTokens;
+        let mut type_params: Vec<String> = Vec::new();
+        for param in &f.sig.generics.params {
+            match param {
+                syn::GenericParam::Type(tp) => type_params.push(tp.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => {}
+                syn::GenericParam::Const(_) => return None,
+            }
+        }
+        if type_params.is_empty() || f.sig.inputs.is_empty() {
+            return None;
+        }
+        // type param -> (impl input index, associated type name)
+        let mut resolved: HashMap<String, (usize, String)> = HashMap::new();
+        let mut impl_inputs: HashSet<usize> = HashSet::new();
+        for (idx, input) in f.sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(pt) = input else {
+                return None;
+            };
+            if !matches!(pt.pat.as_ref(), syn::Pat::Ident(_)) {
+                return None;
+            }
+            if let syn::Type::ImplTrait(it) = pt.ty.as_ref() {
+                impl_inputs.insert(idx);
+                for bound in &it.bounds {
+                    let syn::TypeParamBound::Trait(tb) = bound else {
+                        continue;
+                    };
+                    let Some(seg) = tb.path.segments.last() else {
+                        continue;
+                    };
+                    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                        continue;
+                    };
+                    for arg in &args.args {
+                        if let syn::GenericArgument::AssocType(assoc) = arg
+                            && let syn::Type::Path(tp) = &assoc.ty
+                            && let Some(ident) = tp.path.get_ident()
+                            && type_params.contains(&ident.to_string())
+                            && matches!(
+                                assoc.ident.to_string().as_str(),
+                                "Output" | "Item" | "Error" | "Target"
+                            )
+                        {
+                            resolved
+                                .entry(ident.to_string())
+                                .or_insert((idx, assoc.ident.to_string()));
+                        }
+                    }
+                }
+            } else {
+                let text = pt.ty.to_token_stream().to_string();
+                if type_params.iter().any(|t| contains_whole_word(&text, t)) {
+                    return None;
+                }
+            }
+        }
+        if !type_params.iter().all(|t| resolved.contains_key(t)) {
+            return None;
+        }
+        self.push_type_param_scope(&f.sig.generics);
+        let mut params = Vec::new();
+        let mut args = Vec::new();
+        for (idx, input) in f.sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(pt) = input else {
+                unreachable!()
+            };
+            let syn::Pat::Ident(pi) = pt.pat.as_ref() else {
+                unreachable!()
+            };
+            let name = escape_cpp_keyword(&pi.ident.to_string());
+            let ty = if impl_inputs.contains(&idx) {
+                format!("__RustyImplArg{}", idx)
+            } else {
+                self.resolve_param_cpp_type(&pt.ty)
+            };
+            if ty.is_empty() || type_string_has_auto_placeholder(&ty) {
+                self.pop_type_param_scope();
+                return None;
+            }
+            params.push(format!("{} {}", ty, name));
+            args.push(format!("std::forward<decltype({})>({})", name, name));
+        }
+        self.pop_type_param_scope();
+        let mut template_params: Vec<usize> = impl_inputs.iter().copied().collect();
+        template_params.sort();
+        let head = template_params
+            .iter()
+            .map(|idx| format!("typename __RustyImplArg{}", idx))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let resolved_args: Vec<String> = type_params
+            .iter()
+            .map(|t| {
+                let (idx, assoc) = &resolved[t];
+                format!("typename rusty::detail::assoc_{}<__RustyImplArg{}>::type", assoc, idx)
+            })
+            .collect();
+        let constraint = resolved_args
+            .iter()
+            .map(|r| format!("!std::is_same_v<{}, rusty::detail::missing_assoc_type>", r))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        Some(format!(
+            "{}template<{}>\ndecltype(auto) {}({}) requires ({}) {{\n    return {}<{}>({});\n}}",
+            export_prefix,
+            head,
+            cpp_name,
+            params.join(", "),
+            constraint,
+            cpp_name,
+            resolved_args.join(", "),
+            args.join(", ")
+        ))
     }
 
     pub(super) fn emit_foreign_mod(&mut self, fm: &syn::ItemForeignMod) {

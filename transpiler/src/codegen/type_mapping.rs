@@ -4521,7 +4521,20 @@ impl CodeGen {
                             false
                         }
                     });
-                    return if has_mutable_trait {
+                    // A future is CONSUMED (polled mutably, then moved into
+                    // a task or awaited): take it by value, as Rust does —
+                    // a `const auto&` could only copy it on (lion-executor's
+                    // `spawn(future: impl Future<Output = T>)` handing a
+                    // move-only rusty::Task on to the task cell).
+                    let is_future = it.bounds.iter().any(|b| {
+                        matches!(b, syn::TypeParamBound::Trait(tb)
+                            if tb.path.segments.last().is_some_and(|s| {
+                                s.ident == "Future" || s.ident == "IntoFuture"
+                            }))
+                    });
+                    return if is_future {
+                        "auto".to_string()
+                    } else if has_mutable_trait {
                         // Use forwarding reference to accept both lvalues and
                         // std::move'd rvalues (Rust passes impl Write by value,
                         // so the transpiler may emit std::move on last use).

@@ -1299,3 +1299,56 @@ pub async fn main_task() -> u64 {
     assert!(cpp.contains("auto&& _m = __awaited_1;"), "{cpp}");
     assert!(!cpp.contains("_m = co_await"), "{cpp}");
 }
+
+#[test]
+fn impl_future_argument_is_taken_by_value_and_its_output_deduced() {
+    // lion-executor's `pub fn spawn<T>(future: impl Future<Output = T>) ->
+    // JoinHandle<T>`: the future is consumed, so it is a by-value parameter
+    // moved on (a `const auto&` could only copy the move-only rusty::Task);
+    // and `T`, which Rust infers from the argument's `Output`, gets a
+    // forwarding overload that computes it, so `spawn(fut)` resolves while
+    // the transpiler's own `spawn<T>(..)` calls keep the primary.
+    let cpp = translate(
+        r#"
+use std::future::Future;
+pub struct JoinHandle<T> {
+    pub v: Option<T>,
+}
+pub struct Boxed {
+    pub n: u64,
+}
+fn boxed(_f: impl Future<Output = u64>) -> Boxed {
+    Boxed { n: 1 }
+}
+pub fn spawn<T>(future: impl Future<Output = T>) -> JoinHandle<T> {
+    let _keep = boxed_any(future);
+    JoinHandle { v: None }
+}
+fn boxed_any<F: Future>(f: F) -> Option<F> {
+    Some(f)
+}
+pub fn describe(x: impl std::fmt::Display) -> String {
+    format!("{x}")
+}
+"#,
+    );
+    assert!(cpp.contains("JoinHandle<T> spawn(auto future) {"), "{cpp}");
+    assert!(cpp.contains("::boxed_any(std::move(future))"), "{cpp}");
+    assert!(
+        cpp.contains(
+            "decltype(auto) spawn(__RustyImplArg0 future) requires (!std::is_same_v<typename rusty::detail::assoc_Output<__RustyImplArg0>::type, rusty::detail::missing_assoc_type>) {"
+        ),
+        "{cpp}"
+    );
+    assert!(
+        cpp.contains(
+            "return spawn<typename rusty::detail::assoc_Output<__RustyImplArg0>::type>(std::forward<decltype(future)>(future));"
+        ),
+        "{cpp}"
+    );
+    // A fully deducible signature gets no overload; a non-future impl
+    // argument keeps its reference.
+    assert_eq!(cpp.matches("decltype(auto) spawn(").count(), 1, "{cpp}");
+    assert!(!cpp.contains("decltype(auto) boxed(") && !cpp.contains("decltype(auto) describe("), "{cpp}");
+    assert!(cpp.contains("describe(const auto& x)"), "{cpp}");
+}
