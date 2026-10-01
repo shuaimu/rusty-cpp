@@ -176,6 +176,15 @@ pub struct UfcsTraitManifest {
     /// not the re-exported dependency module's members.
     #[serde(default)]
     pub cross_crate_reexports: BTreeMap<String, String>,
+    /// Non-generic type aliases this crate declares whose target is spelled
+    /// entirely in primitive or std types: crate-relative path (`os::RawFd`,
+    /// and `RawFd` when the crate root re-exports it) -> the target's Rust
+    /// tokens (`i32`). A consumer needs the target to see that two of its
+    /// methods collide in C++ (`deregister(fd: i32)` and an `impl` method
+    /// `deregister(fd: lion_reactor::os::RawFd)` are one signature there);
+    /// it never sees the dependency's `type` items.
+    #[serde(default)]
+    pub type_aliases: BTreeMap<String, String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -6066,6 +6075,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             preserved_collapse_methods: Vec::new(),
             trait_method_return_assoc: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
+            type_aliases: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
@@ -6157,6 +6167,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             preserved_collapse_methods: Vec::new(),
             trait_method_return_assoc: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
+            type_aliases: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_byvalue_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();

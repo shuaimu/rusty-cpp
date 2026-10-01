@@ -7,7 +7,7 @@ pub mod spec;
 pub mod time;
 pub mod widget;
 
-pub use backend::{with_backend, Backend};
+pub use backend::{with_backend, with_fd_backend, Backend, FdBackend, RawFd};
 pub use spec::inv;
 pub use widget::Widget;
 pub use park::park_total;

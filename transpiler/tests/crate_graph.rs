@@ -142,6 +142,14 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_eq!(manifest["crates"][0]["module"], "dep_base");
     assert_eq!(manifest["crates"][1]["module"], "dep_core");
     let dep_base = out.join("dep-base/dep_base.cppm");
+    // dep-core's manifest carries its portable type aliases, under the
+    // declaring path and the crate-root re-export.
+    let core_manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("dep-core/ufcs-traits.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(core_manifest["type_aliases"]["backend::RawFd"], "i32", "{core_manifest}");
+    assert_eq!(core_manifest["type_aliases"]["RawFd"], "i32", "{core_manifest}");
 
     let core = std::fs::read_to_string(&dep_core).unwrap();
     assert!(core.contains("export module dep_core;"), "{core}");
@@ -214,6 +222,19 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert!(root.contains("inline const Duration Duration::ZERO{"), "{root}");
     assert!(root.contains("return static_cast<uint32_t>(Duration::from_micros("), "{root}");
     assert!(!root.contains("dep_core::time::Duration::"), "{root}");
+    // EpollLike: `close(fd: i32)` and the trait's `close(fd: RawFd)` are one
+    // member (dep-core's manifest carries `RawFd = i32`); the trait's
+    // forwarding body adds nothing. `label`'s trait body differs, so it stays
+    // as the tagged member that dep-core's generic adapter probes first.
+    assert_eq!(root.matches("uint32_t close(int32_t fd);").count(), 1, "{root}");
+    assert!(!root.contains("close(dep_core::backend::RawFd"), "{root}");
+    assert!(root.contains("uint32_t rusty_FdBackend_label() const;"), "{root}");
+    assert!(
+        core.contains(
+            "if constexpr (requires { this->rusty_target().rusty_FdBackend_label(); }) { return this->rusty_target().rusty_FdBackend_label(); } else { return this->rusty_target().label(); }"
+        ),
+        "{core}"
+    );
     for slots in [out.join("rusty_hand_slots.md"), out.join("dep-core/rusty_hand_slots.md")] {
         let text = std::fs::read_to_string(&slots).unwrap();
         assert!(text.contains("\n0 slot(s) requiring"), "{text}");
@@ -278,7 +299,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "8541\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "10658\n");
 }
 
 #[test]

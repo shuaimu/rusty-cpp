@@ -5751,7 +5751,7 @@ impl CodeGen {
         &mut self,
         trait_name: &str,
         cls_export: &str,
-        methods: &[(String, String, Vec<String>, &'static str)],
+        methods: &[(String, String, Vec<String>, &'static str, String)],
     ) {
         self.writeln(&format!(
             "{}template <class U> class {}DynAdapter final : public {} {{",
@@ -5785,7 +5785,8 @@ impl CodeGen {
         // and return types may be declared later in the crate than the trait
         // (and must be complete in a definition).
         let adapter = self.purview_scope_qualified_name(&format!("{}DynAdapter", trait_name));
-        for (return_type, method_name, params, const_suffix) in methods {
+        let trait_tag = crate::codegen::sanitize_collapse_trait_tag(trait_name);
+        for (return_type, method_name, params, const_suffix, rust_name) in methods {
             self.writeln(&format!(
                 "{} {}({}){} override;",
                 return_type,
@@ -5805,14 +5806,22 @@ impl CodeGen {
                 })
                 .collect::<Vec<_>>();
             // Names after the qualified declarator-id (parameters, trailing
-            // return type) resolve in the adapter's own namespace.
+            // return type) resolve in the adapter's own namespace. An
+            // implementor whose inherent method of this name and signature
+            // took the plain member keeps its trait body as
+            // `rusty_<Trait>_<m>` (§206); dispatch through the trait object
+            // reaches that one, as Rust's does.
+            let tagged = format!("rusty_{}_{}", trait_tag, rust_name);
+            let tagged_call = format!("this->rusty_target().{}({})", tagged, args.join(", "));
             self.deferred_purview_tail_items.push(format!(
-                "template <class U>\nauto {}<U>::{}({}){} -> {} {{ return this->rusty_target().{}({}); }}\n",
+                "template <class U>\nauto {}<U>::{}({}){} -> {} {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return this->rusty_target().{}({}); }} }}\n",
                 adapter,
                 method_name,
                 params.join(", "),
                 const_suffix,
                 return_type,
+                tagged_call,
+                tagged_call,
                 method_name,
                 args.join(", ")
             ));
@@ -6290,7 +6299,7 @@ impl CodeGen {
             && self.block_depth == 0
             && trait_template_prefix.is_empty()
             && bases.is_empty();
-        let mut dyn_adapter_methods: Vec<(String, String, Vec<String>, &'static str)> = Vec::new();
+        let mut dyn_adapter_methods: Vec<(String, String, Vec<String>, &'static str, String)> = Vec::new();
         if dyn_adapter_supported {
             self.writeln(&format!(
                 "{}template <class U> class {}DynAdapter;",
@@ -6479,6 +6488,7 @@ impl CodeGen {
                     method_name.clone(),
                     params.clone(),
                     const_suffix,
+                    method.sig.ident.to_string(),
                 ));
             }
         }

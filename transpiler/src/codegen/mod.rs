@@ -1837,6 +1837,15 @@ pub struct CodeGen {
     /// methods classify + qualify. Empty in single-crate / flag-off mode.
     pub(crate) dependency_ufcs_trait_manifests:
         Vec<crate::transpile::UfcsTraitManifest>,
+    /// Dependency type aliases from their manifests' `type_aliases`, keyed by
+    /// the crate-rooted Rust path (`lion_reactor::os::RawFd` -> `i32`). Only
+    /// the impl-method collision check reads it: `fn f(fd: i32)` and
+    /// `fn f(fd: lion_reactor::os::RawFd)` are one C++ signature.
+    pub(crate) dependency_type_alias_targets: HashMap<String, syn::Type>,
+    /// This crate's non-generic type aliases by crate-relative path
+    /// (`os::RawFd`, `RawFd` at the root) -> target, for the same check and
+    /// for the manifest's `type_aliases`.
+    pub(crate) declared_alias_paths: std::collections::BTreeMap<String, syn::Type>,
     /// UFCS cross-crate: trait short name → C++ namespace prefix. Currently
     /// always empty: the transpiler emits each crate at GLOBAL scope inside its
     /// C++ module and resolves cross-crate references via `import`, so a
@@ -3482,6 +3491,8 @@ impl CodeGen {
             ufcs_template_self_body: false,
             ufcs_free_fn_body: false,
             dependency_ufcs_trait_manifests: Vec::new(),
+            dependency_type_alias_targets: HashMap::new(),
+            declared_alias_paths: std::collections::BTreeMap::new(),
             ufcs_trait_module_prefix: HashMap::new(),
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
@@ -5386,6 +5397,15 @@ impl CodeGen {
         &mut self,
         manifests: Vec<crate::transpile::UfcsTraitManifest>,
     ) {
+        self.dependency_type_alias_targets.clear();
+        for manifest in &manifests {
+            for (path, target) in &manifest.type_aliases {
+                if let Ok(ty) = syn::parse_str::<syn::Type>(target) {
+                    self.dependency_type_alias_targets
+                        .insert(format!("{}::{}", manifest.module, path), ty);
+                }
+            }
+        }
         self.dependency_ufcs_trait_manifests = manifests;
     }
 
@@ -5559,6 +5579,26 @@ impl CodeGen {
                 Some((name.clone(), format!("{}::{}", prefix, name)))
             })
             .collect();
+        // Aliases a consumer can resolve without this crate's names: the
+        // target is spelled in primitives and std paths only.
+        let mut type_aliases: std::collections::BTreeMap<String, String> = self
+            .declared_alias_paths
+            .iter()
+            .filter(|(_, target)| type_is_portable_alias_target(target))
+            .map(|(path, target)| {
+                (path.clone(), normalize_token_text(target.to_token_stream().to_string()))
+            })
+            .collect();
+        for (name, prefix) in &self.crate_reexports {
+            let declared = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}::{}", prefix, name)
+            };
+            if let Some(target) = type_aliases.get(&declared).cloned() {
+                type_aliases.entry(name.clone()).or_insert(target);
+            }
+        }
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -5630,6 +5670,7 @@ impl CodeGen {
             rusty_ext_methods_by_module,
             c_like_enum_variants,
             cross_crate_reexports,
+            type_aliases,
         }
     }
 
@@ -8042,6 +8083,7 @@ impl CodeGen {
         self.tuple_type_aliases.clear();
         self.tuple_type_alias_elem_types.clear();
         std::rc::Rc::make_mut(&mut self.type_alias_targets).clear();
+        self.declared_alias_paths.clear();
         self.local_declared_types.clear();
         self.unit_struct_types.clear();
         self.extension_trait_impl_methods.clear();
@@ -15999,6 +16041,12 @@ impl CodeGen {
 
     fn record_type_alias_target(&mut self, module_path: &[String], alias: &syn::ItemType) {
         let alias_name = alias.ident.to_string();
+        if alias.generics.params.is_empty() {
+            let mut path = module_path.to_vec();
+            path.push(alias_name.clone());
+            self.declared_alias_paths
+                .insert(path.join("::"), (*alias.ty).clone());
+        }
         std::rc::Rc::make_mut(&mut self.type_alias_targets)
             .insert(alias_name.clone(), (*alias.ty).clone());
         if !module_path.is_empty() {
@@ -55150,7 +55198,32 @@ pub(crate) fn resolve_impl_method_conflict(
             _ => None,
         }
     })();
-    let should_replace = ref_value_twin_preference.unwrap_or(should_replace);
+    // An inherent method and a trait impl's method of one name and C++
+    // signature: Rust resolves a direct call `x.m()` to the inherent one, so
+    // it keeps the plain member whatever the source order, and the trait
+    // body, when it is not a plain forward to the inherent method, is kept
+    // below as the trait-tagged member that trait dispatch (a generic bound,
+    // the trait's dyn adapter) probes first. A forwarder or a derived body
+    // keeps the established preference above.
+    let inherent_preference = (|| {
+        if impl_method_is_automatically_derived(&existing)
+            || impl_method_is_automatically_derived(&merged)
+            || is_assoc_self_forwarder_method(&existing)
+            || is_assoc_self_forwarder_method(&merged)
+        {
+            return None;
+        }
+        let exist_inherent = prior_origin.as_deref()?.starts_with("inherent for");
+        let cand_inherent = origin.starts_with("inherent for");
+        match (exist_inherent, cand_inherent) {
+            (false, true) => Some(true),
+            (true, false) => Some(false),
+            _ => None,
+        }
+    })();
+    let should_replace = ref_value_twin_preference
+        .or(inherent_preference)
+        .unwrap_or(should_replace);
     let (kept, dropped) = if should_replace {
         (&merged, &existing)
     } else {
@@ -55788,12 +55861,116 @@ fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
             params.push(normalize_token_text(ty.to_token_stream().to_string()));
         }
     }
-    let params_key = params.join(",");
+    // A parameter spelled through a type alias collides with the same
+    // parameter spelled as the alias target (`fd: RawFd` / `fd: i32`); the
+    // collection pass records the alias-resolved list when it differs.
+    let params_key = method
+        .attrs
+        .iter()
+        .find_map(|attr| {
+            let syn::Meta::NameValue(nv) = &attr.meta else {
+                return None;
+            };
+            if !nv.path.is_ident("rusty_cpp_conflict_params") {
+                return None;
+            }
+            let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else {
+                return None;
+            };
+            Some(s.value())
+        })
+        .unwrap_or_else(|| params.join(","));
     let generics_key = generic_slots.join(",");
     format!(
         "{}|{}|{}|{}",
         method.sig.ident, receiver_key, generics_key, params_key
     )
+}
+
+/// A type alias target a consumer crate can read without the declaring
+/// crate's names: every path in it is a primitive or rooted at std/core/alloc.
+fn type_is_portable_alias_target(ty: &syn::Type) -> bool {
+    struct Portable(bool);
+    impl<'ast> Visit<'ast> for Portable {
+        fn visit_type_path(&mut self, tp: &'ast syn::TypePath) {
+            if tp.qself.is_some() {
+                self.0 = false;
+                return;
+            }
+            let first = tp.path.segments.first().map(|seg| seg.ident.to_string());
+            let portable = match first.as_deref() {
+                Some("std" | "core" | "alloc") => true,
+                Some(
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
+                    | "u64" | "u128" | "usize" | "f32" | "f64" | "bool" | "char" | "str",
+                ) => tp.path.segments.len() == 1,
+                _ => false,
+            };
+            if !portable {
+                self.0 = false;
+                return;
+            }
+            visit::visit_type_path(self, tp);
+        }
+        fn visit_type_impl_trait(&mut self, _: &'ast syn::TypeImplTrait) {
+            self.0 = false;
+        }
+        fn visit_type_trait_object(&mut self, _: &'ast syn::TypeTraitObject) {
+            self.0 = false;
+        }
+        fn visit_type_macro(&mut self, _: &'ast syn::TypeMacro) {
+            self.0 = false;
+        }
+    }
+    let mut check = Portable(true);
+    check.visit_type(ty);
+    check.0
+}
+
+/// The path a `use` in `items` binds `name` to (`use lion_reactor::os::RawFd;`
+/// -> `lion_reactor::os::RawFd`); renames and `self` leaves count, globs not.
+fn use_binding_path_in_items(items: &[syn::Item], name: &str) -> Option<Vec<String>> {
+    fn walk(tree: &syn::UseTree, prefix: &mut Vec<String>, name: &str) -> Option<Vec<String>> {
+        match tree {
+            syn::UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                let found = walk(&p.tree, prefix, name);
+                prefix.pop();
+                found
+            }
+            syn::UseTree::Name(n) => {
+                if n.ident == "self" {
+                    (prefix.last().is_some_and(|last| last == name)).then(|| prefix.clone())
+                } else if n.ident == name {
+                    let mut path = prefix.clone();
+                    path.push(name.to_string());
+                    Some(path)
+                } else {
+                    None
+                }
+            }
+            syn::UseTree::Rename(r) => {
+                if r.rename != name {
+                    return None;
+                }
+                if r.ident == "self" {
+                    Some(prefix.clone())
+                } else {
+                    let mut path = prefix.clone();
+                    path.push(r.ident.to_string());
+                    Some(path)
+                }
+            }
+            syn::UseTree::Glob(_) => None,
+            syn::UseTree::Group(g) => g.items.iter().find_map(|item| walk(item, prefix, name)),
+        }
+    }
+    items.iter().find_map(|item| {
+        let syn::Item::Use(u) = item else {
+            return None;
+        };
+        walk(&u.tree, &mut Vec::new(), name)
+    })
 }
 
 /// Cluster A: record that the impl-block's type params positionally

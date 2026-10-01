@@ -3485,6 +3485,16 @@ impl CodeGen {
                             if impl_is_automatically_derived {
                                 mark_method_automatically_derived(&mut merged);
                             }
+                            if let Some(params) = (AliasTables {
+                                local: &self.declared_alias_paths,
+                                dependency: &self.dependency_type_alias_targets,
+                            })
+                            .resolved_params_key(&merged, module_path, items)
+                            {
+                                merged.attrs.push(syn::parse_quote!(
+                                    #[rusty_cpp_conflict_params = #params]
+                                ));
+                            }
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
                                 resolve_impl_method_conflict(
@@ -14654,5 +14664,153 @@ fn builtin_std_method_arg_expected_type(method_name: &str, arg_idx: usize) -> Op
         ("read_to_end", 0) => Some(syn::parse_quote!(&mut Vec<u8>)),
         ("read_to_string", 0) => Some(syn::parse_quote!(&mut String)),
         _ => None,
+    }
+}
+
+/// The type aliases the impl-method collision check sees through: this
+/// crate's (`declared_alias_paths`) and the dependency manifests'
+/// (`dependency_type_alias_targets`). Borrowed field by field, so the check
+/// runs while the collection pass holds its impl tables.
+pub(super) struct AliasTables<'a> {
+    pub(super) local: &'a std::collections::BTreeMap<String, syn::Type>,
+    pub(super) dependency: &'a HashMap<String, syn::Type>,
+}
+
+impl AliasTables<'_> {
+    /// The parameter list of a merged impl method's collision key with every
+    /// type alias resolved, when that differs from its spelled list. Two
+    /// methods are one C++ signature when they differ only by an alias
+    /// (SRPC's inherent `deregister(&mut self, fd: i32)` and its `impl
+    /// OsBackend` method `deregister(&mut self, fd: lion_reactor::os::RawFd)`);
+    /// keyed by spelling, both were emitted and C++ rejected the second.
+    pub(super) fn resolved_params_key(
+        &self,
+        method: &syn::ImplItemFn,
+        module_path: &[String],
+        items: &[syn::Item],
+    ) -> Option<String> {
+        if self.local.is_empty() && self.dependency.is_empty() {
+            return None;
+        }
+        let mut resolved = method.clone();
+        let mut changed = false;
+        for arg in resolved.sig.inputs.iter_mut() {
+            if let syn::FnArg::Typed(pt) = arg
+                && self.resolve_in_type(pt.ty.as_mut(), module_path, items, 0)
+            {
+                changed = true;
+            }
+        }
+        if !changed {
+            return None;
+        }
+        let key = impl_method_conflict_key(&resolved);
+        key.splitn(4, '|').nth(3).map(str::to_string)
+    }
+
+    fn resolve_in_type(
+        &self,
+        ty: &mut syn::Type,
+        module_path: &[String],
+        items: &[syn::Item],
+        depth: usize,
+    ) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        if let syn::Type::Path(tp) = &*ty
+            && tp.qself.is_none()
+            && tp
+                .path
+                .segments
+                .iter()
+                .all(|seg| matches!(seg.arguments, syn::PathArguments::None))
+            && let Some(target) = self.target_for_path(&tp.path, module_path, items)
+        {
+            *ty = target;
+            self.resolve_in_type(ty, module_path, items, depth + 1);
+            return true;
+        }
+        struct Children<'a, 'b> {
+            tables: &'a AliasTables<'b>,
+            module_path: &'a [String],
+            items: &'a [syn::Item],
+            depth: usize,
+            changed: bool,
+        }
+        impl syn::visit_mut::VisitMut for Children<'_, '_> {
+            fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+                if self
+                    .tables
+                    .resolve_in_type(ty, self.module_path, self.items, self.depth + 1)
+                {
+                    self.changed = true;
+                }
+            }
+        }
+        let mut children = Children {
+            tables: self,
+            module_path,
+            items,
+            depth,
+            changed: false,
+        };
+        syn::visit_mut::visit_type_mut(&mut children, ty);
+        children.changed
+    }
+
+    /// The target of the non-generic type alias `path` names, if it names one:
+    /// a dependency's (by its crate-rooted path) or this crate's (relative to
+    /// `module_path`, through `crate::`/`self::`/`super::`, or through a `use`
+    /// in `items`).
+    fn target_for_path(
+        &self,
+        path: &syn::Path,
+        module_path: &[String],
+        items: &[syn::Item],
+    ) -> Option<syn::Type> {
+        let segs: Vec<String> = path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let first = segs.first()?;
+        let dependency = |full: &[String]| self.dependency.get(&full.join("::")).cloned();
+        let local = |rel: &[String]| self.local.get(&rel.join("::")).cloned();
+        if path.leading_colon.is_some() {
+            return dependency(&segs);
+        }
+        let resolve_rooted = |full: &[String]| -> Option<syn::Type> {
+            match full.first().map(String::as_str) {
+                Some("crate") => local(&full[1..]),
+                Some("self") => {
+                    let mut rel = module_path.to_vec();
+                    rel.extend(full[1..].iter().cloned());
+                    local(&rel)
+                }
+                Some("super") => {
+                    let mut rel = module_path.to_vec();
+                    let mut idx = 0;
+                    while full.get(idx).is_some_and(|seg| seg == "super") {
+                        rel.pop()?;
+                        idx += 1;
+                    }
+                    rel.extend(full[idx..].iter().cloned());
+                    local(&rel)
+                }
+                _ => dependency(full).or_else(|| {
+                    let mut rel = module_path.to_vec();
+                    rel.extend(full.iter().cloned());
+                    local(&rel)
+                }),
+            }
+        };
+        if matches!(first.as_str(), "crate" | "self" | "super") {
+            return resolve_rooted(&segs);
+        }
+        // A leading name a `use` binds (`RawFd`, or `os` in `os::RawFd`).
+        if let Some(mut bound) = use_binding_path_in_items(items, first) {
+            bound.extend(segs[1..].iter().cloned());
+            if let Some(target) = resolve_rooted(&bound) {
+                return Some(target);
+            }
+        }
+        resolve_rooted(&segs).or_else(|| if segs.len() > 1 { local(&segs) } else { None })
     }
 }

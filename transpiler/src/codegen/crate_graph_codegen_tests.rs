@@ -84,15 +84,17 @@ pub trait OsBackend: Send {
     // Declared in the class; defined after the purview, where every type the
     // signatures name is complete.
     assert!(cpp.contains("uint32_t register_(int32_t fd, size_t token) override;"), "{cpp}");
+    // An implementor whose trait body was kept as the tagged member beside
+    // a same-signature inherent method is reached through that member.
     assert!(
         cpp.contains(
-            "template <class U>\nauto ::OsBackendDynAdapter<U>::register_(int32_t fd, size_t token) -> uint32_t { return this->rusty_target().register_(std::move(fd), std::move(token)); }"
+            "template <class U>\nauto ::OsBackendDynAdapter<U>::register_(int32_t fd, size_t token) -> uint32_t { if constexpr (requires { this->rusty_target().rusty_OsBackend_register(std::move(fd), std::move(token)); }) { return this->rusty_target().rusty_OsBackend_register(std::move(fd), std::move(token)); } else { return this->rusty_target().register_(std::move(fd), std::move(token)); } }"
         ),
         "{cpp}"
     );
     assert!(
         cpp.contains(
-            "auto ::OsBackendDynAdapter<U>::deregister(const int32_t& fd) const -> bool { return this->rusty_target().deregister(fd); }"
+            "auto ::OsBackendDynAdapter<U>::deregister(const int32_t& fd) const -> bool { if constexpr (requires { this->rusty_target().rusty_OsBackend_deregister(fd); }) { return this->rusty_target().rusty_OsBackend_deregister(fd); } else { return this->rusty_target().deregister(fd); } }"
         ),
         "{cpp}"
     );
@@ -1568,6 +1570,67 @@ pub fn make_or_default<T: Default>(fallback: T) -> T {
     assert!(!cpp.contains("R r ="), "{cpp}");
     assert!(
         cpp.contains("T r = rusty::panic::catch_unwind_std(rusty::panic::AssertUnwindSafe([&]() { return ::make<T>(); }))"),
+        "{cpp}"
+    );
+}
+
+#[test]
+fn inherent_and_trait_method_one_signature_through_an_alias_is_one_member() {
+    // SRPC's epoll backend: an inherent `close(&mut self, fd: i32)` and the
+    // trait method `close(&mut self, fd: Fd)`, `type Fd = i32`, are one C++
+    // signature; keyed by spelling both were members ("class member cannot
+    // be redeclared"). The trait one forwards, so it adds nothing. A
+    // same-named pair whose bodies differ keeps the inherent body on the
+    // plain member (a direct call resolves there in Rust) whichever impl
+    // comes first, and the trait body as `rusty_Backend_label`, which trait
+    // dispatch reaches: compiled and run, 2117 as rustc prints.
+    let cpp = translate(
+        r#"
+pub type Fd = i32;
+pub trait Backend {
+    fn close(&mut self, fd: Fd) -> u32;
+    fn label(&self) -> u32;
+}
+pub struct Epoll {
+    pub closed: u32,
+}
+impl Backend for Epoll {
+    fn close(&mut self, fd: Fd) -> u32 {
+        Epoll::close(self, fd)
+    }
+    fn label(&self) -> u32 {
+        2000
+    }
+}
+impl Epoll {
+    pub fn close(&mut self, fd: i32) -> u32 {
+        self.closed += fd as u32;
+        self.closed
+    }
+    pub fn label(&self) -> u32 {
+        100
+    }
+}
+pub fn run() -> u32 {
+    let mut e = Epoll { closed: 1 };
+    let direct = e.close(2) + e.label();
+    let mut b: Box<dyn Backend> = Box::new(Epoll { closed: 10 });
+    direct + b.close(4) + b.label()
+}
+"#,
+    );
+    assert_eq!(cpp.matches("    uint32_t close(int32_t fd);").count(), 1, "{cpp}");
+    assert!(!cpp.contains("    uint32_t close(Fd fd);"), "{cpp}");
+    assert!(cpp.contains("uint32_t label() const;"), "{cpp}");
+    assert!(cpp.contains("uint32_t rusty_Backend_label() const;"), "{cpp}");
+    assert!(
+        cpp.contains("uint32_t Epoll::label() const {\n    return static_cast<uint32_t>(100);"),
+        "{cpp}"
+    );
+    assert!(
+        cpp.contains(
+            "uint32_t Epoll::rusty_Backend_label() const {\n    return static_cast<uint32_t>(2000);"
+        ),
         "{cpp}"
     );
 }
