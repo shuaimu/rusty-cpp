@@ -1352,3 +1352,36 @@ pub fn describe(x: impl std::fmt::Display) -> String {
     assert!(!cpp.contains("decltype(auto) boxed(") && !cpp.contains("decltype(auto) describe("), "{cpp}");
     assert!(cpp.contains("describe(const auto& x)"), "{cpp}");
 }
+
+#[test]
+fn non_copy_local_passed_by_value_to_an_unknown_callee_is_not_const() {
+    // SRPC's poll thread: `let os_backend: Box<dyn OsBackend> = ..;
+    // RuntimeBuilder::new().os_backend(os_backend)` and `let lion_task =
+    // StacklessLionVoidTask { .. }; lion_executor::spawn_local(lion_task)`,
+    // both callees in a dependency crate with no signature here. A non-Copy
+    // local passed by value is moved; declared `const`, the emitted
+    // `std::move` copied it, and a move-only value has no copy.
+    let cpp = translate(
+        r#"
+pub struct Task {
+    pub id: u64,
+}
+pub fn drive(builder: &mut dep::Builder) -> u64 {
+    let task = Task { id: 4 };
+    dep::spawn_local(task);
+    let backend: Box<u64> = Box::new(9);
+    builder.os_backend(backend);
+    let kept = Task { id: 1 };
+    dep::inspect(&kept);
+    kept.id
+}
+"#,
+    );
+    assert!(cpp.contains("    auto task = Task{.id = static_cast<uint64_t>(4)};"), "{cpp}");
+    assert!(cpp.contains("dep::spawn_local(std::move(task));"), "{cpp}");
+    assert!(
+        cpp.contains("    rusty::Box<uint64_t> backend = rusty::Box<uint64_t>::new_("),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("const auto task") && !cpp.contains("const rusty::Box<uint64_t> backend"), "{cpp}");
+}

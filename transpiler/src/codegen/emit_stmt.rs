@@ -4578,10 +4578,17 @@ impl CodeGen {
                         methods.iter().any(|m| is_soft_consuming_method_name(m))
                     })
                     && !self.multi_use_vars.contains(&name_str);
+                // A non-Copy local passed by value is MOVED (a const
+                // `std::move` copies; a move-only value has no copy).
+                let moved_as_argument = self.bare_argument_vars.contains(&name_str)
+                    && inferred_binding_ty
+                        .as_ref()
+                        .is_some_and(|ty| self.type_is_known_non_copy_owner(ty));
                 let qualifier = if emits_ref_binding {
                     if is_mut { "" } else { "const " }
                 } else if is_mut
                     || is_consumed
+                    || moved_as_argument
                     || soft_consumed_single_use
                     || for_consumed_iterable
                     || by_value_method_receiver
@@ -6038,8 +6045,13 @@ impl CodeGen {
                         Some(&resolved_ty),
                         None,
                     );
+                    // A non-Copy local passed by value is MOVED (a const
+                    // `std::move` copies; a move-only value has no copy).
+                    let moved_as_argument = self.bare_argument_vars.contains(&name_str)
+                        && self.type_is_known_non_copy_owner(&resolved_ty);
                     let qualifier = if is_mut
                         || is_consumed
+                        || moved_as_argument
                         || soft_consumed_single_use
                         || by_value_method_receiver
                         || (!matches!(self.peel_paren_group_type(&resolved_ty), syn::Type::Reference(_))

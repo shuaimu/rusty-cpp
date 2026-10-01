@@ -2548,6 +2548,11 @@ pub struct CodeGen {
     /// Variables used more than once in the current block.
     /// std::move is skipped for these to avoid use-after-move errors.
     pub(crate) multi_use_vars: std::collections::HashSet<String>,
+    /// Locals of the current block (and its nested blocks) passed bare as a
+    /// call or method-call argument: a non-Copy one is MOVED there, so it
+    /// must not be declared `const` (a const `std::move` copies, and a
+    /// move-only value has no copy).
+    pub(crate) bare_argument_vars: std::collections::HashSet<String>,
     /// C6 (checkpoint contract 6): locals in the current block that flow into
     /// a runtime-facade field whose native C++ type is a COPYABLE
     /// `std::function` (see `RUNTIME_FACADE_COPYABLE_CALLABLE_FIELDS`). The
@@ -3620,6 +3625,7 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             deref_assigned_vars: std::collections::HashSet::new(),
             multi_use_vars: std::collections::HashSet::new(),
+            bare_argument_vars: std::collections::HashSet::new(),
             copyable_callable_contract_locals: std::collections::HashMap::new(),
             namespace_placement_contracts: std::collections::HashMap::new(),
             current_placement_scope: None,
@@ -48563,6 +48569,38 @@ impl CodeGen {
         self.new_inner_with_try_style_binding_scope_with_ref_mode(binding_map, true)
     }
 
+    /// A type Rust never copies: an owning std container or smart pointer, or
+    /// a struct/enum this crate declares without `Copy`. (Unknown, generic,
+    /// reference and primitive types answer false.)
+    pub(super) fn type_is_known_non_copy_owner(&self, ty: &syn::Type) -> bool {
+        let syn::Type::Path(tp) = self.peel_paren_group_type(ty) else {
+            return false;
+        };
+        if tp.qself.is_some() {
+            return false;
+        }
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let name = last.ident.to_string();
+        if matches!(
+            name.as_str(),
+            "Box" | "Vec" | "String" | "Rc" | "Arc" | "HashMap" | "HashSet" | "BTreeMap"
+                | "BTreeSet" | "VecDeque" | "BinaryHeap" | "RefCell" | "Mutex" | "RwLock"
+        ) {
+            return true;
+        }
+        if tp.path.segments.len() != 1 || self.is_type_param_in_scope(&name) {
+            return false;
+        }
+        (self.local_declared_types.contains(&name) || self.declared_item_names.contains(&name))
+            && !self.copy_derived_types.contains(&name)
+            && !self.copy_derived_types.contains(&self.scoped_type_key(&name))
+            && (self.struct_field_types.contains_key(&name)
+                || self.struct_field_types.contains_key(&self.scoped_type_key(&name))
+                || self.data_enum_name_matches(&name))
+    }
+
     /// `push_local_cpp_binding_scope_with_types`, where the names in
     /// `owned_payloads` bind values the arm owns (an owned scrutinee's
     /// payload) rather than references into the scrutinee.
@@ -64869,6 +64907,47 @@ fn collect_consuming_method_receiver_vars(
     }
     mark_tail_value_consumed_locals(stmts, &mut result);
     result
+}
+
+/// Simple local names passed bare (by value, not `&x`) as a call or
+/// method-call argument anywhere in `stmts` (`spawn_local(task)`,
+/// `builder.os_backend(backend)`).
+fn collect_bare_argument_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+    fn bare_local(expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Paren(p) => bare_local(&p.expr),
+            syn::Expr::Group(g) => bare_local(&g.expr),
+            syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+                Some(path.path.segments[0].ident.to_string())
+            }
+            _ => None,
+        }
+    }
+    struct Args(std::collections::HashSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for Args {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            for arg in &call.args {
+                if let Some(name) = bare_local(arg) {
+                    self.0.insert(name);
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            for arg in &mc.args {
+                if let Some(name) = bare_local(arg) {
+                    self.0.insert(name);
+                }
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut args = Args(std::collections::HashSet::new());
+    for stmt in stmts {
+        syn::visit::Visit::visit_stmt(&mut args, stmt);
+    }
+    args.0
 }
 
 fn mark_tail_value_consumed_locals(

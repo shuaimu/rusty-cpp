@@ -681,6 +681,10 @@ impl CodeGen {
         let multi_use = collect_multi_use_vars(&block.stmts);
         block_profile_mark("collect_multi_use_vars");
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
+        let prev_bare_arguments = std::mem::replace(
+            &mut self.bare_argument_vars,
+            collect_bare_argument_vars(&block.stmts),
+        );
         // Pre-scan (C6, checkpoint contract 6): locals that flow into a
         // runtime-facade field whose native C++ type is a copyable
         // `std::function` (`rusty::Waker { wake_fn }`). Their declarations
@@ -1141,6 +1145,7 @@ impl CodeGen {
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;
+        self.bare_argument_vars = prev_bare_arguments;
         self.copyable_callable_contract_locals = prev_callable_contracts;
         block_profile_mark("done");
     }
