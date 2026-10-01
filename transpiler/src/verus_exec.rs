@@ -1009,6 +1009,11 @@ impl<'ast> Visit<'ast> for ResidueAudit {
     }
 }
 
+/// Stage 1 against `cargo expand` on a snapshot of every Lion crate (plan T6).
+#[cfg(test)]
+#[path = "verus_differential_tests.rs"]
+mod differential_tests;
+
 /// Test support: the helper executable, built once per test process.
 #[cfg(test)]
 pub(crate) mod test_helper {

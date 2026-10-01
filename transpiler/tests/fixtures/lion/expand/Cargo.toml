@@ -1,0 +1,12 @@
+[package]
+name = "lion-expand"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# SRPC's Lion dependencies, spelled as in srpc/Cargo.toml.
+[dependencies]
+lion-reactor = { path = "../tree/lion-reactor", default-features = false }
+lion-executor = { path = "../tree/lion-executor", default-features = false }
+
+[workspace]

@@ -1,0 +1,16 @@
+[package]
+name = "lion-timer-wheel"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lion Team"]
+description = "A verified hierarchical timer wheel for Lion runtime"
+license = "MIT"
+
+[dependencies]
+vstd = { git = "https://github.com/verus-lang/verus", rev = "db81a74" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(verus_keep_ghost)"] }
+
+[package.metadata.verus]
+verify = true

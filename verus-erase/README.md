@@ -146,4 +146,7 @@ resolves, from Lion's `Cargo.lock`):
    transpiler's `src/verus_exec.rs` to match (its unit test
    `transpiler_and_helper_crate_agree_on_the_vendored_revision` checks this).
 6. Run `upstream-diff.sh`, `cargo test -p verus-erase`, and the transpiler's
-   differential check against `cargo expand` of the Lion crates.
+   differential check against `cargo expand` of the Lion crates: regenerate
+   the snapshot with `transpiler/tests/fixtures/lion/regen.sh` (see its
+   README), then `cd transpiler && cargo test --release differential_`. The
+   check fails until the snapshot's `verus_git_rev` equals `VERUS_GIT_REV`.

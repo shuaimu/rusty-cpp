@@ -1,0 +1,16 @@
+[package]
+name = "lion-parity"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The insert/remove/advance/fire cases over the two Lion leaf crates, as
+# vendored under ../tree (Lion at the revision in ../MANIFEST.toml).
+# `tests/lion_parity.rs` transpiles this crate and its dependency graph with
+# --crate-graph --verus-exec, runs the C++ and compares it with the output of
+# `cargo run --example run` that ../regen.sh recorded in ../MANIFEST.toml.
+[dependencies]
+lion-slab = { path = "../tree/lion-slab" }
+lion-timer-wheel = { path = "../tree/lion-timer-wheel" }
+
+[workspace]
