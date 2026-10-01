@@ -118,6 +118,9 @@ struct Poll<void> {
 struct Waker {
     std::function<void()> wake_fn;
     std::function<void(const std::function<void()>&)> wake_by_ref_fn{};
+    // The task this waker wakes, for `will_wake`: an Arc-built waker's
+    // allocation. A callable-built waker has none.
+    const void* identity = nullptr;
     template<typename F>
     static Waker from_callable(F&& callback) {
         return Waker{std::forward<F>(callback)};
@@ -136,14 +139,22 @@ struct Waker {
                 }
             }
         };
-        return Waker{
+        const void* identity = static_cast<const void*>(std::addressof(*arc));
+        Waker waker{
             OwnedWake{std::move(arc)},
             [](const std::function<void()>& callback) {
                 callback.template target<OwnedWake>()->by_ref();
             }
         };
+        waker.identity = identity;
+        return waker;
     }
     Waker clone() const { return *this; }
+    // Rust `Waker::will_wake(&self, other)`: whether waking `other` wakes the
+    // same task. False when that is unknown, which costs only a re-register.
+    bool will_wake(const Waker& other) const {
+        return identity != nullptr && identity == other.identity;
+    }
     // Existing C++ callers reuse lvalue wakers. Rust's consuming Waker::wake
     // selects the rvalue overload and releases this copy's owner immediately.
     void wake() const & { wake_by_ref(); }
@@ -221,6 +232,15 @@ inline std::coroutine_handle<> start_await(TaskContext& task,
     return task.self;
 }
 
+// `co_await` takes these as they are (a Task, std::suspend_always).
+template<typename A>
+concept direct_awaitable = requires(A& a) { a.await_ready(); };
+
+// A hand-written pollable (`poll(Context&)`, e.g. a JoinHandle or a timer)
+// awaited from a Task: defined after namespace `future` below.
+template<typename A>
+auto await_pollable(A&& a);
+
 struct FinalAwaiter {
     bool await_ready() noexcept { return false; }
     template<typename Promise>
@@ -239,6 +259,9 @@ struct FinalAwaiter {
 template<typename T>
 class Task {
 public:
+    // Rust `Future::Output` (`F::Output` in generic code such as a spawn's
+    // `JoinHandle<F::Output>`).
+    using Output = T;
     struct promise_type : async_detail::TaskContext {
         std::optional<T> result;
         Task get_return_object() {
@@ -250,6 +273,17 @@ public:
         async_detail::FinalAwaiter final_suspend() noexcept { return {}; }
         void return_value(T value) { result.emplace(std::move(value)); }
         void unhandled_exception() { std::terminate(); }
+        // Rust `.await` on any future: an awaiter is awaited as it is; a
+        // pollable is moved into a pinned Task that polls it with this task's
+        // context (`.await` consumes its operand).
+        template<typename A>
+        decltype(auto) await_transform(A&& a) {
+            if constexpr (async_detail::direct_awaitable<std::remove_reference_t<A>>) {
+                return std::forward<A>(a);
+            } else {
+                return async_detail::await_pollable(std::forward<A>(a));
+            }
+        }
         T take_result() {
             if (!result) std::terminate();
             T value = std::move(*result);
@@ -290,6 +324,8 @@ private:
 template<>
 class Task<void> {
 public:
+    // Rust's `()`, as generic code spells `F::Output` (`rusty::Unit`).
+    using Output = std::tuple<>;
     struct promise_type : async_detail::TaskContext {
         Task get_return_object() {
             auto handle = std::coroutine_handle<promise_type>::from_promise(*this);
@@ -300,6 +336,17 @@ public:
         async_detail::FinalAwaiter final_suspend() noexcept { return {}; }
         void return_void() {}
         void unhandled_exception() { std::terminate(); }
+        // Rust `.await` on any future: an awaiter is awaited as it is; a
+        // pollable is moved into a pinned Task that polls it with this task's
+        // context (`.await` consumes its operand).
+        template<typename A>
+        decltype(auto) await_transform(A&& a) {
+            if constexpr (async_detail::direct_awaitable<std::remove_reference_t<A>>) {
+                return std::forward<A>(a);
+            } else {
+                return async_detail::await_pollable(std::forward<A>(a));
+            }
+        }
     };
     Poll<void> poll(Context& cx) {
         if (!handle_) std::terminate();
@@ -376,6 +423,13 @@ auto poll_fn(F f) {
     return pin(PollFn<F>{std::move(f)});
 }
 } // namespace future
+
+namespace async_detail {
+template<typename A>
+auto await_pollable(A&& a) {
+    return future::pin(std::remove_cvref_t<A>(std::move(a)));
+}
+} // namespace async_detail
 
 // Block current thread until a poll-based future completes.
 // Supports both direct pollables and Rust-expanded shapes that use

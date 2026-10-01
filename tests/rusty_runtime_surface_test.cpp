@@ -7,7 +7,8 @@
 // env::var, thread::available_parallelism and JoinHandle::thread;
 // io::Error::from(kind) / io::Error::other, io::Result's consuming unwrap,
 // Arc::ptr_eq, Pin::as_mut / as_ref, flatten over owned containers without
-// `.iter()`, and a drained VecDeque converted through `rusty_from_impl`.
+// `.iter()`, and a drained VecDeque converted through `rusty_from_impl`;
+// a Task awaiting a hand-written pollable, `Task::Output`, Waker::will_wake.
 
 #include "../include/rusty/arc.hpp"
 #include "../include/rusty/io.hpp"
@@ -293,6 +294,61 @@ void test_vecdeque_conversion_hook() {
     assert(*c.items[0] == 0 && *c.items[1] == 1 && *c.items[2] == 2);
 }
 
+// `handle.await` / `sleep.await` inside an async fn: a pollable (no
+// await_ready) is pinned into a Task polled with the awaiting task's
+// context, consuming the operand, lvalue or prvalue; Tasks await as before.
+struct CountdownFuture {
+    int n;
+    std::unique_ptr<int> payload;  // move-only, as a JoinHandle is
+    rusty::Poll<int> poll(rusty::Context& cx) {
+        if (n-- > 0) {
+            cx.waker->wake_by_ref();
+            return rusty::Poll<int>::pending();
+        }
+        return rusty::Poll<int>::ready_with(*payload);
+    }
+};
+
+rusty::Task<int> inner_task() { co_return 1; }
+rusty::Task<void> unit_task() { co_return; }
+
+rusty::Task<int> awaiting_task() {
+    int a = co_await inner_task();
+    CountdownFuture lvalue{2, std::make_unique<int>(40)};
+    int b = co_await std::move(lvalue);
+    int c = co_await CountdownFuture{1, std::make_unique<int>(100)};
+    co_await unit_task();
+    co_return a + b + c;
+}
+
+void test_task_awaits_a_pollable() {
+    static_assert(std::is_same_v<rusty::Task<int>::Output, int>);
+    static_assert(std::is_same_v<rusty::Task<void>::Output, std::tuple<>>);
+    assert(rusty::block_on(awaiting_task()) == 141);
+}
+
+// `Waker::will_wake`: the same Arc-built waker (or a clone) wakes the same
+// task; a different one, or a callable-built one, is not known to.
+struct CountingWake {
+    mutable int woken = 0;
+    static void wake(rusty::Arc<CountingWake> self) { self->woken += 1; }
+};
+
+void test_waker_will_wake() {
+    auto a = rusty::Arc<CountingWake>::make(CountingWake{});
+    auto b = rusty::Arc<CountingWake>::make(CountingWake{});
+    rusty::Waker wa = rusty::Waker::from_arc(a.clone());
+    rusty::Waker wa2 = wa.clone();
+    rusty::Waker wb = rusty::Waker::from_arc(b.clone());
+    rusty::Waker callable = rusty::Waker::from_callable([]() {});
+    assert(wa.will_wake(wa2));
+    assert(wa.will_wake(rusty::Waker::from_arc(a.clone())));
+    assert(!wa.will_wake(wb));
+    assert(!callable.will_wake(callable));
+    wa.wake_by_ref();
+    assert(a->woken == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -313,6 +369,8 @@ int main() {
     test_pin_as_mut_is_the_place();
     test_flatten_owned_containers_without_iter();
     test_vecdeque_conversion_hook();
+    test_task_awaits_a_pollable();
+    test_waker_will_wake();
     std::printf("rusty_runtime_surface_test: all passed\n");
     return 0;
 }
