@@ -85,6 +85,51 @@ public:
         return Error(kind, std::string(std::string_view(std::forward<M>(message))));
     }
 
+    // Rust `io::Error::from(kind)` (`impl From<ErrorKind> for io::Error`):
+    // an error of that kind, described by the kind.
+    static Error from(Kind kind) { return Error(kind, kind_description(kind)); }
+
+    // Rust `io::Error::other(error)`: an `Other` error carrying `error`'s
+    // text (its Display where the type offers one here).
+    template<typename E>
+    static Error other(E&& error) {
+        if constexpr (std::is_convertible_v<E&&, std::string_view>) {
+            return Error(Kind::Other, std::string(std::string_view(std::forward<E>(error))));
+        } else if constexpr (requires { std::string(std::string_view(error.to_string())); }) {
+            return Error(Kind::Other, std::string(std::string_view(error.to_string())));
+        } else if constexpr (requires { std::string(error.rusty_debug_string()); }) {
+            return Error(Kind::Other, std::string(error.rusty_debug_string()));
+        } else {
+            return Error(Kind::Other, "other error");
+        }
+    }
+
+    static const char* kind_description(Kind kind) {
+        switch (kind) {
+            case Kind::NotFound: return "entity not found";
+            case Kind::PermissionDenied: return "permission denied";
+            case Kind::ConnectionRefused: return "connection refused";
+            case Kind::ConnectionReset: return "connection reset";
+            case Kind::ConnectionAborted: return "connection aborted";
+            case Kind::NotConnected: return "not connected";
+            case Kind::AddrInUse: return "address in use";
+            case Kind::AddrNotAvailable: return "address not available";
+            case Kind::BrokenPipe: return "broken pipe";
+            case Kind::AlreadyExists: return "entity already exists";
+            case Kind::WouldBlock: return "operation would block";
+            case Kind::InvalidInput: return "invalid input parameter";
+            case Kind::InvalidData: return "invalid data";
+            case Kind::TimedOut: return "timed out";
+            case Kind::WriteZero: return "write zero";
+            case Kind::Interrupted: return "operation interrupted";
+            case Kind::UnexpectedEof: return "unexpected end of file";
+            case Kind::Unsupported: return "unsupported";
+            case Kind::OutOfMemory: return "out of memory";
+            case Kind::Other: return "other error";
+        }
+        return "other error";
+    }
+
     Kind kind() const { return kind_; }
     const std::string& to_string() const { return message_; }
 
@@ -185,9 +230,13 @@ public:
     bool is_ok() const { return ok_; }
     bool is_err() const { return !ok_; }
 
-    T& unwrap() {
+    // Rust `unwrap(self)` consumes the Result: the value moves out, as
+    // rusty::Result's does. (Handing back a reference into a temporary
+    // Result dangled: the `?` macros stash the unwrapped value past the
+    // Result's lifetime.)
+    T unwrap() {
         if (!ok_) rusty::panic::do_panic("io::Result::unwrap on Err: " + error_.to_string());
-        return *value_;
+        return std::move(*value_);
     }
 
     const T& unwrap() const {
@@ -207,12 +256,12 @@ public:
 
     // Rust `Result::expect(msg)`: the value, or a panic naming `msg` and the error.
     template<typename M>
-    T& expect(M&& message) {
+    T expect(M&& message) {
         if (!ok_) {
             rusty::panic::do_panic(std::string(std::string_view(std::forward<M>(message))) + ": " +
                                    error_.to_string());
         }
-        return *value_;
+        return std::move(*value_);
     }
 
     template<typename M>

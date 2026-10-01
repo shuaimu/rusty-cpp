@@ -4,8 +4,12 @@
 // Option<T&>::is_some_and, the raw-pointer dispatch helpers codegen emits
 // for closure parameters of unknown type, Pin projections, Poll<()>'s two
 // spellings, Mutex::into_inner and PoisonError::into_inner as a value,
-// env::var, thread::available_parallelism and JoinHandle::thread.
+// env::var, thread::available_parallelism and JoinHandle::thread;
+// io::Error::from(kind) / io::Error::other, io::Result's consuming unwrap,
+// Arc::ptr_eq, Pin::as_mut / as_ref, flatten over owned containers without
+// `.iter()`, and a drained VecDeque converted through `rusty_from_impl`.
 
+#include "../include/rusty/arc.hpp"
 #include "../include/rusty/io.hpp"
 #include "../include/rusty/local_key.hpp"
 #include "../include/rusty/once.hpp"
@@ -16,12 +20,16 @@
 #include "../include/rusty/mutex.hpp"
 #include "../include/rusty/pin.hpp"
 #include "../include/rusty/process.hpp"
+#include "../include/rusty/slice.hpp"
 #include "../include/rusty/thread.hpp"
+#include "../include/rusty/vecdeque.hpp"
 
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string>
+#include <vector>
 #include <tuple>
 
 namespace {
@@ -188,6 +196,103 @@ void test_thread_handle_and_parallelism() {
     assert(handle.join().unwrap() == 7);
 }
 
+// `io::Error::from(ErrorKind::WouldBlock)` / `io::Error::other(e)`.
+void test_io_error_from_kind_and_other() {
+    auto e = rusty::io::Error::from(rusty::io::ErrorKind::WouldBlock);
+    assert(e.kind() == rusty::io::ErrorKind::WouldBlock);
+    assert(e.to_string() == "operation would block");
+    auto o = rusty::io::Error::other("boom");
+    assert(o.kind() == rusty::io::ErrorKind::Other);
+    assert(o.to_string() == "boom");
+    struct Displayed {
+        std::string to_string() const { return "displayed"; }
+    };
+    assert(rusty::io::Error::other(Displayed{}).to_string() == "displayed");
+}
+
+// `unwrap(self)` / `expect(self, ..)` consume the io::Result: the value moves
+// out (a move-only one too), where a reference into a temporary dangled.
+void test_io_result_unwrap_moves_out() {
+    auto boxed = rusty::io::Result<std::unique_ptr<int>>::ok(std::make_unique<int>(5));
+    std::unique_ptr<int> p = boxed.unwrap();
+    assert(p && *p == 5);
+    std::unique_ptr<int> q =
+        rusty::io::Result<std::unique_ptr<int>>::ok(std::make_unique<int>(6)).expect("six");
+    assert(q && *q == 6);
+}
+
+// `Arc::ptr_eq(&a, &b)`: same allocation, whether given values or pointers.
+void test_arc_ptr_eq() {
+    auto a = rusty::Arc<int>::make(1);
+    auto b = a.clone();
+    auto c = rusty::Arc<int>::make(1);
+    assert(rusty::Arc<int>::ptr_eq(a, b));
+    assert(!rusty::Arc<int>::ptr_eq(a, c));
+    assert(rusty::Arc<int>::ptr_eq(&a, b));
+    assert(!rusty::Arc<int>::ptr_eq(a, &c));
+    assert(rusty::Arc<int>::ptr_eq(&a, &b));
+}
+
+// `pinned.as_mut()` / `as_ref()` reborrow the pinned place itself.
+void test_pin_as_mut_is_the_place() {
+    Inner i;
+    assert(&rusty::pin_place::as_mut(i) == &i);
+    assert(&rusty::pin_place::as_ref(&i) == &i);
+    assert(rusty::pin_place::as_mut(i).poll() == 2);
+}
+
+// `batch.into_iter().flatten()` over `Option<VecDeque<T>>`: each inner
+// container is an owned temporary (kept alive by the adapter) with no
+// `.iter()` — it is iterated through its begin/end range.
+void test_flatten_owned_containers_without_iter() {
+    rusty::VecDeque<int> d;
+    d.push_back(1);
+    d.push_back(2);
+    d.push_back(3);
+    auto batch = rusty::Option<rusty::VecDeque<int>>(std::move(d));
+    int sum = 0;
+    int count = 0;
+    for (auto&& x : rusty::for_in(rusty::flatten(rusty::iter(std::move(batch))))) {
+        sum += x;
+        ++count;
+    }
+    assert(count == 3 && sum == 6);
+    auto none = rusty::Option<rusty::VecDeque<int>>();
+    int seen = 0;
+    for (auto&& x : rusty::for_in(rusty::flatten(rusty::iter(std::move(none))))) {
+        seen += x;
+    }
+    assert(seen == 0);
+}
+
+// `impl<T> From<VecDeque<T>> for Vec<T>` reached from `.into()`: a
+// consumed deque drains front to back into any `from_iter` collection.
+struct Collected {
+    std::vector<std::unique_ptr<int>> items;
+    template <typename I>
+    static Collected from_iter(I it) {
+        Collected c;
+        while (true) {
+            auto next = it.next();
+            if (next.is_none()) {
+                break;
+            }
+            c.items.push_back(next.unwrap());
+        }
+        return c;
+    }
+};
+
+void test_vecdeque_conversion_hook() {
+    rusty::VecDeque<std::unique_ptr<int>> d;
+    d.push_back(std::make_unique<int>(1));
+    d.push_back(std::make_unique<int>(2));
+    d.push_front(std::make_unique<int>(0));
+    Collected c = rusty_from_impl(std::type_identity<Collected>{}, std::move(d));
+    assert(c.items.size() == 3);
+    assert(*c.items[0] == 0 && *c.items[1] == 1 && *c.items[2] == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -202,6 +307,12 @@ int main() {
     test_mutex_into_inner_and_poison();
     test_env_var();
     test_thread_handle_and_parallelism();
+    test_io_error_from_kind_and_other();
+    test_io_result_unwrap_moves_out();
+    test_arc_ptr_eq();
+    test_pin_as_mut_is_the_place();
+    test_flatten_owned_containers_without_iter();
+    test_vecdeque_conversion_hook();
     std::printf("rusty_runtime_surface_test: all passed\n");
     return 0;
 }

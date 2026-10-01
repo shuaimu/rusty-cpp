@@ -45203,6 +45203,36 @@ impl CodeGen {
             &method_name,
             owner_args_omitted,
         );
+        // An untyped first argument (a destructured closure binding) of a
+        // smart-pointer assoc fn that takes the pointer itself
+        // (`Arc::ptr_eq(q, other)`): the owner IS that argument's type. The
+        // owner-args recovery below reads the argument as the pointee and
+        // spelled `Arc<decltype(q)>`, i.e. `Arc<Arc<Q>>`.
+        if argument_owner_args.is_none()
+            && owner_args_omitted
+            && Self::smart_pointer_owner_family(&owner_name).is_some()
+            && matches!(
+                method_name.as_str(),
+                "ptr_eq" | "strong_count" | "weak_count" | "as_ptr" | "get_mut" | "downgrade"
+                    | "upgrade" | "try_unwrap" | "into_inner"
+            )
+            && let Some(first) = call.args.first()
+        {
+            let mut arg = self.peel_paren_group_expr(first);
+            while let syn::Expr::Reference(reference) = arg {
+                arg = self.peel_paren_group_expr(&reference.expr);
+            }
+            if self.infer_simple_expr_type(arg).is_none()
+                && matches!(arg, syn::Expr::Path(p) if p.path.segments.len() == 1)
+            {
+                let arg_cpp = self.emit_expr_to_string(arg);
+                return format!(
+                    "std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer({}))>::{}",
+                    arg_cpp,
+                    escape_cpp_keyword(&method_name)
+                );
+            }
+        }
         let scoped_owner_args = (!owner_is_runtime_mapped_bare)
             .then(|| {
                 self.recover_omitted_owner_generic_args_from_scope(&owner_path)

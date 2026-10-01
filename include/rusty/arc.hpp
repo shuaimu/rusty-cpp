@@ -489,6 +489,31 @@ public:
         assert(value != nullptr);
         return value->weak_count();
     }
+
+    // Rust `Arc::ptr_eq(&a, &b)`: whether the two point to the same
+    // allocation (compared by data address, as Rust does).
+    // @safe
+    static bool ptr_eq(const Arc& a, const Arc& b) {
+        return a.as_ptr() == b.as_ptr();
+    }
+
+    // @safe
+    static bool ptr_eq(const Arc* a, const Arc& b) {
+        assert(a != nullptr);
+        return a->as_ptr() == b.as_ptr();
+    }
+
+    // @safe
+    static bool ptr_eq(const Arc& a, const Arc* b) {
+        assert(b != nullptr);
+        return a.as_ptr() == b->as_ptr();
+    }
+
+    // @safe
+    static bool ptr_eq(const Arc* a, const Arc* b) {
+        assert(a != nullptr && b != nullptr);
+        return a->as_ptr() == b->as_ptr();
+    }
 };
 
 // @safe - Rust-idiomatic factory function

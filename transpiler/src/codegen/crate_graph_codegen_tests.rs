@@ -1141,3 +1141,37 @@ pub fn take() -> u64 {
     assert!(cpp.contains("static Local from(uint8_t v);"), "{cpp}");
     assert_eq!(cpp.matches("rusty_from_impl(std::type_identity<").count(), 3, "{cpp}");
 }
+
+#[test]
+fn smart_pointer_assoc_fn_on_an_untyped_pointer_argument_names_its_type() {
+    // lion-executor's `Arc::ptr_eq(q, queue)` with `q` a destructured closure
+    // binding the emitter cannot type: the owner-args recovery read `q` as the
+    // pointee and spelled `Arc<decltype(q)>`, i.e. `Arc<Arc<Queue>>`. The
+    // owner IS the argument's own type (include/rusty/arc.hpp gains
+    // `Arc::ptr_eq`). Compiled and run against rustc: 0 7 1 0 either way.
+    let cpp = translate(
+        r#"
+use std::cell::RefCell;
+use std::sync::Arc;
+pub struct Queue {
+    pub n: u32,
+}
+thread_local! {
+    static CTX: RefCell<Option<(Arc<Queue>, u32)>> = RefCell::new(None);
+}
+pub fn is_ours(queue: &Arc<Queue>) -> bool {
+    CTX.with(|c| c.borrow().as_ref().is_some_and(|(q, _)| Arc::ptr_eq(q, queue)))
+}
+pub fn same(a: &Arc<Queue>, b: &Arc<Queue>) -> bool {
+    Arc::ptr_eq(a, b)
+}
+"#,
+    );
+    assert!(
+        cpp.contains("std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(q))>::ptr_eq("),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("Arc<std::remove_cvref_t<decltype((q))>>"), "{cpp}");
+    // A typed argument keeps its spelled owner.
+    assert!(cpp.contains("return Arc<Queue>::ptr_eq(a, b);"), "{cpp}");
+}
