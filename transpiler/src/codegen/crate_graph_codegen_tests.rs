@@ -1634,3 +1634,101 @@ pub fn run() -> u32 {
         "{cpp}"
     );
 }
+
+#[test]
+fn callable_argument_output_deduces_its_type_parameter() {
+    // lion-reactor's AsyncFdReadyGuard: `try_io<R>(self, f: impl
+    // FnOnce(RawFd) -> io::Result<R>)` takes `R` from the closure's output,
+    // which C++ does not deduce, so `guard.try_io(closure)` found no viable
+    // member. A forwarding overload invokes the argument's type on the
+    // bound's inputs and deduces `R` against `rusty::io::Result<R>`; a free
+    // function gets the same, at namespace scope. A parameter C++ deduces
+    // itself (`x: T`) needs none.
+    let cpp = translate(
+        r#"
+use std::io;
+pub type RawFd = i32;
+pub struct ReadyGuard {
+    fd: RawFd,
+}
+impl ReadyGuard {
+    pub fn try_io<R>(self, f: impl FnOnce(RawFd) -> io::Result<R>) -> io::Result<R> {
+        f(self.fd)
+    }
+}
+pub fn with_fd<R, F>(fd: RawFd, f: F) -> Option<R>
+where
+    F: FnOnce(RawFd) -> Option<R>,
+{
+    f(fd)
+}
+pub fn keep<T>(x: T, f: impl FnOnce(T) -> T) -> T {
+    f(x)
+}
+pub struct OnceCell<T> {
+    pub v: Option<T>,
+}
+impl<T> OnceCell<T> {
+    pub fn init(&self, f: impl FnOnce() -> T) -> u32 {
+        let _ = f;
+        0
+    }
+    pub fn try_init<E>(&self, f: impl FnOnce() -> Result<T, E>) -> u32 {
+        let _ = f;
+        1
+    }
+}
+pub enum Slot<T> {
+    Full(T),
+    Empty,
+}
+impl<T> Slot<T> {
+    pub fn or_insert_with(self, default: impl FnOnce() -> T) -> T {
+        match self {
+            Slot::Full(v) => v,
+            Slot::Empty => default(),
+        }
+    }
+}
+pub fn run(guard: ReadyGuard) -> u32 {
+    let a = guard.try_io(|fd: RawFd| -> io::Result<u32> { Ok(fd as u32 + 1) }).unwrap_or(0);
+    let b = with_fd(5, |fd: RawFd| -> Option<u32> { Some(fd as u32) }).unwrap_or(0);
+    a + b + keep(1, |x| x + 1)
+}
+"#,
+    );
+    assert!(
+        cpp.contains(
+            "template<typename R> static std::type_identity<std::tuple<R>> __rusty_deduce_try_io_1(std::type_identity<rusty::io::Result<R>>);"
+        ),
+        "{cpp}"
+    );
+    assert!(
+        cpp.contains(
+            "template<typename __RustyF1, typename __RustyD1 = decltype(__rusty_deduce_try_io_1(std::type_identity<std::invoke_result_t<__RustyF1&, RawFd>>{}))>"
+        ),
+        "{cpp}"
+    );
+    assert!(cpp.contains("decltype(auto) try_io(__RustyF1&& f) {"), "{cpp}");
+    assert!(
+        cpp.contains(
+            "return try_io<std::tuple_element_t<0, typename __RustyD1::type>>(std::forward<__RustyF1>(f));"
+        ),
+        "{cpp}"
+    );
+    assert!(cpp.contains("__rusty_deduce_with_fd_1(std::type_identity<rusty::Option<R>>);"), "{cpp}");
+    assert!(!cpp.contains("__rusty_deduce_keep"), "{cpp}");
+    // A struct's or enum's own parameter belongs to the class, not to the
+    // member: no overload for `init` (once_cell's OnceCell::init had one,
+    // ambiguous with the primary) or `or_insert_with` (hashbrown's Entry: a
+    // helper `template<typename T>` shadowed the class's), and `try_init`
+    // deduces only its own `E`.
+    assert!(!cpp.contains("__rusty_deduce_init"), "{cpp}");
+    assert!(!cpp.contains("__rusty_deduce_or_insert_with"), "{cpp}");
+    assert!(
+        cpp.contains(
+            "template<typename E> static std::type_identity<std::tuple<E>> __rusty_deduce_try_init_1(std::type_identity<rusty::Result<T, E>>);"
+        ),
+        "{cpp}"
+    );
+}

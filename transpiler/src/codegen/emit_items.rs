@@ -1656,10 +1656,338 @@ impl CodeGen {
         self.pop_type_param_scope();
         if let Some(overload) = self.impl_trait_assoc_deduction_overload(f, &name, export_prefix) {
             self.writeln(&overload);
+        } else if let Some(lines) =
+            self.callable_output_deduction_overload(&f.sig, &name, None, export_prefix, None)
+        {
+            for line in lines {
+                self.writeln(&line);
+            }
         }
         if let Some(cond) = &cfg_guard {
             self.writeln(&format!("#endif  // {}", cond));
         }
+    }
+
+    /// `fn try_io<R>(self, f: impl FnOnce(RawFd) -> io::Result<R>)`
+    /// (lion-reactor's AsyncFdReadyGuard): Rust infers `R` from the closure's
+    /// output; C++ deduces nothing from a callable's return type, so
+    /// `guard.try_io(closure)` found no viable `try_io`. A forwarding
+    /// overload invokes the argument's type on the bound's input types
+    /// (`std::invoke_result_t`), deduces the type parameters from that
+    /// result against the bound's output (`rusty::io::Result<R>`, through a
+    /// declared-only deduction helper), and calls the primary with them
+    /// spelled. A failed deduction removes the overload (it is a default
+    /// template argument), and an explicit `try_io<T>(..)` selects the
+    /// primary. Emitted only when each such parameter precedes every
+    /// parameter C++ deduces itself, so the spelled list is a prefix of the
+    /// primary's. `member` is the method's cv-qualifier (`Some("")` for a
+    /// non-const method) and `is_static` its kind; `None` for a free function.
+    pub(super) fn callable_output_deduction_overload(
+        &mut self,
+        sig: &syn::Signature,
+        cpp_name: &str,
+        member: Option<(&str, bool)>,
+        export_prefix: &str,
+        member_template_head: Option<&[String]>,
+    ) -> Option<Vec<String>> {
+        use quote::ToTokens;
+        // The primary's own template parameters, in order, as its template
+        // head declares them: a merged impl's struct (or enum) parameters
+        // belong to the class, not the member, and a helper naming one
+        // shadows it (once_cell's `OnceCell<T>::init(&self, f: impl
+        // FnOnce() -> T)`; hashbrown's `Entry<T, A>::or_insert_with`).
+        let own_generics = &sig.generics;
+        if own_generics
+            .params
+            .iter()
+            .any(|param| matches!(param, syn::GenericParam::Const(_)))
+        {
+            return None;
+        }
+        // A member passes the template head emit_method wrote for it; a free
+        // function's is recomputed (its scope is popped by now).
+        let emitted_heads: Vec<String> = match member_template_head {
+            Some(lines) => {
+                let head = lines
+                    .iter()
+                    .find_map(|line| line.trim().strip_prefix("template<")?.strip_suffix('>'))
+                    .unwrap_or("");
+                let mut parts = Vec::new();
+                let mut depth = 0i32;
+                let mut current = String::new();
+                for ch in head.chars() {
+                    match ch {
+                        '<' | '(' => depth += 1,
+                        '>' | ')' => depth -= 1,
+                        ',' if depth == 0 => {
+                            parts.push(std::mem::take(&mut current));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    current.push(ch);
+                }
+                if !current.trim().is_empty() {
+                    parts.push(current);
+                }
+                parts
+            }
+            None => {
+                let prev_constraint_emit = self.in_constraint_emit.get();
+                self.in_constraint_emit.set(true);
+                let (heads, _) = self.collect_emitted_template_parts(own_generics, false);
+                self.in_constraint_emit.set(prev_constraint_emit);
+                heads
+            }
+        };
+        let declared: Vec<String> = emitted_heads
+            .iter()
+            .filter_map(|head| {
+                let head = head.trim();
+                let rest = head
+                    .strip_prefix("typename ")
+                    .or_else(|| head.strip_prefix("class "))?;
+                let name: String = rest
+                    .trim_start_matches("...")
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                (!name.is_empty()).then_some(name)
+            })
+            .collect();
+        let mut type_params: Vec<String> = Vec::new();
+        for param in &own_generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                let name = tp.ident.to_string();
+                if declared.contains(&name) {
+                    type_params.push(name);
+                }
+            }
+        }
+        if declared.len() != type_params.len() {
+            // A head this signature's generics do not account for (a forced
+            // placeholder): the spelled prefix could not line up.
+            return None;
+        }
+        if type_params.is_empty() {
+            return None;
+        }
+        let mut fn_bounds: HashMap<String, (Vec<syn::Type>, syn::Type)> = HashMap::new();
+        for param in &sig.generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                for bound in &tp.bounds {
+                    if let Some(found) =
+                        Self::callable_bound_return_signature_from_type_param_bound(bound)
+                    {
+                        fn_bounds.insert(tp.ident.to_string(), found);
+                    }
+                }
+            }
+        }
+        if let Some(where_clause) = &sig.generics.where_clause {
+            for predicate in &where_clause.predicates {
+                if let syn::WherePredicate::Type(pt) = predicate
+                    && let syn::Type::Path(bounded) = &pt.bounded_ty
+                    && let Some(ident) = bounded.path.get_ident()
+                {
+                    for bound in &pt.bounds {
+                        if let Some(found) =
+                            Self::callable_bound_return_signature_from_type_param_bound(bound)
+                        {
+                            fn_bounds.insert(ident.to_string(), found);
+                        }
+                    }
+                }
+            }
+        }
+        // (input index, name, callable inputs/output, impl-trait?)
+        let mut callables: Vec<(usize, String, Vec<syn::Type>, syn::Type, bool)> = Vec::new();
+        let mut deducible: HashSet<String> = HashSet::new();
+        let mut inputs: Vec<(String, Option<syn::Type>, bool)> = Vec::new();
+        for (idx, input) in sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(pt) = input else {
+                continue;
+            };
+            let syn::Pat::Ident(pi) = pt.pat.as_ref() else {
+                return None;
+            };
+            let name = escape_cpp_keyword(&pi.ident.to_string());
+            match pt.ty.as_ref() {
+                syn::Type::ImplTrait(it) => {
+                    let found = it.bounds.iter().find_map(
+                        Self::callable_bound_return_signature_from_type_param_bound,
+                    );
+                    if let Some((args, output)) = found {
+                        callables.push((idx, name.clone(), args, output, true));
+                        inputs.push((name, None, true));
+                    } else {
+                        return None;
+                    }
+                }
+                syn::Type::Path(tp)
+                    if tp.qself.is_none()
+                        && tp.path.get_ident().is_some_and(|ident| {
+                            fn_bounds.contains_key(&ident.to_string())
+                        }) =>
+                {
+                    let ident = tp.path.get_ident()?.to_string();
+                    let (args, output) = fn_bounds.get(&ident)?.clone();
+                    deducible.insert(ident);
+                    callables.push((idx, name.clone(), args, output, false));
+                    inputs.push((name, Some((*pt.ty).clone()), false));
+                }
+                other => {
+                    let text = other.to_token_stream().to_string();
+                    for t in &type_params {
+                        if contains_whole_word(&text, t) {
+                            deducible.insert(t.clone());
+                        }
+                    }
+                    inputs.push((name, Some((*pt.ty).clone()), false));
+                }
+            }
+        }
+        let needed: Vec<String> = type_params
+            .iter()
+            .filter(|t| !deducible.contains(*t))
+            .cloned()
+            .collect();
+        if needed.is_empty() || callables.is_empty() {
+            return None;
+        }
+        // The spelled template arguments must be a prefix of the primary's.
+        if type_params[..needed.len()] != needed[..] {
+            return None;
+        }
+        // Each needed parameter, from the first callable output naming it.
+        let mut source: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut helpers: Vec<(usize, Vec<String>, syn::Type, Vec<syn::Type>)> = Vec::new();
+        for (idx, _, args, output, _) in &callables {
+            let text = output.to_token_stream().to_string();
+            let named: Vec<String> = type_params
+                .iter()
+                .filter(|t| contains_whole_word(&text, t))
+                .cloned()
+                .collect();
+            if !named.iter().any(|t| needed.contains(t) && !source.contains_key(t)) {
+                continue;
+            }
+            for (pos, t) in named.iter().enumerate() {
+                if needed.contains(t) {
+                    source.entry(t.clone()).or_insert((*idx, pos));
+                }
+            }
+            helpers.push((*idx, named, output.clone(), args.clone()));
+        }
+        if !needed.iter().all(|t| source.contains_key(t)) {
+            return None;
+        }
+        self.push_type_param_scope(&sig.generics);
+        let helper_name = |idx: usize| format!("__rusty_deduce_{}_{}", cpp_name, idx);
+        let static_kw = if member.is_some() { "static " } else { "" };
+        let mut lines: Vec<String> = Vec::new();
+        for (idx, named, output, _) in &helpers {
+            let output_cpp = self.map_type(output);
+            if output_cpp.is_empty() || type_string_has_auto_placeholder(&output_cpp) {
+                self.pop_type_param_scope();
+                return None;
+            }
+            lines.push(format!(
+                "{}template<{}> {}std::type_identity<std::tuple<{}>> {}(std::type_identity<{}>);",
+                if member.is_some() { "" } else { export_prefix },
+                named.iter().map(|t| format!("typename {}", t)).collect::<Vec<_>>().join(", "),
+                static_kw,
+                named.join(", "),
+                helper_name(*idx),
+                output_cpp
+            ));
+        }
+        let mut head: Vec<String> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        let mut args: Vec<String> = Vec::new();
+        let callable_by_idx: HashMap<usize, &(usize, String, Vec<syn::Type>, syn::Type, bool)> =
+            callables.iter().map(|c| (c.0, c)).collect();
+        let mut callable_tparam: HashMap<usize, String> = HashMap::new();
+        let typed_inputs: Vec<(usize, &(String, Option<syn::Type>, bool))> = sig
+            .inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, input)| matches!(input, syn::FnArg::Typed(_)))
+            .map(|(idx, _)| idx)
+            .zip(inputs.iter())
+            .collect();
+        for (idx, (name, ty, is_impl)) in &typed_inputs {
+            if callable_by_idx.contains_key(idx) {
+                let tparam = format!("__RustyF{}", idx);
+                head.push(format!("typename {}", tparam));
+                params.push(format!("{}&& {}", tparam, name));
+                args.push(format!("std::forward<{}>({})", tparam, name));
+                callable_tparam.insert(*idx, tparam);
+                let _ = is_impl;
+            } else {
+                let ty = ty.as_ref()?;
+                let mapped = self.resolve_param_cpp_type(ty);
+                if mapped.is_empty() || type_string_has_auto_placeholder(&mapped) {
+                    self.pop_type_param_scope();
+                    return None;
+                }
+                params.push(format!("{} {}", mapped, name));
+                args.push(format!("std::forward<decltype({})>({})", name, name));
+            }
+        }
+        for (idx, _, _, call_args) in &helpers {
+            let tparam = callable_tparam.get(idx)?.clone();
+            let mut invoke = vec![format!("{}&", tparam)];
+            for arg in call_args {
+                let mapped = self.map_type(arg);
+                if mapped.is_empty() || type_string_has_auto_placeholder(&mapped) {
+                    self.pop_type_param_scope();
+                    return None;
+                }
+                invoke.push(mapped);
+            }
+            head.push(format!(
+                "typename __RustyD{} = decltype({}(std::type_identity<std::invoke_result_t<{}>>{{}}))",
+                idx,
+                helper_name(*idx),
+                invoke.join(", ")
+            ));
+        }
+        self.pop_type_param_scope();
+        let spelled: Vec<String> = needed
+            .iter()
+            .map(|t| {
+                let (idx, pos) = source[t];
+                format!("std::tuple_element_t<{}, typename __RustyD{}::type>", pos, idx)
+            })
+            .collect();
+        let (prefix, suffix) = match member {
+            Some((qualifier, is_static)) => (
+                if is_static { "static " } else { "" }.to_string(),
+                if is_static { String::new() } else { qualifier.to_string() },
+            ),
+            None => (String::new(), String::new()),
+        };
+        lines.push(format!(
+            "{}template<{}>",
+            if member.is_some() { "" } else { export_prefix },
+            head.join(", ")
+        ));
+        lines.push(format!(
+            "{}decltype(auto) {}({}){} {{",
+            prefix,
+            cpp_name,
+            params.join(", "),
+            suffix
+        ));
+        lines.push(format!(
+            "    return {}<{}>({});",
+            cpp_name,
+            spelled.join(", "),
+            args.join(", ")
+        ));
+        lines.push("}".to_string());
+        Some(lines)
     }
 
     /// `fn spawn<T>(future: impl Future<Output = T>) -> JoinHandle<T>`: Rust
@@ -10832,6 +11160,19 @@ impl CodeGen {
                     arity_requires
                 ));
             }
+            if self.current_struct.is_some()
+                && let Some(lines) = self.callable_output_deduction_overload(
+                    &method.sig,
+                    &name,
+                    Some((qualifier.as_str(), is_static)),
+                    "",
+                    Some(method_template_prefix_lines.as_slice()),
+                )
+            {
+                for line in lines {
+                    self.writeln(&line);
+                }
+            }
             self.pop_type_param_scope();
             return;
         }
@@ -11175,6 +11516,20 @@ impl CodeGen {
         }
         if hoisted_local_type_scope_pushed {
             self.hoisted_local_type_name_scopes.pop();
+        }
+        if out_of_line_owner.is_none()
+            && self.current_struct.is_some()
+            && let Some(lines) = self.callable_output_deduction_overload(
+                &method.sig,
+                &name,
+                Some((qualifier.as_str(), is_static)),
+                "",
+                Some(method_template_prefix_lines.as_slice()),
+            )
+        {
+            for line in lines {
+                self.writeln(&line);
+            }
         }
         self.pop_type_param_scope();
         if let Some(start) = method_profile_start {
