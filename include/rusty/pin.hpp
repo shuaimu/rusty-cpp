@@ -55,6 +55,12 @@ template<typename P>
 decltype(auto) get_ref(P&& p) { return detail::place(std::forward<P>(p)); }
 template<typename P>
 decltype(auto) into_ref(P&& p) { return detail::place(std::forward<P>(p)); }
+// `pin.as_mut()` / `as_ref()` reborrow the pin, and `pin!(e)` in expression
+// position is `e`'s place: all the same place.
+template<typename P>
+decltype(auto) as_mut(P&& p) { return detail::place(std::forward<P>(p)); }
+template<typename P>
+decltype(auto) as_ref(P&& p) { return detail::place(std::forward<P>(p)); }
 
 // `pin.map_unchecked_mut(|s| &mut s.field)`: the projected field, pinned.
 template<typename P, typename F>

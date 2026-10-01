@@ -895,3 +895,78 @@ pub fn peek(backend: &Option<Box<u64>>, ok: bool) -> Result<u64, u32> {
     // A borrowed scrutinee's payload stays a reference into it.
     assert!(!cpp.contains("std::move(b)"), "{cpp}");
 }
+
+#[test]
+fn hand_written_future_poll_is_typed_through_the_pin_surface() {
+    // lion-executor's TaskCell::poll and Runtime::block_on. The std pinning,
+    // polling and unwinding surface types what the body builds from it:
+    // `self.get_unchecked_mut()` is `&mut Self`; `Pin::new_unchecked(r)` over a
+    // reference is the pinned place (aliased, never copied); `pin.poll(cx)`
+    // is `Poll<F::Output>`, and `catch_unwind(..)` a `Result` of it, whose
+    // nested `Poll::Ready(value)` types `value`. So the escaping `if`'s slot
+    // is `Result<F::Output, JoinError>` (it was `Result<JoinError,
+    // JoinError>`). `pin!(f)` over a parameter aliases it, and
+    // `fut.as_mut()` reborrows the same place. Compiled and run against
+    // rustc with a concrete future: 19007 19101 either way.
+    let cpp = translate(
+        r#"
+use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::{pin, Pin};
+use std::task::{Context, Poll};
+pub struct JoinError {
+    pub code: u32,
+}
+impl JoinError {
+    pub fn cancelled() -> JoinError {
+        JoinError { code: 1 }
+    }
+}
+pub struct TaskCell<F: Future> {
+    future: Option<F>,
+    cancelled: bool,
+    out: Option<Result<F::Output, JoinError>>,
+}
+impl<F: Future> Future for TaskCell<F> {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = unsafe { self.get_unchecked_mut() };
+        let outcome = if this.cancelled {
+            Err(JoinError::cancelled())
+        } else {
+            let future = this.future.as_mut().expect("unfinished task has its future");
+            let future = unsafe { Pin::new_unchecked(future) };
+            match catch_unwind(AssertUnwindSafe(|| future.poll(cx))) {
+                Ok(Poll::Pending) => return Poll::Pending,
+                Ok(Poll::Ready(value)) => Ok(value),
+                Err(_payload) => Err(JoinError::cancelled()),
+            }
+        };
+        this.out = Some(outcome);
+        Poll::Ready(())
+    }
+}
+pub fn poll_pinned<F: Future>(f: F, cx: &mut Context<'_>) -> Poll<F::Output> {
+    let mut fut = pin!(f);
+    let first = fut.as_mut().poll(cx);
+    if first.is_ready() {
+        return first;
+    }
+    fut.as_mut().poll(cx)
+}
+"#,
+    );
+    assert!(
+        cpp.contains("TaskCell<F>& this_ = rusty::pin_place::get_unchecked_mut((*this));"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("auto& future_shadow1 = rusty::pin::new_unchecked(future);"), "{cpp}");
+    assert!(
+        cpp.contains("std::optional<rusty::Result<typename F::Output, JoinError>> _let_if_value;"),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("Result<JoinError, JoinError>"), "{cpp}");
+    assert!(cpp.contains("auto& fut = f;"), "{cpp}");
+    assert!(cpp.contains("auto first = rusty::pin_place::as_mut(fut).poll(cx);"), "{cpp}");
+    assert!(!cpp.contains("pin!("), "{cpp}");
+}

@@ -5329,6 +5329,12 @@ impl CodeGen {
         if let Some(ty) = self.infer_local_binding_projection_from_call(init_expr) {
             return Some(ty);
         }
+        if let Some(ty) = self.infer_pin_poll_unwind_expr_type(
+            super::peel_to_tail_expr(init_expr)
+                .unwrap_or_else(|| self.peel_paren_group_expr(init_expr)),
+        ) {
+            return Some(ty);
+        }
         let expr = self.extract_value_expr(init_expr)?;
         match expr {
             syn::Expr::Closure(closure) => match &closure.output {
@@ -6392,6 +6398,110 @@ impl CodeGen {
             return None;
         }
         Some(bound)
+    }
+
+    /// The std pinning / polling / unwinding surface a hand-written future's
+    /// `poll` is built from:
+    /// - `Pin::new_unchecked(p)` / `Pin::new(p)` is a `Pin<P>`;
+    /// - `pin.get_unchecked_mut()` / `get_mut()` is the `P` it pins, and on a
+    ///   `self: Pin<&mut Self>` receiver it is `&mut Self`;
+    /// - `pin.poll(cx)` on a `Pin<&mut F>` (F a type parameter) is
+    ///   `Poll<F::Output>`;
+    /// - `catch_unwind(f)` (through `AssertUnwindSafe(f)`) is
+    ///   `Result<R, Box<dyn Any + Send>>`, R the closure's result.
+    pub(super) fn infer_pin_poll_unwind_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let pin_inner = |ty: &syn::Type| -> Option<syn::Type> {
+            let syn::Type::Path(tp) = self.peel_paren_group_type(ty) else {
+                return None;
+            };
+            let last = tp.path.segments.last()?;
+            if last.ident != "Pin" {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })
+        };
+        match expr {
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(fp) = self.peel_paren_group_expr(&call.func) else {
+                    return None;
+                };
+                let segs: Vec<String> =
+                    fp.path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+                let last = segs.last()?.as_str();
+                if call.args.len() == 1
+                    && segs.len() >= 2
+                    && segs[segs.len() - 2] == "Pin"
+                    && matches!(last, "new_unchecked" | "new")
+                {
+                    let inner = self.infer_simple_expr_type(&call.args[0])?;
+                    return Some(syn::parse_quote!(std::pin::Pin<#inner>));
+                }
+                if call.args.len() == 1
+                    && last == "catch_unwind"
+                    && (segs.len() == 1 || segs[segs.len() - 2] == "panic")
+                {
+                    let mut callee = self.peel_paren_group_expr(&call.args[0]);
+                    if let syn::Expr::Call(wrap) = callee
+                        && wrap.args.len() == 1
+                        && let syn::Expr::Path(wp) = self.peel_paren_group_expr(&wrap.func)
+                        && wp.path.segments.last().is_some_and(|seg| seg.ident == "AssertUnwindSafe")
+                    {
+                        callee = self.peel_paren_group_expr(&wrap.args[0]);
+                    }
+                    let syn::Expr::Closure(closure) = callee else {
+                        return None;
+                    };
+                    let ret: syn::Type = match &closure.output {
+                        syn::ReturnType::Type(_, ty) => (**ty).clone(),
+                        syn::ReturnType::Default => self.infer_simple_expr_type(&closure.body)?,
+                    };
+                    return Some(syn::parse_quote!(
+                        Result<#ret, Box<dyn std::any::Any + Send>>
+                    ));
+                }
+                None
+            }
+            syn::Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                if mc.args.is_empty() && matches!(method.as_str(), "get_unchecked_mut" | "get_mut") {
+                    if let Some(recv_ty) = self.infer_simple_expr_type(&mc.receiver)
+                        && let Some(inner) = pin_inner(&recv_ty)
+                    {
+                        return Some(inner);
+                    }
+                    if method == "get_unchecked_mut"
+                        && matches!(self.peel_paren_group_expr(&mc.receiver),
+                            syn::Expr::Path(p) if p.path.is_ident("self"))
+                        && let Some(Some(self_ty)) = self.current_impl_method_self_tys.last()
+                    {
+                        return Some(syn::parse_quote!(&mut #self_ty));
+                    }
+                    return None;
+                }
+                if method == "poll" && mc.args.len() == 1 {
+                    let recv_ty = self.infer_simple_expr_type(&mc.receiver)?;
+                    let inner = pin_inner(&recv_ty)?;
+                    let pointee = self.peel_reference_paren_group_type(&inner).clone();
+                    let syn::Type::Path(tp) = &pointee else {
+                        return None;
+                    };
+                    let ident = tp.path.get_ident()?.to_string();
+                    if !self.is_type_param_in_scope(&ident) {
+                        return None;
+                    }
+                    let param = tp.path.segments[0].ident.clone();
+                    return Some(syn::parse_quote!(std::task::Poll<#param::Output>));
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Structurally unify a callee's declared parameter type against a concrete
@@ -7795,6 +7905,9 @@ impl CodeGen {
         let expr_key = expr as *const syn::Expr as usize;
         let _inference_guard =
             ExprTypeInferenceGuard::enter(&self.expr_type_inference_in_progress, expr_key)?;
+        if let Some(ty) = self.infer_pin_poll_unwind_expr_type(expr) {
+            return Some(ty);
+        }
         match expr {
             syn::Expr::Lit(lit) => self.infer_literal_type(&lit.lit),
             syn::Expr::Path(path) => {

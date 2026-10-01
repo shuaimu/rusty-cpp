@@ -3033,6 +3033,16 @@ impl CodeGen {
                     joined.join(" + ")
                 }
             }
+            // `pin!(e)` pins `e` in place: `Pin<&mut T>` is the pinned place
+            // itself here (include/rusty/pin.hpp), so the value is the pin.
+            // (`let x = pin!(e);` binds it in emit_local.)
+            "pin" => match syn::parse2::<syn::Expr>(mac.tokens.clone()) {
+                Ok(pinned) => format!(
+                    "rusty::pin_place::as_mut({})",
+                    self.emit_expr_to_string(&pinned)
+                ),
+                Err(_) => format!("/* {}!({}) */", macro_name, tokens),
+            },
             "for_both" => self
                 .try_lower_for_both_macro_expr(mac)
                 .unwrap_or_else(|| format!("/* {}!({}) */", macro_name, tokens)),
@@ -11460,16 +11470,22 @@ impl CodeGen {
             "get_unchecked_mut" | "map_unchecked_mut" | "map_unchecked"
         ) && matches!(self.peel_paren_group_expr(&mc.receiver),
             syn::Expr::Path(p) if p.path.is_ident("self"));
-        if matches!(
-            method_name.as_str(),
-            "get_unchecked_mut" | "get_mut" | "get_ref" | "into_ref" | "map_unchecked_mut"
-                | "map_unchecked"
-        ) && (receiver_is_pinned_self
-            || self.infer_simple_expr_type(&mc.receiver).is_some_and(|ty| {
+        let receiver_is_typed_pin = || {
+            self.infer_simple_expr_type(&mc.receiver).is_some_and(|ty| {
                 matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Path(tp)
                     if tp.qself.is_none()
                         && tp.path.segments.last().is_some_and(|seg| seg.ident == "Pin"))
-            }))
+            })
+        };
+        if (matches!(
+            method_name.as_str(),
+            "get_unchecked_mut" | "get_mut" | "get_ref" | "into_ref" | "map_unchecked_mut"
+                | "map_unchecked"
+        ) && (receiver_is_pinned_self || receiver_is_typed_pin()))
+            // `pinned.as_mut()` / `as_ref()` reborrow the pin: the same place.
+            || (matches!(method_name.as_str(), "as_mut" | "as_ref")
+                && mc.args.is_empty()
+                && receiver_is_typed_pin())
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let mut call_args = vec![receiver];

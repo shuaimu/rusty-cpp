@@ -3380,6 +3380,81 @@ impl CodeGen {
 
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
+        // `let x = pin!(e);` pins `e` in place. `Pin<&mut T>` is the pinned
+        // place itself here (include/rusty/pin.hpp): a local or parameter `e`
+        // is aliased (`auto& x = e;`, never copied or moved again — `pin!`
+        // consumed it), any other value gets a slot of its own. The binding
+        // is typed `Pin<&mut T>` so `x.as_mut()` reborrows the same place.
+        if let syn::Pat::Ident(pi) = pat
+            && pi.by_ref.is_none()
+            && pi.subpat.is_none()
+            && let Some(init) = &local.init
+            && init.diverge.is_none()
+            && let syn::Expr::Macro(m) = self.peel_paren_group_expr(&init.expr)
+            && m.mac.path.is_ident("pin")
+            && let Ok(pinned) = syn::parse2::<syn::Expr>(m.mac.tokens.clone())
+        {
+            let pinned_ty = self.infer_simple_expr_type(&pinned);
+            // A local or a parameter (`pin!(future)` in `block_on(future: F)`).
+            let pinned_is_local_place = matches!(
+                self.peel_paren_group_expr(&pinned),
+                syn::Expr::Path(p) if p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && {
+                        let name = p.path.segments[0].ident.to_string();
+                        self.local_bindings.iter().any(|scope| scope.contains_key(&name))
+                            || self.param_bindings.iter().any(|scope| scope.contains_key(&name))
+                    }
+            );
+            let pinned_cpp = self.emit_expr_to_string(&pinned);
+            let rust_name = pi.ident.to_string();
+            let cpp_name = self.allocate_local_cpp_name(&rust_name);
+            let pin_ty: syn::Type = match pinned_ty {
+                Some(ty) => syn::parse_quote!(std::pin::Pin<&mut #ty>),
+                None => syn::parse_quote!(std::pin::Pin<&mut _>),
+            };
+            self.register_local_binding(rust_name, Some(pin_ty));
+            if pinned_is_local_place {
+                self.writeln(&format!("auto& {} = {};", cpp_name, pinned_cpp));
+            } else {
+                self.writeln(&format!("auto {} = {};", cpp_name, pinned_cpp));
+            }
+            return;
+        }
+        // `let x = unsafe { Pin::new_unchecked(r) };` (or `Pin::new(r)`) over a
+        // REFERENCE `r`: `Pin<&mut T>` is the pinned place itself here
+        // (include/rusty/pin.hpp), so the binding aliases that place. A
+        // decaying `auto` copied the future lion-executor's TaskCell::poll then
+        // polled (and a move-only future has no copy). Typed `Pin<&mut T>`, so
+        // `x.poll(cx)` stays typed.
+        if let syn::Pat::Ident(pi) = pat
+            && pi.by_ref.is_none()
+            && pi.subpat.is_none()
+            && get_local_type(local).is_none()
+            && let Some(init) = &local.init
+            && init.diverge.is_none()
+            && let syn::Expr::Call(call) = peel_to_tail_expr(&init.expr)
+                .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr))
+            && call.args.len() == 1
+            && let syn::Expr::Path(fp) = self.peel_paren_group_expr(&call.func)
+            && fp.path.segments.len() >= 2
+            && fp.path.segments[fp.path.segments.len() - 2].ident == "Pin"
+            && matches!(
+                fp.path.segments[fp.path.segments.len() - 1].ident.to_string().as_str(),
+                "new_unchecked" | "new"
+            )
+            && self
+                .infer_simple_expr_type(&call.args[0])
+                .is_some_and(|ty| matches!(ty, syn::Type::Reference(_)))
+        {
+            let pin_ty = self.infer_pin_poll_unwind_expr_type(&syn::Expr::Call(call.clone()));
+            let init_cpp = self.emit_expr_to_string(&syn::Expr::Call(call.clone()));
+            let rust_name = pi.ident.to_string();
+            let cpp_name = self.allocate_local_cpp_name(&rust_name);
+            self.register_local_binding(rust_name, pin_ty);
+            self.writeln(&format!("auto& {} = {};", cpp_name, init_cpp));
+            return;
+        }
         // §208 feeder: a plain un-annotated `let map = serializer
         //     .serialize_map(len)?;` used to register with ty=None (measured:
         // 12x "register map ty=None"), so collapse-probe routing could never
@@ -4559,6 +4634,17 @@ impl CodeGen {
                                     .filter(|ty| self.type_is_reference_like(ty)),
                                 _ => None,
                             });
+                    // The pin projections (`self.get_unchecked_mut()` on a
+                    // `Pin<&mut Self>` receiver) type as `&mut Self` through
+                    // the std pin surface; keep that over a placeholder.
+                    let inferred_ref_from_init = inferred_ref_from_init.or_else(|| {
+                        local.init.as_ref().and_then(|init| {
+                            let value = peel_to_tail_expr(&init.expr)
+                                .unwrap_or_else(|| self.peel_paren_group_expr(&init.expr));
+                            self.infer_pin_poll_unwind_expr_type(value)
+                                .filter(|ty| self.type_is_reference_like(ty))
+                        })
+                    });
                     let promoted_ref_ty = inferred_ref_from_init
                         .or_else(|| {
                             self.lookup_local_binding_type(&name_str).and_then(|ty| {
