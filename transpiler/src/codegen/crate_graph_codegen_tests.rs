@@ -1075,3 +1075,69 @@ impl Exec {
     assert!(cpp.contains("return Exec::has((*this));"), "{cpp}");
     assert!(!cpp.contains("try_recv_raw();"), "{cpp}");
 }
+
+#[test]
+fn foreign_from_impl_lowers_to_an_adl_conversion_hook() {
+    // lion-executor's `impl<T> From<VecDeque<T>> for Vec<T>`: no struct the
+    // crate emits can absorb a `from` for `Vec`, and C++ cannot add a member
+    // to it. `from` becomes a free `rusty_from_impl(type_identity<Vec<T>>,
+    // VecDeque<T>)` beside the impl, and the module's `from_into` (behind
+    // `.into()` and `?`) finds it first by argument-dependent lookup. Its body
+    // converts std's VecDeque through the runtime's own hook
+    // (include/rusty/vecdeque.hpp). A `From` for a crate type stays a member.
+    // Compiled (libc++, SRPC flags) and run against rustc: 2340 either way.
+    let cpp = translate(
+        r#"
+pub mod collections {
+    pub mod vec_deque {
+        use std::collections::VecDeque as StdVecDeque;
+        pub struct VecDeque<T> {
+            inner: StdVecDeque<T>,
+        }
+        impl<T> VecDeque<T> {
+            pub fn new() -> Self {
+                VecDeque { inner: StdVecDeque::new() }
+            }
+            pub fn push_back(&mut self, v: T) {
+                self.inner.push_back(v);
+            }
+        }
+        impl<T> From<VecDeque<T>> for Vec<T> {
+            fn from(deque: VecDeque<T>) -> Self {
+                deque.inner.into()
+            }
+        }
+    }
+}
+use collections::vec_deque::VecDeque;
+pub struct Local(pub u8);
+impl From<u8> for Local {
+    fn from(v: u8) -> Self {
+        Local(v)
+    }
+}
+pub fn take() -> u64 {
+    let mut d = VecDeque::new();
+    d.push_back(3u64);
+    d.push_back(4u64);
+    let v: Vec<u64> = d.into();
+    let l: Local = 7u8.into();
+    v[0] * 100 + v[1] * 10 + v.len() as u64 * 1000 + l.0 as u64
+}
+"#,
+    );
+    assert!(
+        cpp.contains("rusty::Vec<T> rusty_from_impl(std::type_identity<rusty::Vec<T>>, VecDeque<T> deque) {"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("return rusty::from_into<rusty::Vec<T>>(std::move(deque.inner));"), "{cpp}");
+    assert!(
+        cpp.contains(
+            "if constexpr (requires { rusty_from_impl(std::type_identity<Target>{}, std::forward<Input>(input)); }) {"
+        ),
+        "{cpp}"
+    );
+    assert!(cpp.contains("rusty::from_into<rusty::Vec<uint64_t>>(std::move(d))"), "{cpp}");
+    assert!(cpp.contains("static Local from(uint8_t v);"), "{cpp}");
+    assert_eq!(cpp.matches("rusty_from_impl(std::type_identity<").count(), 3, "{cpp}");
+}

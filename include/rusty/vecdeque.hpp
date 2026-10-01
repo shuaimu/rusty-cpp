@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <cassert>
 #include <utility>  // for std::move, std::forward
+#include <type_traits>  // std::type_identity (rusty_from_impl)
 #include <cstddef>  // for size_t
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <rusty/function.hpp>
@@ -619,7 +620,25 @@ public:
     bool is_contiguous() const {
         return size_ == 0 || head_ + size_ <= capacity_;
     }
+
 };
+
+// The by-value iterator a consumed VecDeque drains through, front to back.
+template<typename T>
+struct VecDequeDrainIter {
+    VecDeque<T> deque;
+    Option<T> next() { return deque.pop_front(); }
+    VecDequeDrainIter into_iter() { return std::move(*this); }
+};
+
+// Rust's `impl<T> From<VecDeque<T>> for Vec<T>` (and any other
+// `FromIterator` collection built from a drained deque): found by ADL from
+// `rusty::from_into`'s conversion-impl hook (`rusty_from_impl`).
+template<typename Target, typename T>
+auto rusty_from_impl(std::type_identity<Target>, VecDeque<T> deque)
+    -> decltype(Target::from_iter(std::declval<VecDequeDrainIter<T>>())) {
+    return Target::from_iter(VecDequeDrainIter<T>{std::move(deque)});
+}
 
 // Helper function to create a VecDeque
 template<typename T>

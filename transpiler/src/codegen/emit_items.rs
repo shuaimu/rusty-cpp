@@ -7586,6 +7586,10 @@ impl CodeGen {
                 let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
                 for item in ordered_items {
                     if let syn::Item::Impl(i) = item {
+                        if self.try_emit_foreign_from_impl(i) {
+                            self.newline();
+                            continue;
+                        }
                         if self.concrete_positive_auto_trait_impl(i, &self.module_stack).is_some() {
                             self.emit_item(item);
                             self.newline();
@@ -9126,7 +9130,123 @@ impl CodeGen {
         self.writeln("};");
     }
 
+    /// `impl<G> From<S> for Foreign` where `Foreign` is not a crate type
+    /// (`impl<T> From<VecDeque<T>> for Vec<T>`): no struct absorbs it, and
+    /// C++ cannot add a member to `Foreign`. Lower `from` to a free function
+    /// `rusty_from_impl(std::type_identity<Foreign>, S)` in the impl's
+    /// namespace, which `rusty::from_into` (`.into()`, and `?`'s error
+    /// conversion) finds by argument-dependent lookup.
+    pub(super) fn try_emit_foreign_from_impl(&mut self, i: &syn::ItemImpl) -> bool {
+        let Some((None, trait_path, _)) = i.trait_.as_ref() else {
+            return false;
+        };
+        let Some(trait_seg) = trait_path.segments.last() else {
+            return false;
+        };
+        if trait_seg.ident != "From" {
+            return false;
+        }
+        let syn::PathArguments::AngleBracketed(trait_args) = &trait_seg.arguments else {
+            return false;
+        };
+        if trait_args.args.len() != 1
+            || !matches!(trait_args.args.first(), Some(syn::GenericArgument::Type(_)))
+        {
+            return false;
+        }
+        let Some(self_tp) = Self::impl_self_type_path(i.self_ty.as_ref()) else {
+            return false;
+        };
+        let Some(self_tail) = self_tp.path.segments.last().map(|seg| seg.ident.to_string()) else {
+            return false;
+        };
+        if self_tail == "Self"
+            || self.local_declared_types.contains(&self_tail)
+            || self.declared_item_names.contains(&self_tail)
+            || self.is_type_param_in_scope(&self_tail)
+            || i.generics.params.iter().any(|param| {
+                matches!(param, syn::GenericParam::Type(tp) if tp.ident == self_tail)
+            })
+        {
+            return false;
+        }
+        let fns: Vec<&syn::ImplItemFn> = i
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let [from_fn] = fns.as_slice() else {
+            return false;
+        };
+        if from_fn.sig.ident != "from" || from_fn.sig.inputs.len() != 1 {
+            return false;
+        }
+        struct ReplaceSelf<'a>(&'a syn::Type);
+        impl syn::visit_mut::VisitMut for ReplaceSelf<'_> {
+            fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+                if let syn::Type::Path(tp) = ty
+                    && tp.qself.is_none()
+                    && tp.path.is_ident("Self")
+                {
+                    *ty = self.0.clone();
+                    return;
+                }
+                syn::visit_mut::visit_type_mut(self, ty);
+            }
+            fn visit_expr_path_mut(&mut self, p: &mut syn::ExprPath) {
+                if p.qself.is_none()
+                    && p.path.segments.len() > 1
+                    && p.path.segments[0].ident == "Self"
+                    && let syn::Type::Path(self_tp) = self.0
+                {
+                    let rest: Vec<syn::PathSegment> =
+                        p.path.segments.iter().skip(1).cloned().collect();
+                    let mut path = self_tp.path.clone();
+                    path.segments.extend(rest);
+                    p.path = path;
+                    return;
+                }
+                syn::visit_mut::visit_expr_path_mut(self, p);
+            }
+        }
+        let mut generics = i.generics.clone();
+        generics.params.extend(from_fn.sig.generics.params.iter().cloned());
+        if let Some(method_where) = &from_fn.sig.generics.where_clause {
+            generics
+                .make_where_clause()
+                .predicates
+                .extend(method_where.predicates.iter().cloned());
+        }
+        let mut sig = from_fn.sig.clone();
+        sig.ident = syn::Ident::new("rusty_from_impl", proc_macro2::Span::call_site());
+        sig.generics = generics;
+        sig.output = syn::ReturnType::Type(Default::default(), Box::new((*i.self_ty).clone()));
+        let mut item_fn = syn::ItemFn {
+            attrs: Vec::new(),
+            vis: syn::Visibility::Public(Default::default()),
+            sig,
+            block: Box::new(from_fn.block.clone()),
+        };
+        syn::visit_mut::VisitMut::visit_item_fn_mut(&mut ReplaceSelf(i.self_ty.as_ref()), &mut item_fn);
+        let target_cpp = self.map_type(i.self_ty.as_ref());
+        let start = self.output.len();
+        self.emit_function(&item_fn);
+        let chunk = self.output.split_off(start);
+        let tagged = chunk.replace(
+            "rusty_from_impl(",
+            &format!("rusty_from_impl(std::type_identity<{}>, ", target_cpp),
+        );
+        self.output.push_str(&tagged);
+        true
+    }
+
     pub(super) fn emit_impl_block(&mut self, i: &syn::ItemImpl) {
+        if self.try_emit_foreign_from_impl(i) {
+            return;
+        }
         if Self::has_cpp_marker_impl_attr(&i.attrs) {
             self.emit_cpp_marker_impl(i);
             return;

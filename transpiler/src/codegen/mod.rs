@@ -8918,14 +8918,18 @@ impl CodeGen {
                 } else {
                     let runtime_helpers =
                         runtime_path_fallback_helpers_text_for_module(&self.output);
-                    global_helper_text.push_str(&runtime_helpers);
+                    global_helper_text
+                        .push_str(&Self::with_foreign_from_impl_hook(&self.output, runtime_helpers));
                 }
             } else if !self.inline_rust_block {
                 // Inline-rust blocks already `import rusty;`, so the preamble is
                 // redundant — and emitting its `namespace rusty {...}` inside the
                 // consumer's namespace would shadow `::rusty`. Skip it; the
                 // emitted `rusty::*` references resolve to the imported module.
-                helper_text.push_str(runtime_path_fallback_helpers_text());
+                helper_text.push_str(&Self::with_foreign_from_impl_hook(
+                    &self.output,
+                    runtime_path_fallback_helpers_text().to_string(),
+                ));
             }
         }
         prologue_text.push_str(&helper_text);
@@ -9191,6 +9195,33 @@ impl CodeGen {
             out.push_str(";\n");
         }
         out.push('\n');
+        out
+    }
+
+    /// A module that lowers a foreign `From` impl (`rusty_from_impl`,
+    /// emit_items.rs `try_emit_foreign_from_impl`) gets a first `from_into`
+    /// tier that finds it by argument-dependent lookup. Other modules keep
+    /// the helper text as it was.
+    fn with_foreign_from_impl_hook(output: &str, helpers: String) -> String {
+        if !output.contains("rusty_from_impl(std::type_identity<") {
+            return helpers;
+        }
+        const HEAD: &str = "Target from_into(Input&& input) {\n";
+        const FIRST: &str = "if constexpr (requires { Target::from(std::forward<Input>(input)); }) {";
+        let Some(head) = helpers.find(HEAD) else {
+            return helpers;
+        };
+        let Some(rel) = helpers[head..].find(FIRST) else {
+            return helpers;
+        };
+        let at = head + rel;
+        let mut out = helpers.clone();
+        out.replace_range(
+            at..at + FIRST.len(),
+            "if constexpr (requires { rusty_from_impl(std::type_identity<Target>{}, std::forward<Input>(input)); }) {\n\
+             return rusty_from_impl(std::type_identity<Target>{}, std::forward<Input>(input));\n\
+             } else if constexpr (requires { Target::from(std::forward<Input>(input)); }) {",
+        );
         out
     }
 
