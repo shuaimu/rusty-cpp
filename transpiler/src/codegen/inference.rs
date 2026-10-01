@@ -6716,6 +6716,33 @@ impl CodeGen {
                         syn::ReturnType::Type(_, ty) => (**ty).clone(),
                         syn::ReturnType::Default => self.infer_simple_expr_type(&closure.body)?,
                     };
+                    // `|| recover()` with `R: FnOnce() -> T`: the body calls a
+                    // binding typed by the callable type parameter `R`, which
+                    // yields the bound's output `T`, not `R` (take_mut's
+                    // take_or_recover). Resolved through the bound, or left
+                    // untyped; a call that merely returns a type parameter
+                    // keeps it.
+                    let ret = match (&ret, self.peel_paren_group_expr(&closure.body)) {
+                        (syn::Type::Path(tp), syn::Expr::Call(body_call))
+                            if tp.qself.is_none()
+                                && tp.path.get_ident().is_some_and(|ident| {
+                                    self.is_type_param_in_scope(&ident.to_string())
+                                })
+                                && self.infer_simple_expr_type(&body_call.func).is_some_and(
+                                    |callee| {
+                                        let mut callee = &callee;
+                                        while let syn::Type::Reference(r) = callee {
+                                            callee = &r.elem;
+                                        }
+                                        Self::types_equivalent_by_tokens(callee, &ret)
+                                    },
+                                ) =>
+                        {
+                            let ident = tp.path.get_ident()?.to_string();
+                            self.lookup_callable_return_type_for_type_param(&ident)?
+                        }
+                        _ => ret,
+                    };
                     return Some(syn::parse_quote!(
                         Result<#ret, Box<dyn std::any::Any + Send>>
                     ));

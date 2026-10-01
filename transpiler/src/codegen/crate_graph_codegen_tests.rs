@@ -1520,3 +1520,54 @@ pub fn bump(o: &mut Other) {
     assert!(cpp.contains("rusty::Box<Pollable>& p_shadow1 = p;"), "{cpp}");
     assert!(cpp.contains("auto& v = rusty::detail::deref_if_pointer_like(_iflet_scrutinee.unwrap());"), "{cpp}");
 }
+
+#[test]
+fn catch_unwind_over_a_callable_type_parameter_yields_its_bounds_output() {
+    // take_mut's take_or_recover: `recover: R` with `R: FnOnce() -> T`, and
+    // `let r = catch_unwind(AssertUnwindSafe(|| recover())).unwrap_or_else(..)`.
+    // The closure calls a binding typed by the callable parameter, so the
+    // result is `Result<T, _>` and `r` a `T`; typed as `R` it declared
+    // `R r` and the lambda's `T` did not convert. A call that merely
+    // returns a type parameter (`make::<T>()`) keeps it.
+    let cpp = translate(
+        r#"
+use std::panic;
+pub fn take_or_recover<T, F, R>(mut_ref: &mut T, recover: R, closure: F)
+where
+    F: FnOnce(T) -> T,
+    R: FnOnce() -> T,
+{
+    unsafe {
+        let old_t = std::ptr::read(mut_ref);
+        let new_t = panic::catch_unwind(panic::AssertUnwindSafe(|| closure(old_t)));
+        match new_t {
+            Err(err) => {
+                let r = panic::catch_unwind(panic::AssertUnwindSafe(|| recover()))
+                    .unwrap_or_else(|_| std::process::abort());
+                std::ptr::write(mut_ref, r);
+                panic::resume_unwind(err);
+            }
+            Ok(new_t) => std::ptr::write(mut_ref, new_t),
+        }
+    }
+}
+fn make<T: Default>() -> T {
+    T::default()
+}
+pub fn make_or_default<T: Default>(fallback: T) -> T {
+    let r = panic::catch_unwind(panic::AssertUnwindSafe(|| make::<T>()))
+        .unwrap_or(fallback);
+    r
+}
+"#,
+    );
+    assert!(
+        cpp.contains("T r = rusty::panic::catch_unwind_std(rusty::panic::AssertUnwindSafe([&]() { return recover(); }))"),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("R r ="), "{cpp}");
+    assert!(
+        cpp.contains("T r = rusty::panic::catch_unwind_std(rusty::panic::AssertUnwindSafe([&]() { return ::make<T>(); }))"),
+        "{cpp}"
+    );
+}
