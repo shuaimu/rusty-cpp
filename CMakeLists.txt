@@ -585,6 +585,9 @@ set(TEST_SOURCES
     # MaybeUninit::assume_init_read / NonNull::read relocate (end the source's
     # lifetime) like ptr::read — a copy leaked one element per read.
     tests/rusty_relocating_read_test.cpp
+    # Once / OnceCell / OnceLock publish through their own acquire/release
+    # flag (also built under ThreadSanitizer below).
+    tests/rusty_once_sync_test.cpp
     tests/rusty_vec_test.cpp
     tests/rusty_function_test.cpp
     tests/rusty_array_test.cpp
@@ -1018,6 +1021,35 @@ foreach(test_source IN LISTS TEST_SOURCES)
     endif()
     list(APPEND TEST_TARGETS ${test_executable})
 endforeach()
+
+# rusty_once_sync_tsan_test — rusty_once_sync_test under ThreadSanitizer with
+# libc++, whose std::call_once publishes completion from inside the
+# uninstrumented shared library: before Once/OnceCell/OnceLock carried their
+# own acquire/release flag, a reader that came after the initializer raced
+# it in TSan's eyes (SRPC's TSan battery, Lion's Instant::now()). Any report
+# fails the test. Built only where clang can link -fsanitize=thread against
+# libc++.
+include(CheckCXXSourceCompiles)
+set(_rusty_tsan_flags -fsanitize=thread -stdlib=libc++)
+set(CMAKE_REQUIRED_FLAGS "-fsanitize=thread -stdlib=libc++")
+set(CMAKE_REQUIRED_LINK_OPTIONS -fsanitize=thread -stdlib=libc++)
+check_cxx_source_compiles("#include <mutex>
+int main() { static std::once_flag f; std::call_once(f, [] {}); return 0; }"
+    RUSTY_HAVE_TSAN_LIBCXX)
+unset(CMAKE_REQUIRED_FLAGS)
+unset(CMAKE_REQUIRED_LINK_OPTIONS)
+if(RUSTY_HAVE_TSAN_LIBCXX)
+    add_executable(rusty_once_sync_tsan_test.out tests/rusty_once_sync_test.cpp)
+    target_include_directories(rusty_once_sync_tsan_test.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(rusty_once_sync_tsan_test.out PRIVATE cxx_std_23)
+    target_compile_options(rusty_once_sync_tsan_test.out PRIVATE ${_rusty_tsan_flags} -O1 -g)
+    target_link_options(rusty_once_sync_tsan_test.out PRIVATE ${_rusty_tsan_flags})
+    target_link_libraries(rusty_once_sync_tsan_test.out PRIVATE Threads::Threads)
+    add_test(NAME rusty_once_sync_tsan_test COMMAND rusty_once_sync_tsan_test.out)
+    set_tests_properties(rusty_once_sync_tsan_test PROPERTIES
+        ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1:exitcode=66")
+    list(APPEND TEST_TARGETS rusty_once_sync_tsan_test.out)
+endif()
 
 add_custom_target(run-tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
