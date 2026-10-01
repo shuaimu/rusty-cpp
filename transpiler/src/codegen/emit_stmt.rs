@@ -2948,6 +2948,32 @@ impl CodeGen {
         .then_some(payload)
     }
 
+    /// `block` starts by re-binding `name` with an explicit reference-to-
+    /// smart-pointer type (`let p: &mut Box<dyn T> = p;`).
+    fn block_reannotates_binding_as_smart_pointer(block: &syn::Block, name: &str) -> bool {
+        let Some(syn::Stmt::Local(local)) = block.stmts.first() else {
+            return false;
+        };
+        let syn::Pat::Type(pat_type) = &local.pat else {
+            return false;
+        };
+        let syn::Pat::Ident(pi) = pat_type.pat.as_ref() else {
+            return false;
+        };
+        let init_is_name = local.init.as_ref().is_some_and(|init| {
+            matches!(init.expr.as_ref(), syn::Expr::Path(p) if p.path.is_ident(name))
+        });
+        let syn::Type::Reference(reference) = pat_type.ty.as_ref() else {
+            return false;
+        };
+        pi.ident == name
+            && init_is_name
+            && matches!(reference.elem.as_ref(), syn::Type::Path(tp)
+                if tp.path.segments.last().is_some_and(|seg| {
+                    matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+                }))
+    }
+
     pub(super) fn emit_if_let_body(
         &mut self,
         cond: &str,
@@ -3080,6 +3106,7 @@ impl CodeGen {
                     // neither its initializer nor body inherits .value().
                     cpp_name = self.reserve_synthetic_cpp_name(&format!("{}_iflet", cpp_name));
                 }
+                let payload_rust_name = rust_name.clone();
                 binding_map.insert(rust_name, cpp_name.clone());
                 if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
                     self.writeln(&format!("auto&& _iflet_take = {};", scrutinee));
@@ -3100,11 +3127,21 @@ impl CodeGen {
                     // Those are represented as pointer-like unwrap values in C++ runtime types;
                     // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
                     // call arguments (avoid producing pointer-to-pointer by accident).
+                    // A body that re-annotates the payload as the smart pointer it
+                    // is (`let p: &mut Box<dyn PollableBase> = p;`, SRPC's idiom for
+                    // an untyped payload) needs that pointer: only a raw pointer is
+                    // peeled then. Otherwise the pointer-like peel stays (an alias
+                    // of a Box the emitter cannot see through relies on it).
                     if scrutinee_is_as_mut {
-                        self.writeln(&format!(
-                            "auto& {} = rusty::detail::deref_if_pointer_like({});",
-                            cpp_name, unwrap_expr
-                        ));
+                        let peel = if Self::block_reannotates_binding_as_smart_pointer(
+                            then_branch,
+                            &payload_rust_name,
+                        ) {
+                            "rusty::detail::deref_if_pointer"
+                        } else {
+                            "rusty::detail::deref_if_pointer_like"
+                        };
+                        self.writeln(&format!("auto& {} = {}({});", cpp_name, peel, unwrap_expr));
                     } else {
                         // Preserve both value and reference payload categories exactly.
                         self.writeln(&format!("decltype(auto) {} = {};", cpp_name, unwrap_expr));

@@ -1478,3 +1478,45 @@ pub fn drive(b: &mut Backend) -> usize {
     assert!(cpp.contains("this->wait(batch, rusty::Option<uint64_t>{rusty::None})"), "{cpp}");
     assert!(!cpp.contains("wait(&batch"), "{cpp}");
 }
+
+#[test]
+fn as_mut_if_let_payload_keeps_a_boxed_value() {
+    // SRPC's poll_fd_entry_handle_read: `if let Some(p) = (*guard).as_mut()`
+    // over an `Option<Box<dyn PollableBase>>` binds `p: &mut Box<dyn ..>`,
+    // which the body re-annotates (`let p: &mut Box<dyn PollableBase> = p;`)
+    // to hand the emitter the Box. The payload peel reached THROUGH the Box
+    // (a pointer-like), so `rusty::Box<..>& p2 = p` bound the trait object and
+    // did not compile. With the re-annotation only a raw pointer is peeled;
+    // without it the pointer-like peel stays (SRPC's server calls through an
+    // unannotated payload of a `Box` alias it relies on).
+    let cpp = translate(
+        r#"
+use std::cell::RefCell;
+pub trait Pollable {
+    fn handle_read(&mut self) -> u32;
+}
+pub struct Entry {
+    pub proxy: RefCell<Option<Box<dyn Pollable>>>,
+}
+pub fn handle_read(entry: &Entry) -> u32 {
+    let mut guard = entry.proxy.borrow_mut();
+    if let Some(p) = (*guard).as_mut() {
+        let p: &mut Box<dyn Pollable> = p;
+        return p.handle_read();
+    }
+    0
+}
+pub struct Other {
+    pub slot: Option<u32>,
+}
+pub fn bump(o: &mut Other) {
+    if let Some(v) = o.slot.as_mut() {
+        *v += 1;
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("auto& p = rusty::detail::deref_if_pointer(_iflet_scrutinee.unwrap());"), "{cpp}");
+    assert!(cpp.contains("rusty::Box<Pollable>& p_shadow1 = p;"), "{cpp}");
+    assert!(cpp.contains("auto& v = rusty::detail::deref_if_pointer_like(_iflet_scrutinee.unwrap());"), "{cpp}");
+}
