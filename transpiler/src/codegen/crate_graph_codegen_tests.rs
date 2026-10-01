@@ -712,3 +712,104 @@ impl Runtime {
     assert!(cpp.contains("plain->tick();"), "{cpp}");
     assert!(cpp.contains("return this->boxed.try_borrow().is_err();"), "{cpp}");
 }
+
+#[test]
+fn value_if_and_value_match_with_escaping_arms_lower_as_statements() {
+    // lion-executor's poll_task and new_reactor shapes. A value `if` whose
+    // `else` tail is a match with a `return` arm, and a value `match` with a
+    // `?` arm, both escape the function: an IIFE traps that arm, and the
+    // if-let slot typed a bare `Err(e)` as `Result<JoinError, JoinError>`.
+    // Both lower as statements assigning an optional slot, the slot typed
+    // from the arms (`Result<T, JoinError>` from `Ok(value)` and `Err(..)`).
+    // Compiled and run against rustc: 13 1011 3 -9 5 -77 either way.
+    let cpp = translate(
+        r#"
+use std::task::Poll;
+pub struct JoinError {
+    pub code: u32,
+}
+impl JoinError {
+    pub fn cancelled() -> JoinError {
+        JoinError { code: 1 }
+    }
+}
+pub struct Sender<T> {
+    pub v: Option<T>,
+    pub cancelled: bool,
+}
+impl<T> Sender<T> {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+    pub fn finish(self, r: Result<T, JoinError>) -> u64 {
+        match r {
+            Ok(_) => 1,
+            Err(e) => 100 + e.code as u64,
+        }
+    }
+}
+pub struct Countdown<T> {
+    pub n: u64,
+    pub v: Option<T>,
+}
+impl<T> Countdown<T> {
+    pub fn pull(&mut self) -> Poll<T> {
+        if self.n > 0 {
+            self.n -= 1;
+            Poll::Pending
+        } else {
+            Poll::Ready(self.v.take().expect("pulled twice"))
+        }
+    }
+}
+pub fn poll_step<T>(sender: Sender<T>, s: &mut Countdown<T>) -> Poll<u64> {
+    let outcome = if sender.is_cancelled() {
+        Err(JoinError::cancelled())
+    } else {
+        match s.pull() {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(value) => Ok(value),
+        }
+    };
+    Poll::Ready(sender.finish(outcome))
+}
+pub enum Created<T> {
+    Ok(T),
+    Err(u32),
+}
+pub fn make(k: u64) -> Created<u64> {
+    if k == 0 { Created::Err(9) } else { Created::Ok(k) }
+}
+fn fallback(ok: bool) -> Result<Created<u64>, u32> {
+    if ok { Ok(Created::Ok(5)) } else { Err(77) }
+}
+pub fn create(k: Option<u64>, ok: bool) -> Result<u64, u32> {
+    let created = match k {
+        Some(k) => make(k),
+        None => fallback(ok)?,
+    };
+    match created {
+        Created::Ok(v) => Ok(v),
+        Created::Err(e) => Err(e),
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("std::optional<rusty::Result<T, JoinError>> _let_if_value;"), "{cpp}");
+    assert!(cpp.contains("_let_if_value.emplace(rusty::Err(JoinError::cancelled()));"), "{cpp}");
+    assert!(cpp.contains("return rusty::Poll<uint64_t>::pending();"), "{cpp}");
+    assert!(
+        cpp.contains("rusty::Result<T, JoinError> outcome = std::move(_let_if_value).value();"),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("Result<JoinError, JoinError>"), "{cpp}");
+    assert!(cpp.contains("std::optional<Created<uint64_t>> _let_match_value;"), "{cpp}");
+    assert!(
+        cpp.contains("_let_match_value.emplace(RUSTY_TRY_INTO(::fallback("),
+        "{cpp}"
+    );
+    assert!(
+        cpp.contains("Created<uint64_t> created = std::move(_let_match_value).value();"),
+        "{cpp}"
+    );
+}

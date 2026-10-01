@@ -37918,6 +37918,19 @@ impl CodeGen {
                         .map(|seg| seg.ident.to_string())
                         .unwrap_or_default();
                     let canonical_ctor_name = self.canonical_variant_name(&ctor_name);
+                    // `Poll::Ready(v)` against `Poll<T>` binds `v: T`.
+                    if canonical_ctor_name == "Ready"
+                        && let syn::Type::Path(poll_tp) = self.peel_reference_paren_group_type(&peeled_ty)
+                        && let Some(poll_seg) = poll_tp.path.segments.last()
+                        && poll_seg.ident == "Poll"
+                        && let syn::PathArguments::AngleBracketed(poll_args) = &poll_seg.arguments
+                        && let Some(syn::GenericArgument::Type(payload_ty)) = poll_args.args.first()
+                        && let Some(single_pat) = tuple_struct_pat.elems.first()
+                    {
+                        let payload_ty = payload_ty.clone();
+                        self.bind_pattern_types_into_env(single_pat, &payload_ty, env);
+                        return;
+                    }
                     if let Some((owner, type_args)) = self.option_or_result_type_args(&peeled_ty) {
                         let payload_ty = match (owner.as_str(), canonical_ctor_name) {
                             ("Option", "Some") => type_args.first().cloned(),
@@ -47588,7 +47601,7 @@ impl CodeGen {
         }
     }
 
-    fn expr_tree_has_return_or_try(&self, expr: &syn::Expr) -> bool {
+    pub(super) fn expr_tree_has_return_or_try(&self, expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Return(_) => true,
             syn::Expr::Try(_) => true,
