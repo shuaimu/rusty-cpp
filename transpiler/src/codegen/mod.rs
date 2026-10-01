@@ -2794,6 +2794,11 @@ pub struct CodeGen {
     pub(crate) local_manually_drop_bindings: Vec<HashSet<String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     pub(crate) param_bindings: Vec<HashMap<String, syn::Type>>,
+    /// While a method merged into its struct from ANOTHER module is emitted:
+    /// that authoring module, whose imports the method's names resolve
+    /// through (`use crate::types::Duration;` in `executor::ext` for an
+    /// `impl Executor` block merged into `executor::Executor`).
+    pub(crate) merged_method_origin_scope: Option<Vec<String>>,
     /// Rust parameter names in declaration order for each `param_bindings` scope.
     ///
     /// The binding map deliberately remains a `HashMap` for hot type lookups, but
@@ -3664,6 +3669,7 @@ impl CodeGen {
             hoisted_local_type_name_scopes: Vec::new(),
             local_manually_drop_bindings: Vec::new(),
             param_bindings: Vec::new(),
+            merged_method_origin_scope: None,
             param_binding_order: Vec::new(),
             callable_param_bound_scopes: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),

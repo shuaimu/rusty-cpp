@@ -3549,11 +3549,31 @@ impl CodeGen {
                         {
                             let mut rewritten =
                                 self.rewrite_cpp_import_bound_type_spelling(&bound_target);
-                            rewritten = self.resolve_nested_local_reexport_path(&rewritten);
-                            if let Some(resolved_nested) =
-                                self.try_resolve_nested_local_type_path(&rewritten)
-                            {
-                                rewritten = resolved_nested;
+                            // A dependency crate's path (`lion_reactor::Reactor`
+                            // through `use lion_reactor::Reactor as LionReactor;`)
+                            // is already qualified: the local nested-type
+                            // lookups below would rebind its tail to the
+                            // crate's own same-named type.
+                            let bound_root = bound_target
+                                .trim_start_matches("::")
+                                .split("::")
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            let bound_is_dependency_path = bound_target
+                                .trim_start_matches("::")
+                                .contains("::")
+                                && self
+                                    .dependency_ufcs_trait_manifests
+                                    .iter()
+                                    .any(|m| m.module == bound_root);
+                            if !bound_is_dependency_path {
+                                rewritten = self.resolve_nested_local_reexport_path(&rewritten);
+                                if let Some(resolved_nested) =
+                                    self.try_resolve_nested_local_type_path(&rewritten)
+                                {
+                                    rewritten = resolved_nested;
+                                }
                             }
                             let rewritten_trimmed = rewritten.trim_start_matches("::");
                             let rewritten_parts: Vec<&str> = rewritten_trimmed

@@ -3388,6 +3388,15 @@ impl CodeGen {
                     let impl_block: &syn::ItemImpl =
                         debug_renamed_impl.as_ref().unwrap_or(impl_block);
 
+                    // An impl in a module that does not declare its type: the
+                    // methods merge into the struct emitted elsewhere, and are
+                    // tagged with this authoring module (whose imports their
+                    // names resolve through).
+                    let merged_from_module = (!module_path.is_empty()
+                        && raw_type_name.rsplit("::").next().is_some_and(|tail| {
+                            !self.module_path_declares_type_name_exact(module_path, tail)
+                        }))
+                    .then(|| module_path.join("::"));
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     let seen_method_keys = self
                         .impl_method_conflict_keys
@@ -3536,6 +3545,13 @@ impl CodeGen {
                                 impl_block,
                             );
                             collected_item = syn::ImplItem::Fn(merged);
+                        }
+                        if let syn::ImplItem::Fn(method) = &mut collected_item
+                            && let Some(origin) = merged_from_module.as_deref()
+                        {
+                            method.attrs.push(syn::parse_quote!(
+                                #[rusty_cpp_merged_from = #origin]
+                            ));
                         }
                         entry.push(collected_item);
                     }

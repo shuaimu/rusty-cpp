@@ -999,6 +999,26 @@ impl CodeGen {
     }
 
     pub(super) fn resolve_scope_import_binding_path(&self, local_name: &str) -> Option<String> {
+        // A method merged in from another module resolves a CRATE-internal
+        // import through ITS module first (Rust resolved it there: `use
+        // crate::types::Duration;` in `executor::ext`, where the struct's own
+        // module means no `Duration`). Dependency and std imports keep their
+        // established resolution.
+        if let Some(origin) = self.merged_method_origin_scope.as_ref()
+            && !self.current_scope_declares_type_name(local_name)
+            && let Some(bound) =
+                self.resolve_scope_import_binding_path_for_scope(&origin.join("::"), local_name)
+            && {
+                let normalized = bound.trim_start_matches("::");
+                let root = normalized.split("::").next().unwrap_or_default();
+                root == "crate"
+                    || self.local_declared_types.contains(normalized)
+                    || self.declared_module_paths.contains(normalized)
+                    || self.declared_module_names.contains(root)
+            }
+        {
+            return Some(bound);
+        }
         let scope_key = self.module_stack.join("::");
         let type_declared_in_scope = if self.in_forward_decl_signature {
             self.current_module_declares_type_name_exact(local_name)

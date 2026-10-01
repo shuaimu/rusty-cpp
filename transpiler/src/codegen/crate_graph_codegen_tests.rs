@@ -1175,3 +1175,50 @@ pub fn same(a: &Arc<Queue>, b: &Arc<Queue>) -> bool {
     // A typed argument keeps its spelled owner.
     assert!(cpp.contains("return Arc<Queue>::ptr_eq(a, b);"), "{cpp}");
 }
+
+#[test]
+fn merged_impl_method_resolves_names_through_its_authoring_module() {
+    // lion-executor's `executor/ext.rs`: `impl Executor` blocks written in a
+    // child module merge into the struct emitted in `executor`, which imports
+    // no `Duration`; the method's names resolve through the module that
+    // wrote it (`use crate::types::Duration;`). They were resolved from the
+    // struct's module, where `Duration` fell to std's (`rusty::time::Duration`,
+    // no `ms` field). Compiled and run against rustc: 5 either way.
+    let cpp = translate(
+        r#"
+pub mod types {
+    pub mod duration {
+        #[derive(Clone, Copy)]
+        pub struct Duration {
+            pub ms: u64,
+        }
+        impl Duration {
+            pub fn from_millis(ms: u64) -> Duration {
+                Duration { ms }
+            }
+        }
+    }
+    pub use duration::Duration;
+}
+pub mod executor {
+    pub mod ext {
+        use super::Executor;
+        use crate::types::Duration;
+        impl Executor {
+            pub fn idle_timeout(&self) -> Duration {
+                Duration::from_millis(self.idle)
+            }
+        }
+    }
+    pub struct Executor {
+        pub idle: u64,
+    }
+}
+pub fn run() -> u64 {
+    executor::Executor { idle: 5 }.idle_timeout().ms
+}
+"#,
+    );
+    assert!(!cpp.contains("rusty::time::Duration idle_timeout"), "{cpp}");
+    assert!(cpp.contains("::types::duration::Duration idle_timeout() const;"), "{cpp}");
+}

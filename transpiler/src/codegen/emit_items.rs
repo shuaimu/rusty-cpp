@@ -2107,6 +2107,23 @@ impl CodeGen {
         lines
     }
 
+    /// The authoring module a merged method was tagged with at collection
+    /// (`#[rusty_cpp_merged_from = "executor::ext"]`, collect_passes.rs).
+    pub(super) fn merged_method_origin_module(attrs: &[syn::Attribute]) -> Option<Vec<String>> {
+        attrs.iter().find_map(|attr| {
+            let syn::Meta::NameValue(nv) = &attr.meta else {
+                return None;
+            };
+            if !nv.path.is_ident("rusty_cpp_merged_from") {
+                return None;
+            }
+            let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else {
+                return None;
+            };
+            Some(s.value().split("::").map(str::to_string).collect())
+        })
+    }
+
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
         // The owning native header already declares this checked C binding.
         if crate::cpp_native_types::has_marker(&s.attrs) {
@@ -3195,7 +3212,12 @@ impl CodeGen {
                 self.method_emission_out_of_line_owner = None;
                 self.method_emission_skip_conflict_registration = false;
             }
+            let prev_merged_origin = self.merged_method_origin_scope.take();
             for impl_item in &reordered {
+                self.merged_method_origin_scope = match impl_item {
+                    syn::ImplItem::Fn(method) => Self::merged_method_origin_module(&method.attrs),
+                    _ => None,
+                };
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&alias_rust_name);
@@ -3441,6 +3463,7 @@ impl CodeGen {
                     self.emit_impl_item(impl_item);
                 }
             }
+            self.merged_method_origin_scope = prev_merged_origin;
             if is_hoisted_local_type {
                 self.method_emission_out_of_line_owner = prev_local_out_of_line_owner;
                 self.method_emission_skip_conflict_registration = prev_local_skip_conflict;

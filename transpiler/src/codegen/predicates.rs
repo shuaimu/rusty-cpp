@@ -1424,6 +1424,25 @@ impl CodeGen {
         if self.is_local_type_name_in_scope(name) {
             return true;
         }
+        // A method merged in from another module sees that module's
+        // declarations and imports (see `merged_method_origin_scope`).
+        if let Some(origin) = self.merged_method_origin_scope.as_ref() {
+            if self.module_path_declares_type_name_exact(origin, name) {
+                return true;
+            }
+            if self
+                .resolve_scope_import_binding_path_for_scope(&origin.join("::"), name)
+                .is_some_and(|target| {
+                    let normalized = target.trim().trim_start_matches("::");
+                    !normalized.starts_with("std::")
+                        && !normalized.starts_with("core::")
+                        && !normalized.starts_with("alloc::")
+                        && !normalized.starts_with("rusty::")
+                })
+            {
+                return true;
+            }
+        }
         // Effective module scope: UFCS helper-namespace emissions run with an
         // empty module_stack BY DESIGN (their bytes must match global-scope
         // emission); ufcs_impl_module_path carries the impl's module then.
