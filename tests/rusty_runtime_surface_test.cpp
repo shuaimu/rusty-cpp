@@ -10,6 +10,9 @@
 // `.iter()`, and a drained VecDeque converted through `rusty_from_impl`;
 // a Task awaiting a hand-written pollable, `Task::Output`, Waker::will_wake.
 
+#include <cstring>
+#include <new>
+
 #include "../include/rusty/arc.hpp"
 #include "../include/rusty/io.hpp"
 #include "../include/rusty/local_key.hpp"
@@ -21,6 +24,7 @@
 #include "../include/rusty/mutex.hpp"
 #include "../include/rusty/pin.hpp"
 #include "../include/rusty/send_impls.hpp"
+#include "../include/rusty/fn.hpp"
 #include "../include/rusty/process.hpp"
 #include "../include/rusty/slice.hpp"
 #include "../include/rusty/thread.hpp"
@@ -378,6 +382,47 @@ void test_peek_unwrap_views_an_owned_payload() {
     assert(some.is_some() && some.unwrap_mut().calls == 1);
 }
 
+// A Waker or fn pointer moved BITWISE, as a resizing hash table moves its
+// slots (memcpy into the new table, the old one freed without destruction),
+// still wakes and is destroyed cleanly. libc++'s std::function pointed into
+// the old slot: destroying it freed that pointer ("free(): invalid pointer").
+int plus_one(int x) { return x + 1; }
+
+template<typename T, typename Use>
+void relocate_bitwise_then_use(T value, Use use) {
+    alignas(T) unsigned char from[sizeof(T)];
+    alignas(T) unsigned char to[sizeof(T)];
+    ::new (static_cast<void*>(from)) T(std::move(value));
+    std::memcpy(to, from, sizeof(T));
+    std::memset(from, 0xab, sizeof(T));
+    T* moved = std::launder(reinterpret_cast<T*>(to));
+    use(*moved);
+    moved->~T();
+}
+
+void test_waker_and_fn_survive_bitwise_relocation() {
+    int woken = 0;
+    relocate_bitwise_then_use(rusty::Waker::from_callable([&woken] { ++woken; }),
+                              [](rusty::Waker& w) {
+                                  w.wake_by_ref();
+                                  rusty::Waker copy = w;
+                                  std::move(copy).wake();
+                              });
+    assert(woken == 2);
+    struct Count {
+        mutable int n = 0;
+        static void wake(rusty::Arc<Count> self) { self->n += 1; }
+    };
+    auto count = rusty::Arc<Count>::make(Count{});
+    relocate_bitwise_then_use(rusty::Waker::from_arc(count.clone()),
+                              [](rusty::Waker& w) { w.wake_by_ref(); });
+    assert(count->n == 1);
+    int seen = 0;
+    relocate_bitwise_then_use(rusty::SafeFn<int(int)>(&plus_one),
+                              [&seen](rusty::SafeFn<int(int)>& f) { seen = f(41); });
+    assert(seen == 42);
+}
+
 // std::task::Waker is Send and Sync, and so is what holds one.
 static_assert(rusty::is_send<rusty::Waker>::value && rusty::is_sync<rusty::Waker>::value);
 static_assert(rusty::is_send<rusty::Mutex<rusty::Option<rusty::Waker>>>::value);
@@ -407,6 +452,7 @@ int main() {
     test_task_awaits_a_pollable();
     test_waker_will_wake();
     test_peek_unwrap_views_an_owned_payload();
+    test_waker_and_fn_survive_bitwise_relocation();
     std::printf("rusty_runtime_surface_test: all passed\n");
     return 0;
 }

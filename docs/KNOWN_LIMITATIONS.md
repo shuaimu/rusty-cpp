@@ -332,6 +332,18 @@ The string literal tracking is implemented in:
   helper `IdBased` does. `test_string_keys_unstubbed` still uses
   `std::string` keys but inserts them in sorted order, so nothing shifts; it is
   latent, not a counterexample.
+- `std` `HashMap`/`HashSet` (the vendored hashbrown port) does the same: a
+  resize copies each occupied slot's bytes into the new table
+  (`RawTableInner::resize_inner`, a type-erased `ptr::copy_nonoverlapping`),
+  and the old table is freed without running destructors. libc++'s
+  `std::function` keeps a small callable inline and points at it from inside
+  itself, so it is not bitwise-relocatable either: a `HashMap` of values
+  holding one aborted with `free(): invalid pointer` on the first destroy
+  after a growth (Lion's `ResourceSlab` of `Waker`s, measured at rusty-cpp
+  dc6e7558). The runtime's own callable holders, `rusty::Waker` and
+  `rusty::SafeFn`, now keep their callable on the heap
+  (`rusty::detail::RelocatableFunction`) and are relocatable. A user type
+  with a self-pointer stored in either collection is still affected.
 
 ---
 

@@ -27,6 +27,8 @@
 #include <thread>
 #include <utility>
 
+#include "rusty/relocatable_function.hpp"
+
 namespace rusty {
 
 // A pending poll has no live payload, including for non-default-constructible T.
@@ -121,8 +123,10 @@ struct Waker {
     // containers holding one derive theirs from this.
     static constexpr bool is_send = true;
     static constexpr bool is_sync = true;
-    std::function<void()> wake_fn;
-    std::function<void(const std::function<void()>&)> wake_by_ref_fn{};
+    // Moved bitwise by the containers that hold wakers (a std::function's
+    // inline buffer is self-referential; see relocatable_function.hpp).
+    detail::RelocatableFunction<void()> wake_fn;
+    detail::RelocatableFunction<void(const detail::RelocatableFunction<void()>&)> wake_by_ref_fn{};
     // The task this waker wakes, for `will_wake`: an Arc-built waker's
     // allocation. A callable-built waker has none.
     const void* identity = nullptr;
@@ -147,7 +151,7 @@ struct Waker {
         const void* identity = static_cast<const void*>(std::addressof(*arc));
         Waker waker{
             OwnedWake{std::move(arc)},
-            [](const std::function<void()>& callback) {
+            [](const detail::RelocatableFunction<void()>& callback) {
                 callback.template target<OwnedWake>()->by_ref();
             }
         };
