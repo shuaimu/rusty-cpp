@@ -3107,6 +3107,10 @@ pub struct CodeGen {
     /// Collected `const` item types keyed by unscoped and scoped names.
     /// Used for simple expression type recovery on const-symbol paths.
     pub(crate) item_const_types: HashMap<String, syn::Type>,
+    /// `thread_local!` statics: the key's crate-relative path (its module
+    /// path joined with its name) -> the key's value type `T` (the static
+    /// is a `LocalKey<T>`).
+    pub(crate) thread_local_value_types: HashMap<String, syn::Type>,
     /// Top-level inline module names declared in this file.
     /// Used to lower bare module imports (`use crate::{iter};`) as namespace imports.
     pub(crate) declared_module_names: HashSet<String>,
@@ -3733,6 +3737,7 @@ impl CodeGen {
             suppress_dependent_assoc_traits_routing: std::cell::Cell::new(false),
             declared_item_names: HashSet::new(),
             item_const_types: HashMap::new(),
+            thread_local_value_types: HashMap::new(),
             declared_module_names: HashSet::new(),
             declared_module_paths: HashSet::new(),
             module_pub_item_names: HashMap::new(),
@@ -38565,6 +38570,11 @@ impl CodeGen {
             let syn::Expr::MethodCall(inner) = receiver else {
                 return false;
             };
+            // `cell.try_borrow_mut().expect(..)`: the Result holds a guard
+            // BY VALUE (guard_flow.rs, typed tier), not a reference.
+            if self.known_guard_producing_method_call(inner) {
+                return false;
+            }
             let inner_method = inner.method.to_string();
             return matches!(
                 inner_method.as_str(),
@@ -39622,6 +39632,15 @@ impl CodeGen {
             match current {
                 syn::Expr::MethodCall(mc) => {
                     let method = mc.method.to_string();
+                    // `cell.try_borrow_mut().expect(..)` yields the guard BY
+                    // VALUE (guard_flow.rs, typed tier), not a reference.
+                    if matches!(method.as_str(), "unwrap" | "unwrap_unchecked" | "expect")
+                        && let syn::Expr::MethodCall(inner) =
+                            self.peel_paren_group_expr(&mc.receiver)
+                        && self.known_guard_producing_method_call(inner)
+                    {
+                        return false;
+                    }
                     if method.ends_with("_mut")
                         || matches!(
                             method.as_str(),
@@ -40738,6 +40757,14 @@ impl CodeGen {
         {
             return format!("(*{}).{}({})", receiver, method_call, args.join(", "));
         }
+        // A guard over a smart pointer (`RefMut<Box<Executor>>` from
+        // `cell.borrow_mut()` on a `RefCell<Box<Executor>>`): Rust autoderefs
+        // through both layers; `->` would stop at the Box.
+        if self.expr_is_guard_over_smart_pointer(receiver_expr)
+            && !Self::smart_pointer_level_method_name(method_name)
+        {
+            return format!("(**{}).{}({})", receiver, method_call, args.join(", "));
+        }
         let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr)
             || self.method_receiver_uses_wrapper_autoderef_member_access(receiver_expr, method_name)
         {
@@ -40765,6 +40792,52 @@ impl CodeGen {
             member_op,
             method_call,
             args.join(", ")
+        )
+    }
+
+    /// `expr`'s inferred type is a borrow/lock guard over a Box/Rc/Arc
+    /// (`RefMut<Box<T>>`): member access autoderefs through two layers.
+    pub(super) fn expr_is_guard_over_smart_pointer(&self, expr: &syn::Expr) -> bool {
+        let Some(ty) = self.infer_simple_expr_type(self.peel_paren_group_expr(expr)) else {
+            return false;
+        };
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&ty) else {
+            return false;
+        };
+        let Some(outer) = tp.path.segments.last() else {
+            return false;
+        };
+        if !matches!(
+            outer.ident.to_string().as_str(),
+            "Ref" | "RefMut" | "MutexGuard" | "SpinMutexGuard" | "RwLockReadGuard"
+                | "RwLockWriteGuard"
+        ) {
+            return false;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &outer.arguments else {
+            return false;
+        };
+        let Some(inner) = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        }) else {
+            return false;
+        };
+        matches!(
+            self.peel_reference_paren_group_type(inner),
+            syn::Type::Path(inner_tp) if inner_tp.path.segments.last().is_some_and(|seg| {
+                matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+            })
+        )
+    }
+
+    /// Methods a Box/Rc/Arc answers itself, so a call through a guard stops
+    /// at the smart pointer (`guard.clone()` clones the Rc).
+    fn smart_pointer_level_method_name(method_name: &str) -> bool {
+        matches!(
+            method_name,
+            "clone" | "as_ref" | "as_mut" | "as_ptr" | "get_mut" | "downgrade" | "into_raw"
+                | "strong_count" | "weak_count" | "ptr_eq"
         )
     }
 

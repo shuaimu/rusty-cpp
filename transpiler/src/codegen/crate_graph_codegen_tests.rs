@@ -629,3 +629,86 @@ pub mod iterator {
     assert!(!cpp.contains("Alignment::"), "{cpp}");
     assert!(cpp.contains("::Left(RUSTY_TRY_OPT(inner.next()))"), "{cpp}");
 }
+
+#[test]
+fn thread_local_key_closure_parameter_is_typed_by_the_key() {
+    // lion-executor's tls.rs shape: `KEY.with(|c| ..)` hands the closure a
+    // `&T`, T the key's declared value type. Typed, the destructured payload
+    // is an `Arc<Queue>` whose methods go through `->`; untyped, the body
+    // spelled `queue.take_all()` on the Arc (a hard error).
+    let cpp = translate(
+        r#"
+use std::cell::RefCell;
+use std::sync::Arc;
+pub struct Queue {
+    pub n: u32,
+}
+impl Queue {
+    pub fn take_all(&self) -> u32 {
+        self.n
+    }
+}
+thread_local! {
+    static CTX: RefCell<Option<(Arc<Queue>, u32)>> = RefCell::new(None);
+}
+pub fn set_ctx(q: Arc<Queue>, k: u32) {
+    CTX.with(|c| *c.borrow_mut() = Some((q, k)));
+}
+pub fn drain() -> Option<u32> {
+    CTX.with(|c| c.borrow().as_ref().map(|(queue, _)| queue.take_all()))
+}
+"#,
+    );
+    assert!(cpp.contains("return queue->take_all();"), "{cpp}");
+    assert!(cpp.contains("return *c.borrow_mut() = rusty::Option<"), "{cpp}");
+    assert!(!cpp.contains("__mdisp_as_ref"), "{cpp}");
+}
+
+#[test]
+fn try_borrow_guard_is_held_by_value_and_reaches_through_a_box() {
+    // lion-executor's Runtime keeps `RefCell<Box<Executor>>` and takes it with
+    // `try_borrow_mut().expect(..)`: the guard is a `RefMut<Box<Executor>>`
+    // held by value, and Rust autoderefs through BOTH layers — `->` stops at
+    // the Box. Over a plain `RefCell<Exec>` one layer stays one layer.
+    let cpp = translate(
+        r#"
+use std::cell::RefCell;
+pub struct Exec {
+    pub n: u64,
+}
+impl Exec {
+    pub fn tick(&mut self) {
+        self.n += 1;
+    }
+}
+pub struct Runtime {
+    pub boxed: RefCell<Box<Exec>>,
+    pub plain: RefCell<Exec>,
+}
+impl Runtime {
+    pub fn run(&self, n: u64) -> u64 {
+        let mut exec = self.boxed.try_borrow_mut().expect("not re-entrant");
+        exec.n = n;
+        exec.tick();
+        let mut plain = self.plain.try_borrow_mut().expect("not re-entrant");
+        plain.n = n * 10;
+        plain.tick();
+        exec.n + plain.n
+    }
+    pub fn busy(&self) -> bool {
+        let _held = self.boxed.borrow_mut();
+        self.boxed.try_borrow().is_err()
+    }
+}
+"#,
+    );
+    assert!(
+        cpp.contains("auto exec = this->boxed.try_borrow_mut().expect(\"not re-entrant\");"),
+        "{cpp}"
+    );
+    assert!(cpp.contains("(**exec).n = std::move(n);"), "{cpp}");
+    assert!(cpp.contains("(**exec).tick();"), "{cpp}");
+    assert!(cpp.contains("(*plain).n = "), "{cpp}");
+    assert!(cpp.contains("plain->tick();"), "{cpp}");
+    assert!(cpp.contains("return this->boxed.try_borrow().is_err();"), "{cpp}");
+}

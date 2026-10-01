@@ -5176,6 +5176,13 @@ impl CodeGen {
                         self.collect_item_const_types(nested_items, &nested_path);
                     }
                 }
+                syn::Item::Macro(m) if m.mac.path.is_ident("thread_local") => {
+                    for s in crate::cpp_abi::parse_thread_local_statics(&m.mac).unwrap_or_default() {
+                        let mut key = module_path.to_vec();
+                        key.push(s.ident.to_string());
+                        self.thread_local_value_types.insert(key.join("::"), (*s.ty).clone());
+                    }
+                }
                 syn::Item::Static(s) => {
                     let name = s.ident.to_string();
                     let ty = (*s.ty).clone();

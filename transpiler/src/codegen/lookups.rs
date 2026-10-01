@@ -2293,6 +2293,63 @@ impl CodeGen {
         Some((ctor_name, &call.args[0]))
     }
 
+    /// The value type `T` of the `thread_local!` key a path names (the static
+    /// is a `LocalKey<T>`): `KEY` declared in (or imported into) the current
+    /// module, or a `mod::KEY` path; a bare name a local binding shadows, or
+    /// one that several modules declare, names none.
+    pub(super) fn thread_local_key_value_type(&self, receiver: &syn::Expr) -> Option<syn::Type> {
+        if self.thread_local_value_types.is_empty() {
+            return None;
+        }
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(receiver) else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.is_empty() {
+            return None;
+        }
+        let segments: Vec<String> =
+            path.path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let name = segments.last()?.clone();
+        if segments.len() == 1
+            && self.local_bindings.iter().any(|scope| scope.contains_key(&name))
+        {
+            return None;
+        }
+        let joined = segments.join("::");
+        let mut candidates: Vec<String> = Vec::new();
+        let mut scope = self.module_stack.clone();
+        loop {
+            let mut key = scope.clone();
+            key.extend(segments.iter().cloned());
+            candidates.push(key.join("::"));
+            if scope.pop().is_none() {
+                break;
+            }
+        }
+        if segments.len() == 1
+            && let Some(target) = self.resolve_scope_import_binding_path(&name)
+        {
+            let target = target.trim_start_matches("::");
+            let target = target.strip_prefix("crate::").unwrap_or(target);
+            candidates.insert(0, target.to_string());
+        }
+        for key in &candidates {
+            if let Some(ty) = self.thread_local_value_types.get(key) {
+                return Some(ty.clone());
+            }
+        }
+        let suffix = format!("::{}", joined);
+        let mut found = self
+            .thread_local_value_types
+            .iter()
+            .filter(|(key, _)| **key == joined || key.ends_with(&suffix));
+        let first = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        Some(first.1.clone())
+    }
+
     /// Look up the nearest in-scope local binding type for a variable name.
     pub(super) fn lookup_local_binding_type(&self, name: &str) -> Option<syn::Type> {
         let recorded = self.lookup_local_binding_type_recorded(name);

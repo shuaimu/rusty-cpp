@@ -102,6 +102,11 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // Bare `Ref` stays unmapped: the name is too common to claim.
         "std::cell::Ref" | "cell::Ref" => Some(("rusty::Ref", true)),
         "RefMut" | "std::cell::RefMut" | "cell::RefMut" => Some(("rusty::RefMut", true)),
+        // `try_borrow` / `try_borrow_mut` errors (include/rusty/refcell.hpp).
+        "std::cell::BorrowError" | "cell::BorrowError" => Some(("rusty::BorrowError", false)),
+        "std::cell::BorrowMutError" | "cell::BorrowMutError" => {
+            Some(("rusty::BorrowMutError", false))
+        }
         "MutexGuard" | "std::sync::MutexGuard" | "sync::MutexGuard" => {
             Some(("rusty::MutexGuard", true))
         }

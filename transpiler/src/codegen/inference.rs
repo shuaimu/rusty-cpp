@@ -6614,7 +6614,10 @@ impl CodeGen {
         // BY VALUE. Track the wrapper type on the local so downstream
         // method calls on the guard route through wrapper-deref handling
         // (`guard->method()` instead of `guard.method()`).
-        if matches!(method.as_str(), "borrow" | "borrow_mut") && mc.args.is_empty() {
+        // `try_borrow()` / `try_borrow_mut()` wrap the same guard in a Result.
+        if matches!(method.as_str(), "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut")
+            && mc.args.is_empty()
+        {
             if let Some(receiver_ty) = self
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
@@ -6642,10 +6645,15 @@ impl CodeGen {
                         _ => None,
                     })
                 {
-                    return Some(if method == "borrow_mut" {
-                        parse_quote!(RefMut<#inner_ty>)
-                    } else {
-                        parse_quote!(Ref<#inner_ty>)
+                    return Some(match method.as_str() {
+                        "borrow_mut" => parse_quote!(RefMut<#inner_ty>),
+                        "try_borrow_mut" => {
+                            parse_quote!(Result<RefMut<#inner_ty>, std::cell::BorrowMutError>)
+                        }
+                        "try_borrow" => {
+                            parse_quote!(Result<Ref<#inner_ty>, std::cell::BorrowError>)
+                        }
+                        _ => parse_quote!(Ref<#inner_ty>),
                     });
                 }
             }

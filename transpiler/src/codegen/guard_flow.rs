@@ -282,7 +282,7 @@ impl CodeGen {
     /// that already hold the `ExprMethodCall`.
     pub(super) fn known_guard_producing_method_call(&self, mc: &syn::ExprMethodCall) -> bool {
         let method = mc.method.to_string();
-        (matches!(method.as_str(), "borrow" | "borrow_mut")
+        (matches!(method.as_str(), "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut")
             && self.receiver_is_refcell_container_type(&mc.receiver))
             || (matches!(method.as_str(), "lock" | "try_lock" | "read" | "write")
                 && self.receiver_is_mutex_container_type(&mc.receiver))

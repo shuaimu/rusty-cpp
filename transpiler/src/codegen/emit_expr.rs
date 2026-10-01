@@ -9750,8 +9750,28 @@ impl CodeGen {
                     continue;
                 }
             }
+            // `KEY.with(|v| ..)` / `KEY.try_with(|v| ..)` on a `thread_local!`
+            // key: the closure's parameter is `&T`, `T` the key's declared
+            // value type. Typing it lets the body see `v.borrow()` as a
+            // `Ref<T>` (guard dispatch) and destructured payloads as what
+            // they are (`Arc<Q>` methods through `->`).
+            let thread_local_closure_param = matches!(method_name.as_str(), "with" | "try_with")
+                && idx == 0
+                && mc.args.len() == 1
+                && matches!(self.peel_paren_group_expr(arg),
+                    syn::Expr::Closure(closure) if closure.inputs.len() == 1)
+                && self.pending_closure_param_types.borrow().is_none();
+            if thread_local_closure_param
+                && let Some(value_ty) = self.thread_local_key_value_type(&mc.receiver)
+            {
+                *self.pending_closure_param_types.borrow_mut() =
+                    Some(vec![syn::parse_quote!(&#value_ty)]);
+            }
             let mut emitted_arg =
                 self.emit_call_arg_with_pass_style(arg, style, arg_expected, false, None);
+            if thread_local_closure_param {
+                *self.pending_closure_param_types.borrow_mut() = None;
+            }
             let map_like_insert_key_arg = method_name == "insert"
                 && idx == 0
                 && (self
@@ -24966,8 +24986,14 @@ impl CodeGen {
                     }
                 } else {
                     let base = self.emit_expr_to_string(&f.base);
-                    let base_for_field =
-                        if self.expr_base_needs_explicit_deref_for_field_access(&f.base) {
+                    let base_for_field = if self.expr_is_guard_over_smart_pointer(&f.base) {
+                        // `exec.reactor` on a `RefMut<Box<Executor>>`: two layers.
+                        if self.method_receiver_needs_parentheses(&f.base) {
+                            format!("(**({}))", base)
+                        } else {
+                            format!("(**{})", base)
+                        }
+                    } else if self.expr_base_needs_explicit_deref_for_field_access(&f.base) {
                             if self.method_receiver_needs_parentheses(&f.base) {
                                 format!("(*({}))", base)
                             } else {
