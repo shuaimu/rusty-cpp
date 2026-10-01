@@ -16396,6 +16396,22 @@ impl CodeGen {
             }
         }
 
+        // `Self::f(..)` inside an impl names the impl's own type: its metadata
+        // is keyed by that type (`Executor::try_recv_raw`), scoped or not.
+        if let Some(rest) = joined.strip_prefix("Self::")
+            && let Some(owner) = self.current_struct.as_deref()
+        {
+            let owner_tail = owner.rsplit("::").next().unwrap_or(owner);
+            out.push(format!("{}::{}", owner_tail, rest));
+            let scoped = self.scoped_type_key(owner_tail);
+            if scoped != owner_tail {
+                out.push(format!("{}::{}", scoped, rest));
+            }
+            if owner != owner_tail && owner != scoped {
+                out.push(format!("{}::{}", owner, rest));
+            }
+        }
+
         // Metadata maps are collected from raw Rust identifiers, while emission
         // scopes can carry escaped C++ identifiers (`private_`). Query both.
         let mut normalized_variants = Vec::new();
@@ -47003,6 +47019,18 @@ impl CodeGen {
             self.lookup_owner_method_has_receiver(&trait_segment, &method_name),
             Some(false)
         ) {
+            return None;
+        }
+        // `Self::helper(&mut self.q)` names the impl's own type: an associated
+        // fn without a receiver stays a static call (`Exec::helper(q)`), never
+        // `this->q.helper()`.
+        if trait_segment == "Self"
+            && let Some(owner) = self.current_struct.as_deref()
+            && matches!(
+                self.lookup_owner_method_has_receiver(owner, &method_name),
+                Some(false)
+            )
+        {
             return None;
         }
         // A trait STATIC method (no self receiver) is an associated call, not

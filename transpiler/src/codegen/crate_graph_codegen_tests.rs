@@ -1033,3 +1033,45 @@ pub fn mpsc_queue<T>() -> (MpscSender<T>, MpscReceiver<T>) {
     assert!(cpp.contains("::queue<uint64_t>()"), "{cpp}");
     assert_eq!(cpp.matches("::queue()").count(), 1, "{cpp}");
 }
+
+#[test]
+fn self_path_to_an_associated_fn_without_receiver_stays_a_static_call() {
+    // lion-executor's `Self::try_recv_raw(&mut self.receiver)`: `Self::f`
+    // names the impl's own type, whose `f` takes no receiver. It was lowered
+    // as UFCS dispatch on the first argument (`this->q.try_recv_raw()`, no
+    // such member); `Self::has(self)` stays static too. Compiled and run
+    // against rustc (with a `run` driving both): 801 either way.
+    let cpp = translate(
+        r#"
+pub struct Rx {
+    pub v: Option<u64>,
+}
+impl Rx {
+    pub fn pop(&mut self) -> Option<u64> {
+        self.v.take()
+    }
+}
+pub struct Exec {
+    pub q: Rx,
+}
+impl Exec {
+    fn try_recv_raw(rx: &mut Rx) -> Option<u64> {
+        rx.pop()
+    }
+    pub fn drain(&mut self) -> u64 {
+        let raw = Self::try_recv_raw(&mut self.q);
+        raw.unwrap_or(0)
+    }
+    pub fn peek(&self) -> bool {
+        Self::has(self)
+    }
+    fn has(this: &Exec) -> bool {
+        this.q.v.is_some()
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("auto raw = Exec::try_recv_raw(this->q);"), "{cpp}");
+    assert!(cpp.contains("return Exec::has((*this));"), "{cpp}");
+    assert!(!cpp.contains("try_recv_raw();"), "{cpp}");
+}
