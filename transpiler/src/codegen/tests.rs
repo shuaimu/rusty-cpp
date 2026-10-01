@@ -14418,6 +14418,34 @@ fn test_sibling_file_unit_struct_emits_as_a_constructed_value() {
     );
 }
 
+/// A struct with a Drop impl in a SIBLING file (crate mode: each file is its
+/// own module) is non-aggregate there (a user destructor and deleted copies),
+/// so a literal of it here must use its fieldwise constructor. The per-file
+/// scan saw no Drop impl and emitted a designated initializer (SRPC's
+/// tcp_channel building reactor.rs's `PollTaskUnwindAbort { armed: true }`).
+#[test]
+fn test_sibling_file_drop_struct_literal_uses_its_constructor() {
+    let sibling: syn::ItemStruct =
+        syn::parse_str("pub struct Guard { pub armed: bool, pub code: u32 }").unwrap();
+    let file: syn::File = syn::parse_str(
+        "use super::reactor::Guard;\npub fn arm() -> u32 { let g = Guard { code: 7, armed: true }; g.code }",
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cross_file_structs(vec![sibling.clone()]);
+    cg.set_cross_file_drop_types(&["Guard".to_string()]);
+    cg.emit_file(&file, Some("my_crate.user"));
+    let out = cg.into_output();
+    assert!(out.contains("auto g = Guard(true, 7);"), "{out}");
+    assert!(!out.contains("Guard{.armed"), "{out}");
+    // Without the crate-wide Drop fact the literal stays an aggregate init.
+    let mut plain = CodeGen::new();
+    plain.set_cross_file_structs(vec![sibling]);
+    plain.emit_file(&file, Some("my_crate.user"));
+    let plain = plain.into_output();
+    assert!(plain.contains("auto g = Guard{.code = 7, .armed = true};"), "{plain}");
+}
+
 /// A `pub mod` after another item used to emit its `export import` at that
 /// source position, below the declaration -- which clang rejects outright
 /// ("imports must immediately follow the module declaration"), so the unit did

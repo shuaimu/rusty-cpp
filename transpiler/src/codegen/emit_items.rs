@@ -11372,6 +11372,10 @@ impl CodeGen {
             // targets the synthesized fieldwise ctor).
             self.is_cpp_inherit_type(name)
                 || self.type_has_drop_impl(name)
+                // A sibling file's Drop struct: non-aggregate there too.
+                || self
+                    .cross_file_drop_tails
+                    .contains(name.rsplit("::").next().unwrap_or(name))
                 // PhantomPinned structs emit deleted moves (user-declared) —
                 // non-aggregate, so their literals need the fieldwise ctor.
                 || self.type_has_phantom_pinned(name)

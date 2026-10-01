@@ -3197,6 +3197,22 @@ fn prepare_crate_codegen(
     // B: the crate-wide audited-name map, so a caller in one file emits the
     // owner's C++ identity for a renamed sibling item.
     options.cross_file_cpp_name_targets = crate::cpp_name::crate_wide_function_targets(source_units);
+    // `impl Drop for X` anywhere in the crate (tail names).
+    options.cross_file_drop_types = impl_blocks_by_source
+        .values()
+        .flatten()
+        .filter(|item| {
+            item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                path.segments.last().is_some_and(|seg| seg.ident == "Drop")
+            })
+        })
+        .filter_map(|item| match item.self_ty.as_ref() {
+            syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     options.cross_file_structs = cross_file_structs;
     options.cross_file_struct_qualified_paths = cross_file_struct_qualified_paths;
     options.cross_file_type_aliases = cross_file_type_aliases;
@@ -12041,6 +12057,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_traits: Vec::new(),
         cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
+        cross_file_drop_types: Vec::new(),
         cross_file_struct_qualified_paths: BTreeSet::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
@@ -12766,6 +12783,7 @@ fn main() {
         cross_file_traits: Vec::new(),
         cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
+        cross_file_drop_types: Vec::new(),
         cross_file_struct_qualified_paths: BTreeSet::new(),
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),

@@ -1929,6 +1929,14 @@ pub struct CodeGen {
     /// (crate mode). Set once by `set_cross_file_structs`, never cleared by
     /// `emit_file`'s per-file reset.
     pub(crate) cross_file_phantom_pinned_tails: HashSet<String>,
+    /// Struct tails with an `impl Drop` somewhere in the crate (crate mode;
+    /// see TranspileOptions::cross_file_drop_types), unique among the
+    /// crate's struct names.
+    pub(crate) cross_file_drop_tails: HashSet<String>,
+    /// Named-field declaration order of structs a sibling file declares
+    /// (crate mode; unique struct names only), for the fieldwise-constructor
+    /// form of their literals.
+    pub(crate) cross_file_struct_field_order: HashMap<String, Vec<String>>,
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     pub(crate) current_struct: Option<String>,
@@ -3494,6 +3502,8 @@ impl CodeGen {
             types_with_user_clone: HashSet::new(),
             types_with_phantom_pinned: HashSet::new(),
             cross_file_phantom_pinned_tails: HashSet::new(),
+            cross_file_drop_tails: HashSet::new(),
+            cross_file_struct_field_order: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
             type_param_scope_order: Vec::new(),
@@ -6631,6 +6641,20 @@ impl CodeGen {
             .iter()
             .map(|s| (s.ident.to_string(), s.generics.clone()))
             .collect();
+        self.cross_file_struct_field_order = structs
+            .iter()
+            .filter_map(|s| match &s.fields {
+                syn::Fields::Named(named) => Some((
+                    s.ident.to_string(),
+                    named
+                        .named
+                        .iter()
+                        .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect();
         // This pre-pass supplies leaf names. An ambiguous leaf cannot prove
         // a field's ownership constraints without its defining module path.
         let mut seen = HashSet::new();
@@ -6639,6 +6663,7 @@ impl CodeGen {
             if !seen.insert(name.clone()) {
                 self.cross_file_struct_field_types.remove(&name);
                 self.cross_file_auto_trait_generics.remove(&name);
+                self.cross_file_struct_field_order.remove(&name);
             }
         }
         // `PhantomPinned` structs from sibling files: their literals and
@@ -6656,6 +6681,16 @@ impl CodeGen {
         self.cross_file_struct_tails = structs
             .into_iter()
             .map(|s| s.ident.to_string())
+            .collect();
+    }
+
+    /// Crate-wide `impl Drop` hosts (tail names), kept only when the crate
+    /// declares that struct name once (set_cross_file_structs runs first).
+    pub fn set_cross_file_drop_types(&mut self, names: &[String]) {
+        self.cross_file_drop_tails = names
+            .iter()
+            .filter(|name| self.cross_file_struct_field_types.contains_key(name.as_str()))
+            .cloned()
             .collect();
     }
 

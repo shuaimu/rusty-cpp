@@ -997,6 +997,11 @@ pub struct TranspileOptions {
     /// the methods (and the orphan emission should therefore be
     /// suppressed). Empty for single-file mode.
     pub cross_file_structs: Vec<syn::ItemStruct>,
+    /// Struct names a crate-mode pre-pass found an `impl Drop for` in any
+    /// file: a sibling file's struct literal of one must use its fieldwise
+    /// constructor (the Drop type is non-aggregate in C++). Empty for
+    /// single-file mode.
+    pub cross_file_drop_types: Vec<String>,
     /// Exact Rust paths of public unconditional structs declared directly in
     /// physical sibling modules. Module anchors and aliases do not create a
     /// flat-import marker, but still need this ownership proof for UFCS.
@@ -2501,6 +2506,7 @@ impl Default for TranspileOptions {
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
+            cross_file_drop_types: Vec::new(),
             cross_file_struct_qualified_paths: BTreeSet::new(),
             cross_file_type_aliases: Vec::new(),
             flat_import_type_authorizations: BTreeSet::new(),
@@ -3368,6 +3374,7 @@ fn transpile_full_with_options_impl(
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
+    codegen.set_cross_file_drop_types(&options.cross_file_drop_types);
     codegen.cross_file_struct_qualified_paths = options.cross_file_struct_qualified_paths.clone();
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_flat_import_type_authorizations(

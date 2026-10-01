@@ -2859,6 +2859,15 @@ impl CodeGen {
             let scoped = self.scoped_type_key(struct_name);
             self.struct_field_order.get(&scoped)
         })
+        .or_else(|| {
+            // A Drop struct a sibling file declares (crate mode): its literal
+            // here takes the fieldwise constructor, in declaration order.
+            let tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
+            self.cross_file_drop_tails
+                .contains(tail)
+                .then(|| self.cross_file_struct_field_order.get(tail))
+                .flatten()
+        })
     }
 
     pub(super) fn extract_add_pointer_inner_cpp_type(ty: &str) -> Option<String> {
