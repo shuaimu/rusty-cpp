@@ -9572,9 +9572,16 @@ impl CodeGen {
             // Result<T, JoinError>)` of `JoinSender<T>`) names that owner's
             // parameter; outside the owner, with no receiver type to
             // substitute it, it is no hint at all.
+            // Nor does any by-name hint apply to a dependency crate's type
+            // (`self.inner.park(..)` on a `lion_reactor::Reactor` next to the
+            // crate's own `Reactor::park(Option<Duration>)`): the crate's own
+            // method of that name says nothing about the dependency's.
+            let receiver_is_dependency_type =
+                self.receiver_type_is_dependency_crate_type(&mc.receiver);
             let method_expected_ty = self
                 .lookup_method_arg_expected_type(&method_name, idx)
-                .filter(|ty| !self.type_mentions_out_of_scope_owner_type_param(ty));
+                .filter(|ty| !self.type_mentions_out_of_scope_owner_type_param(ty))
+                .filter(|_| !receiver_is_dependency_type);
             let owner_expected_ty = self.lookup_method_arg_expected_type_from_receiver_owner(
                 &mc.receiver,
                 &method_name,

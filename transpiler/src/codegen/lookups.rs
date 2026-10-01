@@ -128,6 +128,44 @@ impl CodeGen {
         Some(out)
     }
 
+    /// The receiver's inferred type is a namespace-wrapped dependency crate's
+    /// type (`lion_reactor::Reactor`, directly or through an import alias
+    /// such as `use lion_reactor::Reactor as LionReactor;`).
+    pub(super) fn receiver_type_is_dependency_crate_type(&self, receiver: &syn::Expr) -> bool {
+        if self.dependency_ufcs_trait_manifests.is_empty() {
+            return false;
+        }
+        let Some(ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&ty) else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.is_empty() {
+            return false;
+        }
+        let first = tp.path.segments[0].ident.to_string();
+        let head = if tp.path.segments.len() == 1 {
+            if self.local_declared_types.contains(&first) || self.is_type_param_in_scope(&first) {
+                return false;
+            }
+            match self.resolve_scope_import_binding_path(&first) {
+                Some(target) => target
+                    .trim_start_matches("::")
+                    .split("::")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                None => return false,
+            }
+        } else {
+            first
+        };
+        self.dependency_ufcs_trait_manifests
+            .iter()
+            .any(|m| m.module == head && crate::transpile::crate_is_namespace_wrapped(&m.module))
+    }
+
     pub(super) fn lookup_owner_method_has_receiver(&self, owner: &str, method_name: &str) -> Option<bool> {
         let mut keys = Vec::new();
         keys.push(Self::owner_method_key(owner, method_name));

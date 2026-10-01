@@ -2414,6 +2414,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                         && authorization.leaf == segments[1]
                 })
             && !matches!(segments[0].as_str(), "std" | "core" | "alloc" | "rusty")
+            // A dependency crate's path (`dep::Reactor`, re-exported from its
+            // `reactor` module) is not a stale spelling of the crate's OWN
+            // same-tail type (`types::reactor::Reactor`, which wraps it).
+            && !self
+                .dependency_ufcs_trait_manifests
+                .iter()
+                .any(|manifest| manifest.module == segments[0])
             && !self.is_type_param_in_scope(&segments[0])
             && segments[0] != "Self"
         {

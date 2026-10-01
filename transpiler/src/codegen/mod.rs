@@ -32845,6 +32845,54 @@ impl CodeGen {
         false
     }
 
+    /// The concrete instantiation of an owned scrutinee's generic enum for
+    /// `runtime_match_enum_is_type_param_free`, when the variant machinery
+    /// has no context for it: a dependency crate's generic data enum
+    /// (`lion_reactor::IoResult<(Reactor, InterruptHandle)>`) — manifests
+    /// carry its arity, not its variants — matched by an arm whose path
+    /// names that enum (`lion_reactor::IoResult::Ok(r)`). Ownership only;
+    /// the lowering itself is unchanged.
+    fn runtime_match_scrutinee_instantiation_ctx(
+        &self,
+        scrutinee: &syn::Expr,
+        pat: &syn::Pat,
+    ) -> Option<VariantTypeContext> {
+        let path = match pat {
+            syn::Pat::TupleStruct(ts) => &ts.path,
+            syn::Pat::Struct(ps) => &ps.path,
+            _ => return None,
+        };
+        let owner = path.segments.iter().nth_back(1)?.ident.to_string();
+        let ty = self
+            .infer_simple_expr_type(scrutinee)
+            .or_else(|| self.infer_local_binding_type_from_initializer(scrutinee))?;
+        let syn::Type::Path(tp) = self.peel_paren_group_type(&ty) else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != owner {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let template_args: Vec<String> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                _ => None,
+            })
+            .collect();
+        if template_args.is_empty() {
+            return None;
+        }
+        Some(VariantTypeContext {
+            enum_name: owner,
+            template_args,
+        })
+    }
+
     /// By-value payload bindings of a CONSUMED match may move only when
     /// the matched enum is DECLARED with no type params: a generic payload
     /// (`Either<L, R>` with `L = int&`) may instantiate to a reference,
@@ -32882,7 +32930,13 @@ impl CodeGen {
                 // String (r7 enum_string).
                 let tail =
                     ctx.enum_name.rsplit("::").next().unwrap_or(&ctx.enum_name);
-                return self.declared_item_names.contains(tail)
+                // A dependency crate's generic enum (manifest-declared, in
+                // local_type_module_path) is as concrete here as a local
+                // one: `match created { IoResult::Ok(r) => Ok(r) }` over a
+                // lion_reactor::IoResult<(Reactor, InterruptHandle)> must
+                // move the move-only tuple.
+                return (self.declared_item_names.contains(tail)
+                    || self.local_type_module_path.contains_key(tail))
                     && ctx.template_args.iter().all(|a| {
                         let a = a.trim();
                         !a.contains('&')
@@ -34369,7 +34423,44 @@ impl CodeGen {
                 variant_index, value_name
             );
         }
+        // A generic enum of a dependency crate (`lion_executor_spec::types::
+        // PollResult<T>`): its variant structs are templates, and the visit
+        // lambda deduces their arguments (`PollResult_Ready<__Vs...>`).
+        if !Self::cpp_spelling_has_terminal_template_args(&emitted)
+            && self.names_dependency_generic_enum_variant_struct(&emitted)
+        {
+            return format!("{}<__Vs...>", emitted);
+        }
         emitted
+    }
+
+    /// `cpp` spells a variant struct (`::dep::mod::Enum_Variant`) of an enum a
+    /// namespace-wrapped dependency declares with type parameters — through
+    /// its declaring module, or through a re-export (`dep::Enum_Variant` for
+    /// `pub use mod::Enum;`) when the dependency declares that name once.
+    fn names_dependency_generic_enum_variant_struct(&self, cpp: &str) -> bool {
+        let segments: Vec<&str> = cpp.trim_start_matches("::").split("::").collect();
+        if segments.len() < 2 {
+            return false;
+        }
+        let head = segments[0];
+        let leaf = segments[segments.len() - 1];
+        let module_path = segments[1..segments.len() - 1].join("::");
+        self.dependency_ufcs_trait_manifests.iter().any(|m| {
+            if m.module != head || !crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                return false;
+            }
+            let named: Vec<_> = m
+                .declared_types
+                .iter()
+                .filter(|dt| {
+                    leaf.strip_prefix(dt.name.as_str())
+                        .is_some_and(|rest| rest.len() > 1 && rest.starts_with('_'))
+                })
+                .collect();
+            named.iter().any(|dt| dt.arity > 0 && dt.module_path == module_path)
+                || (named.len() == 1 && named[0].arity > 0)
+        })
     }
 
 

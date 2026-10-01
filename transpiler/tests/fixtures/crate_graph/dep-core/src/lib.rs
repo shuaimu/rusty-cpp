@@ -1,6 +1,7 @@
 #[cfg(feature = "extra")]
 mod extra;
 pub mod backend;
+pub mod park;
 pub mod sched;
 pub mod spec;
 pub mod time;
@@ -9,6 +10,7 @@ pub mod widget;
 pub use backend::{with_backend, Backend};
 pub use spec::inv;
 pub use widget::Widget;
+pub use park::park_total;
 pub use sched::sched_total;
 pub use time::tick_total;
 

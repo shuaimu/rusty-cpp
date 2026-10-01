@@ -21,7 +21,9 @@
 //! `derive(Hash, Copy)` newtype, 230 from `dep_core::sched_total`
 //! (rustc on `sched.rs` with `dep-base`: 230), and 1500 + 7 from std's
 //! `Duration` in the root beside `dep_core::time::Duration` (rustc on
-//! `time.rs` and the root's `micros`: 1507).
+//! `time.rs` and the root's `micros`: 1507), and 3068 from
+//! `dep_core::park_total`, lion-executor's Runtime and Executor shapes over
+//! dep-base (rustc on `park.rs` with `dep-base`: 3068).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -176,6 +178,31 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
         core.contains("template <class U> using rusty_dyn_adapter = BackendDynAdapter<U>;"),
         "{core}"
     );
+    // park.rs. A dependency's re-exported `dep_base::Reactor` stays dep-base's,
+    // not the crate's same-tail `sched::types::reactor::Reactor`.
+    assert!(
+        core.contains("uint64_t take(std::tuple<dep_base::Reactor, rusty::Box<uint64_t>> pair) {"),
+        "{core}"
+    );
+    assert!(!core.contains("sched::types::reactor::Reactor pair"), "{core}");
+    // The crate's own `park(Option<Ticks>)` says nothing about the argument
+    // of dep-base's `Reactor::park` (no `-> ..::Ticks` closure annotation).
+    assert!(
+        core.contains("this->inner.park(timeout.map([&](auto&& t) { return t.into_base(); }));"),
+        "{core}"
+    );
+    // A merged `impl Executor` names `Ticks` through ITS module's import.
+    assert!(
+        core.contains("rusty::Option<::dep_core::park::rt::ticks::Ticks>(Ticks::from_raw("),
+        "{core}"
+    );
+    // A dependency's generic enum: its template variant struct is deduced in
+    // the visit lambda, and an owned scrutinee's move-only payload moves.
+    assert!(
+        core.contains("[&]<typename... __Vs>(const dep_base::Outcome_Done<__Vs...>& _v)"),
+        "{core}"
+    );
+    assert!(core.contains("return take(std::move(pair));"), "{core}");
 
     let root = std::fs::read_to_string(out.join("graph_root.cppm")).unwrap();
     assert!(root.contains("export module graph_root;"), "{root}");
@@ -251,7 +278,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "5473\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "8541\n");
 }
 
 #[test]

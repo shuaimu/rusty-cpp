@@ -23,6 +23,7 @@ pub fn run() -> u32 {
         + dep_core::sched_total() as u32
         + micros()
         + dep_core::tick_total() as u32
+        + dep_core::park_total() as u32
 }
 
 /// std's `Duration`, beside `dep_core::time::Duration`.

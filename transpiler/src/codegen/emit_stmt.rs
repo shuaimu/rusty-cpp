@@ -1266,8 +1266,16 @@ impl CodeGen {
 
         let mut saw_runtime_pattern = false;
         for (idx, arm) in match_expr.arms.iter().enumerate() {
+            let instantiation_ctx = if variant_ctx.is_none() && !match_bindings_are_refs {
+                self.runtime_match_scrutinee_instantiation_ctx(&match_expr.expr, &arm.pat)
+            } else {
+                None
+            };
             let arm_bindings_are_refs = match_bindings_are_refs
-                || !self.runtime_match_enum_is_type_param_free(&arm.pat, variant_ctx);
+                || !self.runtime_match_enum_is_type_param_free(
+                    &arm.pat,
+                    variant_ctx.or(instantiation_ctx.as_ref()),
+                );
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     if let Some((cond_method, unwrap_method)) =
