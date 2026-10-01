@@ -1897,3 +1897,78 @@ pub fn looped(n: u32) -> u32 {
     );
     assert_eq!(crate::slots::detect_slots("t.cppm", &cpp).len(), 2, "{cpp}");
 }
+
+#[test]
+fn reference_map_closure_return_does_not_leak_onto_a_later_closure() {
+    // lion-reactor: `get_slot_mut`'s `.map(|w| &mut w.inner)` forces
+    // `-> decltype(auto)` on ITS lambda (an `Option<&mut T>` payload), but the
+    // pending flag was not tied to that closure: a codegen copy made before
+    // the closure consumed it handed it to later closures, among them
+    // `Reactor::enter`'s `NEXT_EPOCH.with(|n| { let e = n.get(); ..; e })`,
+    // which then returned `std::move(e)` as `uint64_t&&`, a reference to its
+    // own local. Every Lion I/O registration read a garbage epoch at -O2 and
+    // reported "no Lion reactor". Compiled at -O2 with
+    // -Werror=return-stack-address and run: 261102, as rustc prints
+    // (2619d788..dc6e7558: 1).
+    let cpp = translate(
+        r#"
+use std::cell::Cell;
+use std::collections::HashMap;
+pub struct Wrapper {
+    pub inner: u64,
+}
+pub struct Slab {
+    pub inner: HashMap<u64, Wrapper>,
+}
+impl Slab {
+    fn get_slot_mut(&mut self, key: u64) -> Option<&mut u64> {
+        self.inner.get_mut(&key).map(|w| &mut w.inner)
+    }
+    pub fn bump(&mut self, key: u64) -> bool {
+        match self.get_slot_mut(key) {
+            Some(v) => {
+                *v += 1;
+                true
+            }
+            None => false,
+        }
+    }
+}
+thread_local! {
+    static NEXT_EPOCH: Cell<u64> = const { Cell::new(1) };
+}
+pub struct Reactor {
+    pub id: u64,
+}
+impl Reactor {
+    pub fn enter(&mut self) -> u64 {
+        let epoch = NEXT_EPOCH.with(|n| {
+            let e = n.get();
+            n.set(e + 1);
+            e
+        });
+        epoch + self.id
+    }
+}
+"#,
+    );
+    assert!(cpp.contains("return this->inner.get(key).map([&](auto&& w) -> decltype(auto) {"), "{cpp}");
+    assert!(cpp.contains("NEXT_EPOCH.with([&](auto&& n) {\n"), "{cpp}");
+    assert!(!cpp.contains("NEXT_EPOCH.with([&](auto&& n) -> decltype(auto)"), "{cpp}");
+}
+
+#[test]
+fn decltype_auto_scope_returns_a_bare_local_without_moving_it() {
+    // `decltype(std::move(e))` is `T&&`: from a `decltype(auto)` function or
+    // lambda it returns a reference to the dying local. `return e;` deduces
+    // `T` (or keeps a reference binding's reference) and still moves.
+    let mut cg = CodeGen::new();
+    cg.push_return_value_scope("decltype(auto)");
+    assert_eq!(cg.decltype_auto_safe_return_value("std::move(e)".to_string()), "e");
+    assert_eq!(
+        cg.decltype_auto_safe_return_value("std::move(a.b)".to_string()),
+        "std::move(a.b)"
+    );
+    cg.push_return_value_scope("auto");
+    assert_eq!(cg.decltype_auto_safe_return_value("std::move(e)".to_string()), "std::move(e)");
+}

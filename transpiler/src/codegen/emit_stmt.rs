@@ -627,6 +627,7 @@ impl CodeGen {
                     if let Some(typed) = self.maybe_type_bare_none_return(&expr_str) {
                         expr_str = typed;
                     }
+                    expr_str = self.decltype_auto_safe_return_value(expr_str);
                     self.writeln(&format!("{} {};", keyword, expr_str));
                 } else {
                     self.writeln(&format!("{};", expr_str));
@@ -934,8 +935,10 @@ impl CodeGen {
             return;
         }
         self.return_value_scopes.push(false);
+        self.return_scope_decltype_auto.push(false);
         emit(self);
         self.return_value_scopes.pop();
+        self.return_scope_decltype_auto.pop();
     }
 
     /// partition_result-style recovery: `match r { Ok(v) => Either::Left(v),

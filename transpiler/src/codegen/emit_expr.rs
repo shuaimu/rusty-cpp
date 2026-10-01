@@ -9647,11 +9647,13 @@ impl CodeGen {
                         .or_else(|| self.expected_result_type_arg(Some(expected), 0))
                         .cloned()
                 });
-            *self.pending_map_closure_return_type.borrow_mut() = return_payload.filter(|ty| {
-                matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
-                    && !self.type_contains_infer(ty)
-                    && !self.type_contains_unresolved_placeholder_like(ty)
-            });
+            *self.pending_map_closure_return_type.borrow_mut() = return_payload
+                .filter(|ty| {
+                    matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
+                        && !self.type_contains_infer(ty)
+                        && !self.type_contains_unresolved_placeholder_like(ty)
+                })
+                .map(|ty| (closure_key, ty));
         }
         if matches!(method_name.as_str(), "eq" | "ne")
             && mc.args.len() == 1
@@ -25482,6 +25484,7 @@ impl CodeGen {
                         if let Some(typed) = self.maybe_type_bare_none_return(&val) {
                             val = typed;
                         }
+                        let val = self.decltype_auto_safe_return_value(val);
                         format!("{} {}", keyword, val)
                     }
                     None => keyword.to_string(),
@@ -27927,11 +27930,12 @@ impl CodeGen {
         // reference, and the concrete payload type may not be spellable in
         // this scope (in-scope type params). Only fires when the closure has
         // no explicit Rust annotation.
+        let closure_key = closure as *const syn::ExprClosure as usize;
         let force_decltype_auto_return = self
             .pending_map_closure_return_type
             .borrow_mut()
             .take()
-            .is_some()
+            .is_some_and(|(key, _)| key == closure_key)
             && matches!(closure.output, syn::ReturnType::Default);
         inner.bind_closure_params_for_emission(closure);
         if !untyped_param_scope.is_empty() {
@@ -28089,8 +28093,15 @@ impl CodeGen {
                 // surrounding void-return contexts; keep tail-expression return
                 // behavior local to the lambda body.
                 inner.return_value_scopes.clear();
+                inner.return_scope_decltype_auto.clear();
                 inner.return_type_hints.clear();
-                inner.push_return_value_scope(if void_callback { "void" } else { "auto" });
+                inner.push_return_value_scope(if void_callback {
+                    "void"
+                } else if lambda_return_annotation.trim() == "-> decltype(auto)" {
+                    "decltype(auto)"
+                } else {
+                    "auto"
+                });
                 if inner.should_push_return_type_hint_for_closure(&resolved_closure_output) {
                     inner.push_return_type_hint(&resolved_closure_output);
                 }
@@ -28174,6 +28185,7 @@ impl CodeGen {
                 }) =>
             {
                 inner.return_value_scopes.clear();
+                inner.return_scope_decltype_auto.clear();
                 inner.return_type_hints.clear();
                 inner.emit_macro_stmt(&mac_expr.mac);
                 let mut body_str = inner.into_output();
@@ -28197,6 +28209,7 @@ impl CodeGen {
                 // Single expression body → return it
                 // Push the explicit return type hint so Err/Ok inside can use it for qualification
                 inner.return_value_scopes.clear();
+                inner.return_scope_decltype_auto.clear();
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
                 if inner.should_push_return_type_hint_for_closure(&resolved_closure_output) {

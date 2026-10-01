@@ -248,7 +248,12 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
         "#include <cstdio>\nimport graph_root;\nint main() { std::printf(\"%u\\n\", run()); return 0; }\n",
     )
     .unwrap();
-    let flags = ["-std=c++23", "-DRUSTY_PORTABLE_INTRINSICS=1", "-pthread"];
+    let flags = [
+        "-std=c++23",
+        "-DRUSTY_PORTABLE_INTRINSICS=1",
+        "-pthread",
+        "-Werror=return-stack-address",
+    ];
     let bmi_dir = directory.path().join("bmi");
     std::fs::create_dir_all(&bmi_dir).unwrap();
     let prebuilt = format!("-fprebuilt-module-path={}", bmi_dir.display());

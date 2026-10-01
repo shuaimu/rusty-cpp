@@ -10622,14 +10622,14 @@ fn compile_module_step(
     let stdlib = if import_std { " -stdlib=libc++" } else { "" };
     let cmd_str = if precompile {
         format!(
-            "{} -std={}{} {} -march=native -x c++-module --precompile -I{} -fprebuilt-module-path={} {} -o {} {}",
+            "{} -std={}{} {} -march=native -Werror=return-stack-address -x c++-module --precompile -I{} -fprebuilt-module-path={} {} -o {} {}",
             cpp_compiler, cxx_standard, stdlib, portable_intrinsics_define,
             include_dir.display(), pcm_dir.display(), rusty_pcm_flag,
             unit.pcm_path.display(), unit.source_path.display()
         )
     } else {
         format!(
-            "{} -std={}{} {} -march=native -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
+            "{} -std={}{} {} -march=native -Werror=return-stack-address -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
             cpp_compiler, cxx_standard, stdlib, portable_intrinsics_define,
             include_dir.display(), pcm_dir.display(), rusty_pcm_flag,
             unit.source_path.display(), unit.object_path.display()
@@ -10637,9 +10637,13 @@ fn compile_module_step(
     };
 
     let mut cmd = std::process::Command::new(cpp_compiler);
+    // A function returning a reference to its own local (a `decltype(auto)`
+    // lambda's `return std::move(local);`) is a dangling read, not a style
+    // issue; a generated module must not compile with one.
     cmd.arg(format!("-std={}", cxx_standard))
         .arg(portable_intrinsics_define)
-        .arg("-march=native");
+        .arg("-march=native")
+        .arg("-Werror=return-stack-address");
     if import_std {
         cmd.arg("-stdlib=libc++");
     }
@@ -11152,7 +11156,7 @@ fn run_stage_d_module_build(
         .map(|p| format!("-fprebuilt-module-path={}", p.display()))
         .unwrap_or_default();
     let runner_compile_cmd = format!(
-        "{} -std={}{} {} -march=native -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
+        "{} -std={}{} {} -march=native -Werror=return-stack-address -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
         cpp_compiler,
         cxx_standard,
         stdlib_flag_suffix,
@@ -11168,7 +11172,8 @@ fn run_stage_d_module_build(
     runner_compile_command
         .arg(format!("-std={}", cxx_standard))
         .arg(portable_intrinsics_define)
-        .arg("-march=native");
+        .arg("-march=native")
+        .arg("-Werror=return-stack-address");
     if args.import_std {
         runner_compile_command.arg("-stdlib=libc++");
     }

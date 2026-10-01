@@ -2677,7 +2677,11 @@ pub struct CodeGen {
     /// from the map call's own expected Option/Result payload. Only set for
     /// REFERENCE payloads (`Option<&mut V>`): an unannotated lambda's
     /// deduced return decays V& to V, so the annotation must be forced.
-    pub(crate) pending_map_closure_return_type: std::cell::RefCell<Option<syn::Type>>,
+    /// Keyed by the closure's address, as the input side is: a codegen copy
+    /// made before the closure consumed it must not hand it to a later one
+    /// (it forced `-> decltype(auto)` onto lion-reactor's unrelated
+    /// `NEXT_EPOCH.with(|n| ..)` closure).
+    pub(crate) pending_map_closure_return_type: std::cell::RefCell<Option<(usize, syn::Type)>>,
     /// Scoped raw-C++ element overrides for empty collection locals whose element
     /// type is NOT nameable as a `syn::Type` — because it is the item type of an
     /// `auto`-typed iterator chain (e.g. `let v = Vec::new(); v.extend(it.take(n))`
@@ -3212,6 +3216,8 @@ pub struct CodeGen {
     /// Stack tracking whether current function/method context returns a value.
     /// Used for tail expression lowering decisions (e.g., tail `match`).
     pub(crate) return_value_scopes: Vec<bool>,
+    /// Parallel to `return_value_scopes`: the scope returns `decltype(auto)`.
+    pub(crate) return_scope_decltype_auto: Vec<bool>,
     /// Optional concrete return type in current function/method context.
     /// Used to propagate expected type into tail expression lowering.
     pub(crate) return_type_hints: Vec<Option<syn::Type>>,
@@ -3795,6 +3801,7 @@ impl CodeGen {
             current_struct_assoc_cpp_types: Vec::new(),
             current_struct_method_output_types: Vec::new(),
             return_value_scopes: Vec::new(),
+            return_scope_decltype_auto: Vec::new(),
             return_type_hints: Vec::new(),
             force_typed_option_ctor_scopes: Vec::new(),
             constructor_template_hints: Vec::new(),
@@ -8031,6 +8038,7 @@ impl CodeGen {
         self.current_struct_assoc_cpp_types.clear();
         self.current_struct_method_output_types.clear();
         self.return_value_scopes.clear();
+        self.return_scope_decltype_auto.clear();
         self.return_type_hints.clear();
         self.force_typed_option_ctor_scopes.clear();
         self.constructor_template_hints.clear();
@@ -51901,10 +51909,32 @@ impl CodeGen {
 
     fn push_return_value_scope(&mut self, return_type: &str) {
         self.return_value_scopes.push(return_type != "void");
+        self.return_scope_decltype_auto
+            .push(return_type.trim() == "decltype(auto)");
     }
 
     fn pop_return_value_scope(&mut self) {
         self.return_value_scopes.pop();
+        self.return_scope_decltype_auto.pop();
+    }
+
+    /// A returned value in a `decltype(auto)` function or lambda: a bare
+    /// local is returned as itself, never `std::move(local)`. `decltype` of
+    /// `std::move(e)` is `T&&`, a reference to the local that dies with the
+    /// return (lion-reactor's `NEXT_EPOCH.with(|n| { let e = n.get(); ..; e
+    /// })` read garbage at -O2); `return e;` deduces `T` and still moves.
+    pub(super) fn decltype_auto_safe_return_value(&self, value: String) -> String {
+        if !self.return_scope_decltype_auto.last().copied().unwrap_or(false) {
+            return value;
+        }
+        if let Some(inner) = value.strip_prefix("std::move(").and_then(|rest| rest.strip_suffix(')'))
+            && !inner.is_empty()
+            && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !inner.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return inner.to_string();
+        }
+        value
     }
 
     fn in_value_return_scope(&self) -> bool {
