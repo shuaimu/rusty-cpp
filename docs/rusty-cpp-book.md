@@ -31,6 +31,16 @@ A Rust-style borrow checker for C++ code.
   - [17. Build System Integration](#17-build-system-integration)
   - [18. Include Path Configuration](#18-include-path-configuration)
   - [19. Gradual Adoption Strategy](#19-gradual-adoption-strategy)
+    - [19.1 Adopt safety checking](#191-adopt-safety-checking)
+    - [19.2 Prepare C++ for canonical Rust](#192-prepare-c-for-canonical-rust)
+    - [19.3 Inventory and sequence the migration](#193-inventory-and-sequence-the-migration)
+    - [19.4 Shape types and construction](#194-shape-types-and-construction)
+    - [19.5 Shape ownership and function signatures](#195-shape-ownership-and-function-signatures)
+    - [19.6 Make mutation and cleanup explicit](#196-make-mutation-and-cleanup-explicit)
+    - [19.7 Design the interoperability boundary](#197-design-the-interoperability-boundary)
+    - [19.8 Translate, generate, and verify](#198-translate-generate-and-verify)
+    - [19.9 Investigate conversion blockers](#199-investigate-conversion-blockers)
+    - [19.10 Review checklist](#1910-review-checklist)
 - [Part VII: Reference](#part-vii-reference)
   - [20. Annotation Reference](#20-annotation-reference)
   - [21. Error Messages](#21-error-messages)
@@ -1787,7 +1797,19 @@ RustyCpp automatically detects common include paths:
 
 ## 19. Gradual Adoption Strategy
 
-### File-by-File Migration
+RustyCpp supports adopting safety checks in existing C++ and authoring Rust that
+generates C++. You can start with annotations, then reshape selected C++ types
+so their eventual translation to Rust requires few design changes.
+
+The preparation and conversion guidance below is adapted from Mako's
+*Porting C++ to an Inline-Rust DSL: A Field Guide*, especially its pre-conversion
+rulebook and the experience of migrating the SRPC library. It collects the
+reusable techniques here; project-specific policies, build scripts, and dated
+migration counts belong in the consuming project's documentation.
+
+### 19.1 Adopt safety checking
+
+#### File-by-File Migration
 
 Start by annotating one file at a time:
 
@@ -1802,7 +1824,7 @@ namespace myapp {
 }
 ```
 
-### Namespace-Level Annotations
+#### Namespace-Level Annotations
 
 Annotate entire namespaces:
 
@@ -1818,7 +1840,7 @@ namespace myapp::legacy {
 }
 ```
 
-### Mixing Safe and Unsafe Code
+#### Mixing Safe and Unsafe Code
 
 Use `@unsafe` blocks to call into legacy code:
 
@@ -1833,6 +1855,493 @@ void safe_wrapper() {
     // Continue with safe code
 }
 ```
+
+Keep an unsafe region small enough to explain its preconditions. A comment
+marking a function safe is a contract to check, not evidence that its body is
+safe. Confirm that the build actually invokes the checker on the files you
+intend to cover. Annotation scope and propagation are described in
+[Chapter 6](#6-the-safety-annotation-system).
+
+### 19.2 Prepare C++ for canonical Rust
+
+For this chapter, "conversion-friendly C++" means C++ whose ownership, state,
+and interfaces already have a clear Rust representation. The intended path is:
+
+```text
+Existing C++
+    -> reshape and test as C++
+    -> translate the prepared unit to Rust
+    -> validate Rust, generate C++, and test behavior
+```
+
+The one-shot part is translating the prepared unit. Preparation can take several
+changes, especially for a class with shared state or a large caller graph.
+RustyCpp's transpiler runs from Rust to C++; it does not automatically recover
+Rust ownership or lifetimes from arbitrary C++.
+
+Choose where the Rust source will live before starting:
+
+| Source form | Use it when | What to verify |
+|---|---|---|
+| Canonical `.rs` files | The module can own its Rust definitions and declare its external dependencies | Rust type and borrow checking, generated C++ compilation, and behavior |
+| Inline `#if RUSTYCPP_RUST` blocks | A local migration must coexist with surrounding C++ declarations | The inline profile's accepted syntax, generated declarations, and the complete C++ build |
+
+Prefer canonical `.rs` files when the goal is canonical Rust. Inline blocks can
+be an intermediate step. Their ability to refer to surrounding C++ does not
+make those references valid in a standalone Rust crate. Move them behind
+explicit bindings or adapters as part of completing the conversion.
+
+Passing the C++ checker or successfully emitting C++ is not equivalent to
+passing `rustc`. Use Rust validation to establish the Rust ownership contract.
+See the [transpiler guide](rusty-cpp-transpiler.md) for lowering rules and its
+[inline profile](rusty-cpp-transpiler.md#12-strict-v1-spec-inline-rust-blocks-in-c-low-risk-profile)
+for the separate inline contract.
+
+### 19.3 Inventory and sequence the migration
+
+Start with declarations and dependencies. For each candidate, record the owner
+of its data, its callers, its base classes, its construction and cleanup paths,
+and any external types it exposes. For a large tree, a repeatable inventory
+script helps; for a small component, a table is enough.
+
+Classify candidates by the work they need:
+
+| Category | Typical examples | Next step |
+|---|---|---|
+| Direct translation | Constants, named enums, small value types, simple functions | Exercise the generation and validation workflow |
+| C++ preparation | Overloads, stateful inheritance, implicit initialization, unclear ownership | Reshape and test before translating |
+| Suspected tool gap | A valid Rust construct that fails in the chosen mode | Reduce to a reproducer and record the tool revision |
+| External boundary | Generated interfaces, platform APIs, third-party objects | Design bindings and ownership at the boundary |
+| Already migrated | Canonical Rust or inline Rust | Verify regeneration and remove obsolete workarounds when appropriate |
+
+A syntax match is a lead to investigate. A raw pointer may describe a slice, a
+borrow, an owned foreign object, or an unsafe implementation detail. Those need
+different changes.
+
+Work from small value types and interfaces toward their implementors and larger
+stateful classes. Convert a trait and its adapters together, or keep the
+intermediate interface explicitly compatible. Keep mutually dependent types or
+overload implementations in the same conversion unit when splitting them would
+leave unresolved declarations.
+
+Use two reviewable changes for each unit:
+
+1. Reshape the C++ and its callers. Keep behavior intact, build, and run the
+   affected tests. This change should stand on its own even if conversion waits.
+2. Translate the prepared unit, regenerate C++, update integration as needed,
+   and repeat validation. Change tests in whichever step changes their API.
+
+Do not mix a behavioral redesign into the translation unless it is necessary
+and tested separately. The split makes initialization, ownership, and code
+generation failures easier to locate.
+
+### 19.4 Shape types and construction
+
+#### Separate interface from state
+
+A Rust trait describes behavior; it does not inherit fields from a concrete
+base. Split a C++ base that mixes virtual methods and state into a data-free
+interface and an ordinary state object. Concrete types own that state by
+composition, or carry the fields directly when that is clearer.
+
+```cpp
+// Before: behavior and storage are inherited together.
+struct Event {
+    bool ready = false;
+    virtual bool poll() = 0;
+    virtual ~Event() = default;
+};
+struct TimerEvent : Event {
+    int remaining = 0;
+};
+
+// Prepared shape: the interface owns no state.
+struct Pollable {
+    virtual bool poll() = 0;
+    virtual ~Pollable() = default;
+};
+struct EventState {
+    bool ready;
+};
+struct PreparedTimerEvent : Pollable {
+    EventState state;
+    int remaining;
+};
+```
+
+The resulting Rust has a `trait Pollable`, an `EventState` struct, and a concrete
+struct implementing the trait. Trait supertraits are still useful; removing
+concrete inheritance does not require removing interface composition.
+
+If existing C++ callers require a real base-class upcast, investigate the
+transpiler's `#[cpp_inherit]` extension. A plain Rust trait implementation does
+not by itself promise that C++ inheritance relationship. Check the emitted base
+list and an actual upcast at the call site. Inline declaration visibility and
+crate-mode resolution differ, so test the mode you will ship. Keep this C++
+compatibility requirement separate from the Rust trait design.
+
+#### Give construction a named, complete operation
+
+Replace constructor overloads and default arguments with named factories such
+as `make`, `with_capacity`, or `from_config`. The Rust counterparts can be
+associated functions returning `Self`. An ordinary Rust `new` function lowers
+to a C++ `new_` member because `new` is a C++ keyword.
+
+Make every initialization explicit. Removing a constructor or a default member
+initializer can leave code that still compiles but initializes different fields.
+In particular, C++ parenthesized aggregate initialization can preserve the old
+`Type(args)` syntax while changing its meaning.
+
+```cpp
+// Original API.
+struct RetryPolicy {
+    unsigned limit;
+    unsigned attempts = 0;
+    explicit RetryPolicy(unsigned limit = 3) : limit(limit) {}
+};
+
+// Prepared C++ API. Update callers to PreparedRetryPolicy::make(3).
+struct PreparedRetryPolicy {
+    unsigned limit;
+    unsigned attempts;
+
+    static PreparedRetryPolicy make(unsigned limit) {
+        return PreparedRetryPolicy{limit, 0};
+    }
+};
+```
+
+The prepared type translates directly:
+
+```rust
+pub struct RetryPolicy {
+    limit: u32,
+    attempts: u32,
+}
+
+impl RetryPolicy {
+    pub fn new(limit: u32) -> Self {
+        Self { limit, attempts: 0 }
+    }
+}
+```
+
+Audit default construction, array elements, container insertion, deserialization,
+and generated callers as well as obvious constructor calls. Preserve private
+construction invariants. Making a constructor public merely to simplify
+generation can be a correctness regression. Use `#[cpp_ctor]` only for an
+actual C++ construction requirement, such as initialization that must occur at
+the final address, and verify its supported behavior.
+
+Decide copy, move, and address-stability requirements before translating the
+type. A Rust type is not `Copy` merely because its generated C++ happens to be
+copy-constructible. Inspect generated special members and container call sites.
+An apparently empty C++ destructor may suppress implicit move generation;
+removing it can therefore change behavior.
+
+#### Lift declarations and keep useful generics
+
+Move nested C++ types and aliases to module or namespace scope, giving them
+distinct names. Replace anonymous member enums with named enums and update
+every enumerator use, including switch arms and macros. Move class static data
+to an explicit module-level owner or accessor while preserving linkage,
+initialization order, and thread-local behavior. Rust associated constants may
+still be appropriate for immutable values.
+
+Choose names usable in both languages. Rename Rust keywords in C++ fields and
+parameters before conversion, or use a supported Rust raw identifier when the
+public spelling must remain compatible. Reserve `self` for its receiver role.
+
+Ordinary class and method templates often translate to Rust generics. Keep the
+type parameter when it expresses useful behavior. Variadic parameter packs,
+SFINAE, and CRTP do not have the same direct spelling; reconsider those APIs
+individually. For example, repeated single-value operations or a slice may
+replace a variadic API. Type erasure is a choice with allocation and dispatch
+costs, not a prerequisite for converting every template.
+
+### 19.5 Shape ownership and function signatures
+
+Make each parameter's ownership visible before translation:
+
+| C++ intent or pattern | Prepared interface | Rust counterpart |
+|---|---|---|
+| Non-null, read-only borrowed object | `const T&` | `&T` |
+| Exclusive mutable borrowed object | `T&`, with overlapping aliases removed | `&mut T` |
+| Nullable borrowed object | Explicit optional borrow | `Option<&T>` or `Option<&mut T>` |
+| Pointer plus element count | A span with a documented valid range | `&[T]` or `&mut [T]` |
+| `bool find(Key, T* out)` | Return an optional value | `Option<T>` |
+| Status code plus output parameter | Return a value or a structured error | `Result<T, E>` |
+| Unique ownership | An owning handle with explicit transfer | `Box<T>` or a resource-specific owner |
+| Shared ownership | Counted handle with explicit clone and transfer | `Rc<T>` or `Arc<T>` according to the thread model |
+
+A mutable C++ reference alone does not establish Rust's exclusivity. Remove
+overlapping borrows, document returned-reference lifetimes, and scope access so
+the Rust borrow checker can establish them. For a buffer, preserve the
+difference between its initialized length and capacity. Keep a raw pointer at
+an FFI boundary only with the validity, length, ownership, and lifetime contract
+needed to construct the safe view.
+
+Borrow a reference-counted handle when the callee only observes it. Clone when
+the callee needs another owner, and move when it takes the existing owner.
+In hand-written C++, an explicit `.clone()` and a move express that distinction.
+Do not infer Rust ownership from a C++ copy constructor: historical runtime
+versions have allowed shallow copies of generated `Rc` values. Inspect the
+runtime used by your build and exercise destruction as well as successful use.
+
+Rust does not overload functions by argument count or type and has no default
+function arguments. For an arity-based family, use distinct names or one
+signature with explicit options. For a per-type operation such as serialization,
+one trait with implementations for the supported types may preserve the
+abstraction better than renaming every call.
+
+Treat operators according to their meaning. Equality and ordering can map to
+the corresponding traits; assignment is an ownership operation; stream-style
+serialization may need an explicit method or an adapter. An open-ended C++
+overload family using ADL needs a boundary design, not a textual rename alone.
+
+Replace stored member-function pointers and `std::bind` expressions with a
+closure or trait-based callback. Specify whether the callback borrows or owns
+its captures, whether it mutates them, and whether it crosses threads. In Rust,
+select `Fn`, `FnMut`, or `FnOnce` to match those requirements. Keep generics when
+static dispatch fits; use an owned trait object when heterogeneous storage is
+required. A callback that outlives its caller cannot capture stack state by
+reference.
+
+### 19.6 Make mutation and cleanup explicit
+
+Preserve the meaning of C++ `const` methods. A method that changes logically
+internal state through a shared receiver needs an interior-mutability type:
+
+| State and access pattern | Rust representation |
+|---|---|
+| Small `Copy` value, single thread | `Cell<T>` |
+| Borrow-checked state at runtime, single thread | `RefCell<T>` |
+| Shared state protected across threads | `Mutex<T>` or `RwLock<T>` |
+| Independent atomic value | An atomic type with explicit ordering |
+
+Group fields protected by one lock into a state struct and make the mutex own
+it. This makes the lock/data relationship part of the type:
+
+```rust
+use std::sync::Mutex;
+
+struct QueueState {
+    values: Vec<u32>,
+    closed: bool,
+}
+
+struct Queue {
+    state: Mutex<QueueState>,
+}
+
+impl Queue {
+    fn push(&self, value: u32) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return false;
+        }
+        state.values.push(value);
+        true
+    }
+}
+```
+
+This example chooses to panic on a poisoned mutex. Preserve or deliberately
+define the error policy in production. Name guards, keep them alive for the
+whole borrow, and release them before invoking code that may acquire the same
+lock or reenter the object. A `RefCell` borrow can also fail on reentrancy.
+
+When retrieving a mutable value from a container, preserve the reference through
+intermediate bindings and assign through it. An explicit Rust reference type
+can make intent clearer and expose lowering mistakes. If a write disappears,
+inspect the generated C++ for a copied local where a reference was intended.
+Use a behavioral check that reads the container afterward.
+
+Move meaningful destructor behavior into `Drop` or an appropriate resource
+owner. Preserve stop/join ordering, deregistration, and exactly-once release.
+An owning raw pointer needs a matching destruction path; moving it behind an
+opaque handle does not remove that responsibility.
+
+Address-stable or self-referential objects need a separate design. Consider an
+owning allocation and `Pin` where appropriate. `PhantomPinned` prevents the
+automatic `Unpin` implementation in Rust; by itself it does not pin a value.
+Verify the transpiler's corresponding C++ move restrictions and test the
+address-sensitive operation. Keep foreign non-movable objects behind an owner
+whose allocation and release rules are explicit.
+
+### 19.7 Design the interoperability boundary
+
+Keep methods as methods when their interface is already useful. A method can
+delegate platform-specific work to a small free function while the type,
+ownership, and ordinary control flow migrate to Rust. Choose that boundary by
+reading the implementation and its callees.
+
+Raw-pointer operations and syscalls do not automatically require permanent
+C++. Rust can express unsafe code and foreign calls. First consider a suitable
+Rust API, then an explicitly declared foreign call with a documented unsafe
+contract. Keep C++ exceptions, unsupported type metaprogramming, and foreign
+object construction behind an adapter where necessary. Catch C++ exceptions
+inside that adapter and translate them into an explicit result.
+
+For canonical Rust, every external dependency needs a real binding or a
+supported project interoperability declaration. Inline-mode name passthrough
+does not provide such a binding. A C++ `std::vector<T>` can remain at a legacy
+C++ boundary, but it is not interchangeable with Rust `Vec<T>` or the runtime's
+transpiled `rusty::Vec<T>`. Convert deliberately and preserve length, ownership,
+and allocation behavior. Do not copy assumptions from retired container shims.
+
+Keep generated wire types and third-party objects at a clearly owned boundary.
+Use C-compatible values or opaque handles plus create/use/destroy operations
+for a C ABI. Neither a Rust struct nor a generated C++ class is automatically
+layout-compatible with the type it replaces. `Vec`, `Arc`, `Cell`, and mutex
+objects must not be exposed as if they were C records.
+
+Before moving a helper to C, trace its calls. C needs a C ABI adapter to invoke
+a C++ module function. A short helper that calls generated C++ may be harder to
+move than a long helper that calls only C libraries. Avoid duplicating logic to
+make the dependency graph appear simpler.
+
+Document each remaining adapter's reason and removal condition. "Uses pointers"
+is too broad; "owns a foreign object whose destructor is provided by library X"
+explains the actual boundary.
+
+### 19.8 Translate, generate, and verify
+
+For a prepared unit, write the struct or enum, associated factories, method
+signatures, and trait implementations together. Initialize every field, give
+borrows explicit lifetimes where needed, and keep external operations behind
+the boundary selected above. Prefer ordinary valid Rust over spellings chosen
+only because permissive C++ output happens to compile.
+
+For canonical sources, the basic generation commands, run from the rusty-cpp
+checkout, are:
+
+```bash
+cargo build --release -p rusty-cpp-transpiler
+./target/release/rusty-cpp-transpiler input.rs -o output.cppm -m my_module
+./target/release/rusty-cpp-transpiler --crate path/to/Cargo.toml --output-dir cpp_out
+```
+
+Validate the Rust with the owning project's Rust build, including its actual
+features, target configuration, and external bindings. Then compile and link
+the emitted C++ with its runtime and consumers. Crate mode can carry the module
+tree and dependencies; a single-file probe does not establish that cross-module
+resolution works.
+
+For an inline carrier, use numeric `#if RUSTYCPP_RUST` gating, followed by the
+generated region maintained by the tool. See the inline profile for the exact
+marker grammar. Normal C++ builds use `RUSTYCPP_RUST=0`.
+
+```bash
+./target/release/rusty-cpp-transpiler inline-rust --rewrite --files src/example.cpp
+./target/release/rusty-cpp-transpiler inline-rust --check --files src/example.cpp
+```
+
+Check declaration placement before generating:
+
+- Inline bodies need the declarations visible to their translation unit. Do
+  not assume a C++ module import gives the inline translator the same metadata
+  as crate-mode input.
+- A free function defined in a header must be safe to include in multiple
+  translation units. Otherwise, keep its definition in one source file and
+  maintain a matching declaration. Check generated destructors and out-of-line
+  methods for the same issue.
+- Keep required includes in the global module fragment and exports in the
+  correct module. Adding a `match`, loop, or container operation may introduce
+  another runtime dependency. Compile and link a consumer to check reachability.
+- Express platform choices through supported Rust configuration or an explicit
+  platform adapter. A C++ `-D` macro does not automatically become Rust `cfg`.
+  Macro expansion support also depends on the selected translation mode.
+
+Generated regions are derived output. Fix their Rust input or the translator
+and regenerate them. If a project requires a generation post-pass, make it
+deterministic, versioned, and part of the build rather than a manual edit.
+
+`inline-rust --check` exercises code generation and validates carrier structure
+and Rust payload hashes. It does not byte-compare the stored C++ with the newly
+generated output. To detect output drift, regenerate in a disposable copy and
+compare output.
+Record the transpiler revision and runtime revision together, and rebuild the
+binary after changing its source. A stale executable invalidates a capability
+probe.
+
+Use a short validation loop:
+
+1. Validate the Rust and regenerate the affected unit.
+2. Read the generated ownership transfers, references, initialization, cleanup,
+   and interface adapters where the translation is sensitive.
+3. Build and link the library and its affected consumers.
+4. Run focused behavior tests, then the required integration checks. Confirm
+   that the intended tests were built and executed.
+5. Sweep callers for old constructors, enum names, callback signatures, and
+   implicit copies. Keep the source, callers, and any required tool-version
+   change together in the review.
+
+Successful compilation alone cannot detect a mutation applied to a temporary
+copy, an omitted configuration branch, or incorrect reference counting. Check
+observable state, destruction, error paths, and each supported platform branch.
+For code that runs both as Rust and generated C++, compare their results on the
+same inputs.
+
+### 19.9 Investigate conversion blockers
+
+Classify a blocker before introducing a workaround:
+
+| Kind | Example | Response |
+|---|---|---|
+| Language mismatch | Default arguments, concrete inheritance, variadic type packs | Redesign the API using Rust concepts |
+| Mode or interoperability restriction | An inline block depends on declarations it cannot resolve | Change the conversion unit, use crate mode, or add an explicit adapter |
+| Translator or runtime defect | Valid supported Rust emits a copied value where mutation needs a reference | Reduce the case and fix the responsible layer |
+| Project boundary | A third-party C++ API must remain binary-compatible | Preserve an adapter with a documented contract |
+
+Do not treat all templates, closures, atomics, destructors, or raw-pointer code
+as unconvertible. Earlier migrations outlived several such tool limitations.
+Record the exact construct, mode, source revision, command, and observed
+failure. Re-run the probe when changing the toolchain.
+
+A useful probe preserves the feature that caused the failure: cross-module
+imports, const receivers, alias types, or a particular generic instantiation.
+Parse and emit, then compile, link, and execute enough of the result to verify
+the claim. A simplified single-file example can miss a module-resolution bug;
+successful emission can miss invalid C++.
+
+When supported Rust is mistranslated, fix the translator instead of distorting
+the source around the wrong semantics. When the original C++ has no direct Rust
+shape, reshape the API. Keep an adapter if neither step can preserve the needed
+contract yet, with a concrete reason for retaining it.
+
+Pay particular attention to conditional compilation, `Send`/`Sync` constraints,
+and inherited C++ marker traits. An ignored attribute or a marker inherited
+from an empty base may compile while losing the intended restriction. Inspect
+the emitted constraints and exercise both allowed and forbidden uses. Never
+infer a derived object's thread safety from its data-free base.
+
+### 19.10 Review checklist
+
+Use this against the prepared C++ diff, then repeat the relevant checks after
+translation:
+
+- [ ] Each object and parameter has an explicit owner or borrow. Mutable
+  borrows do not overlap, and retained callbacks own or validly borrow captures.
+- [ ] Concrete state uses composition. Trait interfaces and required C++
+  upcasts have been checked with their callers.
+- [ ] Factories initialize every field. Default construction, aggregate
+  initialization, container insertion, and deserialization preserve behavior.
+- [ ] Overloads, default arguments, anonymous enums, nested types, static data,
+  and keyword names have deliberate Rust representations. Useful generics stay.
+- [ ] Shared mutation uses the right cell, lock, or atomic for the thread model.
+  Guard lifetimes and reentrant calls have been checked.
+- [ ] Copy, move, clone, destruction, and address-stability requirements survive
+  the conversion. Ownership is released exactly once.
+- [ ] Foreign types and C++-specific behavior have explicit bindings or adapters.
+  Buffer bounds, error translation, and ABI layout are documented where needed.
+- [ ] The conversion unit contains the definitions it needs. Header definitions,
+  module imports, exports, includes, macros, and platform configuration work in
+  the actual build mode.
+- [ ] Tool and runtime revisions are recorded. Suspected gaps have a reproducer;
+  historical workarounds are not assumed necessary.
+- [ ] Rust validation, C++ compilation and linking, and the relevant behavior
+  checks pass. Regeneration reproduces any checked-in generated output.
 
 ---
 
@@ -2964,8 +3473,9 @@ Rust-like cross-crate resolution without brittle number-matching.
 
 ---
 
-*Document version: 1.7*
-*Last updated: June 2026*
+*Document version: 1.8*
+*Last updated: September 2026*
+*Section 19 expanded with C++ preparation and canonical Rust migration guidance*
 *Section 32 (macro hygiene & cross-crate manifest) added June 2026*
 *Reorganized: Raw pointer discussion moved to dedicated Section 24 in Part VIII*
 *Early examples now use references instead of pointers to match Rust's safe-by-default model*
