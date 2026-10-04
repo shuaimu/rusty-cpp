@@ -176,6 +176,15 @@ pub struct UfcsTraitManifest {
     /// not the re-exported dependency module's members.
     #[serde(default)]
     pub cross_crate_reexports: BTreeMap<String, String>,
+    /// Non-generic type aliases this crate declares whose target is spelled
+    /// entirely in primitive or std types: crate-relative path (`os::RawFd`,
+    /// and `RawFd` when the crate root re-exports it) -> the target's Rust
+    /// tokens (`i32`). A consumer needs the target to see that two of its
+    /// methods collide in C++ (`deregister(fd: i32)` and an `impl` method
+    /// `deregister(fd: lion_reactor::os::RawFd)` are one signature there);
+    /// it never sees the dependency's `type` items.
+    #[serde(default)]
+    pub type_aliases: BTreeMap<String, String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -997,6 +1006,11 @@ pub struct TranspileOptions {
     /// the methods (and the orphan emission should therefore be
     /// suppressed). Empty for single-file mode.
     pub cross_file_structs: Vec<syn::ItemStruct>,
+    /// Struct names a crate-mode pre-pass found an `impl Drop for` in any
+    /// file: a sibling file's struct literal of one must use its fieldwise
+    /// constructor (the Drop type is non-aggregate in C++). Empty for
+    /// single-file mode.
+    pub cross_file_drop_types: Vec<String>,
     /// Exact Rust paths of public unconditional structs declared directly in
     /// physical sibling modules. Module anchors and aliases do not create a
     /// flat-import marker, but still need this ownership proof for UFCS.
@@ -1058,6 +1072,14 @@ pub struct TranspileOptions {
     /// dev-dependency) are harmless — so a transpile-time panic there is a
     /// false failure. The backstop still fires for the crate under test.
     pub is_dependency: bool,
+    /// `--verus-exec`: erase Verus `verus! { }` blocks (and evaluate the
+    /// Verus driver cfgs as false) in every crate source before any pass
+    /// reads it. Disabled by default; see `crate::verus_exec`.
+    pub verus_exec: crate::verus_exec::VerusExecConfig,
+    /// `--crate-graph`: this crate's resolved features and its dependencies'
+    /// surfaces (see `crate::crate_graph`). `None` outside graph mode, which
+    /// leaves every crate-mode path exactly as before.
+    pub crate_graph: Option<crate::crate_graph::GraphCrateContext>,
 }
 
 /// Classification of a method *name* across the whole crate, used by the UFCS
@@ -1600,12 +1622,13 @@ fn resolve_rust_import_target(
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    resolve_relative_rust_path(
+    resolve_relative_rust_path_in(
         &segments,
         binding_scope,
         declared_trait_paths,
         bindings,
         visiting,
+        true,
     )
 }
 
@@ -1681,6 +1704,26 @@ fn resolve_relative_rust_path(
     bindings: &RustItemImportBindings,
     visiting: &mut std::collections::HashSet<(String, String)>,
 ) -> Option<ResolvedRustItemPath> {
+    resolve_relative_rust_path_in(
+        segments,
+        module_path,
+        declared_trait_paths,
+        bindings,
+        visiting,
+        false,
+    )
+}
+
+/// `import_target`: `segments` is the target of a `use` declaration (see the
+/// glob rule below).
+fn resolve_relative_rust_path_in(
+    segments: &[String],
+    module_path: &[String],
+    declared_trait_paths: &std::collections::HashSet<String>,
+    bindings: &RustItemImportBindings,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+    import_target: bool,
+) -> Option<ResolvedRustItemPath> {
     let head = segments.first()?;
     let tail = &segments[1..];
     let candidates = [
@@ -1710,7 +1753,14 @@ fn resolve_relative_rust_path(
         bindings,
     );
     let Some(best_depth) = best_depth else {
-        if glob_depth.is_some() {
+        // A glob could supply the name — except the first segment of a `use`
+        // target naming an extern-prelude crate: an import whose `std` is
+        // also glob-supplied is rejected by rustc's import resolution as
+        // ambiguous, so in a compiling crate `use std::…` beside a glob
+        // import names the crate. (Direct paths keep failing closed.)
+        if glob_depth.is_some()
+            && !(import_target && matches!(head.as_str(), "std" | "core" | "alloc"))
+        {
             return None;
         }
         return Some(ResolvedRustItemPath::External(segments.to_vec()));
@@ -2465,6 +2515,7 @@ impl Default for TranspileOptions {
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
+            cross_file_drop_types: Vec::new(),
             cross_file_struct_qualified_paths: BTreeSet::new(),
             cross_file_type_aliases: Vec::new(),
             flat_import_type_authorizations: BTreeSet::new(),
@@ -2472,6 +2523,8 @@ impl Default for TranspileOptions {
             cxx_namespace: None,
             flat_import_namespace: None,
             auto_namespace: false,
+            verus_exec: crate::verus_exec::VerusExecConfig::default(),
+            crate_graph: None,
         }
     }
 }
@@ -3292,6 +3345,13 @@ fn transpile_full_with_options_impl(
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
+    codegen.set_emit_dyn_adapters(
+        options
+            .crate_graph
+            .as_ref()
+            .is_some_and(|graph| graph.dependency),
+    );
+    codegen.set_crate_graph_mode(options.crate_graph.is_some());
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_authenticated_cpp_inherit_roots(
         options.authenticated_cpp_inherit_roots.clone(),
@@ -3323,6 +3383,7 @@ fn transpile_full_with_options_impl(
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
+    codegen.set_cross_file_drop_types(&options.cross_file_drop_types);
     codegen.cross_file_struct_qualified_paths = options.cross_file_struct_qualified_paths.clone();
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_flat_import_type_authorizations(
@@ -6014,6 +6075,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             preserved_collapse_methods: Vec::new(),
             trait_method_return_assoc: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
+            type_aliases: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
@@ -6105,6 +6167,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             preserved_collapse_methods: Vec::new(),
             trait_method_return_assoc: std::collections::BTreeMap::new(),
             cross_crate_reexports: std::collections::BTreeMap::new(),
+            type_aliases: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_byvalue_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();

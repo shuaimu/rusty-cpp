@@ -1235,6 +1235,21 @@ impl CodeGen {
                         out,
                     );
                 }
+                // A `thread_local!` static is defined (and initialised) where
+                // its module is emitted: its value type must be complete there
+                // (`RefCell<VecDeque<TaskId>>` needs the crate's VecDeque).
+                syn::Item::Macro(m) if m.mac.path.is_ident("thread_local") => {
+                    for s in crate::cpp_abi::parse_thread_local_statics(&m.mac).unwrap_or_default() {
+                        self.collect_type_module_dependencies_strict(
+                            &s.ty,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            true,
+                            out,
+                        );
+                    }
+                }
                 syn::Item::Fn(f) => {
                     // Signature positions only need the type NAMEABLE: the
                     // per-module pre-pass forward-declares structs and emits
@@ -3373,6 +3388,15 @@ impl CodeGen {
                     let impl_block: &syn::ItemImpl =
                         debug_renamed_impl.as_ref().unwrap_or(impl_block);
 
+                    // An impl in a module that does not declare its type: the
+                    // methods merge into the struct emitted elsewhere, and are
+                    // tagged with this authoring module (whose imports their
+                    // names resolve through).
+                    let merged_from_module = (!module_path.is_empty()
+                        && raw_type_name.rsplit("::").next().is_some_and(|tail| {
+                            !self.module_path_declares_type_name_exact(module_path, tail)
+                        }))
+                    .then(|| module_path.join("::"));
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     let seen_method_keys = self
                         .impl_method_conflict_keys
@@ -3461,6 +3485,16 @@ impl CodeGen {
                             if impl_is_automatically_derived {
                                 mark_method_automatically_derived(&mut merged);
                             }
+                            if let Some(params) = (AliasTables {
+                                local: &self.declared_alias_paths,
+                                dependency: &self.dependency_type_alias_targets,
+                            })
+                            .resolved_params_key(&merged, module_path, items)
+                            {
+                                merged.attrs.push(syn::parse_quote!(
+                                    #[rusty_cpp_conflict_params = #params]
+                                ));
+                            }
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
                                 resolve_impl_method_conflict(
@@ -3521,6 +3555,13 @@ impl CodeGen {
                                 impl_block,
                             );
                             collected_item = syn::ImplItem::Fn(merged);
+                        }
+                        if let syn::ImplItem::Fn(method) = &mut collected_item
+                            && let Some(origin) = merged_from_module.as_deref()
+                        {
+                            method.attrs.push(syn::parse_quote!(
+                                #[rusty_cpp_merged_from = #origin]
+                            ));
                         }
                         entry.push(collected_item);
                     }
@@ -3897,8 +3938,26 @@ impl CodeGen {
                         }
                         let path = normalized.trim().trim_start_matches("::");
                         if let Some((prefix, name)) = path.rsplit_once("::") {
-                            self.crate_reexports
-                                .insert(name.to_string(), prefix.to_string());
+                            // A relative path in a nested module resolves
+                            // against that module first (`pub(crate) use
+                            // waker::create_waker;` inside `mod types` is
+                            // `types::waker::create_waker`); record it
+                            // crate-rooted.
+                            let prefix = match prefix.split("::").next() {
+                                Some(first)
+                                    if !module_path.is_empty()
+                                        && self.declared_module_paths.contains(&format!(
+                                            "{}::{}",
+                                            module_path.join("::"),
+                                            first
+                                        ))
+                                        && !self.declared_module_paths.contains(first) =>
+                                {
+                                    format!("{}::{}", module_path.join("::"), prefix)
+                                }
+                                _ => prefix.to_string(),
+                            };
+                            self.crate_reexports.insert(name.to_string(), prefix.clone());
                             self.crate_pub_reexport_targets
                                 .insert(format!("{}::{}", prefix, name));
                         }
@@ -5141,6 +5200,13 @@ impl CodeGen {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
                         self.collect_item_const_types(nested_items, &nested_path);
+                    }
+                }
+                syn::Item::Macro(m) if m.mac.path.is_ident("thread_local") => {
+                    for s in crate::cpp_abi::parse_thread_local_statics(&m.mac).unwrap_or_default() {
+                        let mut key = module_path.to_vec();
+                        key.push(s.ident.to_string());
+                        self.thread_local_value_types.insert(key.join("::"), (*s.ty).clone());
                     }
                 }
                 syn::Item::Static(s) => {
@@ -6440,6 +6506,26 @@ impl CodeGen {
                     self.record_function_return_type(&scoped_name, return_ty);
                 }
                 syn::Item::Trait(t) => {
+                    // A trait's declared method signatures, for calls through
+                    // a trait object (`Box<dyn Tr>`, `&mut dyn Tr`), which
+                    // have no impl to take them from.
+                    let mut owners = vec![t.ident.to_string()];
+                    if !module_path.is_empty() {
+                        owners.push(format!("{}::{}", module_path.join("::"), t.ident));
+                    }
+                    for trait_item in &t.items {
+                        let syn::TraitItem::Fn(method) = trait_item else {
+                            continue;
+                        };
+                        let method_name = method.sig.ident.to_string();
+                        let expected_types =
+                            self.collect_arg_expected_types_from_inputs(&method.sig.inputs, true);
+                        for owner in &owners {
+                            std::rc::Rc::make_mut(&mut self.trait_object_method_arg_expected_types)
+                                .entry(format!("{}::{}", owner, method_name))
+                                .or_insert_with(|| expected_types.clone());
+                        }
+                    }
                     // Checkpoint contract 4/7/10: a non-`pub` trait's C++ class
                     // is emitted inside an anonymous namespace, and everything
                     // synthesized FOR it must share that internal/vague linkage.
@@ -10826,6 +10912,59 @@ impl CodeGen {
                 result.extend(visitor.hits);
             }
         }
+        // A fresh local initialised by a call (`let w = slab.remove(k).unwrap();`)
+        // and then consumed by a user method taking `self` by value
+        // (`w.with_read_waker(waker)`): a `const auto` binding cannot call the
+        // (non-const) consuming member. Match/if/block initialisers are left
+        // out (their let-IIFE typing path is the one the general version
+        // above disturbed).
+        {
+            let mut call_inits: HashSet<String> = HashSet::new();
+            for stmt in stmts {
+                if let syn::Stmt::Local(local) = stmt
+                    && let Some(init) = &local.init
+                    && matches!(
+                        self.peel_paren_group_expr(&init.expr),
+                        syn::Expr::MethodCall(_) | syn::Expr::Call(_)
+                    )
+                    && let syn::Pat::Ident(pi) = &local.pat
+                    && pi.subpat.is_none()
+                {
+                    call_inits.insert(pi.ident.to_string());
+                }
+            }
+            if !call_inits.is_empty() {
+                struct CallInitConsumed<'a> {
+                    cg: &'a CodeGen,
+                    names: &'a HashSet<String>,
+                    hits: HashSet<String>,
+                }
+                impl<'a, 'ast> Visit<'ast> for CallInitConsumed<'a> {
+                    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                        if let syn::Expr::Path(p) = self.cg.peel_paren_group_expr(&mc.receiver)
+                            && let Some(ident) = p.path.get_ident()
+                            && self.names.contains(&ident.to_string())
+                            && self
+                                .cg
+                                .known_method_consumes_self_by_value(&mc.method.to_string())
+                        {
+                            self.hits.insert(ident.to_string());
+                        }
+                        visit::visit_expr_method_call(self, mc);
+                    }
+                    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+                }
+                let mut visitor = CallInitConsumed {
+                    cg: self,
+                    names: &call_inits,
+                    hits: HashSet::new(),
+                };
+                for stmt in stmts {
+                    visitor.visit_stmt(stmt);
+                }
+                result.extend(visitor.hits);
+            }
+        }
         // `place = local;` consumes the local (Rust moves assignment RHS
         // places). A `const auto` binding would turn that emitted
         // `std::move(local)` into a copy — deleted for variants holding
@@ -14525,5 +14664,153 @@ fn builtin_std_method_arg_expected_type(method_name: &str, arg_idx: usize) -> Op
         ("read_to_end", 0) => Some(syn::parse_quote!(&mut Vec<u8>)),
         ("read_to_string", 0) => Some(syn::parse_quote!(&mut String)),
         _ => None,
+    }
+}
+
+/// The type aliases the impl-method collision check sees through: this
+/// crate's (`declared_alias_paths`) and the dependency manifests'
+/// (`dependency_type_alias_targets`). Borrowed field by field, so the check
+/// runs while the collection pass holds its impl tables.
+pub(super) struct AliasTables<'a> {
+    pub(super) local: &'a std::collections::BTreeMap<String, syn::Type>,
+    pub(super) dependency: &'a HashMap<String, syn::Type>,
+}
+
+impl AliasTables<'_> {
+    /// The parameter list of a merged impl method's collision key with every
+    /// type alias resolved, when that differs from its spelled list. Two
+    /// methods are one C++ signature when they differ only by an alias
+    /// (SRPC's inherent `deregister(&mut self, fd: i32)` and its `impl
+    /// OsBackend` method `deregister(&mut self, fd: lion_reactor::os::RawFd)`);
+    /// keyed by spelling, both were emitted and C++ rejected the second.
+    pub(super) fn resolved_params_key(
+        &self,
+        method: &syn::ImplItemFn,
+        module_path: &[String],
+        items: &[syn::Item],
+    ) -> Option<String> {
+        if self.local.is_empty() && self.dependency.is_empty() {
+            return None;
+        }
+        let mut resolved = method.clone();
+        let mut changed = false;
+        for arg in resolved.sig.inputs.iter_mut() {
+            if let syn::FnArg::Typed(pt) = arg
+                && self.resolve_in_type(pt.ty.as_mut(), module_path, items, 0)
+            {
+                changed = true;
+            }
+        }
+        if !changed {
+            return None;
+        }
+        let key = impl_method_conflict_key(&resolved);
+        key.splitn(4, '|').nth(3).map(str::to_string)
+    }
+
+    fn resolve_in_type(
+        &self,
+        ty: &mut syn::Type,
+        module_path: &[String],
+        items: &[syn::Item],
+        depth: usize,
+    ) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        if let syn::Type::Path(tp) = &*ty
+            && tp.qself.is_none()
+            && tp
+                .path
+                .segments
+                .iter()
+                .all(|seg| matches!(seg.arguments, syn::PathArguments::None))
+            && let Some(target) = self.target_for_path(&tp.path, module_path, items)
+        {
+            *ty = target;
+            self.resolve_in_type(ty, module_path, items, depth + 1);
+            return true;
+        }
+        struct Children<'a, 'b> {
+            tables: &'a AliasTables<'b>,
+            module_path: &'a [String],
+            items: &'a [syn::Item],
+            depth: usize,
+            changed: bool,
+        }
+        impl syn::visit_mut::VisitMut for Children<'_, '_> {
+            fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+                if self
+                    .tables
+                    .resolve_in_type(ty, self.module_path, self.items, self.depth + 1)
+                {
+                    self.changed = true;
+                }
+            }
+        }
+        let mut children = Children {
+            tables: self,
+            module_path,
+            items,
+            depth,
+            changed: false,
+        };
+        syn::visit_mut::visit_type_mut(&mut children, ty);
+        children.changed
+    }
+
+    /// The target of the non-generic type alias `path` names, if it names one:
+    /// a dependency's (by its crate-rooted path) or this crate's (relative to
+    /// `module_path`, through `crate::`/`self::`/`super::`, or through a `use`
+    /// in `items`).
+    fn target_for_path(
+        &self,
+        path: &syn::Path,
+        module_path: &[String],
+        items: &[syn::Item],
+    ) -> Option<syn::Type> {
+        let segs: Vec<String> = path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let first = segs.first()?;
+        let dependency = |full: &[String]| self.dependency.get(&full.join("::")).cloned();
+        let local = |rel: &[String]| self.local.get(&rel.join("::")).cloned();
+        if path.leading_colon.is_some() {
+            return dependency(&segs);
+        }
+        let resolve_rooted = |full: &[String]| -> Option<syn::Type> {
+            match full.first().map(String::as_str) {
+                Some("crate") => local(&full[1..]),
+                Some("self") => {
+                    let mut rel = module_path.to_vec();
+                    rel.extend(full[1..].iter().cloned());
+                    local(&rel)
+                }
+                Some("super") => {
+                    let mut rel = module_path.to_vec();
+                    let mut idx = 0;
+                    while full.get(idx).is_some_and(|seg| seg == "super") {
+                        rel.pop()?;
+                        idx += 1;
+                    }
+                    rel.extend(full[idx..].iter().cloned());
+                    local(&rel)
+                }
+                _ => dependency(full).or_else(|| {
+                    let mut rel = module_path.to_vec();
+                    rel.extend(full.iter().cloned());
+                    local(&rel)
+                }),
+            }
+        };
+        if matches!(first.as_str(), "crate" | "self" | "super") {
+            return resolve_rooted(&segs);
+        }
+        // A leading name a `use` binds (`RawFd`, or `os` in `os::RawFd`).
+        if let Some(mut bound) = use_binding_path_in_items(items, first) {
+            bound.extend(segs[1..].iter().cloned());
+            if let Some(target) = resolve_rooted(&bound) {
+                return Some(target);
+            }
+        }
+        resolve_rooted(&segs).or_else(|| if segs.len() > 1 { local(&segs) } else { None })
     }
 }

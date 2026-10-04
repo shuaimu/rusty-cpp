@@ -591,7 +591,67 @@ impl CodeGen {
         }
     }
 
+    /// `match x.await { .. }` in value position lowers through a lambda, and a
+    /// `co_await` inside a lambda makes the LAMBDA the coroutine (ill-formed
+    /// with its `return`s). Await the scrutinee first, in the enclosing
+    /// coroutine: `let __awaited_N = x.await;` before the statement, which then
+    /// matches on `__awaited_N`. None when no statement needs it.
+    fn hoist_awaited_match_scrutinees(block: &syn::Block) -> Option<syn::Block> {
+        struct FindAwait(bool);
+        impl<'ast> syn::visit::Visit<'ast> for FindAwait {
+            fn visit_expr_await(&mut self, _: &'ast syn::ExprAwait) {
+                self.0 = true;
+            }
+            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+            fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+        }
+        fn awaits(expr: &syn::Expr) -> bool {
+            let mut finder = FindAwait(false);
+            syn::visit::Visit::visit_expr(&mut finder, expr);
+            finder.0
+        }
+        fn scrutinee_slot(stmt: &mut syn::Stmt) -> Option<&mut syn::Expr> {
+            let expr = match stmt {
+                syn::Stmt::Local(local) => &mut local.init.as_mut()?.expr,
+                syn::Stmt::Expr(expr, _) => expr,
+                _ => return None,
+            };
+            let mut expr: &mut syn::Expr = expr;
+            while let syn::Expr::Paren(_) | syn::Expr::Group(_) = expr {
+                expr = match expr {
+                    syn::Expr::Paren(p) => &mut p.expr,
+                    syn::Expr::Group(g) => &mut g.expr,
+                    _ => unreachable!(),
+                };
+            }
+            match expr {
+                syn::Expr::Match(m) if awaits(&m.expr) => Some(&mut m.expr),
+                _ => None,
+            }
+        }
+        let mut stmts = Vec::with_capacity(block.stmts.len() + 1);
+        let mut changed = false;
+        for (idx, stmt) in block.stmts.iter().enumerate() {
+            let mut stmt = stmt.clone();
+            if let Some(slot) = scrutinee_slot(&mut stmt) {
+                let name = syn::Ident::new(
+                    &format!("__awaited_{}", idx),
+                    proc_macro2::Span::call_site(),
+                );
+                let awaited = std::mem::replace(slot, syn::parse_quote!(#name));
+                stmts.push(syn::parse_quote!(let #name = #awaited;));
+                changed = true;
+            }
+            stmts.push(stmt);
+        }
+        changed.then(|| syn::Block { brace_token: block.brace_token, stmts })
+    }
+
     pub(super) fn emit_block(&mut self, block: &syn::Block) {
+        if let Some(hoisted) = Self::hoist_awaited_match_scrutinees(block) {
+            return self.emit_block(&hoisted);
+        }
         // Record this block's `static` items so a `return NAME;` over one does
         // not emit std::move (see return_expr_should_move_local).
         let block_static_names: std::collections::HashSet<String> = block
@@ -621,6 +681,10 @@ impl CodeGen {
         let multi_use = collect_multi_use_vars(&block.stmts);
         block_profile_mark("collect_multi_use_vars");
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
+        let prev_bare_arguments = std::mem::replace(
+            &mut self.bare_argument_vars,
+            collect_bare_argument_vars(&block.stmts),
+        );
         // Pre-scan (C6, checkpoint contract 6): locals that flow into a
         // runtime-facade field whose native C++ type is a copyable
         // `std::function` (`rusty::Waker { wake_fn }`). Their declarations
@@ -651,6 +715,11 @@ impl CodeGen {
         block_profile_mark("collect_mutable_pointer_aliased_locals");
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
         block_profile_mark("collect_repeat_element_type_hints");
+        for (call_key, template_args) in
+            self.collect_generic_call_template_args_from_later_use(&block.stmts)
+        {
+            self.generic_call_later_use_template_args.insert(call_key, template_args);
+        }
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
         block_profile_mark("collect_local_generic_placeholder_hints");
         // Large expanded test functions can contain massive generated blocks.
@@ -785,6 +854,7 @@ impl CodeGen {
         self.collection_decltype_element_overrides
             .push(decltype_element_overrides);
         self.local_bindings.push(HashMap::new());
+        self.raw_pointer_cast_locals.push(HashMap::new());
         self.local_shadowed_binding_types.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
         self.local_cpp_names_used.push(HashSet::new());
@@ -1045,6 +1115,7 @@ impl CodeGen {
         self.block_depth -= 1;
         self.local_static_names.pop();
         self.local_bindings.pop();
+        self.raw_pointer_cast_locals.pop();
         self.local_shadowed_binding_types.pop();
         self.local_cpp_bindings.pop();
         self.local_cpp_names_used.pop();
@@ -1074,6 +1145,7 @@ impl CodeGen {
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;
+        self.bare_argument_vars = prev_bare_arguments;
         self.copyable_callable_contract_locals = prev_callable_contracts;
         block_profile_mark("done");
     }
@@ -1397,6 +1469,8 @@ impl CodeGen {
             self.peel_paren_group_expr(&match_expr.expr),
             syn::Expr::Reference(r) if r.mutability.is_some()
         );
+        let scrutinee_owns_payload = !scrutinee_is_mut_borrow
+            && !self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
         let payload_source = if self.runtime_match_scrutinee_borrows_payload(&match_expr.expr)
             && !scrutinee_is_mut_borrow
         {
@@ -1527,7 +1601,37 @@ impl CodeGen {
                             &arm.body,
                             &arm_binding_map.keys().cloned().collect(),
                         );
-                    if needs_payload_materialization {
+                    // See the emit_stmt twin: an owned scrutinee's unguarded
+                    // arm that uses a by-value binding views the payload
+                    // mutably (`rusty::detail::peek_unwrap`), at every level.
+                    let arm_uses_owned_payload = scrutinee_owns_payload
+                        && arm.guard.is_none()
+                        && needs_payload_materialization
+                        && expr_uses_bindings_by_value(
+                            &arm.body,
+                            &arm_binding_map.keys().cloned().collect(),
+                        );
+                    if arm_uses_owned_payload || arm_consumes_payload {
+                        binding_stmts = binding_stmts
+                            .iter()
+                            .map(|stmt| Self::rewrite_std_as_const_runtime_unwraps_to_peek(stmt))
+                            .collect();
+                    }
+                    if needs_payload_materialization
+                        && arm_uses_owned_payload
+                        && payload_condition.is_some()
+                        && !arm_consumes_payload
+                    {
+                        let peek = if unwrap_method == "unwrap_err" {
+                            "rusty::detail::peek_unwrap_err"
+                        } else {
+                            "rusty::detail::peek_unwrap"
+                        };
+                        arm_payload_setup_lines.push(format!(
+                            "auto&& {} = {}(rusty::detail::deref_if_pointer(_m));",
+                            matched_value, peek
+                        ));
+                    } else if needs_payload_materialization {
                         let payload_value_source = if (payload_condition.is_some()
                             || arm.guard.is_some())
                             && !scrutinee_is_mut_borrow
@@ -1841,9 +1945,25 @@ impl CodeGen {
             for binding_line in arm_binding_lines {
                 self.writeln(&binding_line);
             }
-            let pushed_binding_scope = self.push_local_cpp_binding_scope_with_types(
+            // An OWNED scrutinee (`match self.slab.remove(id)`, `match task`)
+            // moves its payload into the arm's by-value bindings: they own
+            // their values and may be moved on (`Some(task) => f(Some(task))`),
+            // where a borrowed scrutinee's bindings stay references.
+            let owned_payload_bindings: HashSet<String> = if scrutinee_owns_payload {
+                let mut explicit_refs = HashSet::new();
+                self.collect_pattern_explicit_ref_binding_names(&arm.pat, &mut explicit_refs);
+                arm_binding_map
+                    .keys()
+                    .filter(|name| !explicit_refs.contains(*name))
+                    .cloned()
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let pushed_binding_scope = self.push_local_cpp_binding_scope_with_owned_payloads(
                 &arm_binding_map,
                 Some(&arm_binding_types),
+                &owned_payload_bindings,
             );
 
             if let Some((_, guard)) = &arm.guard {
@@ -3013,6 +3133,16 @@ impl CodeGen {
                     joined.join(" + ")
                 }
             }
+            // `pin!(e)` pins `e` in place: `Pin<&mut T>` is the pinned place
+            // itself here (include/rusty/pin.hpp), so the value is the pin.
+            // (`let x = pin!(e);` binds it in emit_local.)
+            "pin" => match syn::parse2::<syn::Expr>(mac.tokens.clone()) {
+                Ok(pinned) => format!(
+                    "rusty::pin_place::as_mut({})",
+                    self.emit_expr_to_string(&pinned)
+                ),
+                Err(_) => format!("/* {}!({}) */", macro_name, tokens),
+            },
             "for_both" => self
                 .try_lower_for_both_macro_expr(mac)
                 .unwrap_or_else(|| format!("/* {}!({}) */", macro_name, tokens)),
@@ -5427,6 +5557,14 @@ impl CodeGen {
         }
 
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        // An OWNED scrutinee (`match backend { Some(backend) => f(backend) }`)
+        // moves its payload into the arms' by-value bindings, exactly as in
+        // try_emit_runtime_match_stmt: they may be moved on (a move-only
+        // Box passed by value), where a borrowed scrutinee's stay references.
+        let scrutinee_owns_payload = !matches!(
+            self.peel_paren_group_expr(&match_expr.expr),
+            syn::Expr::Reference(_)
+        ) && !self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
         let scrutinee_var = self.reserve_synthetic_cpp_name("_m");
         let match_scrutinee_ty = self
             .infer_simple_expr_type(&match_expr.expr)
@@ -5468,8 +5606,22 @@ impl CodeGen {
             for binding in bindings {
                 self.writeln(&binding);
             }
-            let pushed_binding_scope =
-                self.push_local_cpp_binding_scope_with_types(&binding_map, Some(&binding_types));
+            let owned_payload_bindings: HashSet<String> = if scrutinee_owns_payload {
+                let mut explicit_refs = HashSet::new();
+                self.collect_pattern_explicit_ref_binding_names(&arm.pat, &mut explicit_refs);
+                binding_map
+                    .keys()
+                    .filter(|name| !explicit_refs.contains(*name))
+                    .cloned()
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let pushed_binding_scope = self.push_local_cpp_binding_scope_with_owned_payloads(
+                &binding_map,
+                Some(&binding_types),
+                &owned_payload_bindings,
+            );
             if let Some((_, guard)) = &arm.guard {
                 let guard_condition = self.emit_expr_to_string(guard);
                 self.writeln(&format!("if ({}) {{", guard_condition));
@@ -6264,6 +6416,72 @@ impl CodeGen {
             method_call,
             static_args.join(", ")
         ))
+    }
+
+    /// A crate type's own method called through its path
+    /// (`SrpcEpollBackend::wait(self, &mut batch, timeout)`) is the method
+    /// call `self.wait(&mut batch, timeout)`: emitted as one, its arguments
+    /// are typed by the method's parameters (`&mut batch` binds the `Vec&`
+    /// parameter where it emitted as the pointer `&batch`, and `Some(3)`
+    /// takes the parameter's `Option<u64>`). Only for a receiver method of a
+    /// type the crate declares: other owners keep their own lowering.
+    fn try_emit_crate_type_ufcs_as_method_call(
+        &self,
+        call: &syn::ExprCall,
+        func_path: &syn::ExprPath,
+        owner_tail: &str,
+    ) -> Option<String> {
+        if func_path.qself.is_some() || call.args.is_empty() {
+            return None;
+        }
+        // `Self::m(self, ..)` names the impl's own type.
+        let self_tail;
+        let owner_tail = if owner_tail == "Self" {
+            self_tail = self
+                .current_struct
+                .as_deref()?
+                .rsplit("::")
+                .next()?
+                .to_string();
+            self_tail.as_str()
+        } else {
+            owner_tail
+        };
+        let owner_is_crate_type = self.local_declared_types.contains(owner_tail)
+            || self.declared_item_names.contains(owner_tail)
+            || self
+                .current_struct
+                .as_deref()
+                .is_some_and(|current| current.rsplit("::").next() == Some(owner_tail));
+        if !owner_is_crate_type
+            || self.data_enum_name_matches(owner_tail)
+            || self.module_runtime_helper_traits.contains(owner_tail)
+        {
+            return None;
+        }
+        let last = func_path.path.segments.last()?;
+        let method_name = last.ident.to_string();
+        if self.lookup_owner_method_has_receiver(owner_tail, &method_name) != Some(true) {
+            return None;
+        }
+        let turbofish = match &last.arguments {
+            syn::PathArguments::AngleBracketed(ab) => Some(ab.clone()),
+            _ => None,
+        };
+        let mut receiver = self.peel_paren_group_expr(&call.args[0]).clone();
+        if let syn::Expr::Reference(reference) = &receiver {
+            receiver = (*reference.expr).clone();
+        }
+        let method_call = syn::ExprMethodCall {
+            attrs: Vec::new(),
+            receiver: Box::new(receiver),
+            dot_token: Default::default(),
+            method: last.ident.clone(),
+            turbofish,
+            paren_token: Default::default(),
+            args: call.args.iter().skip(1).cloned().collect(),
+        };
+        Some(self.emit_expr_to_string(&syn::Expr::MethodCall(method_call)))
     }
 
     pub(super) fn try_emit_deserialize_map_seed_rewrite(
@@ -9406,7 +9624,15 @@ impl CodeGen {
                             && !self.type_contains_unresolved_placeholder_like(ty)
                     })
             });
-            *self.pending_map_closure_input_type.borrow_mut() = input_ty;
+            // Tagged with the closure it is for: a copy of this codegen made
+            // before the closure consumed it (a fragment renderer) must not
+            // hand it to an unrelated later closure.
+            let closure_key = match self.peel_paren_group_expr(&mc.args[0]) {
+                syn::Expr::Closure(closure) => closure as *const syn::ExprClosure as usize,
+                _ => 0,
+            };
+            *self.pending_map_closure_input_type.borrow_mut() =
+                input_ty.map(|ty| (closure_key, ty));
             // RETURN-side: the map call's own expected Option/Result payload
             // is the closure's return. Threaded only for REFERENCE payloads
             // (`Option<&mut V>`) — an unannotated lambda's deduced return
@@ -9421,11 +9647,13 @@ impl CodeGen {
                         .or_else(|| self.expected_result_type_arg(Some(expected), 0))
                         .cloned()
                 });
-            *self.pending_map_closure_return_type.borrow_mut() = return_payload.filter(|ty| {
-                matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
-                    && !self.type_contains_infer(ty)
-                    && !self.type_contains_unresolved_placeholder_like(ty)
-            });
+            *self.pending_map_closure_return_type.borrow_mut() = return_payload
+                .filter(|ty| {
+                    matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
+                        && !self.type_contains_infer(ty)
+                        && !self.type_contains_unresolved_placeholder_like(ty)
+                })
+                .map(|ty| (closure_key, ty));
         }
         if matches!(method_name.as_str(), "eq" | "ne")
             && mc.args.len() == 1
@@ -9503,7 +9731,20 @@ impl CodeGen {
                         None
                     }
                 });
-            let method_expected_ty = self.lookup_method_arg_expected_type(&method_name, idx);
+            // A by-name hint from a generic owner's impl (`fn finish(self, r:
+            // Result<T, JoinError>)` of `JoinSender<T>`) names that owner's
+            // parameter; outside the owner, with no receiver type to
+            // substitute it, it is no hint at all.
+            // Nor does any by-name hint apply to a dependency crate's type
+            // (`self.inner.park(..)` on a `lion_reactor::Reactor` next to the
+            // crate's own `Reactor::park(Option<Duration>)`): the crate's own
+            // method of that name says nothing about the dependency's.
+            let receiver_is_dependency_type =
+                self.receiver_type_is_dependency_crate_type(&mc.receiver);
+            let method_expected_ty = self
+                .lookup_method_arg_expected_type(&method_name, idx)
+                .filter(|ty| !self.type_mentions_out_of_scope_owner_type_param(ty))
+                .filter(|_| !receiver_is_dependency_type);
             let owner_expected_ty = self.lookup_method_arg_expected_type_from_receiver_owner(
                 &mc.receiver,
                 &method_name,
@@ -9734,8 +9975,28 @@ impl CodeGen {
                     continue;
                 }
             }
+            // `KEY.with(|v| ..)` / `KEY.try_with(|v| ..)` on a `thread_local!`
+            // key: the closure's parameter is `&T`, `T` the key's declared
+            // value type. Typing it lets the body see `v.borrow()` as a
+            // `Ref<T>` (guard dispatch) and destructured payloads as what
+            // they are (`Arc<Q>` methods through `->`).
+            let thread_local_closure_param = matches!(method_name.as_str(), "with" | "try_with")
+                && idx == 0
+                && mc.args.len() == 1
+                && matches!(self.peel_paren_group_expr(arg),
+                    syn::Expr::Closure(closure) if closure.inputs.len() == 1)
+                && self.pending_closure_param_types.borrow().is_none();
+            if thread_local_closure_param
+                && let Some(value_ty) = self.thread_local_key_value_type(&mc.receiver)
+            {
+                *self.pending_closure_param_types.borrow_mut() =
+                    Some(vec![syn::parse_quote!(&#value_ty)]);
+            }
             let mut emitted_arg =
                 self.emit_call_arg_with_pass_style(arg, style, arg_expected, false, None);
+            if thread_local_closure_param {
+                *self.pending_closure_param_types.borrow_mut() = None;
+            }
             let map_like_insert_key_arg = method_name == "insert"
                 && idx == 0
                 && (self
@@ -11374,6 +11635,58 @@ impl CodeGen {
                 return format!("rusty::ptr::read_unaligned({})", receiver);
             }
         }
+        // `Pin<&mut T>` / `Pin<&T>` is modelled by the pinned place itself, so
+        // Pin's projections are free functions over it (rusty::pin_place,
+        // include/rusty/pin.hpp):
+        // `self.get_unchecked_mut()` / `self.map_unchecked_mut(|s| &mut s.0)`
+        // in a `self: Pin<&mut Self>` method, or on a pinned local.
+        let receiver_is_pinned_self = matches!(
+            method_name.as_str(),
+            "get_unchecked_mut" | "map_unchecked_mut" | "map_unchecked"
+        ) && matches!(self.peel_paren_group_expr(&mc.receiver),
+            syn::Expr::Path(p) if p.path.is_ident("self"));
+        let receiver_is_typed_pin = || {
+            self.infer_simple_expr_type(&mc.receiver).is_some_and(|ty| {
+                matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Path(tp)
+                    if tp.qself.is_none()
+                        && tp.path.segments.last().is_some_and(|seg| seg.ident == "Pin"))
+            })
+        };
+        if (matches!(
+            method_name.as_str(),
+            "get_unchecked_mut" | "get_mut" | "get_ref" | "into_ref" | "map_unchecked_mut"
+                | "map_unchecked"
+        ) && (receiver_is_pinned_self || receiver_is_typed_pin()))
+            // `pinned.as_mut()` / `as_ref()` reborrow the pin: the same place.
+            || (matches!(method_name.as_str(), "as_mut" | "as_ref")
+                && mc.args.is_empty()
+                && receiver_is_typed_pin())
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let mut call_args = vec![receiver];
+            call_args.extend(mc.args.iter().map(|arg| self.emit_expr_to_string(arg)));
+            return format!("rusty::pin_place::{}({})", method_name, call_args.join(", "));
+        }
+        // Rust `<*mut T>::as_mut()` / `<*const T>::as_ref()` -> Option of a
+        // reference (None for null).
+        if matches!(method_name.as_str(), "as_mut" | "as_ref") && args.is_empty() {
+            if self.is_expr_raw_pointer_like(&mc.receiver) {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
+                return format!("rusty::ptr::{}({})", method_name, receiver);
+            }
+            // A closure parameter of unknown type may be a raw pointer
+            // (`opt_ptr.and_then(|p| unsafe { p.as_mut() })`): dispatch on
+            // the C++ type.
+            if let syn::Expr::Path(path) = self.peel_paren_group_expr(&mc.receiver)
+                && let Some(ident) = path.path.get_ident()
+                && self.should_lower_untyped_closure_param_deref(&ident.to_string())
+                && self.infer_simple_expr_type(&mc.receiver).is_none()
+            {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                return format!("rusty::ptr::{}_dispatch({})", method_name, raw_receiver);
+            }
+        }
         // Rust `ptr.is_null()` → C++ `ptr == nullptr`
         if method_name == "is_null" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -12154,6 +12467,15 @@ impl CodeGen {
             free_args.push(self_expr.to_string());
             free_args.extend(args.iter().cloned());
             let free_call = format!("{}({})", free_fn, free_args.join(", "));
+            // A guard or smart pointer (`RefMut<HashMap>`) reaches the member
+            // through its deref; the enum's free function never takes one.
+            if !receiver_is_self {
+                let deref_call = member_call.replacen(self_expr, "(*__self)", 1);
+                return format!(
+                    "([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                    member_call, member_call, deref_call, deref_call, free_call, receiver
+                );
+            }
             return format!(
                 "([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
                 member_call, member_call, free_call, receiver
@@ -13566,6 +13888,9 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
+        if let syn::Expr::Async(async_expr) = self.peel_paren_group_expr(expr) {
+            return self.emit_async_block_to_string(async_expr, expected_ty);
+        }
         if self.expected_type_is_string_view(expected_ty)
             && matches!(self.peel_paren_group_expr(expr), syn::Expr::Field(_))
         {
@@ -13576,6 +13901,32 @@ impl CodeGen {
         {
             let inner = self.emit_expr_to_string(expr);
             return format!("rusty::String::from({})", inner);
+        }
+        if super::type_mapping::is_verus_ghost_marker_expr(expr) {
+            return "rusty::Ghost{}".to_string();
+        }
+        // `&arc` where a `&T` is expected (`let conn: &TcpConnection =
+        // &t.conn_;` with `conn_: Arc<TcpConnection>`): Rust's deref coercion
+        // through the smart pointer. The reference binding takes the pointee;
+        // the pointer itself does not convert to it.
+        if let Some(syn::Type::Reference(expected_ref)) =
+            expected_ty.map(|ty| self.peel_paren_group_type(ty))
+            && let syn::Expr::Reference(reference) = self.peel_paren_group_expr(expr)
+            && let Some(operand_ty) = self.infer_simple_expr_type(&reference.expr)
+            && let syn::Type::Path(operand_tp) = self.peel_reference_paren_group_type(&operand_ty)
+            && let Some(pointer_seg) = operand_tp.path.segments.last()
+            && matches!(pointer_seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+            && let syn::PathArguments::AngleBracketed(pointer_args) = &pointer_seg.arguments
+            && let Some(syn::GenericArgument::Type(pointee)) = pointer_args.args.first()
+        {
+            let expected_cpp = self.map_type(&expected_ref.elem);
+            if !expected_cpp.is_empty()
+                && !type_string_has_auto_placeholder(&expected_cpp)
+                && expected_cpp == self.map_type(pointee)
+                && expected_cpp != self.map_type(self.peel_reference_paren_group_type(&operand_ty))
+            {
+                return format!("(*{})", self.emit_expr_to_string(&reference.expr));
+            }
         }
         match expr {
             syn::Expr::Path(path_expr)
@@ -14908,8 +15259,23 @@ impl CodeGen {
         // Fallback for externally-transpiled data enums where local enum metadata
         // is unavailable in this compilation unit. Prefer static variant
         // constructors on the expected owner type (`Type::Variant(...)`).
+        //
+        // A bare call to a type this crate declares is that type's own
+        // (tuple-struct) constructor, never a variant of the expected owner:
+        // `let id = ResourceId(raw);` in a fn returning `Vec<IoEvent>` became
+        // `rusty::Vec<IoEvent>::ResourceId(raw)`.
+        if path.segments.len() == 1
+            && (self.local_declared_types.contains(&variant_name)
+                || self.current_scope_declares_type_name(&variant_name))
+        {
+            return None;
+        }
         let expected_path = self.expected_type_path(expected_ty)?;
         let mut owner_tail = expected_path.segments.last()?.ident.to_string();
+        // The std collections declare no variants.
+        if Self::is_polymorphic_collection_name(&owner_tail) {
+            return None;
+        }
         if owner_tail == "Self" {
             owner_tail = self
                 .current_struct
@@ -14969,6 +15335,38 @@ impl CodeGen {
             // Tuple-struct constructors and same-name local value constructors
             // should stay as direct constructor calls (`Type(...)`), not
             // re-bound to `Type::Type(...)`.
+            return None;
+        }
+        // A bare name a `use` binds to something other than an enum variant
+        // (`use std::panic::AssertUnwindSafe;` then `AssertUnwindSafe(|| ..)`
+        // in a fn returning `Poll<()>`) is that import's own constructor. A
+        // binding to a variant (`use super::Left;` of the root's
+        // `pub use crate::Either::{Left, Right};`) stays one: the expected
+        // owner is often spelled through an associated type
+        // (`Option<Self::Item>`), so its Rust tail (`Item`) is no test.
+        if path.segments.len() == 1
+            && let Some(bound) = self.resolve_scope_import_binding_path(&variant_name)
+            && let Some(parent) = bound.trim_start_matches("::").rsplit("::").nth(1)
+            && parent != owner_tail
+            && !self.enum_name_owns_variant(parent, &variant_name)
+        {
+            return None;
+        }
+        // A runtime-mapped std enum has a fixed variant set: `Err(e)` whose
+        // expected type is the enclosing fn's `Poll<()>` is Result's Err, never
+        // `Poll::Err`.
+        let std_enum_variants: Option<&[&str]> = match owner_tail.as_str() {
+            "Poll" => Some(&["Ready", "Pending"]),
+            "Cow" => Some(&["Borrowed", "Owned"]),
+            "Ordering" => Some(&["Less", "Equal", "Greater"]),
+            "Bound" => Some(&["Included", "Excluded", "Unbounded"]),
+            "ControlFlow" => Some(&["Continue", "Break"]),
+            _ => None,
+        };
+        if let Some(variants) = std_enum_variants
+            && mapped_owner.starts_with("rusty::")
+            && !variants.contains(&variant_name.as_str())
+        {
             return None;
         }
         if self.is_type_param_in_scope(&owner_tail) {
@@ -19723,6 +20121,15 @@ impl CodeGen {
         if let Some(trait_call) = self.try_emit_known_trait_ufcs_call(call) {
             return trait_call;
         }
+        if let syn::Expr::Path(func_path) = call.func.as_ref()
+            && func_path.path.segments.len() >= 2
+            && let Some(owner_tail) =
+                func_path.path.segments.iter().nth_back(1).map(|seg| seg.ident.to_string())
+            && let Some(lowered) =
+                self.try_emit_crate_type_ufcs_as_method_call(call, func_path, &owner_tail)
+        {
+            return lowered;
+        }
         if let Some(trait_call) = self.try_emit_trait_ufcs_by_value_receiver_call(call) {
             return trait_call;
         }
@@ -20083,6 +20490,11 @@ impl CodeGen {
                         return format!("{}({})", c_like_callee, ufcs_args.join(", "));
                     }
                     let receiver = &call.args[0];
+                    if let Some(lowered) =
+                        self.try_emit_crate_type_ufcs_as_method_call(call, func_path, &owner_tail)
+                    {
+                        return lowered;
+                    }
                     let member_args: Vec<String> = call
                         .args
                         .iter()
@@ -22453,6 +22865,11 @@ impl CodeGen {
                     // Keep helper UFCS calls in associated-call form to avoid
                     // rewriting `Trait::method(self)` into recursive member calls.
                 } else {
+                    if let Some(lowered) =
+                        self.try_emit_crate_type_ufcs_as_method_call(call, path_expr, &owner_tail)
+                    {
+                        return lowered;
+                    }
                     let method_template_args = self.emit_expr_path_template_args(&path_expr.path);
                     let member_args: Vec<String> = call
                         .args
@@ -22855,9 +23272,26 @@ impl CodeGen {
             let first = args[0].clone();
             args[0] = format!("rusty::detail::deref_if_pointer_like({})", first);
         }
+        let later_use_template_args = if call_has_explicit_type_args {
+            None
+        } else {
+            self.generic_call_later_use_template_args
+                .get(&(call as *const syn::ExprCall as usize))
+                .map(|args| args.iter().map(|ty| self.map_type(ty)).collect::<Vec<_>>())
+                .filter(|args| {
+                    args.iter().all(|arg| {
+                        !arg.is_empty()
+                            && arg != "auto"
+                            && !arg.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(arg)
+                    })
+                })
+        };
         let func = if let Some(template_args) = recovered_function_template_args {
             format!("{}<{}>", func, template_args.join(", "))
         } else if let Some(template_args) = fn_path_template_args {
+            format!("{}<{}>", func, template_args.join(", "))
+        } else if let Some(template_args) = later_use_template_args {
             format!("{}<{}>", func, template_args.join(", "))
         } else {
             func
@@ -24400,6 +24834,10 @@ impl CodeGen {
                 if let Some(lambda) = self.try_emit_method_reference_lambda(&path.path) {
                     return lambda;
                 }
+                // `--verus-exec` ghost marker value: the empty tag, constructed.
+                if super::type_mapping::is_verus_ghost_marker_expr(expr) {
+                    return "rusty::Ghost{}".to_string();
+                }
                 // `PhantomData` as a VALUE expression (no expected type to drive
                 // the element — e.g. a UFCS member-fallback shim arg whose lambda
                 // param is `auto&&`). It must be a CONSTRUCTED value, never the
@@ -24841,8 +25279,14 @@ impl CodeGen {
                     }
                 } else {
                     let base = self.emit_expr_to_string(&f.base);
-                    let base_for_field =
-                        if self.expr_base_needs_explicit_deref_for_field_access(&f.base) {
+                    let base_for_field = if self.expr_is_guard_over_smart_pointer(&f.base) {
+                        // `exec.reactor` on a `RefMut<Box<Executor>>`: two layers.
+                        if self.method_receiver_needs_parentheses(&f.base) {
+                            format!("(**({}))", base)
+                        } else {
+                            format!("(**{})", base)
+                        }
+                    } else if self.expr_base_needs_explicit_deref_for_field_access(&f.base) {
                             if self.method_receiver_needs_parentheses(&f.base) {
                                 format!("(*({}))", base)
                             } else {
@@ -25001,6 +25445,7 @@ impl CodeGen {
                 }
             }
             syn::Expr::Closure(closure) => self.emit_closure_to_string(closure),
+            syn::Expr::Async(async_expr) => self.emit_async_block_to_string(async_expr, None),
             syn::Expr::Return(ret) => {
                 let keyword = if self.in_async { "co_return" } else { "return" };
                 match &ret.expr {
@@ -25039,6 +25484,7 @@ impl CodeGen {
                         if let Some(typed) = self.maybe_type_bare_none_return(&val) {
                             val = typed;
                         }
+                        let val = self.decltype_auto_safe_return_value(val);
                         format!("{} {}", keyword, val)
                     }
                     None => keyword.to_string(),
@@ -25046,7 +25492,30 @@ impl CodeGen {
             }
             syn::Expr::Await(aw) => {
                 let inner = self.emit_expr_to_string(&aw.base);
-                format!("co_await {}", inner)
+                // `.await` consumes its operand (`IntoFuture::into_future(self)`):
+                // a local future (a JoinHandle, a hand-written pollable) moves
+                // into the awaiter — the runtime pins a pollable by value
+                // (include/rusty/async.hpp, Task's await_transform). A
+                // reference binding is polled in place.
+                let consumed_local = match self.peel_paren_group_expr(&aw.base) {
+                    syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                        let name = p.path.segments[0].ident.to_string();
+                        self.lookup_local_binding_cpp_name(&name).is_some()
+                            && !self.is_local_reference_binding_in_scope(&name)
+                            && !self.lookup_local_binding_type(&name).is_some_and(|ty| {
+                                matches!(
+                                    self.peel_paren_group_type(&ty),
+                                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                                )
+                            })
+                    }
+                    _ => false,
+                };
+                if consumed_local && !inner.starts_with("std::move(") {
+                    format!("co_await std::move({})", inner)
+                } else {
+                    format!("co_await {}", inner)
+                }
             }
             syn::Expr::Assign(a) => {
                 let left_peeled = self.peel_paren_group_expr(&a.left);
@@ -25218,7 +25687,17 @@ impl CodeGen {
             syn::Expr::Const(_) => {
                 "/* const-block elided (Rust 2024 compile-time fence) */ (void)0".to_string()
             }
-            _ => self.match_expr_unreachable_fallback().to_string(),
+            // An expression kind with no lowering here (a value-position
+            // `loop`/`while`/`for`, a bare `let`, `yield`, a try block,
+            // verbatim tokens): fail closed. The placeholder still compiles
+            // where a value is needed, but the marker is a hand slot, so the
+            // slot manifest and the gates see it; it was a silent
+            // `unreachable_panic()`, a function that panics on reaching it.
+            other => format!(
+                "/* TODO transpiler: unlowered {} expression */ {}",
+                expr_kind_name(other),
+                self.match_expr_unreachable_fallback()
+            ),
         }
     }
 
@@ -26886,6 +27365,142 @@ impl CodeGen {
     /// - Complex expressions (a + b, foo()) — these produce temporaries
     /// - Type paths / constants (ALL_CAPS names)
     /// Emit a closure expression as a C++ lambda.
+    /// `async move { .. }` / `async { .. }`: an immediately-invoked coroutine
+    /// lambda, as an `async fn` is a coroutine function:
+    /// `[captures](this auto) -> rusty::Task<T> { .. co_return v; }()`. The
+    /// explicit object parameter takes the lambda BY VALUE, so the coroutine
+    /// frame holds the captures (an ordinary lambda's would die with the
+    /// temporary closure object at the end of the full-expression). Captures
+    /// follow the closure rules: `async move` moves what it names, `async`
+    /// borrows. `T` comes from the expected type (`impl Future<Output = T>`)
+    /// or the block's tail; when neither gives it the block fails closed with
+    /// a `TODO transpiler` marker (a hand slot) instead of the silent
+    /// `unreachable_panic()` every unhandled expression became.
+    pub(super) fn emit_async_block_to_string(
+        &self,
+        async_expr: &syn::ExprAsync,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let output = expected_ty
+            .and_then(|ty| self.future_output_of_expected_type(ty))
+            .or_else(|| match async_expr.block.stmts.last() {
+                None => Some(syn::parse_quote!(())),
+                Some(syn::Stmt::Expr(tail, None)) => {
+                    if self.is_expr_diverging(tail) {
+                        Some(syn::parse_quote!(()))
+                    } else if let syn::Expr::Await(awaited) = self.peel_paren_group_expr(tail) {
+                        // `f(..).await`: an `async fn` call types as its
+                        // declared output, a `-> impl Future<Output = T>` one
+                        // as that future.
+                        self.infer_simple_expr_type(&awaited.base).map(|base| {
+                            self.future_output_of_expected_type(&base).unwrap_or(base)
+                        })
+                    } else {
+                        self.infer_simple_expr_type(tail)
+                    }
+                }
+                Some(_) => Some(syn::parse_quote!(())),
+            })
+            .filter(|ty| !self.type_contains_infer(ty) && self.type_names_resolve_here(ty));
+        let unknown = "/* TODO transpiler: async block whose output type is unknown */ rusty::intrinsics::unreachable_panic()";
+        let Some(output) = output else {
+            return unknown.to_string();
+        };
+        let output_cpp = if self.is_explicit_unit_type(&output) {
+            "void".to_string()
+        } else {
+            self.map_type(&output)
+        };
+        if output_cpp.is_empty() || type_string_has_auto_placeholder(&output_cpp) {
+            return unknown.to_string();
+        }
+        let block = &async_expr.block;
+        let closure = syn::ExprClosure {
+            attrs: Vec::new(),
+            lifetimes: None,
+            constness: None,
+            movability: None,
+            asyncness: None,
+            capture: async_expr.capture,
+            or1_token: Default::default(),
+            inputs: syn::punctuated::Punctuated::new(),
+            or2_token: Default::default(),
+            output: if output_cpp == "void" {
+                syn::ReturnType::Default
+            } else {
+                syn::ReturnType::Type(Default::default(), Box::new(output.clone()))
+            },
+            body: Box::new(syn::parse_quote!(#block)),
+        };
+        self.emit_closure_with_param_scopes_void_result_and_async_output(
+            &closure,
+            None,
+            None,
+            None,
+            false,
+            Some(&output_cpp),
+        )
+    }
+
+    /// Every single-segment name in `ty` means something at this point: a
+    /// primitive or prelude type, a type parameter in scope, or a type or alias
+    /// this crate declares. An inferred type can carry a CALLEE's own type
+    /// parameter (`mystery::<T>()`'s declared `T`), which names nothing here.
+    fn type_names_resolve_here(&self, ty: &syn::Type) -> bool {
+        struct Names<'a> {
+            cg: &'a CodeGen,
+            ok: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Names<'_> {
+            fn visit_type_path(&mut self, tp: &'ast syn::TypePath) {
+                if tp.qself.is_none() && tp.path.segments.len() == 1 {
+                    let name = tp.path.segments[0].ident.to_string();
+                    let known = matches!(
+                        name.as_str(),
+                        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
+                            | "u64" | "u128" | "usize" | "f32" | "f64" | "bool" | "char" | "str"
+                            | "String" | "Vec" | "Option" | "Result" | "Box" | "Rc" | "Arc"
+                            | "Self"
+                    ) || self.cg.is_type_param_in_scope(&name)
+                        || self.cg.local_declared_types.contains(&name)
+                        || self.cg.type_alias_targets.contains_key(&name);
+                    if !known {
+                        self.ok = false;
+                    }
+                }
+                syn::visit::visit_type_path(self, tp);
+            }
+        }
+        let mut names = Names { cg: self, ok: true };
+        syn::visit::Visit::visit_type(&mut names, ty);
+        names.ok
+    }
+
+    /// `T` of an expected `impl Future<Output = T>` (or `impl IntoFuture`).
+    fn future_output_of_expected_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::ImplTrait(it) = self.peel_paren_group_type(ty) else {
+            return None;
+        };
+        it.bounds.iter().find_map(|bound| {
+            let syn::TypeParamBound::Trait(tb) = bound else {
+                return None;
+            };
+            let seg = tb.path.segments.last()?;
+            if !matches!(seg.ident.to_string().as_str(), "Future" | "IntoFuture") {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::AssocType(assoc) if assoc.ident == "Output" => {
+                    Some(assoc.ty.clone())
+                }
+                _ => None,
+            })
+        })
+    }
+
     pub(super) fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
         self.emit_closure_to_string_with_param_scopes(closure, None, None, None)
     }
@@ -26969,6 +27584,28 @@ impl CodeGen {
         char_predicate_param_scope: Option<HashSet<String>>,
         expected_return_type: Option<&syn::ReturnType>,
         void_callback: bool,
+    ) -> String {
+        self.emit_closure_with_param_scopes_void_result_and_async_output(
+            closure,
+            map_param_scope,
+            char_predicate_param_scope,
+            expected_return_type,
+            void_callback,
+            None,
+        )
+    }
+
+    /// `async_output`: the closure is an `async { .. }` block's body with that
+    /// output, lowered as an immediately-invoked coroutine lambda (see
+    /// `emit_async_block_to_string`).
+    fn emit_closure_with_param_scopes_void_result_and_async_output(
+        &self,
+        closure: &syn::ExprClosure,
+        map_param_scope: Option<HashSet<String>>,
+        char_predicate_param_scope: Option<HashSet<String>>,
+        expected_return_type: Option<&syn::ReturnType>,
+        void_callback: bool,
+        async_output: Option<&str>,
     ) -> String {
         // A boxed Fn returning () has the C++ signature void(...). Preserve
         // evaluation before explicit unit returns, then emit the body in a
@@ -27176,7 +27813,13 @@ impl CodeGen {
                 || (all_captures_are_raw_pointers
                     && !body_reassigns_a_capture
                     && !body_consumes_a_capture));
-        let lambda_mutability = if needs_mutable { " mutable" } else { "" };
+        // An explicit object parameter (an async block's `this auto`) takes
+        // the closure by value; `mutable` is ill-formed beside it.
+        let lambda_mutability = if needs_mutable && async_output.is_none() {
+            " mutable"
+        } else {
+            ""
+        };
 
         // A callable-shaped expected type means this closure IS the callable.
         // Type its params from the signature (so body casts see the real
@@ -27266,9 +27909,16 @@ impl CodeGen {
             })
             .collect();
 
-        let params_str = params.join(", ");
+        let params_str = if async_output.is_some() {
+            "this auto".to_string()
+        } else {
+            params.join(", ")
+        };
 
         let mut inner = self.new_inner_for_block();
+        if async_output.is_some() {
+            inner.in_async = true;
+        }
         // The `.map(closure)` input type was recorded on `self`; hand it to the
         // sub-codegen so it types the closure's destructured params.
         *inner.pending_map_closure_input_type.borrow_mut() =
@@ -27280,11 +27930,12 @@ impl CodeGen {
         // reference, and the concrete payload type may not be spellable in
         // this scope (in-scope type params). Only fires when the closure has
         // no explicit Rust annotation.
+        let closure_key = closure as *const syn::ExprClosure as usize;
         let force_decltype_auto_return = self
             .pending_map_closure_return_type
             .borrow_mut()
             .take()
-            .is_some()
+            .is_some_and(|(key, _)| key == closure_key)
             && matches!(closure.output, syn::ReturnType::Default);
         inner.bind_closure_params_for_emission(closure);
         if !untyped_param_scope.is_empty() {
@@ -27442,8 +28093,15 @@ impl CodeGen {
                 // surrounding void-return contexts; keep tail-expression return
                 // behavior local to the lambda body.
                 inner.return_value_scopes.clear();
+                inner.return_scope_decltype_auto.clear();
                 inner.return_type_hints.clear();
-                inner.push_return_value_scope(if void_callback { "void" } else { "auto" });
+                inner.push_return_value_scope(if void_callback {
+                    "void"
+                } else if lambda_return_annotation.trim() == "-> decltype(auto)" {
+                    "decltype(auto)"
+                } else {
+                    "auto"
+                });
                 if inner.should_push_return_type_hint_for_closure(&resolved_closure_output) {
                     inner.push_return_type_hint(&resolved_closure_output);
                 }
@@ -27457,6 +28115,24 @@ impl CodeGen {
                         inner.push_return_type_hint(expected_rt);
                     }
                 }
+                // An un-annotated closure with an early `return` besides its
+                // tail deduces its C++ return type from the FIRST return
+                // statement, which may be a bare variant struct
+                // (`return IoResult::Ok(id)` -> `IoResult_Ok{id}`) while the
+                // tail yields the enum. Rust types the closure by the tail:
+                // annotate it with the tail's type when the tail names only
+                // parameters and captures.
+                let lambda_return_annotation = if lambda_return_annotation.is_empty()
+                    && matches!(&resolved_closure_output, syn::ReturnType::Default)
+                    && fallback_expected_return_ty.is_none()
+                    && !void_callback
+                {
+                    inner
+                        .closure_tail_decltype_return_annotation(&block.block)
+                        .unwrap_or(lambda_return_annotation)
+                } else {
+                    lambda_return_annotation
+                };
                 inner.emit_block(&block.block);
                 let mut body_str = inner.into_output();
                 let closure_expected_unit = expected_return_type
@@ -27479,6 +28155,17 @@ impl CodeGen {
                     }
                     body_str = format!("{}{}", prelude_str, body_str);
                 }
+                if let Some(output) = async_output {
+                    // A body with no `co_await`/`co_return` is no coroutine:
+                    // end a unit block with `co_return;` so it always is.
+                    if output == "void" {
+                        body_str.push_str("co_return;\n");
+                    }
+                    return format!(
+                        "[{}]({}) -> rusty::Task<{}> {{\n{}}}()",
+                        capture, params_str, output, body_str
+                    );
+                }
                 format!(
                     "[{}]({}){}{} {{\n{}}}",
                     capture, params_str, lambda_mutability, lambda_return_annotation, body_str
@@ -27498,6 +28185,7 @@ impl CodeGen {
                 }) =>
             {
                 inner.return_value_scopes.clear();
+                inner.return_scope_decltype_auto.clear();
                 inner.return_type_hints.clear();
                 inner.emit_macro_stmt(&mac_expr.mac);
                 let mut body_str = inner.into_output();
@@ -27521,6 +28209,7 @@ impl CodeGen {
                 // Single expression body → return it
                 // Push the explicit return type hint so Err/Ok inside can use it for qualification
                 inner.return_value_scopes.clear();
+                inner.return_scope_decltype_auto.clear();
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
                 if inner.should_push_return_type_hint_for_closure(&resolved_closure_output) {
@@ -27548,6 +28237,31 @@ impl CodeGen {
                     body_expected_ty,
                 );
                 let body_diverging = inner.is_expr_diverging(&closure.body);
+                // `|| *slot = None` / `|| n += 1`: an assignment is `()` in Rust.
+                // Returning the C++ assignment's value (`T&`, decayed by the
+                // lambda's deduced return) copied the assigned value — a
+                // deleted copy for a move-only one (lion-executor's
+                // TaskCell::poll drops its future through
+                // `catch_unwind(|| *future = None)`).
+                let body_is_unit_assignment = lambda_return_annotation.is_empty()
+                    && match inner.peel_paren_group_expr(&closure.body) {
+                        syn::Expr::Assign(_) => true,
+                        syn::Expr::Binary(b) => matches!(
+                            b.op,
+                            syn::BinOp::AddAssign(_)
+                                | syn::BinOp::SubAssign(_)
+                                | syn::BinOp::MulAssign(_)
+                                | syn::BinOp::DivAssign(_)
+                                | syn::BinOp::RemAssign(_)
+                                | syn::BinOp::BitXorAssign(_)
+                                | syn::BinOp::BitAndAssign(_)
+                                | syn::BinOp::BitOrAssign(_)
+                                | syn::BinOp::ShlAssign(_)
+                                | syn::BinOp::ShrAssign(_)
+                        ),
+                        _ => false,
+                    };
+                let body_diverging = body_diverging || body_is_unit_assignment;
                 if closure_param_prelude.is_empty() {
                     if body_diverging || void_callback {
                         format!(
@@ -27590,6 +28304,75 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    /// ` -> std::remove_cvref_t<decltype(<tail>)>` for a closure block that
+    /// has a tail expression and an early `return`, when the tail names no
+    /// binding the block itself introduces (so it is valid in the lambda's
+    /// trailing return type). Emitted with a throwaway copy of the closure's
+    /// codegen state, which already binds the parameters.
+    pub(super) fn closure_tail_decltype_return_annotation(
+        &self,
+        block: &syn::Block,
+    ) -> Option<String> {
+        use syn::visit::Visit;
+        let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() else {
+            return None;
+        };
+        #[derive(Default)]
+        struct Scan {
+            has_return: bool,
+            bound: HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for Scan {
+            fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+                self.has_return = true;
+                syn::visit::visit_expr_return(self, node);
+            }
+            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.bound.insert(node.ident.to_string());
+                syn::visit::visit_pat_ident(self, node);
+            }
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+        }
+        let mut scan = Scan::default();
+        for stmt in &block.stmts[..block.stmts.len() - 1] {
+            scan.visit_stmt(stmt);
+        }
+        if !scan.has_return {
+            return None;
+        }
+        let mut tail_idents = HashSet::new();
+        fn collect(tokens: proc_macro2::TokenStream, out: &mut HashSet<String>) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        out.insert(ident.to_string());
+                    }
+                    proc_macro2::TokenTree::Group(group) => collect(group.stream(), out),
+                    _ => {}
+                }
+            }
+        }
+        collect(quote::quote!(#tail), &mut tail_idents);
+        if tail_idents.iter().any(|ident| scan.bound.contains(ident)) {
+            return None;
+        }
+        let probe = self.clone();
+        let tail_cpp = probe.emit_expr_to_string(tail);
+        // A brace-initialised tail (an enum variant written without its
+        // expected type, `IoResult_Ok{v}`) names the variant, not the enum.
+        if tail_cpp.trim().is_empty()
+            || tail_cpp.contains('{')
+            || tail_cpp.contains("[&")
+            || tail_cpp.contains("[=")
+            || tail_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&tail_cpp)
+        {
+            return None;
+        }
+        Some(format!(" -> std::remove_cvref_t<decltype({})>", tail_cpp))
     }
 
     /// Emit a single closure parameter.
@@ -28061,5 +28844,20 @@ impl CodeGen {
                         .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
                 })
             })
+    }
+}
+
+/// The syn variant name of an expression, for a fail-closed marker.
+fn expr_kind_name(expr: &syn::Expr) -> &'static str {
+    match expr {
+        syn::Expr::ForLoop(_) => "for",
+        syn::Expr::Loop(_) => "loop",
+        syn::Expr::While(_) => "while",
+        syn::Expr::Let(_) => "let",
+        syn::Expr::Yield(_) => "yield",
+        syn::Expr::TryBlock(_) => "try-block",
+        syn::Expr::Infer(_) => "infer",
+        syn::Expr::Verbatim(_) => "verbatim",
+        _ => "other",
     }
 }

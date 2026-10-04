@@ -1,0 +1,10 @@
+[package]
+name = "graph-root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep-core = { path = "../dep-core", default-features = false }
+dep-unused = { path = "../dep-unused" }
+
+[workspace]

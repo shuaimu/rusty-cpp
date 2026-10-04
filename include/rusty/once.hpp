@@ -2,8 +2,23 @@
 
 #include <atomic>
 #include "platform/threading.hpp"
+#include "option.hpp"
 
 namespace rusty {
+
+// Synchronization note (Once, OnceCell, OnceLock).
+//
+// Every reader observes completion through the cell's own atomic: an acquire
+// load paired with the release store the initializer makes after it
+// finishes. A completed cell is read on that fast path alone, without
+// entering call_once; a thread that did enter call_once (it raced the
+// initializer and waited for it) loads the flag again before it reads.
+// std::call_once's internal handoff would order those reads too, but in
+// libc++ it lives in the uninstrumented shared library, so ThreadSanitizer
+// cannot see it and reported the waiter's read of the value as a race with
+// the initializer's write (SRPC's TSan battery, through Lion's
+// Instant::now() start time). The atomic edge is one TSan sees, and the fast
+// path is also the cheaper one.
 
 // Once - Ensures a piece of code is executed exactly once
 // Matches Rust's std::sync::Once behavior
@@ -19,6 +34,7 @@ namespace rusty {
 class Once {
 private:
     platform::threading::once_flag flag_;
+    std::atomic<bool> completed_{false};
 
 public:
     Once() = default;
@@ -29,7 +45,20 @@ public:
     // exactly one will execute the function, and the others will wait
     template<typename F>
     void call_once(F&& func) {
-        platform::threading::call_once(flag_, std::forward<F>(func));
+        if (completed_.load(std::memory_order_acquire)) {
+            return;
+        }
+        platform::threading::call_once(flag_, [this, &func]() {
+            std::forward<F>(func)();
+            completed_.store(true, std::memory_order_release);
+        });
+        // The waiters' edge to the function's effects (see the note above).
+        (void)completed_.load(std::memory_order_acquire);
+    }
+
+    // Rust's `Once::is_completed`.
+    bool is_completed() const {
+        return completed_.load(std::memory_order_acquire);
     }
 
     // Non-copyable, non-movable
@@ -72,6 +101,9 @@ public:
     // Set the value (only succeeds if not already set)
     // Returns true if the value was set, false if already initialized
     bool set(T value) {
+        if (initialized_.load(std::memory_order_acquire)) {
+            return false;
+        }
         bool success = false;
         platform::threading::call_once(flag_, [this, &value, &success]() {
             new (storage_) T(std::move(value));
@@ -100,10 +132,15 @@ public:
     // Get or initialize the value
     template<typename F>
     const T& get_or_init(F&& func) {
-        platform::threading::call_once(flag_, [this, &func]() {
-            new (storage_) T(func());
-            initialized_.store(true, std::memory_order_release);
-        });
+        if (!initialized_.load(std::memory_order_acquire)) {
+            platform::threading::call_once(flag_, [this, &func]() {
+                new (storage_) T(func());
+                initialized_.store(true, std::memory_order_release);
+            });
+            // The waiters' edge to the initializer's writes (see the note
+            // above). The flag is set: call_once returned normally.
+            (void)initialized_.load(std::memory_order_acquire);
+        }
         return *as_ptr();
     }
 
@@ -123,6 +160,38 @@ public:
             as_ptr()->~T();
         }
     }
+};
+
+
+// OnceLock<T> - Rust's `std::sync::OnceLock`: a thread-safe cell written at
+// most once, with Rust's API shape (`get` returns an Option of a reference;
+// `get_or_init` runs the initializer once). Built on OnceCell.
+template<typename T>
+class OnceLock {
+private:
+    OnceCell<T> cell_;
+
+public:
+    OnceLock() = default;
+
+    // `OnceLock::new()`. Returned as a prvalue, so the non-movable cell is
+    // constructed in place (`static OnceLock<T> X = OnceLock<T>::new_();`).
+    static OnceLock new_() { return OnceLock(); }
+
+    Option<const T&> get() const {
+        const T* value = cell_.get();
+        return value != nullptr ? Option<const T&>(*value) : Option<const T&>(None);
+    }
+
+    template<typename F>
+    const T& get_or_init(F&& init) {
+        return cell_.get_or_init(std::forward<F>(init));
+    }
+
+    OnceLock(const OnceLock&) = delete;
+    OnceLock& operator=(const OnceLock&) = delete;
+    OnceLock(OnceLock&&) = delete;
+    OnceLock& operator=(OnceLock&&) = delete;
 };
 
 } // namespace rusty

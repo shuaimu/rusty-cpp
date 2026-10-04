@@ -9794,12 +9794,38 @@ TEST_CASE("pred_panic_reuse_unstubbed") {
     check(m);
 }
 
-// rustc set/tests.rs::test_extract_if_drop_panic_leak: DEFERRED —
-// KNOWN PORT DIVERGENCE: MaybeUninit::assume_init_read COPIES for
-// copyable T (Rust ptr::read relocates), so the extracted element
-// is a clone whose InDrop panic never fires; making it relocate
-// double-frees on the dying-IntoIter/append teardown (needs
-// dead-slot tracking there first). See maybe_uninit.hpp note.
+// rustc set/tests.rs::test_extract_if_drop_panic_leak. Un-deferred once
+// MaybeUninit::assume_init_read relocated instead of copying: the extracted
+// element used to be a clone (whose InDrop panic the copy resets), so the
+// panic never fired and the original leaked in its slot.
+TEST_CASE("set_test_extract_if_drop_panic_leak_unstubbed") {
+    btree_testing::CrashTestDummy a(0), b(1), c(2);
+    {
+        auto s = make_set<btree_testing::Instance>();
+        s.insert(a.spawn(btree_testing::Panic::Never));
+        s.insert(b.spawn(btree_testing::Panic::InDrop));
+        s.insert(c.spawn(btree_testing::Panic::Never));
+
+        auto r = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&] {
+            auto it = s.extract_if(rusty::range_full{}, [](auto&& dummy) { return dummy.query(true); });
+            // `.for_each(drop)`: each extracted element dies at the end of
+            // its iteration; b's destructor panics.
+            while (true) {
+                auto v = it.next();
+                if (!v.is_some()) break;
+                auto dummy = std::move(v).unwrap();
+            }
+        }));
+        assert(r.is_err());
+    }  // Rust drops the set inside the closure; here it goes at scope end.
+
+    assert(a.queried() == 1);
+    assert(b.queried() == 1);
+    assert(c.queried() == 0);
+    assert(a.dropped() == 1);
+    assert(b.dropped() == 1);
+    assert(c.dropped() == 1);
+}
 
 // rustc set/tests.rs::test_extract_if_pred_panic_leak
 TEST_CASE("set_test_extract_if_pred_panic_leak_unstubbed") {
@@ -9826,9 +9852,13 @@ TEST_CASE("set_test_extract_if_pred_panic_leak_unstubbed") {
     assert(s.last().unwrap().id() == 2);
 }
 
-// rustc map/tests.rs::test_append_drop_leak: DEFERRED — same
-// assume_init_read clone divergence as above (InDrop never fires
-// during append; drop counts diverge).
+// rustc map/tests.rs::test_append_drop_leak: DEFERRED — no longer for
+// assume_init_read (it relocates now, and append leaks nothing), but because
+// MergeIter::next CLONES: its match arms bind `auto&& a_k` / `auto&& a` and
+// return `make_tuple(a_k, b_v)` / `Option(a)`, copying where Rust moves out of
+// the pattern. Translated with CrashTestDummy it measures dropped a=3 b=4 c=2
+// with cloned a=2 b=2 c=0 (Rust: a=1 b=2 c=2, no clones) — every clone is
+// dropped, so the counts balance, but they are not Rust's.
 
 // rustc map/tests.rs::test_append_ord_chaos — Cyclic3's Ord violates
 // transitivity; append must not lose or duplicate elements.

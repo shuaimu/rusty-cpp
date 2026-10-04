@@ -13,10 +13,35 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 namespace rusty {
+namespace detail {
+
+// `#[derive(Hash)]` lowered to a std::hash specialization: every field's
+// std::hash, combined in declaration order. A field type without std::hash
+// contributes nothing (equal values still hash equal).
+inline void hash_combine(std::size_t& seed, std::size_t value) noexcept {
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+template<typename... Fields>
+std::size_t hash_fields(const Fields&... fields) {
+    std::size_t seed = 0;
+    ([&](const auto& field) {
+        using Field = std::remove_cvref_t<decltype(field)>;
+        if constexpr (requires { std::hash<Field>{}(field); }) {
+            hash_combine(seed, std::hash<Field>{}(field));
+        }
+    }(fields), ...);
+    return seed;
+}
+
+} // namespace detail
+
 namespace hash {
 
 class SipHasher {

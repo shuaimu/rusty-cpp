@@ -102,6 +102,11 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // Bare `Ref` stays unmapped: the name is too common to claim.
         "std::cell::Ref" | "cell::Ref" => Some(("rusty::Ref", true)),
         "RefMut" | "std::cell::RefMut" | "cell::RefMut" => Some(("rusty::RefMut", true)),
+        // `try_borrow` / `try_borrow_mut` errors (include/rusty/refcell.hpp).
+        "std::cell::BorrowError" | "cell::BorrowError" => Some(("rusty::BorrowError", false)),
+        "std::cell::BorrowMutError" | "cell::BorrowMutError" => {
+            Some(("rusty::BorrowMutError", false))
+        }
         "MutexGuard" | "std::sync::MutexGuard" | "sync::MutexGuard" => {
             Some(("rusty::MutexGuard", true))
         }
@@ -139,6 +144,20 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "BTreeSet" | "std::collections::BTreeSet" => Some(("rusty::BTreeSet", true)),
         "VecDeque" | "std::collections::VecDeque" => Some(("rusty::VecDeque", true)),
         "std::collections::hash_map::DefaultHasher" => Some(("DefaultHasher", false)),
+        // The borrowing views a `HashMap` hands out (`map.values()` /
+        // `keys()` / `values_mut()`) are the std port's own iterator structs
+        // (transpiled/std_port: `collections::hash::map::Values<K, V>` ...);
+        // Rust's leading lifetime argument is dropped like every other one.
+        // Qualified spellings only: a bare `Values` is too common to claim.
+        "std::collections::hash_map::Values" | "collections::hash_map::Values" => {
+            Some(("::std_port::collections::hash::map::Values", true))
+        }
+        "std::collections::hash_map::ValuesMut" | "collections::hash_map::ValuesMut" => {
+            Some(("::std_port::collections::hash::map::ValuesMut", true))
+        }
+        "std::collections::hash_map::Keys" | "collections::hash_map::Keys" => {
+            Some(("::std_port::collections::hash::map::Keys", true))
+        }
         // BinaryHeap and LinkedList previously fell back to rusty::Vec as a
         // "deterministic compile surface in expanded serde-style targets"
         // before either had a dedicated transpiled port. Both now have one:
@@ -198,6 +217,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // Concurrency
         "Mutex" | "std::sync::Mutex" => Some(("rusty::Mutex", true)),
+        "PoisonError" | "std::sync::PoisonError" => Some(("rusty::PoisonError", true)),
+        "OnceLock" | "std::sync::OnceLock" => Some(("rusty::OnceLock", true)),
         "RwLock" | "std::sync::RwLock" => Some(("rusty::RwLock", true)),
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
@@ -424,6 +445,10 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "PhantomData" | "std::marker::PhantomData" | "core::marker::PhantomData" => {
             Some(("rusty::PhantomData", true))
         }
+        // `--verus-exec`: vstd's `Ghost<T>` / `Tracked<T>`, which the
+        // pre-pass rewrites to this reserved marker (`verus_lower::GHOST_MARKER`)
+        // with `T` dropped. The C++ side is one empty tag type.
+        "RustyVerusGhost" => Some(("rusty::Ghost", false)),
         "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
         "std::future::Ready" | "core::future::Ready" => Some(("rusty::future::Ready", true)),
         "std::time::Instant" => Some(("rusty::time::Instant", false)),
@@ -786,6 +811,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         }
         "core::fmt::Formatter::debug_struct_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_struct_field1_finish")
+        }
+        "PoisonError::into_inner" | "std::sync::PoisonError::into_inner" => {
+            Some("rusty::sync::poison_into_inner")
         }
         "Pin::new_unchecked" | "std::pin::Pin::new_unchecked" | "core::pin::Pin::new_unchecked" => {
             Some("rusty::pin::new_unchecked")

@@ -2,6 +2,7 @@
 #define RUSTY_PROCESS_HPP
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -154,6 +155,21 @@ public:
 } // namespace path
 
 namespace env {
+
+// Rust `std::env::VarError`: the variable is unset (or not unicode).
+struct VarError {
+    bool operator==(const VarError&) const = default;
+};
+
+// Rust `std::env::var(key)`.
+template<typename K>
+rusty::Result<rusty::String, VarError> var(const K& key) {
+    const std::string name{std::string_view(key)};
+    if (const char* value = std::getenv(name.c_str()); value != nullptr) {
+        return rusty::Result<rusty::String, VarError>::Ok(rusty::String::from(std::string(value)));
+    }
+    return rusty::Result<rusty::String, VarError>::Err(VarError{});
+}
 
 namespace consts {
 #if defined(_WIN32)

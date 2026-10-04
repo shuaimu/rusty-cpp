@@ -196,6 +196,12 @@ pub struct EffectiveLocalNormalDependencyGraph {
     pub target_triple: String,
     root_manifest: PathBuf,
     direct_dependencies: HashMap<PathBuf, Vec<EffectiveLocalNormalDependency>>,
+    /// Cargo's normal-unit feature set for the root package itself (the
+    /// selected features of the probe's edge to it).
+    root_features: Option<Vec<String>>,
+    /// Every selected normal dependency edge (registry ones included) of each
+    /// local package, as the extern-prelude names it occupies.
+    extern_dependencies: HashMap<PathBuf, Vec<ResolvedExternDependency>>,
 }
 
 impl EffectiveLocalNormalDependencyGraph {
@@ -210,6 +216,20 @@ impl EffectiveLocalNormalDependencyGraph {
         self.direct_dependencies
             .get(&canonicalized_path(manifest_path))
             .map(Vec::as_slice)
+    }
+
+    /// Cargo's normal-unit feature set for the root package.
+    pub fn root_resolved_features(&self) -> Option<&[String]> {
+        self.root_features.as_deref()
+    }
+
+    /// The extern-prelude names a local package's selected normal
+    /// dependencies occupy in this graph (registry dependencies included).
+    pub fn extern_dependencies(&self, manifest_path: &Path) -> &[ResolvedExternDependency] {
+        self.extern_dependencies
+            .get(&canonicalized_path(manifest_path))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Return Cargo's exact normal-unit feature set for a selected local
@@ -2087,6 +2107,7 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
     }
 
     let mut direct_dependencies = HashMap::new();
+    let mut extern_dependencies = HashMap::<PathBuf, Vec<ResolvedExternDependency>>::new();
     let mut pending = vec![selected.id.as_str()];
     let mut visited = HashSet::new();
     while let Some(package_id) = pending.pop() {
@@ -2133,6 +2154,15 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
                         dependency.pkg
                     )
                 })?;
+            // Every selected normal edge occupies an extern-prelude name,
+            // registry dependencies included.
+            extern_dependencies
+                .entry(canonicalized_path(&package.manifest_path))
+                .or_insert_with(Vec::new)
+                .push(ResolvedExternDependency {
+                    extern_crate_root: dependency.name.replace('-', "_"),
+                    package_name: dependency_package.name.clone(),
+                });
             if dependency_package.source.is_some() {
                 continue;
             }
@@ -2171,10 +2201,16 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
         direct_dependencies.insert(canonicalized_path(&package.manifest_path), edges);
     }
 
+    let root_features = normal_selection
+        .selected_features_by_id
+        .get(&selected.id)
+        .cloned();
     Ok(EffectiveLocalNormalDependencyGraph {
         target_triple,
         root_manifest,
         direct_dependencies,
+        root_features,
+        extern_dependencies,
     })
 }
 

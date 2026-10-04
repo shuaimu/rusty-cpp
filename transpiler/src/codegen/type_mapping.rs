@@ -870,7 +870,48 @@ impl CodeGen {
         if self.impl_method_is_fmt_formatter_method(method) {
             return "rusty::fmt::Result".to_string();
         }
-        self.map_return_type(&method.sig.output)
+        let mapped = self.map_return_type(&method.sig.output);
+        // `async fn` methods return their future, as async free fns do.
+        if method.sig.asyncness.is_some() {
+            return format!("rusty::Task<{}>", mapped);
+        }
+        mapped
+    }
+
+    /// A crate type path whose module the C++ renames
+    /// (`collections::mpsc_queue::MpscReceiver<T>` ->
+    /// `collections::mpsc_queue_tests::MpscReceiver<T>`, the module renamed
+    /// away from the fn `mpsc_queue` it re-exports). Only the module head
+    /// before any template argument list is rewritten; paths through no
+    /// renamed module are returned unchanged.
+    pub(super) fn rename_modules_in_type_path_head(&self, path: &str) -> String {
+        if self.module_namespace_renames.is_empty() || !path.contains("::") {
+            return path.to_string();
+        }
+        let (head, tail) = match path.find('<') {
+            Some(idx) => (&path[..idx], &path[idx..]),
+            None => (path, ""),
+        };
+        let (global, body) = match head.strip_prefix("::") {
+            Some(rest) => ("::", rest),
+            None => ("", head),
+        };
+        let mut prefix: Vec<&str> = Vec::new();
+        let mut renamed_any = false;
+        let mut out: Vec<String> = Vec::new();
+        for seg in body.split("::") {
+            prefix.push(seg);
+            if let Some(renamed) = self.module_namespace_renames.get(&prefix.join("::")) {
+                out.push(renamed.clone());
+                renamed_any = true;
+            } else {
+                out.push(seg.to_string());
+            }
+        }
+        if !renamed_any {
+            return path.to_string();
+        }
+        format!("{}{}{}", global, out.join("::"), tail)
     }
 
     pub(super) fn type_is_reference_like(&self, ty: &syn::Type) -> bool {
@@ -2651,6 +2692,11 @@ impl CodeGen {
     }
 
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
+        // `--verus-exec` ghost marker (see `crate::verus_lower`): always the
+        // empty tag, whatever scope the codegen thinks it is in.
+        if is_verus_ghost_marker_type(ty) {
+            return "rusty::Ghost".to_string();
+        }
         if let Some(mapped) = self.try_map_standard_any_type(ty) { return mapped; }
         if let Some(mapped) = self.try_map_standard_future_type(ty) { return mapped; }
         if let Some(callback) = self.try_map_transparent_nullable_callback_type(ty) {
@@ -3503,11 +3549,31 @@ impl CodeGen {
                         {
                             let mut rewritten =
                                 self.rewrite_cpp_import_bound_type_spelling(&bound_target);
-                            rewritten = self.resolve_nested_local_reexport_path(&rewritten);
-                            if let Some(resolved_nested) =
-                                self.try_resolve_nested_local_type_path(&rewritten)
-                            {
-                                rewritten = resolved_nested;
+                            // A dependency crate's path (`lion_reactor::Reactor`
+                            // through `use lion_reactor::Reactor as LionReactor;`)
+                            // is already qualified: the local nested-type
+                            // lookups below would rebind its tail to the
+                            // crate's own same-named type.
+                            let bound_root = bound_target
+                                .trim_start_matches("::")
+                                .split("::")
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            let bound_is_dependency_path = bound_target
+                                .trim_start_matches("::")
+                                .contains("::")
+                                && self
+                                    .dependency_ufcs_trait_manifests
+                                    .iter()
+                                    .any(|m| m.module == bound_root);
+                            if !bound_is_dependency_path {
+                                rewritten = self.resolve_nested_local_reexport_path(&rewritten);
+                                if let Some(resolved_nested) =
+                                    self.try_resolve_nested_local_type_path(&rewritten)
+                                {
+                                    rewritten = resolved_nested;
+                                }
                             }
                             let rewritten_trimmed = rewritten.trim_start_matches("::");
                             let rewritten_parts: Vec<&str> = rewritten_trimmed
@@ -3595,7 +3661,7 @@ impl CodeGen {
                             && let Some(reexport_target) =
                                 self.resolve_type_reexport_path_via_scope_binding(&path_str)
                         {
-                            path_str = reexport_target;
+                            path_str = self.rename_modules_in_type_path_head(&reexport_target);
                         }
                         if !path_str.starts_with("::") {
                             let root = path_str.split("::").next().unwrap_or("");
@@ -4146,6 +4212,7 @@ impl CodeGen {
                     {
                         path_str = reexport_target;
                     }
+                    path_str = self.rename_modules_in_type_path_head(&path_str);
                     path_str =
                         self.maybe_force_global_for_shadowed_module_root_in_type_path(&path_str);
                     return self.maybe_prefix_typename_for_dependent_type_path(tp, path_str);
@@ -4454,7 +4521,20 @@ impl CodeGen {
                             false
                         }
                     });
-                    return if has_mutable_trait {
+                    // A future is CONSUMED (polled mutably, then moved into
+                    // a task or awaited): take it by value, as Rust does —
+                    // a `const auto&` could only copy it on (lion-executor's
+                    // `spawn(future: impl Future<Output = T>)` handing a
+                    // move-only rusty::Task on to the task cell).
+                    let is_future = it.bounds.iter().any(|b| {
+                        matches!(b, syn::TypeParamBound::Trait(tb)
+                            if tb.path.segments.last().is_some_and(|s| {
+                                s.ident == "Future" || s.ident == "IntoFuture"
+                            }))
+                    });
+                    return if is_future {
+                        "auto".to_string()
+                    } else if has_mutable_trait {
                         // Use forwarding reference to accept both lvalues and
                         // std::move'd rvalues (Rust passes impl Write by value,
                         // so the transpiler may emit std::move on last use).
@@ -5451,4 +5531,18 @@ impl CodeGen {
         }
         Ok(params.join(", "))
     }
+}
+
+/// The `--verus-exec` ghost marker type (`crate::verus_lower::GHOST_MARKER`,
+/// the lowering of vstd's `Ghost<T>` / `Tracked<T>`).
+pub(super) fn is_verus_ghost_marker_type(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path)
+        if path.qself.is_none() && path.path.is_ident(crate::verus_lower::GHOST_MARKER))
+}
+
+/// The `--verus-exec` ghost marker value (`crate::verus_lower::GHOST_MARKER`,
+/// the lowering of `Ghost::assume_new*` / `Tracked::assume_new*`).
+pub(super) fn is_verus_ghost_marker_expr(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Path(path)
+        if path.qself.is_none() && path.path.is_ident(crate::verus_lower::GHOST_MARKER))
 }

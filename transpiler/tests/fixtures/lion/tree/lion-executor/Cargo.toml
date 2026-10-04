@@ -1,0 +1,37 @@
+[package]
+name = "lion-executor"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lion Team"]
+description = "A single-threaded async executor for Lion runtime (v2: verification-compatible)"
+license = "MIT"
+
+[dependencies]
+# default-features = false: the reactor's mio backend is this crate's `mio`
+# feature, so an embedder that disables it here gets a runtime with no mio.
+lion-reactor = { path = "../lion-reactor", package = "lion-reactor", default-features = false }
+lion-reactor-spec = { path = "../lion-reactor-spec", package = "lion-reactor-spec" }
+lion-utility-spec = { path = "../lion-utility/lion-utility-spec", package = "lion-utility-spec" }
+lion-slab = { path = "../lion-slab", package = "lion-slab" }
+lion-timer-wheel = { path = "../lion-timer-wheel", package = "lion-timer-wheel" }
+vstd = { git = "https://github.com/verus-lang/verus", rev = "db81a74" }
+lion-framework-spec = { path = "../lion-framework-spec", package = "lion-framework-spec" }
+lion-executor-spec = { path = "../lion-executor-spec", package = "lion-executor-spec" }
+
+[features]
+# Lion's default OS backend (lion-reactor's MioBackend). Without it,
+# Runtime::new fails with ErrorKind::Unsupported and a runtime needs
+# RuntimeBuilder::os_backend.
+default = ["mio"]
+mio = ["lion-reactor/mio"]
+
+[dev-dependencies]
+# The in-process mock OS backend (lion_reactor::os::mock) for backend tests,
+# which also run with --no-default-features (no mio anywhere).
+lion-reactor = { path = "../lion-reactor", package = "lion-reactor", default-features = false, features = ["test-backend"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(verus_keep_ghost)"] }
+
+[package.metadata.verus]
+verify = true

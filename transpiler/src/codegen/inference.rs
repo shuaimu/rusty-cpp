@@ -991,11 +991,34 @@ impl CodeGen {
                     escaped_target = escaped_target.trim_start_matches("::").to_string();
                 }
             }
-            Some(escaped_target)
+            // Through a module the C++ renames (`collections::mpsc_queue` ->
+            // `mpsc_queue_tests`, beside the fn it re-exports): bindings are
+            // recorded before the renames are known.
+            Some(self.rename_modules_in_type_path_head(&escaped_target))
         }
     }
 
     pub(super) fn resolve_scope_import_binding_path(&self, local_name: &str) -> Option<String> {
+        // A method merged in from another module resolves a CRATE-internal
+        // import through ITS module first (Rust resolved it there: `use
+        // crate::types::Duration;` in `executor::ext`, where the struct's own
+        // module means no `Duration`). Dependency and std imports keep their
+        // established resolution.
+        if let Some(origin) = self.merged_method_origin_scope.as_ref()
+            && !self.current_scope_declares_type_name(local_name)
+            && let Some(bound) =
+                self.resolve_scope_import_binding_path_for_scope(&origin.join("::"), local_name)
+            && {
+                let normalized = bound.trim_start_matches("::");
+                let root = normalized.split("::").next().unwrap_or_default();
+                root == "crate"
+                    || self.local_declared_types.contains(normalized)
+                    || self.declared_module_paths.contains(normalized)
+                    || self.declared_module_names.contains(root)
+            }
+        {
+            return Some(bound);
+        }
         let scope_key = self.module_stack.join("::");
         let type_declared_in_scope = if self.in_forward_decl_signature {
             self.current_module_declares_type_name_exact(local_name)
@@ -3737,6 +3760,241 @@ impl CodeGen {
         common
     }
 
+    /// `let PAT = f();` where `f`'s type parameters are not all determined by
+    /// its arguments (`fn queue<T>() -> (Sender<T>, Receiver<T>)`): Rust
+    /// infers them from how the bindings are used later in the block, C++
+    /// cannot. Solve them from the later uses — a binding passed where a
+    /// declared parameter type is known (`Executor::new(rx, ..)` taking
+    /// `Receiver<Task>`) — and record the full template argument list for the
+    /// call. A parameter no use pins leaves the call as it was.
+    pub(super) fn collect_generic_call_template_args_from_later_use(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> Vec<(usize, Vec<syn::Type>)> {
+        use syn::visit::Visit;
+        let mut out = Vec::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            let Some(init) = &local.init else {
+                continue;
+            };
+            if init.diverge.is_some() {
+                continue;
+            }
+            let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr) else {
+                continue;
+            };
+            let syn::Expr::Path(func_path) = call.func.as_ref() else {
+                continue;
+            };
+            if func_path.qself.is_some()
+                || func_path
+                    .path
+                    .segments
+                    .iter()
+                    .any(|seg| !matches!(seg.arguments, syn::PathArguments::None))
+            {
+                continue;
+            }
+            let Some((type_params, ret_ty)) = self
+                .lookup_function_type_param_names_with_import_fallback(&call.func)
+                .cloned()
+                .zip(
+                    self.lookup_function_return_type(&call.func)
+                        .cloned()
+                        .or_else(|| self.lookup_fn_return_type_with_import_fallback(&call.func)),
+                )
+                .or_else(|| self.std_generic_constructor_signature(&func_path.path))
+            else {
+                continue;
+            };
+            let mut bindings: HashMap<String, syn::Type> = HashMap::new();
+            // The arguments pin what they can.
+            for (idx, arg) in call.args.iter().enumerate() {
+                if let (Some(param_ty), Some(arg_ty)) = (
+                    self.lookup_function_arg_expected_type(&call.func, idx).cloned(),
+                    self.infer_simple_expr_type(arg),
+                ) {
+                    self.unify_type_param_binding(&param_ty, &arg_ty, &type_params, &mut bindings);
+                }
+            }
+            if type_params.iter().all(|param| bindings.contains_key(param)) {
+                continue;
+            }
+            let mut binding_tys: Vec<(String, syn::Type)> = Vec::new();
+            match &local.pat {
+                syn::Pat::Ident(pi) => binding_tys.push((pi.ident.to_string(), ret_ty.clone())),
+                syn::Pat::Tuple(tuple_pat) => {
+                    let syn::Type::Tuple(tuple_ty) = self.peel_paren_group_type(&ret_ty) else {
+                        continue;
+                    };
+                    if tuple_ty.elems.len() != tuple_pat.elems.len() {
+                        continue;
+                    }
+                    for (elem_pat, elem_ty) in tuple_pat.elems.iter().zip(tuple_ty.elems.iter()) {
+                        if let syn::Pat::Ident(pi) = elem_pat {
+                            binding_tys.push((pi.ident.to_string(), elem_ty.clone()));
+                        }
+                    }
+                }
+                _ => continue,
+            }
+            if binding_tys.is_empty() {
+                continue;
+            }
+            struct Uses<'a> {
+                cg: &'a CodeGen,
+                binding_tys: &'a [(String, syn::Type)],
+                type_params: &'a [String],
+                bindings: &'a mut HashMap<String, syn::Type>,
+            }
+            impl Uses<'_> {
+                fn binding_named(&self, arg: &syn::Expr) -> Option<&syn::Type> {
+                    let mut arg = self.cg.peel_paren_group_expr(arg);
+                    while let syn::Expr::Reference(r) = arg {
+                        arg = self.cg.peel_paren_group_expr(&r.expr);
+                    }
+                    let syn::Expr::Path(p) = arg else {
+                        return None;
+                    };
+                    let ident = p.path.get_ident()?.to_string();
+                    self.binding_tys
+                        .iter()
+                        .find(|(name, _)| *name == ident)
+                        .map(|(_, ty)| ty)
+                }
+                fn pin(&mut self, generic_ty: &syn::Type, declared: &syn::Type) {
+                    let mut found = HashMap::new();
+                    self.cg.unify_type_param_binding(generic_ty, declared, self.type_params, &mut found);
+                    for (param, ty) in found {
+                        // A declared type spelled with its own callee's
+                        // parameters pins nothing here.
+                        let tokens = quote::quote!(#ty).to_string();
+                        let names_param = tokens
+                            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .any(|tok| {
+                                tok.len() == 1
+                                    && tok.chars().all(|c| c.is_ascii_uppercase())
+                                    && !self.cg.is_type_param_in_scope(tok)
+                            });
+                        if !names_param {
+                            self.bindings.entry(param).or_insert(ty);
+                        }
+                    }
+                }
+            }
+            impl<'ast> Visit<'ast> for Uses<'_> {
+                // `Wrapper { field: binding }` / `Wrapper { binding }`: the
+                // field's declared type.
+                fn visit_expr_struct(&mut self, s: &'ast syn::ExprStruct) {
+                    if let Some(struct_name) =
+                        s.path.segments.last().map(|seg| seg.ident.to_string())
+                    {
+                        for field in &s.fields {
+                            let syn::Member::Named(field_ident) = &field.member else {
+                                continue;
+                            };
+                            let Some(generic_ty) = self.binding_named(&field.expr).cloned() else {
+                                continue;
+                            };
+                            if let Some(declared) = self
+                                .cg
+                                .lookup_struct_field_type(&struct_name, &field_ident.to_string())
+                            {
+                                self.pin(&generic_ty, &declared);
+                            }
+                        }
+                    }
+                    syn::visit::visit_expr_struct(self, s);
+                }
+                fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+                    for (idx, arg) in c.args.iter().enumerate() {
+                        let Some(generic_ty) = self.binding_named(arg).cloned() else {
+                            continue;
+                        };
+                        let declared = self
+                            .cg
+                            .lookup_function_arg_expected_type(&c.func, idx)
+                            .cloned()
+                            .or_else(|| {
+                                let syn::Expr::Path(fp) = c.func.as_ref() else {
+                                    return None;
+                                };
+                                let segs = &fp.path.segments;
+                                if segs.len() < 2 {
+                                    return None;
+                                }
+                                let owner = segs[segs.len() - 2].ident.to_string();
+                                let method = segs[segs.len() - 1].ident.to_string();
+                                self.cg.lookup_owner_method_arg_expected_type(&owner, &method, idx, None)
+                            });
+                        if let Some(declared) = declared {
+                            self.pin(&generic_ty, &declared);
+                        }
+                    }
+                    syn::visit::visit_expr_call(self, c);
+                }
+                fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+                    for (idx, arg) in mc.args.iter().enumerate() {
+                        let Some(generic_ty) = self.binding_named(arg).cloned() else {
+                            continue;
+                        };
+                        if let Some(declared) = self.cg.lookup_method_arg_expected_type_from_receiver_owner(
+                            &mc.receiver,
+                            &mc.method.to_string(),
+                            idx,
+                            None,
+                        ) {
+                            self.pin(&generic_ty, &declared);
+                        }
+                    }
+                    syn::visit::visit_expr_method_call(self, mc);
+                }
+            }
+            let mut uses = Uses {
+                cg: self,
+                binding_tys: &binding_tys,
+                type_params: &type_params,
+                bindings: &mut bindings,
+            };
+            for later in &stmts[i + 1..] {
+                uses.visit_stmt(later);
+            }
+            if type_params.iter().all(|param| bindings.contains_key(param)) {
+                let args = type_params.iter().map(|param| bindings[param].clone()).collect();
+                out.push((call as *const syn::ExprCall as usize, args));
+            }
+        }
+        out
+    }
+
+    /// The type parameters and return type of a std generic constructor whose
+    /// parameters no argument determines (`std::sync::mpsc::channel<T>()`),
+    /// as the path resolves through the scope's imports.
+    fn std_generic_constructor_signature(&self, path: &syn::Path) -> Option<(Vec<String>, syn::Type)> {
+        let segments: Vec<String> = path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let resolved = if segments.len() == 1 {
+            self.resolve_scope_import_binding_path(&segments[0])?
+        } else {
+            segments.join("::")
+        };
+        let resolved = resolved.trim_start_matches("::");
+        let t: Vec<String> = vec!["T".to_string()];
+        match resolved {
+            "std::sync::mpsc::channel" | "sync::mpsc::channel" | "mpsc::channel"
+            | "rusty::sync::mpsc::channel" => {
+                Some((t, syn::parse_quote!((Sender<T>, Receiver<T>))))
+            }
+            "std::sync::mpsc::sync_channel" | "sync::mpsc::sync_channel"
+            | "mpsc::sync_channel" | "rusty::sync::mpsc::sync_channel" => {
+                Some((t, syn::parse_quote!((SyncSender<T>, Receiver<T>))))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn infer_variant_type_context_from_expr(&self, expr: &syn::Expr) -> Option<VariantTypeContext> {
         match expr {
             syn::Expr::Path(path) => {
@@ -4681,6 +4939,31 @@ impl CodeGen {
             return None;
         }
 
+        // Backward-inferred owner type (the constructor-call arm of
+        // `augment_collect_local_type_hints_from_struct_literal_consumption`):
+        // `let inner = Owner::new(); S { inner }` with `S::inner: Owner<A>`.
+        // The hint is the owner's full type; pass it through when the init
+        // is an associated call on that same owner written without type
+        // arguments.
+        if let syn::Type::Path(hint_tp) = hint
+            && hint_tp.qself.is_none()
+            && let Some(hint_last) = hint_tp.path.segments.last()
+            && matches!(hint_last.arguments, syn::PathArguments::AngleBracketed(_))
+            && let syn::Expr::Call(call) = init_expr
+            && let syn::Expr::Path(init_path) = call.func.as_ref()
+            && init_path.qself.is_none()
+            && init_path.path.segments.len() >= 2
+            && let Some(init_owner_seg) = init_path.path.segments.iter().nth_back(1)
+            && init_owner_seg.ident == hint_last.ident
+            && matches!(init_owner_seg.arguments, syn::PathArguments::None)
+            && !matches!(
+                hint_last.ident.to_string().as_str(),
+                "Vec" | "Cell" | "OnceCell" | "OnceBox" | "Lazy" | "ArrayBuilder" | "ArrayVec"
+                    | "Option" | "Box" | "SmallVec" | "ArrayString" | "ByteArray"
+            )
+        {
+            return Some(hint.clone());
+        }
         // Backward-inferred collect target: `let x = <iter>....collect()` /
         // `collect::<Vec<_>>()`. The consumption-scan pass
         // (`augment_collect_local_type_hints_from_struct_literal_consumption`)
@@ -5038,6 +5321,40 @@ impl CodeGen {
     /// Cell::new(0); v.push(DropCounter(&cell));` shape where the
     /// pre-this-fix flow correctly inferred `Cell<int32_t>` from
     /// the literal arg.
+    /// `init` is an associated-function call on a generic owner written
+    /// without type arguments (`Slab::new()`, `lion_slab::Slab::new()`) and
+    /// `hint` is that owner's full type with arguments (`Slab<V>`).
+    pub(super) fn owner_call_pinned_by_full_hint(init: &syn::Expr, hint: &syn::Type) -> bool {
+        // Built-in placeholder owners (`Vec`, `Cell`, ...) have their own
+        // element-type hints, which this full-type shape must not override.
+        if call_owner_placeholder_target(init).is_some() {
+            return false;
+        }
+        let mut init = init;
+        while let syn::Expr::Paren(inner) = init {
+            init = &inner.expr;
+        }
+        let syn::Expr::Call(call) = init else {
+            return false;
+        };
+        let syn::Expr::Path(func) = call.func.as_ref() else {
+            return false;
+        };
+        let syn::Type::Path(hint_tp) = hint else {
+            return false;
+        };
+        func.qself.is_none()
+            && hint_tp.qself.is_none()
+            && func.path.segments.len() >= 2
+            && func.path.segments.iter().nth_back(1).is_some_and(|owner| {
+                matches!(owner.arguments, syn::PathArguments::None)
+                    && hint_tp.path.segments.last().is_some_and(|last| {
+                        last.ident == owner.ident
+                            && matches!(last.arguments, syn::PathArguments::AngleBracketed(_))
+                    })
+            })
+    }
+
     pub(super) fn bare_owner_should_yield_to_specialized_hint(
         &self,
         inferred: &syn::Type,
@@ -5265,6 +5582,12 @@ impl CodeGen {
         init_expr: &syn::Expr,
     ) -> Option<syn::Type> {
         if let Some(ty) = self.infer_local_binding_projection_from_call(init_expr) {
+            return Some(ty);
+        }
+        if let Some(ty) = self.infer_pin_poll_unwind_expr_type(
+            super::peel_to_tail_expr(init_expr)
+                .unwrap_or_else(|| self.peel_paren_group_expr(init_expr)),
+        ) {
             return Some(ty);
         }
         let expr = self.extract_value_expr(init_expr)?;
@@ -6332,6 +6655,137 @@ impl CodeGen {
         Some(bound)
     }
 
+    /// The std pinning / polling / unwinding surface a hand-written future's
+    /// `poll` is built from:
+    /// - `Pin::new_unchecked(p)` / `Pin::new(p)` is a `Pin<P>`;
+    /// - `pin.get_unchecked_mut()` / `get_mut()` is the `P` it pins, and on a
+    ///   `self: Pin<&mut Self>` receiver it is `&mut Self`;
+    /// - `pin.poll(cx)` on a `Pin<&mut F>` (F a type parameter) is
+    ///   `Poll<F::Output>`;
+    /// - `catch_unwind(f)` (through `AssertUnwindSafe(f)`) is
+    ///   `Result<R, Box<dyn Any + Send>>`, R the closure's result.
+    pub(super) fn infer_pin_poll_unwind_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let pin_inner = |ty: &syn::Type| -> Option<syn::Type> {
+            let syn::Type::Path(tp) = self.peel_paren_group_type(ty) else {
+                return None;
+            };
+            let last = tp.path.segments.last()?;
+            if last.ident != "Pin" {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })
+        };
+        match expr {
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(fp) = self.peel_paren_group_expr(&call.func) else {
+                    return None;
+                };
+                let segs: Vec<String> =
+                    fp.path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+                let last = segs.last()?.as_str();
+                if call.args.len() == 1
+                    && segs.len() >= 2
+                    && segs[segs.len() - 2] == "Pin"
+                    && matches!(last, "new_unchecked" | "new")
+                {
+                    let inner = self.infer_simple_expr_type(&call.args[0])?;
+                    return Some(syn::parse_quote!(std::pin::Pin<#inner>));
+                }
+                if call.args.len() == 1
+                    && last == "catch_unwind"
+                    && (segs.len() == 1 || segs[segs.len() - 2] == "panic")
+                {
+                    let mut callee = self.peel_paren_group_expr(&call.args[0]);
+                    if let syn::Expr::Call(wrap) = callee
+                        && wrap.args.len() == 1
+                        && let syn::Expr::Path(wp) = self.peel_paren_group_expr(&wrap.func)
+                        && wp.path.segments.last().is_some_and(|seg| seg.ident == "AssertUnwindSafe")
+                    {
+                        callee = self.peel_paren_group_expr(&wrap.args[0]);
+                    }
+                    let syn::Expr::Closure(closure) = callee else {
+                        return None;
+                    };
+                    let ret: syn::Type = match &closure.output {
+                        syn::ReturnType::Type(_, ty) => (**ty).clone(),
+                        syn::ReturnType::Default => self.infer_simple_expr_type(&closure.body)?,
+                    };
+                    // `|| recover()` with `R: FnOnce() -> T`: the body calls a
+                    // binding typed by the callable type parameter `R`, which
+                    // yields the bound's output `T`, not `R` (take_mut's
+                    // take_or_recover). Resolved through the bound, or left
+                    // untyped; a call that merely returns a type parameter
+                    // keeps it.
+                    let ret = match (&ret, self.peel_paren_group_expr(&closure.body)) {
+                        (syn::Type::Path(tp), syn::Expr::Call(body_call))
+                            if tp.qself.is_none()
+                                && tp.path.get_ident().is_some_and(|ident| {
+                                    self.is_type_param_in_scope(&ident.to_string())
+                                })
+                                && self.infer_simple_expr_type(&body_call.func).is_some_and(
+                                    |callee| {
+                                        let mut callee = &callee;
+                                        while let syn::Type::Reference(r) = callee {
+                                            callee = &r.elem;
+                                        }
+                                        Self::types_equivalent_by_tokens(callee, &ret)
+                                    },
+                                ) =>
+                        {
+                            let ident = tp.path.get_ident()?.to_string();
+                            self.lookup_callable_return_type_for_type_param(&ident)?
+                        }
+                        _ => ret,
+                    };
+                    return Some(syn::parse_quote!(
+                        Result<#ret, Box<dyn std::any::Any + Send>>
+                    ));
+                }
+                None
+            }
+            syn::Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                if mc.args.is_empty() && matches!(method.as_str(), "get_unchecked_mut" | "get_mut") {
+                    if let Some(recv_ty) = self.infer_simple_expr_type(&mc.receiver)
+                        && let Some(inner) = pin_inner(&recv_ty)
+                    {
+                        return Some(inner);
+                    }
+                    if method == "get_unchecked_mut"
+                        && matches!(self.peel_paren_group_expr(&mc.receiver),
+                            syn::Expr::Path(p) if p.path.is_ident("self"))
+                        && let Some(Some(self_ty)) = self.current_impl_method_self_tys.last()
+                    {
+                        return Some(syn::parse_quote!(&mut #self_ty));
+                    }
+                    return None;
+                }
+                if method == "poll" && mc.args.len() == 1 {
+                    let recv_ty = self.infer_simple_expr_type(&mc.receiver)?;
+                    let inner = pin_inner(&recv_ty)?;
+                    let pointee = self.peel_reference_paren_group_type(&inner).clone();
+                    let syn::Type::Path(tp) = &pointee else {
+                        return None;
+                    };
+                    let ident = tp.path.get_ident()?.to_string();
+                    if !self.is_type_param_in_scope(&ident) {
+                        return None;
+                    }
+                    let param = tp.path.segments[0].ident.clone();
+                    return Some(syn::parse_quote!(std::task::Poll<#param::Output>));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Structurally unify a callee's declared parameter type against a concrete
     /// argument type, recording `type_param -> concrete` bindings. Handles the
     /// common shapes: a bare type-param ident (`T` <- arg), references on either
@@ -6552,7 +7006,10 @@ impl CodeGen {
         // BY VALUE. Track the wrapper type on the local so downstream
         // method calls on the guard route through wrapper-deref handling
         // (`guard->method()` instead of `guard.method()`).
-        if matches!(method.as_str(), "borrow" | "borrow_mut") && mc.args.is_empty() {
+        // `try_borrow()` / `try_borrow_mut()` wrap the same guard in a Result.
+        if matches!(method.as_str(), "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut")
+            && mc.args.is_empty()
+        {
             if let Some(receiver_ty) = self
                 .infer_simple_expr_type(&mc.receiver)
                 .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
@@ -6580,10 +7037,15 @@ impl CodeGen {
                         _ => None,
                     })
                 {
-                    return Some(if method == "borrow_mut" {
-                        parse_quote!(RefMut<#inner_ty>)
-                    } else {
-                        parse_quote!(Ref<#inner_ty>)
+                    return Some(match method.as_str() {
+                        "borrow_mut" => parse_quote!(RefMut<#inner_ty>),
+                        "try_borrow_mut" => {
+                            parse_quote!(Result<RefMut<#inner_ty>, std::cell::BorrowMutError>)
+                        }
+                        "try_borrow" => {
+                            parse_quote!(Result<Ref<#inner_ty>, std::cell::BorrowError>)
+                        }
+                        _ => parse_quote!(Ref<#inner_ty>),
                     });
                 }
             }
@@ -7240,10 +7702,26 @@ impl CodeGen {
         }
         let (owner, args) = self.option_or_result_type_args(receiver_ty)?;
         match owner.as_str() {
-            "Option" if matches!(method, "unwrap" | "unwrap_unchecked" | "expect") => {
+            // `unwrap_or_else(f)` / `unwrap_or(v)` / `unwrap_or_default()` yield
+            // the payload too (`m.lock().unwrap_or_else(PoisonError::into_inner)`
+            // is the guard).
+            "Option"
+                if matches!(
+                    method,
+                    "unwrap" | "unwrap_unchecked" | "expect" | "unwrap_or_else" | "unwrap_or"
+                        | "unwrap_or_default"
+                ) =>
+            {
                 args.first().cloned()
             }
-            "Result" if matches!(method, "unwrap" | "expect") => args.first().cloned(),
+            "Result"
+                if matches!(
+                    method,
+                    "unwrap" | "expect" | "unwrap_or_else" | "unwrap_or" | "unwrap_or_default"
+                ) =>
+            {
+                args.first().cloned()
+            }
             "Result" if matches!(method, "unwrap_err" | "expect_err") => args.get(1).cloned(),
             _ => None,
         }
@@ -7709,6 +8187,9 @@ impl CodeGen {
         let expr_key = expr as *const syn::Expr as usize;
         let _inference_guard =
             ExprTypeInferenceGuard::enter(&self.expr_type_inference_in_progress, expr_key)?;
+        if let Some(ty) = self.infer_pin_poll_unwind_expr_type(expr) {
+            return Some(ty);
+        }
         match expr {
             syn::Expr::Lit(lit) => self.infer_literal_type(&lit.lit),
             syn::Expr::Path(path) => {
@@ -13387,6 +13868,12 @@ impl CodeGen {
         hints: &mut HashMap<String, syn::Type>,
     ) {
         let mut candidate_counts: HashMap<String, usize> = HashMap::new();
+        // Locals initialised by an associated-function call on a generic
+        // owner written without type arguments (`let inner = Slab::new();`,
+        // `lion_slab::Slab::new()`), keyed to that owner's name. Rust types
+        // such a local from its consumption: a struct field of declared type
+        // `Owner<Args>` pins it to exactly that type.
+        let mut owner_calls: HashMap<String, String> = HashMap::new();
         for stmt in stmts {
             let syn::Stmt::Local(local) = stmt else {
                 continue;
@@ -13404,6 +13891,32 @@ impl CodeGen {
             let Some(init) = local.init.as_ref() else {
                 continue;
             };
+            if let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr)
+                // Owners the placeholder pipeline already types from their
+                // own usage (`Vec`, `Cell`, `HashMap`, ...) keep that path;
+                // it stores their element type, not the full owner type.
+                && call_owner_placeholder_target(&init.expr).is_none()
+                && let syn::Expr::Path(func) = call.func.as_ref()
+                && func.qself.is_none()
+                && func.path.segments.len() >= 2
+                && let Some(owner) = func.path.segments.iter().nth_back(1)
+                && matches!(owner.arguments, syn::PathArguments::None)
+                && func
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|method| matches!(method.arguments, syn::PathArguments::None))
+                && owner
+                    .ident
+                    .to_string()
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
+                owner_calls.insert(name.clone(), owner.ident.to_string());
+                *candidate_counts.entry(name).or_insert(0) += 1;
+                continue;
+            }
             let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&init.expr) else {
                 continue;
             };
@@ -13433,6 +13946,7 @@ impl CodeGen {
         struct Scan<'g> {
             cg: &'g CodeGen,
             names: HashSet<String>,
+            owner_calls: HashMap<String, String>,
             // None = poisoned by conflicting consumptions.
             found: HashMap<String, Option<syn::Type>>,
         }
@@ -13479,6 +13993,24 @@ impl CodeGen {
                     ) else {
                         continue;
                     };
+                    if let Some(owner) = self.owner_calls.get(&local_name) {
+                        // Only the owner's own full type pins the local, and
+                        // only when it carries the type arguments the call
+                        // omitted.
+                        let pins = !via_into_iter
+                            && matches!(&field_ty, syn::Type::Path(tp)
+                                if tp.qself.is_none()
+                                    && tp.path.segments.last().is_some_and(|last| {
+                                        last.ident == owner
+                                            && matches!(
+                                                last.arguments,
+                                                syn::PathArguments::AngleBracketed(_)
+                                            )
+                                    }));
+                        if !pins {
+                            continue;
+                        }
+                    }
                     let candidate: syn::Type = if via_into_iter {
                         let peeled = self.cg.peel_reference_paren_group_type(&field_ty);
                         let Some(elem) = vec_into_iter_element_type(peeled) else {
@@ -13516,6 +14048,7 @@ impl CodeGen {
         let mut scan = Scan {
             cg: self,
             names,
+            owner_calls,
             found: HashMap::new(),
         };
         for stmt in stmts {
@@ -14100,9 +14633,48 @@ impl CodeGen {
         if scoped_matches.len() != 1 {
             return None;
         }
+        // The scope's own import of the name wins over the crate's unique
+        // same-named declaration: `use lion_reactor::Reactor;` at the root of a
+        // crate that also declares `types::reactor::Reactor`. Defer to the
+        // scope-binding resolution (resolve_unique_nonlocal_type_path).
+        let scope_key = self.module_stack.join("::");
+        if let Some(bound) = self.resolve_scope_import_binding_path_for_scope(&scope_key, name) {
+            let bound = bound.trim().trim_start_matches("::");
+            let bound = bound.strip_prefix("crate::").unwrap_or(bound);
+            if bound != scoped_matches[0] {
+                return None;
+            }
+        }
 
         let escaped = self.escape_and_rename_qualified_name(scoped_matches[0]);
         Some(format!("::{}", escaped))
+    }
+
+    /// `::<dep>[::<module>]::<name>` for the one namespace-wrapped dependency
+    /// crate whose manifest declares a type `name` (graph mode only).
+    pub(super) fn unique_dependency_type_path(&self, name: &str) -> Option<String> {
+        if !self.crate_graph_mode {
+            return None;
+        }
+        let mut found: Vec<String> = Vec::new();
+        for manifest in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&manifest.module) {
+                continue;
+            }
+            for declared in &manifest.declared_types {
+                if declared.name != name {
+                    continue;
+                }
+                found.push(if declared.module_path.is_empty() {
+                    format!("::{}::{}", manifest.module, name)
+                } else {
+                    format!("::{}::{}::{}", manifest.module, declared.module_path, name)
+                });
+            }
+        }
+        found.sort();
+        found.dedup();
+        (found.len() == 1).then(|| found.remove(0))
     }
 
     pub(super) fn resolve_unique_nonlocal_type_path(&self, name: &str) -> Option<String> {
@@ -14231,7 +14803,12 @@ impl CodeGen {
             })
             .collect();
         if scoped_matches.is_empty() {
-            return None;
+            // Under --crate-graph, a bare name no local declaration or
+            // in-scope import binds may still be a dependency crate's type the
+            // AUTHORING scope imported (a method merged into its struct from
+            // another module: `use crate::types::PollResult;` in
+            // `executor/poll_task.rs`, declared inside `executor`'s class).
+            return self.unique_dependency_type_path(name);
         }
 
         let current_scoped = if self.module_stack.is_empty() {

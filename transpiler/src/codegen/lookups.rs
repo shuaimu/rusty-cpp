@@ -128,6 +128,44 @@ impl CodeGen {
         Some(out)
     }
 
+    /// The receiver's inferred type is a namespace-wrapped dependency crate's
+    /// type (`lion_reactor::Reactor`, directly or through an import alias
+    /// such as `use lion_reactor::Reactor as LionReactor;`).
+    pub(super) fn receiver_type_is_dependency_crate_type(&self, receiver: &syn::Expr) -> bool {
+        if self.dependency_ufcs_trait_manifests.is_empty() {
+            return false;
+        }
+        let Some(ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&ty) else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.is_empty() {
+            return false;
+        }
+        let first = tp.path.segments[0].ident.to_string();
+        let head = if tp.path.segments.len() == 1 {
+            if self.local_declared_types.contains(&first) || self.is_type_param_in_scope(&first) {
+                return false;
+            }
+            match self.resolve_scope_import_binding_path(&first) {
+                Some(target) => target
+                    .trim_start_matches("::")
+                    .split("::")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                None => return false,
+            }
+        } else {
+            first
+        };
+        self.dependency_ufcs_trait_manifests
+            .iter()
+            .any(|m| m.module == head && crate::transpile::crate_is_namespace_wrapped(&m.module))
+    }
+
     pub(super) fn lookup_owner_method_has_receiver(&self, owner: &str, method_name: &str) -> Option<bool> {
         let mut keys = Vec::new();
         keys.push(Self::owner_method_key(owner, method_name));
@@ -631,6 +669,14 @@ impl CodeGen {
         arg_idx: usize,
         substitutions: Option<&HashMap<String, syn::Type>>,
     ) -> Option<syn::Type> {
+        // `Owner::method(recv, a, b)` for a receiver method of a crate type:
+        // the method's recorded parameters have no receiver slot, so argument
+        // `i` is parameter `i - 1` (the receiver itself has none).
+        let arg_idx = match self.crate_type_ufcs_receiver_method(call) {
+            Some(()) if arg_idx == 0 => return None,
+            Some(()) => arg_idx - 1,
+            None => arg_idx,
+        };
         let expected = match self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx) {
             Some(expected) => expected.clone(),
             // Invoking a CALLABLE PARAM (`f(&mut self.entries)` where
@@ -649,6 +695,31 @@ impl CodeGen {
             }
             _ => Some(expected),
         }
+    }
+
+    /// `call` is `Owner::method(recv, ..)` (or `Self::method(recv, ..)`) naming
+    /// a receiver method of a type this crate declares.
+    pub(super) fn crate_type_ufcs_receiver_method(&self, call: &syn::ExprCall) -> Option<()> {
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.len() < 2 || call.args.is_empty() {
+            return None;
+        }
+        let segments = &path.path.segments;
+        let method = segments.last()?.ident.to_string();
+        let owner = segments[segments.len() - 2].ident.to_string();
+        let owner = if owner == "Self" {
+            self.current_struct.as_deref()?.rsplit("::").next()?.to_string()
+        } else {
+            owner
+        };
+        let crate_type = self.local_declared_types.contains(&owner)
+            || self.declared_item_names.contains(&owner);
+        (crate_type
+            && !self.data_enum_name_matches(&owner)
+            && self.lookup_owner_method_has_receiver(&owner, &method) == Some(true))
+        .then_some(())
     }
 
     fn boxed_callback_invocation_arg_expected_type(
@@ -2293,6 +2364,63 @@ impl CodeGen {
         Some((ctor_name, &call.args[0]))
     }
 
+    /// The value type `T` of the `thread_local!` key a path names (the static
+    /// is a `LocalKey<T>`): `KEY` declared in (or imported into) the current
+    /// module, or a `mod::KEY` path; a bare name a local binding shadows, or
+    /// one that several modules declare, names none.
+    pub(super) fn thread_local_key_value_type(&self, receiver: &syn::Expr) -> Option<syn::Type> {
+        if self.thread_local_value_types.is_empty() {
+            return None;
+        }
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(receiver) else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.is_empty() {
+            return None;
+        }
+        let segments: Vec<String> =
+            path.path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let name = segments.last()?.clone();
+        if segments.len() == 1
+            && self.local_bindings.iter().any(|scope| scope.contains_key(&name))
+        {
+            return None;
+        }
+        let joined = segments.join("::");
+        let mut candidates: Vec<String> = Vec::new();
+        let mut scope = self.module_stack.clone();
+        loop {
+            let mut key = scope.clone();
+            key.extend(segments.iter().cloned());
+            candidates.push(key.join("::"));
+            if scope.pop().is_none() {
+                break;
+            }
+        }
+        if segments.len() == 1
+            && let Some(target) = self.resolve_scope_import_binding_path(&name)
+        {
+            let target = target.trim_start_matches("::");
+            let target = target.strip_prefix("crate::").unwrap_or(target);
+            candidates.insert(0, target.to_string());
+        }
+        for key in &candidates {
+            if let Some(ty) = self.thread_local_value_types.get(key) {
+                return Some(ty.clone());
+            }
+        }
+        let suffix = format!("::{}", joined);
+        let mut found = self
+            .thread_local_value_types
+            .iter()
+            .filter(|(key, _)| **key == joined || key.ends_with(&suffix));
+        let first = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        Some(first.1.clone())
+    }
+
     /// Look up the nearest in-scope local binding type for a variable name.
     pub(super) fn lookup_local_binding_type(&self, name: &str) -> Option<syn::Type> {
         let recorded = self.lookup_local_binding_type_recorded(name);
@@ -2731,6 +2859,15 @@ impl CodeGen {
             let scoped = self.scoped_type_key(struct_name);
             self.struct_field_order.get(&scoped)
         })
+        .or_else(|| {
+            // A Drop struct a sibling file declares (crate mode): its literal
+            // here takes the fieldwise constructor, in declaration order.
+            let tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
+            self.cross_file_drop_tails
+                .contains(tail)
+                .then(|| self.cross_file_struct_field_order.get(tail))
+                .flatten()
+        })
     }
 
     pub(super) fn extract_add_pointer_inner_cpp_type(ty: &str) -> Option<String> {
@@ -2757,14 +2894,81 @@ impl CodeGen {
         arg_idx: usize,
         arg_expr: Option<&syn::Expr>,
     ) -> Option<syn::Type> {
+        if let Some(receiver_ty) = self.infer_simple_expr_type(receiver)
+            && let Some(trait_path) = self.dyn_trait_object_owner_path(&receiver_ty)
+        {
+            let mut keys = vec![trait_path.clone()];
+            if let Some(tail) = trait_path.rsplit("::").next() {
+                keys.push(tail.to_string());
+            }
+            if !self.module_stack.is_empty() {
+                keys.push(format!("{}::{}", self.module_stack.join("::"), trait_path));
+            }
+            for key in keys {
+                if let Some(Some(ty)) = self
+                    .trait_object_method_arg_expected_types
+                    .get(&format!("{}::{}", key, method_name))
+                    .and_then(|types| types.get(arg_idx))
+                {
+                    return Some(ty.clone());
+                }
+            }
+        }
         let (owner, substitutions) = self.receiver_owner_name_and_type_substitutions(receiver)?;
         let expected =
             self.lookup_owner_method_arg_expected_type(&owner, method_name, arg_idx, arg_expr)?;
-        if substitutions.is_empty() {
-            Some(expected)
+        let expected = if substitutions.is_empty() {
+            expected
         } else {
-            Some(self.substitute_type_params_in_type(&expected, &substitutions))
+            self.substitute_type_params_in_type(&expected, &substitutions)
+        };
+        // The owner's own type parameters mean something only where they are
+        // in scope: `sender.finish(Err(e))` on a destructured
+        // `sender: JoinSender<R>` whose arguments were not inferred spelled
+        // `Result<T, JoinError>` with JoinSender's `T` undeclared. Give no
+        // expected type rather than one naming an out-of-scope parameter.
+        let owner_tail = owner.rsplit("::").next().unwrap_or(owner.as_str());
+        if let Some(params) = self
+            .declared_type_params
+            .get(&owner)
+            .or_else(|| self.declared_type_params.get(owner_tail))
+        {
+            let tokens = quote::quote!(#expected).to_string();
+            let mentions = |param: &str| {
+                tokens
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|token| token == param)
+            };
+            if params
+                .iter()
+                .any(|param| mentions(param) && !self.is_type_param_in_scope(param))
+            {
+                return None;
+            }
         }
+        Some(expected)
+    }
+
+    /// `ty` names a generic parameter some crate type declares
+    /// (`declared_type_params`) that is not in scope here and is not itself a
+    /// declared type.
+    pub(super) fn type_mentions_out_of_scope_owner_type_param(&self, ty: &syn::Type) -> bool {
+        let tokens = quote::quote!(#ty).to_string();
+        tokens
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|token| !token.is_empty())
+            .any(|token| {
+                !self.is_type_param_in_scope(token)
+                    && !self.local_declared_types.contains(token)
+                    && self
+                        .declared_type_params
+                        .values()
+                        .any(|params| params.iter().any(|param| param == token))
+                    && !self
+                        .local_declared_types
+                        .iter()
+                        .any(|decl| decl.rsplit("::").next() == Some(token))
+            })
     }
 
     /// Does the receiver's resolved owner type declare `method_name` as an

@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <cassert>
 #include "unsafe_cell.hpp"
+#include "result.hpp"
 
 // RefCell<T> - Interior mutability with runtime borrow checking
 // Provides interior mutability with dynamic borrow checking
@@ -21,6 +22,15 @@ namespace rusty {
 
 template<typename T>
 class RefCell;
+
+// std::cell::BorrowError / BorrowMutError: a `try_borrow` / `try_borrow_mut`
+// that would violate the borrow rules.
+struct BorrowError {
+    bool operator==(const BorrowError&) const = default;
+};
+struct BorrowMutError {
+    bool operator==(const BorrowMutError&) const = default;
+};
 
 // Forward declarations for borrow guards
 template<typename T>
@@ -109,6 +119,24 @@ public:
     RefMut<T> borrow_mut() const {
         add_writer();
         return RefMut<T>(*this);
+    }
+
+    // Rust `RefCell::try_borrow` / `try_borrow_mut`: the guard, or an error
+    // instead of the borrow-rule panic.
+    // @lifetime: (&'a) -> Result<Ref<'a, T>, BorrowError>
+    Result<Ref<T>, BorrowError> try_borrow() const {
+        if (*borrow_state.get_const() < 0) {
+            return Result<Ref<T>, BorrowError>::Err(BorrowError{});
+        }
+        return Result<Ref<T>, BorrowError>::Ok(borrow());
+    }
+
+    // @lifetime: (&'a mut) -> Result<RefMut<'a, T>, BorrowMutError>
+    Result<RefMut<T>, BorrowMutError> try_borrow_mut() const {
+        if (*borrow_state.get_const() != 0) {
+            return Result<RefMut<T>, BorrowMutError>::Err(BorrowMutError{});
+        }
+        return Result<RefMut<T>, BorrowMutError>::Ok(borrow_mut());
     }
 
     // Try to immutably borrow (returns true on success)

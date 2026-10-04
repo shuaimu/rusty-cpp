@@ -1,0 +1,21 @@
+[package]
+name = "lion-reactor-spec"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lion Team"]
+description = "Shared reactor event-log vocabulary for Lion crates (event enums, log predicates, invariant templates, bounded contracts, io anchor bridge)"
+license = "MIT"
+
+[dependencies]
+vstd = { git = "https://github.com/verus-lang/verus", rev = "db81a74" }
+lion-framework-spec = { path = "../lion-framework-spec", package = "lion-framework-spec" }
+lion-utility-spec = { path = "../lion-utility/lion-utility-spec", package = "lion-utility-spec" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(verus_keep_ghost)"] }
+
+[package.metadata.verus]
+verify = true
+
+[package.metadata.verus.ide]
+extra_args = "--crate-type=lib --expand-errors"

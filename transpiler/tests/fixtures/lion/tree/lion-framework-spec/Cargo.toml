@@ -1,0 +1,19 @@
+[package]
+name = "lion-framework-spec"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lion Team"]
+description = "Shared verification framework for Lion crates (ModuleSpec / AsyncContract / LocalLiveness / ActionSafety)"
+license = "MIT"
+
+[dependencies]
+vstd = { git = "https://github.com/verus-lang/verus", rev = "db81a74" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(verus_keep_ghost)"] }
+
+[package.metadata.verus]
+verify = true
+
+[package.metadata.verus.ide]
+extra_args = "--crate-type=lib --expand-errors"

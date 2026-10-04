@@ -21,6 +21,7 @@
 #include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <cstring>
 #include <cerrno>   // Error::last_os_error / kind_from_errno
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -84,8 +85,60 @@ public:
         return Error(kind, std::string(std::string_view(std::forward<M>(message))));
     }
 
+    // Rust `io::Error::from(kind)` (`impl From<ErrorKind> for io::Error`):
+    // an error of that kind, described by the kind.
+    static Error from(Kind kind) { return Error(kind, kind_description(kind)); }
+
+    // Rust `io::Error::other(error)`: an `Other` error carrying `error`'s
+    // text (its Display where the type offers one here).
+    template<typename E>
+    static Error other(E&& error) {
+        if constexpr (std::is_convertible_v<E&&, std::string_view>) {
+            return Error(Kind::Other, std::string(std::string_view(std::forward<E>(error))));
+        } else if constexpr (requires { std::string(std::string_view(error.to_string())); }) {
+            return Error(Kind::Other, std::string(std::string_view(error.to_string())));
+        } else if constexpr (requires { std::string(error.rusty_debug_string()); }) {
+            return Error(Kind::Other, std::string(error.rusty_debug_string()));
+        } else {
+            return Error(Kind::Other, "other error");
+        }
+    }
+
+    static const char* kind_description(Kind kind) {
+        switch (kind) {
+            case Kind::NotFound: return "entity not found";
+            case Kind::PermissionDenied: return "permission denied";
+            case Kind::ConnectionRefused: return "connection refused";
+            case Kind::ConnectionReset: return "connection reset";
+            case Kind::ConnectionAborted: return "connection aborted";
+            case Kind::NotConnected: return "not connected";
+            case Kind::AddrInUse: return "address in use";
+            case Kind::AddrNotAvailable: return "address not available";
+            case Kind::BrokenPipe: return "broken pipe";
+            case Kind::AlreadyExists: return "entity already exists";
+            case Kind::WouldBlock: return "operation would block";
+            case Kind::InvalidInput: return "invalid input parameter";
+            case Kind::InvalidData: return "invalid data";
+            case Kind::TimedOut: return "timed out";
+            case Kind::WriteZero: return "write zero";
+            case Kind::Interrupted: return "operation interrupted";
+            case Kind::UnexpectedEof: return "unexpected end of file";
+            case Kind::Unsupported: return "unsupported";
+            case Kind::OutOfMemory: return "out of memory";
+            case Kind::Other: return "other error";
+        }
+        return "other error";
+    }
+
     Kind kind() const { return kind_; }
     const std::string& to_string() const { return message_; }
+
+    // Rust's `impl Display for io::Error` / `Debug` through a formatter:
+    // the message (a wrapping type's `self.inner.fmt(f)` delegates here).
+    template<typename Formatter>
+    auto fmt(Formatter& f) const -> decltype(f.write_str(std::string_view{})) {
+        return f.write_str(std::string_view(message_));
+    }
     const char* what() const { return message_.c_str(); }
     Option<const void*&> source() const { return Option<const void*&>{None}; }
 
@@ -159,6 +212,10 @@ using ErrorKind = Error::Kind;
 template<typename T>
 class Result {
 public:
+    // The `?` machinery (try.hpp) and generic Result code name these.
+    using ok_type = T;
+    using err_type = Error;
+
     static Result ok(T value) { return Result(std::move(value), true); }
     static Result err(Error error) { return Result(std::move(error)); }
     static Result Ok(T value) { return ok(std::move(value)); }
@@ -173,14 +230,30 @@ public:
     bool is_ok() const { return ok_; }
     bool is_err() const { return !ok_; }
 
-    T& unwrap() {
+    // Rust `unwrap(self)` consumes the Result: the value moves out, as
+    // rusty::Result's does. (Handing back a reference into a temporary
+    // Result dangled: the `?` macros stash the unwrapped value past the
+    // Result's lifetime.)
+    T unwrap() {
         if (!ok_) rusty::panic::do_panic("io::Result::unwrap on Err: " + error_.to_string());
-        return value_;
+        return std::move(*value_);
     }
 
     const T& unwrap() const {
         if (!ok_) rusty::panic::do_panic("io::Result::unwrap on Err: " + error_.to_string());
-        return value_;
+        return *value_;
+    }
+
+    // A mutable view of the value in place, as rusty::Result's: a match arm
+    // peeks at an owned scrutinee's payload without consuming it.
+    T& unwrap_mut() {
+        if (!ok_) rusty::panic::do_panic("io::Result::unwrap_mut on Err: " + error_.to_string());
+        return *value_;
+    }
+
+    Error& unwrap_err_mut() {
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err_mut on Ok");
+        return error_;
     }
 
     Error& unwrap_err() {
@@ -188,9 +261,46 @@ public:
         return error_;
     }
 
+    const Error& unwrap_err() const {
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err on Ok");
+        return error_;
+    }
+
+    // Rust `Result::expect(msg)`: the value, or a panic naming `msg` and the error.
+    template<typename M>
+    T expect(M&& message) {
+        if (!ok_) {
+            rusty::panic::do_panic(std::string(std::string_view(std::forward<M>(message))) + ": " +
+                                   error_.to_string());
+        }
+        return std::move(*value_);
+    }
+
+    template<typename M>
+    const T& expect(M&& message) const {
+        if (!ok_) {
+            rusty::panic::do_panic(std::string(std::string_view(std::forward<M>(message))) + ": " +
+                                   error_.to_string());
+        }
+        return *value_;
+    }
+
+    T unwrap_or(T fallback) const {
+        return ok_ ? *value_ : std::move(fallback);
+    }
+
+    // Rust `Result::ok()` / `err()`.
+    Option<T> ok() const {
+        return ok_ ? Option<T>(*value_) : Option<T>(None);
+    }
+
+    Option<Error> err() const {
+        return ok_ ? Option<Error>(None) : Option<Error>(error_);
+    }
+
     bool operator==(const Result& other) const {
         if (ok_ != other.ok_) return false;
-        if (ok_) return value_ == other.value_;
+        if (ok_) return *value_ == *other.value_;
         return true;
     }
 
@@ -198,7 +308,7 @@ public:
     auto map(F f) -> rusty::Result<decltype(f(std::declval<T>())), Error> {
         using NewT = decltype(f(std::declval<T>()));
         if (ok_) {
-            return rusty::Result<NewT, Error>::Ok(f(std::move(value_)));
+            return rusty::Result<NewT, Error>::Ok(f(std::move(*value_)));
         }
         return rusty::Result<NewT, Error>::Err(std::move(error_));
     }
@@ -207,16 +317,18 @@ public:
     auto map_err(F f) -> rusty::Result<T, decltype(f(std::declval<Error>()))> {
         using NewE = decltype(f(std::declval<Error>()));
         if (ok_) {
-            return rusty::Result<T, NewE>::Ok(std::move(value_));
+            return rusty::Result<T, NewE>::Ok(std::move(*value_));
         }
         return rusty::Result<T, NewE>::Err(f(std::move(error_)));
     }
 
 private:
     Result(T value, bool) : value_(std::move(value)), error_(""), ok_(true) {}
-    Result(Error error) : value_{}, error_(std::move(error)), ok_(false) {}
+    // An Err holds no T: `io::Result<T>` works for a T without a default
+    // constructor (a handle type such as an fd wrapper).
+    Result(Error error) : value_(std::nullopt), error_(std::move(error)), ok_(false) {}
 
-    T value_;
+    std::optional<T> value_;
     Error error_;
     bool ok_;
 };
@@ -245,6 +357,11 @@ public:
 
     Error& unwrap_err() {
         if (ok_) rusty::panic::do_panic("io::Result::unwrap_err on Ok");
+        return error_;
+    }
+
+    Error& unwrap_err_mut() {
+        if (ok_) rusty::panic::do_panic("io::Result::unwrap_err_mut on Ok");
         return error_;
     }
 

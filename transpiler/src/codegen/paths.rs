@@ -2414,6 +2414,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                         && authorization.leaf == segments[1]
                 })
             && !matches!(segments[0].as_str(), "std" | "core" | "alloc" | "rusty")
+            // A dependency crate's path (`dep::Reactor`, re-exported from its
+            // `reactor` module) is not a stale spelling of the crate's OWN
+            // same-tail type (`types::reactor::Reactor`, which wraps it).
+            && !self
+                .dependency_ufcs_trait_manifests
+                .iter()
+                .any(|manifest| manifest.module == segments[0])
             && !self.is_type_param_in_scope(&segments[0])
             && segments[0] != "Self"
         {
@@ -3149,7 +3156,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             && segments[0] == "std"
             && matches!(
                 segments[1].as_str(),
-                "time" | "path" | "ffi" | "env" | "process"
+                "time" | "path" | "ffi" | "env" | "process" | "future"
             );
         // General Layer 1 (std-port mapping): a PORTED std module's deep member types
         // (`vec::Drain`, `vec::IntoIter`, …) are transpiled into the `rusty::port::<mod>`

@@ -524,7 +524,20 @@ impl CodeGen {
             let output = expected
                 .and_then(|ty| self.standard_poll_output(ty))
                 .or_else(|| self.infer_simple_expr_type(&call.args[0]));
-            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            // The payload's expected type is the Poll's output, not the
+            // enclosing return type (`Poll::Ready(Err(e))` in a fn returning
+            // `Poll<io::Result<T>>` constructs an io::Result).
+            let payload_expected = expected.and_then(|ty| self.standard_poll_output(ty));
+            let arg = match payload_expected.as_ref() {
+                Some(payload) if matches!(
+                    self.peel_paren_group_expr(&call.args[0]),
+                    syn::Expr::Call(_)
+                ) => self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &call.args[0],
+                    Some(payload),
+                ),
+                _ => self.emit_expr_maybe_move(&call.args[0]),
+            };
             let cpp = output
                 .as_ref()
                 .map(|ty| self.standard_future_output_cpp(ty))

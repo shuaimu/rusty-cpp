@@ -26,6 +26,8 @@
 #include <cstdlib>
 #include <string>
 
+#include <rusty/string.hpp>  // rusty::String (IdBased::name)
+
 namespace btree_testing {
 
 // ─────────────────────────────────────────────────────────────────────
@@ -223,11 +225,25 @@ struct Governed {
 
 // IdBased: id determines order, name is opaque. Lets tests insert
 // "different" values that map to the same key.
+//
+// `name` is `rusty::String`, the translation of Rust's `String`, and NOT
+// `std::string`. That is a port precondition, not a preference: btree_port
+// (like the Rust code it is transpiled from) moves elements between node
+// slots BITWISE — `MaybeUninit<T>`'s copy/move is a memcpy, and the slice
+// shifts / splits / merges go through it — so an element type must be
+// bitwise-relocatable, as every Rust type is. libstdc++'s `std::string` is
+// not: its SSO buffer pointer points into the object itself, so after a
+// shift it points into the neighbouring slot (see docs/KNOWN_LIMITATIONS.md,
+// "btree_port elements must be bitwise-relocatable"). `rusty::String` owns a
+// malloc'd buffer and relocates fine. A `std::string` name here once made
+// test_id_based_append_manual pass only because extracted elements used to be
+// COPIED (re-reading the chars through the stale pointer); once extraction
+// relocated, the moved-out key stole a pointer into the node and freed it.
 struct IdBased {
     uint32_t id;
-    std::string name;
+    rusty::String name;
 
-    IdBased(uint32_t id_, std::string name_) : id(id_), name(std::move(name_)) {}
+    IdBased(uint32_t id_, const char* name_) : id(id_), name(name_) {}
 
     bool operator<(const IdBased& other) const { return id < other.id; }
     bool operator==(const IdBased& other) const { return id == other.id; }

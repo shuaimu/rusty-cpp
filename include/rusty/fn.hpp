@@ -6,6 +6,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "rusty/relocatable_function.hpp"
+
 // rusty::SafeFn<Signature> - Type-safe wrapper for function pointers to @safe functions
 // rusty::UnsafeFn<Signature> - Type-safe wrapper for function pointers to @unsafe functions
 //
@@ -68,7 +70,9 @@ public:
 
 private:
     pointer ptr_;
-    std::function<Ret(Args...)> callable_;
+    // Moved bitwise by the containers that hold fn pointers (a
+    // std::function's inline buffer is self-referential).
+    detail::RelocatableFunction<Ret(Args...)> callable_;
 
 public:
     /// @safe - Default constructor (null)

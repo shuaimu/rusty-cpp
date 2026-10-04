@@ -33,6 +33,7 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 #include "mem.hpp"
@@ -121,7 +122,27 @@ public:
     constexpr NonNull() noexcept : ptr_(nullptr) {}
     constexpr NonNull<T> add(std::size_t n) const noexcept { return NonNull<T>(ptr_ + n); }
     constexpr NonNull<T> sub(std::size_t n) const noexcept { return NonNull<T>(ptr_ - n); }
-    constexpr T read() const noexcept { return *ptr_; }
+    // `NonNull::read` is `ptr::read`, so it RELOCATES — lowered exactly like
+    // `rusty::ptr::read` below (see the rationale there): trivially
+    // destructible T is copied, anything that owns something is moved out and
+    // its source lifetime ended. A plain copy here left the source alive in a
+    // slot nobody destroys again — one leaked element per read (Vec IntoIter's
+    // fold/try_fold, alloc's IntoIter::next and Box::take) — the same defect
+    // MaybeUninit::assume_init_read had in the btree port.
+    constexpr T read() const
+        noexcept(std::is_trivially_destructible_v<T>
+                     ? std::is_nothrow_copy_constructible_v<T>
+                     : (std::is_nothrow_move_constructible_v<T>
+                        && std::is_nothrow_destructible_v<T>))
+    {
+        if constexpr (std::is_trivially_destructible_v<T>) {
+            return *ptr_;
+        } else {
+            T out(std::move(*ptr_));
+            std::destroy_at(ptr_);
+            return out;
+        }
+    }
     constexpr std::size_t offset_from_unsigned(NonNull<T> origin) const noexcept {
         return static_cast<std::size_t>(ptr_ - origin.ptr_);
     }
@@ -508,6 +529,41 @@ inline Option<T&> as_mut(T* ptr) {
         return Option<T&>(None);
     }
     return Option<T&>(*ptr);
+}
+
+namespace detail {
+// `x as usize` whose source type the transpiler could not see (a closure
+// parameter): a raw pointer's address, or an ordinary integer conversion.
+template<typename To, typename From>
+To integer_or_address_cast(From&& from) {
+    using F = std::remove_cvref_t<From>;
+    if constexpr (std::is_pointer_v<F>) {
+        return static_cast<To>(reinterpret_cast<std::uintptr_t>(from));
+    } else {
+        return static_cast<To>(from);
+    }
+}
+} // namespace detail
+
+// `x.as_mut()` / `x.as_ref()` whose receiver type the transpiler could not
+// see (a closure parameter): the raw-pointer lowering above for a pointer,
+// the receiver's own method otherwise (Option, Box, Pin, ...).
+template<typename P>
+decltype(auto) as_mut_dispatch(P&& p) {
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<P>>) {
+        return as_mut(p);
+    } else {
+        return std::forward<P>(p).as_mut();
+    }
+}
+
+template<typename P>
+decltype(auto) as_ref_dispatch(P&& p) {
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<P>>) {
+        return as_ref(static_cast<const std::remove_pointer_t<std::remove_cvref_t<P>>*>(p));
+    } else {
+        return std::forward<P>(p).as_ref();
+    }
 }
 
 // Rust's `ptr::read` RELOCATES: it copies the bytes out and the source becomes

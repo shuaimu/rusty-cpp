@@ -1,0 +1,20 @@
+[package]
+name = "lion-executor-spec"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lion Team"]
+description = "Shared executor event-log vocabulary for Lion crates (events, log predicates, fifo queue, invariant templates, bounded contracts)"
+license = "MIT"
+
+[dependencies]
+vstd = { git = "https://github.com/verus-lang/verus", rev = "db81a74" }
+lion-framework-spec = { path = "../lion-framework-spec", package = "lion-framework-spec" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(verus_keep_ghost)"] }
+
+[package.metadata.verus]
+verify = true
+
+[package.metadata.verus.ide]
+extra_args = "--crate-type=lib --expand-errors"

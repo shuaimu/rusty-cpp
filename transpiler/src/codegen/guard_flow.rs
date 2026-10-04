@@ -164,7 +164,9 @@ impl CodeGen {
         // it wraps (flow, not shape — doctrine rule 1).
         let peels_result = match method.as_str() {
             "unwrap" => mc.args.is_empty(),
-            "expect" => mc.args.len() == 1,
+            // `lock().unwrap_or_else(PoisonError::into_inner)` recovers the
+            // guard from the poison error: a guard either way.
+            "expect" | "unwrap_or_else" => mc.args.len() == 1,
             _ => false,
         };
         if peels_result {
@@ -280,7 +282,7 @@ impl CodeGen {
     /// that already hold the `ExprMethodCall`.
     pub(super) fn known_guard_producing_method_call(&self, mc: &syn::ExprMethodCall) -> bool {
         let method = mc.method.to_string();
-        (matches!(method.as_str(), "borrow" | "borrow_mut")
+        (matches!(method.as_str(), "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut")
             && self.receiver_is_refcell_container_type(&mc.receiver))
             || (matches!(method.as_str(), "lock" | "try_lock" | "read" | "write")
                 && self.receiver_is_mutex_container_type(&mc.receiver))

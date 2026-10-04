@@ -585,6 +585,33 @@ constexpr decltype(auto) deref_if_pointer(T&& value) {
     }
 }
 
+/// A match arm's payload accessor for an OWNED scrutinee whose arm uses a
+/// by-value binding (Rust moves the payload into it): a mutable peek into the
+/// scrutinee when the scrutinee is mutable, so the binding can be consumed
+/// through a `self`-by-value member (a const lvalue has none), and the const
+/// accessor otherwise. It never consumes the scrutinee, so a later arm still
+/// tests it when a nested sub-pattern fails.
+template<typename T>
+constexpr decltype(auto) peek_unwrap(T&& value) {
+    if constexpr (!std::is_const_v<std::remove_reference_t<T>>
+                  && requires { value.unwrap_mut(); }) {
+        return value.unwrap_mut();
+    } else {
+        return std::as_const(value).unwrap();
+    }
+}
+
+/// `peek_unwrap` for the `Err` payload.
+template<typename T>
+constexpr decltype(auto) peek_unwrap_err(T&& value) {
+    if constexpr (!std::is_const_v<std::remove_reference_t<T>>
+                  && requires { value.unwrap_err_mut(); }) {
+        return value.unwrap_err_mut();
+    } else {
+        return std::as_const(value).unwrap_err();
+    }
+}
+
 /// Rust's mem::forget suppresses the WHOLE drop glue — the value's own
 /// Drop impl AND every field's, recursively. Emitted structs call this
 /// per member from rusty_mark_forgotten(); members without the hook
@@ -2964,6 +2991,30 @@ decltype(auto) skip(Range&& range, size_t remaining) {
     }
 }
 
+namespace detail {
+// flat_map's inner iterator over an iterable: `iter(x)`, adapted to the
+// next() protocol when that is an STL-style begin/end range instead (a
+// container with no `.iter()`, such as rusty::VecDeque). An OWNED inner
+// container is moved into the adapter; a borrowed one is iterated in a copy.
+template<typename R>
+decltype(auto) flat_inner_iter_borrowed(R&& r) {
+    if constexpr (has_option_like_next_v<
+                      std::remove_reference_t<decltype(iter(std::forward<R>(r)))>>) {
+        return iter(std::forward<R>(r));
+    } else {
+        return make_view_next_iter(std::forward<R>(r));
+    }
+}
+template<typename S>
+decltype(auto) flat_inner_iter_owned(S& stored) {
+    if constexpr (has_option_like_next_v<std::remove_reference_t<decltype(iter(stored))>>) {
+        return iter(stored);
+    } else {
+        return make_view_next_iter(std::move(stored));
+    }
+}
+} // namespace detail
+
 // `Iterator::flat_map(f)` — map each item to an iterable, flatten lazily: hold
 // the current inner iterator, and advance the outer one whenever it drains.
 template<typename Iter, typename Func>
@@ -2980,12 +3031,14 @@ class flat_map_next_iter {
     // inner_storage_ and iterate THAT. A REFERENCE inner — identity-flatten
     // over `.iter()`, whose items live in the outer container — stays stable,
     // so iterate it in place (no copy, works for move-only elements).
-    static constexpr bool inner_is_reference = std::is_reference_v<InnerIterable>;
+    // An RVALUE reference (the identity map of `flatten()` over an iterator
+    // of owned containers) is an owned temporary too: store it.
+    static constexpr bool inner_is_reference = std::is_lvalue_reference_v<InnerIterable>;
     using StoredInner = std::remove_cvref_t<InnerIterable>;
     using InnerIter = std::remove_cvref_t<std::conditional_t<
         inner_is_reference,
-        decltype(iter(std::declval<InnerIterable>())),
-        decltype(iter(std::declval<StoredInner&>()))>>;
+        decltype(detail::flat_inner_iter_borrowed(std::declval<InnerIterable>())),
+        decltype(detail::flat_inner_iter_owned(std::declval<StoredInner&>()))>>;
     using ItemType = detail::next_item_t<std::remove_reference_t<InnerIter>>;
 
 public:
@@ -3012,13 +3065,16 @@ public:
             // Slice iterators yield POINTERS; the flat_map closure is written
             // against the item value (`|s| s.chars()`), so feed it the
             // pointee — identity for value items (mirrors max_by_key #98).
-            decltype(auto) produced = func_(
-                detail::deref_if_pointer_like(detail::option_like_take_value(outer)));
             if constexpr (inner_is_reference) {
-                inner_.emplace(iter(produced));
+                decltype(auto) produced = func_(
+                    detail::deref_if_pointer_like(detail::option_like_take_value(outer)));
+                inner_.emplace(detail::flat_inner_iter_borrowed(produced));
             } else {
-                inner_storage_.emplace(std::move(produced));
-                inner_.emplace(iter(*inner_storage_));
+                // Store the produced iterable in the same full-expression that
+                // produced it: an rvalue-reference result names a temporary.
+                inner_storage_.emplace(func_(
+                    detail::deref_if_pointer_like(detail::option_like_take_value(outer))));
+                inner_.emplace(detail::flat_inner_iter_owned(*inner_storage_));
             }
         }
     }

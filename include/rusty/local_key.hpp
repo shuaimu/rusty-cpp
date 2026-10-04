@@ -17,9 +17,18 @@
 //    except through `with`, so a reference cannot accidentally outlive the
 //    thread (C++ cannot enforce the no-escape part, but the shape steers
 //    callers the same way).
+#include <type_traits>
 #include <utility>
 
+#include "result.hpp"
+
 namespace rusty {
+
+// std::thread::AccessError: `try_with` on a key whose value is being (or has
+// been) destroyed by thread exit.
+struct AccessError {
+    bool operator==(const AccessError&) const = default;
+};
 
 template <typename T>
 class LocalKey {
@@ -29,6 +38,14 @@ public:
 
     LocalKey(const LocalKey&) = delete;
     LocalKey& operator=(const LocalKey&) = delete;
+
+    // The key's value dies with the thread. From the start of that
+    // destruction on, `try_with` reports AccessError instead of handing out
+    // the value (Rust's contract: code that may run during thread-local
+    // teardown, such as another key's destructor, uses try_with). Like Rust's
+    // own thread-local keys, the state lives in the key's storage, which the
+    // thread keeps until all of its thread-locals are destroyed.
+    ~LocalKey() { alive_ = false; }
 
     template <typename F>
     decltype(auto) with(F&& f) {
@@ -40,8 +57,23 @@ public:
         return std::forward<F>(f)(value_);
     }
 
+    template <typename F>
+    auto try_with(F&& f) -> Result<std::remove_cvref_t<std::invoke_result_t<F&&, T&>>, AccessError> {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&&, T&>>;
+        if (!alive_) {
+            return Result<R, AccessError>::Err(AccessError{});
+        }
+        if constexpr (std::is_void_v<R>) {
+            std::forward<F>(f)(value_);
+            return Result<R, AccessError>::Ok();
+        } else {
+            return Result<R, AccessError>::Ok(std::forward<F>(f)(value_));
+        }
+    }
+
 private:
     T value_;
+    bool alive_ = true;
 };
 
 }  // namespace rusty

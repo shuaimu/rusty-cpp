@@ -7877,7 +7877,9 @@ fn test_match_catch_all_binding() {
     // The catch-all binds the whole scrutinee and passes that enum onward.
     // Using the binding also prevents a missing or payload-only bind from
     // satisfying this test through an unrelated unused variable declaration.
-    assert!(out.contains("if (true) { const auto& other = _m;"), "{out}");
+    // `e` is owned, so the binding owns it too: non-const, so the move is a
+    // move (a const alias made `std::move(other)` a copy).
+    assert!(out.contains("if (true) { auto&& other = _m;"), "{out}");
     assert!(out.contains("return ::consume(std::move(other));"), "{out}");
 }
 
@@ -14416,6 +14418,34 @@ fn test_sibling_file_unit_struct_emits_as_a_constructed_value() {
     );
 }
 
+/// A struct with a Drop impl in a SIBLING file (crate mode: each file is its
+/// own module) is non-aggregate there (a user destructor and deleted copies),
+/// so a literal of it here must use its fieldwise constructor. The per-file
+/// scan saw no Drop impl and emitted a designated initializer (SRPC's
+/// tcp_channel building reactor.rs's `PollTaskUnwindAbort { armed: true }`).
+#[test]
+fn test_sibling_file_drop_struct_literal_uses_its_constructor() {
+    let sibling: syn::ItemStruct =
+        syn::parse_str("pub struct Guard { pub armed: bool, pub code: u32 }").unwrap();
+    let file: syn::File = syn::parse_str(
+        "use super::reactor::Guard;\npub fn arm() -> u32 { let g = Guard { code: 7, armed: true }; g.code }",
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_cross_file_structs(vec![sibling.clone()]);
+    cg.set_cross_file_drop_types(&["Guard".to_string()]);
+    cg.emit_file(&file, Some("my_crate.user"));
+    let out = cg.into_output();
+    assert!(out.contains("auto g = Guard(true, 7);"), "{out}");
+    assert!(!out.contains("Guard{.armed"), "{out}");
+    // Without the crate-wide Drop fact the literal stays an aggregate init.
+    let mut plain = CodeGen::new();
+    plain.set_cross_file_structs(vec![sibling]);
+    plain.emit_file(&file, Some("my_crate.user"));
+    let plain = plain.into_output();
+    assert!(plain.contains("auto g = Guard{.code = 7, .armed = true};"), "{plain}");
+}
+
 /// A `pub mod` after another item used to emit its `export import` at that
 /// source position, below the declaration -- which clang rejects outright
 /// ("imports must immediately follow the module declaration"), so the unit did
@@ -15838,7 +15868,10 @@ fn test_derive_debug() {
 #[test]
 fn test_derive_hash() {
     let out = transpile_str("#[derive(Hash)] struct S { x: i32 }");
-    assert!(out.contains("struct std::hash<S>"));
+    // Qualified from the global scope, where the specialization is emitted,
+    // and hashing the fields rather than returning 0.
+    assert!(out.contains("struct std::hash<::S>"), "{out}");
+    assert!(out.contains("return rusty::detail::hash_fields(v.x);"), "{out}");
 }
 
 #[test]
@@ -41516,9 +41549,11 @@ fn test_self_ufcs_method_call_converted_to_dot_call() {
         }
         "#,
     );
+    // Emitted through the method-call path (the receiver method of a crate
+    // type called through its path is that method call): `this->bits()`.
     assert!(
-        out.contains("(*this).bits()"),
-        "Flags::bits(self) should become (*this).bits()\nGot: {out}"
+        out.contains("this->bits()"),
+        "Flags::bits(self) should become this->bits()\nGot: {out}"
     );
     assert!(
         !out.contains("Flags::bits((*this))"),
@@ -41544,8 +41579,8 @@ fn test_leaf5134_self_ufcs_rewrite_requires_self_like_argument() {
         "#,
     );
     assert!(
-        out.contains("(*this).bits()"),
-        "self-like UFCS call should still rewrite to dot-call\nGot: {out}"
+        out.contains("this->bits()"),
+        "self-like UFCS call should still rewrite to a member call\nGot: {out}"
     );
     // Arg may be bare or wrapped in `static_cast<uint8_t>(1)`.
     assert!(

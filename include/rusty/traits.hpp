@@ -234,4 +234,24 @@ concept Sync = is_sync<T>::value;
 template<typename T>
 concept ThreadSafe = Send<T> && Sync<T>;
 
+namespace detail {
+// `type Output = F::Output;` in an impl over a type parameter F, spelled so
+// the class template stays instantiable for an F without that member:
+// `assoc_Output<F>::type` is `F::Output` when it exists and the incomplete
+// `missing_assoc_type` otherwise (an error only where it is used).
+struct missing_assoc_type;
+#define RUSTY_DETAIL_ASSOC_PROBE(Name)                                           \
+    template<typename P, typename = void>                                        \
+    struct assoc_##Name { using type = missing_assoc_type; };                    \
+    template<typename P>                                                         \
+    struct assoc_##Name<P, std::void_t<typename std::remove_cvref_t<P>::Name>> { \
+        using type = typename std::remove_cvref_t<P>::Name;                      \
+    };
+RUSTY_DETAIL_ASSOC_PROBE(Output)
+RUSTY_DETAIL_ASSOC_PROBE(Item)
+RUSTY_DETAIL_ASSOC_PROBE(Error)
+RUSTY_DETAIL_ASSOC_PROBE(Target)
+#undef RUSTY_DETAIL_ASSOC_PROBE
+} // namespace detail
+
 } // namespace rusty

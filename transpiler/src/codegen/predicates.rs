@@ -1424,6 +1424,25 @@ impl CodeGen {
         if self.is_local_type_name_in_scope(name) {
             return true;
         }
+        // A method merged in from another module sees that module's
+        // declarations and imports (see `merged_method_origin_scope`).
+        if let Some(origin) = self.merged_method_origin_scope.as_ref() {
+            if self.module_path_declares_type_name_exact(origin, name) {
+                return true;
+            }
+            if self
+                .resolve_scope_import_binding_path_for_scope(&origin.join("::"), name)
+                .is_some_and(|target| {
+                    let normalized = target.trim().trim_start_matches("::");
+                    !normalized.starts_with("std::")
+                        && !normalized.starts_with("core::")
+                        && !normalized.starts_with("alloc::")
+                        && !normalized.starts_with("rusty::")
+                })
+            {
+                return true;
+            }
+        }
         // Effective module scope: UFCS helper-namespace emissions run with an
         // empty module_stack BY DESIGN (their bytes must match global-scope
         // emission); ufcs_impl_module_path carries the impl's module then.
@@ -2168,6 +2187,13 @@ impl CodeGen {
                     "std::thread::JoinHandle" | "rusty::thread::JoinHandle" if args.len() == 1 => {
                         return Some("true".into());
                     }
+                    // std implements Send and Sync for Waker unconditionally:
+                    // a RawWakerVTable's functions must be thread-safe. (A
+                    // `Context` borrows one and is neither; it is never a
+                    // field.)
+                    "std::task::Waker" | "core::task::Waker" | "rusty::Waker" if args.is_empty() => {
+                        return Some("true".into());
+                    }
                     _ => {}
                 }
             }
@@ -2193,8 +2219,9 @@ impl CodeGen {
             }
 
             // Transparent containers: the same trait, of every argument.
+            // `Pin<P>` is Send/Sync exactly when `P` is.
             "Vec" | "VecDeque" | "Option" | "Box" | "Result" | "HashMap" | "HashSet"
-            | "BTreeMap" | "BTreeSet" | "BinaryHeap" => Some(join(all(which, visited)?)),
+            | "BTreeMap" | "BTreeSet" | "BinaryHeap" | "Pin" => Some(join(all(which, visited)?)),
 
             // Arc<T> is Send AND Sync exactly when T is Send + Sync.
             "Arc" => {
@@ -2321,6 +2348,26 @@ impl CodeGen {
         {
             return Some(Some("true".into()));
         }
+        // A name imported through a re-export (`use super::BoxedFuture;` where
+        // `types` re-exports `boxed_future::BoxedFuture`) keys the importing
+        // path; fall back to the one declared struct with that name.
+        // (The bare-name key registered beside every scoped one does not
+        // count as a second declaration.)
+        let unique_tail_key = || -> Option<String> {
+            let suffix = format!("::{}", leaf);
+            let mut matches = self
+                .struct_field_types
+                .keys()
+                .filter(|candidate| candidate.ends_with(&suffix));
+            let first = matches.next()?.clone();
+            matches.next().is_none().then_some(first)
+        };
+        let resolved_key = (!self.struct_field_types.contains_key(&key)
+            && !self.type_alias_targets.contains_key(&key)
+            && !external_root)
+            .then(unique_tail_key)
+            .flatten();
+        let key = resolved_key.unwrap_or(key);
         let fields: Vec<syn::Type> = if let Some(fields) = self.struct_field_types.get(&key) {
             fields.values().cloned().collect()
         } else if let Some(alias) = self.type_alias_targets.get(&key) {
@@ -3429,6 +3476,24 @@ impl CodeGen {
             }
             _ => false,
         }
+    }
+
+    /// A std constructor of a raw pointer in associated-call form:
+    /// `Arc::as_ptr(&a)`, `Box::into_raw(b)`, `ptr::null_mut()`.
+    pub(super) fn expr_is_raw_pointer_ctor_call(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return false;
+        };
+        path.path.segments.len() >= 2
+            && path.path.segments.last().is_some_and(|seg| {
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "as_ptr" | "as_mut_ptr" | "into_raw" | "null" | "null_mut"
+                )
+            })
     }
 
     pub(super) fn is_type_raw_pointer_like(&self, ty: &syn::Type) -> bool {

@@ -10,6 +10,7 @@
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
 #include <rusty/alloc.hpp>
+#include <rusty/dyn_adapter.hpp>  // Box<U> -> Box<dyn Trait> for foreign implementors
 #include <rusty/maybe_uninit.hpp>  // Box::new_uninit / Box::write_
 
 // Box<T> - A smart pointer for heap-allocated values with single ownership
@@ -44,6 +45,7 @@ struct span_element<std::span<E, N>> {
 
 template<typename Container>
 decltype(auto) as_slice(Container&& container);
+
 
 template<typename T, typename A = rusty::alloc::Global>
 class Box {
@@ -99,6 +101,18 @@ public:
     // @lifetime: owned
     static Box new_(T value) requires std::is_default_constructible_v<A> {
         return new_in(std::move(value), A{});
+    }
+
+    // `Box::<dyn Trait>::new(value)` for an implementor the trait's crate
+    // never saw: box the value in the interface's generic owning adapter
+    // (see the unsize-coercion constructor below).
+    // @lifetime: owned
+    template<typename U,
+             typename Adapter = typename detail::dyn_adapter_for<T, std::remove_cvref_t<U>>::type>
+        requires (!std::is_convertible_v<std::remove_cvref_t<U>*, T*>
+                  && std::is_default_constructible_v<A>)
+    static Box new_(U&& value) {
+        return Box(Box<Adapter, A>::new_(Adapter(std::forward<U>(value))));
     }
 
     // Rust `Box::<T>::new_uninit() -> Box<MaybeUninit<T>>`: heap storage for
@@ -264,6 +278,20 @@ public:
         : ptr(other.ptr), alloc_(std::move(other.alloc_)) {
         other.ptr = nullptr;
     }
+
+    // Unsize coercion `Box<U>` -> `Box<dyn Trait>` for an implementor the
+    // trait's crate never saw (a dependency's trait implemented in a consumer
+    // crate): a transpiled trait interface class names its generic owning
+    // adapter `rusty_dyn_adapter<U>`, and the value moves into one. An
+    // implementor the trait's crate does see is converted at the construction
+    // site through its explicit `<Trait>Adapter<U>` specialization instead.
+    // @lifetime: owned
+    template<typename U, typename UA, typename = typename std::enable_if<
+        !std::is_convertible<U*, T*>::value
+        && std::is_same<UA, A>::value>::type,
+        typename Adapter = typename detail::dyn_adapter_for<T, U>::type>
+    Box(Box<U, UA>&& other) requires std::is_default_constructible_v<A>
+        : Box(Box<Adapter, A>::new_(Adapter(std::move(*other.ptr)))) {}
 
     // Move assignment - transfers ownership of both ptr and allocator.
     // @lifetime: owned

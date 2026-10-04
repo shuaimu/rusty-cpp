@@ -1,0 +1,12 @@
+[package]
+name = "dep-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["extra"]
+extra = []
+
+[dependencies]
+dep-base = { path = "../dep-base" }
+dep-spec = { path = "../dep-spec" }

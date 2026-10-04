@@ -10,6 +10,8 @@
 #include "result.hpp"
 #include "option.hpp"
 #include "traits.hpp"
+#include "num.hpp"   // NonZero (available_parallelism)
+#include "io.hpp"    // io::Result (available_parallelism)
 
 // rusty::thread — Rust-style threading primitives.
 //
@@ -135,11 +137,18 @@ struct ParkTokenShared {
     ParkToken inner;
 };
 
+struct ParkTokenSlot {
+    SharedState<ParkTokenShared> token = SharedState<ParkTokenShared>::make();
+};
+
 inline SharedState<ParkTokenShared> current_park_token() {
-    struct Slot {
-        SharedState<ParkTokenShared> token = SharedState<ParkTokenShared>::make();
-    };
-    return platform::threading::thread_exit_local<Slot>().token;
+    return platform::threading::thread_exit_local<ParkTokenSlot>().token;
+}
+
+// A spawned thread adopts the park token its spawner created for it, so the
+// JoinHandle's `thread()` (made before the thread runs) unparks this thread.
+inline void install_park_token(SharedState<ParkTokenShared> token) {
+    platform::threading::thread_exit_local<ParkTokenSlot>().token = std::move(token);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -261,6 +270,7 @@ class BoundThreadTask {
     SharedState<JoinState<ReturnType>> state_;
     std::decay_t<Function> function_;
     std::tuple<std::decay_t<Args>...> arguments_;
+    SharedState<ParkTokenShared> park_token_{};
 
     template<std::size_t... I>
     decltype(auto) invoke(std::index_sequence<I...>) {
@@ -277,7 +287,12 @@ public:
         : state_(std::move(state)), function_(std::forward<Function>(function)),
           arguments_(std::forward<Args>(args)...) {}
 
+    void adopt_park_token(SharedState<ParkTokenShared> token) { park_token_ = std::move(token); }
+
     void operator()() {
+        if (park_token_) {
+            install_park_token(park_token_);
+        }
         auto retained_state = state_;
         run_into_state<ReturnType>(retained_state, [this]() -> ReturnType {
             if constexpr (std::is_void_v<std::invoke_result_t<Function, Args...>>) {
@@ -329,6 +344,12 @@ public:
         : token_(detail::current_park_token()),
           id_(platform::threading::current_thread_id()) {}
 
+    // The handle of another thread: its park token and id.
+    Thread(detail::SharedState<detail::ParkTokenShared> token, ThreadId id)
+        : token_(std::move(token)), id_(id) {}
+
+    Thread clone() const { return *this; }
+
     static Thread current() {
         return Thread();
     }
@@ -363,6 +384,18 @@ inline void yield_now() {
     platform::threading::yield();
 }
 
+// Rust `std::thread::available_parallelism()`: the hardware concurrency,
+// as an io::Result of a nonzero count (Err when it is unknown).
+inline rusty::io::Result<rusty::num::NonZero<size_t>> available_parallelism() {
+    unsigned n = std::thread::hardware_concurrency();
+    if (n == 0) {
+        return rusty::io::Result<rusty::num::NonZero<size_t>>::err(rusty::io::Error::new_(
+            rusty::io::ErrorKind::Unsupported, "available_parallelism: unknown"));
+    }
+    return rusty::io::Result<rusty::num::NonZero<size_t>>::ok(
+        rusty::num::NonZero<size_t>::new_unchecked(static_cast<size_t>(n)));
+}
+
 // ============================================================================
 // JoinHandle - Rust-style: detaches on drop if not joined
 // ============================================================================
@@ -373,13 +406,19 @@ private:
     mutable platform::threading::thread thread_;
     detail::SharedState<detail::JoinState<T>> state_;
     mutable bool joined_ = false;
+    Thread thread_handle_;
 
 public:
     JoinHandle(platform::threading::thread&& t,
-               detail::SharedState<detail::JoinState<T>> s)
+               detail::SharedState<detail::JoinState<T>> s,
+               detail::SharedState<detail::ParkTokenShared> park_token)
         : thread_(std::move(t))
         , state_(std::move(s))
+        , thread_handle_(std::move(park_token), ThreadId{thread_.get_id()})
     {}
+
+    // Rust `JoinHandle::thread()`: the spawned thread's handle (unpark, id).
+    const Thread& thread() const { return thread_handle_; }
 
     // Block until thread completes and return a Rust-style Result.
     rusty::Result<T, JoinError> join() const {
@@ -456,14 +495,15 @@ auto spawn(F&& func, Args&&... args)
     // libstdc++14 + clang19 + C++20-modules destructor-noexcept bug
     // that fires for arbitrary user lambda types that capture
     // transpiled module values.
-    detail::TypeErasedClosure body{
-        detail::BoundThreadTask<ReturnType, false, F, Args...>(
-            std::move(thread_state), std::forward<F>(func), std::forward<Args>(args)...)
-    };
+    auto park_token = detail::SharedState<detail::ParkTokenShared>::make();
+    detail::BoundThreadTask<ReturnType, false, F, Args...> task(
+        std::move(thread_state), std::forward<F>(func), std::forward<Args>(args)...);
+    task.adopt_park_token(park_token);
+    detail::TypeErasedClosure body{std::move(task)};
 
     platform::threading::thread thread(std::move(body));
 
-    return JoinHandle<ReturnType>(std::move(thread), std::move(state));
+    return JoinHandle<ReturnType>(std::move(thread), std::move(state), std::move(park_token));
 }
 
 // ============================================================================

@@ -8,6 +8,7 @@
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <utility>
 #include "option.hpp"  // For Option<T&> and SomeRef()
+#include "dyn_adapter.hpp"  // Arc<U> -> Arc<dyn Trait> for foreign implementors
 
 // Arc<T> - Atomically Reference Counted pointer
 // Equivalent to Rust's Arc<T>
@@ -188,6 +189,17 @@ public:
         return make(std::move(value));
     }
 
+    // `Arc::<dyn Trait>::new(value)` for an implementor the trait's crate
+    // never saw: the value lives in an `Arc<U>` that the interface's generic
+    // adapter shares (see the unsize-coercion constructor below).
+    // @lifetime: owned
+    template<typename U, typename V = std::remove_cvref_t<U>,
+             typename Adapter = typename detail::dyn_adapter_for<T, Arc<V>>::type>
+        requires (!std::is_convertible_v<V*, T*>)
+    static Arc<T> new_(U&& value) {
+        return Arc<T>(Arc<V>::new_(std::forward<U>(value)));
+    }
+
     // Factory method for in-place construction with arguments
     // @safe - Public API is safe, internal allocation is encapsulated
     // @lifetime: owned
@@ -280,6 +292,14 @@ public:
     Arc(const Arc<U>& other) : ptr(reinterpret_cast<ControlBlock*>(other.ptr)) {
         increment();
     }
+
+    // @safe - Unsize coercion `Arc<U>` -> `Arc<dyn Trait>` for an
+    // implementor the trait's crate never saw (see rusty::Box's twin): the
+    // interface's generic adapter shares ownership of the source `Arc<U>` and
+    // forwards every call through it.
+    template<typename U, typename = typename std::enable_if<!std::is_convertible<U*, T*>::value>::type,
+             typename Adapter = typename detail::dyn_adapter_for<T, Arc<U>>::type>
+    Arc(const Arc<U>& other) : Arc(Arc<Adapter>::new_(Adapter(other))) {}
 
     // @safe - Move constructor with no ref count change
     Arc(Arc&& other) noexcept : ptr(other.ptr) {
@@ -468,6 +488,31 @@ public:
     static size_t weak_count(const Arc* value) {
         assert(value != nullptr);
         return value->weak_count();
+    }
+
+    // Rust `Arc::ptr_eq(&a, &b)`: whether the two point to the same
+    // allocation (compared by data address, as Rust does).
+    // @safe
+    static bool ptr_eq(const Arc& a, const Arc& b) {
+        return a.as_ptr() == b.as_ptr();
+    }
+
+    // @safe
+    static bool ptr_eq(const Arc* a, const Arc& b) {
+        assert(a != nullptr);
+        return a->as_ptr() == b.as_ptr();
+    }
+
+    // @safe
+    static bool ptr_eq(const Arc& a, const Arc* b) {
+        assert(b != nullptr);
+        return a.as_ptr() == b->as_ptr();
+    }
+
+    // @safe
+    static bool ptr_eq(const Arc* a, const Arc* b) {
+        assert(a != nullptr && b != nullptr);
+        return a->as_ptr() == b->as_ptr();
     }
 };
 

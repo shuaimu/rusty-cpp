@@ -23,6 +23,12 @@ sha2 = "0.10"
 # flock(2) for the shared module-cache build lock (already in the tree
 # transitively; pinning it directly for the one syscall).
 libc = "0.2"
+# --verus-exec: a deterministic printer for the erased source handed to every
+# later pass. Verus's erasure itself runs in the separate
+# `rusty-cpp-verus-erase` helper (../verus-erase), which is deliberately NOT a
+# dependency: linking verus_syn would turn on proc-macro2's `span-locations`
+# for this binary and roughly double its memory on every run.
+prettyplease = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
