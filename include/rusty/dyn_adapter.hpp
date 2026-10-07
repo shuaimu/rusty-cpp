@@ -15,11 +15,19 @@ namespace rusty {
 namespace detail {
 
 // SFINAE-friendly: no `type` when `I` is not such an interface.
+//
+// The adapters themselves derive from `I` and so INHERIT the alias; without
+// the `is_final` guard `Box<TrAdapter<X>>::new_(v)` would take the adapter
+// for an interface and box it in `TrAdapter<TrAdapter<...>>` without end
+// (§3.2.4 generic forwarders are `final`; an interface — abstract, with a
+// protected constructor — never is).
 template<typename I, typename U, typename = void>
 struct dyn_adapter_for {};
 
 template<typename I, typename U>
-struct dyn_adapter_for<I, U, std::void_t<typename I::template rusty_dyn_adapter<U>>> {
+struct dyn_adapter_for<I, U,
+    std::enable_if_t<!std::is_final_v<I>,
+                     std::void_t<typename I::template rusty_dyn_adapter<U>>>> {
     using type = typename I::template rusty_dyn_adapter<U>;
 };
 

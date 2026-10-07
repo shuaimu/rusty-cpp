@@ -1269,6 +1269,170 @@ pub fn collect_trait_supertraits(items: &[syn::Item]) -> HashMap<String, Vec<Str
     out
 }
 
+/// Book §3.2.2 rule 7: each crate-declared trait's explicit TYPE parameters
+/// (`trait Tr<A, B>` → `["A", "B"]`; lifetimes and consts skipped). Non-empty
+/// → its impl functions carry a trailing `rusty::tag<…>` key.
+pub fn collect_trait_generic_type_params(items: &[syn::Item]) -> HashMap<String, Vec<String>> {
+    fn walk(items: &[syn::Item], out: &mut HashMap<String, Vec<String>>) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let params: Vec<String> = t
+                        .generics
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if !params.is_empty() {
+                        out.insert(t.ident.to_string(), params);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if module_is_cfg_disabled(m) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(items, &mut out);
+    out
+}
+
+/// Book §3.2.2 rule 7: trait short names with at least one impl whose self
+/// type is a REFERENCE (`impl Tr for &T` / `&mut T`). Their impl functions and
+/// default templates carry a trailing `rusty::self_tag<Self>` key — the plain
+/// impl's defaulted, the reference impl's not.
+pub fn collect_traits_with_reference_self_impls(
+    items: &[syn::Item],
+) -> std::collections::HashSet<String> {
+    fn walk(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Impl(imp) => {
+                    let Some((_, trait_path, _)) = &imp.trait_ else { continue };
+                    let Some(name) = trait_path.segments.last().map(|s| s.ident.to_string()) else { continue };
+                    if matches!(imp.self_ty.as_ref(), syn::Type::Reference(_)) {
+                        out.insert(name);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if module_is_cfg_disabled(m) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(items, &mut out);
+    out
+}
+
+/// Book §3.2.2 rule 7: trait → the token spellings of its NON-reference impl
+/// self types. A reference impl (`impl Tr for &T`) keeps its `self_tag` key
+/// non-defaulted only when a plain sibling (`impl Tr for T`) exists — the
+/// sibling is the default; a lone `impl Tr for &str` IS the default.
+pub fn collect_trait_plain_self_types(
+    items: &[syn::Item],
+) -> HashMap<String, std::collections::HashSet<String>> {
+    fn walk(items: &[syn::Item], out: &mut HashMap<String, std::collections::HashSet<String>>) {
+        for item in items {
+            match item {
+                syn::Item::Impl(imp) => {
+                    let Some((_, trait_path, _)) = &imp.trait_ else { continue };
+                    let Some(name) = trait_path.segments.last().map(|s| s.ident.to_string()) else { continue };
+                    if !matches!(imp.self_ty.as_ref(), syn::Type::Reference(_)) {
+                        out.entry(name)
+                            .or_default()
+                            .insert(imp.self_ty.to_token_stream().to_string());
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if module_is_cfg_disabled(m) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(items, &mut out);
+    out
+}
+
+/// Book §3.2.2 rule 7: `(trait, method)` → the trait TYPE parameter the method
+/// returns bare (`fn conv(&self) -> A`). A `let`-annotated or parameter-typed
+/// use of such a call determines `A`, so the call site passes `rusty::tag<A>`.
+pub fn collect_trait_methods_returning_generic(
+    items: &[syn::Item],
+) -> HashMap<(String, String), String> {
+    fn walk(items: &[syn::Item], out: &mut HashMap<(String, String), String>) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let params: Vec<String> = t
+                        .generics
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if params.is_empty() {
+                        continue;
+                    }
+                    for ti in &t.items {
+                        let syn::TraitItem::Fn(m) = ti else { continue };
+                        let syn::ReturnType::Type(_, ret) = &m.sig.output else { continue };
+                        let syn::Type::Path(tp) = ret.as_ref() else { continue };
+                        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                            continue;
+                        }
+                        let seg = &tp.path.segments[0];
+                        if !seg.arguments.is_none() {
+                            continue;
+                        }
+                        let name = seg.ident.to_string();
+                        if params.contains(&name) {
+                            out.insert((t.ident.to_string(), m.sig.ident.to_string()), name);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if module_is_cfg_disabled(m) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(items, &mut out);
+    out
+}
+
 /// Trait short names with an UNBOUNDED blanket impl `impl<T> Tr for T` (no
 /// bounds on `T`, self type exactly `T`): every type implements them, so the
 /// book §3.2.3 marker primary `impls_<Tr>` is defined TRUE (a constrained

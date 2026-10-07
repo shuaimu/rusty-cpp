@@ -20,6 +20,20 @@ struct PhantomData {
     constexpr PhantomData(const PhantomData<U>&) noexcept {}
 };
 
+// Book §3.2.2 rule 7 — trailing keys where a C++ parameter type cannot carry a
+// Rust distinction. `tag<A…>`: a generic trait's arguments (`impl Tr<i32> for
+// T` beside `impl Tr<u8> for T` differ only in them); `self_tag<Self>`: the
+// impl's self type INCLUDING reference-ness (`impl Tr for T` beside `impl Tr
+// for &T` both take `const T&`). Both are defaulted on the common case, so a
+// plain call stays `Tr_::m(x)`; the emitter passes them where Rust's
+// resolution is lexically determined (a bound, a path, a `let` annotation, a
+// receiver of reference depth ≥ 2) and the dyn forwarders pass them in every
+// slot.
+template<typename... A>
+struct tag {};
+template<typename S>
+struct self_tag {};
+
 // Erased Verus ghost state. `rusty-cpp-transpiler --verus-exec` lowers
 // vstd's `Ghost<T>` and `Tracked<T>` (plain-rustc `PhantomData` wrappers whose
 // `T` is a spec type such as `int` or a ghost log) and their executable

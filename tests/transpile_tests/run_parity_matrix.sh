@@ -33,10 +33,6 @@ declare -a MATRIX_CRATES=(
     # each flips PASS independently. KNOWN_FAIL until the phase-2 step that
     # fixes that family's shipped-lane cells lands.
     "trait_probes_census"
-    "trait_probes_thin"
-    "trait_probes_defaults"
-    "trait_probes_collapse"
-    "trait_probes_scoping"
     # alloc: the CONSOLIDATED stdlib module — Rust's `alloc` crate
     # (vec + raw_vec + collections/vec_deque) emitted as ONE C++20 module via
     # --expand, dissolving the Vec<->VecDeque cycle stubs and the per-port
@@ -90,10 +86,6 @@ declare -a MATRIX_CRATES=(
 # Itertools-default-body long tail (see memory itertools-codegen-remaining).
 declare -a KNOWN_FAIL_CRATES=(
     "trait_probes_census"
-    "trait_probes_thin"
-    "trait_probes_defaults"
-    "trait_probes_collapse"
-    "trait_probes_scoping"
     "itertools"
     "serde_yaml"
     "hashbrown"

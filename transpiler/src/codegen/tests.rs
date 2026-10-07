@@ -48731,6 +48731,74 @@ fn test_ufcs_methodless_concrete_impl_emits_multi_owner_marker() {
 }
 
 #[test]
+fn test_ufcs_rule7_keys_distinguish_generic_trait_args_and_reference_self_impls() {
+    // Book §3.2.2 rule 7: `impl Tr<i32> for T` + `impl Tr<u8> for T` differ
+    // only in the trait argument, `impl Tr for T` + `impl Tr for &T` only in
+    // the self type's reference-ness — neither is a C++ overload distinction,
+    // so the impl functions carry trailing keys (`rusty::tag<A>`,
+    // `rusty::self_tag<Self>`), defaulted on the common case. Call sites pass
+    // them where Rust's resolution is lexical: a `let` annotation, a path, a
+    // receiver of reference depth two; the forwarders pass them in every slot.
+    let out = transpile_str(
+        r#"
+        pub trait ConvT<A> { fn conv(&self) -> A; fn name(&self) -> &str; }
+        pub struct Tv { pub v: i32 }
+        impl ConvT<i32> for Tv { fn conv(&self) -> i32 { self.v } fn name(&self) -> &str { "i" } }
+        impl ConvT<u8> for Tv { fn conv(&self) -> u8 { 7 } fn name(&self) -> &str { "u" } }
+        pub trait RefTr { fn m(&self) -> i32; }
+        pub struct Tr2 { pub v: i32 }
+        impl RefTr for Tr2 { fn m(&self) -> i32 { self.v } }
+        impl RefTr for &Tr2 { fn m(&self) -> i32 { self.v + 1000 } }
+        pub fn use_it(t: &Tv, x: &Tr2) -> i32 {
+            let a: i32 = t.conv();
+            let b: u8 = t.conv();
+            let n = <Tv as ConvT<u8>>::name(t);
+            let r: &Tr2 = x;
+            let d: &dyn RefTr = &r;
+            let bx: Box<dyn RefTr> = Box::new(r);
+            a + b as i32 + n.len() as i32 + x.m() + (&r).m() + d.m() + bx.m()
+        }
+        "#,
+    );
+    // Impl functions: the generic trait's argument, the self type's reference-ness.
+    assert!(
+        out.contains("self_, rusty::tag<int32_t> = {});") && out.contains("self_, rusty::tag<uint8_t> = {});"),
+        "generic-trait impl functions must carry the defaulted `rusty::tag<A>` key:\n{out}"
+    );
+    assert!(
+        out.contains("m(RefTr_::impl_::tag, const Tr2& self_, rusty::self_tag<Tr2> = {});"),
+        "the plain impl's `self_tag` is the default:\n{out}"
+    );
+    assert!(
+        out.contains("m(RefTr_::impl_::tag, const Tr2& self_, rusty::self_tag<const Tr2&>);"),
+        "the reference impl beside a plain sibling is never the default:\n{out}"
+    );
+    // Call sites: the `let` annotation fixes `A` for a method returning the bare parameter.
+    assert!(
+        out.contains("ConvT_::conv(std::forward<decltype(__self)>(__self), rusty::tag<int32_t>{})")
+            && out.contains("ConvT_::conv(std::forward<decltype(__self)>(__self), rusty::tag<uint8_t>{})"),
+        "a `let` annotation must pass the trait-argument key:\n{out}"
+    );
+    assert!(
+        out.matches("rusty::tag<uint8_t>{}").count() >= 3,
+        "the explicit path `<Tv as ConvT<u8>>::name` must pass the key too:\n{out}"
+    );
+    // Receiver of reference depth two → the reference impl.
+    assert!(
+        out.contains("RefTr_::m(std::forward<decltype(__self)>(__self), rusty::self_tag<const Tr2&>{})"),
+        "`(&r).m()` must key the reference impl:\n{out}"
+    );
+    // The forwarders key every slot; `&r` keys the forwarder on the reference type.
+    assert!(out.contains("RefTr_::m(value_, rusty::self_tag<U>{})"), "{out}");
+    assert!(out.contains("RefTrAdapterRef<const Tr2&>(r)"), "{out}");
+    assert!(
+        out.contains("rusty::Box<RefTrAdapter<const Tr2&>>::new_(r)"),
+        "`Box::new(r)` into `Box<dyn RefTr>` boxes the REFERENCE:\n{out}"
+    );
+    assert!(!out.contains("rusty::tag<int32_t>{}, rusty::self_tag"), "self_tag precedes tag:\n{out}");
+}
+
+#[test]
 fn test_ufcs_trait_namespace_is_a_dispatcher_over_tagged_impl_functions() {
     // Book §3.2.2 rules 1-3 (2026-10-07): `Tr_::m` is a function-template
     // dispatcher whose unqualified inner call does tag-ADL at instantiation;

@@ -6230,6 +6230,20 @@ impl CodeGen {
                     // the consumer's instantiation point, where its members exist.
                     let mut call_args = vec!["value_".to_string()];
                     call_args.extend(args.iter().cloned());
+                    // Book §3.2.2 rule 7: the forwarders carry the keys as
+                    // template parameters and pass them in every slot.
+                    if self.ufcs_traits_with_ref_self_impls.contains(owner) {
+                        call_args.push(format!("rusty::self_tag<{}>{{}}", impl_param));
+                    }
+                    if owner == trait_name
+                        && let Some(gparams) = self.ufcs_trait_generic_params.get(owner)
+                        && !gparams.is_empty()
+                    {
+                        call_args.push(format!(
+                            "rusty::tag<{}>{{}}",
+                            gparams.iter().map(|g| escape_cpp_keyword(g)).collect::<Vec<_>>().join(", ")
+                        ));
+                    }
                     let call = format!("{}_::{}({})", owner, slot.cpp_name, call_args.join(", "));
                     let tagged = format!(
                         "rusty_{}_{}",

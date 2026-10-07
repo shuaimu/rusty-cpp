@@ -155,9 +155,9 @@ impl CodeGen {
 
         // Accept `&val` / `&mut val`, or a bare value if the existing
         // arg-shape lowering would have passed it by reference anyway.
-        let inner_expr = match self.peel_paren_group_expr(arg) {
-            syn::Expr::Reference(r) => self.peel_paren_group_expr(r.expr.as_ref()),
-            other => other,
+        let (inner_expr, took_address) = match self.peel_paren_group_expr(arg) {
+            syn::Expr::Reference(r) => (self.peel_paren_group_expr(r.expr.as_ref()), true),
+            other => (other, false),
         };
         // Only wrap variables / field accesses / call results that name
         // a concrete value site. Skip literals and bare trait-object
@@ -174,15 +174,25 @@ impl CodeGen {
 
         let inner_cpp = self.emit_expr_to_string(inner_expr);
         let adapter_suffix = if is_mut { "AdapterRefMut" } else { "AdapterRef" };
-        // The Adapter's template args are (trait_args..., decltype(value)).
+        // Book §3.2.2 rule 7: `&r` with `r: &T` unsizes the REFERENCE — the
+        // forwarder is over `const T&` (`impl Tr for &T`), which the slots key
+        // with `rusty::self_tag<const T&>`. A plain `r` unsizes the pointee.
+        let implementor = match self.infer_simple_expr_type(inner_expr) {
+            Some(ty) if took_address && matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_)) => {
+                let mapped = self.map_type(&ty);
+                if mapped.is_empty() || type_string_has_auto_placeholder(&mapped) {
+                    format!("std::remove_cvref_t<decltype({})>", inner_cpp)
+                } else {
+                    mapped
+                }
+            }
+            _ => format!("std::remove_cvref_t<decltype({})>", inner_cpp),
+        };
+        // The Adapter's template args are (trait_args..., implementor).
         let adapter_args = if trait_args.is_empty() {
-            format!("std::remove_cvref_t<decltype({})>", inner_cpp)
+            implementor
         } else {
-            format!(
-                "{}, std::remove_cvref_t<decltype({})>",
-                trait_args.join(", "),
-                inner_cpp
-            )
+            format!("{}, {}", trait_args.join(", "), implementor)
         };
         Some((
             format!("{}{}<{}>({})", trait_name, adapter_suffix, adapter_args, inner_cpp),
@@ -7001,12 +7011,29 @@ impl CodeGen {
         let args: Vec<String> = mc.args.iter().map(|a| self.emit_expr_to_string(a)).collect();
         let escaped = escape_cpp_keyword_in_member_position(&method_name);
         let callee = format!("{}::{}", self.ufcs_trait_namespace(&owner), escaped);
-        Some(self.emit_multi_owner_ufcs_call(
+        // Book §3.2.2 rule 7: inside a default template the keys are the
+        // template's own — the trait's generic parameters and `Self_`.
+        let mut keys: Vec<String> = Vec::new();
+        if self.ufcs_traits_with_ref_self_impls.contains(&owner) {
+            keys.push("rusty::self_tag<Self_>{}".to_string());
+        }
+        if let Some(gparams) = self.ufcs_trait_generic_params.get(&owner)
+            && !gparams.is_empty()
+            && &owner == trait_name
+        {
+            keys.push(format!(
+                "rusty::tag<{}>{{}}",
+                gparams.iter().map(|g| escape_cpp_keyword(g)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let trailing: String = keys.iter().map(|k| format!(", {}", k)).collect::<Vec<_>>().join("");
+        Some(self.emit_multi_owner_ufcs_call_with_trailing(
             std::slice::from_ref(&callee),
             &receiver,
             &args,
             &escaped,
             None,
+            std::slice::from_ref(&trailing),
         ))
     }
 
@@ -7545,8 +7572,21 @@ impl CodeGen {
                                 }
                             }
                         }
-                        return self.emit_extension_call_with_receiver_autoderef_fallback(
-                            &callee, &receiver, &args,
+                        // Book §3.2.2 rule 7: the trailing keys this call site
+                        // can determine (an expected type for a bare-parameter
+                        // return, the receiver's bound or reference depth).
+                        let owner = traits.iter().next().unwrap();
+                        let recv_ty = self.infer_simple_expr_type(&mc.receiver);
+                        let trailing = self.ufcs_trailing_key_args(
+                            owner,
+                            &method_name,
+                            recv_ty.as_ref(),
+                            None,
+                            &[],
+                            expected_ty,
+                        );
+                        return self.emit_extension_call_with_receiver_autoderef_fallback_with_trailing(
+                            &callee, &receiver, &args, &trailing,
                         );
                     }
                     // Multi-owner (Fix A): try each owner's qualified `<Tr>_::m`
@@ -7569,8 +7609,17 @@ impl CodeGen {
                     {
                         let callee =
                             format!("{}::{}", self.ufcs_trait_namespace(&scoped[0]), escaped);
-                        return self.emit_extension_call_with_receiver_autoderef_fallback(
-                            &callee, &receiver, &args,
+                        let recv_ty = self.infer_simple_expr_type(&mc.receiver);
+                        let trailing = self.ufcs_trailing_key_args(
+                            &scoped[0],
+                            &method_name,
+                            recv_ty.as_ref(),
+                            None,
+                            &[],
+                            expected_ty,
+                        );
+                        return self.emit_extension_call_with_receiver_autoderef_fallback_with_trailing(
+                            &callee, &receiver, &args, &trailing,
                         );
                     }
                     // The marker-based guard needs every owner's `impls_<Tr>`
@@ -7615,8 +7664,24 @@ impl CodeGen {
                             crate::codegen::sanitize_collapse_trait_tag(short),
                             method_name
                         );
-                        tagged_member = Some(tagged_storage.as_str());
+                        if !self.ufcs_trait_is_keyed(owner) {
+                            tagged_member = Some(tagged_storage.as_str());
+                        }
                     }
+                    let recv_ty = self.infer_simple_expr_type(&mc.receiver);
+                    let trailing: Vec<String> = owner_list
+                        .iter()
+                        .map(|owner| {
+                            self.ufcs_trailing_key_args(
+                                owner,
+                                &method_name,
+                                recv_ty.as_ref(),
+                                None,
+                                &[],
+                                expected_ty,
+                            )
+                        })
+                        .collect();
                     if guarded {
                         return self.emit_guarded_multi_owner_ufcs_call(
                             &callees,
@@ -7626,10 +7691,11 @@ impl CodeGen {
                             &escaped,
                             tagged_member,
                             &method_name,
+                            &trailing,
                         );
                     }
-                    return self.emit_multi_owner_ufcs_call(
-                        &callees, &receiver, &args, &escaped, tagged_member,
+                    return self.emit_multi_owner_ufcs_call_with_trailing(
+                        &callees, &receiver, &args, &escaped, tagged_member, &trailing,
                     );
                 }
             }
@@ -18964,6 +19030,47 @@ impl CodeGen {
         }
     }
 
+    /// Book §3.2.2 rule 7 (see the dispatcher): `rusty::Box<Tr>::new_(r)` →
+    /// `rusty::Box<TrAdapter<const T&>>::new_(r)` when `Tr` is a crate trait
+    /// and the single argument's Rust type is a reference.
+    fn rekey_box_dyn_new_on_reference_payload(&self, call: &syn::ExprCall, emitted: String) -> String {
+        if call.args.len() != 1 {
+            return emitted;
+        }
+        let Some(rest) = emitted.strip_prefix("rusty::Box<") else {
+            return emitted;
+        };
+        let Some(close) = rest.find(">::new_(") else {
+            return emitted;
+        };
+        let inner = &rest[..close];
+        if inner.contains('<') {
+            return emitted;
+        }
+        let Some(trait_short) = inner.rsplit("::").next() else {
+            return emitted;
+        };
+        if !self.trait_declared_path_by_short_name.contains_key(trait_short) {
+            return emitted;
+        }
+        let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) else {
+            return emitted;
+        };
+        if !matches!(self.peel_paren_group_type(&arg_ty), syn::Type::Reference(_)) {
+            return emitted;
+        }
+        let implementor = self.map_type(&arg_ty);
+        if implementor.is_empty() || type_string_has_auto_placeholder(&implementor) {
+            return emitted;
+        }
+        format!(
+            "rusty::Box<{}Adapter<{}>>::new_({}",
+            inner,
+            implementor,
+            &rest[close + ">::new_(".len()..]
+        )
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
@@ -18971,6 +19078,12 @@ impl CodeGen {
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_call(call, expected_ty) { return mapped; }
         let emitted = self.emit_call_expr_to_string_lowered(call, expected_ty);
+        // Book §3.2.2 rule 7: `Box::new(r)` into `Box<dyn Tr>` with `r: &T`
+        // boxes the REFERENCE (`impl Tr for &T`). Every lowering path funnels
+        // through here as `rusty::Box<Tr>::new_(…)`; spell the owning forwarder
+        // over `const T&` — the construction-site rewrite would key it on
+        // `remove_cvref_t<decltype(r)>`, the pointee.
+        let emitted = self.rekey_box_dyn_new_on_reference_payload(call, emitted);
         // C11 family (checkpoint contract 11): the hand-written runtime
         // facades have no such static member — collapse the emitted call onto
         // the constructor / free function the runtime really declares. The
@@ -20618,11 +20731,48 @@ impl CodeGen {
                     let mut all_args = Vec::with_capacity(args.len() + 1);
                     all_args.push(receiver.clone());
                     all_args.extend(args.iter().cloned());
+                    // Book §3.2.2 rule 7: the path's trait arguments and `qself`
+                    // are lexical; the first argument's type replays the probe.
+                    let (explicit_self_ty, explicit_trait_args) = match call.func.as_ref() {
+                        syn::Expr::Path(fp) => (
+                            fp.qself.as_ref().map(|q| q.ty.as_ref()),
+                            fp.path
+                                .segments
+                                .iter()
+                                .nth_back(1)
+                                .map(|seg| match &seg.arguments {
+                                    syn::PathArguments::AngleBracketed(a) => a
+                                        .args
+                                        .iter()
+                                        .filter_map(|g| match g {
+                                            syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>(),
+                                    _ => Vec::new(),
+                                })
+                                .unwrap_or_default(),
+                        ),
+                        _ => (None, Vec::new()),
+                    };
+                    let first_arg_ty = call
+                        .args
+                        .first()
+                        .and_then(|a| self.infer_simple_expr_type(a));
+                    let trailing = self.ufcs_trailing_key_args(
+                        trait_name,
+                        &ufcs.method_name,
+                        first_arg_ty.as_ref(),
+                        explicit_self_ty,
+                        &explicit_trait_args,
+                        expected_ty,
+                    );
                     return format!(
-                        "{}::{}({})",
+                        "{}::{}({}{})",
                         self.ufcs_trait_namespace(trait_name),
                         escape_cpp_keyword(&ufcs.method_name),
-                        all_args.join(", ")
+                        all_args.join(", "),
+                        trailing
                     );
                 }
                 let is_self = matches!(
@@ -21115,6 +21265,24 @@ impl CodeGen {
                 .and_then(|ty| self.known_local_dyn_trait_smart_ptr_cpp_name(ty, "Box"))
         {
             let arg = self.emit_expr_maybe_move(&call.args[0]);
+            // Book §3.2.2 rule 7: `Box::new(r)` with `r: &T` is a `Box<&T>` —
+            // the owning forwarder over the REFERENCE (`impl Tr for &T`); the
+            // construction-site rewrite's `remove_cvref_t<decltype(r)>` would
+            // strip it. Spell the forwarder here (the rewrite leaves
+            // `<Tr>Adapter<…>` alone).
+            if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0])
+                && matches!(self.peel_paren_group_type(&arg_ty), syn::Type::Reference(_))
+                && let Some(trait_short) = trait_cpp.rsplit("::").next()
+                && self.trait_declared_path_by_short_name.contains_key(trait_short)
+            {
+                let implementor = self.map_type(&arg_ty);
+                if !implementor.is_empty() && !type_string_has_auto_placeholder(&implementor) {
+                    return format!(
+                        "rusty::Box<{}Adapter<{}>>::new_({})",
+                        trait_cpp, implementor, arg
+                    );
+                }
+            }
             return format!("rusty::Box<{}>::new_({})", trait_cpp, arg);
         }
 
@@ -21184,6 +21352,16 @@ impl CodeGen {
         // there the call targets the CRATE's inherent method, not the runtime
         // helper. `rusty::String::...` forms only appear once the type has already
         // been rewritten to the runtime String, so they always remap.
+        // Book §3.2.2 rule 7: `ref_via_bound(&r)` with `fn ref_via_bound<X:
+        // Tr>(x: &X)` and `r: &T` instantiates `X = &T`; C++ deduction would
+        // collapse the reference and the bounded call inside would key the
+        // plain impl. Spell the arguments explicitly where a reference-depth
+        // argument determines them.
+        if !func.contains('<')
+            && let Some(targs) = self.explicit_generic_args_for_reference_depth(call)
+        {
+            func = format!("{}<{}>", func, targs);
+        }
         let crate_owns_string = self.bare_std_named_type_suppression_applies("String");
         func = match func.as_str() {
             "std::string_view::from_utf8" | "::std::string_view::from_utf8" => {
@@ -24267,6 +24445,84 @@ impl CodeGen {
     /// (`pub use std::iter as __std_iter`) re-exported by itertools. The
     /// trait segment must be immediately preceded by that module segment, so
     /// user types named `Iterator`/`IntoIterator` are not affected.
+    /// Book §3.2.2 rule 7: the explicit template-argument list for a call to
+    /// a crate generic function when some `&P` parameter receives an argument
+    /// of Rust type `&&T` (`P = &T`, which deduction from `const P&` would
+    /// collapse to `T`). Every parameter up to the last one so determined
+    /// must be bindable from the arguments (`P` by value, `&P` by one
+    /// reference); otherwise `None` and the call stays deduced.
+    fn explicit_generic_args_for_reference_depth(&self, call: &syn::ExprCall) -> Option<String> {
+        let params: Vec<String> =
+            self.lookup_function_type_param_names_with_import_fallback(&call.func)?.clone();
+        if params.is_empty() {
+            return None;
+        }
+        let param_index = |ty: &syn::Type| -> Option<(usize, bool)> {
+            let (inner, by_ref) = match self.peel_paren_group_type(ty) {
+                syn::Type::Reference(r) => (self.peel_paren_group_type(&r.elem), true),
+                other => (other, false),
+            };
+            let syn::Type::Path(tp) = inner else {
+                return None;
+            };
+            if tp.qself.is_some()
+                || tp.path.segments.len() != 1
+                || !tp.path.segments[0].arguments.is_none()
+            {
+                return None;
+            }
+            params
+                .iter()
+                .position(|p| p == &tp.path.segments[0].ident.to_string())
+                .map(|i| (i, by_ref))
+        };
+        let mut bindings: Vec<Option<String>> = vec![None; params.len()];
+        let mut needed = false;
+        for (i, arg) in call.args.iter().enumerate() {
+            let Some(decl) = self.lookup_function_arg_expected_type_with_import_fallback(&call.func, i)
+            else {
+                continue;
+            };
+            let Some((idx, by_ref)) = param_index(decl) else {
+                continue;
+            };
+            let Some(arg_ty) = self.infer_simple_expr_type(arg) else {
+                continue;
+            };
+            let bound: &syn::Type = if by_ref {
+                match self.peel_paren_group_type(&arg_ty) {
+                    syn::Type::Reference(outer) => outer.elem.as_ref(),
+                    _ => continue,
+                }
+            } else {
+                self.peel_paren_group_type(&arg_ty)
+            };
+            if by_ref && matches!(self.peel_paren_group_type(bound), syn::Type::Reference(_)) {
+                needed = true;
+            }
+            if bindings[idx].is_none() {
+                let mapped = self.map_type(bound);
+                if !mapped.is_empty() && !type_string_has_auto_placeholder(&mapped) {
+                    bindings[idx] = Some(mapped);
+                }
+            }
+        }
+        if !needed {
+            return None;
+        }
+        let last = bindings.iter().rposition(|b| b.is_some())?;
+        if bindings[..=last].iter().any(|b| b.is_none()) {
+            return None;
+        }
+        Some(
+            bindings[..=last]
+                .iter()
+                .map(|b| b.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+
     pub(super) fn try_emit_std_iter_trait_ufcs_call(&self, call: &syn::ExprCall) -> Option<String> {
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
             return None;
@@ -24795,12 +25051,47 @@ impl CodeGen {
                 crate::codegen::sanitize_collapse_trait_tag(&owner_leaf),
                 method_name
             );
-            return Some(self.emit_multi_owner_ufcs_call(
+            // Book §3.2.2 rule 7: path-syntax keys (trait arguments, `qself`,
+            // the first argument's probe type).
+            let (explicit_self_ty, explicit_trait_args) = match call.func.as_ref() {
+                syn::Expr::Path(fp) => (
+                    fp.qself.as_ref().map(|q| q.ty.as_ref()),
+                    fp.path
+                        .segments
+                        .iter()
+                        .nth_back(1)
+                        .map(|seg| match &seg.arguments {
+                            syn::PathArguments::AngleBracketed(a) => a
+                                .args
+                                .iter()
+                                .filter_map(|g| match g {
+                                    syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>(),
+                            _ => Vec::new(),
+                        })
+                        .unwrap_or_default(),
+                ),
+                _ => (None, Vec::new()),
+            };
+            let first_arg_ty = call.args.first().and_then(|a| self.infer_simple_expr_type(a));
+            let trailing = self.ufcs_trailing_key_args(
+                &owner_leaf,
+                &method_name,
+                first_arg_ty.as_ref(),
+                explicit_self_ty,
+                &explicit_trait_args,
+                None,
+            );
+            let keyed_owner = self.ufcs_trait_is_keyed(&owner_leaf);
+            return Some(self.emit_multi_owner_ufcs_call_with_trailing(
                 std::slice::from_ref(&callee),
                 &recv,
                 &extra_args,
                 &escape_cpp_keyword(&method_name),
-                Some(qualified_tag.as_str()),
+                if keyed_owner { None } else { Some(qualified_tag.as_str()) },
+                std::slice::from_ref(&trailing),
             ));
         }
 

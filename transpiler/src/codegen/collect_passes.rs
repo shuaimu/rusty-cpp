@@ -7250,6 +7250,7 @@ impl CodeGen {
                             extra_template_requires: None,
                             impl_generics: Some(impl_block.generics.clone()),
                             impl_module_path: module_path.to_vec(),
+                            trait_args: Self::trait_path_type_args(trait_path),
                         });
                     }
                 }

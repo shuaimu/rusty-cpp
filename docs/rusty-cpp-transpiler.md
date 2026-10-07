@@ -2314,6 +2314,46 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   2/2 flip to PASS — the first `dyn` cells to match rustc; `collapse` waits on step (7) (return-type-only
   overloads), `census` on `&dyn` inside `Vec` / slices (today `const Tr&` — an array of references) and
   on an unrelated float-literal typing gap.
+- *2026-10-07 — step (7), the keys of rule 7:* `rusty::tag<A…>` and `rusty::self_tag<S>` (one-line
+  helpers in `include/rusty/marker.hpp`). A generic trait's impl functions carry a trailing
+  `rusty::tag<X…> = {}` with the impl's trait arguments, its default templates `rusty::tag<A…> = {}`
+  over the trait's parameters (added to the template head when the signature did not use them); a
+  trait with an `impl Tr for &T` carries `rusty::self_tag<S>` on every function — the plain impl's
+  and the default template's defaulted, the reference impl's *not* when a plain sibling exists (a
+  lone `impl Tr for &str` is the only candidate and keeps its default). `self_tag` precedes `tag`:
+  it is the one key that may be non-defaulted, and C++ forbids a defaulted parameter ahead of a
+  non-defaulted one (serde_core's `impl<E> IntoDeserializer<E> for &str`, measured). The keys are part
+  of the `impl_` lane's dedupe signature (the `&T` impl is no longer the "losing body"), and the
+  retiring `rusty_ext` lane drops the return type from its signature instead (two return-type-only
+  twins cannot coexist there). **Call sites** pass what is lexically determined: the path's trait
+  arguments and `qself` (`<T as Tr<u8>>::m`, `<&T as Tr>::m`), the receiver's bound
+  (`trait_bound_args_scopes`), an expected type when the method returns the bare parameter (`let b:
+  u8 = t.conv()`), a type-parameter receiver (`self_tag<X>`, which the call site instantiates as
+  `via_bound<const T&>(r)` by spelling the template arguments when a `&P` parameter receives a
+  `&&T`), and the receiver's reference depth (Rust's by-value probe step: the key is passed exactly
+  when the receiver's type less one reference is itself a reference — `(&r).m()`, `rr.m()`,
+  `RefTr::m(&r)`); a `tag` is never passed without the `self_tag` ahead of it. A keyed call puts the
+  trait namespace *first* in the ladder and the shim (the member is the cross-crate fallback), and
+  a keyed trait never probes the pre-key `rusty_<Tr>_<m>` collapse member — both measured on the
+  collapse probe (`name via i32` where rustc says `via u8`; `1007` where rustc says `7`). The
+  forwarders pass `self_tag<U>{}` / `tag<T…>{}` in every slot; `&r` with `r: &T` keys the forwarder
+  on `const T&`, and `Box::new(r)` into `Box<dyn Tr>` spells `TrAdapter<const T&>` (the
+  construction-site rewrite would strip the reference). That last cell exposed a header bug: the
+  generic forwarders derive from the interface and so *inherit* its `rusty_dyn_adapter` alias, which
+  made `Box<TrAdapter<X>>::new_(v)` take the forwarder for an interface and box it in
+  `TrAdapter<TrAdapter<…>>` without end (clang: recursive instantiation through
+  `rust_layout_size`); `rusty::detail::dyn_adapter_for` now rejects a `final` class — every forwarder
+  is final, an interface (abstract, protected constructor) never is. Oracle: `trait_probes_collapse`
+  6/6 (was a precompile failure); thin 3/3, defaults 2/2, scoping 3/3 hold; thin/defaults/collapse/
+  scoping leave `KNOWN_FAIL_CRATES`, `census` stays (its two cells above are untouched by rule 7).
+- *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
+  re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
+  definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
+  `serde_bytes::serde_core::Serialize_`), and its calls are spelled relative to match. A dependency
+  trait the consumer never implements (`SeqAccess`) is then unreachable through that shadow (`no
+  member named 'SeqAccess_' in namespace 'serde_bytes::serde_core'`); an absolute spelling cannot
+  repair a namespace *definition*. The manifest step (§3.2.16 (8)) must reopen the dependency's
+  `<Tr>_::impl_` at global scope with using-declaration bridges and re-emit no dispatchers.
 - *Marker hygiene found by the comparison gates (2026-10-07):* the explicit-specialization dedupe keys on
   the same canonical spelling the free-function emitters use (`isize`/`i64`, `NonZero<usize>`/`<u64>` are
   one C++ type — `redefinition of impls_Serialize<long>` otherwise); a nested-module impl whose self type

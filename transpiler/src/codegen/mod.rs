@@ -64,6 +64,10 @@ pub(crate) struct ExtensionImplMethod {
     /// measured as an undefined reference to `rusty_ext::m<Sc>`), so neither may
     /// read emitter state that only one of them sets.
     impl_module_path: Vec<String>,
+    /// The impl's trait TYPE arguments (`impl Tr<u8> for T` → `[u8]`), for the
+    /// trailing `rusty::tag<…>` key (book §3.2.2 rule 7). Empty for a trait
+    /// default and for a non-generic trait.
+    trait_args: Vec<syn::Type>,
 }
 
 /// One crate-local `impl<G…> From<SRC> for S<TARG>` shape, kept in Rust-type
@@ -1804,6 +1808,19 @@ pub struct CodeGen {
     /// (short names). Elaborated transitively by `ufcs_elaborate_supertraits`
     /// for the bound regime of candidate enumeration and for default bodies.
     pub(crate) ufcs_trait_supertraits: HashMap<String, Vec<String>>,
+    /// Book §3.2.2 rule 7: trait → explicit type parameters (`trait Tr<A>`);
+    /// its impl functions / default templates / forwarder slots carry
+    /// `rusty::tag<…>`.
+    pub(crate) ufcs_trait_generic_params: HashMap<String, Vec<String>>,
+    /// Book §3.2.2 rule 7: traits with an `impl Tr for &T` — their functions
+    /// carry `rusty::self_tag<Self>`.
+    pub(crate) ufcs_traits_with_ref_self_impls: HashSet<String>,
+    /// Book §3.2.2 rule 7: trait → token spellings of its non-reference impl
+    /// self types (a reference impl's `self_tag` is defaulted iff no sibling).
+    pub(crate) ufcs_trait_plain_self_types: HashMap<String, HashSet<String>>,
+    /// Book §3.2.2 rule 7: `(trait, method)` → the trait type parameter the
+    /// method returns bare, so an expected type at the call site fixes it.
+    pub(crate) ufcs_trait_method_return_generic: HashMap<(String, String), String>,
     /// Book §3.2.13 rule 6 (2026-10-07): the trait whose DEFAULT-method body is
     /// being emitted as a `template<class Self_>` free function, and that
     /// trait's Rust module; `None` outside such a body. A `self.m()` in that
@@ -3566,6 +3583,10 @@ impl CodeGen {
             ufcs_trait_assoc_type_names: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_trait_supertraits: HashMap::new(),
+            ufcs_trait_generic_params: HashMap::new(),
+            ufcs_traits_with_ref_self_impls: HashSet::new(),
+            ufcs_trait_plain_self_types: HashMap::new(),
+            ufcs_trait_method_return_generic: HashMap::new(),
             ufcs_default_body_trait: None,
             ufcs_default_body_module_path: Vec::new(),
             scope_glob_import_modules: HashSet::new(),
@@ -6015,6 +6036,19 @@ impl CodeGen {
             }
             for tr in &m.declared_traits {
                 let bridge = format!("{}_", tr);
+                // RELATIVE on purpose: the consumer re-emits the dependency
+                // trait's dispatcher namespace and bridges its own impls into
+                // it, and that definition (`namespace serde_core::Serialize_
+                // {`) nests under the consumer (`serde_bytes::serde_core::…`)
+                // — the calls must land in the same nested shadow. The shadow
+                // makes a dependency trait the consumer never implements
+                // (serde_core's `SeqAccess`) unreachable through it (measured:
+                // `no member named 'SeqAccess_' in namespace
+                // 'serde_bytes::serde_core'`); an absolute spelling cannot
+                // fix that (`namespace ::x` is ill-formed) — the manifest step
+                // (§3.2.16 (8)) must reopen the dependency's `<Tr>_::impl_` at
+                // global scope with using-declaration bridges and re-emit no
+                // dispatchers.
                 repls.push((bridge.clone(), format!("{}::{}", m.module, bridge)));
             }
             // HYGIENE-ALIAS resolution (book § 32, the .rmeta analog): a consumer references a
@@ -8428,6 +8462,14 @@ impl CodeGen {
             crate::transpile::collect_trait_default_methods(&file.items);
         self.ufcs_trait_supertraits =
             crate::transpile::collect_trait_supertraits(&file.items);
+        self.ufcs_trait_generic_params =
+            crate::transpile::collect_trait_generic_type_params(&file.items);
+        self.ufcs_traits_with_ref_self_impls =
+            crate::transpile::collect_traits_with_reference_self_impls(&file.items);
+        self.ufcs_trait_plain_self_types =
+            crate::transpile::collect_trait_plain_self_types(&file.items);
+        self.ufcs_trait_method_return_generic =
+            crate::transpile::collect_trait_methods_returning_generic(&file.items);
         self.ufcs_universal_blanket_traits =
             crate::transpile::collect_unbounded_blanket_impl_traits(&file.items);
         self.ufcs_trait_assoc_type_names =
@@ -21146,6 +21188,7 @@ impl CodeGen {
     ) -> Option<(String, Vec<ExtensionImplMethod>)> {
         let (_, trait_path, _) = impl_block.trait_.as_ref()?;
         let trait_name = trait_path.segments.last().map(|s| s.ident.to_string())?;
+        let trait_type_args: Vec<syn::Type> = Self::trait_path_type_args(trait_path);
         // See the per-method skip in collect_extension_trait_impl_methods:
         // a reference-forwarding blanket's default-bodied methods collapse
         // over (and drop) the trait default's real body, then self-recurse.
@@ -21212,6 +21255,7 @@ impl CodeGen {
                 extra_template_requires: None,
                 impl_generics: Some(impl_block.generics.clone()),
                 impl_module_path: module_path.to_vec(),
+                trait_args: trait_type_args.clone(),
             });
         }
         if specs.is_empty() {
@@ -21937,6 +21981,18 @@ impl CodeGen {
             })
             .collect();
         let trait_cpp = escape_cpp_keyword(trait_name);
+        // A const generic (`impl<const N: usize> Tr for [u8; N]`) is a
+        // template parameter the partial specialization cannot deduce through
+        // `sanitize_array_capacity<N>()` (serde_bytes: `use of undeclared
+        // identifier 'N'` on the would-be explicit specialization) — no marker.
+        if impl_block
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p, syn::GenericParam::Const(_)))
+        {
+            return;
+        }
         if type_params.is_empty() {
             let self_cpp = self.qualify_nested_local_type_for_global_scope(
                 &self.rewrite_cpp_import_bound_type_spelling(
@@ -22080,8 +22136,42 @@ impl CodeGen {
         // constant expression `f<N>()`, or a dependent nested name `T::X`
         // (alloc: `impls_IsZero<std::array<T, rusty::sanitize_array_capacity<N>()>>`
         // → clang `-Wunusable-partial-specialization`, an error under -Werror).
+        // An alias template (`rusty::detail::associated_item_t<A>`, any
+        // `…_t<…>`) is a non-deduced context: a parameter that appears only
+        // inside one cannot be deduced (smallvec's `impl<A: Array>
+        // ToSmallVec<A::Item> for [A::Item]` → `std::span<const
+        // associated_item_t<A>>`, `-Wunusable-partial-specialization`).
+        let deducible_view: String = {
+            let bytes = self_cpp.as_bytes();
+            let mut out = String::with_capacity(self_cpp.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'<' && out.ends_with("_t") {
+                    // drop the balanced template-argument list
+                    let mut depth = 0usize;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'<' => depth += 1,
+                            b'>' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            out
+        };
         let mentions = |param: &str| -> bool {
-            self_cpp
+            deducible_view
                 .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                 .any(|tok| tok == param)
         };
@@ -22270,6 +22360,7 @@ impl CodeGen {
                 extra_template_requires: None,
                 impl_generics: None,
                 impl_module_path: Vec::new(),
+                trait_args: Vec::new(),
             });
         }
         if specs.is_empty() {
@@ -23838,6 +23929,7 @@ impl CodeGen {
             };
             params.push(format!("{} {}", ty, param_name));
         }
+        params.extend(self.ufcs_trailing_key_params(method_spec, &self_cpp_ty, &mut free_generics, true));
 
         if method_name == "serialize"
             && method.sig.inputs.len() == 2
@@ -23922,6 +24014,95 @@ impl CodeGen {
             ),
         );
         true
+    }
+
+    /// The TYPE arguments of a trait path (`Tr<'a, u8>` → `[u8]`).
+    fn trait_path_type_args(trait_path: &syn::Path) -> Vec<syn::Type> {
+        match trait_path.segments.last().map(|s| &s.arguments) {
+            Some(syn::PathArguments::AngleBracketed(a)) => a
+                .args
+                .iter()
+                .filter_map(|g| match g {
+                    syn::GenericArgument::Type(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Book §3.2.2 rule 7: the trailing key parameters of an impl function or
+    /// default template in the `<Tr>_::impl_` lane — `rusty::tag<A…>` for a
+    /// generic trait (the impl's trait arguments; the trait's parameters for a
+    /// default, added to the template head when the signature did not use
+    /// them), then `rusty::self_tag<Self>` for a trait with an `impl Tr for &T`
+    /// (defaulted for the plain impl and the default template, NOT for the
+    /// reference impl). `with_defaults`: the declaration spells `= {}`; the
+    /// definition must not repeat it. Empty outside the `impl_` lane.
+    fn ufcs_trailing_key_params(
+        &self,
+        method_spec: &ExtensionImplMethod,
+        self_cpp_ty: &str,
+        free_generics: &mut syn::Generics,
+        with_defaults: bool,
+    ) -> Vec<String> {
+        let Some(ns) = self.ufcs_tag_namespace.as_deref() else {
+            return Vec::new();
+        };
+        let trait_name = ns.strip_suffix('_').unwrap_or(ns);
+        let default = if with_defaults { " = {}" } else { "" };
+        let mut out: Vec<String> = Vec::new();
+        // `self_tag` FIRST: it is the one key that may be non-defaulted (the
+        // reference impl beside a plain sibling), and C++ forbids a defaulted
+        // parameter ahead of a non-defaulted one (serde_core's
+        // `impl<E> IntoDeserializer<E> for &str`, measured).
+        if self.ufcs_traits_with_ref_self_impls.contains(trait_name) {
+            if method_spec.self_is_template_param {
+                out.push(format!("rusty::self_tag<Self_>{}", default));
+            } else if let syn::Type::Reference(r) = &method_spec.self_ty {
+                let has_plain_sibling = self
+                    .ufcs_trait_plain_self_types
+                    .get(trait_name)
+                    .is_some_and(|set| set.contains(&r.elem.to_token_stream().to_string()));
+                // Beside a plain sibling the reference impl is never the
+                // default; alone, it is the only candidate and may be.
+                let ref_default = if has_plain_sibling { "" } else { default };
+                out.push(format!(
+                    "rusty::self_tag<{}>{}",
+                    self.map_type(&method_spec.self_ty),
+                    ref_default
+                ));
+            } else {
+                out.push(format!("rusty::self_tag<{}>{}", self_cpp_ty, default));
+            }
+        }
+        if let Some(gparams) = self.ufcs_trait_generic_params.get(trait_name)
+            && !gparams.is_empty()
+        {
+            if method_spec.self_is_template_param {
+                for name in gparams {
+                    let present = free_generics.params.iter().any(|p| {
+                        matches!(p, syn::GenericParam::Type(tp) if tp.ident == name.as_str())
+                    });
+                    if !present {
+                        let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+                        free_generics.params.push(syn::parse_quote!(#ident));
+                    }
+                }
+                let names: Vec<String> = gparams.iter().map(|n| escape_cpp_keyword(n)).collect();
+                out.push(format!("rusty::tag<{}>{}", names.join(", "), default));
+            } else if method_spec.trait_args.len() == gparams.len() {
+                let mapped: Vec<String> = method_spec
+                    .trait_args
+                    .iter()
+                    .map(|ty| self.rewrite_cpp_import_bound_type_spelling(&self.map_type(ty)))
+                    .collect();
+                if mapped.iter().all(|m| !m.contains("/* TODO") && !type_string_has_auto_placeholder(m)) {
+                    out.push(format!("rusty::tag<{}>{}", mapped.join(", "), default));
+                }
+            }
+        }
+        out
     }
 
     /// Book §3.2.2 rule 3: the `requires` clause of an impl / default free
@@ -24228,12 +24409,42 @@ impl CodeGen {
             .map(|ty| self.canonicalize_extension_overload_type_for_dedupe(ty))
             .collect();
         let canonical_return = self.canonicalize_extension_overload_type_for_dedupe(&return_type);
+        // Book §3.2.2 rule 7: in the `<Tr>_::impl_` lane the trailing keys make
+        // `impl Tr for &T` / `impl Tr<u8> for T` DISTINCT overloads of their
+        // `T` / `Tr<i32>` siblings, so they are not duplicates there. The
+        // `rusty_ext` lane has no keys and keeps collapsing them.
+        let keys = if self.ufcs_tag_namespace.is_some() {
+            let refself = if matches!(method_spec.self_ty, syn::Type::Reference(_)) {
+                "|refself"
+            } else {
+                ""
+            };
+            let targs: Vec<String> = method_spec
+                .trait_args
+                .iter()
+                .map(|ty| self.canonicalize_extension_overload_type_for_dedupe(&self.map_type(ty)))
+                .collect();
+            format!("{}|targs={}", refself, targs.join(","))
+        } else {
+            String::new()
+        };
+        // The `rusty_ext` lane (no keys) cannot hold two functions that differ
+        // only in their return type (`impl ConvF<i32> for f64` + `impl
+        // ConvF<String> for f64`: C++ rejects the pair outright), so there the
+        // return type is NOT part of the key and the second collapses onto the
+        // first — the `impl_` lane's keyed overloads are the real ones.
+        let return_key = if self.ufcs_tag_namespace.is_some() {
+            canonical_return
+        } else {
+            String::new()
+        };
         Some(format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}{}",
             method_name,
             free_generics.params.len(),
             canonical_params.join("|"),
-            canonical_return
+            return_key,
+            keys
         ))
     }
 
@@ -24351,6 +24562,7 @@ impl CodeGen {
             };
             params.push(format!("{} {}", ty, param_name));
         }
+        params.extend(self.ufcs_trailing_key_params(method_spec, &self_cpp_ty, &mut free_generics, false));
 
         if method_name == "serialize"
             && method.sig.inputs.len() == 2
@@ -42535,6 +42747,23 @@ impl CodeGen {
         receiver_expr: &str,
         extra_args: &[String],
     ) -> String {
+        self.emit_extension_call_with_receiver_autoderef_fallback_with_trailing(
+            callee,
+            receiver_expr,
+            extra_args,
+            "",
+        )
+    }
+
+    /// Book §3.2.2 rule 7: `trailing` (`, rusty::tag<…>{}` / `,
+    /// rusty::self_tag<…>{}`) goes on the trait-namespace calls only.
+    fn emit_extension_call_with_receiver_autoderef_fallback_with_trailing(
+        &self,
+        callee: &str,
+        receiver_expr: &str,
+        extra_args: &[String],
+        trailing: &str,
+    ) -> String {
         // Each `extra_arg` is passed as a lambda parameter (`__arg{i}`)
         // rather than embedded textually in the IIFE body. This is
         // critical when `extra_args[i]` is itself a lambda that
@@ -42596,8 +42825,8 @@ impl CodeGen {
         let mut deref_args = Vec::with_capacity(extra_args.len() + 1);
         deref_args.push(deref_receiver.to_string());
         deref_args.extend(deref_arg_uses.iter().cloned());
-        let direct_call = format!("{}({})", callee, direct_args.join(", "));
-        let deref_call = format!("{}({})", callee, deref_args.join(", "));
+        let direct_call = format!("{}({}{})", callee, direct_args.join(", "), trailing);
+        let deref_call = format!("{}({}{})", callee, deref_args.join(", "), trailing);
         // Split the callee into its path-with-method base and an optional
         // turbofish suffix BEFORE taking the `::`-leaf. A turbofish type arg
         // can itself contain `::` (e.g. `next_value<de::IgnoredAny>`), so
@@ -42798,6 +43027,26 @@ impl CodeGen {
                         Some(format!("{}({})", sibling, deref_args.join(", ")))
                     })
             });
+        // Book §3.2.2 rule 7: a trailing key means Rust's resolution was
+        // lexically the TRAIT (a bound on a type parameter, a `let`
+        // annotation, a reference-depth probe) — the keyed free function
+        // comes first and the member is only the cross-crate fallback
+        // (`x.name()` under `X: ConvT<u8>` must not land on the struct
+        // member that the i32 impl merged in).
+        if !trailing.is_empty() {
+            return format!(
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                direct_call,
+                direct_call,
+                deref_call,
+                deref_call,
+                member_call_direct,
+                member_call_direct,
+                member_call,
+                arg_call_list
+            );
+        }
         // MEMBER tier first: rustc resolves INHERENT methods before trait
         // methods at each deref level. The trait free fn's requires-check
         // only probes the SIGNATURE (an unconstrained template is always
@@ -42846,6 +43095,143 @@ impl CodeGen {
     /// multi-owner defaults whose BODIES call trait methods, these templates
     /// additionally need per-trait `requires` constraints — the marker/constraint
     /// completion; serde's `size_hint` body is `{ None }` so it needs only this.)
+    /// Book §3.2.2 rule 7: does this trait's lane carry keys (a generic trait,
+    /// or one with an `impl Tr for &T`)? Then every impl has its own keyed
+    /// free function and the pre-key "preserved collapse member"
+    /// (`rusty_<Tr>_<m>`, the LOSING body of a struct-level collapse) must
+    /// never be probed ahead of the trait namespace — it is the other impl.
+    pub(crate) fn ufcs_trait_is_keyed(&self, owner: &str) -> bool {
+        let short = owner.rsplit("::").next().unwrap_or(owner);
+        self.ufcs_traits_with_ref_self_impls.contains(short)
+            || self
+                .ufcs_trait_generic_params
+                .get(short)
+                .is_some_and(|params| !params.is_empty())
+    }
+
+    /// Book §3.2.2 rule 7: the trailing key arguments a call site passes to a
+    /// trait-namespace call, as `", a, b"` (empty when nothing is determined).
+    /// `rusty::tag<A…>{}` for a generic owner when `A` is lexically
+    /// recoverable — an explicit path (`<T as Tr<u8>>::m`), the receiver's
+    /// bound (`X: Tr<u8>`), or an expected type where the method returns the
+    /// bare parameter (`let b: u8 = t.conv()`); omitted otherwise so the Rust
+    /// arguments decide (`t.m(av)`). `rusty::self_tag<S>{}` for an owner with
+    /// an `impl Tr for &T`: a type-parameter receiver passes `self_tag<X>`
+    /// (`X` may be instantiated as a reference); otherwise Rust's probe is
+    /// replayed on the receiver's type `R` — the by-value step matches
+    /// `&self` of `impl for S` when `R == &S`, so `S` is `R` less one
+    /// reference, and the key is passed exactly when that `S` is itself a
+    /// reference (`(&r).m()`, `rr.m()` with `rr: &&T`, `RefTr::m(&r)`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ufcs_trailing_key_args(
+        &self,
+        owner: &str,
+        method: &str,
+        receiver_rust_ty: Option<&syn::Type>,
+        explicit_self_ty: Option<&syn::Type>,
+        explicit_trait_args: &[syn::Type],
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let short = owner.rsplit("::").next().unwrap_or(owner);
+        let mut self_key: Option<String> = None;
+        let mut tag_key: Option<String> = None;
+        let clean = |s: &str| -> bool {
+            !s.is_empty()
+                && s != "auto"
+                && !s.contains("/* TODO")
+                && !type_string_has_auto_placeholder(s)
+        };
+        // The receiver's declared type with references peeled, and whether it
+        // is a bare type parameter in scope.
+        let peeled: Option<&syn::Type> = receiver_rust_ty.map(|ty| {
+            let mut inner = ty;
+            loop {
+                match inner {
+                    syn::Type::Reference(r) => inner = &r.elem,
+                    syn::Type::Paren(p) => inner = &p.elem,
+                    syn::Type::Group(g) => inner = &g.elem,
+                    _ => break,
+                }
+            }
+            inner
+        });
+        let type_param: Option<String> = peeled.and_then(|ty| match ty {
+            syn::Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp.path.segments[0].arguments.is_none()
+                    && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string()) =>
+            {
+                Some(tp.path.segments[0].ident.to_string())
+            }
+            _ => None,
+        });
+        if let Some(gparams) = self.ufcs_trait_generic_params.get(short)
+            && !gparams.is_empty()
+        {
+            let mut args: Option<Vec<String>> = None;
+            if explicit_trait_args.len() == gparams.len() {
+                args = Some(explicit_trait_args.iter().map(|ty| self.map_type(ty)).collect());
+            } else if let Some(param) = &type_param {
+                for scope in self.trait_bound_args_scopes.iter().rev() {
+                    if let Some((bound_trait, bound_args)) = scope.get(param)
+                        && bound_trait.rsplit("::").next().unwrap_or(bound_trait) == short
+                        && bound_args.len() == gparams.len()
+                    {
+                        args = Some(bound_args.iter().map(|ty| self.map_type(ty)).collect());
+                        break;
+                    }
+                }
+            }
+            if args.is_none()
+                && gparams.len() == 1
+                && let Some(expected) = expected_ty
+                && self
+                    .ufcs_trait_method_return_generic
+                    .contains_key(&(short.to_string(), method.to_string()))
+            {
+                args = Some(vec![self.map_type(expected)]);
+            }
+            if let Some(args) = args
+                && args.iter().all(|a| clean(a))
+            {
+                tag_key = Some(format!("rusty::tag<{}>{{}}", args.join(", ")));
+            }
+        }
+        if self.ufcs_traits_with_ref_self_impls.contains(short) {
+            // Rust's probe replayed on the self type: the key is REQUIRED when
+            // it lands on a reference impl, and (because `self_tag` precedes
+            // `tag` positionally) whenever a `tag` is passed.
+            let probe_self: Option<&syn::Type> = if let Some(self_ty) = explicit_self_ty {
+                Some(self_ty)
+            } else {
+                receiver_rust_ty.map(|recv| match self.peel_paren_group_type(recv) {
+                    syn::Type::Reference(r) => r.elem.as_ref(),
+                    other => other,
+                })
+            };
+            if let Some(param) = &type_param {
+                self_key = Some(format!("rusty::self_tag<{}>{{}}", escape_cpp_keyword(param)));
+            } else if let Some(probe_self) = probe_self {
+                let is_ref = matches!(self.peel_paren_group_type(probe_self), syn::Type::Reference(_));
+                if is_ref || tag_key.is_some() {
+                    let mapped = self.map_type(probe_self);
+                    if clean(&mapped) {
+                        self_key = Some(format!("rusty::self_tag<{}>{{}}", mapped));
+                    }
+                }
+            }
+            if tag_key.is_some() && self_key.is_none() {
+                // Cannot place the tag without the self key ahead of it.
+                tag_key = None;
+            }
+        }
+        let mut keys: Vec<String> = Vec::new();
+        keys.extend(self_key);
+        keys.extend(tag_key);
+        keys.iter().map(|k| format!(", {}", k)).collect::<Vec<_>>().join("")
+    }
+
     pub(crate) fn emit_multi_owner_ufcs_call(
         &self,
         callees: &[String],
@@ -42861,6 +43247,31 @@ impl CodeGen {
             member_leaf,
             tagged_member,
             None,
+            &[],
+        )
+    }
+
+    /// Book §3.2.2 rule 7: the same ladder with per-callee trailing KEY
+    /// arguments (`, rusty::tag<uint8_t>{}` / `, rusty::self_tag<const T&>{}`),
+    /// appended to the trait-namespace arms only — never to the member
+    /// fallback, which takes the Rust arguments alone.
+    pub(crate) fn emit_multi_owner_ufcs_call_with_trailing(
+        &self,
+        callees: &[String],
+        receiver_expr: &str,
+        extra_args: &[String],
+        member_leaf: &str,
+        tagged_member: Option<&str>,
+        trailing_per_callee: &[String],
+    ) -> String {
+        self.build_multi_owner_ufcs_call(
+            callees,
+            receiver_expr,
+            extra_args,
+            member_leaf,
+            tagged_member,
+            None,
+            trailing_per_callee,
         )
     }
 
@@ -42881,6 +43292,7 @@ impl CodeGen {
         member_leaf: &str,
         tagged_member: Option<&str>,
         method_name: &str,
+        trailing_per_callee: &[String],
     ) -> String {
         self.build_multi_owner_ufcs_call(
             callees,
@@ -42889,6 +43301,7 @@ impl CodeGen {
             member_leaf,
             tagged_member,
             Some((method_name, owners)),
+            trailing_per_callee,
         )
     }
 
@@ -42900,7 +43313,11 @@ impl CodeGen {
         member_leaf: &str,
         tagged_member: Option<&str>,
         e0034_guard_for: Option<(&str, &[String])>,
+        trailing_per_callee: &[String],
     ) -> String {
+        let trailing_for = |i: usize| -> &str {
+            trailing_per_callee.get(i).map(String::as_str).unwrap_or("")
+        };
         let direct_receiver = "std::forward<decltype(__self)>(__self)";
         let deref_receiver =
             "rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))";
@@ -42949,7 +43366,15 @@ impl CodeGen {
         // collapse body `rusty_<Trait>_<m>` FIRST. That member exists only
         // where an impl-collapse fired (2d42a92b), so every non-colliding
         // type falls through to the chain below byte-identically.
-        if let Some(tag) = tagged_member {
+        // Book §3.2.2 rule 7: a trailing key names the exact impl function
+        // (`rusty::tag<uint8_t>`, `rusty::self_tag<const T&>`); the preserved
+        // collapse member is a pre-key relic that would return the OTHER
+        // impl's body (`<X as ConvT<u8>>::name(x)` → `rusty_ConvT_name`, the
+        // i32 one). Keys ⇒ the keyed free function is authoritative.
+        let keyed = trailing_per_callee.iter().any(|k| !k.is_empty());
+        if let Some(tag) = tagged_member
+            && !keyed
+        {
             for (recv, uses) in [
                 (direct_receiver, &direct_arg_uses),
                 (deref_receiver, &deref_arg_uses),
@@ -42961,15 +43386,15 @@ impl CodeGen {
                 ));
             }
         }
-        for callee in callees {
-            let call = format!("{}({})", callee, direct_args);
+        for (i, callee) in callees.iter().enumerate() {
+            let call = format!("{}({}{})", callee, direct_args, trailing_for(i));
             branches.push_str(&format!(
                 "if constexpr (requires {{ {}; }}) {{ return {}; }} else ",
                 call, call
             ));
         }
-        for callee in callees {
-            let call = format!("{}({})", callee, deref_args);
+        for (i, callee) in callees.iter().enumerate() {
+            let call = format!("{}({}{})", callee, deref_args, trailing_for(i));
             branches.push_str(&format!(
                 "if constexpr (requires {{ {}; }}) {{ return {}; }} else ",
                 call, call
@@ -43003,13 +43428,14 @@ impl CodeGen {
                     method
                 );
                 let mut arms = String::new();
-                for (owner, callee) in owners.iter().zip(callees.iter()) {
+                for (i, (owner, callee)) in owners.iter().zip(callees.iter()).enumerate() {
                     let short = owner.rsplit("::").next().unwrap_or(owner);
                     arms.push_str(&format!(
-                        "if constexpr (impls_{}<__ufcs_S>::value) {{ return {}({}); }} else ",
+                        "if constexpr (impls_{}<__ufcs_S>::value) {{ return {}({}{}); }} else ",
                         escape_cpp_keyword(short),
                         callee,
-                        direct_args
+                        direct_args,
+                        trailing_for(i)
                     ));
                 }
                 (guard, arms)
@@ -45733,6 +46159,33 @@ impl CodeGen {
     }
 
     fn emit_call_func_with_owner_template_recovery(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let func = self.emit_call_func_with_owner_template_recovery_inner(call, expected_ty);
+        // Book §3.2.2 rule 7: `Box::new(r)` into `Box<dyn Tr>` with `r: &T`
+        // boxes the REFERENCE (`impl Tr for &T`). The recovered owner is
+        // `rusty::Box<Tr>::new_`; spell the owning forwarder over `const T&`
+        // here, once for every call path — the construction-site rewrite would
+        // key it on `remove_cvref_t<decltype(r)>`, the pointee.
+        if call.args.len() == 1
+            && let Some(inner) = func.strip_prefix("rusty::Box<").and_then(|s| s.strip_suffix(">::new_"))
+            && !inner.contains('<')
+            && let Some(trait_short) = inner.rsplit("::").next()
+            && self.trait_declared_path_by_short_name.contains_key(trait_short)
+            && let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0])
+            && matches!(self.peel_paren_group_type(&arg_ty), syn::Type::Reference(_))
+        {
+            let implementor = self.map_type(&arg_ty);
+            if !implementor.is_empty() && !type_string_has_auto_placeholder(&implementor) {
+                return format!("rusty::Box<{}Adapter<{}>>::new_", inner, implementor);
+            }
+        }
+        func
+    }
+
+    fn emit_call_func_with_owner_template_recovery_inner(
         &self,
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
