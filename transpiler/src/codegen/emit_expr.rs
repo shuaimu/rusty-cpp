@@ -92,6 +92,28 @@ impl CodeGen {
         arg: &syn::Expr,
         expected_ty: Option<&syn::Type>,
     ) -> Option<String> {
+        let (forwarder, is_mut) = self.try_emit_interface_traits_dyn_forwarder(arg, expected_ty)?;
+        // Book §3.2.10: a non-const `Tr&` parameter cannot bind the forwarder
+        // prvalue; `rusty::dyn_lvalue` lends it an lvalue for the duration of
+        // the full-expression, which covers the call (a `let` binding takes
+        // the named-local route in emit_local instead).
+        Some(if is_mut {
+            format!("rusty::dyn_lvalue({})", forwarder)
+        } else {
+            forwarder
+        })
+    }
+
+    /// The bare forwarder expression for a `&dyn` / `&mut dyn` coercion of a
+    /// concrete value (`TrAdapterRef<…>(x)`), with the mutability of the
+    /// expected reference; `None` when no coercion applies — including a
+    /// source that is ALREADY a trait object (`t: &dyn Tr`, `let sup: &dyn
+    /// Super = t;`), which binds by base-class conversion.
+    pub(super) fn try_emit_interface_traits_dyn_forwarder(
+        &self,
+        arg: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<(String, bool)> {
         let expected = expected_ty?;
         let syn::Type::Reference(ref_ty) = expected else {
             return None;
@@ -146,6 +168,9 @@ impl CodeGen {
         ) {
             return None;
         }
+        if self.expr_is_trait_object_valued(inner_expr) {
+            return None;
+        }
 
         let inner_cpp = self.emit_expr_to_string(inner_expr);
         let adapter_suffix = if is_mut { "AdapterRefMut" } else { "AdapterRef" };
@@ -159,10 +184,38 @@ impl CodeGen {
                 inner_cpp
             )
         };
-        Some(format!(
-            "{}{}<{}>({})",
-            trait_name, adapter_suffix, adapter_args, inner_cpp
+        Some((
+            format!("{}{}<{}>({})", trait_name, adapter_suffix, adapter_args, inner_cpp),
+            is_mut,
         ))
+    }
+
+    /// Is this a local / parameter whose Rust type is a trait object or a
+    /// reference / `Box` to one? Such a source already IS the interface.
+    fn expr_is_trait_object_valued(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = expr else {
+            return false;
+        };
+        if path.qself.is_some() || path.path.segments.len() != 1 {
+            return false;
+        }
+        let name = path.path.segments[0].ident.to_string();
+        let Some(ty) = self.lookup_local_binding_type(&name) else {
+            return false;
+        };
+        let inner = self.peel_reference_paren_group_type(&ty);
+        if matches!(inner, syn::Type::TraitObject(_)) {
+            return true;
+        }
+        if let syn::Type::Path(tp) = inner
+            && let Some(last) = tp.path.segments.last()
+            && matches!(last.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+            && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+            && matches!(args.args.first(), Some(syn::GenericArgument::Type(syn::Type::TraitObject(_))))
+        {
+            return true;
+        }
+        false
     }
 
     pub(super) fn try_emit_auto_deref_arg_for_expected_reference(
@@ -14010,6 +14063,11 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
+        // Book §3.2.10: `let d: &dyn Tr = &x;` over a tier-2 value — the
+        // forwarder temporary is lifetime-extended by the `const Tr&` binding.
+        if let Some(wrapped) = self.try_emit_interface_traits_dyn_ref_coercion(expr, expected_ty) {
+            return wrapped;
+        }
         if let syn::Expr::Async(async_expr) = self.peel_paren_group_expr(expr) {
             return self.emit_async_block_to_string(async_expr, expected_ty);
         }
@@ -16879,6 +16937,22 @@ impl CodeGen {
                         self.emit_expr_to_string_with_expected(elem, Some(expected_elem_ty))
                     })
                     .collect();
+                // Book §3.2.10: `vec![Box::new(3i32), Box::new(W(4))]` typed
+                // `Vec<Box<dyn Tr>>` — each element is a DIFFERENT
+                // `rusty::Box<TrAdapter<U>>`; CTAD cannot deduce the array, so
+                // spell the element type and let Box's converting constructor
+                // unsize each one.
+                if Self::type_mentions_trait_object(expected_elem_ty) {
+                    let elem_cpp = self.map_type(expected_elem_ty);
+                    if !elem_cpp.is_empty() && !type_string_has_auto_placeholder(&elem_cpp) {
+                        return Some(format!(
+                            "std::array<{}, {}>{{{}}}",
+                            elem_cpp,
+                            elems.len(),
+                            elems.join(", ")
+                        ));
+                    }
+                }
                 Some(format!("std::array{{{}}}", elems.join(", ")))
             }
             syn::Expr::Repeat(repeat) => {
@@ -16888,6 +16962,23 @@ impl CodeGen {
                 Some(format!("rusty::array_repeat({}, {})", value, len))
             }
             _ => None,
+        }
+    }
+
+    /// `Box<dyn Tr>` / `Rc<dyn Tr>` / `&dyn Tr` / `dyn Tr` anywhere in the type.
+    fn type_mentions_trait_object(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::TraitObject(_) => true,
+            syn::Type::Reference(r) => Self::type_mentions_trait_object(&r.elem),
+            syn::Type::Paren(p) => Self::type_mentions_trait_object(&p.elem),
+            syn::Type::Group(g) => Self::type_mentions_trait_object(&g.elem),
+            syn::Type::Path(tp) => tp.path.segments.iter().any(|seg| match &seg.arguments {
+                syn::PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| {
+                    matches!(arg, syn::GenericArgument::Type(inner) if Self::type_mentions_trait_object(inner))
+                }),
+                _ => false,
+            }),
+            _ => false,
         }
     }
 

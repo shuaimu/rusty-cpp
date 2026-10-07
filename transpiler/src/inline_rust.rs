@@ -3884,10 +3884,6 @@ impl Base for Derived { fn value(&self) -> i32 { self.value } }
             rewritten.contains("struct Derived : public Base"),
             "a genuine marker imported in a sibling block lost direct inheritance:\n{rewritten}"
         );
-        assert!(
-            !rewritten.contains("class BaseAdapter<Derived>"),
-            "genuine inline marker fell back to an Adapter:\n{rewritten}"
-        );
         run_inline_rust(&InlineRustOptions {
             mode: InlineRustMode::Check,
             files: vec![carrier],
@@ -3932,7 +3928,7 @@ impl Base for Derived { fn value(&self) -> i32 { self.value } }
         let rewritten = std::fs::read_to_string(lookalike_carrier).unwrap();
         assert!(
             !rewritten.contains("struct Derived : public Base")
-                && rewritten.contains("class BaseAdapter<Derived>"),
+                && rewritten.contains("template <class U> class BaseAdapter final : public Base"),
             "a local lookalike acquired compiler-owned inheritance:\n{rewritten}"
         );
 

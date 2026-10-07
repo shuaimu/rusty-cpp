@@ -69,8 +69,16 @@ pub mod reactor {
 
 #[test]
 fn trait_interface_names_its_generic_owning_adapter() {
+    // Book §3.2.10: the owning forwarder `<Tr>Adapter<U>` is generic and
+    // universal — the class names it as `rusty_dyn_adapter` in every mode
+    // (plain, dependency, private, generic), so `Box<U>` -> `Box<dyn Tr>`
+    // works for an implementor the trait's crate never saw.
     let plain = translate("pub trait OsBackend { fn wait(&mut self) -> u32; }");
-    assert!(!plain.contains("DynAdapter") && !plain.contains("rusty_dyn_adapter"), "{plain}");
+    assert!(
+        plain.contains("template <class U> using rusty_dyn_adapter = OsBackendAdapter<U>;"),
+        "{plain}"
+    );
+    assert!(!plain.contains("DynAdapter"), "{plain}");
     let cpp = translate_dependency(
         r#"
 pub trait OsBackend: Send {
@@ -79,30 +87,31 @@ pub trait OsBackend: Send {
 }
 "#,
     );
-    assert!(cpp.contains("template <class U> using rusty_dyn_adapter = OsBackendDynAdapter<U>;"), "{cpp}");
-    assert!(cpp.contains("template <class U> class OsBackendDynAdapter final : public OsBackend {"), "{cpp}");
-    // Declared in the class; defined after the purview, where every type the
-    // signatures name is complete.
-    assert!(cpp.contains("uint32_t register_(int32_t fd, size_t token) override;"), "{cpp}");
-    // An implementor whose trait body was kept as the tagged member beside
-    // a same-signature inherent method is reached through that member.
+    assert!(cpp.contains("template <class U> using rusty_dyn_adapter = OsBackendAdapter<U>;"), "{cpp}");
+    assert!(cpp.contains("template <class U> class OsBackendAdapter final : public OsBackend {"), "{cpp}");
+    // Every slot forwards through the trait's CPO (tag-ADL at instantiation),
+    // which reaches an implementor declared in any later module — including
+    // one whose trait body was kept as the tagged member beside a
+    // same-signature inherent method (its impl function routes there).
     assert!(
         cpp.contains(
-            "template <class U>\nauto ::OsBackendDynAdapter<U>::register_(int32_t fd, size_t token) -> uint32_t { if constexpr (requires { this->rusty_target().rusty_OsBackend_register(std::move(fd), std::move(token)); }) { return this->rusty_target().rusty_OsBackend_register(std::move(fd), std::move(token)); } else { return this->rusty_target().register_(std::move(fd), std::move(token)); } }"
+            "uint32_t register_(int32_t fd, size_t token) override { if constexpr (requires { OsBackend_::register_(value_, fd, token); }) { return OsBackend_::register_(value_, fd, token); } else if constexpr (requires { value_.rusty_OsBackend_register(fd, token); }) { return value_.rusty_OsBackend_register(fd, token); } else { return value_.register_(fd, token); } }"
         ),
         "{cpp}"
     );
     assert!(
         cpp.contains(
-            "auto ::OsBackendDynAdapter<U>::deregister(const int32_t& fd) const -> bool { if constexpr (requires { this->rusty_target().rusty_OsBackend_deregister(fd); }) { return this->rusty_target().rusty_OsBackend_deregister(fd); } else { return this->rusty_target().deregister(fd); } }"
+            "bool deregister(const int32_t& fd) const override { if constexpr (requires { OsBackend_::deregister(value_, fd); }) { return OsBackend_::deregister(value_, fd); } else if constexpr (requires { value_.rusty_OsBackend_deregister(fd); }) { return value_.rusty_OsBackend_deregister(fd); } else { return value_.deregister(fd); } }"
         ),
         "{cpp}"
     );
-    // A private trait cannot be implemented by another crate.
     let private = translate_dependency("trait Hidden { fn f(&self) -> u32; }");
-    assert!(!private.contains("DynAdapter"), "{private}");
-    // Generic traits keep only the explicit-specialization adapters.
+    assert!(private.contains("template <class U> class HiddenAdapter final : public Hidden {"), "{private}");
     let generic = translate_dependency("pub trait Sink<T> { fn put(&mut self, value: T); }");
+    assert!(
+        generic.contains("template <class T, class U> class SinkAdapter final : public Sink<T> {"),
+        "{generic}"
+    );
     assert!(!generic.contains("DynAdapter"), "{generic}");
 }
 

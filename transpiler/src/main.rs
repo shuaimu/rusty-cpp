@@ -6171,15 +6171,22 @@ impl<T: std::default::Default> Decode for core::option::Option<T> {
         )
         .unwrap();
         let generated = std::fs::read_to_string(output_dir.join("std_consumer.cppm")).unwrap();
+        // Book §3.2.10 / §3.2.2 rule 3: there is no per-impl adapter lane any
+        // more — the impl is a function template in `Decode_::impl_`. A fake
+        // `std` dependency's `Default` is neither the sysroot's (no
+        // `std::default_initializable` lowering) nor one of THIS crate's traits
+        // (no `has_Default` marker constraint).
         assert!(
-            generated.contains(
-                "constrained/const generic partial specializations are unsupported"
-            ),
-            "fake std acquired the erased Default Adapter lane:\n{generated}"
+            generated.contains("void decode(Decode_::impl_::tag, rusty::Option<T>& self_)"),
+            "the generic impl function must be emitted:\n{generated}"
+        );
+        assert!(
+            !generated.contains("std::default_initializable") && !generated.contains("has_Default<T>"),
+            "fake std acquired an authenticated-Default constraint:\n{generated}"
         );
         assert!(
             !generated.contains("class DecodeAdapter<rusty::Option<T>>"),
-            "fake std emitted an unconstrained Adapter partial specialization:\n{generated}"
+            "fake std emitted a per-impl Adapter partial specialization:\n{generated}"
         );
     }
 

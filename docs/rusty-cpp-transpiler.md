@@ -2269,6 +2269,51 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   beside the dispatcher — the ABI-pinned companion of the table above. The `rusty_ext` lane is untouched
   (step 5). `impl Tr for &T` is still keyed on `const T&` and invisible to cvref-stripping lookups
   until `self_tag` lands (step 7).
+- *2026-10-07 — step (4), with §3.2.2 rules 2–3 made real:* the three **generic forwarders** per trait
+  (`TrAdapter<T…, U>`, `TrAdapterRef`, `TrAdapterRefMut`) are declared before the interface (its
+  `rusty_dyn_adapter` alias names the owning one) and defined after it; every slot — this trait's and
+  the transitive supertrait closure's, from a per-trait slot registry — is one line through the
+  *owner's* CPO (`Super_::s(value_)` for a supertrait slot) — tried first, with the implementor's
+  members as the fallback (`if constexpr (requires { Tr_::m(value_); }) … else value_.rusty_<Tr>_<m>()
+  … else value_.m()`), because a *consumer* crate's implementor of a dependency's trait emits no
+  `impl_` functions into the dependency's namespace, only members (the retired `DynAdapter`'s case,
+  pinned by `crate_graph_emits_one_module_per_needed_crate_and_runs`); a `cpp_trait_member_dispatch`
+  owner's slots call the implementor's member only (the tagged `rusty_<Tr>_<m>` one when present), and the `Ref`
+  forwarder's `&mut self` slots are `rusty::intrinsics::unreachable_via_const_dyn()` (throws; the
+  negative clang-runtime unit test binds a `Ref` forwarder through a non-const `Tr&` and expects the
+  trap). The per-impl adapter specializations, the constrained partial specializations and the
+  `DynAdapter` are retired (the assoc-type helper specializations stay). Coercions: `&mut dyn` in
+  argument position is `rusty::dyn_lvalue(TrAdapterRefMut<…>(x))` (the temporary spans the call;
+  item (k) unchanged), `let d: &mut dyn Tr = &mut x` a named `auto&&` forwarder local, `let d: &dyn Tr
+  = &x` a lifetime-extended `const Tr&`, and a source that already *is* a trait object is never
+  wrapped. **Ranking (rules 2–3), as emitted and measured:** every impl function and default template
+  takes `tag` as parameter 0; the right body wins by overload resolution's own rules — a concrete impl
+  (non-template, exact) beats the default template; a blanket, now `requires (has_X<T>)` for every
+  *crate*-trait bound of the impl (resolved by the impl's lexical scope: a `std` lookalike two modules
+  over is the crate's trait, `use std::default::Default as D` is not, a bare name under a glob falls
+  back to the unique same-leaf crate trait; standard-library bounds are dropped — they only ever
+  narrowed a valid program's overload set; the marker partial specialization uses the *same* resolved
+  constraint set; the retiring `rusty_ext` lane stays unconstrained, its forward declarations precede
+  the marker concepts), beats the *unconstrained*
+  single-owner default with the equivalent template head (constrained ▷ unconstrained); and a concrete
+  impl of *another* type, viable only through an implicit conversion, loses to the default, exact on
+  the receiver (`impl A for u8 {}` beside `impl A for i32`: rustc runs A's default). A derived-to-base
+  "default tag" ranking was measured and **rejected**: it made that last case ambiguous (the scoping
+  probe went red). A multi-owner default's constraint is spelled through the concept (`requires
+  (has_A<Self_>)`) so a blanket spelled `has_A<T> && …` would subsume it; that conjunct is not emitted
+  yet (it must track whether the blanket's marker specialization was emitted), so a multi-owner default
+  beside a blanket impl of one owner is a loud ambiguity, not a silent choice. Measured on a 60-line
+  clang probe: `int=99900 sc=7 w=1100 u8=1100`, static and through a forwarder slot, and
+  `multi int=1 sc=7 u8=1000`. Found on the way: the dispatcher's parameters were named `s` / `r` and
+  a method *named* `s` (thin's `Super::s`) found the parameter in its own trailing return type (now
+  `__self` / `__rest`); a one-letter local type (`struct W<T>`) was taken for an unbound generic, making
+  every `impl Tr for W<i32>` function an undeducible template; `Box::new(W(4))` into `Box<dyn Tr>`
+  sniffed the bare generic name (now deduced); `vec![Box::new(3i32), Box::new(W(4)), …]` typed
+  `Vec<Box<dyn Tr>>` spells `std::array<rusty::Box<Tr>, N>` so each forwarder `Box` unsizes (CTAD
+  cannot deduce a heterogeneous array). Oracle: `trait_probes_thin` 3/3 and `trait_probes_defaults`
+  2/2 flip to PASS — the first `dyn` cells to match rustc; `collapse` waits on step (7) (return-type-only
+  overloads), `census` on `&dyn` inside `Vec` / slices (today `const Tr&` — an array of references) and
+  on an unrelated float-literal typing gap.
 - *Marker hygiene found by the comparison gates (2026-10-07):* the explicit-specialization dedupe keys on
   the same canonical spelling the free-function emitters use (`isize`/`i64`, `NonZero<usize>`/`<u64>` are
   one C++ type — `redefinition of impls_Serialize<long>` otherwise); a nested-module impl whose self type

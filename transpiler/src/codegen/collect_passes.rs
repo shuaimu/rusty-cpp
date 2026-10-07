@@ -7248,6 +7248,8 @@ impl CodeGen {
                             foreign_adapter_generics: Some((impl_block.generics.clone(), module_path.to_vec())),
                             self_is_template_param: false,
                             extra_template_requires: None,
+                            impl_generics: Some(impl_block.generics.clone()),
+                            impl_module_path: module_path.to_vec(),
                         });
                     }
                 }
@@ -13214,8 +13216,20 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 if tp.qself.is_none() && tp.path.segments.len() == 1 {
                     let ident = tp.path.segments[0].ident.to_string();
+                    // A crate-declared type that happens to have a one-letter
+                    // name (`struct W<T>(T)`) is not a type parameter: treating
+                    // it as one made every `impl Tr for W<i32>` function an
+                    // undeducible template (book §3.2.15, thin probe).
+                    let declared_local_type = !self.is_type_param_in_scope(&ident)
+                        && (self.local_declared_types.contains(&ident)
+                            || self.declared_item_names.contains(&ident)
+                            || self
+                                .local_declared_types
+                                .iter()
+                                .any(|decl| decl.rsplit("::").next() == Some(ident.as_str())));
                     if ident.len() == 1
                         && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                        && !declared_local_type
                     {
                         out.insert(ident);
                     }

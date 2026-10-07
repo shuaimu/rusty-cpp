@@ -24,6 +24,18 @@ struct dyn_adapter_for<I, U, std::void_t<typename I::template rusty_dyn_adapter<
 };
 
 } // namespace detail
+
+// `&mut dyn Trait` in ARGUMENT position over a tier-2 value (book §3.2.10):
+// the forwarder `TraitAdapterRefMut<U>(x)` is a prvalue, and a non-const
+// `Trait&` parameter cannot bind one. This lends it an lvalue; the temporary
+// lives to the end of the full-expression, which covers the call. A `let`
+// binding takes a named forwarder local instead (its lifetime must outlive
+// the statement).
+// (`static_cast`: C++23 P2266 treats a returned rvalue-reference parameter
+// as an xvalue, which an lvalue reference return type cannot bind.)
+template<typename T>
+constexpr T& dyn_lvalue(T&& t) noexcept { return static_cast<T&>(t); }
+
 } // namespace rusty
 
 #endif // RUSTY_DYN_ADAPTER_HPP

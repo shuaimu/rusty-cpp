@@ -52,6 +52,18 @@ pub(crate) struct ExtensionImplMethod {
     /// template header and skips the `using Self = decltype(self_);` alias
     /// (which would be the ill-formed `using Self = Self;`).
     self_is_template_param: bool,
+    /// The `impl<…>` block's own generics (bounds intact). Book §3.2.2 rule 3:
+    /// a blanket / conditional impl's functions carry `requires has_X<T>` for
+    /// every crate-trait bound, so they match only where Rust's impl applies
+    /// (and so a default template never outranks or ties them). `None` for a
+    /// trait default and for shapes with no impl block.
+    impl_generics: Option<syn::Generics>,
+    /// The impl block's Rust module path — the lexical scope its bounds resolve
+    /// in. Both the declaration and the definition pass must derive the SAME
+    /// `requires` clause (a mismatch leaves the declared template undefined:
+    /// measured as an undefined reference to `rusty_ext::m<Sc>`), so neither may
+    /// read emitter state that only one of them sets.
+    impl_module_path: Vec<String>,
 }
 
 /// One crate-local `impl<G…> From<SRC> for S<TARG>` shape, kept in Rust-type
@@ -112,6 +124,23 @@ impl AssocMethodProjection {
             (_, None) => 3,
         }
     }
+}
+
+/// One vtable slot of a trait interface class (book §3.2.10): the C++
+/// signature the interface declared it with. The trait's three generic
+/// forwarders override every slot — their own and every base trait's — with a
+/// one-line body through the owner trait's CPO (`Owner_::m(value_, …)`).
+#[derive(Debug, Clone)]
+pub(crate) struct InterfaceSlot {
+    pub(crate) return_type: String,
+    pub(crate) cpp_name: String,
+    pub(crate) params: Vec<String>,
+    pub(crate) const_suffix: &'static str,
+    /// `&mut self` receiver: the `Ref` forwarder cannot reach it (stub).
+    pub(crate) is_mut: bool,
+    /// The Rust method name (for the `rusty_<Trait>_<m>` tagged member a
+    /// member-dispatch implementor keeps beside a same-named inherent method).
+    pub(crate) rust_name: String,
 }
 
 /// Storage shape for a `--interface-traits` Adapter specialization.
@@ -2471,6 +2500,13 @@ pub struct CodeGen {
     /// `&dyn Trait` call sites — appending the specializations at file end
     /// left them after `main()`.
     pub(crate) local_adapter_insert_pos: Option<usize>,
+    /// Book §3.2.10: every emitted vtable slot per interface trait (short
+    /// name), so a sub-trait's forwarders can enumerate the transitive
+    /// supertrait closure's slots. Filled by `emit_trait_interface_pattern`.
+    pub(crate) interface_trait_slots: HashMap<String, Vec<InterfaceSlot>>,
+    /// The locally declared supertraits that became C++ bases of each
+    /// interface — `(short name, declared key)` — for the same closure.
+    pub(crate) interface_trait_bases: HashMap<String, Vec<(String, String)>>,
     /// Depth counter for type argument nesting.  When > 0, `impl Trait` maps
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).
@@ -3666,6 +3702,8 @@ impl CodeGen {
             display_impl_types: HashSet::new(),
             manual_debug_display_clash_types: HashSet::new(),
             local_adapter_insert_pos: None,
+            interface_trait_slots: HashMap::new(),
+            interface_trait_bases: HashMap::new(),
             type_arg_nesting: std::cell::Cell::new(0),
             unwrap_tmp_counter: std::cell::Cell::new(0),
             iflet_result_counter: 0,
@@ -5029,9 +5067,19 @@ impl CodeGen {
             .iter()
             .filter_map(|p| p.split("::").last().map(str::to_string))
             .collect();
+        // A bare generic type name (`Box::new(W(4))` with `struct W<T>(T)`)
+        // cannot be the forwarder's argument: the construction-site rewrite
+        // must deduce it (`std::remove_cvref_t<decltype(W(4))>`) instead.
+        let generic_type_names: HashSet<String> = self
+            .declared_type_params
+            .iter()
+            .filter(|(_, params)| !params.is_empty())
+            .map(|(name, _)| name.rsplit("::").next().unwrap_or(name).to_string())
+            .collect();
         self.output = rewrite_interface_traits_smart_ptr_construction(
             &self.output,
             &trait_names,
+            &generic_type_names,
         );
         self.output =
             inject_rusty_module_import_if_needed(&self.output, self.in_umbrella_closure);
@@ -21094,6 +21142,7 @@ impl CodeGen {
     fn ufcs_trait_impl_specs(
         impl_block: &syn::ItemImpl,
         trait_default_methods: &std::collections::BTreeMap<String, Vec<String>>,
+        module_path: &[String],
     ) -> Option<(String, Vec<ExtensionImplMethod>)> {
         let (_, trait_path, _) = impl_block.trait_.as_ref()?;
         let trait_name = trait_path.segments.last().map(|s| s.ident.to_string())?;
@@ -21161,6 +21210,8 @@ impl CodeGen {
                 foreign_adapter_generics: None,
                 self_is_template_param: false,
                 extra_template_requires: None,
+                impl_generics: Some(impl_block.generics.clone()),
+                impl_module_path: module_path.to_vec(),
             });
         }
         if specs.is_empty() {
@@ -21238,7 +21289,7 @@ impl CodeGen {
         // `using namespace <Tr>_;`. Do not re-add a cpp_inherit skip here —
         // it silently deletes provider-owned strong symbols.
         let Some((written_trait_name, specs)) =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
         else {
             return;
         };
@@ -21419,7 +21470,7 @@ impl CodeGen {
             .unwrap_or(&written_trait_name)
             .to_string();
         let Some((_, specs)) =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
         else {
             // Book §3.2.6 (2026-10-07): an impl block with no methods of its
             // own (`impl A for u8 {}`, every method defaulted) still makes its
@@ -21669,32 +21720,41 @@ impl CodeGen {
     /// primary (loud `explicit specialization after instantiation` on a
     /// misordered concrete impl) and the named concept every bound and ladder
     /// tests. Keyed by the trait's short name, like `namespace <Tr>_`.
+    /// Does a crate-declared trait (by short name) get `impls_<Tr>` / `has_<Tr>`?
+    /// A cpp_trait_member_dispatch trait keeps member dispatch and gets no UFCS
+    /// layer — but the registries are keyed by SHORT name and two modules may
+    /// declare same-named traits, one marked and one not (the lexical-scope
+    /// review fixture). Only when EVERY declared trait with this leaf is marked
+    /// is there no primary. A STATIC predicate (no emission-order state): the
+    /// early `rusty_ext` forward-declaration pass and the late definition pass
+    /// must derive the same `requires` clause from it — reading the "emitted"
+    /// set made them differ, leaving the declared template undefined (measured:
+    /// undefined reference to `rusty_ext::m<Sc>`).
+    fn ufcs_trait_gets_marker_primary(&self, name: &str) -> bool {
+        if !self.ufcs_declared_trait_names.contains(name) {
+            return false;
+        }
+        let marked = |key: &str| self.cpp_trait_member_dispatch_traits.iter().any(|t| t == key);
+        let declared_keys: Vec<&String> = self
+            .trait_declared_paths
+            .iter()
+            .filter(|k| k.rsplit("::").next() == Some(name))
+            .collect();
+        let all_marked = if declared_keys.is_empty() {
+            marked(name)
+        } else {
+            declared_keys.iter().all(|k| marked(k) || marked(name))
+                && !declared_keys.iter().any(|k| !marked(k) && !marked(name))
+        };
+        !all_marked
+    }
+
     fn emit_ufcs_trait_marker_primaries(&mut self) {
         let mut names: Vec<String> = self.ufcs_declared_trait_names.iter().cloned().collect();
         names.sort();
         let mut emitted_any = false;
         for name in names {
-            // A cpp_trait_member_dispatch trait keeps member dispatch and gets no
-            // UFCS layer — but the registries are keyed by SHORT name and two
-            // modules may declare same-named traits, one marked and one not
-            // (the lexical-scope review fixture). Skip only when every declared
-            // trait with this leaf is marked; otherwise the unmarked one's impl
-            // functions name `<Tr>_::impl_::tag` and need the namespace.
-            let marked = |key: &str| {
-                self.cpp_trait_member_dispatch_traits.iter().any(|t| t == key)
-            };
-            let declared_keys: Vec<&String> = self
-                .trait_declared_paths
-                .iter()
-                .filter(|k| k.rsplit("::").next() == Some(name.as_str()))
-                .collect();
-            let all_marked = if declared_keys.is_empty() {
-                marked(&name)
-            } else {
-                declared_keys.iter().all(|k| marked(k) || marked(&name))
-                    && !declared_keys.iter().any(|k| !marked(k) && !marked(&name))
-            };
-            if all_marked {
+            if !self.ufcs_trait_gets_marker_primary(&name) {
                 continue;
             }
             // Contract 10 / C21c, mirrored: class templates do NOT merge across
@@ -21760,6 +21820,16 @@ impl CodeGen {
             methods.dedup();
             self.writeln(&format!("{}namespace {}_ {{", export, name));
             self.indent += 1;
+            // Book §3.2.2 rules 2-3 (measured on a clang probe, 2026-10-07): every
+            // impl function AND default template takes `tag` as parameter 0. The
+            // ranking that makes the right body win is overload resolution's own:
+            // a concrete impl (non-template, exact) beats the default template; a
+            // blanket (`requires (has_X<T>)`, constrained) beats the unconstrained
+            // single-owner default with the equivalent head; a concrete impl of
+            // ANOTHER type (viable only through an implicit conversion) loses to
+            // the default (exact on the receiver). A derived-to-base "default
+            // tag" was measured and REJECTED: it made that last case ambiguous
+            // (`impl A for u8 {}` vs `impl A for i32`, the scoping probe).
             self.writeln("namespace impl_ { struct tag {}; struct adl_enabler_; }");
             for method in &methods {
                 let mname = escape_cpp_keyword_in_member_position(method);
@@ -21770,12 +21840,16 @@ impl CodeGen {
                 // the name and suppress ADL (measured: `unexpected namespace
                 // name 'tap'`).
                 self.writeln(&format!("void {}(impl_::adl_enabler_);", mname));
+                // The parameters are `__self` / `__rest`, never `s` / `r`: a
+                // method NAMED `s` (thin probe's `Super::s`) would otherwise find
+                // the dispatcher's own parameter in its trailing return type and
+                // body ("'s' does not name a template", measured).
                 self.writeln(&format!(
-                    "template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto {m}(S&& s, R&&... r) -> decltype({m}(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...)) {{ return {m}(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...); }}",
+                    "template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto {m}(S&& __self, R&&... __rest) -> decltype({m}(impl_::tag{{}}, std::forward<S>(__self), std::forward<R>(__rest)...)) {{ return {m}(impl_::tag{{}}, std::forward<S>(__self), std::forward<R>(__rest)...); }}",
                     m = mname
                 ));
                 self.writeln(&format!(
-                    "template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto {m}(S&& s, R&&... r) -> decltype({m}<E0, E...>(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...)) {{ return {m}<E0, E...>(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...); }}",
+                    "template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto {m}(S&& __self, R&&... __rest) -> decltype({m}<E0, E...>(impl_::tag{{}}, std::forward<S>(__self), std::forward<R>(__rest)...)) {{ return {m}<E0, E...>(impl_::tag{{}}, std::forward<S>(__self), std::forward<R>(__rest)...); }}",
                     m = mname
                 ));
             }
@@ -21963,73 +22037,17 @@ impl CodeGen {
             }
             return;
         }
-        // Blanket / conditional impl: every bound on every type parameter must
-        // be a crate-declared trait (its `has_` concept exists), and every type
-        // parameter must appear in the self type (a partial specialization
-        // must be deducible).
-        let mut constraints: Vec<String> = Vec::new();
-        let mut bound_ok = true;
-        let mut push_bound = |param: &str, bound: &syn::TypeParamBound, constraints: &mut Vec<String>, bound_ok: &mut bool| {
-            match bound {
-                syn::TypeParamBound::Lifetime(_) => {}
-                syn::TypeParamBound::Trait(tb) => {
-                    if tb.modifier != syn::TraitBoundModifier::None {
-                        return; // `?Sized`
-                    }
-                    let Some(seg) = tb.path.segments.last() else {
-                        *bound_ok = false;
-                        return;
-                    };
-                    let name = seg.ident.to_string();
-                    if matches!(name.as_str(), "Sized" | "Send" | "Sync" | "Unpin") {
-                        return;
-                    }
-                    if !seg.arguments.is_none()
-                        || !self.ufcs_marker_primaries_emitted.contains(&name)
-                    {
-                        *bound_ok = false;
-                        return;
-                    }
-                    constraints.push(format!("has_{}<{}>", escape_cpp_keyword(&name), param));
-                }
-                _ => *bound_ok = false,
-            }
-        };
-        for p in &impl_block.generics.params {
-            if let syn::GenericParam::Type(tp) = p {
-                let param = tp.ident.to_string();
-                for bound in &tp.bounds {
-                    push_bound(&param, bound, &mut constraints, &mut bound_ok);
-                }
-            }
-        }
-        if let Some(wc) = &impl_block.generics.where_clause {
-            for pred in &wc.predicates {
-                let syn::WherePredicate::Type(pt) = pred else {
-                    bound_ok = false;
-                    continue;
-                };
-                let syn::Type::Path(tp) = &pt.bounded_ty else {
-                    bound_ok = false;
-                    continue;
-                };
-                if tp.qself.is_some() || tp.path.segments.len() != 1 {
-                    bound_ok = false;
-                    continue;
-                }
-                let param = tp.path.segments[0].ident.to_string();
-                if !type_params.contains(&param) {
-                    bound_ok = false;
-                    continue;
-                }
-                for bound in &pt.bounds {
-                    push_bound(&param, bound, &mut constraints, &mut bound_ok);
-                }
-            }
-        }
-        if !bound_ok {
-            return;
-        }
+        // Blanket / conditional impl: the marker's constraint set is EXACTLY the
+        // impl functions' (book §3.2.2 rule 3) — the same resolver-based
+        // builder, so `has_Decode<Vec<X>>` is true for precisely the X the
+        // dispatcher would route to this impl. (Earlier the marker keyed on the
+        // bound's leaf name, so `impl<T: ::std::default::Default>` beside a
+        // local `trait Default` constrained on the WRONG trait.)
+        let constraints: Vec<String> = self
+            .ufcs_crate_trait_bound_constraints(&impl_block.generics, &self.ufcs_impl_module_path)
+            .into_iter()
+            .map(|(_, constraint)| constraint)
+            .collect();
         // An unbounded blanket over a bare parameter is the primary itself
         // (defined true above), not a partial specialization.
         if constraints.is_empty()
@@ -22250,6 +22268,8 @@ impl CodeGen {
                 foreign_adapter_generics: None,
                 self_is_template_param: true,
                 extra_template_requires: None,
+                impl_generics: None,
+                impl_module_path: Vec::new(),
             });
         }
         if specs.is_empty() {
@@ -22278,8 +22298,10 @@ impl CodeGen {
                 // Book §3.2.3 (2026-10-07): the exact-type marker — an
                 // `int64_t` receiver no longer satisfies B's default through
                 // `__ufcs_impls(const int32_t&)`'s integral conversion.
+                // Spelled through the CONCEPT (not the inline `impls_` expression)
+                // so a blanket constrained `has_<Tr><T> && …` can subsume it.
                 spec.extra_template_requires = Some(format!(
-                    "requires impls_{}<std::remove_cvref_t<Self_>>::value",
+                    "requires has_{}<Self_>",
                     escape_cpp_keyword(trait_name)
                 ));
             }
@@ -23884,12 +23906,9 @@ impl CodeGen {
         return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         self.record_extension_free_function_symbol(&method_name);
         // Fix A part 2: inject the multi-owner default's `requires` constraint
-        // after the template parameter list.
-        let requires_prefix = method_spec
-            .extra_template_requires
-            .as_deref()
-            .map(|r| format!("{} ", r))
-            .unwrap_or_default();
+        // after the template parameter list; book §3.2.2 rule 3: a blanket's
+        // bound-derived constraints.
+        let requires_prefix = self.ufcs_free_function_requires_prefix(method_spec, &free_generics);
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
             export_prefix,
@@ -23903,6 +23922,157 @@ impl CodeGen {
             ),
         );
         true
+    }
+
+    /// Book §3.2.2 rule 3: the `requires` clause of an impl / default free
+    /// function — the multi-owner default's marker constraint (Fix A part 2)
+    /// joined with every crate-trait bound of the impl block's type parameters
+    /// that survive in `free_generics` (`impl<T: Score> Tr for T` →
+    /// `requires (has_Score<T>)`). Bounds that are not crate traits with a
+    /// marker (`Copy`, `Into<f64>`, foreign traits) are dropped: a partial
+    /// constraint only narrows, never widens. Empty when nothing applies.
+    fn ufcs_free_function_requires_prefix(
+        &self,
+        method_spec: &ExtensionImplMethod,
+        free_generics: &syn::Generics,
+    ) -> String {
+        let mut clauses: Vec<String> = Vec::new();
+        if let Some(extra) = method_spec.extra_template_requires.as_deref() {
+            clauses.push(extra.trim_start_matches("requires ").trim().to_string());
+        }
+        // Bound constraints belong to the `<Tr>_::impl_` lane only, where the
+        // dispatcher's ranking needs them. The retiring `rusty_ext` lane (step 5)
+        // keeps its unconstrained shape: its forward declarations are emitted
+        // before the marker concepts exist (`use of undeclared identifier
+        // 'has_Score'`, measured), and it is only ever a member-fallback.
+        if let Some(impl_generics) = &method_spec.impl_generics
+            && self.ufcs_tag_namespace.is_some()
+        {
+            let live: HashSet<String> = free_generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            for (param, constraint) in
+                self.ufcs_crate_trait_bound_constraints(impl_generics, &method_spec.impl_module_path)
+            {
+                if live.contains(&param) && !clauses.contains(&constraint) {
+                    clauses.push(constraint);
+                }
+            }
+        }
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("requires ({}) ", clauses.join(" && "))
+        }
+    }
+
+    /// Every `(param, has_X<param>)` pair derivable from an impl block's
+    /// generics: inline bounds and `where` predicates on a bare type
+    /// parameter, keeping only crate-declared traits whose marker primary is
+    /// emitted (`?Sized`, `Sized`/`Send`/`Sync`/`Unpin`, lifetimes skipped;
+    /// generic trait bounds and foreign traits dropped).
+    fn ufcs_crate_trait_bound_constraints(
+        &self,
+        generics: &syn::Generics,
+        module_path: &[String],
+    ) -> Vec<(String, String)> {
+        let type_params: Vec<String> = generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push_bound = |param: &str, bound: &syn::TypeParamBound, out: &mut Vec<(String, String)>| {
+            let syn::TypeParamBound::Trait(tb) = bound else {
+                return;
+            };
+            if tb.modifier != syn::TraitBoundModifier::None {
+                return;
+            }
+            let Some(seg) = tb.path.segments.last() else {
+                return;
+            };
+            let written = seg.ident.to_string();
+            if matches!(written.as_str(), "Sized" | "Send" | "Sync" | "Unpin") {
+                return;
+            }
+            if !seg.arguments.is_none() {
+                return;
+            }
+            // Resolve the bound by the impl's lexical scope (imports, aliases,
+            // nested `std` lookalikes): only a CRATE-declared trait has a
+            // marker. `impl<T: Default>` under `use std::default::Default` is
+            // not `trait Default {}` two modules over, and vice versa.
+            let mut key = self.resolve_trait_scoped_key_for_impl(&tb.path, module_path);
+            if !self.trait_declared_paths.contains(&key) {
+                // A bare name the resolver could not pin because a glob import is
+                // visible (`use evil::*; impl<T: Default>`): a glob shadows the
+                // prelude, so when exactly one crate trait has that leaf it is the
+                // bound (the marker specialization already keys on the leaf).
+                // A qualified or absolute unresolved path (`::std::default::Default`)
+                // is never a crate trait.
+                let bare = tb.path.leading_colon.is_none() && tb.path.segments.len() == 1;
+                if !(bare && key.starts_with("@unresolved-trait::")) {
+                    return;
+                }
+                let mut same_leaf = self
+                    .trait_declared_paths
+                    .iter()
+                    .filter(|k| k.rsplit("::").next() == Some(written.as_str()));
+                let Some(only) = same_leaf.next() else {
+                    return;
+                };
+                if same_leaf.next().is_some() {
+                    return;
+                }
+                key = only.clone();
+            }
+            let name = key.rsplit("::").next().unwrap_or(&key).to_string();
+            if !self.ufcs_trait_gets_marker_primary(&name) {
+                return;
+            }
+            out.push((
+                param.to_string(),
+                format!("has_{}<{}>", escape_cpp_keyword(&name), escape_cpp_keyword(param)),
+            ));
+        };
+        for p in &generics.params {
+            if let syn::GenericParam::Type(tp) = p {
+                let param = tp.ident.to_string();
+                for bound in &tp.bounds {
+                    push_bound(&param, bound, &mut out);
+                }
+            }
+        }
+        if let Some(wc) = &generics.where_clause {
+            for pred in &wc.predicates {
+                let syn::WherePredicate::Type(pt) = pred else {
+                    continue;
+                };
+                let syn::Type::Path(tp) = &pt.bounded_ty else {
+                    continue;
+                };
+                if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                    continue;
+                }
+                let param = tp.path.segments[0].ident.to_string();
+                if !type_params.contains(&param) {
+                    continue;
+                }
+                for bound in &pt.bounds {
+                    push_bound(&param, bound, &mut out);
+                }
+            }
+        }
+        out
     }
 
     /// Checkpoint contract 10: the generated `<Trait>_` UFCS layer is synthetic
@@ -24319,12 +24489,9 @@ impl CodeGen {
             ));
         }
         // Fix A part 2: inject the multi-owner default's `requires` constraint
-        // after the template parameter list (must match the declaration).
-        let requires_prefix = method_spec
-            .extra_template_requires
-            .as_deref()
-            .map(|r| format!("{} ", r))
-            .unwrap_or_default();
+        // after the template parameter list (must match the declaration);
+        // book §3.2.2 rule 3: a blanket's bound-derived constraints.
+        let requires_prefix = self.ufcs_free_function_requires_prefix(method_spec, &free_generics);
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
             export_prefix,
@@ -55575,7 +55742,11 @@ fn inject_module_import_if_referenced(output: &str, needle: &str, import_line: &
     result
 }
 
-fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[String]) -> String {
+fn rewrite_interface_traits_smart_ptr_construction(
+    output: &str,
+    traits: &[String],
+    generic_type_names: &HashSet<String>,
+) -> String {
     let mut result = output.to_string();
     for owner in &["Box", "Rc", "Arc"] {
         for trait_name in traits {
@@ -55653,7 +55824,10 @@ fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[Strin
                         continue;
                     }
                     let after_open_paren = &after_args[suffix.len()..];
-                    let inner = sniff_leading_type_ident(after_open_paren);
+                    // A generic type's bare name needs its arguments (CTAD at
+                    // the payload, `W(4)`): route it to the deduced form below.
+                    let inner = sniff_leading_type_ident(after_open_paren)
+                        .filter(|ident| !generic_type_names.contains(ident));
                     let arg_already_adapter = after_open_paren
                         .trim_start()
                         .starts_with(&format!("{}Adapter", trait_name));

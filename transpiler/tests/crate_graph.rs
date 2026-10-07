@@ -181,9 +181,10 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert!(core.contains("using channel_tests::channel;"), "{core}");
     assert!(core.contains("using Output = typename rusty::detail::assoc_Output<F>::type;"), "{core}");
     assert!(core.contains("rusty::pin_place::map_unchecked_mut((*this),"), "{core}");
-    // A consumer crate's implementor reaches the trait through its generic adapter.
+    // A consumer crate's implementor reaches the trait through its generic
+    // owning forwarder (book §3.2.10).
     assert!(
-        core.contains("template <class U> using rusty_dyn_adapter = BackendDynAdapter<U>;"),
+        core.contains("template <class U> using rusty_dyn_adapter = BackendAdapter<U>;"),
         "{core}"
     );
     // park.rs. A dependency's re-exported `dep_base::Reactor` stays dep-base's,
@@ -229,9 +230,13 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_eq!(root.matches("uint32_t close(int32_t fd);").count(), 1, "{root}");
     assert!(!root.contains("close(dep_core::backend::RawFd"), "{root}");
     assert!(root.contains("uint32_t rusty_FdBackend_label() const;"), "{root}");
+    // Book §3.2.10: the dependency's generic forwarder slot tries the trait's
+    // CPO first (tag-ADL at the consumer's instantiation point); a consumer
+    // implementor that emitted only members is reached through the tagged
+    // `rusty_FdBackend_label` member it kept beside its inherent `label`.
     assert!(
         core.contains(
-            "if constexpr (requires { this->rusty_target().rusty_FdBackend_label(); }) { return this->rusty_target().rusty_FdBackend_label(); } else { return this->rusty_target().label(); }"
+            "uint32_t label() const override { if constexpr (requires { FdBackend_::label(value_); }) { return FdBackend_::label(value_); } else if constexpr (requires { value_.rusty_FdBackend_label(); }) { return value_.rusty_FdBackend_label(); } else { return value_.label(); } }"
         ),
         "{core}"
     );

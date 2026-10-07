@@ -3180,27 +3180,41 @@ impl<T: std::default::Default> Decode for core::option::Option<T> {
         );
     }
 
+    // Book §3.2.10 / §3.2.2 rule 3: there is no per-impl adapter lane and no
+    // std-bound lowering any more — in BOTH authentication outcomes the impl is
+    // an unconstrained function template in `Decode_::impl_` and the trait's
+    // generic forwarders serve it. What these helpers still pin is that the
+    // direct and parity lanes emit the SAME thing (and never a `has_Default`
+    // marker constraint, since no crate trait `Default` exists here).
+    // The unauthenticated (fail-closed) lane may drop the impl function
+    // altogether; the authenticated lane must emit it. Neither emits a
+    // per-impl adapter or a std-bound constraint any more.
     fn assert_hand_slot(cpp: &str, label: &str) {
+        assert_generic_impl_shape(cpp, label);
+    }
+
+    fn assert_adapter(cpp: &str, label: &str) {
         assert!(
-            cpp.contains("constrained/const generic partial specializations are unsupported"),
-            "{label}: missing hand slot:\n{cpp}"
+            cpp.contains("void decode(Decode_::impl_::tag, rusty::Option<T>& self_)"),
+            "{label}: missing the generic impl function:\n{cpp}"
+        );
+        assert_generic_impl_shape(cpp, label);
+    }
+
+    fn assert_generic_impl_shape(cpp: &str, label: &str) {
+        assert!(
+            cpp.contains("template <class U> class DecodeAdapter final : public Decode"),
+            "{label}: missing the generic owning forwarder:\n{cpp}"
         );
         for forbidden in [
             "class DecodeAdapter<rusty::Option<T>>",
             "class DecodeAdapterRef<rusty::Option<T>>",
             "class DecodeAdapterRefMut<rusty::Option<T>>",
+            "std::default_initializable",
+            "has_Default<T>",
+            "constrained/const generic partial specializations are unsupported",
         ] {
             assert!(!cpp.contains(forbidden), "{label}: emitted {forbidden}:\n{cpp}");
-        }
-    }
-
-    fn assert_adapter(cpp: &str, label: &str) {
-        for expected in [
-            "class DecodeAdapter<rusty::Option<T>>",
-            "class DecodeAdapterRef<rusty::Option<T>>",
-            "class DecodeAdapterRefMut<rusty::Option<T>>",
-        ] {
-            assert!(cpp.contains(expected), "{label}: missing {expected}:\n{cpp}");
         }
     }
 
@@ -3521,27 +3535,41 @@ impl<T: std::default::Default> Decode for core::option::Option<T> {
 
 #[test]
 fn dev_dependency_lib_name_std_is_target_scoped_and_parity_authentication_is_atomic() {
+    // Book §3.2.10 / §3.2.2 rule 3: there is no per-impl adapter lane and no
+    // std-bound lowering any more — in BOTH authentication outcomes the impl is
+    // an unconstrained function template in `Decode_::impl_` and the trait's
+    // generic forwarders serve it. What these helpers still pin is that the
+    // direct and parity lanes emit the SAME thing (and never a `has_Default`
+    // marker constraint, since no crate trait `Default` exists here).
+    // The unauthenticated (fail-closed) lane may drop the impl function
+    // altogether; the authenticated lane must emit it. Neither emits a
+    // per-impl adapter or a std-bound constraint any more.
     fn assert_hand_slot(cpp: &str, label: &str) {
+        assert_generic_impl_shape(cpp, label);
+    }
+
+    fn assert_adapter(cpp: &str, label: &str) {
         assert!(
-            cpp.contains("constrained/const generic partial specializations are unsupported"),
-            "{label}: missing constrained-generic hand slot:\n{cpp}"
+            cpp.contains("void decode(Decode_::impl_::tag, rusty::Option<T>& self_)"),
+            "{label}: missing the generic impl function:\n{cpp}"
+        );
+        assert_generic_impl_shape(cpp, label);
+    }
+
+    fn assert_generic_impl_shape(cpp: &str, label: &str) {
+        assert!(
+            cpp.contains("template <class U> class DecodeAdapter final : public Decode"),
+            "{label}: missing the generic owning forwarder:\n{cpp}"
         );
         for forbidden in [
             "class DecodeAdapter<rusty::Option<T>>",
             "class DecodeAdapterRef<rusty::Option<T>>",
             "class DecodeAdapterRefMut<rusty::Option<T>>",
+            "std::default_initializable",
+            "has_Default<T>",
+            "constrained/const generic partial specializations are unsupported",
         ] {
             assert!(!cpp.contains(forbidden), "{label}: emitted {forbidden}:\n{cpp}");
-        }
-    }
-
-    fn assert_adapter(cpp: &str, label: &str) {
-        for expected in [
-            "class DecodeAdapter<rusty::Option<T>>",
-            "class DecodeAdapterRef<rusty::Option<T>>",
-            "class DecodeAdapterRefMut<rusty::Option<T>>",
-        ] {
-            assert!(cpp.contains(expected), "{label}: missing {expected}:\n{cpp}");
         }
     }
 

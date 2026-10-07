@@ -99,36 +99,10 @@ impl CodeGen {
             if anon_adapter {
                 self.writeln("namespace {");
             }
-            // Owning: holds U by value.
-            self.emit_one_local_adapter(
-                trait_name,
-                trait_key,
-                trait_args,
-                "Adapter",
-                &qualified_self_cpp,
-                AdapterStorageKind::Owning,
-                methods,
-            );
-            // Borrowing const ref: holds const U&.
-            self.emit_one_local_adapter(
-                trait_name,
-                trait_key,
-                trait_args,
-                "AdapterRef",
-                &qualified_self_cpp,
-                AdapterStorageKind::ConstRef,
-                methods,
-            );
-            // Borrowing mut ref: holds U&.
-            self.emit_one_local_adapter(
-                trait_name,
-                trait_key,
-                trait_args,
-                "AdapterRefMut",
-                &qualified_self_cpp,
-                AdapterStorageKind::MutRef,
-                methods,
-            );
+            // Book §3.2.10: no per-impl adapter specialization — the trait's
+            // three GENERIC forwarders serve every implementor. Only the
+            // assoc-type helper spec remains.
+            let _ = methods;
             // Phase 3b.1: helper traits class spec for this impl. The
             // local-impl pipeline appends each assoc-type binding to
             // trait_args after the explicit generic args (see
@@ -3544,6 +3518,29 @@ impl CodeGen {
             let cpp_name = self.allocate_local_cpp_name(&rust_name);
             self.register_local_binding(rust_name, pin_ty);
             self.writeln(&format!("auto& {} = {};", cpp_name, init_cpp));
+            return;
+        }
+        // Book §3.2.10: `let d: &mut dyn Tr = &mut x;` over a tier-2 value binds
+        // a NAMED forwarder — a non-const `Tr&` cannot bind the prvalue, and the
+        // argument-position `rusty::dyn_lvalue` temporary would not outlive the
+        // statement. `auto&&` extends the forwarder's lifetime to the binding's;
+        // it converts to `Tr&` wherever the Rust reference is used.
+        if let syn::Pat::Ident(pi) = pat
+            && pi.by_ref.is_none()
+            && pi.subpat.is_none()
+            && let Some(declared) = get_local_type(local)
+            && let Some(init) = &local.init
+            && init.diverge.is_none()
+            && let syn::Type::Reference(declared_ref) = self.peel_paren_group_type(declared)
+            && declared_ref.mutability.is_some()
+            && matches!(declared_ref.elem.as_ref(), syn::Type::TraitObject(_))
+            && let Some((forwarder, true)) =
+                self.try_emit_interface_traits_dyn_forwarder(&init.expr, Some(declared))
+        {
+            let rust_name = pi.ident.to_string();
+            let cpp_name = self.allocate_local_cpp_name(&rust_name);
+            self.register_local_binding(rust_name, Some(declared.clone()));
+            self.writeln(&format!("auto&& {} = {};", cpp_name, forwarder));
             return;
         }
         // §208 feeder: a plain un-annotated `let map = serializer

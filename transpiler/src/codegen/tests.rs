@@ -8266,22 +8266,24 @@ fn test_interface_traits_generic_impl_emits_specialization_with_trait_args() {
          struct IntBag { x: i32 } \
          impl Container<i32> for IntBag { fn get(&self) -> i32 { self.x } }",
     );
-    // Owning adapter specialization includes both trait arg and U.
+    // Book §3.2.10: the generic forwarders take the trait's generics AND the
+    // implementor (`<T, U>`), deriving from the parameterized interface.
     assert!(
         out.contains(
-            "class ContainerAdapter<int32_t, IntBag> final : public Container<int32_t>"
+            "template <class T, class U> class ContainerAdapter final : public Container<T>"
         ),
         "{out}"
     );
     // All three flavors are present.
     assert!(
-        out.contains("class ContainerAdapterRef<int32_t, IntBag>"),
+        out.contains("template <class T, class U> class ContainerAdapterRef final : public Container<T>"),
         "{out}"
     );
     assert!(
-        out.contains("class ContainerAdapterRefMut<int32_t, IntBag>"),
+        out.contains("template <class T, class U> class ContainerAdapterRefMut final : public Container<T>"),
         "{out}"
     );
+    assert!(!out.contains("ContainerAdapter<int32_t, IntBag>"), "{out}");
 }
 
 #[test]
@@ -8297,20 +8299,23 @@ fn test_interface_traits_assoc_type_impl_emits_specialization_with_assoc_args() 
          struct MyStr; struct MyString; \
          impl MyToOwned for MyStr { type Owned = MyString; fn to_owned(&self) -> MyString { MyString } }",
     );
+    // Book §3.2.10: the lifted assoc-type parameter rides on the generic
+    // forwarders' template list (`<Owned, U>`), never on a per-impl spec.
     assert!(
         out.contains(
-            "class MyToOwnedAdapter<MyString, MyStr> final : public MyToOwned<MyString>"
+            "template <class Owned, class U> class MyToOwnedAdapter final : public MyToOwned<Owned>"
         ),
         "{out}"
     );
     assert!(
-        out.contains("class MyToOwnedAdapterRef<MyString, MyStr>"),
+        out.contains("template <class Owned, class U> class MyToOwnedAdapterRef final : public MyToOwned<Owned>"),
         "{out}"
     );
     assert!(
-        out.contains("class MyToOwnedAdapterRefMut<MyString, MyStr>"),
+        out.contains("template <class Owned, class U> class MyToOwnedAdapterRefMut final : public MyToOwned<Owned>"),
         "{out}"
     );
+    assert!(!out.contains("MyToOwnedAdapter<MyString, MyStr>"), "{out}");
 }
 
 #[test]
@@ -8328,13 +8333,15 @@ fn test_interface_traits_foreign_impl_assoc_type_emits_specialization_with_assoc
          fn to_owned(&self) -> String { self.clone() } }",
     );
     assert!(
-        out.contains("final : public MyToOwned<rusty::String>"),
+        out.contains("template <class Owned, class U> class MyToOwnedAdapter final : public MyToOwned<Owned>"),
         "{out}"
     );
+    // The foreign-self impl's function carries the concrete binding.
     assert!(
-        out.contains("MyToOwnedAdapter<rusty::String, rusty::String>"),
+        out.contains("to_owned(MyToOwned_::impl_::tag, const rusty::String& self_)"),
         "{out}"
     );
+    assert!(!out.contains("MyToOwnedAdapter<rusty::String, rusty::String>"), "{out}");
 }
 
 #[test]
@@ -8357,19 +8364,21 @@ fn test_interface_traits_foreign_generic_impl_emits_partial_adapter_specializati
         "#,
     );
 
+    // Book §3.2.10: no partial specialization per generic impl — the trait's
+    // three GENERIC forwarders serve every implementor through the CPO, and
+    // the generic impls are function templates in `Encode_::impl_`.
     for expected in [
-        "template <typename T>\nclass EncodeAdapter<rusty::Vec<T>> final : public Encode",
-        "template <typename T>\nclass EncodeAdapterRef<rusty::Vec<T>> final : public Encode",
-        "template <typename T>\nclass EncodeAdapterRefMut<rusty::Vec<T>> final : public Encode",
-        "template <typename K, typename V>\nclass EncodeAdapter<rusty::BTreeMap<K, V>> final : public Encode",
-        "template <typename K, typename V>\nclass EncodeAdapterRef<rusty::BTreeMap<K, V>> final : public Encode",
-        "template <typename K, typename V>\nclass EncodeAdapterRefMut<rusty::BTreeMap<K, V>> final : public Encode",
+        "template <class U> class EncodeAdapter final : public Encode",
+        "template <class U> class EncodeAdapterRef final : public Encode",
+        "template <class U> class EncodeAdapterRefMut final : public Encode",
+        "void encode(Encode_::impl_::tag, const rusty::Vec<T>& self_, Archive& archive)",
+        "void encode(Encode_::impl_::tag, const rusty::BTreeMap<K, V>& self_, Archive& archive)",
     ] {
         assert!(out.contains(expected), "missing `{expected}`:\n{out}");
     }
     assert!(
-        !out.contains("skipped EncodeAdapter<rusty::Vec<T>>"),
-        "generic foreign impl regressed to a hand slot:\n{out}"
+        !out.contains("EncodeAdapter<rusty::Vec<T>>") && !out.contains("skipped EncodeAdapter"),
+        "a per-impl adapter specialization survived:\n{out}"
     );
 }
 
@@ -8381,11 +8390,15 @@ fn test_interface_traits_foreign_generic_impl_lowers_standard_bounds_and_rejects
         impl<T: Clone> Encode for Vec<T> { fn encode(&self) {} }
         "#,
     );
+    // Book §3.2.2 rule 3: a std bound is not a crate trait — it is dropped from
+    // the impl function's `requires` (it only ever narrowed a valid program's
+    // overload set), and no per-impl adapter exists to carry it.
     assert!(
-        bounded.contains("requires (rusty::clone_like<T>)"),
-        "standard Clone bound must constrain the adapter:\n{bounded}"
+        !bounded.contains("requires (rusty::clone_like<T>)")
+            && bounded.contains("void encode(Encode_::impl_::tag, const rusty::Vec<T>& self_)"),
+        "std Clone bound must leave the impl function unconstrained:\n{bounded}"
     );
-    assert!(bounded.contains("class EncodeAdapter<rusty::Vec<T>>"));
+    assert!(!bounded.contains("class EncodeAdapter<rusty::Vec<T>>"));
 
     let where_bounded = transpile_str_interface_traits(
         r#"
@@ -8394,8 +8407,9 @@ fn test_interface_traits_foreign_generic_impl_lowers_standard_bounds_and_rejects
         "#,
     );
     assert!(
-        where_bounded.contains("requires (rusty::clone_like<T>)"),
-        "where-clause Clone bound must constrain the adapter:\n{where_bounded}"
+        !where_bounded.contains("requires (rusty::clone_like<T>)")
+            && where_bounded.contains("void encode(Encode_::impl_::tag, const rusty::Vec<T>& self_)"),
+        "where-clause std Clone bound must leave the impl function unconstrained:\n{where_bounded}"
     );
 
     let const_generic = transpile_str_interface_traits(
@@ -8404,12 +8418,13 @@ fn test_interface_traits_foreign_generic_impl_lowers_standard_bounds_and_rejects
         impl<const N: usize> Encode for std::array<i32, N> { fn encode(&self) {} }
         "#,
     );
+    // A const-generic impl is an ordinary function template now; the forwarder
+    // needs no specialization for it.
     assert!(
-        const_generic
-            .contains("constrained/const generic partial specializations are unsupported"),
-        "const-generic impl must remain a hand slot:\n{const_generic}"
+        !const_generic.contains("constrained/const generic partial specializations are unsupported")
+            && const_generic.contains("template <class U> class EncodeAdapter final : public Encode"),
+        "const-generic impl must not fall back to a hand slot:\n{const_generic}"
     );
-
 }
 
 #[test]
@@ -8428,19 +8443,27 @@ fn test_interface_traits_foreign_generic_impl_preserves_local_and_key_bounds() {
             for std::collections::HashSet<T> { fn decode(&mut self) {} }
         "#,
     );
+    // Book §3.2.2 rule 3: a blanket / conditional impl's functions carry the
+    // crate-trait bounds as `has_X<T>` (std bounds are dropped), so they match
+    // only where Rust's impl applies and never tie with a default template.
     for expected in [
-        "requires { sizeof(EncodeAdapter<T>); } || std::is_base_of_v<Encode, T>",
-        "requires { sizeof(DecodeAdapter<T>); } || std::is_base_of_v<Decode, T>",
-        "std::default_initializable<T>",
-        "std::totally_ordered<K>",
-        "std::equality_comparable<T>",
-        "requires(const T& value) { std::hash<T>{}(value); }",
-        "class DecodeAdapter<rusty::BTreeMap<K, V>>",
-        "class DecodeAdapterRefMut<rusty::HashSet<T>>",
+        "requires (has_Encode<T>) void encode(Encode_::impl_::tag, const rusty::Vec<T>& self_)",
+        "requires (has_Decode<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)",
+        "requires (has_Decode<K> && has_Decode<V>) void decode(Decode_::impl_::tag, rusty::BTreeMap<K, V>& self_)",
+        "requires (has_Decode<T>) void decode(Decode_::impl_::tag, rusty::HashSet<T>& self_)",
+        "template <class U> class DecodeAdapter final : public Decode",
     ] {
         assert!(out.contains(expected), "missing {expected}:\n{out}");
     }
-    assert!(!out.contains("constrained/const generic partial specializations are unsupported"), "{out}");
+    for gone in [
+        "sizeof(EncodeAdapter<T>)",
+        "std::default_initializable<T>",
+        "std::totally_ordered<K>",
+        "class DecodeAdapter<rusty::BTreeMap<K, V>>",
+        "constrained/const generic partial specializations are unsupported",
+    ] {
+        assert!(!out.contains(gone), "retired adapter machinery survived ({gone}):\n{out}");
+    }
 
     let unsupported = transpile_str_interface_traits(
         r#"
@@ -8448,7 +8471,14 @@ fn test_interface_traits_foreign_generic_impl_preserves_local_and_key_bounds() {
         impl<T: foreign::Missing> Encode for Vec<T> { fn encode(&self) {} }
         "#,
     );
-    assert!(unsupported.contains("constrained/const generic partial specializations are unsupported"));
+    // A foreign bound has no marker: the impl function stays unconstrained
+    // rather than failing closed on a now-nonexistent adapter.
+    assert!(
+        !unsupported.contains("constrained/const generic partial specializations are unsupported")
+            && unsupported.contains("void encode(Encode_::impl_::tag, const rusty::Vec<T>& self_)")
+            && !unsupported.contains("has_Missing"),
+        "{unsupported}"
+    );
 }
 
 #[test]
@@ -8459,16 +8489,21 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
         "#,
     );
+    // Book §3.2.2 rule 3: std bounds (`Default`, `Clone`) are not crate traits —
+    // they are dropped from the impl function's `requires`; the generic
+    // forwarders need no per-impl specialization at all.
     for expected in [
-        "template <typename T>\n    requires (std::default_initializable<T>)\nclass DecodeAdapter<rusty::Vec<T>> final : public Decode",
-        "template <typename T>\n    requires (std::default_initializable<T>)\nclass DecodeAdapterRef<rusty::Vec<T>> final : public Decode",
-        "template <typename T>\n    requires (std::default_initializable<T>)\nclass DecodeAdapterRefMut<rusty::Vec<T>> final : public Decode",
+        "template <class U> class DecodeAdapter final : public Decode",
+        "template <class U> class DecodeAdapterRef final : public Decode",
+        "template <class U> class DecodeAdapterRefMut final : public Decode",
+        "void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)",
     ] {
         assert!(out.contains(expected), "missing `{expected}`:\n{out}");
     }
     assert!(
-        !out.contains("constrained/const generic partial specializations are unsupported"),
-        "legacy Default-only impl unexpectedly became a hand slot:\n{out}"
+        !out.contains("std::default_initializable<T>")
+            && !out.contains("constrained/const generic partial specializations are unsupported"),
+        "a std bound leaked into the impl function or a hand slot appeared:\n{out}"
     );
 
     let clone_bound = transpile_str_interface_traits(
@@ -8478,8 +8513,9 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        clone_bound.contains("requires (rusty::clone_like<T>)"),
-        "standard Clone must emit its operation requirement:\n{clone_bound}"
+        !clone_bound.contains("requires (rusty::clone_like<T>)")
+            && clone_bound.contains("void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "standard Clone must leave the impl function unconstrained:\n{clone_bound}"
     );
 
     let local_shadow = transpile_str_interface_traits(
@@ -8489,9 +8525,11 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         impl<T: Default> Decode for Vec<T> { fn decode(&mut self) {} }
         "#,
     );
+    // A local same-leaf `Default` IS a crate trait: its marker constrains the
+    // impl function (the std lane is not authenticated by the leaf name).
     assert!(
-        local_shadow.contains("constrained/const generic partial specializations are unsupported"),
-        "a local same-leaf trait must not authenticate the erased std Default lane:\n{local_shadow}"
+        local_shadow.contains("requires (has_Default<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "a local same-leaf trait must constrain through its own marker:\n{local_shadow}"
     );
     assert!(!local_shadow.contains("class DecodeAdapter<rusty::Vec<T>>"));
 
@@ -8504,9 +8542,8 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        imported_shadow
-            .contains("constrained/const generic partial specializations are unsupported"),
-        "an imported same-leaf trait must not authenticate the erased std Default lane:\n{imported_shadow}"
+        imported_shadow.contains("requires (has_Default<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "an imported same-leaf trait must constrain through its own marker:\n{imported_shadow}"
     );
 
     let glob_shadow = transpile_str_interface_traits(
@@ -8518,9 +8555,8 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        glob_shadow
-            .contains("constrained/const generic partial specializations are unsupported"),
-        "a glob-provided same-leaf trait must fail closed:\n{glob_shadow}"
+        glob_shadow.contains("requires (has_Default<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "a glob-provided same-leaf trait must constrain through its own marker:\n{glob_shadow}"
     );
 
     let explicit_std = transpile_str_interface_traits(
@@ -8530,8 +8566,9 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        explicit_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
-        "explicit std Default must retain the narrow legacy lane:\n{explicit_std}"
+        !explicit_std.contains("has_Default<T>")
+            && explicit_std.contains("void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "explicit std Default is not a crate trait — no marker constraint:\n{explicit_std}"
     );
 
     let aliased_std = transpile_str_interface_traits(
@@ -8542,8 +8579,9 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        aliased_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
-        "an exact alias of std Default must retain the narrow legacy lane:\n{aliased_std}"
+        !aliased_std.contains("has_Default<T>") && !aliased_std.contains("has_StdDefault<T>")
+            && aliased_std.contains("void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "an exact alias of std Default is not a crate trait — no marker constraint:\n{aliased_std}"
     );
 
     let qualified_local_std_shadow = transpile_str_interface_traits(
@@ -8556,9 +8594,8 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        qualified_local_std_shadow
-            .contains("constrained/const generic partial specializations are unsupported"),
-        "a local `std` module must not authenticate a qualified lookalike:\n{qualified_local_std_shadow}"
+        qualified_local_std_shadow.contains("requires (has_Default<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "a local `std` module's lookalike is a crate trait — its own marker constrains:\n{qualified_local_std_shadow}"
     );
 
     let qualified_import_std_shadow = transpile_str_interface_traits(
@@ -8572,9 +8609,8 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        qualified_import_std_shadow
-            .contains("constrained/const generic partial specializations are unsupported"),
-        "an imported `std` alias must not authenticate a qualified lookalike:\n{qualified_import_std_shadow}"
+        qualified_import_std_shadow.contains("requires (has_Default<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "an imported `std` alias names the crate's lookalike — its marker constrains:\n{qualified_import_std_shadow}"
     );
 
     let qualified_glob_std_shadow = transpile_str_interface_traits(
@@ -8587,10 +8623,13 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         }
         "#,
     );
+    // A QUALIFIED path through a glob-provided `std` root cannot be pinned
+    // (glob vs extern prelude): the impl function stays unconstrained rather
+    // than guessing — never a `has_Default` requirement from a lookalike root.
     assert!(
-        qualified_glob_std_shadow
-            .contains("constrained/const generic partial specializations are unsupported"),
-        "a glob-provided `std` root must fail closed:\n{qualified_glob_std_shadow}"
+        qualified_glob_std_shadow.contains("void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)")
+            && !qualified_glob_std_shadow.contains("requires (has_Default<T>) void decode("),
+        "a glob-provided `std` root must fail closed on the impl function:\n{qualified_glob_std_shadow}"
     );
 
     let nested_parent_import_shadows = transpile_str_interface_traits(
@@ -8617,18 +8656,29 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         }
         "#,
     );
+    // Both bounds resolve to the nearer child-local `Default` (a crate trait):
+    // each impl function is constrained on its marker; a parent `std` import
+    // never wins over a nearer local module or trait.
+    // (declaration + definition of each impl function)
     assert_eq!(
         nested_parent_import_shadows
-            .matches("constrained/const generic partial specializations are unsupported")
+            .matches("requires (has_Default<T>) void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)")
             .count(),
         2,
-        "nearer local modules and traits must beat parent imports:\n{nested_parent_import_shadows}"
+        "nearer local modules must beat parent imports:\n{nested_parent_import_shadows}"
+    );
+    assert_eq!(
+        nested_parent_import_shadows
+            .matches("requires (has_Default<T>) void decode_bare(DecodeBare_::impl_::tag, rusty::Vec<T>& self_)")
+            .count(),
+        2,
+        "nearer local traits must beat parent imports:\n{nested_parent_import_shadows}"
     );
     assert!(
         !nested_parent_import_shadows.contains("class DecodeAdapter<rusty::Vec<T>>")
             && !nested_parent_import_shadows
                 .contains("class DecodeBareAdapter<rusty::Vec<T>>"),
-        "a parent std import authenticated a child-local Default:\n{nested_parent_import_shadows}"
+        "a per-impl adapter specialization survived:\n{nested_parent_import_shadows}"
     );
 
     let absolute_std = transpile_str_interface_traits(
@@ -8641,8 +8691,9 @@ fn test_interface_traits_foreign_generic_impl_authenticates_standard_bounds() {
         "#,
     );
     assert!(
-        absolute_std.contains("class DecodeAdapter<rusty::Vec<T>>"),
-        "an absolute std path must retain the narrow legacy lane:\n{absolute_std}"
+        !absolute_std.contains("has_Default<T>")
+            && absolute_std.contains("void decode(Decode_::impl_::tag, rusty::Vec<T>& self_)"),
+        "an absolute std path is not a crate trait — no marker constraint:\n{absolute_std}"
     );
 
     let temp = tempfile::tempdir().unwrap();
@@ -8727,8 +8778,12 @@ fn test_interface_traits_foreign_generic_impl_maps_assoc_binding_in_param_scope(
         "#,
     );
     assert!(
-        out.contains("template <typename T>\nclass HeadAdapter<T, rusty::Vec<T>> final : public Head<T>"),
-        "generic parameter or associated binding was not mapped in scope:\n{out}"
+        out.contains("template <class Item, class U> class HeadAdapter final : public Head<Item>"),
+        "the generic forwarder must take the lifted assoc-type parameter:\n{out}"
+    );
+    assert!(
+        !out.contains("HeadAdapter<T, rusty::Vec<T>>"),
+        "a per-impl adapter specialization survived:\n{out}"
     );
     assert!(
         out.contains("template <class Item>\nclass Head;"),
@@ -9085,11 +9140,35 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
             && !module.contains("using ::marked::deep::__ufcs_Layer::depth"),
         "marked lexical owners leaked UFCS helpers:\n{module}"
     );
-    assert_eq!(module.matches("return value_.root_value();").count(), 3, "{module}");
-    assert_eq!(module.matches("return value_.value();").count(), 9, "{module}");
-    assert_eq!(module.matches("return Clash_::value(value_);").count(), 6, "{module}");
-    assert_eq!(module.matches("return value_.depth();").count(), 3, "{module}");
-    assert_eq!(module.matches("return Layer_::depth(value_);").count(), 3, "{module}");
+    // Book §3.2.10: per TRAIT (one marked `Clash`, two unmarked; one marked and
+    // one unmarked `Layer`), three generic forwarders each — not per
+    // implementor. A marked owner's slot probes the member first; an unmarked
+    // owner's slot the CPO first.
+    assert_eq!(
+        module.matches("{ if constexpr (requires { value_.rusty_RootDispatch_root_value(); })").count(),
+        3,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { value_.rusty_Clash_value(); })").count(),
+        3,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
+        6,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { value_.rusty_Layer_depth(); })").count(),
+        3,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { Layer_::depth(value_); })").count(),
+        3,
+        "{module}"
+    );
 
     let temp = tempfile::tempdir().unwrap();
     let module_source = temp.path().join("trait_dispatch_scope_review.cppm");
@@ -9318,34 +9397,43 @@ pub mod external_glob {
         1,
         "only the nearer child-local unmarked trait may retain UFCS lowering:\n{out}"
     );
+    // `marked::Clash` is a cpp_trait_member_dispatch trait: an impl resolved to
+    // it gets NO UFCS impl function (member dispatch); the nearer child-local
+    // unmarked trait keeps one. (The per-impl adapter specializations that
+    // used to witness the resolution are retired — book §3.2.10.)
+    for host in [
+        "::local_alias::AliasHost",
+        "::local_chain::ChainHost",
+        "::local_reexport_chain::ReexportHost",
+    ] {
+        assert!(
+            !out.contains(&format!("value(Clash_::impl_::tag, const {host}& self_)")),
+            "local spelling did not resolve to marked::Clash ({host}):\n{out}"
+        );
+    }
     assert!(
-        out.contains("class ClashAdapter<::local_alias::AliasHost>"),
-        "local alias did not resolve to marked::Clash:\n{out}"
-    );
-    assert!(
-        out.contains("class ClashAdapter<::local_chain::ChainHost>"),
-        "chained local alias did not resolve to marked::Clash:\n{out}"
-    );
-    assert!(
-        out.contains(
-            "namespace marked {\ntemplate <>\nclass ClashAdapter<::local_reexport_chain::ReexportHost>"
-        ),
-        "intermediate local re-export lost the marked trait identity:\n{out}"
-    );
-    assert!(
-        out.contains(
-            "namespace nested_shadow::inner::selected {\ntemplate <>\nclass ClashAdapter<::nested_shadow::inner::ChildHost>"
-        ),
+        out.contains("value(Clash_::impl_::tag, const ::nested_shadow::inner::ChildHost& self_)"),
         "parent import beat a nearer child module:\n{out}"
     );
     assert!(
-        !out.contains("ClashAdapter<::external_case::ExternalHost>")
-            && !out.contains("ClashAdapter<::external_chain::ExternalHost>")
-            && !out.contains("ClashAdapter<::external_glob::ExternalHost>")
-            && !out.contains("SelectedAdapter"),
+        !out.contains("ExternalHost& self_")
+            && !out.contains("SelectedAdapter")
+            && !out.contains("namespace Selected_"),
         "external/import spelling acquired local trait behavior:\n{out}"
     );
-    assert_eq!(out.matches("return value_.value();").count(), 9, "{out}");
+    // Two marked `Clash` traits (root, `marked`) → three generic forwarders each
+    // dispatching to the member first; the unmarked child-local one forwards
+    // through its CPO first (members only as the cross-crate fallback).
+    assert_eq!(
+        out.matches("{ if constexpr (requires { value_.rusty_Clash_value(); })").count(),
+        6,
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
+        3,
+        "{out}"
+    );
 }
 
 #[test]
@@ -9527,12 +9615,10 @@ pub mod glob_shadow {
         !out.contains("struct ImportedDerived : public Base"),
         "{out}"
     );
-    assert!(out.contains("class BaseAdapter<Derived>"), "{out}");
-    assert!(
-        out.contains("class BaseAdapter<ImportedDerived>"),
-        "{out}"
-    );
-    for (module, derived) in [
+    // The ordinary (non-inheriting) lane: the trait's generic forwarders exist
+    // once; no implementor is an interface subclass.
+    assert!(out.contains("template <class U> class BaseAdapter final : public Base"), "{out}");
+    for (_module, derived) in [
         ("local_shadow", "LocalDerived"),
         ("alias_shadow", "AliasDerived"),
         ("glob_shadow", "GlobDerived"),
@@ -9540,10 +9626,6 @@ pub mod glob_shadow {
         assert!(
             !out.contains(&format!("struct {derived} : public")),
             "lookalike marker changed {derived} inheritance:\n{out}"
-        );
-        assert!(
-            out.contains(&format!("BaseAdapter<::{module}::{derived}>")),
-            "lookalike marker suppressed {derived}'s ordinary adapter:\n{out}"
         );
     }
 }
@@ -9815,15 +9897,15 @@ fn test_interface_traits_local_impl_emits_adapter_specialization() {
     assert!(out.contains("uint32_t speak() const"), "{out}");
     // And the Adapter specialization is also emitted.
     assert!(
-        out.contains("class AnimalAdapter<Dog> final : public Animal"),
+        out.contains("template <class U> class AnimalAdapter final : public Animal"),
         "{out}"
     );
-    assert!(out.contains("Dog value_;"), "{out}");
+    assert!(out.contains("U value_;"), "{out}");
     // Non-explicit since the Box<dyn> unsizing rewrite relies on the payload
     // implicitly converting to the owning adapter.
     assert!(
-        out.contains("AnimalAdapter(Dog v) : value_(std::move(v))")
-            && !out.contains("explicit AnimalAdapter(Dog v)"),
+        out.contains("AnimalAdapter(U v) : value_(std::move(v))")
+            && !out.contains("explicit AnimalAdapter(U v)"),
         "{out}"
     );
     // Override delegates via the UFCS free function.
@@ -9855,12 +9937,15 @@ fn test_interface_traits_one_adapter_per_impl_type() {
          impl Animal for Dog { fn speak(&self) -> u32 { self.x } } \
          impl Animal for Cat { fn speak(&self) -> u32 { self.y } }",
     );
-    assert!(
-        out.contains("class AnimalAdapter<Dog> final : public Animal"),
+    // Book §3.2.10: ONE generic forwarder per trait and receiver kind — never a
+    // per-implementor specialization.
+    assert_eq!(
+        out.matches("class AnimalAdapter final : public Animal").count(),
+        1,
         "{out}"
     );
     assert!(
-        out.contains("class AnimalAdapter<Cat> final : public Animal"),
+        !out.contains("AnimalAdapter<Dog>") && !out.contains("AnimalAdapter<Cat>"),
         "{out}"
     );
 }
@@ -9875,12 +9960,12 @@ fn test_interface_traits_adapter_ref_specialization_emitted() {
          impl Animal for Dog { fn speak(&self) -> u32 { self.x } }",
     );
     assert!(
-        out.contains("class AnimalAdapterRef<Dog> final : public Animal"),
+        out.contains("template <class U> class AnimalAdapterRef final : public Animal"),
         "{out}"
     );
-    assert!(out.contains("const Dog& value_;"), "{out}");
+    assert!(out.contains("const U& value_;"), "{out}");
     assert!(
-        out.contains("explicit AnimalAdapterRef(const Dog& u) : value_(u)"),
+        out.contains("explicit AnimalAdapterRef(const U& u) : value_(u)"),
         "{out}"
     );
     // Const method delegates via the UFCS free function.
@@ -9895,12 +9980,12 @@ fn test_interface_traits_adapter_ref_mut_specialization_emitted() {
          impl Animal for Dog { fn speak(&self) {} fn rename(&mut self, n: u32) { self.x = n; } }",
     );
     assert!(
-        out.contains("class AnimalAdapterRefMut<Dog> final : public Animal"),
+        out.contains("template <class U> class AnimalAdapterRefMut final : public Animal"),
         "{out}"
     );
-    assert!(out.contains("Dog& value_;"), "{out}");
+    assert!(out.contains("U& value_;"), "{out}");
     assert!(
-        out.contains("explicit AnimalAdapterRefMut(Dog& u) : value_(u)"),
+        out.contains("explicit AnimalAdapterRefMut(U& u) : value_(u)"),
         "{out}"
     );
     // Both &self and &mut self delegate normally.
@@ -9921,12 +10006,92 @@ fn test_interface_traits_adapter_ref_mut_method_emits_abort() {
          struct Dog { x: u32 } \
          impl Animal for Dog { fn rename(&mut self, n: u32) { self.x = n; } }",
     );
-    // AdapterRef has the &mut method override stubbed.
-    let expected_section = "class AnimalAdapterRef<Dog> final : public Animal";
+    // AdapterRef has the &mut method override stubbed (book §3.2.10, decision
+    // (d): the stub traps loudly if ever bound through a non-const `Animal&`).
+    let expected_section = "class AnimalAdapterRef final : public Animal";
     let after = out.split(expected_section).nth(1).unwrap_or("");
     assert!(
-        after.contains("std::abort();  // unreachable through &dyn T"),
-        "AdapterRef should stub &mut method with std::abort. Output:\n{out}"
+        after.contains("void rename(uint32_t n) override { rusty::intrinsics::unreachable_via_const_dyn(); }"),
+        "AdapterRef should stub the &mut slot with the trapping helper. Output:\n{out}"
+    );
+}
+
+#[test]
+fn test_interface_traits_ref_forwarder_mut_slot_traps_through_nonconst_binding_clang_runtime() {
+    // Book §3.2.10, decision (d): the `Ref` forwarder's `&mut self` slots are
+    // unreachable through `const Tr&`; an emitter path that ever bound a `Ref`
+    // forwarder through a non-const `Tr&` must trap at the first call rather
+    // than silently do nothing. The gate's negative case.
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping Ref-forwarder stub proof: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits(
+        r#"
+        pub trait Counter { fn get(&self) -> i32; fn bump(&mut self, by: i32); }
+        pub struct Cell { pub v: i32 }
+        impl Counter for Cell {
+            fn get(&self) -> i32 { self.v }
+            fn bump(&mut self, by: i32) { self.v += by; }
+        }
+        "#,
+    );
+    cpp.push_str(
+        r#"
+int main() {
+    Cell c{};
+    c.v = 5;
+    CounterAdapterRef<Cell> ref_view(c);
+    const Counter& ok = ref_view;
+    if (ok.get() != 5) return 2;
+    Counter& wrong = ref_view;
+    try { wrong.bump(1); return 1; } catch (const std::logic_error&) {}
+    if (c.v != 5) return 3;
+    CounterAdapterRefMut<Cell> mut_view(c);
+    Counter& fine = mut_view;
+    fine.bump(2);
+    return c.v == 7 && fine.get() == 7 ? 0 : 4;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("ref_forwarder_stub.cpp");
+    let binary_path = temp.path().join("ref_forwarder_stub");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "Ref-forwarder stub C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "Ref-forwarder stub runtime proof failed (exit {:?}): the &mut slot through a non-const binding must trap, the RefMut forwarder must work",
+        run.status.code()
     );
 }
 
@@ -10052,7 +10217,7 @@ fn test_interface_traits_mut_ref_dyn_arg_wraps_with_adapter_ref_mut() {
     );
     assert!(
         out.contains(
-            "use_noise(AnimalAdapterRefMut<std::remove_cvref_t<decltype(dog)>>(dog))"
+            "use_noise(rusty::dyn_lvalue(AnimalAdapterRefMut<std::remove_cvref_t<decltype(dog)>>(dog)))"
         ),
         "{out}"
     );
@@ -10182,7 +10347,7 @@ fn test_interface_traits_default_method_can_be_overridden_by_impl() {
          }",
     );
     // Adapter should override both methods.
-    let after_adapter = out.split("class GreetAdapter<Dog>").nth(1).unwrap_or("");
+    let after_adapter = out.split("class GreetAdapter final").nth(1).unwrap_or("");
     assert!(after_adapter.contains("uint32_t name() const override"), "{out}");
     assert!(after_adapter.contains("uint32_t greet() const override"), "{out}");
 }
@@ -20916,8 +21081,8 @@ fn test_dyn_adapter_specializations_precede_first_function() {
         "#,
     );
     let spec = out
-        .find("class SpeakAdapterRef<")
-        .expect("adapter specialization missing");
+        .find("class SpeakAdapterRef final")
+        .expect("generic forwarder definition missing");
     let use_site = out
         .find("SpeakAdapterRef<std::remove_cvref_t")
         .expect("adapter use site missing");
@@ -21341,7 +21506,7 @@ fn test_box_dyn_trait_wraps_adapter_and_adapter_is_movable() {
         "trait Shape { fn area(&self) -> i32; } struct Sq { s: i32 } impl Shape for Sq { fn area(&self) -> i32 { self.s * self.s } } pub fn f() -> i32 { let b: Box<dyn Shape> = Box::new(Sq { s: 3 }); b.area() }",
     );
     assert!(
-        out.contains("ShapeAdapter(Sq v)") && !out.contains("explicit ShapeAdapter(Sq v)"),
+        out.contains("ShapeAdapter(U v)") && !out.contains("explicit ShapeAdapter(U v)"),
         "owning adapter ctor must be non-explicit:\n{out}"
     );
     assert!(
@@ -45722,7 +45887,7 @@ fn test_module_mode_local_dyn_trait_box_keeps_ordinary_adapter_path() {
     );
     assert!(out.contains("using AnimalBox = rusty::Box<Animal>;"), "{out}");
     assert!(
-        out.contains("class AnimalAdapter<Dog> final : public Animal"),
+        out.contains("template <class U> class AnimalAdapter final : public Animal"),
         "ordinary local impls still require their owning adapter:\n{out}"
     );
     assert!(
@@ -47738,7 +47903,7 @@ fn foreign_ordinary_trait_impl_stays_with_extension_owner() {
     };
     impl_cg.emit_file(&source, Some("example.encode"));
     let implementation_output = impl_cg.into_output();
-    assert!(implementation_output.contains("class EncodeAdapter<Number>"), "{implementation_output}");
+    assert!(implementation_output.contains("template <class U> class EncodeAdapter final : public Encode"), "{implementation_output}");
     assert!(implementation_output.contains("void encode(const Number& self_, Archive& archive)"), "{implementation_output}");
     assert!(implementation_output.contains(".total += self_.value"), "canonical body must remain emitted: {implementation_output}");
     assert!(!implementation_output.contains("#if 0"), "{implementation_output}");
@@ -48560,7 +48725,7 @@ fn test_ufcs_methodless_concrete_impl_emits_multi_owner_marker() {
         "every crate-declared trait gets a defined-false marker primary and a concept:\n{out}"
     );
     assert!(
-        out.contains("requires impls_A<std::remove_cvref_t<Self_>>::value"),
+        out.contains("requires (has_A<Self_>)"),
         "a multi-owner default is constrained on the exact-type marker:\n{out}"
     );
 }
@@ -48578,13 +48743,16 @@ fn test_ufcs_trait_namespace_is_a_dispatcher_over_tagged_impl_functions() {
         pub fn call(x: i32) -> i32 { x.speak() + x.twice() }
         "#,
     );
-    assert!(out.contains("namespace impl_ { struct tag {}; struct adl_enabler_; }"), "{out}");
     assert!(
-        out.contains("auto speak(S&& s, R&&... r) -> decltype(speak(impl_::tag{}, std::forward<S>(s), std::forward<R>(r)...))"),
+        out.contains("namespace impl_ { struct tag {}; struct adl_enabler_; }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("auto speak(S&& __self, R&&... __rest) -> decltype(speak(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...))"),
         "the dispatcher must forward through tag-ADL:\n{out}"
     );
     assert!(
-        out.contains("auto speak(S&& s, R&&... r) -> decltype(speak<E0, E...>(impl_::tag{}"),
+        out.contains("auto speak(S&& __self, R&&... __rest) -> decltype(speak<E0, E...>(impl_::tag{}"),
         "the explicit-template-argument dispatcher overload must exist:\n{out}"
     );
     assert!(out.contains("namespace Speak_::impl_ {"), "{out}");

@@ -6075,87 +6075,188 @@ impl CodeGen {
     /// this is the adapter for implementors outside the trait's crate, which
     /// the trait's crate cannot write explicit `<Trait>Adapter`
     /// specializations for.
-    fn emit_trait_dyn_adapter(
+    /// Book §3.2.10: the three generic forwarders of a trait. Each is one class
+    /// template deriving from the interface; every slot of this trait AND of
+    /// every (transitive) supertrait that became a C++ base is overridden with
+    /// a one-line body through the OWNER trait's CPO — `Owner_::m(value_, …)`
+    /// is a dependent call resolved at instantiation by tag-ADL, so it reaches
+    /// the implementor's override, a constrained blanket, or the default
+    /// template in that order (§3.2.2), for an implementor declared in any
+    /// later module. No body of any impl lives here.
+    ///
+    /// The `Ref` forwarder's `&mut self` slots are unreachable through a
+    /// `const Tr&` (C++ will not call a non-const member through it) and trap
+    /// loudly if an emitter path ever binds one through `Tr&` (decision (d)).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_trait_generic_forwarders(
         &mut self,
         trait_name: &str,
+        trait_key: &str,
         cls_export: &str,
-        methods: &[(String, String, Vec<String>, &'static str, String)],
+        template_args: &str,
+        trait_generic_arglist: &str,
+        impl_param: &str,
+        own_slots: &[InterfaceSlot],
+        bases: &[(String, String)],
     ) {
-        self.writeln(&format!(
-            "{}template <class U> class {}DynAdapter final : public {} {{",
-            cls_export, trait_name, trait_name
-        ));
-        self.indent += 1;
-        self.writeln("U value_;");
-        for constness in ["", " const"] {
-            self.writeln(&format!("decltype(auto) rusty_target(){} {{", constness));
-            self.indent += 1;
-            self.writeln(
-                "if constexpr (requires { value_.operator->(); *value_; }) { return (*value_); } else { return (value_); }",
-            );
-            self.indent -= 1;
-            self.writeln("}");
-        }
-        self.indent -= 1;
-        self.writeln("public:");
-        self.indent += 1;
-        self.writeln(&format!(
-            "{}DynAdapter(U value) : value_(std::move(value)) {{}}",
-            trait_name
-        ));
-        // The interface deletes its copy/move (a trait object is unsized);
-        // the adapter is movable into its owning allocation all the same.
-        self.writeln(&format!(
-            "{}DynAdapter({}DynAdapter&& other) : value_(std::move(other.value_)) {{}}",
-            trait_name, trait_name
-        ));
-        // Declared here, defined after the purview: a method's parameter
-        // and return types may be declared later in the crate than the trait
-        // (and must be complete in a definition).
-        let adapter = self.purview_scope_qualified_name(&format!("{}DynAdapter", trait_name));
-        let trait_tag = crate::codegen::sanitize_collapse_trait_tag(trait_name);
-        for (return_type, method_name, params, const_suffix, rust_name) in methods {
-            self.writeln(&format!(
-                "{} {}({}){} override;",
-                return_type,
-                method_name,
-                params.join(", "),
-                const_suffix
-            ));
-            let args = params
-                .iter()
-                .map(|param| {
-                    let (ty, name) = param.rsplit_once(' ').unwrap_or(("", param.as_str()));
-                    if ty.trim_end().ends_with('&') || ty.trim_end().ends_with('*') {
-                        name.to_string()
-                    } else {
-                        format!("std::move({})", name)
+        // (owner short name, owner key, slot)
+        let mut slots: Vec<(String, String, InterfaceSlot)> = own_slots
+            .iter()
+            .map(|slot| (trait_name.to_string(), trait_key.to_string(), slot.clone()))
+            .collect();
+        let mut seen: HashSet<String> = own_slots.iter().map(|s| s.cpp_name.clone()).collect();
+        let mut stack: Vec<(String, String)> = bases.iter().rev().cloned().collect();
+        let mut visited: HashSet<String> = HashSet::new();
+        while let Some((base, base_key)) = stack.pop() {
+            if !visited.insert(base.clone()) {
+                continue;
+            }
+            if let Some(base_slots) = self.interface_trait_slots.get(&base) {
+                for slot in base_slots {
+                    if seen.insert(slot.cpp_name.clone()) {
+                        slots.push((base.clone(), base_key.clone(), slot.clone()));
                     }
-                })
-                .collect::<Vec<_>>();
-            // Names after the qualified declarator-id (parameters, trailing
-            // return type) resolve in the adapter's own namespace. An
-            // implementor whose inherent method of this name and signature
-            // took the plain member keeps its trait body as
-            // `rusty_<Trait>_<m>` (§206); dispatch through the trait object
-            // reaches that one, as Rust's does.
-            let tagged = format!("rusty_{}_{}", trait_tag, rust_name);
-            let tagged_call = format!("this->rusty_target().{}({})", tagged, args.join(", "));
-            self.deferred_purview_tail_items.push(format!(
-                "template <class U>\nauto {}<U>::{}({}){} -> {} {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return this->rusty_target().{}({}); }} }}\n",
-                adapter,
-                method_name,
-                params.join(", "),
-                const_suffix,
-                return_type,
-                tagged_call,
-                tagged_call,
-                method_name,
-                args.join(", ")
-            ));
+                }
+            }
+            if let Some(grand) = self.interface_trait_bases.get(&base) {
+                stack.extend(grand.iter().rev().cloned());
+            }
         }
-        self.indent -= 1;
-        self.writeln("};");
+        // A `cpp_trait_member_dispatch` owner (tier-1 fast path) has no UFCS
+        // layer: its slots reach the implementor's MEMBER — the tagged
+        // `rusty_<Trait>_<m>` one when an inherent same-signature method took
+        // the plain name (§206), else the plain member. So does a trait that
+        // got no `<Tr>_` namespace at all.
+        // Keyed by the DECLARED path only: a marked root-level `Clash` must not
+        // turn an unmarked `nested::selected::Clash` into member dispatch.
+        let member_dispatch = |this: &Self, short: &str, key: &str| -> bool {
+            !this.ufcs_declared_trait_names.contains(short)
+                || this.cpp_trait_member_dispatch_traits.contains(key)
+        };
+        let base_cpp = format!("{}{}", trait_name, trait_generic_arglist);
+        for (suffix, kind) in [
+            ("Adapter", AdapterStorageKind::Owning),
+            ("AdapterRef", AdapterStorageKind::ConstRef),
+            ("AdapterRefMut", AdapterStorageKind::MutRef),
+        ] {
+            self.writeln(&format!(
+                "{}template <{}> class {}{} final : public {} {{",
+                cls_export, template_args, trait_name, suffix, base_cpp
+            ));
+            self.indent += 1;
+            match kind {
+                AdapterStorageKind::Owning => self.writeln(&format!("{} value_;", impl_param)),
+                AdapterStorageKind::ConstRef => {
+                    self.writeln(&format!("const {}& value_;", impl_param))
+                }
+                AdapterStorageKind::MutRef => self.writeln(&format!("{}& value_;", impl_param)),
+            }
+            self.indent -= 1;
+            self.writeln("public:");
+            self.indent += 1;
+            match kind {
+                // Non-explicit: the unsizing coercion `Box::new(Sq{..})` as
+                // `Box<dyn Shape>` converts the payload at the construction site.
+                AdapterStorageKind::Owning => {
+                    self.writeln(&format!(
+                        "{t}{s}({p} v) : value_(std::move(v)) {{}}",
+                        t = trait_name,
+                        s = suffix,
+                        p = impl_param
+                    ));
+                    // The interface deletes copy AND move; Box/Rc::new_ take the
+                    // forwarder by value and must move it into place.
+                    self.writeln(&format!(
+                        "{t}{s}({t}{s}&& other) : value_(std::move(other.value_)) {{}}",
+                        t = trait_name,
+                        s = suffix
+                    ));
+                }
+                AdapterStorageKind::ConstRef => self.writeln(&format!(
+                    "explicit {t}{s}(const {p}& u) : value_(u) {{}}",
+                    t = trait_name,
+                    s = suffix,
+                    p = impl_param
+                )),
+                AdapterStorageKind::MutRef => self.writeln(&format!(
+                    "explicit {t}{s}({p}& u) : value_(u) {{}}",
+                    t = trait_name,
+                    s = suffix,
+                    p = impl_param
+                )),
+            }
+            for (owner, owner_key, slot) in &slots {
+                let args: Vec<String> = slot
+                    .params
+                    .iter()
+                    .map(|param| {
+                        let (ty, name) = param.rsplit_once(' ').unwrap_or(("", param.as_str()));
+                        let ty = ty.trim_end();
+                        if ty.ends_with('&')
+                            || ty.ends_with('*')
+                            || cpp_by_value_param_is_scalar(ty)
+                        {
+                            name.to_string()
+                        } else {
+                            format!("std::move({})", name)
+                        }
+                    })
+                    .collect();
+                let stub = slot.is_mut && matches!(kind, AdapterStorageKind::ConstRef);
+                let prefix = if slot.return_type.trim() == "void" { "" } else { "return " };
+                let body = if stub {
+                    "rusty::intrinsics::unreachable_via_const_dyn();".to_string()
+                } else if member_dispatch(self, owner, owner_key) {
+                    let tagged = format!(
+                        "rusty_{}_{}",
+                        crate::codegen::sanitize_collapse_trait_tag(owner),
+                        slot.rust_name
+                    );
+                    format!(
+                        "if constexpr (requires {{ value_.{tagged}({a}); }}) {{ {p}value_.{tagged}({a}); }} else {{ {p}value_.{m}({a}); }}",
+                        tagged = tagged,
+                        a = args.join(", "),
+                        p = prefix,
+                        m = slot.cpp_name
+                    )
+                } else {
+                    // The CPO first. A CONSUMER crate's implementor of this
+                    // (dependency) trait emits no `impl_` functions into the
+                    // dependency's namespace — only members (the tagged
+                    // `rusty_<Tr>_<m>` one beside a same-signature inherent
+                    // method, else the plain one) — so the slot falls back to
+                    // them, exactly as the retired `DynAdapter` probed. A
+                    // requires-expression on `value_` is dependent: decided at
+                    // the consumer's instantiation point, where its members exist.
+                    let mut call_args = vec!["value_".to_string()];
+                    call_args.extend(args.iter().cloned());
+                    let call = format!("{}_::{}({})", owner, slot.cpp_name, call_args.join(", "));
+                    let tagged = format!(
+                        "rusty_{}_{}",
+                        crate::codegen::sanitize_collapse_trait_tag(owner),
+                        slot.rust_name
+                    );
+                    format!(
+                        "if constexpr (requires {{ {call}; }}) {{ {p}{call}; }} else if constexpr (requires {{ value_.{tagged}({a}); }}) {{ {p}value_.{tagged}({a}); }} else {{ {p}value_.{m}({a}); }}",
+                        call = call,
+                        p = prefix,
+                        tagged = tagged,
+                        a = args.join(", "),
+                        m = slot.cpp_name
+                    )
+                };
+                self.writeln(&format!(
+                    "{} {}({}){} override {{ {} }}",
+                    slot.return_type,
+                    slot.cpp_name,
+                    slot.params.join(", "),
+                    slot.const_suffix,
+                    body
+                ));
+            }
+            self.indent -= 1;
+            self.writeln("};");
+        }
     }
 
     pub(super) fn emit_trait_interface_pattern(&mut self, t: &syn::ItemTrait) {
@@ -6631,17 +6732,61 @@ impl CodeGen {
         // Adapter classes are emitted outside the anonymous namespace
         // either way, and find the trait class via name lookup within
         // the same TU when it's anon-wrapped.
-        if wrap_in_anon_ns {
-            self.writeln("namespace {");
-        }
-        // Open the abstract base class. A pub trait in module mode is `export`ed so
-        // downstream crates can `using ::<crate>::<Trait>;` re-export it (the prefix
-        // goes on the template line when the class is templated).
+        // A pub trait in module mode is `export`ed so downstream crates can
+        // `using ::<crate>::<Trait>;` re-export it (the prefix goes on the
+        // template line when the class is templated).
         let cls_export = if self.should_export_item(&t.vis, &trait_name_str) {
             "export "
         } else {
             ""
         };
+        // Book §3.2.10: `dyn Tr` over a tier-2 implementor binds one of three
+        // GENERIC forwarders per trait — `TrAdapter<U>` (owning, `Box<dyn>`),
+        // `TrAdapterRef<U>` (`&dyn`), `TrAdapterRefMut<U>` (`&mut dyn`) —
+        // written once here, never specialized per impl. They are declared
+        // before the interface (the class names `rusty_dyn_adapter`) and
+        // defined right after it. For a generic trait the template list is
+        // `<trait generics…, U>`, matching the call sites' spelling
+        // `TrAdapterRef<A…, std::remove_cvref_t<decltype(x)>>`.
+        let forwarder_impl_param = {
+            let mut candidate = "U".to_string();
+            while trait_generic_idents.iter().any(|g| g == &candidate) {
+                candidate.push('_');
+            }
+            candidate
+        };
+        let forwarder_template_args = if trait_generic_idents.is_empty() {
+            format!("class {}", forwarder_impl_param)
+        } else {
+            format!(
+                "{}, class {}",
+                trait_generic_idents
+                    .iter()
+                    .map(|g| format!("class {}", g))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                forwarder_impl_param
+            )
+        };
+        // Their own anonymous-namespace block for a non-`pub` trait (anonymous
+        // namespaces unify), so the class itself still opens right after a
+        // `namespace {` line (contract 4; pinned by trait_pub_visibility).
+        if wrap_in_anon_ns {
+            self.writeln("namespace {");
+        }
+        for suffix in ["Adapter", "AdapterRef", "AdapterRefMut"] {
+            self.writeln(&format!(
+                "{}template <{}> class {}{};",
+                cls_export, forwarder_template_args, trait_name, suffix
+            ));
+        }
+        if wrap_in_anon_ns {
+            self.writeln("}");
+        }
+        if wrap_in_anon_ns {
+            self.writeln("namespace {");
+        }
+        // Open the abstract base class.
         // The generic owning adapter (`<Trait>DynAdapter<U>`, below) serves an
         // implementor this crate cannot see: a consumer crate implementing a
         // dependency's trait. Only for a non-generic trait without local
@@ -6649,18 +6794,7 @@ impl CodeGen {
         // Only a `pub` trait can be implemented outside its crate (and a
         // private one's anonymous namespace cannot take out-of-line member
         // definitions from global scope).
-        let dyn_adapter_supported = self.emit_dyn_adapters
-            && !wrap_in_anon_ns
-            && self.block_depth == 0
-            && trait_template_prefix.is_empty()
-            && bases.is_empty();
-        let mut dyn_adapter_methods: Vec<(String, String, Vec<String>, &'static str, String)> = Vec::new();
-        if dyn_adapter_supported {
-            self.writeln(&format!(
-                "{}template <class U> class {}DynAdapter;",
-                cls_export, trait_name
-            ));
-        }
+        let mut interface_slots: Vec<InterfaceSlot> = Vec::new();
         if !trait_template_prefix.is_empty() {
             // Strip the trailing newline since writeln adds its own.
             self.writeln(&format!("{}{}", cls_export, trait_template_prefix.trim_end()));
@@ -6681,14 +6815,18 @@ impl CodeGen {
         // ("exception specification is not available until end of class
         // definition") when the class inherits from another local trait.
         self.writeln(&format!("virtual ~{}() noexcept(false) {{}}", trait_name));
-        if dyn_adapter_supported {
-            // rusty::Box<Trait> / rusty::Arc<Trait> unsize conversions from an
-            // unrelated implementor find their adapter here.
-            self.writeln(&format!(
-                "template <class U> using rusty_dyn_adapter = {}DynAdapter<U>;",
-                trait_name
-            ));
-        }
+        // rusty::Box<Trait> / rusty::Arc<Trait> unsize conversions
+        // (include/rusty/dyn_adapter.hpp) find the owning forwarder here.
+        self.writeln(&format!(
+            "template <class {p}> using rusty_dyn_adapter = {t}Adapter<{args}{p}>;",
+            p = forwarder_impl_param,
+            t = trait_name,
+            args = if trait_generic_idents.is_empty() {
+                String::new()
+            } else {
+                format!("{}, ", trait_generic_idents.join(", "))
+            }
+        ));
 
         // Emit one pure-virtual per trait method.
         for item in &t.items {
@@ -6838,14 +6976,18 @@ impl CodeGen {
                     params.join(", "),
                     const_suffix
                 ));
-                dyn_adapter_methods.push((
-                    return_type.clone(),
-                    method_name.clone(),
-                    params.clone(),
-                    const_suffix,
-                    method.sig.ident.to_string(),
-                ));
             }
+            // Every slot — a default's inline copy included — is overridden by
+            // the forwarders: a tier-2 implementor's override of a default must
+            // win through the vtable (`dyn bar.describe = 777`, §3.2.10).
+            interface_slots.push(InterfaceSlot {
+                return_type: return_type.clone(),
+                cpp_name: method_name.clone(),
+                params: params.clone(),
+                const_suffix,
+                is_mut: !is_const,
+                rust_name: method.sig.ident.to_string(),
+            });
         }
 
         // dyn objects are unsized in Rust and must not be stored by value in
@@ -6875,75 +7017,43 @@ impl CodeGen {
             self.writeln("}");
         }
 
-        // Adapter primary templates — left undefined; specializations are
-        // emitted per `impl T for U` in a later phase.
-        // Three flavors:
-        //   TraitAdapter<U>       — owns U by value; used by Box<dyn T> / Rc<dyn T> / Arc<dyn T>
-        //   TraitAdapterRef<U>    — borrows const U&; used to materialize &dyn T from a concrete U
-        //   TraitAdapterRefMut<U> — borrows U&; used to materialize &mut dyn T
-        //
-        // For a generic trait `trait Foo<T>`, the Adapter primary templates
-        // need BOTH the trait's generic params AND the impl-type param U:
-        //   template <class T, class U> class FooAdapter;
-        // The Adapter specialization for `impl Foo<i32> for IntBag` then
-        // becomes `template<> class FooAdapter<int32_t, IntBag> ...`.
-        // Pick a non-conflicting placeholder name for the implementing
-        // type. Default is `U`, but if the trait already declares a
-        // generic named `U` we suffix-bump it to avoid duplicate
-        // template parameter names (a hard compile error).
-        let impl_param_name = {
-            let mut candidate = "U".to_string();
-            while trait_generic_idents.iter().any(|g| g == &candidate) {
-                candidate.push('_');
-            }
-            candidate
-        };
-        let adapter_template_args = if trait_generic_idents.is_empty() {
-            format!("class {}", impl_param_name)
+        // Book §3.2.10: define the three generic forwarders (declared before
+        // the class). Same anonymous namespace as the trait when it is
+        // non-`pub` (contracts 4/10). Register this trait's slots and bases so
+        // a sub-trait's forwarders can enumerate the supertrait closure.
+        let base_trait_names: Vec<(String, String)> = supertraits
+            .iter()
+            .map(|path| {
+                let key = path.trim_start_matches("::").to_string();
+                (key.rsplit("::").next().unwrap_or(&key).to_string(), key)
+            })
+            .collect();
+        let trait_key = if self.module_stack.is_empty() {
+            trait_name_str.clone()
         } else {
-            format!(
-                "{}, class {}",
-                trait_generic_idents
-                    .iter()
-                    .map(|g| format!("class {}", g))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                impl_param_name
-            )
+            format!("{}::{}", self.module_stack.join("::"), trait_name_str)
         };
         self.newline();
-        // The Adapter family is part of a public trait's C++ surface.  The
-        // primary declaration is what makes both the template name and its
-        // later explicit/partial specializations reachable to an importer;
-        // exporting only the abstract base leaves downstream code unable to
-        // name `TraitAdapter<Concrete>` even though that is the concrete type
-        // used to implement Rust's dyn coercion.  Keep private-trait adapters
-        // module-local, matching the trait itself: contract 4 requires the
-        // adapter declarations to inhabit the SAME anonymous namespace as the
-        // trait class, and contract 10 forbids them from adding ordinary strong
-        // symbols.  Omitting `export` alone does neither — a module-attached
-        // class still emits strong `T` definitions for its members.
         if wrap_in_anon_ns {
             self.writeln("namespace {");
         }
-        self.writeln(&format!(
-            "{}template <{}> class {}Adapter;",
-            cls_export, adapter_template_args, trait_name
-        ));
-        self.writeln(&format!(
-            "{}template <{}> class {}AdapterRef;",
-            cls_export, adapter_template_args, trait_name
-        ));
-        self.writeln(&format!(
-            "{}template <{}> class {}AdapterRefMut;",
-            cls_export, adapter_template_args, trait_name
-        ));
-        if dyn_adapter_supported {
-            self.emit_trait_dyn_adapter(&trait_name.to_string(), cls_export, &dyn_adapter_methods);
-        }
+        self.emit_trait_generic_forwarders(
+            &trait_name_str,
+            &trait_key,
+            cls_export,
+            &forwarder_template_args,
+            &trait_generic_arglist,
+            &forwarder_impl_param,
+            &interface_slots,
+            &base_trait_names,
+        );
         if wrap_in_anon_ns {
             self.writeln("}");
         }
+        self.interface_trait_slots
+            .insert(trait_name_str.clone(), interface_slots.clone());
+        self.interface_trait_bases
+            .insert(trait_name_str.clone(), base_trait_names);
 
         // Phase 3b.1: helper traits class forward decl. For each trait
         // with associated types, emit `template <class B> struct
@@ -7523,10 +7633,8 @@ impl CodeGen {
         // headers and base-class arglists we don't yet emit. Skip with a
         // TODO marker rather than emit broken specs that fail to compile.
         if self.interface_traits_with_generics.contains(trait_name) {
-            self.writeln(&format!(
-                "// TODO(interface_traits): {} is generic — Adapter specializations require partial-spec template headers, not yet emitted",
-                trait_name
-            ));
+            // (Only the assoc-type helper specializations are emitted here now;
+            // a generic trait's are not — unchanged scope, no marker comment.)
             return;
         }
         // Group methods by implementing self type.
@@ -7550,10 +7658,6 @@ impl CodeGen {
         for (self_cpp, group) in &by_self {
             // Skip when self type maps to a placeholder we don't recognize.
             if self_cpp.contains("/* TODO") || type_string_has_auto_placeholder(self_cpp) {
-                self.writeln(&format!(
-                    "// TODO(interface_traits): skipped {}Adapter<{}> — unresolved self type",
-                    trait_name, self_cpp
-                ));
                 continue;
             }
             // A generic impl whose Self type contains its impl parameters is a
@@ -7601,10 +7705,6 @@ impl CodeGen {
                         || mapped_impl_generics.len() != referenced_impl_generics.len())
             })
             {
-                self.writeln(&format!(
-                    "// TODO(interface_traits): skipped generic impl `{}Adapter<{}>` — constrained/const generic partial specializations are unsupported",
-                    trait_name, self_cpp
-                ));
                 continue;
             }
             let partial_spec_constraints = partial_spec_constraints.unwrap_or_default();
@@ -7624,8 +7724,6 @@ impl CodeGen {
             if !self.emitted_foreign_adapter_specs.insert(dedup_key) {
                 continue;
             }
-            let methods_only: Vec<&syn::ImplItemFn> =
-                group.iter().map(|m| &m.method).collect();
             // Phase 3a step 3: derive `trait_args` from the impl block's
             // `type Owned = X;` bindings. The trait's assoc-type names
             // were captured at trait-emit time and surface here via
@@ -7649,49 +7747,9 @@ impl CodeGen {
             if !partial_spec_params.is_empty() {
                 self.type_param_scopes.pop();
             }
-            let trait_args: Vec<String> = self
-                .trait_associated_type_names
-                .get(trait_name)
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|assoc_name| {
-                    bindings_cpp
-                        .get(assoc_name)
-                        .or_else(|| bindings_cpp.get(&escape_cpp_keyword(assoc_name)))
-                        .cloned()
-                })
-                .collect();
-            self.emit_one_foreign_adapter(
-                trait_name,
-                &trait_args,
-                &partial_spec_params,
-                &partial_spec_constraints,
-                "Adapter",
-                self_cpp,
-                AdapterStorageKind::Owning,
-                &methods_only,
-            );
-            self.emit_one_foreign_adapter(
-                trait_name,
-                &trait_args,
-                &partial_spec_params,
-                &partial_spec_constraints,
-                "AdapterRef",
-                self_cpp,
-                AdapterStorageKind::ConstRef,
-                &methods_only,
-            );
-            self.emit_one_foreign_adapter(
-                trait_name,
-                &trait_args,
-                &partial_spec_params,
-                &partial_spec_constraints,
-                "AdapterRefMut",
-                self_cpp,
-                AdapterStorageKind::MutRef,
-                &methods_only,
-            );
+            // Book §3.2.10: no per-impl adapter specialization — the trait's
+            // three GENERIC forwarders (emit_trait_generic_forwarders) serve
+            // every implementor. Only the assoc-type helper spec remains.
             // Phase 3b.1: helper traits class spec for this impl. Lets
             // downstream code resolve `<T as Trait>::AssocName` via
             // `typename <Trait>Traits<T>::AssocName` (Phase 3b.2 wires
@@ -9820,7 +9878,7 @@ impl CodeGen {
         // stub below would be a dead `#if 0` duplicate whose
         // `(*this)` bodies read as live bugs to anyone grepping. Skip it.
         if let Some((written_trait_name, _)) =
-            Self::ufcs_trait_impl_specs(i, &self.ufcs_trait_default_methods)
+            Self::ufcs_trait_impl_specs(i, &self.ufcs_trait_default_methods, &self.module_stack)
             && let Some((_, trait_path, _)) = i.trait_.as_ref()
             && {
                 let trait_key = self.resolve_trait_scoped_key_for_impl(
@@ -12447,4 +12505,21 @@ pub(super) fn contains_whole_word(haystack: &str, needle: &str) -> bool {
         from = at + 1;
     }
     false
+}
+
+/// A by-value parameter of this C++ type is passed to a forwarder slot's
+/// callee as-is (a `std::move` of a scalar is noise).
+fn cpp_by_value_param_is_scalar(ty: &str) -> bool {
+    let ty = ty.trim();
+    ty.starts_with("std::span<")
+        || matches!(
+            ty,
+            "bool" | "char" | "signed char" | "unsigned char" | "short" | "unsigned short" | "int"
+                | "unsigned" | "unsigned int" | "long" | "unsigned long" | "long long"
+                | "unsigned long long" | "float" | "double" | "long double" | "size_t"
+                | "ptrdiff_t" | "int8_t" | "int16_t" | "int32_t" | "int64_t" | "uint8_t"
+                | "uint16_t" | "uint32_t" | "uint64_t" | "__int128" | "unsigned __int128"
+                | "char8_t" | "char16_t" | "char32_t" | "wchar_t" | "std::string_view"
+                | "std::byte"
+        )
 }

@@ -38,6 +38,17 @@ namespace intrinsics {
 // The genuinely-unchecked form, for callers that have proved the case.
 [[noreturn]] inline void unreachable_unchecked() { __builtin_unreachable(); }
 
+// The stub body of a `&mut self` slot on a `<Trait>AdapterRef<U>` forwarder
+// (the `&dyn Trait` view over a tier-2 implementor, book §3.2.10). C++ never
+// calls a non-const virtual through a `const Trait&`, so for correct emission
+// this is unreachable; it traps loudly if an emitter path ever binds a `Ref`
+// forwarder through a non-const `Trait&` (decision (d): one interface per
+// trait, runtime enforcement).
+[[noreturn]] inline void unreachable_via_const_dyn() {
+    throw std::logic_error(
+        "rusty: a `&mut self` trait method was reached through a `&dyn` (const) forwarder");
+}
+
 // `assume(cond)` — hint to the optimiser. C++23 has `[[assume]]`; we
 // fall back to `__builtin_assume` (clang) or guarded `__builtin_unreachable`.
 inline void assume(bool cond) noexcept {
