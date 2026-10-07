@@ -45,3 +45,26 @@ compile_test*
 !btree/Cargo.toml
 !btree/src/
 !btree/src/lib.rs
+# Track the committed local `trait_probes_*` parity-test crates (hand-written,
+# not cloned): the differential oracle for the §3.2 trait lowering, one crate
+# per probe family so each flips PASS independently.
+!trait_probes_census/
+!trait_probes_census/Cargo.toml
+!trait_probes_census/src/
+!trait_probes_census/src/lib.rs
+!trait_probes_thin/
+!trait_probes_thin/Cargo.toml
+!trait_probes_thin/src/
+!trait_probes_thin/src/lib.rs
+!trait_probes_defaults/
+!trait_probes_defaults/Cargo.toml
+!trait_probes_defaults/src/
+!trait_probes_defaults/src/lib.rs
+!trait_probes_collapse/
+!trait_probes_collapse/Cargo.toml
+!trait_probes_collapse/src/
+!trait_probes_collapse/src/lib.rs
+!trait_probes_scoping/
+!trait_probes_scoping/Cargo.toml
+!trait_probes_scoping/src/
+!trait_probes_scoping/src/lib.rs
