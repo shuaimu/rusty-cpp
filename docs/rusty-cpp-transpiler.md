@@ -1032,167 +1032,823 @@ Either<R, L> flip(Either<L, R> self) {
 }
 ```
 
-### 3.2 Traits → UFCS Free Functions + Interface Adapters
+### 3.2 Traits → Two Tiers: the C++/Rust Common Subset, and a Namespace Carrier for the Rest
 
-Rust lets a trait *add methods to a type* — through method-call syntax (`x.foo()`),
-concrete impls, **blanket** impls (`impl<T: Iterator> Itertools for T`), and **default**
-method bodies. C++ has no equivalent: a type's member set is fixed at its definition, and
-there is **no UFCS** — `a.foo()` never falls back to `foo(a)`. The trait-lowering design
-works around this by splitting trait usage into two regimes and giving each the C++
-construct that fits:
+> **Status (2026-10-07): ADOPTED — implementation in progress; §3.2.12 tracks what has landed.**
+> Reviewed and adopted 2026-10-07 (design revised 2026-10-04). Until §3.2.12 says otherwise, the
+> shipped transpiler still emits the 2026-06 lane described there.
+> Third revision. 2026-09-23 said "adapters are the design; direct inheritance is a fast path."
+> 2026-09-29 inverted it: **direct inheritance is the design for the subset where Rust and C++
+> genuinely agree — the greatest common divisor, a bijection, idiomatic in both languages (tier 1);
+> everything outside it is a second, one-way tier.** This revision keeps tier 1 unchanged and
+> changes **tier 2's carrier**: the per-impl *body-carrying adapter class* of 09-23/09-29 is retired
+> in favour of what the shipped transpiler already does in outline — a **per-trait namespace of free
+> functions** — made correct by two additions measured on 2026-10-04 (§3.2.15): every impl function
+> takes a per-trait **tag** as its first parameter, and every call goes through a per-method
+> **customization-point object** (`Tr_::m(x)`), so lookup is argument-dependent at the point of
+> instantiation and never frozen. The virtual interface survives as a **thin helper** for `dyn`:
+> pure slots, and one generic forwarder per receiver kind per *trait* (not per impl), each slot one
+> line into the namespace. §3.2.15 is the investigation record (incl. the six carrier probes);
+> §3.2.16 the migration; §3.2.17 the tier-1 contract.
+>
+> This design replaces the earlier Microsoft-Proxy facade design; §4.7, §4.8, §5, §6, §8, §9 and
+> §10.4.4 still carry Proxy remnants and are on the §3.2.16 sweep list.
 
-- **Static dispatch** — `x.foo()` on a concrete or generic receiver; the overwhelming
-  majority of trait usage → **free functions reached through a self-implemented UFCS**,
-  with C++ overload resolution acting as the trait solver.
-- **Dynamic dispatch** — `dyn Trait`, `Box<dyn Trait>`, `&dyn Trait` → an **abstract
-  interface + per-impl adapter** whose vtable slots forward into the *same* static
-  free-function impl.
+Rust lets a trait *add methods to a type* from outside the type's definition — through concrete
+impls, blanket impls, impls on foreign types, and default bodies — and resolves `x.foo()` by which
+traits are in scope. C++ has none of that. But there is a large region where the two languages say
+the same thing in different spelling: a trait whose methods are ordinary receiver methods,
+implemented by a type you define, is *exactly* a C++ abstract class implemented by inheritance — one
+interface, one `override` per method, `&dyn Tr` a reference to the interface. A C++ programmer would
+write that by hand and a Rust programmer would write the trait by hand; neither would recognize the
+other's code as generated. That region is **tier 1**: this design defines it precisely (§3.2.1),
+emits it as that idiomatic C++ plus one named concept per trait (§3.2.2), and states the mapping as
+a contract that is invertible except in two named cells (§3.2.17).
 
-The governing constraint is that the **transpiler stays a lexical, multi-pass, per-file
-translator**: it does name resolution (imports, scopes, `impl`-shape classification) but
-**no type inference and no trait solving**. *Which* impl applies, inherent-vs-trait
-priority, and ambiguity detection are all delegated to clang's overload resolution. The
-line we never cross is "figure out the type of `a`" or "decide which impl wins" — those are
-clang's job, not the transpiler's. (This replaces the earlier Microsoft-Proxy facade design
-and the Proxy-replacing adapter proposal; the adapter machinery survives, re-pointed at the
-static free-function impl, as the *dynamic-dispatch* realization in §3.2.10.)
+Everything Rust's trait system can express that C++'s class system cannot — impls on types you do
+not own, blanket and conditional impls, generic required methods, `Self` in a non-receiver position,
+a subtrait redeclaring a supertrait's name, two instantiations of one generic trait on one type — is
+**tier 2**. Its carrier is the one C++ mechanism that is non-intrusive by construction: a **free
+function taking the receiver as a parameter**, one per impl per method, living in the trait's
+namespace or the receiver's, and found by argument-dependent lookup. Three things make that the
+*trait system* rather than a pile of overloads: a per-trait **tag** type as every impl function's
+first parameter (the ADL anchor and the trait identity, §3.2.2); a per-method **customization-point
+object** every call site spells — `Speak_::speak(x)` — whose body performs the unqualified call
+(§3.2.3); and a per-trait **marker + concept** (`impls_Tr`, `has_Tr`) that is the trait solver
+(§3.2.3). Default bodies are written **once**, as templates in the namespace, and reached from both
+tiers (§3.2.13). `dyn` is a thin interface with pure slots plus one generic forwarder per receiver
+kind per trait (§3.2.10). Tier 2 is Rust → C++ only.
 
-| Rust trait usage | C++ lowering |
-|------------------|--------------|
-| inherent method `impl T { fn m(&self) }` | a **member** `m` on `T` |
-| trait method `impl Tr for T { fn m(&self) }` | a **free function** in a namespace, found by ADL / `using` |
-| blanket `impl<X: B> Tr for X { fn m }` | a **constrained free-function template** (`requires B<X>`) |
-| default method body | a free-function template emitted from the trait's default body |
-| `x.m(args)` (method syntax) | `m(x, args)` via UFCS (member-first), or native `x.m(args)` where `m` is purely inherent |
-| `Tr::m(x, args)` (path syntax) | qualified `Tr_::m(x, args)` — the trait name is copied from the source |
-| `use Tr;` | `using namespace Tr_;` (+ the module `import`) |
-| operator trait (`Add`, `Index`, `Deref`, …) | C++ operator overload (direct, §3.2.9) |
-| associated type `Self::Item` | a type-traits map `TrTraits<Self>::Item` (§3.2.8) |
-| `dyn Tr` / `Box<dyn Tr>` / `&dyn Tr` | interface `Tr` + `TrAdapter<U>` / `TrAdapterRef<U>` (§3.2.10) |
-| marker trait (`Send`, `Sync`, `Sized`) | `static_assert` / concept, no runtime form |
+The governing constraint is unchanged and has a second consequence: the **transpiler stays lexical**
+— name resolution and `impl`-shape classification, no type inference, no trait solving — so **tier
+membership must itself be lexically decidable**. §3.2.1 gives the test and inventories which of its
+inputs the collect pass records today. Which impl applies is still clang's decision: for tier 1 by
+virtual dispatch and base-class tests, for tier 2 by overload resolution over the tag-anchored
+overload set and by the marker.
 
-#### 3.2.1 The model: traits add methods, C++ has no UFCS
+**The question that drove this revision — "`x.speak()` on an `i32`: which namespace?"** Nobody looks
+it up at the call site. Rust has already resolved the call to one trait (from `use`, a bound, or the
+single impl in scope); the emitter *spells* that trait's namespace, `Speak_::speak(x)`. What is
+looked up is the *impl* for `i32`, and that is ADL on `(Speak_::impl_::tag, int32_t)` inside the
+CPO — which finds `impl Speak for i32` wherever it was declared, in any module, before or after the
+caller. The shipped lane's `using namespace Speak_;` + bare `speak(x)` is the shape the probes showed
+to be wrong — the directive leaks into child namespaces, a local named `speak` breaks the call, and a
+qualified call inside a template freezes its overload set across modules (`11000` where rustc gives
+`5550`, §3.2.15) — and it is retired.
 
-The single fact that shapes everything: in C++ `a.foo()` can only find a method declared in
-`a`'s type or its bases, fixed at the type's definition. Anything added from *outside* that
-definition — a trait impl in another file, another crate, or a blanket impl — is unreachable
-by member syntax. The only C++ mechanism that is non-intrusive and works across file/crate
-boundaries is the **free function** (found by ADL or a `using`-brought name). Therefore
-**trait methods are free functions**, and the member-call *syntax* is recovered by a UFCS
-shim we emit ourselves.
+| Rust trait usage | tier | C++ lowering |
+|------------------|:---:|--------------|
+| `trait Tr { fn m(&self); fn n(&mut self); fn k(self); }` | 1 | one `class Tr` with plain names: `virtual R m() const = 0; virtual R n() = 0; virtual R k() && = 0;` (§3.2.17) |
+| `impl Tr for T`, `T` a struct this crate declares, at exactly its own parameters | 1 | `struct T : public Tr { R m() const override; … }` — the type *is* the interface |
+| default that calls only this trait's / supertraits' slots | 1 | a non-pure `virtual` on the interface forwarding to the one namespace body (§3.2.13) |
+| generic default `fn each<F>(&self, f: F) where Self: Sized`, and any default that calls it | 1 | a non-virtual **explicit-object** member on the interface, `template<class F> R each(this auto const& self, F f)`, forwarding to the namespace body — an implementor's override hides it and is reached (§3.2.13) |
+| required method with `where Self: Sized`, or `fn new(..) -> Self`, or `const K` | 1 | a member / `static` / `static constexpr` on each implementor, plus a conjunct of the trait's concept (§3.2.17); not `dyn`-usable in Rust either |
+| `trait Sub: Super` | 1 | `class Sub : public virtual Super` |
+| `trait Tr<A>`, at most one `impl Tr<X> for T` per type | 1 | `template<class A> class Tr`; `struct T : Tr<X>` |
+| `x.m()` when `x`'s *declared* type is lexically a tier-1 implementor of `Tr` | 1 | `x.m()` — a member call, no shim |
+| `Tr::m(&x)` / `<T as Tr>::m(&x)`, same condition | 1 | `x.m()` — the same virtual member call, never `x.Tr::m()` (§3.2.3) |
+| `&dyn Tr` / `&mut dyn Tr` / `Box<dyn Tr>` | 1 | `const Tr&` / `Tr&` / `rusty::Box<Tr>` — an upcast, no forwarder |
+| `fn f<T: Tr>(x: &T)` | 1 | `template<class T> requires has_Tr<T> R f(const T& x)` — the concept, not `derived_from`, because the bound must also admit tier-2 implementors (§3.2.17, lossy cell 2) |
+| `impl Tr for i32` / `String` / `Vec<T>` / a foreign type / a closure / `&T` | 2 | free functions `R m(Tr_::impl_::tag, const int32_t& self_, …)` in `Tr_::impl_` (§3.2.2); `x.m()` → `Tr_::m(x)` (§3.2.3) |
+| `impl Tr for Local` where `(Tr, Local)` fails axis 2 (`impl Tr for W<i32>`, an extra bound, …) | 2 | the same free functions, in `Local`'s declaring namespace (§3.2.5) |
+| blanket / conditional impl | 2 | a constrained function template per method, `template<class T> requires has_B<T> R m(tag, const T& self_)`, plus a constrained partial specialization of the marker (§3.2.2) |
+| two instantiations of one generic trait on one type (`impl Tr<i32> for T` + `impl Tr<u8> for T`) | 2 (that type) | overloads distinguished by a trailing `rusty::tag<A>`; the interface stays tier 1 (§3.2.2) |
+| `impl Tr for &T` beside `impl Tr for T` | 2 | overloads distinguished by a trailing `rusty::self_tag<Self>` (§3.2.2, §3.2.4) |
+| generic *required* method; `Self` in a parameter or nested return without `where Self: Sized`; `-> impl Trait`; `async fn` | 2 | the trait is tier 2: no interface slot for it; a free function (template) in `Tr_::impl_` like any other (§3.2.2, §3.2.10) |
+| a subtrait that redeclares a supertrait's method name | 2 | the subtrait's family uses per-trait slot names `Sub__m` for the redeclared name; the supertrait is untouched (§3.2.1) |
+| one type with a tier-1 impl and a tier-2 impl (or an inherent method) that share a method name | — | legal; the call site's ladder decides by scope with base tests, never by member existence (§3.2.3, §3.2.6) |
+| `x.m()` when the receiver's tier is not lexically known, or it may have a same-named inherent method | 2 | the member-first shim with a CPO arm (§3.2.3) |
+| `&dyn Tr` over a tier-2 implementor | 2 | `TrAdapterRef<U>(u)` — one *generic* forwarder per trait, each slot `Tr_::m(value_)`; `&mut dyn` through a named `TrAdapterRefMut<U>` local (§3.2.10) |
+| `use Tr;` | – | the module `import` only — **no `using namespace`**; the emitter spells `Tr_::` at each call (§3.2.5) |
+| operator traits; associated types; std / prelude traits | – | unchanged: §3.2.9, §3.2.8, and dedicated lowering outside this section |
 
-#### 3.2.2 Static dispatch: inherent → member, trait → free function
+#### 3.2.1 The model: a greatest common divisor, and a second tier for the rest
 
-Classification is purely syntactic, from the `impl` block shape:
+**What "greatest common divisor" means here.** Take the set of things a Rust trait declaration,
+impl, and call site can say; take the set of things a C++ abstract class, derived class, and member
+call can say; intersect them; keep the part where the correspondence is one-to-one in both directions
+*and* lexically recognizable on both sides. That intersection is tier 1. It is not "what happens to
+compile" — a C++ shape that compiles but means something different from the Rust (a base member that
+one override serves for two traits, an inherent method that silently becomes an override) is outside
+it by construction. The correspondence table, with the C++-side grammar a hand-written interface must
+satisfy, is §3.2.17.
 
-- `impl T { fn m … }` (no `for`) → **inherent** → emit `m` as a **member** of `T`.
-- `impl Tr for T { fn m … }` (has `for Tr`) → **trait** → emit `m` as a **free function**.
+**Tier membership is decided on two axes, both lexical, and neither depends on any other crate.**
+
+*Axis 1 — the trait (decides the interface's shape and names).* A trait is tier 1 when:
+- every method has a receiver (`&self`, `&mut self`, `self`) or is a no-receiver associated function;
+- no *required* method is generic over a type parameter (`impl Trait` parameters and `async fn`
+  desugar to one) or returns `impl Trait`;
+- no method mentions `Self` outside its receiver — in a parameter, in the return type, or nested in
+  either (`o: &Self`, `Option<&Self>`, `-> Option<Self>`; rustc's E0038 rule) — **unless the method
+  carries `where Self: Sized`**. A method with `where Self: Sized` is a non-slot in both languages:
+  a default one becomes an explicit-object member of the interface (§3.2.13), a required one a member
+  of each implementor checked by the trait's concept (§3.2.17). A generic *default* must carry
+  `where Self: Sized` (Rust requires it for the trait to stay `dyn`-compatible; E0038 otherwise),
+  and so must every default that calls it;
+- no method name is declared by both the trait and one of its transitive supertraits;
+- every supertrait is itself tier 1.
+Associated types and consts, and generic trait parameters, are allowed (§3.2.8, §3.2.17). A tier-1
+trait's interface has **plain member names**. A trait that fails a test is tier 2 at the trait level:
+no type inherits it directly. Two shapes get special treatment rather than wholesale demotion: a
+subtrait that redeclares a supertrait's name mangles *that name only, in its own family* (`Sub__m`;
+`class Sub : virtual Super` would otherwise fold two Rust methods into one slot — measured, §3.2.15),
+leaving the supertrait's interface untouched; and a trait with `fn new()` / `const K` (without
+`Self: Sized`) is tier 1 but not `dyn`-usable in Rust, so its `dyn` row is vacuous — C++ still
+accepts `const Tr&` for it, a forward-only difference.
+
+*Axis 2 — the impl (decides direct inheritance vs. adapter).* An impl of a tier-1 trait is tier 1 when:
+- the self type, after resolving type aliases within the crate, is a named struct or data-carrying
+  enum **declared in this crate**, and the impl's self type is that type applied to **exactly its own
+  parameter list** — `impl Tr for T` for non-generic `T`, or `impl<X, Y> Tr for W<X, Y>` with each
+  argument one of the impl's own parameters, used once, unbounded beyond the bounds the struct
+  itself declares. A C++ base is a property of the class template, not of one instantiation, so any
+  other shape — a concrete argument (`impl Tr for W<i32>`), a partial one (`W<In<T>>`), a repeated
+  one (`W<T, T>`), an extra bound (`impl<T: B> Tr for W<T>`), a blanket (`impl<T> Tr for T`) — has no
+  base clause (measured: the base lands on the template and `W<&str>` becomes an implementor of the
+  `i32` body, §3.2.15) and is tier 2: free functions keyed on the full self type
+  (`R m(tag, const W<int32_t>& self_)`; `template<class T> R m(tag, const W<In<T>>& self_)`), §3.2.2;
+- the self type is not `repr(C)` / `repr(transparent)` (decision (r));
+- the self type declares no inherent method with the same name as any method of a trait it
+  implements at tier 1 (C++ would silently make the inherent one the override);
+- no two *concrete* tier-1 impls on the type declare the same method name (the type cannot inherit
+  both with plain names); and the type has at most one instantiation of any generic trait (a
+  second instantiation would fold every method that does not mention the differing argument in a
+  parameter position into one slot — ill-formed for a return-only argument, silently one body for
+  an argument-free method; measured, §3.2.15);
+- for every transitive supertrait `Super`, `impl Super for T` is itself a concrete tier-1 impl in this
+  crate. Otherwise `struct T : Sub` with `class Sub : virtual Super` would inherit `Super`'s default
+  body where the supertrait's real impl is an adapter (measured: `1 0 0` where rustc gives `1 999 999`).
+Every other impl of a tier-1 trait — a primitive, a std or dependency type, a reference, slice, tuple,
+array, closure, blanket, or any of the shapes above — is tier 2 at the impl level: free functions in the
+trait's namespace, reached through the trait's CPOs, with the trait's generic forwarder standing in for
+the object under `dyn` (§3.2.10).
+
+**The two axes compose, and the composition is honored at the call site, not by the class.** A
+tier-1 member is a C++ member: visible on the type unconditionally, in every translation unit,
+whatever traits the Rust call site had in scope — and indistinguishable to `requires { r.m(); }` from
+an inherent member. So a type with a tier-1 impl and a tier-2 impl that share a method name is
+*legal* (a crate-local type with `impl Tr1 for T` inherited and `impl Tr2 for T` tier 2 because
+`Tr2` has a generic required method; or, across crates, an orphan-legal downstream `impl B::Tr2 for
+A::T` that `A` never sees) — its calls go through the shim, whose arms test *bases*, not names
+(§3.2.3), and whose ambiguity count uses the trait concepts (§3.2.6). No per-type exclusion evaluated
+in the type's crate can stand in for that rule, because the second impl may live in a crate the
+type's crate never sees. Axis 2's same-name exclusion therefore covers only *concrete* impls the
+pre-pass can enumerate; impls a type acquires through a blanket or conditional impl are never
+enumerated per type (deciding whether one applies is trait solving, §3.2.11) and are handled by the
+call site.
+
+**Why no test depends on another crate.** Axis 1 reads only the trait declaration. Axis 2 reads only
+this crate's impl blocks and type declarations. The one test that *looked* program-wide in an earlier
+draft — "no impl overrides this generic default" — is gone: a generic default is an explicit-object
+member, and a downstream override reaches it by name hiding without the upstream interface changing
+(§3.2.13; measured across a precompiled module boundary, §3.2.15). Consequently a downstream crate
+never changes an upstream emission; a translation may still be whole-program (it always has the
+whole Rust dependency graph, and may use that for optimization), but correctness does not rely on it,
+and a trait exposed to hand-written C++ implementors needs no freezing rule.
+
+**What the boundary costs in coverage.** A census of the local parity-matrix crates (§3.2.16 (p))
+finds roughly **4 of ~288** crate-trait `(trait, impl)` pairs in tier 1. Library crates are made of
+blanket impls, generic required methods (`serialize<S>`), `Self`-taking methods (`PartialEq`-shaped),
+and impls on foreign types; tier 1's coverage there is negligible by construction. Tier 1 is the
+tier of *application* code and of the C++-interop surface — the code a team writes against its own
+types — which is where a bijective, hand-writable mapping pays. The census is the gate metric for
+any widening (§3.2.16 (p)).
+
+**Why the boundary is lexical, and what the collect pass records today.** Every test reads the
+trait declaration, the impl header, or the crate's own type declarations. Inventory (transpiler
+locations in §3.2.16 phase 1): receiver kind — recorded (`trait_method_receiver_kind`); generic /
+`impl Trait` / `async` / `-> Self` / `Self` in parameters / `where Self: Sized` — decided per method
+at emit time in `emit_trait_interface_pattern`, **not** recorded as a trait-level fact, and the
+`Self`-in-parameter and `where Self: Sized` cases are not consulted at all; supertrait lists — read
+from syn at emit time, not stored, absent from the manifest; self type declared here —
+`local_declared_types`, which also contains type aliases (must resolve); self-type arguments vs the
+struct's parameters — not computed (`cpp_inherit` keys on the simple name); blanket / conditional
+presence — not recorded generally; inherent same-name overlap — `inherent_impl_method_names` exists,
+the overlap test does not; two concrete impls sharing a name on one type — no per-type
+implemented-traits map; `repr` — not recorded. The method-name classifier is global
+(`classify_method_names_excluding_traits`, transpile.rs), not per type. Phase 1's pre-pass computes
+all of these; phase 1's manifest carries per trait its tier, its supertraits, the names of its
+non-vtable defaults, and tier-1 traits as owners in `method_owners`, and per dependency type its
+inherent method names — the facts the call-site rules of §3.2.3 and §3.2.6 need on a dependency
+receiver.
+
+**Slot-name convention used in the rest of this section.** Where this section writes a slot as `Tr__m`
+(the §3.2.15 record, and a tier-2 trait's forwarders), read it as *the trait's slot name*: plain `m` for a
+tier-1 trait — the common case, and the only case a hand-written C++ implementor ever sees — and `Tr__m`
+only for a tier-2 trait's redeclared names. Tier-2 *impl functions* never carry it: their identity is the
+tag (§3.2.2), so `m(Sub_::impl_::tag, …)` and `m(Super_::impl_::tag, …)` are distinct without mangling.
+
+#### 3.2.2 Static dispatch: tier 1 is a member call; tier 2 is a free function in the trait's namespace
+
+Classification is syntactic from the `impl` block shape and the §3.2.1 tests:
+
+- `impl T { fn m … }` (no `for`) → **inherent** → a member `m` of `T`. Unchanged.
+- `impl Tr for T` with `(Tr, T)` at **tier 1** → `T` inherits `Tr`; `m` is an `override` on `T`.
+- `impl Tr for T` with `(Tr, T)` at **tier 2** → `m` is a **free function** `m(Tr_::impl_::tag, const T& self_, …)`
+  in the trait's namespace or `T`'s, reached through the CPO `Tr_::m` (below).
+
+**Tier 1.**
 
 ```rust
-impl Foo { fn bar(&self) -> i32 { self.x } }          // inherent
-impl Greet for Foo { fn hello(&self) -> String { … } } // trait
+trait Greet { fn hello(&self) -> String; fn rename(&mut self, s: &str); }
+#[derive(Clone)] struct Foo { x: i32 }
+impl Foo { fn bar(&self) -> i32 { self.x } }
+impl Greet for Foo { fn hello(&self) -> String { … } fn rename(&mut self, s: &str) { … } }
+fn main() { let mut f = Foo { x: 1 }; f.hello(); f.rename("a"); Greet::hello(&f); let g = f.clone(); }
 ```
 ```cpp
-struct Foo { int32_t x; int32_t bar() const { return x; } };   // inherent → member
+class Greet {                                          // the interface: what a C++ author writes
+public:
+    virtual ~Greet() noexcept(false) {}                // noexcept(false): a Rust Drop may unwind (§3.2.17)
+    virtual rusty::String hello() const = 0;
+    virtual void rename(std::string_view s) = 0;
+protected:                                             // C.67: protected + defaulted, NOT deleted — a deleted
+    Greet() = default;                                 //   base copy would delete every implementor's copy/move
+    Greet(const Greet&) = default; Greet& operator=(const Greet&) = default;
+    Greet(Greet&&) = default;      Greet& operator=(Greet&&) = default;
+};
+template<class U> struct impls_Greet : std::false_type {};        // marker primary: emitted for EVERY trait (bounds,
+template<class U> concept has_Greet = impls_Greet<U>::value       //   later tier-2 impls); a tier-1 impl does NOT
+                                    || std::derived_from<U, Greet>;//   specialize it — is_base_of covers it
+namespace Greet_ { /* tag, CPOs, default templates, bridges: tier 2, below */ } // + 3 generic forwarders, likewise
 
-namespace Greet_ {                                         // trait → free function
-    rusty::String hello(const Foo& self) { … }
+struct Foo : public Greet {                            // the impl: inheritance
+    int32_t x;
+    Foo(int32_t x) : x(x) {}                           // a base kills aggregate-init → the emitter writes the ctor
+    Foo(const Foo&) = default; Foo(Foo&&) = default;   // derive(Clone): explicit; the emitter must NOT synthesize
+    Foo& operator=(const Foo&) = default; Foo& operator=(Foo&&) = default;   //   a lone move ctor (it deletes copy)
+    Foo clone() const { return *this; }                // never a designated initializer on a non-aggregate
+    int32_t bar() const { return x; }                  // inherent, unchanged
+    rusty::String hello() const override;              // bodies out-of-line, as any member
+    void rename(std::string_view s) override;
+};
+// main:  f.hello();  f.rename("a");  f.hello();  /* Greet::hello(&f) is the SAME call */  Foo g = f;
+```
+
+There is no shim and no free function *for this impl*; the trait's module still emits the
+marker primary, the concept, the `Greet_` namespace and the generic forwarders, because a bound anywhere (`T:
+Greet`) must admit a later tier-2 impl and the trait's crate cannot know whether one exists
+(§3.2.17). The call is `f.hello()`; path syntax `Greet::hello(&f)` is the *same* member call — Rust's
+`<Foo as Greet>::hello` *is* Foo's override — and the C++ qualified call `f.Greet::hello()` is
+**never** emitted: it suppresses virtual dispatch and runs the base body (a default's, or an undefined
+reference for a pure slot — measured, §3.2.17). The shipped fast path emits this shape for a single
+non-generic trait per type (§3.2.12). Emission details that belong to tier 1 rather than to the type:
+a struct that gains a base is no longer an aggregate, so the emitter writes the fieldwise constructor
+every `Foo{…}` literal needs and never emits a designated initializer for it (the shipped `clone()`
+does); the interface's copy and move are **protected and defaulted, never deleted** (Core Guidelines
+C.67 — a deleted base special member implicitly deletes every implementor's, measured §3.2.17); and
+the emitter must not synthesize a lone move constructor on an implementor, since a user-declared
+move constructor deletes the copy constructor regardless of the base (measured, §3.2.15) — a `Copy`
+or `Clone` implementor gets all four defaulted, a non-`Clone` one gets nothing (and is then
+copyable in C++ where Rust forbids it: a forward-only difference, §3.2.17).
+
+**Tier 2.** For an impl outside axis 2, or any impl of a tier-2 trait, the body is a **free function**
+whose first parameter is the trait's tag and whose second is the receiver, spelled by the Rust
+receiver kind (`const U&`, `U&`, `U`). It is the shipped lane's `Tr_::m(const U& self_)` with the tag
+added and the call protocol changed; nothing inherits anything. Per trait, emitted once in the
+trait's module:
+
+```rust
+trait Speak { fn speak(&self) -> i32; fn bump(&mut self, d: i32); fn consume(self) -> i32;
+              fn twice(&self) -> i32 { self.speak() * 2 } }
+impl Speak for i32 { fn speak(&self) -> i32 { *self } fn bump(&mut self, d: i32) { *self += d; } fn consume(self) -> i32 { self } }
+impl Speak for Foo { … }                                    // Foo: crate-local, tier 1 — unchanged, above
+impl<T: Score> Speak for T { … }                            // blanket
+```
+```cpp
+// ===== trait Speak — in Speak's module, exported =====
+class Speak;                                                                         // the thin dyn helper, defined below
+template<class U> struct impls_Speak : std::false_type {};                          // (5) marker: DEFINED false (§3.2.3)
+template<class U> concept has_Speak = impls_Speak<U>::value || std::derived_from<U, Speak>;   // (6) what every bound emits
+namespace Speak_ {
+    namespace impl_ { struct tag {}; }                     // (1) ADL anchor = trait identity: parameter 0 of EVERY impl function
+    // (2) one customization-point object per method — the ONLY spelling a call site uses. Trailing args (incl. tags) forwarded.
+    inline constexpr struct speak_fn {
+        template<class S, class... R> auto operator()(S&& s, R&&... r) const
+            -> decltype(speak(impl_::tag{}, std::forward<S>(s), std::forward<R>(r)...))   // trailing decltype: SFINAE-friendly
+            { return speak(impl_::tag{}, std::forward<S>(s), std::forward<R>(r)...); }    // UNQUALIFIED: ADL on (tag, S) at instantiation
+    } speak{};
+    inline constexpr struct bump_fn    { /* same shape */ } bump{};
+    inline constexpr struct consume_fn { /* same shape; the receiver arrives as an rvalue */ } consume{};
+    inline constexpr struct twice_fn   { /* same shape */ } twice{};
+    namespace impl_ {
+        // (3) tier-1 bridge: a receiver that INHERITS the interface is reached through its virtual member — one per method
+        template<class S> requires std::derived_from<S, Speak> int32_t speak(tag, const S& s) { return s.speak(); }
+        template<class S> requires std::derived_from<S, Speak> void    bump(tag, S& s, int32_t d) { s.bump(d); }
+        template<class S> requires std::derived_from<S, Speak> int32_t consume(tag, S s) { return std::move(s).consume(); }
+        template<class S> requires std::derived_from<S, Speak> int32_t twice(tag, const S& s) { return s.twice(); }
+        // (4) the default body, written ONCE (§3.2.13); `self.speak()` → the CPO, never a member call
+        template<class S> int32_t default_twice(const S& s) { return Speak_::speak(s) * 2; }
+        template<class S> requires (has_Speak<S> && !std::derived_from<S, Speak>)
+        int32_t twice(tag, const S& s) { return default_twice(s); }                  // reachable for tier-2 receivers only
+    }
 }
-```
+// (7) the thin dyn helper: pure slots; its own default forwards into the namespace body (§3.2.10, §3.2.13)
+class Speak {
+public:
+    virtual ~Speak() noexcept(false) {}
+    virtual int32_t speak() const = 0;
+    virtual void    bump(int32_t d) = 0;
+    virtual int32_t consume() && = 0;
+    virtual int32_t twice() const { return Speak_::impl_::default_twice(*this); }   // tier-1 default: the ONE body, via the bridge (measured: census `describe`)
+protected: /* C.67 protected + defaulted special members, as tier 1 above */
+};
+template<class U> class SpeakAdapterRef final : public Speak {                      // &dyn Speak over a tier-2 U — GENERIC, never specialized
+    const U& value_;
+public:
+    explicit SpeakAdapterRef(const U& u) : value_(u) {}
+    int32_t speak() const override   { return Speak_::speak(value_); }               // every slot: one line into the CPO
+    void    bump(int32_t) override   { rusty::unreachable_via_const_dyn(); }         // stub: const value_ cannot call bump(U&)
+    int32_t consume() && override    { rusty::unreachable_via_const_dyn(); }         // stub: cannot consume through const U&
+    int32_t twice() const override   { return Speak_::twice(value_); }               // U's override if any, else the default template
+};
+template<class U> class SpeakAdapterRefMut final : public Speak { /* U& value_; bump forwards; consume is the stub */ };
+template<class U> class SpeakAdapter       final : public Speak { /* U value_; every slot forwards; consume: Speak_::consume(std::move(value_)) */ };
 
-A **blanket** impl has no single receiver type, so it becomes a *constrained template* in
-the trait namespace:
-
-```cpp
-namespace Itertools_ {
-    template<class T> requires Iterator<T>
-    auto chunks(T self, std::size_t n) { return IntoChunks<T>{std::move(self), n}; }  // default body
+// ===== impl Speak for i32 — in the impl-emitting module (here Speak's own: E0117, §3.2.13) =====
+namespace Speak_::impl_ {
+    int32_t speak(tag, const int32_t& self_);                  // phase 1: declarations (Rust allows any order; §3.2.3)
+    void    bump(tag, int32_t& self_, int32_t d);
+    int32_t consume(tag, int32_t self_);
 }
+template<> struct impls_Speak<int32_t> : std::true_type {};
+// ===== impl<T: Score> Speak for T — a blanket: constrained function templates + a constrained partial marker =====
+namespace Speak_::impl_ {
+    template<class T> requires has_Score<T> int32_t speak(tag, const T& self_);
+    template<class T> requires has_Score<T> void    bump(tag, T& self_, int32_t d);
+    template<class T> requires has_Score<T> int32_t consume(tag, T self_);
+}
+template<class T> requires has_Score<T> struct impls_Speak<T> : std::true_type {};
+// ===== phase 2: bodies, out of line =====
+namespace Speak_::impl_ {
+    int32_t speak(tag, const int32_t& self_) { return self_; }
+    void    bump(tag, int32_t& self_, int32_t d) { self_ += d; }
+    int32_t consume(tag, int32_t self_) { return self_; }
+    template<class T> requires has_Score<T> int32_t speak(tag, const T& self_) { return Score_::score(self_); }
+    /* … */
+}
+// call sites (§3.2.3):  x.speak() → Speak_::speak(x);   x.bump(1) → Speak_::bump(x, 1);   x.consume() → Speak_::consume(x) (i32 is Copy)
+//   Speak::twice(&x) → Speak_::twice(x);   f.speak() with f: Foo (tier 1) → f.speak();   Speak_::speak(f) is also correct (bridge)
 ```
 
-#### 3.2.3 Self-implemented UFCS (member-first dispatch)
+**Declaration order inside the trait's module** is fixed by the dependencies in that listing: the interface's
+forward declaration → the marker primary → the concept → the `Tr_` namespace (tag, CPOs, bridges, default
+templates — the constrained default overload names `has_Tr`) → the interface class → the three forwarders.
+(The census probe spelled `has_Shape` inside `Shape_` through the CPOs instead; equivalent for a trait with
+non-generic required methods, and the marker form is the one this design mandates — rule 5.)
 
-C++ has no UFCS, so we implement Cpp2-style member-first dispatch ourselves. A call
-`x.m(args)` lowers in one of three shapes, chosen by a **global, type-free classification**
-of the method *name* `m` built during the cross-file scan (is `m` used as an inherent name,
-a trait name, or both?):
+**Seven rules, each the fix for a measured failure (§3.2.15, 2026-10-04 probes).** They are emitter invariants. Violating 1, 2 or 4 is loud (a redefinition, an unmatched call, a hard
+error in a concept); violating 3, 6 or 7, or misordering a *partial* marker under 5, is **silent** — a
+frozen overload set, an inherent shadow, or the `T` impl where Rust's probe lands on `&T` — which is the
+price of this carrier, and why §3.2.16 phase 2 turns the six probes into oracle-checked matrix targets
+before any crate flips.
 
-- `m` is **purely inherent** → native `x.m(args)` (clean, no shim).
-- `m` is **purely a trait method** → `m(x, args)` (free call; ADL / `using` finds it).
-- `m` is **both** (inherent on some type, trait on another) and the receiver type is not
-  statically known → the **UFCS shim**:
+1. **`Tr_` holds only the CPO objects; everything else — impl functions, default templates, bridges —
+   lives in `Tr_::impl_`.** A method name written unqualified *inside* `Tr_` finds the CPO variable
+   `Tr_::speak` by ordinary lookup, and a found variable *suppresses* ADL for that call; a default body
+   or concept placed in `Tr_` would then never see an impl (measured). The two namespaces are not a
+   style choice.
+2. **Every impl function takes `impl_::tag` as parameter 0.** The tag gives the call an associated
+   namespace even when the receiver has none — *a fundamental type has no associated namespace*, so
+   without it `hello(self_)` on `i32` is `call to function 'hello' that is neither visible in the
+   template definition nor found by argument-dependent lookup` — it keeps two traits' same-named methods
+   on one type apart (`redefinition` without it, H3), and it keeps a downstream trait's `m` on the same
+   type from making the call ambiguous (H13: `ambiguous` where rustc prints `3005`; fixed by the tag).
+   It is the trait's identity in the overload set.
+3. **Every call site spells the CPO, qualified: `Tr_::m(x, …)`.** The qualified name is a *variable*,
+   immune to a local named `m` (a bare call with `int32_t m` in scope is `called object type 'int32_t'
+   is not a function`, H2) and to inner-scope hiding; the CPO's *body* makes the unqualified call, from
+   inside `Tr_`, where ADL runs at the point of instantiation. This is why a generic caller or a default
+   body compiled in module A reaches an impl added in module B: a *qualified* call to a function
+   template in a template sees only the overloads declared before it (`qlookup` prints `1`; a
+   supertrait-only default gives `sonly=11000` where rustc gives `5550`, silently), the CPO's
+   unqualified call does not.
+4. **The CPO is SFINAE-friendly** — trailing `decltype` on the call, no body-only failure — so a ladder's
+   `requires` and a concept conjunct can test it without a hard error.
+5. **The predicate is the defined-false marker `impls_Tr`, and the concept is `has_Tr = marker ∨ base`**
+   (§3.2.3), as on 09-29. A concept spelled only through the CPOs (`requires { Tr_::speak(c); }`) is not
+   a substitute: an all-default trait has no required method to test, a tier-2 trait with a *generic*
+   required method has no testable call, and a completeness predicate memoizes silently where the
+   defined marker is loud on misordering (§3.2.3). The marker is Fix A's successor (§3.2.13).
+6. **Default bodies live in the namespace, once, constrained to tier-2 receivers, and call the CPO.**
+   `self.m()` inside a default lowers to `Tr_::m(self_)` — never to a member call and never to the
+   member-first shim. The shipped lane's `self_.hello()` resolves to an *inherent* `hello` where Rust's
+   default body sees only the trait's (`2002` vs `2`); the CPO sees only trait impls. A concrete impl
+   that overrides the default is a **non-template** overload (or a more-constrained template), which
+   overload resolution prefers over the default template — the shipped tiebreak, un-retired (§3.2.4,
+   §3.2.13).
+7. **Generic traits: a trailing, defaulted `rusty::tag<A…>`; the `&T`/`T` collapse: a trailing, defaulted
+   `rusty::self_tag<Self>`** (both new one-line `include/rusty` helpers). For `impl Tr<i32> for T` +
+   `impl Tr<u8> for T`, every impl function gets `rusty::tag<int32_t> = {}` / `rusty::tag<uint8_t> = {}`
+   after its Rust parameters. The emitter passes the tag when `A` is lexically recoverable — a bound, a
+   path (`<T as Tr<u8>>::m`), a `let` annotation, the parameter type of the callee the result flows
+   into — and **omits it otherwise**, letting overload resolution on the Rust arguments decide:
+   `t.m(av)` with `av: u8` from a function return is rustc `304`, and the free-function overload set
+   gives `304` with no emitter knowledge. (The 09-29 text "method syntax on a generic trait is emitted
+   only when the trait arguments are lexically recoverable; otherwise Rust requires path syntax" was
+   wrong — Rust infers `A` from the argument there, and the adapter key as written rejected a program
+   rustc accepts.) When neither the lexical context nor an argument determines `A`, Rust itself demands
+   an annotation (E0283), so no third case exists. `impl Tr for T` and `impl Tr for &T` are `m(tag,
+   const T& self_, rusty::self_tag<T> = {})` and `m(tag, const T& self_, rusty::self_tag<const T&>)`:
+   the plain impl is the default, and the emitter passes `self_tag<const T&>` exactly where Rust's
+   probe lands on the `&T` impl — a receiver of Rust reference depth ≥ 2 (`(&r).m()`; `rr.m()` with `rr:
+   &&T`), `<&T as Tr>::m`, `Box::new(r)` → `Box<&T>`, and a type-parameter receiver bound by `X = &T`
+   (`via_bound<const T&>(r)`; deduction would collapse the reference). Measured identical to rustc on
+   9/9 and 7/7 lines (§3.2.15). Both tags compose, one trailing parameter each; the dyn forwarders
+   carry them as template parameters (`TrAdapterRef<A…, U>`, `TrAdapterRef<const T&>`) and pass them in
+   every slot.
+
+**Where an impl's functions are declared** (§3.2.5 has the module rules): in the **self type's
+declaring namespace** when the self type is declared by the emitting crate — ADL on the receiver finds
+them there, and the impl body's relative names (`Helper::new_()`, `private_::unit_only`) resolve *in
+place* with zero relocation, which retires Fix B for these impls (132 of 249 serde_core impls, 69 of 72
+serde; measured, §3.2.15); in **`Tr_::impl_`** — the tag's namespace, which ADL always searches — when
+the self type is a primitive, a reference, a slice, a tuple, an array, a closure, a std or dependency
+type, or a blanket. A crate must **never** add to a namespace another crate owns: two crates each
+declaring `a::ext(const a::Bar&)` is `declaration 'ext' attached to named module 't' cannot be attached
+to other modules` in any importer of both (H1). The shipped `rusty_ext` lane (local trait × foreign self
+type) is this second rule under another name and folds into it (§3.2.14).
+
+**Emission order.** Within a TU the shipped two-pass shape stays: **(1)** every impl's function
+*declarations* — including blanket templates — before any default template and before any call;
+**(2)** all bodies after. The tag makes textual order irrelevant *across* module boundaries (ADL at the
+point of instantiation sees every exported overload the importing TU can reach), but inside one TU a
+default template instantiated before a later-declared non-template override would bind the default —
+the same point-of-instantiation subtlety as the 09-29 marker rule, resolved the same way: by order,
+not by hope. The forward-declaration pass the emitter already performs is that order.
+
+**Non-vtable members** — generic required methods (`fn serialize<S>(&self, s: S)`), `-> Self` methods,
+no-receiver associated functions (`fn new() -> Self`), associated consts — are free functions,
+function templates and `inline constexpr` variables in `Tr_::impl_` like any other method, reached by
+their CPOs (`Serialize_::serialize(x, s)`) or, for a no-receiver item on a type parameter, through
+`TrTraits<T>` (§3.2.8: `TrTraits<T>::new_()`, `TrTraits<T>::K`). A generic required method is a function
+template in the overload set — the one shape no vtable can carry — and needs no interface slot. This is
+the home the 09-23 design gave them as adapter member templates, and it is a phase-2 gate: the shipped
+emitter skips all three shapes today, which is why serde's `Serialize` and `Deserialize` get no
+interface at all (§3.2.15).
+
+> **Retired (2026-10-04):** the per-impl body-carrying adapter specialization `template<> class
+> TrAdapterRef<U> final : Tr { const U& value_; … }` with three flavours, the delegation table between
+> flavours, the two-phase adapter rule, and exact receiver keying through `remove_cvref_t` — the 09-23 /
+> 09-29 tier-2 mechanism. §3.2.15 records why: it matched rustc on every measured cell, as the namespace
+> carrier does, at 28–34 emitted lines per impl against 6–8, five call-site shapes against two, and it
+> rejected the arg-inferred generic-trait call. What it had that the namespace carrier must re-earn —
+> native cross-module defaults through the vtable, and a loud marker — is kept as the CPO protocol
+> (rule 3) and the marker (rule 5). **Retired (2026-09-29, still):** the injected `using namespace
+> Tr_;` (rule 3 replaces it), the second emission of each impl body as a struct member, and `rusty_ext`
+> as a separate lane.
+
+#### 3.2.3 Self-implemented UFCS (member-first dispatch) — tier 2, and the tier boundary at a call site
+
+**Tier 1 has no shim** when the receiver's *declared* type is lexically known and `(Tr, T)` is tier 1:
+`x.m()` is the member call, `Tr::m(&x)` and `<T as Tr>::m(&x)` are the same member call, and a call
+through `&dyn Tr` is the member call on the reference. The declared type is recovered from the
+parameter list, a `let` annotation, the declared type of the initializer chain, or `Self` in impl
+bodies (§3.2.6). The one exception to "path syntax is `x.m()`": an explicit trait argument on a generic
+trait, `<T as Tr<u8>>::m(&x, a)`, lowers to `static_cast<const Tr<uint8_t>&>(x).m(a)` — a base-reference
+cast with virtual dispatch intact, needed only for a type that inherits more than one instantiation,
+which axis 2 already excludes; it is kept for the tier-2 route.
+
+**Tier 2 is a qualified call to the trait's CPO** when the receiver's declared type is lexically known and
+`(Tr, DeclaredType)` is tier 2, or when the receiver is a type parameter whose bound (elaborated through
+supertraits) names exactly one owner of `m` — a type parameter has no inherent candidates:
 
 ```cpp
-// one macro/template per method name `m`, member-first:
-#define RUSTY_UFCS_m(recv, ...) \
-  ([&](auto&& r) -> decltype(auto) {                              \
-    if constexpr (requires { r.m(__VA_ARGS__); }) return r.m(__VA_ARGS__); /* inherent member */ \
-    else return m(static_cast<decltype(r)>(r), ##__VA_ARGS__);            /* trait free fn   */ \
-  })(recv)
+Tr_::m(x, args)                 // fn m(&self, …)       — x an lvalue; the impl function takes const U&
+Tr_::n(x, args)                 // fn n(&mut self, …)   — x a mutable lvalue; the impl function takes U&
+Tr_::k(std::move(x), args)      // fn k(self, …)        — a move, or a copy `Tr_::k(U(x), …)` for a Copy self type (decision (s))
+Tr_::m(x, args, rusty::tag<A>{})          // generic trait, A lexically recoverable (§3.2.2 rule 7); omitted otherwise
+Tr_::m(x, rusty::self_tag<const T&>{})    // the &T impl, where Rust's probe lands on it (§3.2.2 rule 7)
 ```
 
-The `requires`-member branch is tried first, which reproduces Rust's **inherent shadows
-trait** without any type inference. Crucially, the shim is confined to the *both* case — the
-common inherent and trait calls stay as native `x.m()` / `m(x)`, so the output reads like
-ordinary C++, not a wall of wrappers.
+Which of the three receiver spellings applies is a property of the method *name within the trait*, read
+from the trait declaration or the manifest — no type inference. Path syntax `Tr::m(&x)` and `<U as
+Tr>::m(&x)` on a tier-2 pair are the same CPO call. There is no flavour decision, no adapter, no
+specialization to name: the CPO's overload set contains every impl's functions and the bridge, and
+clang's overload resolution on the receiver's type picks one — or reports `no matching function for call
+to object of type 'Tr_::m_fn'`, which is Rust's "the trait bound is not satisfied".
 
-#### 3.2.4 Method-resolution priority (inherent ▷ concrete ▷ blanket)
+**The shim is emitted otherwise** — the receiver's declared type is not recoverable, or it is recoverable
+and has a same-named inherent member that Rust would probe first. It is a generic lambda applied to the
+receiver, and its arms are ordered as Rust's probe is — own type before deref, inherent before trait at
+each step:
 
-When the receiver type *is* known and a name is both inherent and a trait method, priority
-comes from C++ overload resolution for free, by emitting the two kinds with different
-template-ness:
+```cpp
+([&](auto&& r) -> decltype(auto) {
+    using S = std::remove_cvref_t<decltype(r)>;
+    // 1 inherent, own type — a member that is NOT a tier-1 slot of ANY known owner of `m`, in scope or not
+    if constexpr (requires { r.m(args); } && !(std::is_base_of_v<Tr1, S> || std::is_base_of_v<Tr2, S> /* … */))
+        return r.m(args);
+    else if constexpr (has_Tr<S>)                       return Tr_::m(r, args);   // 2 the trait: tier 1 via the bridge, tier 2 via the impl function
+    /* 3–4: the same two tests on deref(r); continue down the deref chain (rusty::deref_call); final arm static_assert(false) */
+})(x)
+```
 
-- **inherent** → a **non-template** free function (or member),
-- **concrete trait impl** → a **constrained template** (`requires same_as<X, Foo>`),
-- **blanket trait impl** → a **less-constrained template** (`requires Iterator<X>`).
+Two shapes, then: the bare CPO call, and this ladder. (The 09-29 ladder had five arms — inherent,
+tier-1 base, tier-2 adapter, and their deref repeats — because tier-1 and tier-2 receivers were reached
+by different spellings; the bridge in `Tr_::impl_` makes `Tr_::m(r)` correct for both.) **Caveat for
+review:** in every 2026-10-04 probe the inherent-vs-trait decision was *hand-resolved* — `w.m()` was
+written as the member call where the inherent `m` exists and as `Tr_::m(w)` where it does not; no probe
+emitted this ladder. Its arms are the 09-29 arms with the adapter arm replaced, and that replacement is
+measured (the bridge: `Shape_::describe(sq)` ≡ `sq.describe()`, census probe), but the ladder as a whole
+is unmeasured in the namespace form (§3.2.15).
 
-C++ prefers a non-template over a template (inherent ▷ trait), and a more-constrained
-template over a less-constrained one (concrete ▷ blanket) — exactly Rust's order, derived
-entirely by the compiler. The *same* tiebreak gives trait **default methods** override
-semantics for free (§3.2.13): the default is a template, an overriding impl is a non-template,
-and the non-template wins.
+**Under plain names, `requires { r.m(); }` no longer means "inherent."** It is satisfied equally by an
+inherent `m`, a tier-1 override of `Tr::m`, and a tier-1 override of some *other* trait's `m`. Three
+rules follow, and every ladder in §3.2.4–§3.2.6 is read with them. *Arm 1 tests inherent, not any
+member:* it carries the negation over every tier-1 interface **known to the crate** — its own
+declarations and every dependency's manifest — that declares `m`, whether or not that trait is in scope
+at this call site. Without it, a cross-crate `impl B::Tr2 for A::T` with only `Tr2` in scope runs
+`Tr1`'s body (measured: C++ `1`, rustc `2`), and with both in scope the guard never fires (C++ `1`,
+rustc E0034). The negation never conflicts with inherent-shadows-trait, because axis 2 excludes a type
+that has both an inherent `m` and a tier-1 base declaring `m`. For a lexically known concrete receiver
+the arm is emitted only when its impl blocks declare an inherent `m`; for a type-parameter receiver the
+arm does not exist at all (Rust's probe on a type parameter has no inherent candidates). *A tier-1
+candidate is a base test,* `std::is_base_of_v<Tr, S>` — true for an implementor and for a `dyn`
+receiver, false for an axis-2-excluded type — and under the CPO it is folded into `has_Tr` (base ∨
+marker): the bridge overload does the member call. *Counts and predicates over impls use the concept
+`has_Tr`, never the marker alone:* a tier-1 impl, and a hand-written implementor under §3.2.17, never
+specializes `impls_Tr`.
 
-**The one subtlety to get right:** the non-template tiebreaker only fires when the candidate
-conversions are *equally good*. If the trait template takes a forwarding ref `T&&` while the
-inherent takes `const Foo&`, the template can win on a *better* conversion for an lvalue,
-silently inverting the priority. Therefore trait-method receivers are emitted **matching the
-Rust `self` kind exactly** (`Self`, `const Self&`, `Self&`), never as greedy forwarding
-refs, so the conversions tie and the non-template tiebreaker decides.
+**Body kind decides the receiver spelling inside trait code.** Inside a **default** body, `self.m()` is
+the CPO call `Tr_::m(self_)` — the default sees only trait impls, as Rust's does (`describe = 2` with an
+inherent `hello = 2002` present; the shipped lane gives `2002`). Inside an **impl** body, `self.m()` is
+the ordinary lowering above — member-first where an inherent `m` exists, because Rust's probe in an impl
+body is the same as anywhere else (`W<i32>`'s override of `twice` calling `self.m()` reaches the inherent
+`m`: `6006`, while the default `ssum` sees the trait's `m`: `1111`; both = rustc, §3.2.15). The emitter
+knows which kind of body it is emitting; this is a new emitter fact.
 
-#### 3.2.5 Where trait free functions live, and `use` → `using`
+**The trait solver.** Each trait — tier 1 or 2 — gets, in its module:
 
-- **Concrete-impl** methods live in the **receiver type's namespace** → found by ADL on the
-  argument, with *no* `using` needed.
-- **Blanket-impl** methods have no receiver-type home, so they live in the **trait's
-  namespace** and are brought into scope by translating `use Tr;` → `using namespace
-  Tr_;` (a lexical, per-import emission — independent of any call site). A tag
-  (`tag_invoke`) is the alternative that makes even blanket methods ADL-reachable via the
-  tag's namespace; the `using` form is preferred for readability.
+```cpp
+template <class U> struct impls_Tr : std::false_type {};                            // DEFINED primary (marker)
+template <class U> concept has_Tr = impls_Tr<U>::value || std::derived_from<U, Tr>;   // NAMED concept
+```
 
-The transpiler never decides which trait a bare `x.foo()` belongs to. It emits `foo(x)`,
-and the `using` directives (translated from the file's `use`/bound/prelude/module-scope) put
-the right candidates in view; clang resolves. Valid Rust guarantees the trait is in scope at
-the call site, so the needed `using` is always derivable from that file. A coarse fallback —
-`using namespace` every trait namespace globally — works except for the rare "two traits,
-same method name, same type, one out of scope," which is tightened to a scoped `using` only
-where clang reports a clash.
+- The *predicate* is the defined-false marker (for tier-2 impls) or the base test (for tier-1 impls),
+  because a completeness test written any other way **memoizes silently**: evaluated before the
+  specialization it yields false and every later evaluation in the TU stays false, with no diagnostic
+  (measured, §3.2.15). A defined primary instantiated before its **explicit** specialization is instead a
+  loud `explicit specialization after instantiation` — for a concrete impl the same slip is a compile
+  error. A misordered *partial* specialization (a blanket impl) is *not* diagnosed even with a defined
+  primary; the emission-order rule of §3.2.2 is the correctness guarantee for both.
+- `has_Tr` is a **named concept**: an inline `requires { … }` outside a templated entity is a hard error,
+  not a soft false; blanket subsumption (§3.2.4) exists only between concept-ids; and it is what every
+  bound emits (§3.2.17). Two blanket partials that neither subsumes make it read false rather than error
+  — valid Rust never produces that (E0119).
+- A concept through the CPOs (`requires(const U& c) { Tr_::m(c); }`) is admissible *as a conjunct* for
+  required methods with a non-generic signature and is what the census probe used; it is not the
+  predicate (§3.2.2 rule 5; decision (y)).
+
+**Cost.** Byte-identical assembly to the 09-29 adapter route and to a direct free-function call at `-O1`
+and above on clang 22 (`cvtsi2sdl (%rdi),%xmm0; mulsd %xmm0,%xmm0; retq` for `Shape_::area(i32)` under
+all three; §3.2.15); the CPO object is an empty `constexpr` struct and the tag an empty class, neither
+odr-used with linkage at `-O1+`; a dyn forwarder carries a vtable only when bound through the interface.
+
+**Emission order is load-bearing — diagnosed for concrete impls, silent for blanket impls.** Every
+`impls_Tr<U>` specialization must precede every evaluation of `impls_Tr<U>::value` in its TU, and every
+impl function's *declaration* must precede the first default template (§3.2.2); the forward-declaration
+pass guarantees both. There is no "instantiate later" escape: a generic lambda's `operator()` is
+instantiated by the end of the *enclosing function*, not the TU (measured, §3.2.15), so order must be
+textual. Tier 1 has no specialization to order — a base class is complete when the derived class is
+declared, and the interface must simply precede its implementors, which the shipped emitter does not
+guarantee for a type declared before its trait (§3.2.16 phase 0).
+
+#### 3.2.4 Method-resolution priority (inherent ▷ trait; concrete ▷ blanket)
+
+*Tier 1:* inherent ▷ trait is C++'s own rule — a member declared on the derived type hides the base's
+— and the §3.2.1 exclusion of same-*name* inherent/trait overlap (name, not signature: a different
+signature hides the whole base overload set and turns a valid Rust call into "too few arguments" or an
+abstract implementor) is what keeps hiding from becoming silent overriding. *Tier 2:* overload
+resolution's own tiebreaks, below, read with §3.2.3's rule that predicates use `has_Tr`.
+
+
+**Tier 2 — priority is overload resolution's own, plus one guard.**
+
+- **inherent ▷ trait** — arm 1 of the shim, lexical, member-first (§3.2.3); never visible to the CPO,
+  whose overload set contains trait impls only. (This is exactly why default bodies call the CPO:
+  §3.2.2 rule 6.)
+- **concrete ▷ blanket**, and **concrete override ▷ default** — the two C++ rules the shipped lane already
+  relies on and this revision *un-retires*: a **non-template** function beats a function template on an
+  otherwise equal match ([over.match.best]), and among templates the **more constrained** wins by
+  subsumption of concept-ids. `describe(tag, const Bar&)` beats `template<class S> describe(tag, const
+  S&)`; `template<class T> requires IntoF64Copy<T> each(tag, const Wrapper<T>&, F)` beats the default
+  `each` template by being more specialized. Stable Rust never *needs* the second rule for impl
+  selection: a concrete impl overlapping a blanket, or two nesting blankets, is E0119, so for valid input
+  at most one impl function is viable — the rule's real job is **override ▷ default** (§3.2.13).
+- **The marker mirrors it:** a concrete impl is `template<> struct impls_Tr<Foo> : true_type`, a
+  blanket a constrained partial specialization; `has_Tr` is one concept either way.
+
+**Receiver keying is by overload resolution, with the tags where C++ would collapse.** The receiver
+arrives as `const U&`, `U&` or `U` and the impl functions are overloaded on it. Two places where a C++
+parameter type cannot carry a Rust distinction get an explicit key: `impl Tr<i32> for T` beside
+`impl Tr<u8> for T` → trailing `rusty::tag<A>`; `impl Tr for T` beside `impl Tr for &T` → trailing
+`rusty::self_tag<Self>` (§3.2.2 rule 7). Both are defaulted on the common case, so the plain call stays
+`Tr_::m(x)`. This replaces the 09-29 exact keying (`remove_cvref_t<decltype(x)>` selecting a
+specialization), and it re-admits what exact keying excluded: **implicit conversions on the receiver**.
+Derived-to-base and user-defined conversions have no Rust counterpart — a C++ caller can reach
+`m(tag, const Base&)` with a `Derived`; valid Rust never emits that call, so it is a forward-only
+acceptance, not a silent-wrong on valid input. One conversion is wanted: it is the free-function lane's
+accidental implementation of Rust's **autoderef / unsize** probe step. For an impl whose self type is a
+view (`impl Tr for [T]`, `str`, `&[T]`, `&str`), a call on a `Vec<T>`, `String`, `[T; N]` or
+string-literal receiver reaches `m(tag, std::span<const T>)` / `m(tag, std::string_view)` through span's
+range constructor or `String`'s `string_view` conversion — valid Rust (`Vec<T>: Deref<Target=[T]>`,
+`String: Deref<Target=str>`). A concrete `impl Tr for Vec<u8>` beside `impl Tr for [u8]` still wins: an
+exact match beats a conversion, which is rustc's probe order. View-typed impl functions take the view by
+value. §3.2.16 (g).
+
+> **Retired (2026-10-04):** explicit-specialization ordering as the priority mechanism and the
+> `TrAdapterRef<U>` exact-keying rule, with the 09-23 view-adapter constrained partial specialization.
+> **Un-retired:** the non-template-▷-template tiebreak on `Tr_::impl_::m` overloads, and the rule that
+> trait receivers are emitted **matching the Rust `self` kind exactly, never as forwarding references**
+> — a forwarding-reference impl function would beat a `const Foo&` non-template on a "better" conversion
+> and break the override tiebreak.
+
+#### 3.2.5 Where the namespace, the impl functions and the forwarders live, and `use` → `import`
+
+*Tier 1:* the interface, the marker primary, the concept, the `Tr_` namespace and the generic forwarders live
+in the trait's module, exported (for every trait, since a downstream crate may bound on it or implement
+it at tier 2); a directly-inheriting struct lives where it is declared and imports the trait's module;
+`use Tr;` is that import and nothing else. A tier-1 impl is a class definition, not a specialization,
+and has no reachability obligation beyond an ordinary base class — but a non-`pub` trait's interface
+is today wrapped in an anonymous namespace (C21), and a `pub` implementor would then expose a TU-local
+base; the wrap must apply only when the trait *and every implementor* are non-`pub` (§3.2.16 phase 0).
+The cross-module discussion below concerns tier-2 impl functions and marker specializations only.
+
+
+**Tier 2.**
+
+- The **`Tr_` namespace** — `impl_::tag`, the CPOs, the default templates, the tier-1 bridges — the
+  **marker primary**, the **concept**, the **thin interface** and its **three generic forwarders** live in
+  the **trait's module**, exported. Nothing in it is per impl.
+- Each impl's **functions** live where §3.2.2 puts them — the self type's declaring namespace for a type
+  this crate declares, `Tr_::impl_` otherwise — in the **impl-emitting crate's module**, exported; by the
+  orphan rule that is the trait's crate, the self type's crate, or (for a generic trait) the crate owning
+  a *trait argument*: `impl From<Local> for Vec<u8>` is legal and lives with `Local`, in `From_::impl_`
+  (a foreign self type), reopened from `Local`'s module. Reopening a namespace from another module is
+  ordinary C++; what H1 forbids is two modules declaring the *same* function.
+- Each impl's **marker specialization** lives in the same module, at **global scope** — an explicit
+  specialization must be declared in the primary's namespace ([temp.expl.spec]/3); under §2.5's per-crate
+  namespace wrap it is emitted outside the wrap.
+- A **nested-module impl on a foreign self type** keeps the shipped Fix B shape (§3.2.14): its functions
+  are emitted in a per-module helper namespace where the body's relative names resolve, and bridged into
+  `Tr_::impl_` with a using-declaration re-emitted after each impl block — 4 lines per impl, against the
+  09-29 adapter bridge's 8 per impl plus 3 per trait. A nested-module impl on a *local* self type needs
+  no bridge at all.
+- `use Tr;` translates to the module `import`. **There is no `using namespace`.** Every call spells
+  `Tr_::m` (§3.2.3).
+
+**Cross-module explicit specialization is conforming.** `impl serde::Serialize for MyType` puts
+`template<> struct impls_Serialize<MyType>` in *my* module while the primary is in serde's, and its impl
+functions in `MyType`'s namespace.
+[temp.expl.spec]/3 restricts only the scope; /4 requires the primary's *declaration* to be
+reachable, which `import` provides; /7 requires the specialization before its first use in each
+TU; [module.reach]/3 governs reachability. Verified on clang 22.1.8 named modules (§3.2.15). The
+one obligation the emitter carries: **the specialization must be reachable from every TU that
+names it or tests its marker** — a TU that imports the trait's module but not the impl's reads
+`impls_Tr<U>` false. That divergence is ill-formed NDR and *not* diagnosed by modules (what they
+diagnose is one class defined with different bases in two units — a different hazard). It is
+inert here for two reasons, and the load-bearing one is Rust's own coherence rule: a TU that cannot
+reach the impl cannot compile a call on that receiver — it hits §3.2.6's `static_assert`, Rust's
+"impl not visible without its crate" error — and coherence guarantees at most one impl of `Tr` for
+`U` in a program, so every TU that *does* compile the ladder took the same arm. Note what does
+**not** guard it: a ladder inside an inline or template function *is* COMDAT-merged across TUs — a
+closure type per call site does not prevent that (reviewer probe) — so the argument must rest on
+coherence, never on closure uniqueness. `false_type::value` is never ODR-used with linkage. A
+direct CPO call has no such softness: a receiver with no reachable impl function is a loud `no matching
+function` in every TU. **Two
+invariants follow and must hold in any implementation:** the marker is never ODR-used, and no
+emitter path may bypass the `static_assert` on a receiver whose impl is unreachable.
+
+**Two emission rules follow from [temp.expl.spec]/7.** *(1) Interface units only.* A specialization
+in a module *implementation* unit is unreachable from importers: a direct use fails loudly, but the
+marker reads **silently false** for every importer while the implementation unit itself sees the impl
+(reviewer probe D2: `via_iu=7000 has=0`). Impl functions, marker and `TrTraits` specializations are emitted
+only into module interface units. *(2) Reachability follows the import graph, not `export`.* An
+interface unit is reachable even when only transitively imported through a non-exported `import`
+([module.reach]/1); `export` on the specialization is irrelevant ([module.reach]/3), and `pub use` →
+`export import` is a *visibility* rule for the type's name, not a reachability rule. The obligation is
+met whenever the consumer's module graph includes the impl-emitting crate — which Rust's dependency
+graph guarantees for any crate that uses the impl. Both compilers agree on the shape (clang 22.1.8,
+gcc 14.2) and mangle the specialization as owned by the primary's module. One caveat for phase 2: the
+*shipped* `<Tr>Traits` primary is currently **defined** (`emit_items.rs`, a nested-typedef fallback
+for foreign traits), where §3.2.3/§3.2.8 assume declared-never-defined — decide which.
+
+**Scope-sensitivity moves carrier — to the emitter's spelling.** The shipped lane models "the trait is in
+scope" as namespace visibility: `using namespace Tr_;` ⟺ `use Tr;` — and in practice injects the
+directive for every trait, at global scope, regardless of `use` (§3.2.15). Measured against Rust's rule
+that is wrong in three independent ways: a namespace-scope directive flows into child namespaces and
+reopened definitions where Rust's `use` is not inherited by child modules (parent `use A` + child `use B`:
+`call to 'foo' is ambiguous` at namespace scope, correct `child=2 parent=1` only with the directive at
+function-body scope); a directive is defeated by inner-scope hiding where a using-*declaration* is not;
+and a local variable named like the method breaks the bare call (H2). Under this design the trait's
+identity is **spelled at every call** — `Tr_::m(x)` — from the same `use` / prelude / bound information,
+and a multi-owner name becomes §3.2.6's enumerated, guarded ladder. There is nothing to inject and no
+scope for it to leak from. Identical information, a carrier exactly as precise as Rust's resolution, and
+a requirement rather than a choice (§3.2.16 (i)).
+
+**Std and prelude traits are outside this section.** `Display`, `Debug`, `Clone`, `Default`,
+`Hash`, `Iterator`, `Deref`, … keep their dedicated member / operator / range lowering as today;
+no `Display_` namespace exists. The namespace lane covers traits this crate declares
+and dependency-crate traits reached through the manifest (§3.2.7).
 
 #### 3.2.6 Two traits with the same method name
 
-Because each trait is its own namespace, `A_::foo` and `B_::foo` **coexist** at
-definition (like Rust, where a type may impl both). Resolution then mirrors Rust exactly:
+Traits `A` and `B` both declare `foo`; type `T` implements both. Resolution mirrors Rust:
 
-- only A `use`d → only `A_` `using`'d → resolves to A;
-- both `use`d, both impl'd, same signature → `foo(x)` is **ambiguous** → C++ error,
-  reproducing Rust's `E0034 (multiple applicable items in scope)`;
-- different signatures → resolved by argument arity;
-- explicit disambiguation `A::foo(x)` in the source → emit qualified `A_::foo(x)` (the
-  trait name is copied from the source path, not computed).
+- **Path syntax** `A::foo(t)` → the member call when `(A, T)` is tier 1 and `T`'s declared type is
+  known; otherwise `A_::foo(t)` — the CPO names the trait, so there is nothing to disambiguate. The trait
+  is copied from the source path.
+- **Method syntax** `t.foo()` when exactly one trait in the candidate set owns `foo` → `A_::foo(t)`
+  likewise (or the §3.2.3 shim when an inherent `foo` may exist).
+- **Method syntax** `t.foo()` when two or more candidates own `foo` → the transpiler emits a **candidate
+  ladder** over them, guarded:
 
-The transpiler never resolves *which* trait; the source's `method` vs `path` syntax already
-encodes "resolve-for-me" vs "I-mean-this-one," and clang detects the genuine ambiguity.
+```cpp
+([&](auto&& r) -> decltype(auto) {                      // generic lambda — required (P2593)
+    using S = std::remove_cvref_t<decltype(r)>;
+    // inherent first — excluding EVERY tier-1 owner of `foo` known to the crate, not just the candidates:
+    // a call with only B in scope must not take A's override.
+    if constexpr (requires { r.foo(); } && !(std::is_base_of_v<A, S> || std::is_base_of_v<B, S>)) return r.foo();
+    else {
+        constexpr int n = has_A<S> + has_B<S>;           // the CONCEPTS (base ∨ marker), never the markers alone
+        static_assert(n <= 1, "ambiguous trait method `foo` for this receiver — use path syntax A::foo(x)");
+        if constexpr (has_A<S>)      return A_::foo(r);  // the CPO: tier 1 through the bridge, tier 2 through the impl function
+        else if constexpr (has_B<S>) return B_::foo(r);
+        else static_assert(false, "no trait in scope provides `foo` for this receiver");
+    }
+})(t)
+```
+
+**What the free functions give for free, and what they do not.** With distinct namespaces there is no
+shared overload set to be ambiguous: `A_::foo(t)` and `B_::foo(t)` are different functions, so the
+*concrete-vs-concrete* E0034 case cannot even be mis-emitted — the emitter must choose, and the guard is
+how it refuses to. But the guard is not redundant. Two E0034 cases are **silent** in any free-function
+form that lets C++ pick: a concrete `impl A for u16` beside `impl B for u16 {}` where `B::foo` is a
+*default* (rustc E0034; a shared overload set prints `16`), and a concrete `impl A for u16` beside a
+blanket `impl<T: A> B for T` (rustc E0034; prints `32`) — C++'s non-template-▷-template and
+more-constrained rules make those *unambiguous* where Rust's are *ambiguous*, because Rust's rule is
+"two applicable items" and C++'s is "one best". The `has_A + has_B` count asks Rust's question. Measured
+(§3.2.15): the guarded ladder gives the assertion on both; the shipped guard-less ladder gives `16` /
+`32`.
+
+- only `A` in the candidate set → resolves to `A` (Rust: same);
+- both candidates, both implemented for `T` — by impl functions, by direct inheritance, or one of each (a
+  concrete `impl A for T` here plus a blanket or foreign-crate `impl B for T` the classifier cannot
+  see) → `n == 2` → the assertion fires ≈ Rust's `E0034` (measured: `d.m()` prints `1` with the
+  09-23 ladder, which counted markers only and whose first arm had no base exclusion);
+- both candidates, one implemented → resolves (Rust: same);
+- neither → the final assertion ≈ "no method named `foo`".
+
+**Arm 1 is not only about ambiguity.** With `A` out of scope and `B` in scope, Rust runs `B::foo`
+(rustc `1000`); an arm 1 without the base exclusion returns `A`'s override (`1`) because the member
+exists regardless of `use`. The exclusion list is therefore scope-*independent* — every tier-1
+interface declaring `foo` that the crate or its manifests know — while the candidate set (which arms
+follow, and what `n` sums) stays scope-precise. No §3.2.1 rule can substitute for this: the second
+impl may live in a crate the self type's crate never sees, and `struct T : A` is already baked into
+`T`'s module.
+
+**The candidate set is fixed by the receiver's declared type, in two regimes.** For a receiver whose
+declared type is **concrete**, the candidates are the traits in lexical scope — `use`, prelude, glob
+imports, traits declared in the enclosing module. For a receiver whose declared type is a **type
+parameter** (or a projection of one), the candidates are the parameter's bounds **elaborated through
+their supertraits, transitively**, and `use`-scope traits are consulted **only if no elaborated bound
+owns the name** — the Rust Reference's order. That second clause is what admits the `use
+itertools::Itertools` keystone of §3.2.7; "bounds only" would reject it, and "`use`-scope only" would
+silently run the wrong body. Inside a trait's default body, `self` is in the type-parameter regime
+with the bound `Self: ThisTrait` plus its supertraits. Both regimes are lexical: the declared type is
+recovered from the parameter list, a `let` annotation or the declared type of the initializer chain,
+or `Self` in trait and impl bodies; the bound set from the function's generics and where-clauses; the
+supertrait closure from the trait declarations and, cross-crate, the manifest. **When the declared type
+cannot be recovered lexically**, the emission is the **union** of both regimes under the guard — loud
+in the overlap case, a false positive on valid Rust that widening declared-type recovery closes —
+never a single regime.
+
+**Two invariants, not options.** The ladder is a **generic lambda**: C++23 (P2593) makes
+`static_assert(false)` in a discarded `if constexpr` branch inert only inside a templated entity
+(measured, §3.2.15). And the `static_assert(n <= 1)` is a **new guarantee this design adds**: the
+shipped emitter's multi-owner form is *already* a guard-less first-wins `if constexpr` ladder over
+qualified `A_::foo` / `B_::foo` arms, including traits not in scope (§3.2.15). The namespace form adds a third: a **type-parameter receiver is
+spelled through its bound** (`A_::foo(x)` for `X: A`), never through an unqualified name — at `g<int>` the
+unqualified form is `ambiguous` once a second owner exists (measured, §3.2.15).
 
 #### 3.2.7 Non-intrusive impls — cross-file, cross-crate, and why not CRTP
+
+
+> Under the two-tier model this section is the argument for why tier 2 exists and why its carrier is a
+> free function. Tier 1 is intrusive by design — the type inherits — and that is fine precisely because
+> axis 2 restricts it to types this crate declares; the non-intrusive carrier is needed where the type is
+> not ours, which is tier 2's definition. The 2026-09-23/29 revisions re-read the paragraphs below with
+> "adapter" substituted for "free function"; the 2026-10-04 revision restores them as written, with three
+> updates: the call is the CPO `Tr_::m(x)` and `use Tr;` is the module `import` alone — `using namespace
+> itertools::Itertools_;` no longer exists (§3.2.5); every impl function carries the tag (§3.2.2); and the
+> manifest additionally carries each trait's tier, supertraits, non-vtable defaults, receiver kinds and
+> tier-1 ownership (§3.2.14). The CRTP rejection is *strengthened* by §3.2.15: a **closure's** C++ type is
+> synthesized by clang and has no definition anywhere to add a base to, and clang 22 rejects re-emitting
+> an upstream module's type with a new base outright (`declaration 'Widget' attached to named module
+> 'up' cannot be attached to other modules`). Both are answered by the free function, as the foreign-type
+> case always was.
 
 Free functions are the only non-intrusive, cross-boundary mechanism, so this design handles
 the cases inheritance cannot. `impl LocalTrait for ForeignType` (orphan-legal because the
@@ -1222,9 +1878,8 @@ assoc-const-ness, and the crate's module name) is persisted as a **sidecar manif
 its `.cppm`. Because dependencies are transpiled before their dependents, a dependent loads
 its dependencies' manifests (through the existing cross-crate symbol-index channel) and folds
 them into its own classifier view. Then `iter.dedup()` against a foreign `itertools::Itertools`
-resolves: `dedup` classifies trait-only, owner `Itertools`, namespace `itertools::Itertools_`
-→ emit the module-qualified call (or `using namespace itertools::Itertools_;` from
-`use itertools::Itertools;`). Manifests must propagate **transitively** in dependency order.
+resolves: `dedup` classifies trait-only, owner `Itertools`, namespace `Itertools_`
+→ emit `Itertools_::dedup(iter)` — the CPO; `use itertools::Itertools;` is the `import` and nothing else. Manifests must propagate **transitively** in dependency order.
 The free functions themselves are emitted with `export`, so they are visible cross-module via
 `import`. *(This is the itertools keystone; until the manifest pipeline lands, foreign-trait
 methods are simply not classified trait-only and fall through to member calls.)*
@@ -1259,11 +1914,11 @@ separately.)*
 reference (`Tr_::foo(const S&)`), `S` being defined in another crate is irrelevant to
 dispatch — `S` is just an imported type passed as an argument, exactly the thing CRTP could
 not handle. The only refinement: the manifest is keyed by the **impl-emitting crate** (by the
-orphan rule, the trait's crate or the type's crate), since the `Tr_::foo(const S&)` overload
-lives in *that* crate's namespace, and the `using` / qualification must name it.
+orphan rule, the trait's crate or the type's crate), since the `foo(tag, const S&)` overload
+lives in *that* crate's module, in `Tr_::impl_`, where the CPO's ADL finds it.
 
 The only irreducible residue is **member-call syntax on a foreign type for a your-crate
-impl** — `foreign.your_method()` must be emitted as `your_method(foreign)`, because C++ cannot
+impl** — `foreign.your_method()` must be emitted as `YourTrait_::your_method(foreign)`, because C++ cannot
 add a member to a foreign definition and has no UFCS fallback.
 
 #### 3.2.8 Associated types
@@ -1282,6 +1937,22 @@ inferred. A generic param that appears **only** in a where-clause callable-retur
 (undeducible in C++) is dropped from the template parameter list and re-introduced as a
 `using` alias computed from the callable, so the call deduces normally.
 
+
+The same shape — a primary template specialized once per impl — is the `impls_Tr` marker of
+§3.2.3, with one deliberate difference: `TrTraits`'s primary is declared-only because it is only
+ever *used* (a missing binding is a loud error), while the marker's primary is *defined* false
+because it is *tested*, and a tested primary must fail loudly on misordering. `TrTraits<U>` also
+mirrors an impl's associated consts and no-receiver functions (§3.2.2), so generic bodies can
+reach them through the type parameter.
+
+*Tier 1:* an associated type on a tier-1 trait is a template parameter of the interface
+(`template<class Item> class Iter { virtual std::optional<Item> next() = 0; }`), bound at the impl
+(`struct Counter : Iter<int32_t>`) and at every `dyn` (`dyn Iter<Item = i32>` → `Iter<int32_t>&`) — the
+same constraint Rust imposes on `dyn`. `TrTraits<U>` remains the map generic code reads `T::Item`
+from; a generic function bounded on such a trait carries the shim, as on any bound (§3.2.17). The
+reverse-direction ambiguity this creates (a template parameter could have been a generic trait
+parameter) is §3.2.17's first lossy cell.
+
 #### 3.2.9 Operator traits
 
 Rust's operator traits map **directly** to C++ operator overloading — no free-function or
@@ -1299,250 +1970,424 @@ Point operator+(Point lhs, const Point& rhs) { return Point{ lhs.x + rhs.x, lhs.
 destructor, `Clone`/`Copy` → copy/move semantics. These are *syntax* in both languages, so
 they are never routed through the UFCS path.
 
-#### 3.2.10 Dynamic dispatch: `dyn Trait` → Interface + Adapter
 
-Static dispatch (free functions) is compile-time; `dyn Trait` needs a runtime vtable. Each
-trait additionally lowers to **three plain C++ classes** that mirror Rust's `Box<dyn T>` vs
-`&dyn T` distinction at the type level, with every vtable slot forwarding into the *static*
-free-function impl (so there is exactly one implementation of each method):
+Two boundaries this section keeps: the *operator* is the C++ operator, but the same trait's
+**named** calls — `a.add(b)`, `Add::add(a, b)`, `a.eq(&b)`, `Ord::max(a, b)`, `PartialEq::ne` —
+go through the §3.2.3 shim like any trait method, and an operator trait's non-operator defaults
+(`Ord::max/min/clamp`) live where §3.2.13 puts defaults. `Iterator` is a std trait
+and stays on its dedicated lowering (§3.2.5): `impl Iterator for T` keeps emitting a **member**
+`next()` on `T`, because the runtime's range machinery (`rusty::into_iter_range`, `for_in`,
+`has_option_like_next` in `include/rusty/slice.hpp`) keys on that member — a `for` loop does not use
+`begin()`/`end()` (the book's own Iterator lowering rule 4). Crate traits blanket over `Iterator`
+(`Itertools`) are ordinary tier-2 impls, and their 70+ provided methods are §3.2.13's concern.
 
-1. **`T`** — a non-copyable, non-movable abstract base with one pure-virtual per
-   object-safe method.
-2. **`TAdapter<U>`** — per `impl T for U`, holds `U` **by value**; used for owning `dyn`
-   (`Box<dyn T>`, `Rc<dyn T>`, `Arc<dyn T>`). Its overrides call `T_::m(value_, …)`.
-3. **`TAdapterRef<U>`** — per `impl T for U`, holds `const U&` (or `U&`) **by reference**;
-   used for borrowed `dyn` (`&dyn T`, `&mut dyn T`). Same forwarding bodies.
+#### 3.2.10 Dynamic dispatch: `dyn Trait` in tier 1 is the interface itself; in tier 2 it is a thin forwarder
 
-`&dyn T` → `const T&`, `&mut dyn T` → `T&`, `Box<dyn T>` → `rusty::Box<T>` — all shapes the
-existing borrow checker already understands. The key change from the older adapter proposal:
-the override bodies **forward to the static free-function impl** (`T_::m(value_, …)`)
-rather than calling a member `value_.m(…)`, because under the static design `U` no longer
-carries the trait method as a member. This is what unifies static and dynamic: both paths
-bottom out in the same `T_::m`.
-
-```cpp
-// === trait Animal ===
-class Animal {
-public:
-    virtual ~Animal() = default;
-    virtual rusty::String speak() const = 0;
-    Animal(const Animal&) = delete; Animal& operator=(const Animal&) = delete;
-    Animal(Animal&&) = delete;      Animal& operator=(Animal&&) = delete;
-protected: Animal() = default;
-};
-template <class U> class AnimalAdapter;
-template <class U> class AnimalAdapterRef;
-
-// === impl Animal for Dog → static free fn + two adapters forwarding to it ===
-namespace Animal_ { rusty::String speak(const Dog& self) { return rusty::String::from("Woof"); } }
-
-template <> class AnimalAdapter<Dog> final : public Animal {
-    Dog value_;
-public:
-    explicit AnimalAdapter(Dog v) : value_(std::move(v)) {}
-    rusty::String speak() const override { return Animal_::speak(value_); }  // forwards to static impl
-};
-template <> class AnimalAdapterRef<Dog> final : public Animal {
-    const Dog& value_;
-public:
-    explicit AnimalAdapterRef(const Dog& u) : value_(u) {}                        // explicit → StructBorrow fires
-    rusty::String speak() const override { return Animal_::speak(value_); }
-};
-
-// &dyn use site:        void make_noise(const Animal& a) { rusty::println("{}", a.speak()); }
-// Box<dyn> construction: rusty::Box<Animal> b = rusty::make_box<AnimalAdapter<Dog>>(Dog{});
-// &dyn coercion:         make_noise(AnimalAdapterRef<Dog>(dog));   // borrows `dog` for the call
-```
-
-**The UFCS bridge — uniform `m(x)` over static and `dyn`.** So a call site can emit the same
-dispatch shape whether the receiver is concrete or a `dyn` reference, the call-site dispatch
-shim ends in a **member fallback** that performs the one virtual call. The shim (a generic
-lambda, so resolved per-instantiation) tries the free function first, then the deref'd free
-function, then — for a receiver whose deref is the abstract interface, where no
-`speak(const Animal&)` free function exists — the member call:
+**Tier 1.** There is nothing to build. The type inherits the interface, so `&dyn Tr` is `const Tr&`
+bound to the object, `&mut dyn Tr` is `Tr&`, `Box<dyn Tr>` is a `rusty::Box<Tr>` holding the object
+(constructed through `Box`'s converting constructor from a `rusty::Box<Dog>`, never by passing the
+abstract base by value — the shipped `Box<Animal>::new_(Dog{…})` spelling does not compile, §3.2.12),
+and supertrait upcasting (`&dyn Sub` → `&dyn Super`) is a base-class conversion — implicit, and
+unambiguous because supertraits are **virtual** bases (`Ord: Eq + PartialOrd`, `Eq: PartialEq`,
+`PartialOrd: PartialEq` is a diamond; with non-virtual bases `derived_from<D, Super>` is false and the
+upcast ambiguous — the shipped fast path emits non-virtual bases, §3.2.12). This is the one place tier
+1 is strictly *better* than the adapter design: the 09-23 investigation found today's adapters abstract
+for any supertrait and `dyn` upcasting impossible through them.
 
 ```cpp
-([&](auto&& __self) -> decltype(auto) {
-    if constexpr (requires { speak(__self); })          return speak(__self);          // concrete value
-    else if constexpr (requires { speak(deref(__self)); }) return speak(deref(__self)); // concrete behind ptr
-    else                                                return deref(__self).speak();   // dyn: one virtual hop
-})(x)
+class Named { public: virtual ~Named() noexcept(false) {} virtual rusty::String name() const = 0; /* C.67 members */ };
+class Animal : public virtual Named {
+public:
+    virtual int32_t speak() const = 0;
+    virtual int32_t twice() const { return speak() * 2; }       // default: calls only slots
+    /* C.67: protected, defaulted special members (§3.2.2) */
+};
+struct Dog : public Animal {
+    int32_t n;
+    Dog(int32_t n) : n(n) {}
+    rusty::String name() const override;                       // the supertrait's slot: Dog's OWN tier-1 impl of Named
+    int32_t speak() const override;
+};
+// &dyn Animal:  const Animal& a = dog;   a.twice();  a.name();          — base-class references
+// Box<dyn>:     rusty::Vec<rusty::Box<Animal>> zoo; zoo.push(rusty::Box<Animal>(rusty::Box<Dog>::new_(Dog{3})));
+// upcast:       const Named& nm = a;                                     — implicit (virtual base)
 ```
 
-C++ resolves each branch by `x`'s static type, with no help from the transpiler:
+A tier-1 implementor never inherits a supertrait default it did not get through a tier-1 impl:
+axis 2 requires `impl Named for Dog` to be a concrete tier-1 impl before `impl Animal for Dog` can be
+(§3.2.1), so `Named`'s default body is reachable on `Dog` only when Rust's `impl Named for Dog` left it
+unoverridden. The borrow checker's view is the ordinary one: `const Animal& a = dog;` is a reference
+borrow of `dog`, and the analyzer fires on it exactly as on any reference (measured, §3.2.15) — no
+`StructBorrow`, no adapter temporary, nothing new for the analyzer to learn.
+
+**Tier 2.** Where the object cannot inherit — a foreign or primitive self type, a blanket, a tier-2 trait,
+an axis-2-excluded local type — a **forwarder** inherits the interface in the object's stead and is what
+`dyn` binds to: `const Tr& r = TrAdapterRef<U>(u);`. The forwarder is **one class template per receiver
+kind per trait**, written once in the trait's module and never specialized; every slot is one line into
+the namespace; it carries no body of any impl:
 
 ```cpp
-// x: Dog           → branch 1: speak(const Dog&)      : DIRECT static call
-// x: const Animal& → branch 3: a.speak() (vtable) → AnimalAdapter<Dog>::speak() → Animal_::speak(const Dog&)
+// === trait Animal: Named { fn speak(&self) -> i32; fn rename(&mut self, s: &str); fn eat(self) -> i32;
+//                            fn twice(&self) -> i32 { self.speak() * 2 } }                     // default
+class Named  { public: virtual ~Named() noexcept(false) {} virtual rusty::String name() const = 0; /* C.67 */ };
+class Animal : public virtual Named {                        // supertraits are VIRTUAL bases (diamonds)
+public:
+    virtual int32_t speak() const = 0;
+    virtual void    rename(std::string_view s) = 0;
+    virtual int32_t eat() && = 0;
+    virtual int32_t twice() const { return Animal_::impl_::default_twice(*this); }   // the ONE default body, §3.2.13
+protected: /* C.67 protected + defaulted */
+};
+template <class U> class AnimalAdapterRef final : public Animal {        // &dyn Animal over a tier-2 U
+    const U& value_;
+public:
+    explicit AnimalAdapterRef(const U& u) : value_(u) {}                 // explicit → StructBorrow fires
+    rusty::String name() const override { return Named_::name(value_); } // SUPERTRAIT slot → the supertrait's CPO (override-or-default)
+    int32_t speak() const override      { return Animal_::speak(value_); }
+    void    rename(std::string_view) override { rusty::unreachable_via_const_dyn(); }   // STUB: const value_ cannot call rename(U&)
+    int32_t eat() && override           { rusty::unreachable_via_const_dyn(); }         // STUB: cannot consume through const U&
+    int32_t twice() const override      { return Animal_::twice(value_); }              // → U's override if any, else the default template
+};
+template <class U> class AnimalAdapterRefMut final : public Animal { U& value_; /* rename forwards; eat is the stub */ };
+template <class U> class AnimalAdapter       final : public Animal { U value_;  /* every slot forwards; eat: Animal_::eat(std::move(value_)) */ };
+// usage:  const Animal& a = AnimalAdapterRef<int32_t>(n);  a.twice();  a.name();
+//         AnimalAdapterRefMut<Cat> __m{cat}; feed(__m);                                 // &mut dyn: a NAMED local (a prvalue cannot bind Animal&)
 ```
 
-(An earlier design declared a separate forwarder overload `Animal_::speak(const Animal&)
-{ return self.speak(); }` so calls stayed uniformly `speak(x)`. That was abandoned: the
-forwarder's parameter needs the interface type forward-declared, but declaring `class Animal;`
-*inside* `namespace Animal_` makes `using namespace Animal_` collide with the real
-`::Animal` (ambiguous). The member fallback lives entirely inside the call-site shim — a
-template resolved at instantiation — so there is no forward-declaration ordering to get wrong,
-and it reaches the same vtable hop.)
+- **Every slot forwards through the CPO, never to a namespace function directly.** `Animal_::twice(value_)`
+  is the CPO; `Animal_::impl_::twice(Animal_::impl_::tag{}, value_)` — a qualified call to the default
+  template — freezes the overload set at the forwarder's definition and runs the default where `U` has an
+  override: `dyn bar.describe=10` where rustc gives `777` (measured). A bare `twice(tag{}, value_)` at
+  class-member scope is also wrong: class-member lookup finds the member `twice` and suppresses ADL
+  (measured: *unqualified at member scope finds the member itself*). The qualified CPO is the only
+  correct spelling from inside a class.
+- **Supertrait slots forward to the supertrait's CPO; they are never inherited as bodies.**
+  `Named_::name(value_)` reaches `impl Named for U`'s function or `Named`'s default template by the same
+  overload resolution as a static call. Inheriting `Named`'s virtual default instead would run the
+  supertrait's *default* where `impl Named for U` overrides it (`1100` where rustc gives `99900`,
+  measured on the 09-23 adapter; the thin forwarder gives `99900`, §3.2.15). The forwarder enumerates the
+  transitive supertrait closure — one line per supertrait slot — where the shipped adapters enumerate
+  nothing and are abstract for any supertrait.
+- **The three stub cells are per trait, not per impl.** `Ref` cannot call a `&mut self` or `self` slot,
+  `RefMut` cannot call a `self` slot: `const U&` cannot yield `U&`, and neither reference can be consumed
+  without a copy Rust forbids (E0507; a silent copy is observable through `Rc` counts and `Drop`). A
+  `Ref` forwarder is only ever bound through `const Tr&`, and C++ will not call a non-const or `&&` member
+  through it, so for correct emission the stubs are unreachable; an emitter path that binds a `Ref`
+  forwarder through non-const `Tr&` is a bug the stub turns loud at first call
+  (`rusty::unreachable_via_const_dyn`, a new `include/rusty` helper that traps). Enforcement is runtime;
+  the phase-2 suite must include the negative case. Decision (d): with the stubs costing three lines per
+  *trait*, the 09-23 `Tr` / `TrMut` interface split is recommended retired for tier-2 traits too — one
+  interface per trait, in both tiers.
+- **Reference depth and generic-trait arguments ride on the forwarder's template parameters.** `impl Tr
+  for &T` → `TrAdapterRef<const T&>` holding `const T&` and passing `rusty::self_tag<const T&>` in every
+  slot; `impl Tr<u8> for T` → `TrAdapterRef<uint8_t, T> : Tr<uint8_t>` passing `rusty::tag<uint8_t>`
+  (§3.2.2 rule 7; measured `dyn x=7 dyn r=1007`, `dyn: name via i32 … | name via u8 …`).
+- **`Box<dyn Tr>` holds `TrAdapter<U>`** (by value), constructed through `Box`'s converting constructor
+  from `rusty::Box<TrAdapter<U>>`; `&mut dyn` coercion at a call site binds through a **named local**
+  because a non-const reference cannot bind a prvalue; the borrow checker sees a named struct borrow.
 
-**Heterogeneous collections — where the vtable earns its keep.** The whole reason `dyn`
-exists, and the thing static dispatch cannot express:
+**One impl, one body — now also for `dyn`.** In the shipped output one default method's body appears in
+**nine** places (§3.2.15); the 09-29 adapter design brought it to one body per impl in the adapter class,
+reached by both routes. Here it is one body per impl, *in the namespace*, and the forwarder has none:
+
+```
+                 Tr_::impl_::m(tag, const U&)   ←──── the ONE body (or the ONE default template)
+                  ▲                          ▲
+   static route ──┘                          └── dynamic route
+   Tr_::m(u)  [CPO → ADL → the body]            const Tr& r = TrAdapterRef<U>(u);  r.m()  [vtable → slot → Tr_::m(value_)]
+   (byte-identical to a direct call, -O1+)      (one runtime hop, then the same CPO)
+```
+
+**Heterogeneous collections — where the vtable earns its keep.** Unchanged in substance:
 
 ```cpp
 rusty::Vec<rusty::Box<Animal>> zoo;
-zoo.push(rusty::make_box<AnimalAdapter<Dog>>(Dog{}));
-zoo.push(rusty::make_box<AnimalAdapter<Cat>>(Cat{}));   // different concrete type, same Box<dyn>
-for (auto& a : zoo) Animal_::speak(*a);            // dispatches per element at runtime
+zoo.push(rusty::Box<Animal>(rusty::Box<AnimalAdapter<int32_t>>::new_(3)));     // tier 2: the forwarder owns the i32
+zoo.push(rusty::Box<Animal>(rusty::Box<Dog>::new_(Dog{3})));                   // tier 1: the object itself
+for (auto& a : zoo) a->speak();                              // dispatches per element at runtime
 ```
 
-The loop does not know which element is a `Dog` or a `Cat` — that is erased — so each call
-dispatches at runtime through the element's vtable to the correct `Animal_::speak(const
-Dog&)` / `speak(const Cat&)`. Overload resolution alone could never do this; the vtable is
-what recovers the erased type at runtime.
+**Object safety.** Only object-safe methods get slots. Excluded from the vtable — required or default, a free
+function (template) in `Tr_::impl_` like any other method (§3.2.2), with no interface slot: generic methods (including `impl Trait` parameters, which desugar to a type parameter, and `async fn`, which desugars to an `impl Future` return), methods that mention `Self` in a parameter or nested in the return type (`o: &Self`, `Option<&Self>`) — §3.8 maps it to
+`rusty::Task<…>` for free functions, but the method emitter never consults `sig.asyncness`, so
+inherent and trait `async fn` are emitted as plain synchronous members today, lane-independent),
+`-> Self` and `-> impl Trait`
+returns, `where Self: Sized` methods, no-receiver functions. The shipped interface emitter's
+skip-list covers only three of these; RPITIT and APIT reach it and break the build (§3.2.15).
+Receivers `self: Box<Self>` / `Rc<Self>` / `Arc<Self>` / `Pin<P>` *are* dispatchable in Rust and
+have no slot shape here yet — §3.2.16 (m). A generic method called on a `dyn` receiver is a compile
+error under this design — no slot, and no impl function for the interface type — which is Rust's E0038.
+Associated types in `dyn` must be bound (`dyn Iterator<Item=X>` → the family is parameterized by
+`X`). `impl Tr for dyn Other` works for the `Ref`/`RefMut` forwarders only — the by-value forwarder
+cannot hold an abstract, non-movable interface — so "up to three" is honest.
 
-**One impl, two routes.** The unifying picture:
+**Borrow-checker integration.** The `dyn` path is implemented and tested: `TrAdapterRef<U>`
+carries `const U& value_`, registered in the analyzer's `types_with_ref_members`; its `explicit`
+constructor emits a `StructBorrow` IR node (`src/ir/mod.rs`) recording an immutable borrow
+(`src/analysis/mod.rs`); move-while-borrowed, assign-to-borrowed, source-outlived-by-view and
+scope release all fire — pinned by `tests/test_struct_ref_member_borrows.rs`. Two things are
+*not* implemented: `TrAdapterRefMut<U>` is emitted but every `StructBorrow` is recorded as an
+immutable borrow — a `StructBorrowMut` recording a *mutable* borrow is still the open extension it
+was; and the **static route constructs nothing under this revision** — `Tr_::m(x)` is a plain call on `x`, a
+use the analyzer already sees — so item (k) shrinks to the `&dyn` coercion in *argument position*
+(`f(TrAdapterRef<U>(x))`), which today records no borrow: the only `StructBorrow` emission site
+(`src/ir/mod.rs`) fires for a named-local construction `lhs = Ctor(args)`. Item (k) is an IR
+addition (expression-level `StructBorrow`, released at the end of the full-expression), not a
+verification (§3.2.16 (k)).
 
-```
-                 T_::m(const U&)   ←──── the ONE impl body
-                  ▲                  ▲
-   static route ──┘                  └── dynamic route
-   m(u) → T_::m(const U&)           shim member fallback: dyn.m() [vtable] → TAdapter<U>::m() → T_::m(const U&)
-   (compile-time overload, direct)       (one runtime vtable hop, then the same impl)
-```
-
-Dynamic dispatch is not a second implementation — it is the interface + adapter providing a
-*runtime route* (the vtable) to the very same `T_::m` that static UFCS reaches directly.
-The method is written once; `dyn` adds only the erasure wrapper and the single virtual hop
-needed to dispatch on a type the compiler was told to forget.
-
-**Object safety.** Only object-safe traits get a vtable, and only object-safe *methods* get
-slots; generic methods (`map<B,F>`), by-value-`Self` returns, and `where Self: Sized`
-methods are excluded — calling them on a `dyn` is a Rust error too, and they remain
-static-only. Associated types in `dyn` must be bound (`dyn Iterator<Item=X>` → the interface
-and adapters are parameterized by `X`). Supertrait upcasting falls out of interface
-inheritance (`class Sub : public Super`); a `clone`-for-`dyn` slot returns a fresh erased
-box.
-
-**Borrow-checker integration (already implemented and tested).** `TAdapterRef<U>` carries a
-`const U& value_` member, registering it in the analyzer's `types_with_ref_members` set; its
-**explicit** constructor emits a `StructBorrow` IR node (`src/ir/mod.rs`) that records an
-immutable borrow of the constructor argument (`src/analysis/mod.rs`). The existing checks
-then fire: move-while-borrowed (`is_transitively_borrowed` on `Move`), assign-to-borrowed
-(the `Assign` handler consulting `get_active_borrows`), source-outlived-by-view
-(`types_with_ref_members` return/scope checks), multiple-immutable-borrows allowed, and
-borrow released on scope exit. Pinned by `tests/test_struct_ref_member_borrows.rs` (six
-tests) with zero regressions across the cross-function-lifetime suite. (`&mut dyn T` needs a
-`TAdapterRefMut<U>` holding `U&` and a `StructBorrowMut` that records a *mutable* borrow —
-the one open extension.) `T` is non-copyable/non-movable to prevent silent slicing; the
-owning `TAdapter<U>` is movable so it can live in a `rusty::Box`.
-
-**Why interface+adapter rather than Proxy or `#[cpp_inherit]` as the default:** plain
-abstract classes are transparent to the borrow checker (a `const Animal&` is an ordinary
-reference), need no external library, and let hand-written C++ implement a Rust trait by
-inheriting `Animal` directly. `#[cpp_inherit]` (a struct inheriting the interface directly,
-no adapter) remains an **opt-in** optimization for C++-interop upcast sites
-(`shared_ptr<U> → shared_ptr<T>`) on types you own.
+*(The 09-23 closing paragraph on "why interface + adapter rather than inheritance" is superseded by this section's tier-1 opening and §3.2.15.)*
 
 #### 3.2.11 What the transpiler does (lexical) vs. does not (semantic)
 
-The whole design hinges on keeping the transpiler on the cheap side of the
-name-resolution / type-inference cliff:
+The whole design hinges on keeping the transpiler on the cheap side of the name-resolution /
+type-inference cliff:
 
 **Does (lexical, bounded — a name resolver + transliterator):**
-- parse; translate `use`/module deps → `import` + `using`;
-- classify `impl T {}` vs `impl Tr for T {}` → member vs free function;
-- classify method *names* globally → inherent / trait / both (drives §3.2.3);
-- emit method-call `x.m()` as `m(x)` (or native member, or the UFCS shim) and path-call
-  `Tr::m(x)` as qualified `Tr_::m(x)`;
-- emit the type-traits map for associated types; a vtable per object-safe trait.
+- parse; translate `use` / module deps → `import`;
+- classify `impl T {}` vs `impl Tr for T {}` → member vs (tier 1) override vs (tier 2) free function in the
+  trait's namespace;
+- classify method *names* globally → inherent / trait / both (drives §3.2.3), with each trait
+  method's **receiver kind** (drives the receiver spelling at the call, §3.2.3) and each default's **call graph over
+  other defaults** (drives §3.2.13's layer choice);
+- emit `x.m()` as a native member, as the CPO call `Tr_::m(x)`, or as the shim (§3.2.3), and `Tr::m(x)` as
+  `Tr_::m(x)`;
+- **enumerate and order the candidate traits** for a multi-owner name (§3.2.6) from the receiver's
+  declared-type regime — elaborated bounds first for a type parameter, lexical scope for a concrete
+  type, their union under the guard when the declared type is not lexically recoverable;
+- emit the type-traits map, the marker + concept, the `Tr_` namespace (tag, CPOs, default templates,
+  bridges), the thin interface and its three generic forwarders.
 
-**Does not (semantic — this is what would make it a mini-rustc, and clang does it instead):**
+**Does not (semantic — what would make it a mini-rustc, and clang does instead):**
 - infer the type of any expression;
 - select which impl applies / solve trait obligations / check coherence & overlap;
 - borrow-check generic trait code; monomorphize.
 
-The dividing test for any future pass: if it needs *"the type of `a`"* or *"which impl
-wins,"* it belongs to clang, not the transpiler.
+**The candidate ladder against this budget.** §3.2.6 is the one place the transpiler names traits
+at a call site. The candidate set comes from the same `use` / prelude / bound information the
+shipped lane consumes to decide which `using namespace Tr_;` to inject, and "which traits own `m`"
+is the global classification already on the *does* list. The transpiler **orders** that set;
+clang decides the receiver's type, whether each candidate's marker is specialized for it, and
+therefore which arm is live. The `static_assert(n <= 1)` is what keeps ordering from becoming
+adjudication: if the order ever mattered to the answer, the assertion has already fired. The
+dividing test is unchanged: nothing here needs "the type of `a`" or "which impl wins."
+
+**Tier membership against this budget.** Every §3.2.1 test is a property of one declaration or a
+per-crate relation between declarations; none requires the type of an expression. Two duties are added
+to the *does* list: decide each `(trait, impl)`'s tier from those declarations, and enumerate, per
+method name, every tier-1 interface (own or from a manifest) that declares it — the exclusion list the
+shim's inherent arm carries (§3.2.3). One is added to the *does not* list: decide whether a blanket or
+conditional impl applies to a given type — §3.2.1 leaves that to the call site's concepts, which clang
+evaluates. The shim is the lexical escape hatch for a receiver whose tier is not recoverable; it is
+never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
 
 #### 3.2.12 Implementation status and migration
 
-- **Analyzer prerequisite: complete.** `StructBorrow` IR node, `Assign`-handler check, and
-  move-of-borrowed reuse are in place and pinned by six tests
-  (`tests/test_struct_ref_member_borrows.rs`).
-- **Transpiler codegen: DEFAULT ON (Phase-7 flip, 2026-06-16).** All of the
-  pieces below are in place: trait emission (free-function declarations + interface `T` +
-  `TAdapter`/`TAdapterRef`); impl emission (`impl Tr for U` → `Tr_::m(const U&, …)` + adapters);
-  call-site classification + the three UFCS shapes (§3.2.3); `use`→`using`/`import` (§3.2.5);
-  the associated-type traits map (§3.2.8); operator traits (§3.2.9); and the `dyn` coercions.
-  UFCS trait lowering is now **unconditional** — the `RUSTY_CPP_UFCS_TRAITS` flag and its legacy
-  call-site routing were deleted post-flip (the flag field, the env opt-out, `set_ufcs_traits`, and
-  every `if self.ufcs_traits` gate are gone; UFCS emission always runs). The Interface+Adapter
-  emission STAYS — it is baseline `dyn Trait` dispatch infrastructure (the adapter vtable slot now
-  forwards to the static `Tr_::m(value_, …)` free function, so static and dynamic dispatch bottom out
-  together). The flip was authorized by the parity matrix at **14/15** under the default: every crate
-  green (either/tap/cfg-if/take_mut/arrayvec/semver/smallvec/once_cell/pollster/`serde_bytes`/
-  `serde_core`/`serde`/`serde_repr`/`bitflags`) except `itertools`, which fails the matrix for
-  pre-existing, UFCS-independent reasons (a transpile panic + multi-session default-body long tail)
-  and is carried as a documented known-fail in `run_parity_matrix.sh` (`KNOWN_FAIL_CRATES`) rather
-  than a regression.
-- **Open extensions:** `&mut dyn T` mutable `StructBorrowMut`; trait upcasting emission;
-  shared-body free function vs duplicate-inline for adapter bodies (now subsumed — both
-  adapters already forward to the one `Tr_::m`); diagnostics quality for C++ overload
-  ambiguity vs Rust `E0034`.
+- **What ships behind `#[cfg_attr(any(), cpp_trait_member_dispatch)]` + `#[cfg_attr(any(), cpp_inherit)]`**
+  is a partial tier 1: one interface class with plain names, `struct Dog : public Animal`, `override`
+  for required methods, a synthesized fieldwise constructor, an inlined default when the body is a
+  single expression calling same-trait methods, no `Animal_` namespace, no adapters (measured, §3.2.15).
+  Everything else in §3.2.17 is **not** emitted, and each is a phase-0 item (§3.2.16): one base slot per
+  type, un-parameterized and never virtual (no two tier-1 traits on one type, no generic-trait base, no
+  `public virtual` supertrait — `derived_from<D, Super>` false, upcast ambiguous); generic defaults →
+  `TODO … not yet supported` and the default emitted *pure*, so every implementor is abstract; a default
+  that calls a supertrait method emitted pure (body dropped); a `Self`-typed parameter reaching the
+  interface as `const Tr&` (implementor hides, becomes abstract); `-> Self`, RPITIT, APIT reaching the
+  interface; no `&&` slots (a `self` receiver emitted `const`); assoc-const traits skipping the interface
+  entirely (a `cpp_inherit` implementor of one is five compile errors); tuple and unit structs without a
+  constructor; `derive(Clone)` emitting a designated initializer on the now-non-aggregate; a synthesized
+  lone move constructor deleting the copy constructor (`derive(Copy)` types non-copyable, `let q = p;`
+  lowered to `std::move`); the interface's special members *deleted* (§3.2.2); `Box::new(local)` into
+  `Box<dyn Tr>` naming the suppressed adapter; the call-site `&dyn` coercion likewise; path syntax
+  applied per *trait*, so `Tr::m(&i)` on a tier-2 impl of the trait becomes a member call on an `int`;
+  bounds emitted unconstrained with the `deref_call` shim; `cpp_inherit` on a foreign self type a *silent*
+  no-op; non-`pub` traits anonymous-namespace-wrapped; a type declared before its trait inheriting an
+  incomplete class; an `fn tenfold` override mis-emitted as `operator-`.
+
+- **Tier 2 is the shipped lane revised in place, and the revision is not implemented.** The shipped
+  default lane is UFCS free functions (`Tr_`, `rusty_ext`) with forwarding adapters and injected `using
+  namespace`; it already has the forward-declaration pass, the Fix B bridge, the Fix A markers and the
+  non-template-▷-template tiebreak this design keeps. What changes, item by item — each a §3.2.15
+  measurement, each a phase-2 step (§3.2.16):
+
+  | shipped (2026-06) | revised (2026-10-04) | why |
+  |---|---|---|
+  | `using namespace Tr_;` injected per trait, global, unconditional | retired; every call spells `Tr_::m(x)` | directive leaks into child namespaces, inner-scope hiding, local-name capture (§3.2.5) |
+  | `Tr_::m(const U& self_, …)` — the method name *is* the function | `Tr_::m` is a CPO; the function is `Tr_::impl_::m(tag, const U&, …)` | a qualified call in a template freezes its overload set across modules (`11000` vs `5550`); a bare name in `Tr_` would find the CPO and suppress ADL (§3.2.2 rules 1–3) |
+  | default body: `self_.hello()`, member-first | default body: `Tr_::hello(self_)` (the CPO) | inherent shadow in a default (`2002` vs `2`, §3.2.13) |
+  | per-impl forwarding adapters (3 per impl), each slot a qualified `Tr_::m(value_)` | 3 *generic* forwarders per trait, each slot the CPO | `dyn bar.describe = 10` vs `777` through a qualified slot (§3.2.10) |
+  | `__ufcs_impls(const U&)` marker + `requires { Tr_::__ufcs_impls(s) }` on defaults (Fix A) | `impls_Tr<U>` defined-false marker + `requires has_Tr<S>` on defaults | loud on misordering where the SFINAE marker was soft (§3.2.3) |
+  | `emit_multi_owner_ufcs_call`: guard-less first-wins `if constexpr` over `A_::foo` / `B_::foo`, traits not in scope included | scope-derived candidates, `static_assert(has_A + has_B <= 1)`, base-excluded inherent arm | silent first-wins where rustc is E0034 (`16`, `32`, §3.2.6) |
+  | `rusty_ext` lane for local trait × foreign self type | the placement rule: such impls live in `Tr_::impl_` (§3.2.2, §3.2.5) | one rule instead of two lanes; same bytes, different name |
+  | `impl Tr for &T` / `for T` collapse: warning + parked body | trailing `rusty::self_tag<Self>` | `impl Tr for i32` + `for &i32` silently routes to one body (§3.2.4) |
+  | generic trait, second impl on one type dropped (`HARD C++ LIMIT`) | trailing `rusty::tag<A>`, defaulted; omitted when an argument determines `A` | `<uint8_t, X>` missing; arg-inferred `t.m(av)` = rustc `304` (§3.2.2 rule 7) |
+  | type-parameter receiver: `deref_call` shim, bound unconstrained | `A_::foo(x)` from the bound; `requires has_A<X>` | the unqualified form is `ambiguous` at `g<int>` once a second owner exists (§3.2.6) |
+  | Fix B bridge for every nested-module impl | bridge only for foreign-self impls in nested modules; local-self impls emitted in place | receiver-namespace placement: 132/249 serde_core impls need no bridge (§3.2.5) |
+  | non-vtable members (generic required methods, `-> Self`, `new`, consts) skipped | free functions / templates / `inline constexpr` in `Tr_::impl_` + `TrTraits` | serde's `Serialize` / `Deserialize` get no interface today (§3.2.2) |
+  | **ABI-pinned companions**: `Tr_::m(U& self_)` for a `cpp_inherit` impl and every `pub` trait's `<Tr>_` functions are symbols an *incumbent* C++ object owns (srpc's ratified ABI: `rrr::Job_::{Ready,Work,Done}(OneTimeJob&)`; 50 `Serialize_`/`Deserialize_`/`rusty_ext` symbols in rrr.serializable; pinned by `test_cpp_inherit_impl_keeps_both_virtual_members_and_ufcs_companions`) | the pinned non-template companions stay in `Tr_` as *overloads beside the dispatcher*, forwarding to the member / `impl_` body — which requires the CPO to be a constrained **function template** `template<class S, class... R> requires (!same_as<remove_cvref_t<S>, impl_::tag>) auto m(S&&, R&&...)` rather than a function object (an object cannot share its name with a function; a function template can, and ordinary lookup finding a *function* does not suppress ADL — this also removes rule 1's hazard). To be measured before step (2) | a design constraint the 10-04 revision did not record; found 2026-10-07 at `mod.rs:21161` |
+
+- **Coverage.** The reviewer's census over the local matrix crates (`either`, `bitflags`, `serde_core`,
+  `smallvec`, …): roughly 4 of ~288 crate-trait `(trait, impl)` pairs satisfy §3.2.1 — and the four are
+  tuple structs the shipped lane cannot construct. Tier 1 does not change how those crates transpile; it
+  changes how application code and C++-interop-facing types do. §3.2.16 (p).
+- **Migration** (§3.2.16): phase 0 fixes the tier-1 lane's defects; phase 1 makes tier 1 the *default*
+  for every `(trait, impl)` that passes §3.2.1, with the free-function lane carrying the rest; phase 2
+  revises the free-function lane in place per the table above, behind a per-crate switch; phase 3 deletes
+  what the revision orphaned (`rusty_ext`, the Fix A markers, the `using` injection, the per-impl adapters).
 
 #### 3.2.13 Default methods
 
-A default method lives in the *trait declaration*, is generic over `Self`, and calls the
-type's other methods through `self`. It lowers to **one** function template in the trait
-namespace — generic over the receiver — not a per-impl emission:
+A default method lives in the trait declaration, is generic over `Self`, and calls the type's other
+methods through `self`. Which C++ form it takes follows a lexical call graph over the trait's default
+bodies, and the answer is the same in both tiers because it is a property of the *trait*:
 
 ```rust
 trait Greet {
-    fn hello(&self) -> i32;                          // required
-    fn describe(&self) -> String { format!("v={}", self.hello()) }   // default
+    fn hello(&self) -> i32;                                                          // required
+    fn describe(&self) -> String { format!("v={}", self.hello()) }                   // default: calls only a slot
+    fn map_hello<F: Fn(i32) -> i32>(&self, f: F) -> i32 where Self: Sized { f(self.hello()) }   // generic default
+    fn via(&self) -> i32 where Self: Sized { self.map_hello(|x| x + 1) }             // default calling it
 }
 ```
+
 ```cpp
-namespace Greet_ {
-    int hello(const Foo& self_);                     // required: per-impl, concrete
-
-    template <class Self>                             // default: ONE emission, generic
-    rusty::String describe(const Self& self_) {
-        return rusty::format("v={}", hello(self_));   // self.hello() lowered via UFCS
-    }
+// ===== in Greet's module: the bodies, ONCE, in the namespace =====
+namespace Greet_::impl_ {
+    template<class S> rusty::String default_describe(const S& s) { return rusty::format("v={}", Greet_::hello(s)); }   // self.hello() → the CPO
+    template<class S, class F> int32_t default_map_hello(const S& s, F f) { return f(Greet_::hello(s)); }
+    template<class S> int32_t default_via(const S& s) { return Greet_::map_hello(s, [](int32_t x) { return x + 1; }); }  // self.map_hello() → the CPO
+    // tier-2 receivers reach them through the CPO: the constrained default overloads (§3.2.2 rule 6)
+    template<class S> requires (has_Greet<S> && !std::derived_from<S, Greet>) rusty::String describe(tag, const S& s) { return default_describe(s); }
+    template<class S, class F> requires (has_Greet<S> && !std::derived_from<S, Greet>) int32_t map_hello(tag, const S& s, F f) { return default_map_hello(s, std::move(f)); }
+    template<class S> requires (has_Greet<S> && !std::derived_from<S, Greet>) int32_t via(tag, const S& s) { return default_via(s); }
 }
+// ===== the interface: tier-1 receivers reach the same bodies through members =====
+class Greet {
+public:
+    virtual int32_t hello() const = 0;                                        // required: pure slot
+    virtual rusty::String describe() const                                    // slot-only default: non-pure virtual …
+        { return Greet_::impl_::default_describe(*this); }                    //   … forwarding to the ONE body; hello() → bridge → vtable → the implementor
+    template <class F> int32_t map_hello(this auto const& self, F f)          // generic default: EXPLICIT-OBJECT member …
+        { return Greet_::impl_::default_map_hello(self, std::move(f)); }      //   … `self` deduces the implementor's type
+    int32_t via(this auto const& self)                                        // default calling it: explicit-object too
+        { return Greet_::impl_::default_via(self); }                          //   → Greet_::map_hello(self) → bridge → self.map_hello(): the implementor's own, if any
+};
+struct Dog : Greet { int32_t hello() const override { return 5; }
+    template <class F> int32_t map_hello(F f) const { return f(5) * 10; } };   // override = hiding; via() reaches it (60)
+// tier 2:  impl Greet for Bar { fn hello … fn describe(&self) -> String { "777".into() } }
+namespace Greet_::impl_ { int32_t hello(tag, const Bar&); rusty::String describe(tag, const Bar&); }   // NON-template ▷ the default template
 ```
 
-Instantiated with `Self = Foo`, `hello(self_)` resolves to Foo's required impl — exactly
-Rust's "the default is monomorphized per `Self` and calls `Self`'s methods." The body's
-`self.other()` calls lower the same way any UFCS call does, recursively (defaults calling
-required methods, or other defaults, all work at instantiation).
 
-**Override semantics are free.** An impl that overrides the default emits a **non-template**
-`Greet_::describe(const Foo&)`. Now `Greet_::describe(foo)` has a concrete (non-template)
-candidate and the generic (template) default; C++ overload resolution prefers the
-non-template → the override wins for `Foo`, while every type without an override matches only
-the template → gets the default. That is precisely "an impl shadows the trait default," via
-the very §3.2.4 non-template-▷-template tiebreak — no special-case logic.
+- **A default that calls only vtable slots** (`describe`) is a **non-pure `virtual`** on the interface for tier 1 and a constrained default template in the namespace for tier 2 — **one body**, `default_describe`, which the virtual forwards to. Its `Greet_::hello(s)` resolves through the bridge and the vtable to a tier-1 implementor's override, and through overload resolution to a tier-2 impl function; a tier-1 impl overrides it with `override`, a tier-2 impl with a non-template overload (`describe(tag, const Bar&)` = `777`). Measured (§3.2.15): static and `dyn` both match rustc in one TU and across two named modules, and it *fixes* a shipped bug — the shipped default resolves `self_.hello()` to an *inherent* `hello` where Rust's default body sees only the trait's (`2002` vs `2`); the CPO sees only trait impls.
+- **A generic default, and every default that transitively calls one,** is a **non-virtual
+  explicit-object member** of the interface (C++23; `this auto const&` for `&self`, `this auto&` for
+  `&mut self`, `this auto&&` for `self`). The object parameter deduces the implementor's static type,
+  so `self.map_hello(…)` inside `via` binds the implementor's own member template when one exists —
+  Rust's override, by name hiding — and the interface's default otherwise. This holds for an override
+  in *any* crate with the upstream interface unchanged: measured `dog: gmap=60 via=60 | cat: gmap=6
+  via=6` = rustc in one TU, across two named modules with the interface precompiled before the override
+  existed (`60`), for a downstream subtrait's default calling the upstream generic default (`60 70 60`),
+  and for all three receiver kinds (§3.2.15). The shape it replaces — the default as a `virtual` whose
+  body calls the generic member through `this` — binds `Tr::map_hello` from the base and is silently
+  wrong for any override (`6` where rustc gives `60`). The Rust side must carry `where Self: Sized` on
+  the generic default and its callers (E0038 otherwise), which is exactly the non-slot spelling; no
+  `dyn` route is lost, because Rust cannot call them on `dyn`. Forward-only caveat: C++ code that calls
+  such a default through a base-typed reference (`const Tr& t = dog; t.via()`) gets the base body
+  (`6`), a call Rust cannot express. **This retires the CRTP `TrDefaults<Adapter>` mixin in both tiers.** For tier 2 the question does not
+  arise: a tier-2 override of a generic default is a more-constrained function template in the namespace
+  (`each(tag, const Wrapper<T>&, F)` beats the default `each`), and `Greet_::via(w)` reaches it by ADL at
+  instantiation, across modules (measured `77`, §3.2.15). The manifest carries, per trait, the names of its non-vtable defaults, so a
+  downstream subtrait whose default calls one classifies the call correctly.
+- **`-> Self` defaults with `where Self: Sized`** are explicit-object members with a deduced return
+  (`auto dup(this auto const& self) { return self; }`), which is how `Self` acquires a C++ spelling.
+- **`Self::Assoc` in a default body** is a plain name on an interface parameterized by its associated
+  types (§3.2.8); in a namespace body it is `TrTraits<S>::Assoc`.
 
-**Composition.** *dyn:* the interface declares `describe()` and each adapter override forwards
-to `Greet_::describe(value_)`, so static and dynamic defaults bottom out in the same template.
-*Cross-crate:* a dependency emits its default templates into its own `Tr_` (with `export`); the
-manifest (§3.2.7) records the trait's defaults so the owner map includes them and the call
-qualifies to `dep::Tr_::describe`. *Assoc-const / runtime-helper traits* are excluded — that
-path already materializes defaults as `<Tr>RuntimeHelper` statics.
+**The override mechanism in tier 2 is overload resolution, and it works across modules only through the
+CPO.** A concrete impl's `describe(tag, const Bar&)` is a non-template; the default is a template;
+[over.match.best] prefers the non-template. A blanket's constrained template beats the default by being
+more constrained. That is the shipped tiebreak, retired on 09-29 as "a simulation of override built from
+overload resolution" and **un-retired here** — because the probes showed it is not a simulation that
+drifts: it matched rustc in every default cell (single TU `a: … describe=2 each=11 via=2 | b: describe=777
+via=6 | i32: describe=42 via=22`; two modules `down.via()=60 down.each(+1)=60 plain.via()=6 up.via()=6
+down.describe()=10 show(down2)=777 | dyn down2.describe=777`), *provided* the default body and the dyn slot
+call the CPO. With a qualified call to the default template instead, the override is invisible from
+another module (`sonly=11000` vs `5550`; `show(down2)=10` vs `777`) — the 09-29 adapter's vtable had no
+such failure mode, which is the one structural advantage the namespace carrier gives up and re-earns
+through §3.2.2 rule 3.
 
-**What needs wiring (the missing pass).** Today emission walks `impl Tr for U` blocks only, so
-an unoverridden default produces no `Tr_::m` and the call falls through to a member (a stopgap
-that works only when the older path materializes the default as a member). The proper fix:
-(1) also walk *trait declarations* and emit each default-bodied method as
-`template<class Self> ret m(<self-kind> Self self_, …)`; (2) early-declare them (§3.2.5
-ordering); (3) add defaults to the owner map so call sites qualify to `Tr_::m`. **Caveats**
-are about transpiling the body *generically*, not dispatch: `Self::Assoc` resolves through
-`TrTraits<Self>::Assoc` (§3.2.8's generic path, since `Self` is now a template param); bounds
-become template constraints; and a default that cannot be expressed generically falls back to
-per-impl materialization.
+**E0117 bounds the exposure.** A primitive impl of a *non-generic* trait can only live in the trait's own
+crate (`only traits defined in the current crate can be implemented for primitive types`), where the
+emitter controls declaration order; so the cross-module "default compiled before the primitive impl
+existed" case exists only for a generic trait with a local argument — `impl Tr2<Local> for u8` in a
+downstream crate — and that is the case the CPO is measured on (`describe2=42`, §3.2.15).
+
+> **Retired:** the 09-23 CRTP `TrDefaults<Adapter>` mixin and the 09-29 body-carrying adapter's
+> `override` / hiding-member override form (§3.2.15). **Kept in purpose, changed in mechanism:** Fix A of
+> §3.2.14 — the `Tr_::__ufcs_impls(const U&)` marker per concrete impl and the `requires {
+> Tr_::__ufcs_impls(s) }` clause on default templates, which solved the multi-owner-default problem
+> (serde's `size_hint` ∈ `MapAccess` ∩ `SeqAccess`) — is the `impls_Tr` type-trait of §3.2.3 and the
+> `requires has_Tr<S>` clause on every default template, loud on misordering where the free-function
+> marker was SFINAE-soft. A multi-owner *call* is the §3.2.6 ladder.
+
+**Would be fixed by this design** (both are open bugs in the shipped lane; neither is fixed until
+§3.2.16 phase 2 lands):
+1. §3.2.14's *"interface-default-body instantiation"* — an object-safe default calling a required
+   method made the interface's `virtual m()` instantiate the free-function default template on
+   the abstract interface itself (`Z_::rz<Z>` → "no member `v` in `Z`"). Here the base default forwards to the
+   namespace body, whose `Greet_::hello(*this)` reaches the pure virtual through the bridge; `describe`
+   above is that case.
+2. A default calling a required method on a type with a same-named **inherent** method: the
+   shipped static route `Greet_::describe(const Self_&)` calls `self_.hello()` with `Self_ = Foo`
+   and picks the *inherent* `hello` — `2002` where rustc gives `2` (§3.2.15); the `dyn` route was
+   already right. The CPO call in the default body sees only trait impls on both routes (measured
+   `describe=2`, §3.2.15).
+
+**What needs wiring (phase 2).** The emitter already places slot-only defaults on the interface (the
+shipped `virtual twice()` shows it) and already emits one `template<class Self_>` default per method in
+`Tr_`. New: the `impl_` split and the tag (§3.2.2 rules 1–2); the CPOs (rule 3); default bodies lowered
+with the CPO for `self.m()` (rule 6) and the body-kind flag that keeps impl bodies on the ordinary
+lowering (§3.2.3); the interface's virtual and explicit-object members as *forwarders* into the namespace
+bodies; `requires has_Tr<S>` on the default templates in place of the `__ufcs_impls` clause; the
+non-vtable members of §3.2.2; removal of the member-first shim from default bodies. The
+body-transpilation caveats — expressing a default *generically*, bounds as constraints, per-impl
+materialization as the fallback for a default that cannot be — are unchanged and independent of where
+the default lives. Assoc-const / runtime-helper traits: the `<Tr>RuntimeHelper` static path for their
+*defaults* depends on the **struct members** that §3.2.2 retires (reviewer probe `rh_dep.cpp`), so it
+cannot simply be kept — in phase 2 their defaults are namespace templates like any other default and
+their consts `inline constexpr` in `Tr_::impl_` / `TrTraits`; until then those traits keep their struct
+members. Phase-2 gate (§3.2.16).
 
 #### 3.2.14 Implementation realities (the long tail)
+
+**Disposition under this design.** Each invariant below was learned making real crates compile under
+the shipped lane — the lane this revision keeps and revises in place — so almost all of them are
+**inherited as written**; the 09-29 table that marked most of them "deleted with `Tr_`" is superseded.
+The "(implemented)" labels in the kept text refer to the shipped lane. One column states whether the
+invariant touches tier 1 (almost none does: the long tail was learned making free functions resolve, and
+tier 1 has none).
+
+| Invariant / mechanism | tier 1 | disposition |
+|---|:---:|---|
+| Owner-map pruning — never qualify to a symbol you didn't emit | – | **Inherited.** The ledger (`ufcs_emitted_trait_methods`) records emitted impl functions per `(trait, self type, method)`, filled by a **pre-pass over impl blocks**, not by emission order; a call may spell `Tr_::m` only if the pre-pass recorded an owner for `m`. |
+| The cross-crate manifest classifies; it does not qualify | ✓ | **Inherited, extended.** Still classifies bare names and names owning traits (`method_owners`, now listing tier-1 traits too); the emitted call is the bare `Tr_::m` CPO, never `dep::Tr_::m` — every crate emits `Tr_` at global scope inside its own module. From **phase 1** it also carries each trait's tier and supertraits, the names of its non-vtable defaults, per-method receiver kinds, blanket presence per `(trait, method)`, and per dependency type its inherent method names; a stale manifest is invalidated, never trusted. |
+| Free functions are global; impl-local types are not (Fix B) | – | **Inherited for foreign-self impls in nested modules; retired for local-self impls** (§3.2.5): a local self type's functions are emitted in its declaring namespace, where the body's relative names resolve in place (132/249 serde_core impls, measured). The helper-namespace + re-emitted using-declaration bridge survives for the other 117/249, bridging into `Tr_::impl_`. |
+| Multi-owner defaults need a constraint, not a guess (Fix A) | – | **Mechanism changed, purpose kept:** `impls_Tr` marker + `requires has_Tr<S>` on default templates (§3.2.3, §3.2.13). |
+| Distinct Rust types, one C++ type → dedupe by canonical signature | – | **Inherited** for `isize`/`i64` and the alias families, the tag now part of the signature. **Fixed** for `impl Tr for &T` vs `impl Tr for T`: `rusty::self_tag<Self>` makes them distinct overloads (§3.2.4, decision (f)). |
+| The impl-collapse preserved member `rusty_<Tr>_<m>` + tagged probe | – | **Superseded by the row above** once `self_tag` lands; until then inherited. |
+| Open: associated-type / generic resolution in free-function *bodies* | – | **Inherited (open).** A default template's body names `Self::Assoc` and needs the `TrTraits<S>::Assoc` substitution (§3.2.13). |
+| Trait static methods in free-fn bodies | – | **Inherited.** |
+| `PhantomData` as a value, concrete-type-as-phantom-param | – | **Inherited.** |
+| Don't intercept a runtime-helper method with UFCS | – | **Inherited.** `method_prefers_runtime_helper_namespace` applies to the CPO interception as it did to the free-function interception. |
+| Open: interface-default-body instantiation | – | **Would be fixed** (§3.2.13). |
+| `rusty_ext` — local trait × foreign self type lane (`emit_cross_crate_rusty_ext_bridge`, `rusty_ext_methods_by_module`, the `rusty_ext_fallback` probe, its block-relocation splice) | – | **Folded into the placement rule** (§3.2.2, §3.2.5): a foreign-self impl of a local trait lives in `Tr_::impl_`, which is where `rusty_ext` put it under another name. The separate namespace, the fallback probe and the retargets are deleted in phase 3; the relocation splice *is* the Fix B bridge and stays. |
+| `rusty::deref_call` / `__mdisp_*` — the deref-chain method dispatcher (`include/rusty/dispatch.hpp`) | ✓ | **Kept.** It is what walks the shim's deref arms (§3.2.3), for a receiver of either tier. |
+| Internal-linkage wrapping of synthesized trait machinery (C21) | ✓ | **Kept** for the namespace machinery and the forwarders. A tier-1 interface is an exported class, not synthesized machinery; wrapped only when the trait *and all its implementors* are non-`pub` (§3.2.5). |
+| Dependency-provided dedup; `Self_` turbofish threading; text-splice relocations | – | **Kept.** Each exists to make a free function's signature or call resolve, and the carrier is still a free function; the tags make most explicit `Self_` arguments unnecessary at call sites but not in the declarations. |
+| `impl Tr for &T` vs `impl Tr for T` collapse | – | tier 2 (references are never tier-1 self types); `self_tag` (above). |
+| The TRAIT-ARG collapse (task #206: two instantiations of one generic trait on one type) | ✓ | the shipped lane warns `HARD C++ LIMIT` and parks the losing body; under this design the pair is tier 2 for that type by §3.2.1 and the impls are overloads keyed by `rusty::tag<A>` (§3.2.2 rule 7). |
+| The injected `using namespace Tr_;` (three emission sites, `mod.rs`) | – | **Deleted in phase 2** — the first step, since every other step spells `Tr_::m` (§3.2.5). |
+| Per-impl forwarding adapters | – | **Replaced** by three generic forwarders per trait (§3.2.10). |
 
 The model above is clean; making real crates (serde, itertools) compile flag-on surfaced a
 set of invariants that are easy to violate and worth stating outright. Each is a consequence
@@ -1681,6 +2526,394 @@ safety net, so every qualified name the transpiler emits must be guaranteed to e
   default whose body does not call a required method (serde's `size_hint` returns `{}`) dodges
   this; the general case is unresolved and tracked as a dedicated follow-up. (Not hit by
   `serde_core`, which is GREEN flag-on as of 2026-06-16.)
+
+#### 3.2.15 Why not "always a virtual class" — the 2026-09 investigation
+
+This section is the evidence behind the design above: a proposal, the strongest form it was
+escalated to, what was measured, and where every line of inquiry ended. All measurements: clang
+22.1.8, `-std=c++23`, this repo's `include/`; the snippets are short enough to reproduce from the
+text. Probe directories are under the session scratchpad (`inherit-probe/`, `escalation/`,
+`review/`).
+
+**The proposal.** Drop the free-function lane and *always* lower a trait to a virtual class that
+the implementing struct inherits — "we always have all the Rust source, so we can always change
+the generated C++ to add inheritance." Escalated, when the first objections were raised, to:
+(A) map every primitive to a C++ class so it *can* carry a base, and (B) abandon prebuilt modules
+and re-emit the whole program so any type can be re-emitted with new bases.
+
+**Verdict.** *No* to the literal question — inheritance cannot be the only path. *Yes* to the
+question underneath it — one lane is achievable, and it is the body-carrying adapter of this
+section, with direct inheritance as its fast path. Every independent probe converged on that
+mechanism; that convergence, more than any single measurement, is why the design changed. *Amended 2026-10-04:* the lane is a **namespace of free functions with tag-anchored ADL and per-method CPOs**, with a thin virtual helper for `dyn`; the body-carrying adapter was the 09-23 / 09-29 answer. Six probes written in both designs' fixed forms matched rustc on every measured cell; the namespace carrier did it at 2–4× less emitted code, closer to the shipped emitter, and admitted the arg-inferred generic-trait call the adapter key rejected. Its price — a lookup protocol whose invariants are silent if violated — is written down as §3.2.2's seven rules (measurements below).
+
+**The two hard reasons `virtual`-for-everything fails.**
+1. *C++ forbids `virtual` on member function templates* — a language rule in every standard
+   mode, because a vtable is a fixed, finite array and a template is an infinite family. Rust
+   encodes the identical fact as **object safety**: all 56 generic methods on `core::Iterator`
+   carry `where Self: Sized` precisely to keep them out of the `dyn` vtable, and rustc rejects
+   `dyn` on a trait with an unbounded generic method (E0038). Generic trait methods are pervasive
+   — 86 of 132 `Itertools` methods, serde's `serialize<S>` / `deserialize<D>` — so a static lane
+   survives by language rule. (The steelman *was* tried: monomorphize whole-program and emit one
+   slot per instantiation. It works for `Self`-free returns — ~30 of `Iterator`'s 56 — and cannot
+   for `Self`-parameterized returns; and no valid Rust program can dispatch through those slots.)
+2. *A `virtual` base on a primitive is ruinous.* Itanium gives each non-primary polymorphic base
+   its own vptr: `sizeof(I32)` is 16 at one base, 168 at twenty (`-fdump-record-layouts`: 20
+   vptrs, payload at offset 160), **784 bytes on a 97-base model of std's surface on `i32`** — a
+   1M-element `Vec<i32>` goes from 3.8 MB to 748 MB; no longer trivially copyable or standard
+   layout; `repr(C)` `Point{x,y}` becomes 32 bytes; `memset` to zero nulls the vptr silently.
+   Whole-program visibility (B) makes this *worse* by maximizing the base set.
+
+**What the escalations buy — and where they stop.** (A) works for its target: `struct i32_cls :
+MyTrait_` with a conversion operator compiles and runs, including `switch`, arithmetic and
+class-typed NTTPs; marker traits are free (EBO: `sizeof` stays 4). With `virtual` *dropped* —
+non-virtual CRTP empty bases — the entire cost case evaporates (`sizeof(I32)` 4 under 97 bases,
+trivially copyable, identical vectorization, `repr(C)` / `atomic` / `bit_cast` / `memcpy` intact).
+But a non-virtual base has no vtable, so `dyn` needs the interface + adapters back — two lanes
+again, the free function respelled as a base member, the same call-site shim. The simplification
+does not survive.
+
+**The premise "we always have all the Rust source" — three ways it fails.** *Closures:* a C++
+closure type is synthesized by clang at the call site — no header, no `.cppm`, nothing to re-emit;
+every `.map(|x| …)` produces one. *Hand-written runtime types:* `rusty::Option`,
+`rusty::slice_iter::Iter<T>` (`include/rusty/slice.hpp`) — adding a base is `redefinition of
+'Option'`; (B) regenerates Rust, these are C++. *Cross-module re-emission is rejected outright:*
+clang 22, `declaration 'Widget' attached to named module 'up' cannot be attached to other modules`.
+
+**Trait scoping has no base-class analogue — and the failure is silent.** One type, `impl A for
+T` and `impl B for T`, called from two modules that `use` different traits: rustc prints `1, 2`;
+always-inherit with the obvious `using T_via_A::foo;` repair compiles at exit 0 and prints **`1,
+1`** with zero diagnostics under `-Wall -Wextra -Werror`. All three spellings were compiled — emit
+both bodies (hard error), collapse to one (silently wrong), proxy bases (false positive) — none is
+Rust-faithful, because Rust's disambiguation lives at the *call site* and a base list on the
+*class*. Per-trait renaming fixes it only if the transpiler decides which trait — the trait solving
+§3.2.11 rules out. This is why §3.2.6 keeps the decision at the call site behind a `static_assert`.
+
+**Measurements that shaped §3.2.2–§3.2.14.**
+
+| Claim in the design | Measurement |
+|---|---|
+| Cross-module explicit specialization works and is conforming (§3.2.5) | primary in module `iface`, `template<> class SpeakAdapterRef<int32_t>` in module `impl_a`, consumer imports both: `int=70 / dyn=70` on clang 22.1.8 and gcc 14.2; [temp.expl.spec]/3,/4,/7, [module.reach]/3. A specialization in an *implementation* unit: direct use loud, marker silently false for importers (`via_iu=7000 has=0`) |
+| Adapter route costs nothing at `-O1+` (§3.2.3) | `-O2`: adapter and free-function routes byte-identical (`leal (%rdi,%rdi,2),%eax; incl %eax; retq`), by-value delegating flavour included; `-O0` materializes the wrapper |
+| A completeness predicate on a declared-only primary memoizes silently (§3.2.3) | `has<int>` evaluated before `template<> struct R<int>` → `early=0`; evaluated again after → still `late=0`; no diagnostic. A two-trait ladder emitted before the second impl resolved to the wrong trait with the guard never firing |
+| A defined-false marker is loud on misordering — for explicit specializations only (§3.2.3) | `impls_R<int>` instantiated before its explicit specialization → `error: explicit specialization of 'impls_R<int>' after instantiation`; a *partial* specialization of the same defined primary after instantiation → silent stale false (reviewer probe `p5_partial_after_inst.cpp`) |
+| No "defer to end of TU" escape for the ladder (§3.2.3) | a generic lambda's `operator()` — with `decltype(auto)` or a declared return type — is instantiated by the end of the enclosing function: a ladder placed before the specialization reads `early=-1` (reviewer probes `p6`, `p6b`) |
+| Nested-module bodies already precede adapters in the shipped output (§3.2.16 (j)) | `inner::go` emitted at line 115, adapter specializations hoisted to 123–182, top-level bodies at 187+ (reviewer probe `order.rs`) |
+| Marker specialized in another module; the non-importing TU disagrees silently (§3.2.5) | primary in module `a`, `template<> struct impls<int> : true_type` in `b`; a TU importing `a`+`b` reads true and runs; a TU importing only `a` reads false — both exit 0 |
+| The shipped emitter keys adapters on trait args (§3.2.2) | `template <class T, class U> class ConvAdapter;` / `class ConvAdapter<int32_t, X> final : public Conv<int32_t>`; only the *first* impl's adapters are emitted (`<uint8_t, X>` missing) |
+| Interface split + delegation + mixin reproduces rustc (§3.2.2, §3.2.10, §3.2.13) | trait with `&self`, `&mut self`, `self`, slot-only default, generic default, a default calling it, and an overridden supertrait default — rustc 1.97.1 oracle: `get=5 twice=10 base=99 gmap=60 via_g=60 \| dyn twice=12 base=99 \| consume=107`, and the C++ probe matches on every field; `const Tr& d; d.bump()` → `error: no member named 'bump'`. (`via_g` calls a `Self: Sized` method, so valid Rust makes it `Self: Sized` too — `dyn via_g` is E0038 — which is why it lives on the mixin and never on a slot; the probe's first cut put it on the vtable and reported a `dyn via_g` Rust cannot express) |
+| A generic-calling default on the base binds the trait's version (§3.2.13) | same probe with `via_g` as a slot on the base: `via_g=6` (rustc `60`); reviewer's independent probe: `2/11` vs rustc `999/15` |
+| Supertrait default inherited instead of delegated (§3.2.10) | reviewer probe: `1100` where rustc gives `99900` |
+| Supertrait + subtrait sharing a method name collapse to one slot (§3.2.2) | `Super::foo` / `Sub::foo`: emitting both bodies → redefinition; one body → `dyn` upcast returns the sub body (`2` where rustc gives `1`) |
+| Native override serves both routes (§3.2.13) | `Dog` overrides `twice`, `Cat` inherits: `static: 100 10 / dyn: 100 10` = rustc; 0 indirect calls in the static path at `-O2` |
+| The §3.2.6 ladder must be a generic lambda | non-generic `[&]()` over a concrete receiver → `error: static assertion failed` on the discarded arm; `[&](auto&& r)` → clean |
+| The shipped multi-owner form is silently first-wins (§3.2.6) | `emit_multi_owner_ufcs_call` emits a guard-less qualified `if constexpr` ladder over `A_::foo` / `B_::foo`, including traits not in scope; prints the first owner's body where rustc errors E0034. The unqualified form: `error: call to 'm' is ambiguous` |
+| `self.m()` inside an adapter body must go through the shim (§3.2.2) | unqualified `hello()` in the adapter body binds the adapter's own override: `1` where rustc gives `1001` (reviewer probe) |
+| The shipped shim inverts Rust's probe order (§3.2.3) | inherent `Dog::m` + `impl Tr for Box<Dog>`: rustc `3`; shipped shim's first arm is `deref(...).m()` → `1` |
+| The shipped static route resolves an inherent shadow inside a default (§3.2.13) | `Greet_::describe` calls `self_.hello()` → inherent: `2002` where rustc gives `2`; the `dyn` route gives `2` |
+| The prior design emits one body many times (§3.2.10) | one default method (`twice`) has **nine** textual definitions in the shipped output |
+| The two existing attributes already emit the fast path (§3.2.12) | `namespace Animal_` ×0, adapters ×0, `struct Dog : public Animal`, `twice() override`; path syntax → `(&d)->speak()`; call-site `&dyn` coercion names the deleted adapter; generic-bound receiver leaves one error |
+| `&T` / `T` receivers already collide (§3.2.14) | transpiler warns `two impls collapse to a single C++ signature`; `impl Tr for i32` + `impl Tr for &i32` → `r.m()` returns the `i32` body |
+| Shipped `use`-scoping is coarse (§3.2.5) | `using namespace A_;` **and** `using namespace B_;` emitted when only `use a::A;` is present |
+| Whole-program re-emission cost (B) | `.ninja_log`: full module-cache build 11.1 → 29.1 min CPU (2.6×); BMI storage 0.82 → 7.08 GB (8.7×); one-binary edit loop 0.65 s → 125.8 s (194×) |
+| Header-mode ODR silence vs module-mode diagnosis | one class with different bases in two TUs: plain link and `-flto -Wodr` both exit 0 and read wrong bytes; named modules diagnose it (`found 1 base class … but in 'mcore' found 0`). Predicate divergence across importers is *not* diagnosed either way |
+
+**Live defects found along the way** (none introduced by this design; unfiled at time of
+writing). RPITIT `fn m(&self) -> impl Trait` in a trait breaks the build in the shipped default
+lane (19 errors, `only virtual member functions can be marked 'override'`) and APIT `fn m(&self, s:
+impl Src)` emits `virtual … (const auto& s) = 0` — both object-safety exclusions missing from the
+interface skip-list; `-> Self` also reaches the interface (`virtual Consume dup() const = 0`, abstract
+by value). GAT `type Item<'a>` → `redefinition of 'Lend' as different kind of symbol`. `#[cpp_inherit]`
+is a silent no-op on foreign / primitive self types. Supertrait adapters are abstract. The `&dyn`
+call-site coercion and generic-bound receiver bugs under `cpp_inherit` (§3.2.12). A generic trait
+with two impls for one type gets adapters for the first only. `impl Tr for i32` + `impl Tr for
+&i32` silently routes to one body. The multi-owner shim is guard-less first-wins and the plain shim
+inverts probe order (table). The UFCS shim emits a textually duplicated, dead first branch. User
+marker traits get a full polymorphic interface (`virtual ~Marker()`, deleted copy). Unrelated to
+traits: `let mut sum = 0; for x in [4_000_000_000u64; 2] { sum += x }` prints `8000000000` under
+rustc and `-589934592` from the shipped output.
+
+**How the two-tier model relates to that investigation.** The investigation's verdict was "no to
+*always* inherit, yes to one lane," and it identified the adapter as that lane. This revision keeps
+every measurement and moves one thing: the *default*. The investigation's own steelman ("a coherent
+restricted dialect where always-inherit genuinely is simpler: crate-local named structs, object-safe
+methods, no blanket impls, no foreign receivers — the C++-interop-facing surface") is tier 1, and
+§3.2.1 is that dialect written down as a decidable test, with its coverage measured honestly
+(§3.2.12). Three of the investigation's findings become tier-1 *exclusions*: the
+inherent-method-silently-overrides case, the subtrait-redeclares-name case, and `Self` in a
+non-receiver position. Two are superseded: per-trait slot names were introduced for one type
+implementing two same-named traits — under the two-tier model that type's impls are adapters, each
+inheriting one interface, so the collision never reaches C++ and tier 1 keeps plain names, with the
+call site's base-tested ladder carrying Rust's scope rule; and the CRTP defaults mixin is replaced by
+explicit-object members. One is *re*-admitted by plain names and fixed at the call site: the
+"trait scoping has no base-class analogue" failure, for a type with a tier-1 and a tier-2 impl sharing
+a name (§3.2.6).
+
+**Measurements added by the 2026-09-29 review** (clang 22.1.8, rustc 1.95–1.97; probes under
+`review3/` and `review/tier1probe/`). Explicit-object defaults: `dog: gmap=60 via=60 | cat: gmap=6 via=6`
+= rustc; the same across a precompiled module boundary (`60`); downstream subtrait `60 70 60`; the
+`virtual`-caller shape `6 6 60 6` vs rustc `6 6 60 60`. Plain-name shadowing: crate B `impl Tr2 for a::Dog`,
+only `Tr2` in scope, 09-23 ladder `1` vs rustc `2`; both in scope `1` vs E0034; guarded arm 1 + `has_`
+count: `2` / assertion. Bound: `requires std::derived_from<T, Tr>` rejects `impl Tr for i32` (`f(&42)`:
+`derived_from<int, Tr>` evaluated to false) where rustc prints `7 1042`; `has_Tr` gives `7 1042`. Generic
+trait, two instantiations: `A` only in the return → `functions that differ only in their return type
+cannot be overloaded`; `A`-free method → one body serves both bases (`i32-impl` where rustc gives
+`u8-impl`); explicit trait arg `<T as Tr<u8>>::m(&t,5)` → `t.m(5)` picks `int32_t` (`6`) where the base
+cast gives rustc's `105`. Concrete self type on a generic struct: `template<class T> struct W : Tr`
+accepts `W<&str>` (rustc E0277) and compiles the `i32` body against it. Subtrait over a tier-2
+supertrait impl: `1 0 0` where rustc gives `1 999 999`. `Self` in a parameter: `hides virtual member
+function`, implementor abstract; rustc E0038. Deleted base copy: derived `= default` copy implicitly
+deleted; protected+defaulted: derived copies work, `Tr& a = x; a = y` rejected. Synthesized lone move
+ctor: `call to implicitly-deleted copy constructor`. `x.Tr::d()` = base body (`100` vs override `2`);
+pure slot → undefined reference. `virtual int k() && = 0` legal, callable directly and through an owning
+`dyn`. Non-virtual supertrait bases: `derived_from<D, Super>` false. Census: ~4 / ~288 pairs tier 1.
+
+**Measurements added by the 2026-10-04 carrier probes** (clang 22.1.8, rustc 1.95–1.97; six probes, each
+writing the namespace carrier and the body-carrying adapter in their *fixed* forms against a rustc oracle;
+`nsvsadapter/{probe,defaults,scoping,thinhelper,probe_crosscrate,costs,hazards}/`, verdicts in
+`nsvsadapter/results.txt`). Both designs matched rustc on every cell; the rows record what each must
+emit or know to do so.
+
+| Probe | Measured |
+|---|---|
+| **collapse-tags** — `trait Tr<A>` with `Tr<i32>` + `Tr<u8>` on one type; `impl Tr for T` + `for &T` | trailing `rusty::tag<A>` / `rusty::self_tag<Self>` ≡ the adapter's `<A, U>` / `<const T&>` key: `diff` vs rustc identical on 7/7 and 9/9 lines. **`t.m(av)` with `av: u8` from a function return: rustc `304`; the free-function overload set gives `304` with no emitter knowledge; the 09-29 §3.2.2 rule rejected the program.** Bare `t.name()` / `let c = t.conv()` with two impls in scope: rustc E0283 — no third case. Machinery: 0 explicit / marker specializations, 0 out-of-line bodies, 1 forwarder template per trait vs 4 / 5 / 6 / 3 for the adapter |
+| **defaults** — inherent shadow, non-template override, primitive impl, cross-module override, `dyn` | fixed namespace form = rustc on all: `a: foo.hello()=1001 <Foo as Tr>::hello=1 describe=2 each=11 via=2 \| b: describe=777 via=6 \| i32: describe=42 via=22 \| d: 2/777/42`; two modules `c: down.via()=60 down.each(+1)=60 plain.via()=6 up.via()=6 down.describe()=10 show(down2)=777 \| plain.each(+1)=6 dyn down2.describe=777`; `impl Tr2<Local> for u8` downstream `describe2=42`. Three traps on the way: primitive impl declared *after* the default templates without a tag → `call to function 'hello' that is neither visible in the template definition nor found by argument-dependent lookup`; dyn slot as a qualified call to the default template → `dyn bar.describe=10` (rustc 777), unqualified at member scope → finds the member itself; `using namespace` defeated by inner-scope hiding (compile failure) → per-name using-declarations, retired altogether under the CPO. Downstream override placed in `Tr_` → silently `show(down2)=10`. E0117: `impl a::Tr for u8` downstream rejected by rustc. Adapter form: all cells, no variant switching |
+| **scoping / E0034** — six scope cases, three E0034 cases, parent/child modules, type-param receiver | namespace form = rustc on `i=1 ii=2 iv=11 ivb=1000 v=1/2/2 vi=1/11/1000`; concrete-vs-concrete `call to 'foo' is ambiguous` for free; **concrete-vs-default (`16`) and concrete-vs-blanket (`32`) silent where rustc is E0034** — the `has_A + has_B` guard restores both (adapter ladder: assertion on both). Parent `use A` + child `use B`: ambiguous with namespace-scope directives, `child=2 parent=1` with function-scope ones — the shipped emitter emits six global directives for two traits (`mod.rs:20900/20974/21309`). Type-parameter receiver must be bound-qualified (`A_::foo(x)`): unqualified is ambiguous at `g<int>`. Cross-crate default inherited through a nested-module override: `7000` both forms. 18 vs 60 surface lines; 1–2 vs 5–7 per impl; one call vs a 6-line ladder per site |
+| **dyn thin forwarders** — `&dyn` over `i32`, `W<i32>`, a blanket; defaults; supertrait override; `&mut dyn`; `Box<dyn>` | rustc `i32 m=6 twice=12 ssum=99906 s=99900 \| W m=11 twice=6006 ssum=1111 s=1100 \| Sc m=140 twice=280 ssum=147 s=7 \| mut y=10 w2=5 \| box 5/10/99905 15/6006/1115 101/202/108`; `ns_thin.cpp` identical, 0 warnings; 6 vs 40 lines per impl; stubs 3 per trait vs 9; -O2 static route byte-identical to both adapter routes. **Body kind:** `W`'s override `twice` sees the inherent `m` (`6006`), the default `ssum` sees the trait's (`1111`). **Module boundary:** a qualified call in a template sees only earlier overloads (`qlookup` prints `1`); `Tr_::twice<BT>` loud `no viable conversion`; supertrait-only default **silently `sonly=11000`** (rustc 5550). Fixed two ways: ADL tags with unqualified calls (`ns_thin_adl.cpp`, `W` prototypes *after* the defaults, identical to oracle) or per-impl materialization; the adapter form passes natively through the vtable |
+| **cross-crate placement** — 4 modules, local-self in a nested module, foreign-self, blanket on `Box<Local>`, hazards | base program identical to rustc in all three forms (`foo.m=13 foo.describe=501 foo.hello=2005 … bar.ext=41 only_ext2=2040`). Receiver-namespace placement: the body with `Helper` / `private_::unit_only` compiles **in place** (zero relocation, `private_` shadowing correct, `13`); Fix B gone for local-self (132/249 serde_core, 69/72 serde), kept for foreign-self in nested modules (117/249; `use of undeclared identifier 'Helper'` otherwise), 4 lines/impl vs 8 + 3/trait. **H1** two crates adding `a::ext(const Bar&)`: `declaration 'ext' attached to named module 't' cannot be attached to other modules`. **H2** local `int32_t m` in the caller: `called object type 'int32_t' is not a function`. **H3** two traits, one method name, one type: `redefinition`. **H13** downstream trait's `m` on the same type: `ambiguous` where rustc `3005`. H2/H3/H13 fixed by the tag form (`ns_tag/`, identical to rustc); H1 is the placement rule |
+| **machinery census** — one trait, four impls incl. a blanket and a tier-1 struct, every use site | identical to rustc in all three forms (`a_ns`, `a_pure`, `b_adapter`), 0 diagnostics at `-O2 -Wall -Wextra`; static-call asm identical. Totals 158 vs 197 lines; trait machinery 95 vs 117; **per tier-2 impl 6–8 vs 28–34**; call-site region 47 vs 64; 2 vs 5 call-site shapes. Per *trait* the adapter is smaller (17 vs 63 lines). The namespace form works **only** as: a CPO per method (a plain qualified `Shape_::area(s)` in a generic caller cannot see a later impl — compile error), SFINAE-friendly CPOs (else `has_Shape` hard-errors), impl functions in `impl_` not `Tr_` (a bare `area` inside `Shape_` names the CPO variable and suppresses ADL), tag parameter 0. Concept memoization silent (`early=0 late=0`) vs defined marker loud |
+
+**Unmeasured in both forms** (by construction only): a tier-1 and a tier-2 impl of same-named traits on
+one type reached through the bridge; `Box<i32>` autoderef through `deref_call` into a CPO; by-value `self` through a CPO with the `Copy`-copy rule, and the by-value bridge `consume(tag, S s)` into an `&&` slot (the §3.2.2 example writes it; no probe compiled it); generic *required* methods through a CPO; associated
+types in a namespace default body; marker reachability under the namespace form across a module graph
+(taken from the 09-29 row); the §3.2.3 ladder as emitted (every probe hand-resolved inherent vs trait).
+
+#### 3.2.16 Migration plan and open review items
+
+**Execution order (2026-10-07).** Phases are executed **2 → 0 → 1 → 3**, not in the numbered order.
+Decision (e) ("phase 1 before phase 2") was carried from 09-23, when phase 2 *replaced* the lane with no
+measuring corpus; phase 2 now *revises the lane every matrix crate uses*, each of its steps has a probe
+cell that flips from FAIL to PASS (`tests/transpile_tests/trait_probes`, §3.2.12), and the §3.2.12 table is
+already its step list — whereas phases 0–1 change the emitted shape of every local-struct trait impl in
+the unit corpus for a census of 4 pairs in the matrix. Within phase 2 the steps run in the order that
+keeps each push gate-green, not the table's order; the first is the §3.2.6 guard (self-contained, loud
+on failure), and the `using namespace Tr_;` deletion waits until every call site is measured to spell
+`Tr_::m` (default bodies and the shipped shim's member branches may still lean on the directive).
+
+**Phase 0 — prerequisites in the tier-1 lane** (every item is a measured defect, §3.2.12): multiple and
+virtual bases; `&&` slots for `self` receivers and move/copy insertion at their call sites; generic
+defaults and their transitive callers as explicit-object members; supertrait-calling defaults kept as
+virtual bodies (and the `operator-` mis-emission); the interface skip-list extended to `Self` in
+parameters, RPITIT, APIT, `-> Self`, `async fn`, GAT, and `where Self: Sized` — deciding *tier*, not
+only slot emission; assoc-const traits given an interface; constructors for tuple and unit structs;
+`clone()` and every literal through the fieldwise constructor; no synthesized lone move constructor, all
+four special members defaulted for `Copy`/`Clone` implementors; interface special members protected and
+defaulted; `Box<dyn>` construction through `Box`'s converting constructor; the call-site `&dyn` coercion;
+path syntax decided per `(trait, declared receiver)`, not per trait; `cpp_inherit` on a foreign or
+concrete-on-generic self type a *diagnosed* no-op; interface hoisted before any implementor; the
+anonymous-namespace wrap only for non-`pub` traits with non-`pub` implementors; `rusty::unreachable_via_const_dyn`
+added to `include/rusty`.
+
+**Phase 1 — tier 1 becomes the default.** A program-wide impl pre-pass (the shape of
+`set_cross_file_traits`, over every impl block in the dependency graph) computes what §3.2.1 needs and
+the collect pass lacks: blanket and conditional presence per `(trait, method name)`; per-type
+implemented-trait sets and same-name collisions over concrete impls; inherent-vs-tier-1 name overlap;
+self-type arguments against `declared_type_params`; alias resolution; supertrait lists (local, and from
+the manifest); generic-default and `Self: Sized` flags per method; `repr`. Every `(trait, impl)` passing
+§3.2.1 is emitted tier 1 with no attribute; everything else keeps the shipped free-function lane.
+`cpp_trait_member_dispatch` / `cpp_inherit` become *force* attributes that may override only the
+coverage-motivated tests (decision (w)), never the semantic ones; an opt-out attribute per impl. **The
+manifest gains its tier-1 fields in this phase** (§3.2.14), because `impl DepTrait for LocalType` needs
+the dependency's tier the moment a second crate exists. Touch list: `predicates.rs` (marker recognition),
+`collect_passes.rs` (the two `cpp_inherit` gates and the pre-pass), `transpile.rs`
+(`classify_method_names_excluding_traits`, the manifest), `mod.rs` (the tier decision ahead of the
+classification at the owner-collection site; five call-site gates), `emit_items.rs` (the interface),
+`emit_expr.rs` (call sites, path syntax, the coercion), `type_mapping.rs`, `main.rs` (crate-mode wiring)
+— eight files. Revertable by deleting the predicate. Gate: the parity matrix plus a **tier census** in
+each crate's log (how many pairs went tier 1, and which §3.2.1 test excluded each of the rest).
+
+**Phase 2 — tier 2: revise the shipped free-function lane in place**, behind a per-crate switch, in the
+order of the §3.2.12 table — each step independently revertable and gated by the parity matrix: (1)
+delete the three `using namespace Tr_;` emission sites and spell `Tr_::m` at every classified call from
+the resolved owner; (2) the `impl_` split, the tag parameter, the CPO per method, `impls_Tr` +
+`has_Tr`, `requires has_Tr<S>` on default templates (retiring `__ufcs_impls`); (3) default bodies
+lowered with the CPO for `self.m()`, the body-kind flag; (4) the three generic forwarders per trait
+replacing per-impl adapters, slots through the CPO, supertrait slots enumerated; (5) the placement rule
+— local-self in place, foreign-self in `Tr_::impl_`, `rusty_ext` re-pointed; (6) the §3.2.6 guard
+replacing `emit_multi_owner_ufcs_call`'s first-wins ladder, and bound-qualified type-parameter
+receivers; (7) `rusty::tag<A>` and `rusty::self_tag<Self>`; (8) the non-vtable members. Gates before
+any crate flips: the non-vtable members exist (else serde has no carrier), assoc-const traits have their
+namespace form, the expression-level `StructBorrow` for the `&dyn` argument coercion is added and pinned
+((k)), the negative test for the unreachable stubs, and the §3.2.3 ladder measured *as emitted*.
+Migration hazards from the 09-23 revision stand: the deprecated no-op `--interface-traits` flag (revive
+as the switch or delete) and the eight vendored-port `post_transpile_patch.py` scripts whose `Tr_::` /
+`rusty_ext::` anchors patch nothing silently — step (2) changes the spelling of every `Tr_::m`
+definition to `impl_::m(tag, …)`, so all eight go stale in step (2), and phase 1 already re-emits
+`alloc`, `std_port` and possibly `hashbrown` impls on local structs.
+
+**Phase 3 — delete what the revision orphaned**, in independently revertable steps: the `rusty_ext`
+namespace, its fallback probe and retargets, including the hand-written `namespace ser::impls::rusty_ext`
+block in `include/rusty/rusty.hpp`; the `__ufcs_impls` markers and their `requires` clauses; the per-impl
+forwarding-adapter emitters; the manifest's retired fields, `version` 2, and a consumer hard-error on
+mismatch (the loader today reads no version and skips unparseable files).
+
+**Decisions for review.** Letters (a)–(o) keep their 2026-09-23 numbering so kept text can cite them;
+(a), (b), (d), (f), (g), (i), (j), (k) are re-stated for the 2026-10-04 carrier.
+
+- **(a) Fix B shape** — tier 2 only: retired for local-self impls (emitted in the self type's declaring
+  namespace), kept as the shipped helper-namespace + using-declaration bridge for foreign-self impls in
+  nested modules (§3.2.5).
+- **(b) Cross-module reachability** — impl functions reached by tag-ADL at the point of instantiation
+  (measured across named modules); marker specializations conforming as 09-23, interface units only; tier 2
+  only.
+- **(c) The `static_assert(n ≤ 1)` guard** — a hard requirement; it now counts with `has_` and follows a
+  base-excluded inherent arm (§3.2.6).
+- **(d) The unreachable stubs on the `Ref` / `RefMut` forwarders** (§3.2.10) vs. splitting the interface.
+  Recommendation: the stubs — three lines per *trait* now, not per impl — with the negative test, and **one
+  interface per trait in both tiers** (the 09-23 `Tr` / `TrMut` split retired for tier-2 traits too).
+  Enforcement is runtime.
+- **(e) Phase 1 before phase 2** — unchanged.
+- **(f) `&T` / `T` receiver collapse** — tier 2; `rusty::self_tag<Self>` fixes it (measured 9/9). Not blocking.
+- **(g) View-typed self impls** — tier 2; the view conversion in overload resolution (`span` / `string_view`),
+  exact match winning, and its dedicated test (§3.2.4).
+- **(h) Naming** — `cpp_trait_member_dispatch` / `cpp_inherit` become *force* attributes (see (w)); decide
+  their names and the opt-out's.
+- **(i) Scope-precise candidates** — tier-2 requirement, now carried by the emitter's spelling `Tr_::m` and
+  the §3.2.6 ladder; no `using` of any kind; the inherent arm's exclusion list is scope-*independent* (§3.2.6).
+- **(j) Emission ordering** — tier 2: the forward-declaration pass (all impl declarations before any default
+  template) within a TU; tag-ADL across modules. Tier 1: the interface must precede its implementors.
+- **(k) The expression-level `StructBorrow`** — tier 2, for the `&dyn` coercion in argument position only
+  (the static route constructs nothing); tier 1's `dyn` is an ordinary reference.
+- **(l) Bounds** — `T: Tr` → `requires has_Tr<T>` for **every** trait. `std::derived_from<T, Tr>` is
+  never emitted: it rejects every tier-2 implementor of a tier-1 trait (measured), and the trait's
+  crate cannot know whether one exists. It survives as the reverse-direction reading (§3.2.17).
+- **(m) `self: Box<Self>` / `Rc<Self>` / `Pin<P>` receivers** — open, tier 2.
+- **(n) Interop naming** — *resolved by the model*: tier-1 interfaces have plain names; hand-written C++
+  overrides `m`; a hand-written `t.m()` always gets the tier-1 body, whatever Rust trait a Rust author
+  had in scope — the price of a plain-named member (§3.2.17).
+- **(o) Book sweep outside §3.2** — unchanged list, plus §12 and the C++ module index (§3.2.17's reverse
+  half is new work there), and, of the 76 code comments citing §3.2.N, the 25 citing §3.2.2/3/5/10/13 — the sections whose
+  mechanism this revision changed — which must be re-read against it (the other 51 cite §3.2.7, §3.2.9 and
+  §3.2.4, whose mechanisms did not move).
+- **(p) The tier census as the gate metric.** Today ~1.4% of the matrix corpus. Every widening below is
+  judged by what it adds to that number versus what it costs the contract.
+- **(q) Associated types in tier 1** as interface template parameters — recommendation: yes, with the
+  reverse-direction annotation (§3.2.17, lossy cell 1).
+- **(r) `repr(C)` / `repr(transparent)` types** — recommendation: exclude; a vptr breaks the layout the
+  attribute exists for. Likewise types whose `size_of` the crate asserts.
+- **(s) By-value `self` receivers** — `virtual R k() && = 0` is legal and maps under
+  `docs/method_qualifiers.md` (measured); the call site inserts `std::move` — or a copy for `Copy` self
+  types, since `std::move(d).k()` would let the body mutate the original Rust copies. Recommendation:
+  tier 1 with that rule; Rust forbids calling it on `dyn`, C++ allows `std::move(*box).k()` — forward-only.
+- **(t) Associated consts in tier 1** as `static constexpr` on the implementor plus a concept conjunct —
+  recommendation: yes; note the trait is then not `dyn`-usable in Rust.
+- **(u) Conditional impls as `std::conditional_t` bases** — a widening candidate: `template<class T>
+  struct W : Tr, std::conditional_t<has_B<T>, Other, NoBase<Other>>` is legal and behaves as Rust does
+  (measured), but the implementor cannot write `override` (the member is plain when the base is absent),
+  each conditional impl needs a distinct empty tag base, and the reverse direction must recognize the
+  pattern. Recommendation: stay tier 2 for now; revisit under (p).
+- **(v) Frozen interop traits** — *retired*: with explicit-object defaults and call-site base tests, no
+  downstream impl changes an upstream interface, so nothing needs freezing.
+- **(w) Force attributes** — define what they may override: only the coverage-motivated tests (`repr`,
+  the at-most-one-instantiation rule when every method is parameter-distinguished, the supertrait-impl
+  rule when the author asserts the supertrait impl is concrete elsewhere), never the semantic ones (an
+  inherent/trait name overlap forced to tier 1 is the silent-override case).
+
+- **(x) Tier-2 carrier (adopted 2026-10-04).** A namespace of free functions + tag-anchored ADL +
+  per-method CPOs, with a thin virtual helper for `dyn`; the body-carrying adapter retired to the §3.2.15
+  record. Adopted on the six-probe comparison; the open items are the seven rules of §3.2.2 as *emitter
+  invariants*, each silent if violated, and the unmeasured list in §3.2.15.
+- **(y) The predicate.** `has_Tr = impls_Tr<U>::value ∨ derived_from<U, Tr>` with the defined-false
+  marker (loud; one line per impl; required for all-default traits and for generic required methods) vs. a
+  concept through the CPOs (zero per-impl lines; silent memoization). Recommendation: the marker as the
+  predicate; a CPO-`requires` conjunct admissible for non-generic required methods.
+- **(z) The tag/CPO protocol as the C++-interop surface for tier 2.** A C++ author implements a Rust
+  trait for a type they cannot or will not modify by writing one free function per method — `R
+  m(Tr_::impl_::tag, const Mine& self_, …)` in `Tr_::impl_` or in `Mine`'s namespace — plus `template<>
+  struct impls_Tr<Mine> : std::true_type {}`; every Rust call site and every `dyn` forwarder reaches it
+  with no further declaration. This is the non-intrusive half of the interop story §3.2.17 gives the
+  intrusive half of, and it falls out of the carrier. Recommendation: document it as supported once
+  phase 2 lands; the reverse direction (Rust consuming a C++ free-function impl) needs an index entry
+  kind like §3.2.17's `interface`.
+
+#### 3.2.17 The tier-1 contract: a bijection between Rust traits and C++ interfaces, in all but two cells
+
+This section is the definition tier 1 is held to. Each row is a two-way correspondence: the transpiler
+emits the right column from the left, and a C++ author who writes the right column has written
+something a Rust crate can consume as the left. **The reverse half is new work**, not an existing path:
+§12's inline-Rust profile excludes trait definitions, impls and `dyn`; the C++ module index (§3.13) has
+callable and opaque-type kinds but no *interface* kind. Consuming a hand-written interface from Rust
+needs an index entry `kind = "interface"` with per-method `{receiver kind, signature, pure | default}`,
+a Rust-side trait stub generated from it, lowering of `impl cpp::Iface for Local` to inheritance and
+`override` with qualifiers from the index, and `&dyn cpp::Iface` → `const ns::Iface&`; an interface with
+associated types is not reverse-consumable without parsing C++. Receiver qualifiers are those of
+`docs/method_qualifiers.md`.
+
+| Rust | C++ | notes |
+|---|---|---|
+| `trait Tr { … }` | `class Tr { public: virtual ~Tr() noexcept(false) {} …; protected: Tr() = default; Tr(const Tr&) = default; Tr& operator=(const Tr&) = default; /* move likewise */ }` | destructor `noexcept(false)`: a Rust `Drop` may unwind (the shipped form is load-bearing; the reverse reads `= default` too); special members **protected and defaulted** (C.67), never deleted (measured) |
+| `fn m(&self) -> R;` / `fn m(&mut self) -> R;` | `virtual R m() const = 0;` / `virtual R m() = 0;` | |
+| `fn m(self) -> R;` | `virtual R m() && = 0;` | call sites `std::move(x).m()`, or a copy for a `Copy` self type; decision (s) |
+| `fn m(&self) -> R { body }` (calls only slots) | `virtual R m() const { body }` | default ↔ non-pure |
+| `fn m<F: ..>(&self, f: F) -> R where Self: Sized { body }` | `template<class F> R m(this auto const& self, F f) { body }` | explicit-object member template; overridable by a hiding member on the implementor in any crate; the `where Self: Sized` is the Rust spelling of "not a slot" |
+| `fn m(&self) -> R where Self: Sized { body }` (calls a generic default, transitively) | `R m(this auto const& self) { body }` | explicit-object; reverse: an explicit-object member with no other template parameter is a non-generic default |
+| `fn m(&self) -> Self where Self: Sized { body }` | `auto m(this auto const& self) { body }` | deduced return is how `Self` gets a C++ spelling |
+| required `fn m(&self, o: &Self) -> R where Self: Sized;` / `fn new(a: A) -> Self;` / `const K: T;` | `R m(const T& o) const;` / `static T new_(A a);` / `static constexpr T K;` on each implementor, plus a conjunct of `has_Tr` (`requires(const T& a, A x) { a.m(a); T::new_(x); T::K; }`) | not a slot in either language; the trait is then not `dyn`-usable in Rust (its `dyn` row is vacuous — C++ still accepts `const Tr&`, forward-only); decision (t) |
+| `trait Sub: Super` | `class Sub : public virtual Super` | virtual base ↔ supertrait; diamonds legal on both sides; the reverse also accepts a non-virtual `public Super` for a single-supertrait chain |
+| `trait Tr<A, B>` | `template<class A, class B> class Tr` | |
+| `trait Tr { type Item; }` | `template<class Item> class Tr` | **lossy cell 1**: the reverse maps a template parameter to a generic parameter unless the C++ carries `// @assoc Item`; decision (q) |
+| `impl Tr for T` (`T` declared here, non-generic) | `struct T : public Tr { R m() const override; … }` | plus the fieldwise constructor and, for `Copy`/`Clone`, all four defaulted special members (§3.2.2); a non-`Clone` implementor is still copyable in C++ — forward-only |
+| `impl<X> Tr for W<X>` (`struct W<X>`, exactly its own parameters, unbounded beyond the struct's) | `template<class X> struct W : public Tr` | the reverse of `template<class X> struct W : Tr` is always this row; `impl Tr for W<i32>` and any partial / nested / repeated / extra-bounded list are tier 2 |
+| `impl Tr<X> for T` (one instantiation per type) | `struct T : Tr<X>` | two instantiations on one type are tier 2 for that type |
+| `x.m()` | `x.m()` | holds when exactly one `m` reaches `T` from all sources; a hand-written `t.m()` always gets the tier-1 body whatever Rust trait a Rust author had in scope — the price of a plain-named member, and why a tier-1 × tier-2 same-name pair routes through the ladder |
+| `Tr::m(&x)` / `<T as Tr>::m(&x)` | `x.m()` | the same virtual call; `x.Tr::m()` is never emitted (measured: base body / undefined reference). The sole exception is an explicit trait argument on a generic trait, `static_cast<const Tr<A>&>(x).m(..)` (§3.2.3) |
+| `&dyn Tr` / `&mut dyn Tr` / `Box<dyn Tr>` | `const Tr&` / `Tr&` / `rusty::Box<Tr>` | |
+| `&dyn Sub` → `&dyn Super` | implicit base conversion | |
+| `fn f<T: Tr>(x: &T)` | forward: `template<class T> requires has_Tr<T> R f(const T& x)`; reverse: `requires std::derived_from<T, Tr>` *or* `has_Tr<T>` read as `T: Tr` | **lossy cell 2**: forward must emit the concept because the bound must also admit tier-2 implementors the trait's crate cannot see (`impl Tr for i32`; `impl<T: Tr + ?Sized> Tr for Box<T>` — measured); the body's `x.m()` is the CPO call `Tr_::m(x)` or the §3.2.3 shim; decision (l) |
+| `impl Tr for i32`, `for &T`, `for [T]`, `for Foreign`, for a closure; blanket; conditional; concrete-on-generic | — | tier 2; not in the contract |
+| generic *required* method; `Self` in a parameter or nested return without `where Self: Sized`; `-> impl Trait`; `async fn` | — | the trait is tier 2; not in the contract. C++ has no `Self`: the interface can only spell `const Tr&`, and the implementor's `const D&` hides rather than overrides (measured) |
+| a subtrait redeclaring a supertrait's method; an inherent method named like a tier-1 trait method; two concrete same-named tier-1 impls on one type; two instantiations of a generic trait on one type | — | tier 2 (the last three per type); not in the contract |
+
+**C++-side grammar.** A hand-written class is in the contract when: it has no data members and no
+non-public members other than the protected default constructor and the protected defaulted copy/move;
+every member function is one of — `virtual`, pure or with a body, with `const`, nothing, or `&&` as its
+only qualifier; a non-virtual member template; a non-virtual explicit-object member whose object
+parameter is `auto const&`, `auto&` or `auto&&`; — `final`, `noexcept`, `[[nodiscard]]` and other
+attributes are ignored; no two member functions share a name (Rust has no overloading — an overload set
+has no trait image and is rejected); no default arguments; no `static` members on the interface (they
+belong on implementors); a `virtual` member with a body calls no non-virtual member template or
+explicit-object member (a hand-written interface that does so has the hidden-override defect of
+§3.2.13 and is outside the contract); base classes are other interfaces in the contract, inherited
+`public virtual` (or `public` for a single chain), and **an interface declares no name a base
+interface declares**; the NVI idiom (public non-virtual calling private virtuals) is outside the
+contract. An implementor is in the contract when it publicly inherits interfaces in the contract,
+overrides each pure virtual with a matching qualifier, may hide an explicit-object or template member
+(that is the override), declares no other member with the name of an inherited virtual, and **inherits
+no two interfaces that declare the same name**.
+
+**Measured (clang 22.1.8; `review/tier1probe/`, `review3/`).** A base that deletes copy makes a derived
+`Dog(const Dog&) = default` implicitly deleted; protected-and-defaulted base members give the derived
+type working copy and move and reject `Tr& a = x; a = y;` with `'operator=' is a protected member`. A
+synthesized lone move constructor deletes the copy constructor regardless of the base. `x.Tr::d()` on an
+overridden default returns the base body (`100`; the override gives `2`); `x.Tr::m()` on a pure slot is
+an undefined reference. `virtual int k() && = 0;` is legal, overridable, callable directly and through an
+owning `dyn`. `requires std::derived_from<T, Tr>` accepts a direct implementor and rejects a type with a
+merely same-named member — but also rejects every tier-2 implementor (`impl Tr for i32`, `f(&42)`:
+`derived_from<int, Tr>` evaluated to false; rustc `7 1042`); `has_Tr` gives `7 1042`. Explicit-object
+defaults reach a downstream hiding override across a precompiled module boundary (`60` = rustc).
+`struct T : Tr<int32_t>, Tr<uint8_t>` with `A` only in the return type: `virtual function 'conv' has a
+different return type than the function it overrides`; with an `A`-free method: one body for both bases.
+`template<class T> struct W : Tr` for `impl Tr for W<i32>`: `W<&str>` accepted (rustc E0277) and the `i32`
+body compiled against it. A `Self`-typed parameter: `hides virtual member function`, implementor abstract
+(rustc E0038).
+
+**What the contract buys.** In the forward direction, a crate that stays inside tier 1 transpiles to
+classes, inheritance, virtual calls, and — per trait — one named concept and its marker primary, which
+is what a C++ author writes to constrain a template on an interface; the CPO call `Tr_::m(x)` appears only inside
+generic functions bounded on a trait. In the reverse direction, once the index work above exists, a C++
+library that exposes its abstractions as interfaces in this grammar can be consumed from Rust as traits
+and implemented from Rust by inheritance, without adapters and without the borrow checker learning
+anything new — the interop case `#[cpp_inherit]` was created for, now stated as the default rather than
+the exception, and with its price stated: a plain-named member is the tier-1 body to every C++ caller.
 
 ### 3.3 Pattern Matching ⚠️
 
