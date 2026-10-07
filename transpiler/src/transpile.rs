@@ -1229,6 +1229,122 @@ pub fn collect_declared_trait_modules(
     out
 }
 
+/// Trait short name → its DIRECT supertraits' short names (`trait Sub: Super +
+/// Other`). Book §3.2.6 / §3.2.13 (2026-10-07): a type-parameter receiver's
+/// candidate traits are its bounds elaborated through supertraits, and a
+/// default body's `self.m()` may name a supertrait's method. Recurses into
+/// inline modules; marker-shaped bounds (`Send`, `Sized`, …) are kept — the
+/// consumers filter by declared method names.
+pub fn collect_trait_supertraits(items: &[syn::Item]) -> HashMap<String, Vec<String>> {
+    fn walk(items: &[syn::Item], out: &mut HashMap<String, Vec<String>>) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let entry = out.entry(t.ident.to_string()).or_default();
+                    for bound in &t.supertraits {
+                        if let syn::TypeParamBound::Trait(tb) = bound
+                            && let Some(seg) = tb.path.segments.last()
+                        {
+                            let name = seg.ident.to_string();
+                            if !entry.contains(&name) {
+                                entry.push(name);
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if module_is_cfg_disabled(m) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(items, &mut out);
+    out
+}
+
+/// Trait short names with an UNBOUNDED blanket impl `impl<T> Tr for T` (no
+/// bounds on `T`, self type exactly `T`): every type implements them, so the
+/// book §3.2.3 marker primary `impls_<Tr>` is defined TRUE (a constrained
+/// partial specialization would have nothing to constrain on and would be a
+/// redefinition of the primary — tap's `TapOps`, baseline 2026-10-07).
+pub fn collect_unbounded_blanket_impl_traits(
+    items: &[syn::Item],
+) -> std::collections::HashSet<String> {
+    fn walk(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Impl(imp) => {
+                    let Some((_, trait_path, _)) = &imp.trait_ else { continue };
+                    let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else { continue };
+                    let type_params: Vec<&syn::TypeParam> = imp
+                        .generics
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            syn::GenericParam::Type(tp) => Some(tp),
+                            _ => None,
+                        })
+                        .collect();
+                    if type_params.len() != 1 {
+                        continue;
+                    }
+                    let tp = type_params[0];
+                    let bounded_inline = tp.bounds.iter().any(|b| match b {
+                        syn::TypeParamBound::Trait(tb) => {
+                            tb.modifier == syn::TraitBoundModifier::None
+                        }
+                        _ => false,
+                    });
+                    let bounded_where = imp.generics.where_clause.as_ref().is_some_and(|wc| {
+                        wc.predicates.iter().any(|pred| match pred {
+                            syn::WherePredicate::Type(pt) => pt.bounds.iter().any(|b| match b {
+                                syn::TypeParamBound::Trait(tb) => {
+                                    tb.modifier == syn::TraitBoundModifier::None
+                                }
+                                _ => false,
+                            }),
+                            _ => false,
+                        })
+                    });
+                    if bounded_inline || bounded_where {
+                        continue;
+                    }
+                    let self_is_param = matches!(
+                        imp.self_ty.as_ref(),
+                        syn::Type::Path(tp_self)
+                            if tp_self.qself.is_none()
+                                && tp_self.path.segments.len() == 1
+                                && tp_self.path.segments[0].ident == tp.ident
+                                && tp_self.path.segments[0].arguments.is_none()
+                    );
+                    if self_is_param {
+                        out.insert(trait_name);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if module_is_cfg_disabled(m) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(items, &mut out);
+    out
+}
+
 pub fn collect_declared_trait_names(items: &[syn::Item]) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     collect_declared_trait_names_into(items, &mut out);

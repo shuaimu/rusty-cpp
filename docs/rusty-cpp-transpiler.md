@@ -1600,6 +1600,14 @@ template <class U> concept has_Tr = impls_Tr<U>::value || std::derived_from<U, T
 - A concept through the CPOs (`requires(const U& c) { Tr_::m(c); }`) is admissible *as a conjunct* for
   required methods with a non-generic signature and is what the census probe used; it is not the
   predicate (§3.2.2 rule 5; decision (y)).
+- Two facts from landing the marker (2026-10-07): an **unbounded blanket** `impl<T> Tr for T` makes the
+  primary itself `std::true_type` — a "partial specialization" on a bare parameter with nothing to
+  constrain on is a redefinition of the primary (tap's `TapOps`); and a **view self type** (`impl Tr for
+  [T]`) is witnessed under both C++ receiver spellings, `std::span<const T>` and `std::span<T>`, because
+  `&[T]` and `&mut [T]` arrive as different types. Only a `pub` trait's marker and concept are `export`ed —
+  class templates do not merge across modules the way `namespace Tr_` does, so two dependencies' private
+  `Sealed` markers must stay module-linkage (contract 10 / C21c). `impl Tr for &T` is keyed
+  `impls_Tr<const T&>` and invisible to a lookup that strips cvref until `self_tag` lands (rule 7).
 
 **Cost.** Byte-identical assembly to the 09-29 adapter route and to a direct free-function call at `-O1`
 and above on clang 22 (`cvtsi2sdl (%rdi),%xmm0; mulsd %xmm0,%xmm0; retq` for `Shape_::area(i32)` under
@@ -2225,6 +2233,26 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   | non-vtable members (generic required methods, `-> Self`, `new`, consts) skipped | free functions / templates / `inline constexpr` in `Tr_::impl_` + `TrTraits` | serde's `Serialize` / `Deserialize` get no interface today (§3.2.2) |
   | **ABI-pinned companions**: `Tr_::m(U& self_)` for a `cpp_inherit` impl and every `pub` trait's `<Tr>_` functions are symbols an *incumbent* C++ object owns (srpc's ratified ABI: `rrr::Job_::{Ready,Work,Done}(OneTimeJob&)`; 50 `Serialize_`/`Deserialize_`/`rusty_ext` symbols in rrr.serializable; pinned by `test_cpp_inherit_impl_keeps_both_virtual_members_and_ufcs_companions`) | the pinned non-template companions stay in `Tr_` as *overloads beside the dispatcher*, forwarding to the member / `impl_` body — which requires the CPO to be a constrained **function template** `template<class S, class... R> requires (!same_as<remove_cvref_t<S>, impl_::tag>) auto m(S&&, R&&...)` rather than a function object (an object cannot share its name with a function; a function template can, and ordinary lookup finding a *function* does not suppress ADL — this also removes rule 1's hazard). To be measured before step (2) | a design constraint the 10-04 revision did not record; found 2026-10-07 at `mod.rs:21161` |
 
+- **Landed (phase 2, in the order §3.2.16 gives).** *2026-10-07 — step (6) + rule 6:* multi-owner method
+  calls take their candidate set from scope — the receiver's elaborated bounds for a type-parameter receiver,
+  else the traits `use`d or declared in the call site's Rust module (`scope_import_bindings`,
+  `ufcs_declared_trait_modules`; a glob import marks the scope *unknown* and keeps the shipped all-owners
+  ladder) — one candidate is the single-owner call, two or more the ladder with `static_assert(__ufcs_n <=
+  1)` (§3.2.6); a `self.m()` inside a default body resolves to `<Tr>_::m(self_)` first, member only as
+  fallback (§3.2.13 rule 6); a method-less concrete impl (`impl A for u8 {}`) emits its Fix-A implementor
+  marker. Oracle: `tests/transpile_tests/trait_probes_scoping` flips to PASS; unit tests `test_ufcs_*`
+    (scope, guard, bound regime, default body, marker). The guard counts implementors by the exact-type
+  marker, never by call viability: `foo(const int32_t&)` is viable for an `int64_t` receiver through an
+  integral conversion, and a viability count fired E0034 on valid Rust (measured on the scoping probe).
+- **Baseline repairs (2026-10-07), found by the first gate on this tree, all in the trait lane:** the
+  empty interface shell for a trait whose methods are all generic / by-value ignored the trait's
+  template parameters while its forward declaration carried them (`redefinition … as a different kind
+  of symbol`: tap, bitflags, smallvec); an associated-const trait was forward-declared as an interface
+  class and then aliased to its `RuntimeHelper` (arrayvec); an unresolvable trait path's placeholder
+  key opened `namespace @unresolved-trait {` (arrayvec; now a visible comment and no bridge). Still
+  open on `main` and outside this lane: `::de::value::rusty_ext::into_deserializer` spelled where the
+  function lives in `__private::de::rusty_ext` (serde_core, serde, serde_bytes); the `alloc`/`rusty`/
+  `path` stdlib-port build scripts (cargo `rustc` extra-arguments rule; port codegen errors).
 - **Coverage.** The reviewer's census over the local matrix crates (`either`, `bitflags`, `serde_core`,
   `smallvec`, …): roughly 4 of ~288 crate-trait `(trait, impl)` pairs satisfy §3.2.1 — and the four are
   tuple structs the shipped lane cannot construct. Tier 1 does not change how those crates transpile; it

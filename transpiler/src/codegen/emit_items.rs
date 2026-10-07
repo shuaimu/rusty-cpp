@@ -6345,7 +6345,34 @@ impl CodeGen {
             } else {
                 ""
             };
-            self.writeln(&format!("{}class {} {{", cls_export, trait_name));
+            // The forward declaration (emit_interface_trait_forward_decl) spells
+            // this class with the trait's generic parameters AND its associated
+            // types as template parameters; the empty shell must agree or it is
+            // a `redefinition … as a different kind of symbol` (tap's
+            // `TapOptionOps<T>`, smallvec's `Array { type Item; }`, bitflags'
+            // `BitFlags { type Iter; type IterNames; }` — baseline 2026-10-07).
+            let shell_params: Vec<String> = trait_generic_idents
+                .iter()
+                .cloned()
+                .chain(t.items.iter().filter_map(|i| match i {
+                    syn::TraitItem::Type(ty) => Some(ty.ident.to_string()),
+                    _ => None,
+                }))
+                .collect();
+            if shell_params.is_empty() {
+                self.writeln(&format!("{}class {} {{", cls_export, trait_name));
+            } else {
+                self.writeln(&format!(
+                    "{}template <{}>",
+                    cls_export,
+                    shell_params
+                        .iter()
+                        .map(|p| format!("class {}", p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                self.writeln(&format!("class {} {{", trait_name));
+            }
             self.writeln("public:");
             self.indent += 1;
             self.writeln(&format!("virtual ~{}() noexcept(false) {{}}", trait_name));

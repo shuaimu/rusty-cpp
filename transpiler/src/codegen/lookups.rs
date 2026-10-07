@@ -4012,6 +4012,154 @@ impl CodeGen {
     }
 
     /// §208 phase 2a: the unique candidate trait among the UFCS OWNER list.
+    /// Book §3.2.6 (2026-10-07): the Rust module a method call is being emitted
+    /// in — the trait's module inside a default body, the impl's module inside
+    /// a UFCS free-function body (module_stack is deliberately not pushed
+    /// there), else the lexical module stack.
+    pub(super) fn ufcs_call_site_rust_module_path(&self) -> Vec<String> {
+        if self.ufcs_default_body_trait.is_some() {
+            return self.ufcs_default_body_module_path.clone();
+        }
+        if !self.ufcs_impl_module_path.is_empty() {
+            return self.ufcs_impl_module_path.clone();
+        }
+        self.module_stack.clone()
+    }
+
+    /// Book §3.2.6: is crate-declared trait `trait_short` in scope in Rust
+    /// module `module_path` — declared there, or bound there by a `use` whose
+    /// target is that trait? `None` when the module has a glob import (unknown).
+    /// Rust's `use` is not inherited by child modules, so an ancestor's import
+    /// or declaration does not count.
+    pub(super) fn ufcs_trait_in_scope_at(
+        &self,
+        trait_short: &str,
+        module_path: &[String],
+    ) -> Option<bool> {
+        let raw_key = module_path.join("::");
+        if self.scope_glob_import_modules.contains(&raw_key) {
+            return None;
+        }
+        let escaped_key = module_path
+            .iter()
+            .map(|seg| escape_cpp_keyword(seg))
+            .collect::<Vec<String>>()
+            .join("::");
+        let norm = |path: &str| -> String {
+            path.trim_start_matches("::")
+                .split("::")
+                .filter(|seg| !seg.is_empty())
+                .map(escape_cpp_keyword)
+                .collect::<Vec<String>>()
+                .join("::")
+        };
+        let declared_module = self.ufcs_declared_trait_modules.get(trait_short);
+        if declared_module.is_some_and(|m| norm(m) == norm(&escaped_key)) {
+            return Some(true);
+        }
+        for key in [raw_key.as_str(), escaped_key.as_str()] {
+            let Some(targets) = self
+                .scope_import_bindings
+                .get(&(key.to_string(), trait_short.to_string()))
+            else {
+                continue;
+            };
+            let bound_here = targets.iter().any(|target| {
+                // Bindings keep Rust's spelling (`crate::A`, or the crate's own
+                // name as a root); the declared-module map is crate-relative.
+                let target = target.trim_start_matches("::");
+                let target = target.strip_prefix("crate::").unwrap_or(target);
+                let stripped = self.strip_current_crate_prefix_from_import_path(target);
+                let target = stripped.as_str();
+                let (prefix, leaf) = match target.rsplit_once("::") {
+                    Some((p, l)) => (p, l),
+                    None => ("", target),
+                };
+                leaf == trait_short
+                    && declared_module.is_none_or(|m| prefix.is_empty() || norm(prefix) == norm(m))
+            });
+            if bound_here {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    /// Book §3.2.6: transitive supertrait closure of `traits` (short names,
+    /// each trait before its supertraits), from `ufcs_trait_supertraits`.
+    pub(super) fn ufcs_elaborate_supertraits(&self, traits: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut stack: Vec<String> = traits
+            .iter()
+            .rev()
+            .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+            .collect();
+        while let Some(t) = stack.pop() {
+            if out.contains(&t) {
+                continue;
+            }
+            if let Some(supers) = self.ufcs_trait_supertraits.get(&t) {
+                for s in supers.iter().rev() {
+                    stack.push(s.clone());
+                }
+            }
+            out.push(t);
+        }
+        out
+    }
+
+    /// Book §3.2.6: the candidate owners of a multi-owner method at this call.
+    /// Regime 2 (type-parameter receiver): the owners among the receiver's
+    /// bounds, elaborated through supertraits. Regime 1 (concrete receiver):
+    /// the owners in lexical scope — a `use` in the current module, or a
+    /// declaration there. `None` = unknown (a glob import, or nothing
+    /// matched), and the caller keeps the shipped unguarded all-owners ladder.
+    pub(super) fn ufcs_scoped_candidate_owners(
+        &self,
+        receiver: &syn::Expr,
+        owners: &[String],
+    ) -> Option<Vec<String>> {
+        if let Some(bounds) = self.receiver_candidate_bound_traits(receiver) {
+            let elaborated = self.ufcs_elaborate_supertraits(&bounds);
+            let hits: Vec<String> = owners
+                .iter()
+                .filter(|owner| {
+                    let short = owner.rsplit("::").next().unwrap_or(owner);
+                    elaborated.iter().any(|b| b == short)
+                })
+                .cloned()
+                .collect();
+            if !hits.is_empty() {
+                return Some(hits);
+            }
+        }
+        let module_path = self.ufcs_call_site_rust_module_path();
+        if std::env::var_os("RUSTY_CPP_DBG_UFCS_SCOPE").is_some() {
+            let key = module_path.join("::");
+            for owner in owners {
+                let short = owner.rsplit("::").next().unwrap_or(owner);
+                eprintln!(
+                    "[ufcs-scope] module={:?} owner={} declared_in={:?} bindings={:?} glob={}",
+                    key,
+                    short,
+                    self.ufcs_declared_trait_modules.get(short),
+                    self.scope_import_bindings.get(&(key.clone(), short.to_string())),
+                    self.scope_glob_import_modules.contains(&key)
+                );
+            }
+        }
+        let mut hits: Vec<String> = Vec::new();
+        for owner in owners {
+            let short = owner.rsplit("::").next().unwrap_or(owner);
+            match self.ufcs_trait_in_scope_at(short, &module_path) {
+                None => return None,
+                Some(true) => hits.push(owner.clone()),
+                Some(false) => {}
+            }
+        }
+        if hits.is_empty() { None } else { Some(hits) }
+    }
+
     pub(super) fn receiver_bound_trait_among(
         &self,
         receiver: &syn::Expr,

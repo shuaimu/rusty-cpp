@@ -41058,7 +41058,7 @@ fn test_extension_trait_mut_receiver_forwarding_ref_and_mut_span() {
         "&mut slice-impl receiver must be a non-const span by value\nGot: {out}"
     );
     assert!(
-        !out.contains("std::span<const rusty::MaybeUninit<Tag>>"),
+        !out.contains("std::span<const rusty::MaybeUninit<Tag>> self_"),
         "&mut receiver must not emit a const-element span\nGot: {out}"
     );
 }
@@ -48390,4 +48390,175 @@ fn independent_trait_order_keeps_complete_base_before_generic_inheritance() {
     let wrapper = out.find("struct BorrowedSink : public Sink {").expect(&out);
     let later = out.find("class Later {").expect(&out);
     assert!(sink < source && source < wrapper && wrapper < later, "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// Book §3.2.6 / §3.2.13 (2026-10-07): scope-derived multi-owner candidates,
+// the E0034 guard, default bodies resolving to the trait, method-less impl
+// markers. Oracle cells: tests/transpile_tests/trait_probes_scoping.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ufcs_multi_owner_candidates_follow_use_scope() {
+    // rustc: only_a::t(5) = 1, only_b::t(5) = 2 — which trait a bare `x.foo()`
+    // names is decided by the traits in scope at the CALL SITE. The shipped
+    // ladder tried every owner first-wins and printed 1 in both modules.
+    let out = transpile_str(
+        r#"
+        pub trait A { fn foo(&self) -> i32 { 1000 } }
+        pub trait B { fn foo(&self) -> i32 { 2000 } }
+        impl A for i32 { fn foo(&self) -> i32 { 1 } }
+        impl B for i32 { fn foo(&self) -> i32 { 2 } }
+        pub mod only_a { use crate::A; pub fn t(x: i32) -> i32 { x.foo() } }
+        pub mod only_b { use crate::B; pub fn t(x: i32) -> i32 { x.foo() } }
+        "#,
+    );
+    let a_def = out.rsplit("namespace only_a {").next().unwrap_or("");
+    let a_def = a_def.split("namespace only_b {").next().unwrap_or("");
+    let b_def = out.rsplit("namespace only_b {").next().unwrap_or("");
+    assert!(
+        a_def.contains("A_::foo(") && !a_def.contains("B_::foo("),
+        "only_a must resolve `x.foo()` to A alone:\n{a_def}"
+    );
+    assert!(
+        b_def.contains("B_::foo(") && !b_def.contains("A_::foo("),
+        "only_b must resolve `x.foo()` to B alone:\n{b_def}"
+    );
+    assert!(!a_def.contains("static_assert(__ufcs_n"), "{a_def}");
+}
+
+#[test]
+fn test_ufcs_multi_owner_in_scope_pair_is_guarded_with_e0034_assert() {
+    // Two traits in scope both own `foo`: Rust is E0034 if the receiver
+    // implements both, and resolves if only one applies. The emitted ladder
+    // asks exactly that question at compile time instead of first-wins.
+    let out = transpile_str(
+        r#"
+        pub trait A { fn foo(&self) -> i32 { 1000 } }
+        pub trait B { fn foo(&self) -> i32 { 2000 } }
+        impl A for i32 { fn foo(&self) -> i32 { 1 } }
+        impl B for i32 { fn foo(&self) -> i32 { 2 } }
+        impl A for i64 { fn foo(&self) -> i32 { 11 } }
+        pub mod both { use crate::{A, B}; pub fn u(x: i64) -> i32 { x.foo() } }
+        "#,
+    );
+    let def = out.rsplit("namespace both {").next().unwrap_or("");
+    assert!(
+        def.contains("static_assert(__ufcs_n <= 1"),
+        "two in-scope owners must be guarded (rustc E0034):\n{def}"
+    );
+    assert!(
+        def.contains("static_cast<int>(impls_A<__ufcs_S>::value) + static_cast<int>(impls_B<__ufcs_S>::value)"),
+        "the guard must count implementors by the exact-type marker, not call viability:\n{def}"
+    );
+    assert!(def.contains("A_::foo(") && def.contains("B_::foo("), "{def}");
+}
+
+#[test]
+fn test_ufcs_blanket_impl_over_crate_trait_emits_constrained_marker() {
+    // `impl<T: Score> Tr for T` witnesses every Score implementor as a Tr
+    // implementor through a constrained partial specialization of the marker.
+    let out = transpile_str(
+        r#"
+        pub trait Score { fn score(&self) -> i32; }
+        pub trait Tr { fn m(&self) -> i32; }
+        pub struct Sc(pub i32);
+        impl Score for Sc { fn score(&self) -> i32 { self.0 } }
+        impl<T: Score> Tr for T { fn m(&self) -> i32 { self.score() + 100 } }
+        "#,
+    );
+    assert!(
+        out.contains("template<class T> requires (has_Score<T>) struct impls_Tr<T> : std::true_type {};"),
+        "a blanket over a crate trait must witness through the bound's concept:\n{out}"
+    );
+    assert!(
+        out.contains("template<> struct impls_Score<Sc> : std::true_type {};"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_ufcs_type_param_receiver_candidates_come_from_its_bound() {
+    // Regime 2: a type-parameter receiver's candidates are its bounds, even
+    // when another owner of the name is `use`d in the same module (rustc:
+    // g(&5i32) = 1 via A, never B).
+    let out = transpile_str(
+        r#"
+        pub trait A { fn foo(&self) -> i32 { 1000 } }
+        pub trait B { fn foo(&self) -> i32 { 2000 } }
+        impl A for i32 { fn foo(&self) -> i32 { 1 } }
+        impl B for i32 { fn foo(&self) -> i32 { 2 } }
+        pub mod bound {
+            #[allow(unused_imports)]
+            use crate::{A, B};
+            pub fn g<X: A>(x: &X) -> i32 { x.foo() }
+        }
+        "#,
+    );
+    let def = out.rsplit("namespace bound {").next().unwrap_or("");
+    assert!(
+        def.contains("A_::foo(") && !def.contains("B_::foo("),
+        "a receiver bound by A alone must not consider B:\n{def}"
+    );
+}
+
+#[test]
+fn test_ufcs_default_body_self_call_resolves_to_the_trait_not_an_inherent_method() {
+    // rustc: Greet::describe(&Dog) = 2000 — a default body sees only the
+    // trait's `hello`; the shipped `self_.hello()` member-first lowering took
+    // Dog's INHERENT hello (2002000).
+    let out = transpile_str(
+        r#"
+        trait Greet { fn hello(&self) -> i32; fn describe(&self) -> i32 { self.hello() * 1000 } }
+        struct Dog;
+        impl Dog { fn hello(&self) -> i32 { 2002 } }
+        impl Greet for Dog { fn hello(&self) -> i32 { 2 } }
+        fn use_it() -> i32 { Greet::describe(&Dog) }
+        "#,
+    );
+    let body = out
+        .split("int32_t describe(const Self_& self_) {")
+        .nth(1)
+        .unwrap_or("");
+    let body: String = body.lines().take(6).collect::<Vec<_>>().join("\n");
+    let trait_call = body.find("Greet_::hello(");
+    let member_call = body.find(".hello(");
+    assert!(
+        trait_call.is_some(),
+        "the default body must call the TRAIT's hello first:\n{body}"
+    );
+    assert!(
+        member_call.is_none_or(|m| trait_call.unwrap() < m),
+        "the trait call must precede the member fallback:\n{body}"
+    );
+}
+
+#[test]
+fn test_ufcs_methodless_concrete_impl_emits_multi_owner_marker() {
+    // `impl A for u8 {}` makes u8 an implementor of A through A's default; the
+    // multi-owner default template is constrained on the Fix-A marker, which
+    // used to be emitted only beside declared methods (rustc: u8.foo() = 1000).
+    let out = transpile_str(
+        r#"
+        pub trait A { fn foo(&self) -> i32 { 1000 } }
+        pub trait B { fn foo(&self) -> i32 { 2000 } }
+        impl A for i32 { fn foo(&self) -> i32 { 1 } }
+        impl B for i32 { fn foo(&self) -> i32 { 2 } }
+        impl A for u8 {}
+        pub mod both { use crate::{A, B}; pub fn u8(x: u8) -> i32 { x.foo() } }
+        "#,
+    );
+    assert!(
+        out.contains("template<> struct impls_A<uint8_t> : std::true_type {};"),
+        "a method-less concrete impl must witness its implementor:\n{out}"
+    );
+    assert!(
+        out.contains("template<class U> struct impls_A : std::false_type {};")
+            && out.contains("template<class U> concept has_A = impls_A<std::remove_cvref_t<U>>::value;"),
+        "every crate-declared trait gets a defined-false marker primary and a concept:\n{out}"
+    );
+    assert!(
+        out.contains("requires impls_A<std::remove_cvref_t<Self_>>::value"),
+        "a multi-owner default is constrained on the exact-type marker:\n{out}"
+    );
 }

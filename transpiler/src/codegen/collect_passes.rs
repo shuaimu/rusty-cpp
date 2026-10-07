@@ -4815,6 +4815,16 @@ impl CodeGen {
         }
     }
 
+    /// Book §3.2.6: does this `use` tree contain a glob (`…::*`)?
+    pub(super) fn use_tree_contains_glob(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Glob(_) => true,
+            syn::UseTree::Path(p) => Self::use_tree_contains_glob(&p.tree),
+            syn::UseTree::Group(g) => g.items.iter().any(Self::use_tree_contains_glob),
+            syn::UseTree::Name(_) | syn::UseTree::Rename(_) => false,
+        }
+    }
+
     pub(super) fn collect_scope_import_bindings(&mut self, items: &[syn::Item], module_path: &[String]) {
         let prev_stack = self.module_stack.clone();
         self.module_stack = module_path.to_vec();
@@ -4840,6 +4850,14 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Use(u) => {
+                    // Book §3.2.6 (2026-10-07): a glob import can bring any
+                    // trait into scope with no per-name binding recorded below;
+                    // mark the module so candidate enumeration treats its
+                    // scope as UNKNOWN (ufcs_trait_in_scope_at).
+                    if Self::use_tree_contains_glob(&u.tree) {
+                        self.scope_glob_import_modules
+                            .insert(module_path.join("::"));
+                    }
                     let flat_import = self
                         .cpp_abi_plan
                         .flat_import_for_use(module_path, u)

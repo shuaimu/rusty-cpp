@@ -6902,11 +6902,69 @@ impl CodeGen {
         None
     }
 
+    /// Book §3.2.13 rule 6 (2026-10-07): inside a trait DEFAULT body being
+    /// emitted as a `template<class Self_>` free function, `self.m()` on a
+    /// method the trait (or a supertrait) declares resolves to the TRAIT's
+    /// `m` — `<Tr>_::m(self_)` first, the member only as a fallback for an impl
+    /// that emitted no free function. Rust's default body never sees an
+    /// inherent same-named method; the shipped member-first lowering did
+    /// (measured `2002` where rustc gives `2`).
+    fn try_emit_default_body_self_trait_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        let trait_name = self.ufcs_default_body_trait.as_ref()?;
+        if mc.turbofish.is_some() {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(&mc.receiver) else {
+            return None;
+        };
+        if path_expr.qself.is_some()
+            || !(path_expr.path.is_ident("self") || path_expr.path.is_ident("self_"))
+        {
+            return None;
+        }
+        let method_name = mc.method.to_string();
+        if Self::method_prefers_runtime_helper_namespace(&method_name)
+            || self.method_call_is_raw_pointer_intrinsic(mc, &method_name)
+        {
+            return None;
+        }
+        // The trait that declares `m`: this trait first, then its supertraits.
+        let owner = self
+            .ufcs_elaborate_supertraits(std::slice::from_ref(trait_name))
+            .into_iter()
+            .find(|t| {
+                self.ufcs_declared_trait_methods
+                    .get(t)
+                    .is_some_and(|methods| methods.iter().any(|m| m == &method_name))
+            })?;
+        if self
+            .cpp_trait_member_dispatch_traits
+            .iter()
+            .any(|t| t == &owner || t.rsplit("::").next() == Some(owner.as_str()))
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let args: Vec<String> = mc.args.iter().map(|a| self.emit_expr_to_string(a)).collect();
+        let escaped = escape_cpp_keyword_in_member_position(&method_name);
+        let callee = format!("{}::{}", self.ufcs_trait_namespace(&owner), escaped);
+        Some(self.emit_multi_owner_ufcs_call(
+            std::slice::from_ref(&callee),
+            &receiver,
+            &args,
+            &escaped,
+            None,
+        ))
+    }
+
     pub(super) fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let Some(call) = self.try_emit_default_body_self_trait_call(mc) {
+            return call;
+        }
         if mc.method == "file" && mc.args.is_empty()
             && self.infer_simple_expr_type(&mc.receiver).as_ref().is_some_and(|ty| {
                 self.map_type(ty).trim_start_matches("const ").trim_end_matches('&')
@@ -7441,7 +7499,39 @@ impl CodeGen {
                     // Multi-owner (Fix A): try each owner's qualified `<Tr>_::m`
                     // rather than the unqualified `m`, which would clash with a
                     // same-named module/namespace (serde's `de::size_hint`).
-                    let mut callees: Vec<String> = traits
+                    //
+                    // Book §3.2.6 (2026-10-07): the candidate set is SCOPE-
+                    // DERIVED — the owners the receiver's bounds name (type-
+                    // parameter receiver), else the owners in lexical scope at
+                    // this call (`use` / declared in the current module). One
+                    // candidate → the single-owner shim, as Rust resolves it
+                    // (only_b::t = 2 where the all-owners ladder printed 1).
+                    // Two or more → the ladder with the E0034 guard. Unknown
+                    // scope (a glob import) → the shipped unguarded ladder.
+                    let all_owners: Vec<String> = traits.iter().cloned().collect();
+                    let scoped_owners =
+                        self.ufcs_scoped_candidate_owners(&mc.receiver, &all_owners);
+                    if let Some(scoped) = &scoped_owners
+                        && scoped.len() == 1
+                    {
+                        let callee =
+                            format!("{}::{}", self.ufcs_trait_namespace(&scoped[0]), escaped);
+                        return self.emit_extension_call_with_receiver_autoderef_fallback(
+                            &callee, &receiver, &args,
+                        );
+                    }
+                    // The marker-based guard needs every owner's `impls_<Tr>`
+                    // primary, which only this crate's traits are guaranteed
+                    // to have (a dependency built before the markers existed
+                    // has none): otherwise keep the unguarded ladder.
+                    let guarded = scoped_owners.as_ref().is_some_and(|scoped| {
+                        scoped.iter().all(|owner| {
+                            let short = owner.rsplit("::").next().unwrap_or(owner);
+                            self.ufcs_marker_primaries_emitted.contains(short)
+                        })
+                    });
+                    let owner_list: Vec<String> = scoped_owners.unwrap_or(all_owners);
+                    let mut callees: Vec<String> = owner_list
                         .iter()
                         .map(|t| format!("{}::{}", self.ufcs_trait_namespace(t), escaped))
                         .collect();
@@ -7452,9 +7542,9 @@ impl CodeGen {
                     // declared type is a bare type param bound by exactly one
                     // of the owners, put that owner's callee first and probe
                     // its preserved collapse member ahead of everything.
-                    let owner_list: Vec<String> = traits.iter().cloned().collect();
                     let bound_owner =
                         self.receiver_bound_trait_among(&mc.receiver, &owner_list);
+                    let mut owner_list = owner_list;
                     let tagged_storage;
                     let mut tagged_member: Option<&str> = None;
                     if let Some(owner) = &bound_owner {
@@ -7463,6 +7553,8 @@ impl CodeGen {
                         if let Some(pos) = callees.iter().position(|c| c == &preferred) {
                             let c = callees.remove(pos);
                             callees.insert(0, c);
+                            let o = owner_list.remove(pos);
+                            owner_list.insert(0, o);
                         }
                         let short = owner.rsplit("::").next().unwrap_or(owner);
                         tagged_storage = format!(
@@ -7471,6 +7563,17 @@ impl CodeGen {
                             method_name
                         );
                         tagged_member = Some(tagged_storage.as_str());
+                    }
+                    if guarded {
+                        return self.emit_guarded_multi_owner_ufcs_call(
+                            &callees,
+                            &owner_list,
+                            &receiver,
+                            &args,
+                            &escaped,
+                            tagged_member,
+                            &method_name,
+                        );
                     }
                     return self.emit_multi_owner_ufcs_call(
                         &callees, &receiver, &args, &escaped, tagged_member,
@@ -10411,12 +10514,31 @@ impl CodeGen {
                 let forwarded_receiver =
                     "std::forward<decltype(_into_deser_recv)>(_into_deser_recv)";
                 if let Some(scoped_fn) = scoped_into_deserializer_fn.as_ref() {
+                    // The helper lives where the resolver found it (serde_core:
+                    // `__private::de::rusty_ext`, under the crate wrap). A
+                    // `requires { ::de::value::rusty_ext::… }` probe on a
+                    // namespace that does not exist is a HARD error, not a
+                    // soft false (baseline 2026-10-07: every serde-family crate
+                    // failed on it) — so the hardcoded value-module spelling is
+                    // probed only when the resolved helper IS that namespace,
+                    // and the resolved helper is tried first, with the `<E>`
+                    // argument the by-value primitive overloads need.
+                    let scoped_with_e = format!("{}<{}>", scoped_fn, err_cpp);
+                    let value_branch = if scoped_fn.contains("de::value::rusty_ext") {
+                        format!(
+                            "else if constexpr (requires {{ {}({}); }}) {{ return {}({}); }} ",
+                            value_into_fn, forwarded_receiver, value_into_fn, forwarded_receiver
+                        )
+                    } else {
+                        String::new()
+                    };
                     return format!(
-                        "([&](auto&& _into_deser_recv) -> decltype(auto) {{ if constexpr (requires {{ {}({}); }}) {{ return {}({}); }} else if constexpr (requires {{ {}({}); }}) {{ return {}({}); }} else {{ return {}.into_deserializer(); }} }})({})",
-                        value_into_fn,
+                        "([&](auto&& _into_deser_recv) -> decltype(auto) {{ if constexpr (requires {{ {}({}); }}) {{ return {}({}); }} {}else if constexpr (requires {{ {}({}); }}) {{ return {}({}); }} else {{ return {}.into_deserializer(); }} }})({})",
+                        scoped_with_e,
                         forwarded_receiver,
-                        value_into_fn,
+                        scoped_with_e,
                         forwarded_receiver,
+                        value_branch,
                         scoped_fn,
                         forwarded_receiver,
                         scoped_fn,

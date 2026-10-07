@@ -1771,6 +1771,34 @@ pub struct CodeGen {
     /// Populated in `emit_file`.
     pub(crate) ufcs_method_trait_owners:
         HashMap<String, std::collections::BTreeSet<String>>,
+    /// Book §3.2.6 (2026-10-07): trait short name → its DIRECT supertraits
+    /// (short names). Elaborated transitively by `ufcs_elaborate_supertraits`
+    /// for the bound regime of candidate enumeration and for default bodies.
+    pub(crate) ufcs_trait_supertraits: HashMap<String, Vec<String>>,
+    /// Book §3.2.13 rule 6 (2026-10-07): the trait whose DEFAULT-method body is
+    /// being emitted as a `template<class Self_>` free function, and that
+    /// trait's Rust module; `None` outside such a body. A `self.m()` in that
+    /// body must resolve to the TRAIT's `m` — an inherent same-named method is
+    /// invisible to a default body in Rust (measured: `2002` where rustc gives
+    /// `2`), so it must never take the member-first lowering.
+    pub(crate) ufcs_default_body_trait: Option<String>,
+    pub(crate) ufcs_default_body_module_path: Vec<String>,
+    /// Book §3.2.6: Rust modules (`::`-joined path) containing a glob
+    /// `use …::*`. A glob brings traits into scope with no per-name entry in
+    /// `scope_import_bindings`, so candidate enumeration in such a module is
+    /// UNKNOWN and keeps the shipped unguarded all-owners ladder.
+    pub(crate) scope_glob_import_modules: HashSet<String>,
+    /// Book §3.2.3 (2026-10-07): trait short names whose exact-type marker
+    /// primary `template<class U> struct impls_<Tr> : std::false_type {}` and
+    /// concept `has_<Tr>` have been emitted (once per name), and the
+    /// `(trait, self type spelling)` pairs whose marker specialization has —
+    /// two Rust impls that collapse to one C++ type (`isize`/`i64`) must not
+    /// specialize twice.
+    pub(crate) ufcs_marker_primaries_emitted: HashSet<String>,
+    pub(crate) ufcs_marker_specializations_emitted: HashSet<(String, String)>,
+    /// Traits with an unbounded `impl<T> Tr for T`: their marker primary is
+    /// defined TRUE (see collect_unbounded_blanket_impl_traits).
+    pub(crate) ufcs_universal_blanket_traits: HashSet<String>,
     /// UFCS Phase 7 / § 3.2.13: `(trait, method)` pairs for which a
     /// `<Tr>_::m` free function was ACTUALLY emitted (the declaration emitter
     /// did not skip it — unsupported self-type mapping, unresolved placeholder,
@@ -3490,6 +3518,13 @@ impl CodeGen {
             ufcs_trait_default_methods: std::collections::BTreeMap::new(),
             ufcs_trait_assoc_type_names: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
+            ufcs_trait_supertraits: HashMap::new(),
+            ufcs_default_body_trait: None,
+            ufcs_default_body_module_path: Vec::new(),
+            scope_glob_import_modules: HashSet::new(),
+            ufcs_marker_primaries_emitted: HashSet::new(),
+            ufcs_marker_specializations_emitted: HashSet::new(),
+            ufcs_universal_blanket_traits: HashSet::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_bridge_emitted_traits: std::collections::HashSet::new(),
             ufcs_default_method_bare_prefix_len: std::collections::HashMap::new(),
@@ -8015,6 +8050,10 @@ impl CodeGen {
         self.import_alias_names.clear();
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
+        self.scope_glob_import_modules.clear();
+        self.ufcs_marker_primaries_emitted.clear();
+        self.ufcs_marker_specializations_emitted.clear();
+        self.ufcs_universal_blanket_traits.clear();
         self.canonical_std_hash_map_import_bindings.clear();
         self.rust_item_import_bindings.clear();
         self.native_cpp_type_names.clear();
@@ -8325,6 +8364,10 @@ impl CodeGen {
             crate::transpile::collect_declared_trait_methods(&file.items);
         self.ufcs_trait_default_methods =
             crate::transpile::collect_trait_default_methods(&file.items);
+        self.ufcs_trait_supertraits =
+            crate::transpile::collect_trait_supertraits(&file.items);
+        self.ufcs_universal_blanket_traits =
+            crate::transpile::collect_unbounded_blanket_impl_traits(&file.items);
         self.ufcs_trait_assoc_type_names =
             crate::transpile::collect_trait_assoc_type_names(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
@@ -8800,6 +8843,7 @@ impl CodeGen {
         // Definitions follow late, near the
         // adapter specializations.
         self.ufcs_def_dedupe_seen.clear();
+        self.emit_ufcs_trait_marker_primaries();
         self.emit_ufcs_trait_impl_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_function_decls");
         // § 3.2.13: default-method templates (early declarations + `using`).
@@ -13729,6 +13773,15 @@ impl CodeGen {
         export_prefix: &str,
         name: &str,
     ) {
+        // A trait with an associated CONST never gets an interface class
+        // (emit_trait_interface_pattern skips it and emits the
+        // `<Tr>RuntimeHelper` + `using <Tr> = <Tr>RuntimeHelper;` instead), so a
+        // forward-declared `template <…> class <Tr>;` here makes that alias a
+        // `redefinition … as a different kind of symbol` (arrayvec's
+        // `ArrayVecImpl { const CAPACITY: usize; }`, baseline 2026-10-07).
+        if t.items.iter().any(|item| matches!(item, syn::TraitItem::Const(_))) {
+            return;
+        }
         // Keep this structurally identical to emit_trait_interface_pattern:
         // that definition models only Rust type parameters, then appends one
         // C++ type parameter per associated type. Lifetimes and const generics
@@ -21303,11 +21356,6 @@ impl CodeGen {
         // Keep the declaration pass exactly aligned with the definition pass:
         // cpp_inherit impls dispatch through virtual members AND export the
         // UFCS companions (see emit_ufcs_trait_impl_block_free_functions).
-        let Some((written_trait_name, specs)) =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
-        else {
-            return;
-        };
         let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
             return;
         };
@@ -21317,11 +21365,31 @@ impl CodeGen {
         if !self.trait_declared_paths.contains(&trait_key) {
             return;
         }
+        let written_trait_name = trait_path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
         let trait_name = trait_key
             .rsplit("::")
             .next()
             .unwrap_or(&written_trait_name)
             .to_string();
+        let Some((_, specs)) =
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods)
+        else {
+            // Book §3.2.6 (2026-10-07): an impl block with no methods of its
+            // own (`impl A for u8 {}`, every method defaulted) still makes its
+            // self type an IMPLEMENTOR. The multi-owner default templates are
+            // constrained on the Fix-A marker `<Tr>_::__ufcs_impls(const U&)`,
+            // which was emitted only beside declared methods — so `A_::foo(u8)`
+            // was non-viable and a two-owner call fell through to the other
+            // trait where rustc runs A's default (`1000`). Emit the marker alone.
+            if !self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
+                self.emit_ufcs_multi_owner_marker_for_methodless_impl(impl_block, &trait_name);
+            }
+            return;
+        };
         // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
         // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
         // ported surface — rrr.serializable's incumbent object owns 50 of
@@ -21346,21 +21414,14 @@ impl CodeGen {
         if specs.is_empty() {
             return;
         }
-        // Fix A part 2: when this trait participates in a MULTI-OWNER method,
-        // emit a marker `<Tr>_::__ufcs_impls(const SelfType&)` witnessing that
-        // this concrete impl's self type implements <Tr>. The multi-owner
-        // default templates' `requires` clauses test this to disambiguate. Only
-        // for concrete impls (generic self types would need a template marker);
-        // emitted EARLY so it precedes the constrained default-template decls.
-        let trait_in_multi_owner = self
-            .ufcs_method_trait_owners
-            .values()
-            .any(|owners| owners.len() > 1 && owners.contains(&trait_name));
-        let impl_is_concrete = !impl_block
-            .generics
-            .params
-            .iter()
-            .any(|p| matches!(p, syn::GenericParam::Type(_)));
+        // Book §3.2.3 (2026-10-07): each impl also witnesses its self type as
+        // an IMPLEMENTOR through the exact-type marker specialization
+        // `template<> struct impls_<Tr><Self> : std::true_type {}` (or a
+        // constrained partial specialization for a blanket), emitted at global
+        // scope after the namespace block below — replacing Fix A's
+        // `<Tr>_::__ufcs_impls(const Self&)` function marker, whose overload
+        // resolution admitted implicit conversions (an `int64_t` receiver
+        // "implemented" B through `impls(const int32_t&)`; measured).
 
         // serde_core Fix B (body positions): a free function emitted at flat
         // global `<Tr>_` scope has its SIGNATURE types qualified (Fix B), but its
@@ -21388,19 +21449,12 @@ impl CodeGen {
                         .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
                 }
             }
-            if trait_in_multi_owner && impl_is_concrete {
-                let self_cpp = self.qualify_nested_local_type_for_global_scope(
-                    &self.rewrite_cpp_import_bound_type_spelling(
-                        &self.map_type(impl_block.self_ty.as_ref()),
-                    ),
-                );
-                self.writeln(&format!("void __ufcs_impls(const {}&);", self_cpp));
-            }
             self.indent -= 1;
             self.writeln("}");
             // Bring the trait free functions into the enclosing scope so an
             // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
             self.writeln(&format!("using namespace {}_;", trait_name));
+            self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
             self.ufcs_impl_module_path.clear();
             return;
         }
@@ -21464,17 +21518,10 @@ impl CodeGen {
         for method in &bridged {
             self.writeln(&format!("{}using ::{}::{};", bridge_export, helper_path, method));
         }
-        if trait_in_multi_owner && impl_is_concrete {
-            let self_cpp = self.qualify_nested_local_type_for_global_scope(
-                &self.rewrite_cpp_import_bound_type_spelling(
-                    &self.map_type(impl_block.self_ty.as_ref()),
-                ),
-            );
-            self.writeln(&format!("void __ufcs_impls(const {}&);", self_cpp));
-        }
         self.indent -= 1;
         self.writeln("}");
         self.writeln(&format!("using namespace {}_;", trait_name));
+        self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
         // Every impl re-opens `<Tr>_` to add its own using-declaration, so the
         // LAST marker is where the overload set is complete.
         // `splice_assoc_projection_dispatchers` fills that one and drops the rest.
@@ -21555,6 +21602,285 @@ impl CodeGen {
     /// body positions). Emitted under the impl's own module so module-relative
     /// body paths resolve by lexical shadowing; bridged into `<Tr>_` with
     /// using-declarations.
+    /// Book §3.2.6: the Fix-A implementor marker for an impl block that declares
+    /// no methods (see emit_ufcs_trait_impl_block_free_function_decls). Same
+    /// conditions as the method-bearing path: a concrete self type, of a trait
+    /// that shares a method name with another trait.
+    fn emit_ufcs_multi_owner_marker_for_methodless_impl(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        trait_name: &str,
+    ) {
+        self.emit_ufcs_impl_marker_specialization(impl_block, trait_name);
+    }
+
+    /// Book §3.2.3 (2026-10-07): the exact-type implementor marker, emitted once
+    /// per crate-declared trait before any impl declaration — the DEFINED-false
+    /// primary (loud `explicit specialization after instantiation` on a
+    /// misordered concrete impl) and the named concept every bound and ladder
+    /// tests. Keyed by the trait's short name, like `namespace <Tr>_`.
+    fn emit_ufcs_trait_marker_primaries(&mut self) {
+        let mut names: Vec<String> = self.ufcs_declared_trait_names.iter().cloned().collect();
+        names.sort();
+        let mut emitted_any = false;
+        for name in names {
+            // Contract 10 / C21c, mirrored: class templates do NOT merge across
+            // modules the way `namespace <Tr>_` does, so an exported
+            // `impls_Sealed` from two dependencies would be ambiguous in a
+            // consumer. Only a `pub` trait's marker is part of the exported
+            // surface; a private trait's keeps module linkage.
+            let key = match self.ufcs_declared_trait_modules.get(&name) {
+                Some(module) if !module.is_empty() => format!("{}::{}", module, name),
+                _ => name.clone(),
+            };
+            let export = if self.module_name.is_some()
+                && !self.ufcs_layer_uses_internal_linkage(&name, &key)
+            {
+                "export "
+            } else {
+                ""
+            };
+            if self
+                .cpp_trait_member_dispatch_traits
+                .iter()
+                .any(|t| t == &name || t.rsplit("::").next() == Some(name.as_str()))
+            {
+                continue;
+            }
+            if !self.ufcs_marker_primaries_emitted.insert(name.clone()) {
+                continue;
+            }
+            if !emitted_any {
+                self.writeln("// UFCS trait migration: implementor markers (book §3.2.3) — DEFINED-false primaries + concepts");
+                emitted_any = true;
+            }
+            let cpp = escape_cpp_keyword(&name);
+            let base = if self.ufcs_universal_blanket_traits.contains(&name) {
+                "std::true_type" // `impl<T> Tr for T`: every type implements it
+            } else {
+                "std::false_type"
+            };
+            self.writeln(&format!(
+                "{}template<class U> struct impls_{} : {} {{}};",
+                export, cpp, base
+            ));
+            self.writeln(&format!(
+                "{}template<class U> concept has_{} = impls_{}<std::remove_cvref_t<U>>::value;",
+                export, cpp, cpp
+            ));
+        }
+        if emitted_any {
+            self.newline();
+        }
+    }
+
+    /// Book §3.2.3 / §3.2.4 (2026-10-07): witness this impl's self type as an
+    /// implementor of `trait_name`. A concrete impl is an explicit
+    /// specialization `template<> struct impls_<Tr><Self> : std::true_type {}`;
+    /// a blanket / conditional impl whose bounds are all crate-declared traits
+    /// is a constrained partial specialization `template<class T> requires
+    /// has_<B><T> struct impls_<Tr><Self<T>> : std::true_type {}`. Other
+    /// generic impls (std bounds) emit nothing — the ladder's viability arms
+    /// still reach them. Emitted at global scope; deduped per (trait, type)
+    /// because distinct Rust types can collapse to one C++ type.
+    fn emit_ufcs_impl_marker_specialization(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        trait_name: &str,
+    ) {
+        if !self.ufcs_marker_primaries_emitted.contains(trait_name) {
+            return;
+        }
+        let type_params: Vec<String> = impl_block
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let trait_cpp = escape_cpp_keyword(trait_name);
+        if type_params.is_empty() {
+            let self_cpp = self.qualify_nested_local_type_for_global_scope(
+                &self.rewrite_cpp_import_bound_type_spelling(
+                    &self.map_type(impl_block.self_ty.as_ref()),
+                ),
+            );
+            if self.extension_self_type_mapping_is_unsupported(&self_cpp)
+                || type_string_has_auto_placeholder(&self_cpp)
+            {
+                return;
+            }
+            // A view self type (`impl Tr for [T]`) is reached through TWO C++
+            // receiver spellings — `std::span<const T>` from `&[T]`, `std::span<T>`
+            // from `&mut [T]` — so witness both (book §3.2.4: view impls).
+            let mut spellings = vec![self_cpp.clone()];
+            if let Some(inner) = self_cpp.strip_prefix("std::span<const ") {
+                spellings.push(format!("std::span<{}", inner));
+            }
+            for spelling in spellings {
+                if !self
+                    .ufcs_marker_specializations_emitted
+                    .insert((trait_name.to_string(), spelling.clone()))
+                {
+                    continue;
+                }
+                self.writeln(&format!(
+                    "template<> struct impls_{}<{}> : std::true_type {{}};",
+                    trait_cpp, spelling
+                ));
+            }
+            return;
+        }
+        // Blanket / conditional impl: every bound on every type parameter must
+        // be a crate-declared trait (its `has_` concept exists), and every type
+        // parameter must appear in the self type (a partial specialization
+        // must be deducible).
+        let mut constraints: Vec<String> = Vec::new();
+        let mut bound_ok = true;
+        let mut push_bound = |param: &str, bound: &syn::TypeParamBound, constraints: &mut Vec<String>, bound_ok: &mut bool| {
+            match bound {
+                syn::TypeParamBound::Lifetime(_) => {}
+                syn::TypeParamBound::Trait(tb) => {
+                    if tb.modifier != syn::TraitBoundModifier::None {
+                        return; // `?Sized`
+                    }
+                    let Some(seg) = tb.path.segments.last() else {
+                        *bound_ok = false;
+                        return;
+                    };
+                    let name = seg.ident.to_string();
+                    if matches!(name.as_str(), "Sized" | "Send" | "Sync" | "Unpin") {
+                        return;
+                    }
+                    if !seg.arguments.is_none()
+                        || !self.ufcs_marker_primaries_emitted.contains(&name)
+                    {
+                        *bound_ok = false;
+                        return;
+                    }
+                    constraints.push(format!("has_{}<{}>", escape_cpp_keyword(&name), param));
+                }
+                _ => *bound_ok = false,
+            }
+        };
+        for p in &impl_block.generics.params {
+            if let syn::GenericParam::Type(tp) = p {
+                let param = tp.ident.to_string();
+                for bound in &tp.bounds {
+                    push_bound(&param, bound, &mut constraints, &mut bound_ok);
+                }
+            }
+        }
+        if let Some(wc) = &impl_block.generics.where_clause {
+            for pred in &wc.predicates {
+                let syn::WherePredicate::Type(pt) = pred else {
+                    bound_ok = false;
+                    continue;
+                };
+                let syn::Type::Path(tp) = &pt.bounded_ty else {
+                    bound_ok = false;
+                    continue;
+                };
+                if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                    bound_ok = false;
+                    continue;
+                }
+                let param = tp.path.segments[0].ident.to_string();
+                if !type_params.contains(&param) {
+                    bound_ok = false;
+                    continue;
+                }
+                for bound in &pt.bounds {
+                    push_bound(&param, bound, &mut constraints, &mut bound_ok);
+                }
+            }
+        }
+        if !bound_ok {
+            return;
+        }
+        // An unbounded blanket over a bare parameter is the primary itself
+        // (defined true above), not a partial specialization.
+        if constraints.is_empty()
+            && type_params.len() == 1
+            && matches!(
+                impl_block.self_ty.as_ref(),
+                syn::Type::Path(tp_self)
+                    if tp_self.qself.is_none()
+                        && tp_self.path.segments.len() == 1
+                        && tp_self.path.segments[0].ident == type_params[0]
+                        && tp_self.path.segments[0].arguments.is_none()
+            )
+        {
+            return;
+        }
+        self.push_type_param_scope(&impl_block.generics);
+        let self_cpp = self.qualify_nested_local_type_for_global_scope(
+            &self.rewrite_cpp_import_bound_type_spelling(
+                &self.map_type(impl_block.self_ty.as_ref()),
+            ),
+        );
+        self.pop_type_param_scope();
+        if self.extension_self_type_mapping_is_unsupported(&self_cpp)
+            || type_string_has_auto_placeholder(&self_cpp)
+        {
+            return;
+        }
+        let mentions = |param: &str| -> bool {
+            self_cpp
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|tok| tok == param)
+        };
+        if !type_params.iter().all(|p| mentions(p)) {
+            return;
+        }
+        let key = (trait_name.to_string(), self_cpp.clone());
+        if !self.ufcs_marker_specializations_emitted.insert(key) {
+            return;
+        }
+        let requires = if constraints.is_empty() {
+            String::new()
+        } else {
+            format!(" requires ({})", constraints.join(" && "))
+        };
+        // Const generics ride along (`impl<T, const CAP: usize> Tr for
+        // ArrayVec<T, CAP>` → `template<class T, size_t CAP>`); lifetimes do not.
+        let mut header: Vec<String> = Vec::new();
+        for p in &impl_block.generics.params {
+            match p {
+                syn::GenericParam::Type(tp) => header.push(format!("class {}", tp.ident)),
+                syn::GenericParam::Const(cp) => {
+                    let ty = self.map_type(&cp.ty);
+                    if type_string_has_auto_placeholder(&ty) {
+                        return;
+                    }
+                    header.push(format!("{} {}", ty, cp.ident));
+                }
+                syn::GenericParam::Lifetime(_) => {}
+            }
+        }
+        let const_names: Vec<String> = impl_block
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        if !const_names.iter().all(|c| mentions(c)) {
+            return;
+        }
+        self.writeln(&format!(
+            "template<{}>{} struct impls_{}<{}> : std::true_type {{}};",
+            header.join(", "),
+            requires,
+            trait_cpp,
+            self_cpp
+        ));
+    }
+
     fn ufcs_impl_helper_namespace_name(trait_name: &str) -> String {
         format!("__ufcs_{}", trait_name)
     }
@@ -21654,9 +21980,12 @@ impl CodeGen {
                 .get(&m)
                 .is_some_and(|o| o.len() > 1)
             {
+                // Book §3.2.3 (2026-10-07): the exact-type marker — an
+                // `int64_t` receiver no longer satisfies B's default through
+                // `__ufcs_impls(const int32_t&)`'s integral conversion.
                 spec.extra_template_requires = Some(format!(
-                    "requires requires(const Self_& __ufcs_s) {{ {}_::__ufcs_impls(__ufcs_s); }}",
-                    trait_name
+                    "requires impls_{}<std::remove_cvref_t<Self_>>::value",
+                    escape_cpp_keyword(trait_name)
                 ));
             }
         }
@@ -21712,10 +22041,18 @@ impl CodeGen {
                     ));
                     self.writeln(&format!("namespace {}_ {{", trait_name));
                     self.indent += 1;
+                    // Book §3.2.13 rule 6: while these DEFAULT bodies emit, a
+                    // `self.m()` on a method of this trait (or a supertrait)
+                    // resolves to the trait's `m`, never member-first
+                    // (try_emit_default_body_self_trait_call).
+                    self.ufcs_default_body_trait = Some(trait_name.clone());
+                    self.ufcs_default_body_module_path = module_path.to_vec();
                     for spec in &specs {
                         self.emit_extension_trait_free_function(spec);
                         self.newline();
                     }
+                    self.ufcs_default_body_trait = None;
+                    self.ufcs_default_body_module_path.clear();
                     self.indent -= 1;
                     self.writeln("}");
                 }
@@ -21789,9 +22126,6 @@ impl CodeGen {
                     // no matching 1-arg overload) instead of a hard "no member
                     // named __ufcs_impls" error. Per-impl `__ufcs_impls(const X&)`
                     // overloads (from the impl decls) are the real witnesses.
-                    if specs.iter().any(|s| s.extra_template_requires.is_some()) {
-                        self.writeln("void __ufcs_impls();");
-                    }
                     for spec in &specs {
                         if self.emit_extension_trait_free_function_declaration(spec) {
                             let m = spec.method.sig.ident.to_string();
@@ -22701,9 +23035,28 @@ impl CodeGen {
     }
 
     fn emit_extension_trait_forward_decls_for_all_scopes(&mut self) -> bool {
+        let mut unresolved: Vec<String> = self
+            .extension_trait_impl_methods
+            .keys()
+            .filter(|trait_key| trait_key.starts_with('@'))
+            .cloned()
+            .collect();
+        unresolved.sort();
+        for key in &unresolved {
+            // Loud, not silent: the impl's rusty_ext methods are not emitted.
+            self.writeln(&format!(
+                "// UNRESOLVED TRAIT PATH: `{}` — its rusty_ext bridge is skipped (see inference.rs @unresolved-trait)",
+                key.trim_start_matches("@unresolved-trait::")
+            ));
+        }
         let mut scope_paths: Vec<Vec<String>> = self
             .extension_trait_impl_methods
             .keys()
+            // A trait path the resolver could not place gets the placeholder
+            // key `@unresolved-trait::X` (inference.rs); it is not a module and
+            // must not open `namespace @unresolved-trait {` (arrayvec baseline
+            // 2026-10-07: the first error in the file was that line).
+            .filter(|trait_key| !trait_key.starts_with('@'))
             .map(|trait_key| {
                 let mut parts: Vec<String> = trait_key.split("::").map(str::to_string).collect();
                 let _ = parts.pop();
@@ -42004,6 +42357,53 @@ impl CodeGen {
         member_leaf: &str,
         tagged_member: Option<&str>,
     ) -> String {
+        self.build_multi_owner_ufcs_call(
+            callees,
+            receiver_expr,
+            extra_args,
+            member_leaf,
+            tagged_member,
+            None,
+        )
+    }
+
+    /// Book §3.2.6 (2026-10-07): the multi-owner ladder for a call whose
+    /// candidate traits are SCOPE-DERIVED (two or more in scope own the name),
+    /// prefixed with Rust's E0034 rule as a compile-time check: count the
+    /// candidates viable on the receiver's own type and `static_assert` the
+    /// count is at most one. The shipped ladder was first-wins over every
+    /// owner, in scope or not — silently running A's body where rustc reports
+    /// "multiple applicable items in scope" (measured `16` / `32`). The deref
+    /// tier below the guard stays first-wins (Rust re-probes per deref step).
+    pub(crate) fn emit_guarded_multi_owner_ufcs_call(
+        &self,
+        callees: &[String],
+        owners: &[String],
+        receiver_expr: &str,
+        extra_args: &[String],
+        member_leaf: &str,
+        tagged_member: Option<&str>,
+        method_name: &str,
+    ) -> String {
+        self.build_multi_owner_ufcs_call(
+            callees,
+            receiver_expr,
+            extra_args,
+            member_leaf,
+            tagged_member,
+            Some((method_name, owners)),
+        )
+    }
+
+    fn build_multi_owner_ufcs_call(
+        &self,
+        callees: &[String],
+        receiver_expr: &str,
+        extra_args: &[String],
+        member_leaf: &str,
+        tagged_member: Option<&str>,
+        e0034_guard_for: Option<(&str, &[String])>,
+    ) -> String {
         let direct_receiver = "std::forward<decltype(__self)>(__self)";
         let deref_receiver =
             "rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))";
@@ -42080,9 +42480,48 @@ impl CodeGen {
         }
         let member_call =
             format!("{}.{}({})", deref_receiver, member_leaf, deref_arg_uses.join(", "));
+        // Book §3.2.6: the guard counts IMPLEMENTORS by the exact-type marker
+        // (`impls_<Tr><S>::value`), never by call viability — every
+        // `foo(const int32_t&)` is viable for an `int64_t` receiver through an
+        // integral conversion, which made a viability count fire E0034 on
+        // valid Rust (measured on the scoping probe). The marker arms select
+        // the owner the same way; the viability arms below them remain the
+        // fallback for impls without a marker (std-bounded blankets).
+        let (guard, marker_arms) = match e0034_guard_for {
+            Some((method, owners)) if callees.len() > 1 && owners.len() == callees.len() => {
+                let terms: Vec<String> = owners
+                    .iter()
+                    .map(|owner| {
+                        let short = owner.rsplit("::").next().unwrap_or(owner);
+                        format!(
+                            "static_cast<int>(impls_{}<__ufcs_S>::value)",
+                            escape_cpp_keyword(short)
+                        )
+                    })
+                    .collect();
+                let guard = format!(
+                    "using __ufcs_S = std::remove_cvref_t<decltype(__self)>; constexpr int __ufcs_n = {}; static_assert(__ufcs_n <= 1, \"ambiguous trait method `{}` for this receiver (rustc E0034: multiple applicable items in scope) — use path syntax `Trait::{}(x)`\"); ",
+                    terms.join(" + "),
+                    method,
+                    method
+                );
+                let mut arms = String::new();
+                for (owner, callee) in owners.iter().zip(callees.iter()) {
+                    let short = owner.rsplit("::").next().unwrap_or(owner);
+                    arms.push_str(&format!(
+                        "if constexpr (impls_{}<__ufcs_S>::value) {{ return {}({}); }} else ",
+                        escape_cpp_keyword(short),
+                        callee,
+                        direct_args
+                    ));
+                }
+                (guard, arms)
+            }
+            _ => (String::new(), String::new()),
+        };
         format!(
-            "([]({}) -> decltype(auto) {{ {}{{ return {}; }} }})({})",
-            arg_param_list, branches, member_call, arg_call_list
+            "([]({}) -> decltype(auto) {{ {}{}{}{{ return {}; }} }})({})",
+            arg_param_list, guard, marker_arms, branches, member_call, arg_call_list
         )
     }
 
