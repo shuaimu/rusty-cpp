@@ -1417,7 +1417,13 @@ before any crate flips.
    (`Shape_::area(const Sq&)` beside the dispatcher: exact non-template match wins, everything else
    resolves as before). The function-template form is therefore the one phase 2 emits; the two
    namespaces are still not a style choice (an impl function named like the dispatcher *in `Tr_`* would
-   join its overload set and be found by qualified lookup where only the dispatcher should be).
+   join its overload set and be found by qualified lookup where only the dispatcher should be). Two
+   facts from landing it (2026-10-07): the dispatcher's unqualified inner call is hijacked by **any
+   same-named non-function visible from `Tr_`** — tap's method `tap` against the crate namespace `tap`
+   (`unexpected namespace name`) — so `Tr_` also declares a never-viable **ADL enabler** `void
+   m(impl_::adl_enabler_);` per method ahead of the dispatchers (ordinary lookup then finds a function and
+   ADL applies); and the tag is spelled **relative** (`Tr_::impl_::tag`), because the UFCS passes emit
+   inside the crate's namespace wrap, where an absolute `::Tr_` does not exist.
 2. **Every impl function takes `impl_::tag` as parameter 0.** The tag gives the call an associated
    namespace even when the receiver has none — *a fundamental type has no associated namespace*, so
    without it `hello(self_)` on `i32` is `call to function 'hello' that is neither visible in the
@@ -2253,6 +2259,24 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
     (scope, guard, bound regime, default body, marker). The guard counts implementors by the exact-type
   marker, never by call viability: `foo(const int32_t&)` is viable for an `int64_t` receiver through an
   integral conversion, and a viability count fired E0034 on valid Rust (measured on the scoping probe).
+- *2026-10-07 — step (2):* `Tr_::m` is the **dispatcher** — a function template (not an object) whose
+  unqualified inner call does tag-ADL at the point of instantiation; emitted in **two overloads**, a plain
+  call and a template-id call `m<E0, E...>(tag, …)` for explicit template arguments (a template-id binds
+  function templates only, so a single explicit-pack dispatcher could not reach a non-template impl —
+  measured). Impl functions, default templates and the Fix B using-declaration bridges live in
+  `Tr_::impl_` with `::Tr_::impl_::tag` as parameter 0 (rules 1–2); call sites still spell `Tr_::m(x)`
+  (rule 3). A `cpp_inherit` impl keeps its pre-revision `Tr_::m(Self&, …)` as a non-template forwarder
+  beside the dispatcher — the ABI-pinned companion of the table above. The `rusty_ext` lane is untouched
+  (step 5). `impl Tr for &T` is still keyed on `const T&` and invisible to cvref-stripping lookups
+  until `self_tag` lands (step 7).
+- *Marker hygiene found by the comparison gates (2026-10-07):* the explicit-specialization dedupe keys on
+  the same canonical spelling the free-function emitters use (`isize`/`i64`, `NonZero<usize>`/`<u64>` are
+  one C++ type — `redefinition of impls_Serialize<long>` otherwise); a nested-module impl whose self type
+  contains a **bare local type name** after global qualification (serde's `Error`, hashbrown's
+  `std::span<const Tag>`) skips its marker with a visible comment — an explicit specialization must sit at
+  the primary's scope where that name does not resolve; a blanket's partial specialization is skipped when
+  a parameter appears only in a non-deduced context (`f<N>()`, `T::X`; alloc's
+  `impls_IsZero<std::array<T, sanitize_array_capacity<N>()>>` is `-Wunusable-partial-specialization`).
 - **Baseline repairs (2026-10-07), found by the first gate on this tree, all in the trait lane:** the
   empty interface shell for a trait whose methods are all generic / by-value ignored the trait's
   template parameters while its forward declaration carried them (`redefinition … as a different kind

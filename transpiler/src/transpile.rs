@@ -5910,7 +5910,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
 
         // Concrete associated return type resolved in the trait free function.
         assert!(
-            on.contains("int32_t produce(const Foo& self_)"),
+            on.contains("int32_t produce(Producer_::impl_::tag, const Foo& self_)"),
             "concrete `Self::Output` must resolve to int32_t in the free function\nGot: {on}"
         );
         // Generic associated type routed through the `<Trait>Traits<T>` map.
@@ -6088,12 +6088,12 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
 
         // The default is one Self-templated free function in Greet_.
         assert!(
-            on.contains("int32_t describe(const Self_& self_)"),
+            on.contains("int32_t describe(Greet_::impl_::tag, const Self_& self_)"),
             "default `describe` must emit a Self-templated free function\nGot: {on}"
         );
         // Bar overrides it → a non-template concrete overload (which wins).
         assert!(
-            on.contains("int32_t describe(const Bar& self_)"),
+            on.contains("int32_t describe(Greet_::impl_::tag, const Bar& self_)"),
             "the Bar override must emit a concrete (non-template) describe overload\nGot: {on}"
         );
         // The default's body lowers `self.hello()` recursively via UFCS.

@@ -7975,15 +7975,15 @@ fn test_ufcs_layer_linkage_is_narrow_and_source_authenticated() {
         "mycrate",
     );
     assert!(
-        out.contains("int32_t m(const S& self_)") && !out.contains("inline int32_t m(const S& self_)"),
+        out.contains("int32_t m(Surface_::impl_::tag, const S& self_)") && !out.contains("inline int32_t m(Surface_::impl_::tag, const S& self_)"),
         "a `pub` trait's UFCS layer is ported surface and stays strong: {out}"
     );
     assert!(
-        out.contains("inline int32_t n(const S& self_)"),
+        out.contains("inline int32_t n(MarkedSurface_::impl_::tag, const S& self_)"),
         "a cpp_internal-marked trait's UFCS layer must take vague linkage: {out}"
     );
     assert!(
-        out.contains("inline int32_t q(const S& self_)"),
+        out.contains("inline int32_t q(Plumbing_::impl_::tag, const S& self_)"),
         "a non-`pub` trait's UFCS layer must take vague linkage: {out}"
     );
 }
@@ -9078,8 +9078,8 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     let module = cg.into_output();
 
     assert!(!module.contains("namespace RootDispatch_"), "{module}");
-    assert_eq!(module.matches("namespace Clash_ {").count(), 2, "{module}");
-    assert_eq!(module.matches("namespace Layer_ {").count(), 1, "{module}");
+    assert_eq!(module.matches("namespace Clash_::impl_ {").count(), 2, "{module}");
+    assert_eq!(module.matches("namespace Layer_::impl_ {").count(), 1, "{module}");
     assert!(
         !module.contains("using ::marked::__ufcs_Clash::value")
             && !module.contains("using ::marked::deep::__ufcs_Layer::depth"),
@@ -9314,7 +9314,7 @@ pub mod external_glob {
 
     let out = transpile_str_interface_traits(source);
     assert_eq!(
-        out.matches("namespace Clash_ {").count(),
+        out.matches("namespace Clash_::impl_ {").count(),
         1,
         "only the nearer child-local unmarked trait may retain UFCS lowering:\n{out}"
     );
@@ -14130,9 +14130,11 @@ fn test_impl_method_conflict_ignores_generic_param_names_and_lifetimes() {
     );
     // The in-class declaration; the UFCS free functions take an explicit
     // `self_` and are a separate surface.
+    // (The §3.2.2 dispatcher block also declares a never-viable
+    // `void ext(impl_::adl_enabler_);` ADL enabler — a free function, not a member.)
     let members = out
         .lines()
-        .filter(|l| l.contains("void ext(") && !l.contains("self_"))
+        .filter(|l| l.contains("void ext(") && !l.contains("self_") && !l.contains("adl_enabler_"))
         .count();
     assert_eq!(
         members, 1,
@@ -41050,7 +41052,7 @@ fn test_extension_trait_mut_receiver_forwarding_ref_and_mut_span() {
         "#,
     );
     assert!(
-        out.contains("fill_empty(Self_&& self_)"),
+        out.contains("fill_empty(TagSliceExt_::impl_::tag, Self_&& self_)"),
         "&mut default method must take a forwarding ref\nGot: {out}"
     );
     assert!(
@@ -46810,7 +46812,7 @@ fn test_module_mode_sync_imported_weak_dyn_agrees_across_surfaces() {
         // so the module does not own an ordinary strong symbol for it. The
         // TYPE surface this test exists to pin — `rusty::sync::Weak<Pollable>`
         // rather than `void*` — is unchanged.
-        out.contains("export inline const rusty::sync::Weak<Pollable>& core_self(const Ev& self_)"),
+        out.contains("export inline const rusty::sync::Weak<Pollable>& core_self(EvCore_::impl_::tag, const Ev& self_)"),
         "UFCS surface: {out}"
     );
     assert!(
@@ -48517,7 +48519,7 @@ fn test_ufcs_default_body_self_call_resolves_to_the_trait_not_an_inherent_method
         "#,
     );
     let body = out
-        .split("int32_t describe(const Self_& self_) {")
+        .split("int32_t describe(Greet_::impl_::tag, const Self_& self_) {")
         .nth(1)
         .unwrap_or("");
     let body: String = body.lines().take(6).collect::<Vec<_>>().join("\n");
@@ -48561,4 +48563,38 @@ fn test_ufcs_methodless_concrete_impl_emits_multi_owner_marker() {
         out.contains("requires impls_A<std::remove_cvref_t<Self_>>::value"),
         "a multi-owner default is constrained on the exact-type marker:\n{out}"
     );
+}
+
+#[test]
+fn test_ufcs_trait_namespace_is_a_dispatcher_over_tagged_impl_functions() {
+    // Book §3.2.2 rules 1-3 (2026-10-07): `Tr_::m` is a function-template
+    // dispatcher whose unqualified inner call does tag-ADL at instantiation;
+    // impl functions and default templates live in `Tr_::impl_` with the tag as
+    // parameter 0; call sites keep spelling `Tr_::m(x)`.
+    let out = transpile_str(
+        r#"
+        pub trait Speak { fn speak(&self) -> i32; fn twice(&self) -> i32 { self.speak() * 2 } }
+        impl Speak for i32 { fn speak(&self) -> i32 { *self + 1 } }
+        pub fn call(x: i32) -> i32 { x.speak() + x.twice() }
+        "#,
+    );
+    assert!(out.contains("namespace impl_ { struct tag {}; struct adl_enabler_; }"), "{out}");
+    assert!(
+        out.contains("auto speak(S&& s, R&&... r) -> decltype(speak(impl_::tag{}, std::forward<S>(s), std::forward<R>(r)...))"),
+        "the dispatcher must forward through tag-ADL:\n{out}"
+    );
+    assert!(
+        out.contains("auto speak(S&& s, R&&... r) -> decltype(speak<E0, E...>(impl_::tag{}"),
+        "the explicit-template-argument dispatcher overload must exist:\n{out}"
+    );
+    assert!(out.contains("namespace Speak_::impl_ {"), "{out}");
+    assert!(
+        out.contains("speak(Speak_::impl_::tag, const int32_t& self_)"),
+        "the impl function takes the tag as parameter 0:\n{out}"
+    );
+    assert!(
+        out.contains("twice(Speak_::impl_::tag, const Self_& self_)"),
+        "the default template takes the tag as parameter 0:\n{out}"
+    );
+    assert!(out.contains("Speak_::speak(") && out.contains("Speak_::twice("), "{out}");
 }

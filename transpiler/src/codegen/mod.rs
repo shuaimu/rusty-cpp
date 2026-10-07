@@ -1799,6 +1799,17 @@ pub struct CodeGen {
     /// Traits with an unbounded `impl<T> Tr for T`: their marker primary is
     /// defined TRUE (see collect_unbounded_blanket_impl_traits).
     pub(crate) ufcs_universal_blanket_traits: HashSet<String>,
+    /// Book §3.2.2 rules 1-3 (2026-10-07): while a `<Tr>_::impl_` impl/default
+    /// function is being emitted, the trait namespace whose `impl_::tag` is
+    /// parameter 0 of every function (`Some("Tr_")`); `None` for the
+    /// `rusty_ext` lane and everything else.
+    pub(crate) ufcs_tag_namespace: Option<String>,
+    /// cpp_inherit impls keep their pre-revision `<Tr>_::m(Self&, …)` free
+    /// functions as ABI companions (srpc's ratified incumbent symbols,
+    /// §3.2.12): collected while the impl's `impl_` functions emit, written
+    /// into `namespace <Tr>_` right after.
+    pub(crate) ufcs_abi_companion_wanted: bool,
+    pub(crate) ufcs_abi_companions_pending: Vec<String>,
     /// UFCS Phase 7 / § 3.2.13: `(trait, method)` pairs for which a
     /// `<Tr>_::m` free function was ACTUALLY emitted (the declaration emitter
     /// did not skip it — unsupported self-type mapping, unresolved placeholder,
@@ -3525,6 +3536,9 @@ impl CodeGen {
             ufcs_marker_primaries_emitted: HashSet::new(),
             ufcs_marker_specializations_emitted: HashSet::new(),
             ufcs_universal_blanket_traits: HashSet::new(),
+            ufcs_tag_namespace: None,
+            ufcs_abi_companion_wanted: false,
+            ufcs_abi_companions_pending: Vec::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_bridge_emitted_traits: std::collections::HashSet::new(),
             ufcs_default_method_bare_prefix_len: std::collections::HashMap::new(),
@@ -21275,8 +21289,11 @@ impl CodeGen {
         // #89: expose the impl's module to bare-name binding checks (see
         // ufcs_impl_module_path) without pushing module_stack.
         self.ufcs_impl_module_path = module_path.to_vec();
+        self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
+        self.ufcs_abi_companion_wanted =
+            self.has_cpp_inherit_attr(&impl_block.attrs, module_path);
         if module_path.is_empty() {
-            self.writeln(&format!("namespace {}_ {{", trait_name));
+            self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
             self.indent += 1;
             for spec in &specs {
                 if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
@@ -21287,7 +21304,9 @@ impl CodeGen {
             }
             self.indent -= 1;
             self.writeln("}");
+            self.emit_pending_ufcs_abi_companions(&trait_name);
             self.ufcs_impl_module_path.clear();
+            self.ufcs_tag_namespace = None;
             return;
         }
         // Nested-module impl: emit the definitions into the per-module helper
@@ -21312,12 +21331,36 @@ impl CodeGen {
         }
         self.ufcs_helper_shadowing_segments.clear();
         self.ufcs_impl_module_path.clear();
+        self.ufcs_tag_namespace = None;
         self.indent -= 1;
         self.writeln("}");
         for _ in &segments {
             self.indent -= 1;
             self.writeln("}");
         }
+        self.emit_pending_ufcs_abi_companions(&trait_name);
+    }
+
+    /// §3.2.12 ABI-pinned companions (see ufcs_abi_companions_pending): the
+    /// collected `<Tr>_::m(Self&, …)` forwarders of a cpp_inherit impl, written
+    /// into `namespace <Tr>_` beside the dispatchers.
+    fn emit_pending_ufcs_abi_companions(&mut self, trait_name: &str) {
+        self.ufcs_abi_companion_wanted = false;
+        if self.ufcs_abi_companions_pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.ufcs_abi_companions_pending);
+        self.writeln(&format!(
+            "// UFCS trait migration: ABI companions for a cpp_inherit `impl {} for ...` (§3.2.12)",
+            trait_name
+        ));
+        self.writeln(&format!("namespace {}_ {{", trait_name));
+        self.indent += 1;
+        for line in pending {
+            self.writeln(&line);
+        }
+        self.indent -= 1;
+        self.writeln("}");
     }
 
     /// Phase 4 (early): emit `namespace <Tr>_` free-function DECLARATIONS +
@@ -21386,7 +21429,11 @@ impl CodeGen {
             // was non-viable and a two-owner call fell through to the other
             // trait where rustc runs A's default (`1000`). Emit the marker alone.
             if !self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
+                // The marker's resolvability checks read the impl's module
+                // (a bare nested-module self type cannot be named globally).
+                self.ufcs_impl_module_path = module_path.to_vec();
                 self.emit_ufcs_multi_owner_marker_for_methodless_impl(impl_block, &trait_name);
+                self.ufcs_impl_module_path.clear();
             }
             return;
         };
@@ -21437,8 +21484,9 @@ impl CodeGen {
         // #89: expose the impl's module to bare-name binding checks (see
         // ufcs_impl_module_path) without pushing module_stack.
         self.ufcs_impl_module_path = module_path.to_vec();
+        self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
         if module_path.is_empty() {
-            self.writeln(&format!("namespace {}_ {{", trait_name));
+            self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
             self.indent += 1;
             for spec in &specs {
                 if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
@@ -21456,6 +21504,7 @@ impl CodeGen {
             self.writeln(&format!("using namespace {}_;", trait_name));
             self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
             self.ufcs_impl_module_path.clear();
+            self.ufcs_tag_namespace = None;
             return;
         }
 
@@ -21498,7 +21547,7 @@ impl CodeGen {
         }
 
         // Bridge + Fix-A marker live in `<Tr>_` at global scope.
-        self.writeln(&format!("namespace {}_ {{", trait_name));
+        self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
         self.indent += 1;
         let helper_path = {
             let mut p = segments.clone();
@@ -21528,6 +21577,7 @@ impl CodeGen {
         self.writeln(&format!("// {}{}", ASSOC_PROJECTION_TAIL_MARKER, trait_name));
         self.ufcs_bridge_emitted_traits.insert(trait_name.clone());
         self.ufcs_impl_module_path.clear();
+        self.ufcs_tag_namespace = None;
     }
 
     /// Emit the member-first dispatchers the Ref-receiver assoc projections
@@ -21624,6 +21674,29 @@ impl CodeGen {
         names.sort();
         let mut emitted_any = false;
         for name in names {
+            // A cpp_trait_member_dispatch trait keeps member dispatch and gets no
+            // UFCS layer — but the registries are keyed by SHORT name and two
+            // modules may declare same-named traits, one marked and one not
+            // (the lexical-scope review fixture). Skip only when every declared
+            // trait with this leaf is marked; otherwise the unmarked one's impl
+            // functions name `<Tr>_::impl_::tag` and need the namespace.
+            let marked = |key: &str| {
+                self.cpp_trait_member_dispatch_traits.iter().any(|t| t == key)
+            };
+            let declared_keys: Vec<&String> = self
+                .trait_declared_paths
+                .iter()
+                .filter(|k| k.rsplit("::").next() == Some(name.as_str()))
+                .collect();
+            let all_marked = if declared_keys.is_empty() {
+                marked(&name)
+            } else {
+                declared_keys.iter().all(|k| marked(k) || marked(&name))
+                    && !declared_keys.iter().any(|k| !marked(k) && !marked(&name))
+            };
+            if all_marked {
+                continue;
+            }
             // Contract 10 / C21c, mirrored: class templates do NOT merge across
             // modules the way `namespace <Tr>_` does, so an exported
             // `impls_Sealed` from two dependencies would be ambiguous in a
@@ -21640,13 +21713,6 @@ impl CodeGen {
             } else {
                 ""
             };
-            if self
-                .cpp_trait_member_dispatch_traits
-                .iter()
-                .any(|t| t == &name || t.rsplit("::").next() == Some(name.as_str()))
-            {
-                continue;
-            }
             if !self.ufcs_marker_primaries_emitted.insert(name.clone()) {
                 continue;
             }
@@ -21668,10 +21734,106 @@ impl CodeGen {
                 "{}template<class U> concept has_{} = impls_{}<std::remove_cvref_t<U>>::value;",
                 export, cpp, cpp
             ));
+            // Book §3.2.2 rules 1-3: the trait namespace holds the tag anchor
+            // and ONE dispatcher per method — a function template whose
+            // unqualified inner call does tag-ADL at the point of
+            // instantiation, so a default body or generic caller compiled in
+            // this module still reaches an impl declared in a later one (a
+            // qualified call freezes its overload set: `11000` vs rustc 5550).
+            // Two overloads: a plain call (binds template AND non-template
+            // impl functions) and a template-id call for explicit template
+            // arguments (`Tr_::next_element<T>(recv)`; a template-id binds
+            // function templates only — measured, fncpo/explicit_targs2.cpp).
+            // Impl functions live in `impl_` (rule 1): an impl function named
+            // like the dispatcher IN `Tr_` would join its overload set.
+            let mut methods: Vec<String> = self
+                .ufcs_declared_trait_methods
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            for (method, owners) in &self.ufcs_method_trait_owners {
+                if owners.contains(&name) && !methods.contains(method) {
+                    methods.push(method.clone());
+                }
+            }
+            methods.sort();
+            methods.dedup();
+            self.writeln(&format!("{}namespace {}_ {{", export, name));
+            self.indent += 1;
+            self.writeln("namespace impl_ { struct tag {}; struct adl_enabler_; }");
+            for method in &methods {
+                let mname = escape_cpp_keyword_in_member_position(method);
+                // Never viable (incomplete parameter type); exists so ordinary
+                // lookup of the bare name from inside `Tr_` finds a FUNCTION —
+                // a same-named namespace or variable visible from here (tap's
+                // crate namespace `tap` vs `fn tap`) would otherwise capture
+                // the name and suppress ADL (measured: `unexpected namespace
+                // name 'tap'`).
+                self.writeln(&format!("void {}(impl_::adl_enabler_);", mname));
+                self.writeln(&format!(
+                    "template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto {m}(S&& s, R&&... r) -> decltype({m}(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...)) {{ return {m}(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...); }}",
+                    m = mname
+                ));
+                self.writeln(&format!(
+                    "template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto {m}(S&& s, R&&... r) -> decltype({m}<E0, E...>(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...)) {{ return {m}<E0, E...>(impl_::tag{{}}, std::forward<S>(s), std::forward<R>(r)...); }}",
+                    m = mname
+                ));
+            }
+            self.indent -= 1;
+            self.writeln("}");
         }
         if emitted_any {
             self.newline();
         }
+    }
+
+    /// Book §3.2.3 (2026-10-07): does `spelling` name a crate-declared generic
+    /// type with FEWER template arguments than it declares? The marker
+    /// specializations sit at the early forward-declaration position, where a
+    /// local class template has no default arguments yet (alloc:
+    /// `impls_SpecFromIter<::collections::vec_deque::VecDeque<T>>` →
+    /// `too few template arguments`). Lexical, top-level-comma counting.
+    fn spelling_underfills_local_generic(&self, spelling: &str) -> bool {
+        let bytes = spelling.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let tok = &spelling[start..i];
+                if i < bytes.len() && bytes[i] == b'<' {
+                    if let Some(params) = self.declared_type_params.get(tok) {
+                        // count top-level args
+                        let mut depth = 0usize;
+                        let mut args = 1usize;
+                        let mut j = i + 1;
+                        let mut empty = true;
+                        while j < bytes.len() {
+                            match bytes[j] {
+                                b'<' | b'(' => depth += 1,
+                                b'>' | b')' if depth > 0 => depth -= 1,
+                                b'>' => break,
+                                b',' if depth == 0 => args += 1,
+                                b' ' => {}
+                                _ => empty = false,
+                            }
+                            j += 1;
+                        }
+                        if empty {
+                            args = 0;
+                        }
+                        if args < params.len() {
+                            return true;
+                        }
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        false
     }
 
     /// Book §3.2.3 / §3.2.4 (2026-10-07): witness this impl's self type as an
@@ -21712,6 +21874,69 @@ impl CodeGen {
             {
                 return;
             }
+            // A nested-module impl whose self type stays BARE after global
+            // qualification (serde's `Error`, declared in several modules — the
+            // Fix B ambiguity guard leaves it unqualified) cannot be named at
+            // global scope; the free functions resolve it lexically inside the
+            // per-module helper namespace, but an explicit specialization must
+            // sit at the primary's scope. Skip the marker, loudly.
+            let bare_local_type_inside = || -> bool {
+                // Tokens that are local type names and are not preceded by `::`
+                // (hashbrown: `std::span<const Tag>` with `Tag` in control::tag).
+                let bytes = self_cpp.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                        let start = i;
+                        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                            i += 1;
+                        }
+                        let tok = &self_cpp[start..i];
+                        let qualified = start >= 2 && &self_cpp[start - 2..start] == "::";
+                        if !qualified
+                            && (self.local_declared_types.contains(tok)
+                                || self.declared_module_names.contains(tok))
+                        {
+                            return true;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                false
+            };
+            // A single bare identifier that is not a C++ builtin spelling is a
+            // local type the registries did not see (serde's derive-expanded
+            // `Field` inside a function body): same hazard, same skip.
+            let bare_unknown_identifier = || -> bool {
+                self_cpp.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && self_cpp.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && !matches!(
+                        self_cpp.as_str(),
+                        "bool" | "char" | "float" | "double" | "void" | "size_t" | "ptrdiff_t"
+                            | "int8_t" | "int16_t" | "int32_t" | "int64_t"
+                            | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t"
+                            | "__int128" | "char8_t" | "char16_t" | "char32_t" | "wchar_t"
+                    )
+            };
+            if !self.ufcs_impl_module_path.is_empty()
+                && (bare_local_type_inside() || bare_unknown_identifier())
+            {
+                self.writeln(&format!(
+                    "// implementor marker skipped: `impl {} for {}` in module `{}` — self type not resolvable at global scope (Fix B ambiguity)",
+                    trait_name,
+                    self_cpp,
+                    self.ufcs_impl_module_path.join("::")
+                ));
+                return;
+            }
+            if self.spelling_underfills_local_generic(&self_cpp) {
+                self.writeln(&format!(
+                    "// implementor marker skipped: `impl {} for {}` — a local generic named with fewer arguments than declared (defaults are not visible here)",
+                    trait_name, self_cpp
+                ));
+                return;
+            }
             // A view self type (`impl Tr for [T]`) is reached through TWO C++
             // receiver spellings — `std::span<const T>` from `&[T]`, `std::span<T>`
             // from `&mut [T]` — so witness both (book §3.2.4: view impls).
@@ -21720,9 +21945,14 @@ impl CodeGen {
                 spellings.push(format!("std::span<{}", inner));
             }
             for spelling in spellings {
+                // Distinct Rust types can be ONE C++ type (`isize`/`i64` →
+                // `long`, `CString`/`String`): key the dedupe on the same
+                // canonical spelling the free-function emitters use, or the
+                // second impl is a `redefinition of impls_<Tr><…>` (serde_core).
+                let canonical = self.canonicalize_extension_overload_type_for_dedupe(&spelling);
                 if !self
                     .ufcs_marker_specializations_emitted
-                    .insert((trait_name.to_string(), spelling.clone()))
+                    .insert((trait_name.to_string(), canonical))
                 {
                     continue;
                 }
@@ -21827,6 +22057,11 @@ impl CodeGen {
         {
             return;
         }
+        // Deducibility, approximated lexically: every parameter must appear as
+        // a plain token, and not only inside a non-deduced context — a
+        // constant expression `f<N>()`, or a dependent nested name `T::X`
+        // (alloc: `impls_IsZero<std::array<T, rusty::sanitize_array_capacity<N>()>>`
+        // → clang `-Wunusable-partial-specialization`, an error under -Werror).
         let mentions = |param: &str| -> bool {
             self_cpp
                 .split(|c: char| !(c.is_alphanumeric() || c == '_'))
@@ -21835,7 +22070,62 @@ impl CodeGen {
         if !type_params.iter().all(|p| mentions(p)) {
             return;
         }
-        let key = (trait_name.to_string(), self_cpp.clone());
+        if self_cpp.contains('(')
+            || self_cpp.contains("typename ")
+            || type_params.iter().any(|p| {
+                self_cpp.contains(&format!("{}::", p)) || self_cpp.contains(&format!("::{}", p))
+            })
+        {
+            return;
+        }
+        if self.spelling_underfills_local_generic(&self_cpp) {
+            self.writeln(&format!(
+                "// implementor marker skipped: `impl {} for {}` — a local generic named with fewer arguments than declared (defaults are not visible here)",
+                trait_name, self_cpp
+            ));
+            return;
+        }
+        if !self.ufcs_impl_module_path.is_empty() {
+            // Same hazard as the concrete path: a bare local type or module
+            // name inside the spelling does not resolve at global scope
+            // (alloc: `impls_SpecFromIter<Vec<T>>`, `impls_AsVecIntoIter<into_iter::IntoIter<T>>`).
+            let bytes = self_cpp.as_bytes();
+            let mut i = 0;
+            let mut bare = false;
+            while i < bytes.len() {
+                if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                    let start = i;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                        i += 1;
+                    }
+                    let tok = &self_cpp[start..i];
+                    let qualified = start >= 2 && &self_cpp[start - 2..start] == "::";
+                    if !qualified
+                        && !type_params.iter().any(|p| p == tok)
+                        && (self.local_declared_types.contains(tok)
+                            || self.declared_module_names.contains(tok))
+                    {
+                        bare = true;
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if bare {
+                self.writeln(&format!(
+                    "// implementor marker skipped: `impl {} for {}` in module `{}` — self type not resolvable at global scope (Fix B ambiguity)",
+                    trait_name,
+                    self_cpp,
+                    self.ufcs_impl_module_path.join("::")
+                ));
+                return;
+            }
+        }
+        let key = (
+            trait_name.to_string(),
+            self.canonicalize_extension_overload_type_for_dedupe(&self_cpp),
+        );
         if !self.ufcs_marker_specializations_emitted.insert(key) {
             return;
         }
@@ -21870,6 +22160,11 @@ impl CodeGen {
             })
             .collect();
         if !const_names.iter().all(|c| mentions(c)) {
+            return;
+        }
+        if const_names.iter().any(|c| {
+            self_cpp.contains(&format!("{}::", c)) || self_cpp.contains(&format!("::{}", c))
+        }) {
             return;
         }
         self.writeln(&format!(
@@ -22039,7 +22334,7 @@ impl CodeGen {
                         "// UFCS trait migration: default methods for trait `{}`",
                         trait_name
                     ));
-                    self.writeln(&format!("namespace {}_ {{", trait_name));
+                    self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
                     self.indent += 1;
                     // Book §3.2.13 rule 6: while these DEFAULT bodies emit, a
                     // `self.m()` on a method of this trait (or a supertrait)
@@ -22047,10 +22342,12 @@ impl CodeGen {
                     // (try_emit_default_body_self_trait_call).
                     self.ufcs_default_body_trait = Some(trait_name.clone());
                     self.ufcs_default_body_module_path = module_path.to_vec();
+                    self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
                     for spec in &specs {
                         self.emit_extension_trait_free_function(spec);
                         self.newline();
                     }
+                    self.ufcs_tag_namespace = None;
                     self.ufcs_default_body_trait = None;
                     self.ufcs_default_body_module_path.clear();
                     self.indent -= 1;
@@ -22116,7 +22413,7 @@ impl CodeGen {
                     if specs.is_empty() {
                         continue;
                     }
-                    self.writeln(&format!("namespace {}_ {{", trait_name));
+                    self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
                     self.indent += 1;
                     // Fix A part 2: if this trait has a constrained (multi-owner)
                     // default, guarantee `<Tr>_::__ufcs_impls` EXISTS even when
@@ -22126,6 +22423,7 @@ impl CodeGen {
                     // no matching 1-arg overload) instead of a hard "no member
                     // named __ufcs_impls" error. Per-impl `__ufcs_impls(const X&)`
                     // overloads (from the impl decls) are the real witnesses.
+                    self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
                     for spec in &specs {
                         if self.emit_extension_trait_free_function_declaration(spec) {
                             let m = spec.method.sig.ident.to_string();
@@ -22141,6 +22439,7 @@ impl CodeGen {
                             }
                         }
                     }
+                    self.ufcs_tag_namespace = None;
                     self.indent -= 1;
                     self.writeln("}");
                     self.writeln(&format!("using namespace {}_;", trait_name));
@@ -23492,6 +23791,10 @@ impl CodeGen {
         );
 
         let mut params = vec![receiver_param];
+        if let Some(ns) = &self.ufcs_tag_namespace {
+            // Book §3.2.2 rule 2: parameter 0 of every impl / default function.
+            params.insert(0, format!("{}::impl_::tag", ns));
+        }
         for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
@@ -23853,6 +24156,10 @@ impl CodeGen {
         );
 
         let mut params = vec![receiver_param];
+        if let Some(ns) = &self.ufcs_tag_namespace {
+            // Book §3.2.2 rule 2: parameter 0 of every impl / default function.
+            params.insert(0, format!("{}::impl_::tag", ns));
+        }
         for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
@@ -23988,6 +24295,29 @@ impl CodeGen {
         // serde_core Fix B: qualify nested-module types in the return position.
         return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         self.record_extension_free_function_symbol(&method_name);
+        if self.ufcs_abi_companion_wanted
+            && free_generics.params.is_empty()
+            && self.ufcs_tag_namespace.is_some()
+            && params.len() >= 2
+        {
+            // §3.2.12 ABI-pinned companion: the pre-revision spelling
+            // `<Tr>_::m(Self&, …)` as a non-template forwarder beside the
+            // dispatcher (a non-template may share the name; measured).
+            let plain_params: Vec<&str> = params[1..].iter().map(String::as_str).collect();
+            let arg_names: Vec<&str> = plain_params
+                .iter()
+                .map(|p| p.rsplit(' ').next().unwrap_or(p))
+                .collect();
+            self.ufcs_abi_companions_pending.push(format!(
+                "{}inline {} {}({}) {{ return impl_::{}(impl_::tag{{}}, {}); }}",
+                export_prefix,
+                return_type,
+                escaped_method_name,
+                plain_params.join(", "),
+                escaped_method_name,
+                arg_names.join(", ")
+            ));
+        }
         // Fix A part 2: inject the multi-owner default's `requires` constraint
         // after the template parameter list (must match the declaration).
         let requires_prefix = method_spec
