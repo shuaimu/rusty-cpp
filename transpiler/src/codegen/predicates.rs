@@ -1152,29 +1152,82 @@ impl CodeGen {
     /// `None` for non-cpp_inherit types. Shared by `emit_struct` (the base
     /// clause) and `emit_cpp_ctor` (the base-subobject init prefix).
     pub(super) fn cpp_inherit_base_name(&self, type_name: &str) -> Option<String> {
+        self.cpp_inherit_base_names(type_name).into_iter().next()
+    }
+
+    /// Every tier-1 trait a `#[cpp_inherit]` implementor inherits, first one
+    /// first (short names). Empty for a non-cpp_inherit type.
+    pub(super) fn cpp_inherit_traits_of(&self, type_name: &str) -> Vec<String> {
         let scoped_key = self.scoped_type_key(type_name);
-        let trait_short = self
+        let Some(first) = self
             .cpp_inherit_trait
             .get(type_name)
             .or_else(|| self.cpp_inherit_trait.get(&scoped_key))
-            .cloned()?;
-        Some(
-            match self
-                .trait_declared_path_by_short_name
-                .get(&trait_short)
-                .cloned()
-            {
-                Some(qualified) => {
-                    let escaped = self.escape_and_rename_qualified_name(&qualified);
-                    if escaped.contains("::") {
-                        format!("::{}", escaped)
-                    } else {
-                        escaped
-                    }
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let mut out = vec![first];
+        if let Some(extra) = self
+            .cpp_inherit_extra_traits
+            .get(type_name)
+            .or_else(|| self.cpp_inherit_extra_traits.get(&scoped_key))
+        {
+            for t in extra {
+                if !out.contains(t) {
+                    out.push(t.clone());
                 }
-                None => trait_short,
-            },
-        )
+            }
+        }
+        out
+    }
+
+    /// The absolute C++ spelling of a tier-1 trait's class, for a base clause
+    /// or a base-subobject init.
+    pub(super) fn cpp_inherit_base_spelling(&self, trait_short: &str) -> String {
+        match self
+            .trait_declared_path_by_short_name
+            .get(trait_short)
+            .cloned()
+        {
+            Some(qualified) => {
+                let escaped = self.escape_and_rename_qualified_name(&qualified);
+                if escaped.contains("::") {
+                    format!("::{}", escaped)
+                } else {
+                    escaped
+                }
+            }
+            None => trait_short.to_string(),
+        }
+    }
+
+    /// Book §3.2.16 phase 0 (multiple and virtual bases): the base-class
+    /// spellings of a `#[cpp_inherit]` implementor, in impl order. A trait
+    /// that is also a supertrait of another trait in the list is spelled
+    /// `virtual` here as well: the subtrait's interface already carries it as
+    /// a virtual base (§3.2.2), and a second, non-virtual copy would make the
+    /// upcast to it ambiguous.
+    pub(super) fn cpp_inherit_base_names(&self, type_name: &str) -> Vec<String> {
+        let traits = self.cpp_inherit_traits_of(type_name);
+        traits
+            .iter()
+            .map(|t| {
+                let is_super_of_another = traits.iter().any(|other| {
+                    other != t
+                        && self
+                            .ufcs_elaborate_supertraits(std::slice::from_ref(other))
+                            .iter()
+                            .any(|s| s == t && s != other)
+                });
+                let spelling = self.cpp_inherit_base_spelling(t);
+                if is_super_of_another {
+                    format!("virtual {}", spelling)
+                } else {
+                    spelling
+                }
+            })
+            .collect()
     }
 
     /// Skip items behind `#[cfg(...)]` when the predicate is known-false in

@@ -3125,6 +3125,10 @@ pub struct CodeGen {
     /// ctor, and the 3 `TraitAdapter<Type>` specializations are suppressed.
     /// Opt-in only — absent types keep the default adapter-wrapper emission.
     pub(crate) cpp_inherit_trait: HashMap<String, String>,
+    /// Book §3.2.16 phase 0 (multiple bases): the SECOND and later tier-1
+    /// traits a `#[cpp_inherit]` implementor inherits (`cpp_inherit_trait`
+    /// keeps the first). Same keys. `cpp_inherit_traits_of` reads both.
+    pub(crate) cpp_inherit_extra_traits: HashMap<String, Vec<String>>,
     /// §3.2.16 phase 0: the trait items behind `cpp_inherit_trait`, keyed by
     /// the module-scoped trait name (`nonvtable_trait_key_here`) and by the
     /// short name. A base class must be complete where the derived class is
@@ -3934,6 +3938,7 @@ impl CodeGen {
             trait_associated_type_names: HashMap::new(),
             trait_declared_path_by_short_name: HashMap::new(),
             cpp_inherit_trait: HashMap::new(),
+            cpp_inherit_extra_traits: HashMap::new(),
             cpp_inherit_trait_items: HashMap::new(),
             hoisted_trait_interfaces: HashSet::new(),
             visited_trait_keys: HashSet::new(),
@@ -8317,6 +8322,7 @@ impl CodeGen {
         self.trait_associated_type_names.clear();
         self.trait_declared_path_by_short_name.clear();
         self.cpp_inherit_trait.clear();
+        self.cpp_inherit_extra_traits.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
         self.tuple_type_aliases.clear();
@@ -29386,7 +29392,7 @@ impl CodeGen {
         // subobject first: `Owner(args) : Base(), field(e)...`. Without this
         // the base is value-initialized only when it happens to have an
         // accessible default ctor — bases without one would fail to compile.
-        if let Some(base) = self.cpp_inherit_base_name(owner) {
+        for base in self.cpp_inherit_base_names(owner) {
             inits.push(format!("{}()", base));
         }
         for field in &struct_lit.fields {

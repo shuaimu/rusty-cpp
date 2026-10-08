@@ -2584,6 +2584,17 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   next structural step), generic defaults and their transitive callers as explicit-object members,
   supertrait-calling defaults kept as virtual bodies (and the `operator-` mis-emission), assoc-const
   traits given an interface.
+- *2026-10-08 — phase 0, multiple and virtual bases (third commit):* (xii) an implementor of several
+  tier-1 traits inherits every one (`struct Sq : public Area, public Perim`, constructor inits
+  `Area(), Perim()`): the registry keeps the first trait in `cpp_inherit_trait` and the rest in
+  `cpp_inherit_extra_traits`; `cpp_inherit_traits_of` / `cpp_inherit_base_names` read both, and the
+  override and `&&` decisions consult every trait. (xiii) Supertraits are **virtual** bases of an
+  interface (`class Animal : public virtual Named`, the §3.2.2 shape), so the diamond — `Animal: Named`,
+  `Pet: Named`, both on `Dog`, which implements `Named` too — has one `Named` subobject, every upcast
+  is unambiguous and one override serves all; an implementor that lists the supertrait directly spells
+  it `virtual` as well (`struct Dog : public virtual Named, public Animal, public Pet`). (xiv) The hoist
+  ahead of an implementor emits a trait's supertraits first. Measured: `4 rex ann rex rex | 9 12 21`
+  (`test_tier1_phase0_multiple_and_virtual_bases_clang_runtime`).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

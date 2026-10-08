@@ -10378,6 +10378,125 @@ fn test_tier1_phase0_member_dispatch_marker_on_ineligible_trait_is_a_diagnosed_n
 }
 
 #[test]
+fn test_tier1_phase0_multiple_and_virtual_bases_clang_runtime() {
+    // Book §3.2.2 / §3.2.16 phase 0: supertraits are VIRTUAL bases of the
+    // interface, and an implementor of several tier-1 traits inherits every
+    // one — the diamond (`Animal: Named`, `Pet: Named`, both on `Dog`, which
+    // also implements `Named`) has ONE `Named` subobject, so every upcast is
+    // unambiguous and one override serves all; two unrelated tier-1 traits
+    // on one type are two bases. The subtrait that precedes its supertrait
+    // in source order is hoisted supertrait-first.
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping tier-1 multiple-bases cells: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+        pub struct Dog { pub n: String, pub o: String }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Animal: Named { fn legs(&self) -> i32; }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Named { fn name(&self) -> String; }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Pet: Named { fn owner(&self) -> String; }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Named for Dog { fn name(&self) -> String { self.n.clone() } }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Animal for Dog { fn legs(&self) -> i32 { 4 } }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Pet for Dog { fn owner(&self) -> String { self.o.clone() } }
+        pub fn cell_diamond() -> String {
+            let d = Dog { n: "rex".to_string(), o: "ann".to_string() };
+            let a: &dyn Animal = &d;
+            let p: &dyn Pet = &d;
+            let n: &dyn Named = &d;
+            format!("{} {} {} {} {}", a.legs(), a.name(), p.owner(), p.name(), n.name())
+        }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Area { fn area(&self) -> i32; }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Perim { fn perim(&self) -> i32; }
+        pub struct Sq { pub s: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Area for Sq { fn area(&self) -> i32 { self.s * self.s } }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Perim for Sq { fn perim(&self) -> i32 { 4 * self.s } }
+        pub fn cell_two_bases() -> String {
+            let q = Sq { s: 3 };
+            let a: &dyn Area = &q;
+            let p: &dyn Perim = &q;
+            format!("{} {} {}", a.area(), p.perim(), q.area() + q.perim())
+        }
+        "#,
+    );
+    assert!(cpp.contains("class Animal : public virtual Named {"), "{cpp}");
+    assert!(cpp.contains("class Pet : public virtual Named {"), "{cpp}");
+    assert!(cpp.contains("struct Dog : public virtual Named, public Animal, public Pet {"), "{cpp}");
+    assert!(cpp.contains("struct Sq : public Area, public Perim {"), "{cpp}");
+    assert!(cpp.contains("Sq(int32_t s_init) : Area(), Perim(), s(std::move(s_init)) {}"), "{cpp}");
+    let named = cpp.find("class Named {").expect("Named");
+    let animal = cpp.find("class Animal : public virtual Named {").expect("Animal");
+    let dog = cpp.find("struct Dog : ").expect("Dog");
+    assert!(named < animal && animal < dog, "supertrait-first hoist order: {cpp}");
+    cpp.push_str(
+        r#"
+#include <cstdio>
+#include <string>
+static int check(const char* cell, const std::string& got, const char* want) {
+    if (got != want) { std::printf("FAIL %s: got [%s] want [%s]\n", cell, got.c_str(), want); return 1; }
+    return 0;
+}
+int main() {
+    int bad = 0;
+    bad += check("diamond", std::string(rusty::to_string_view(cell_diamond())), "4 rex ann rex rex");
+    bad += check("two_bases", std::string(rusty::to_string_view(cell_two_bases())), "9 12 21");
+    return bad;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("tier1_bases.cpp");
+    let binary_path = temp.path().join("tier1_bases");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "tier-1 multiple-bases C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "tier-1 multiple-bases runtime proof failed (exit {:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+#[test]
 fn test_interface_traits_three_forward_decls_emitted_per_trait() {
     // The trait header should forward-declare all three adapter
     // primary templates so dyn type mappings can name them even

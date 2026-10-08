@@ -3329,12 +3329,24 @@ impl CodeGen {
                                     trait_short
                                 );
                             } else {
-                                self.cpp_inherit_trait
-                                    .insert(simple_type_name.clone(), trait_short.clone());
-                                self.cpp_inherit_trait
-                                    .insert(type_name.clone(), trait_short.clone());
+                                // Phase 0 (multiple bases): the first tier-1 trait of
+                                // this implementor is `cpp_inherit_trait`'s entry, every
+                                // later one joins `cpp_inherit_extra_traits`.
                                 let scoped = self.scoped_type_key(&simple_type_name);
-                                self.cpp_inherit_trait.insert(scoped.clone(), trait_short.clone());
+                                for key in [simple_type_name.clone(), type_name.clone(), scoped.clone()] {
+                                    match self.cpp_inherit_trait.get(&key) {
+                                        None => {
+                                            self.cpp_inherit_trait.insert(key, trait_short.clone());
+                                        }
+                                        Some(first) if first == trait_short => {}
+                                        Some(_) => {
+                                            let extra = self.cpp_inherit_extra_traits.entry(key).or_default();
+                                            if !extra.contains(trait_short) {
+                                                extra.push(trait_short.clone());
+                                            }
+                                        }
+                                    }
+                                }
                                 // Book §3.2.2: a by-value `self` method of a
                                 // tier-1 (member-dispatch) trait is a `&&` slot;
                                 // record the implementor's such methods for the

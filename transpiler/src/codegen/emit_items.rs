@@ -2642,31 +2642,8 @@ impl CodeGen {
         // Only a trait of THIS module is hoisted — one from another module
         // would land in the wrong namespace.
         if cpp_inherit_base.is_some() {
-            let scoped_owner = self.scoped_type_key(&name_str);
-            let trait_short = self
-                .cpp_inherit_trait
-                .get(&name_str)
-                .or_else(|| self.cpp_inherit_trait.get(&scoped_owner))
-                .cloned();
-            if let Some(trait_short) = trait_short {
-                let key = self.nonvtable_trait_key_here(&trait_short);
-                let declared_here = self
-                    .trait_declared_path_by_short_name
-                    .get(&trait_short)
-                    .is_some_and(|declared| declared == &key);
-                if declared_here
-                    && !self.hoisted_trait_interfaces.contains(&key)
-                    && !self.visited_trait_keys.contains(&key)
-                    && let Some(t) = self.cpp_inherit_trait_items.get(&key).cloned()
-                {
-                    self.writeln(&format!(
-                        "// `{}` hoisted ahead of its implementor `{}` (a base must be complete here)",
-                        trait_short, name_str
-                    ));
-                    self.emit_trait(&t);
-                    self.newline();
-                    self.hoisted_trait_interfaces.insert(key);
-                }
+            for trait_short in self.cpp_inherit_traits_of(&name_str) {
+                self.hoist_cpp_inherit_trait_interface(&trait_short, &name_str, 0);
             }
         }
         // Preserve the established cpp_inherit behavior: any `#[cpp_ctor]`
@@ -2740,9 +2717,18 @@ impl CodeGen {
         } else {
             ""
         };
-        let base_clause = match &cpp_inherit_base {
-            Some(base) => format!(" : public {}", base),
-            None => String::new(),
+        let cpp_inherit_bases: Vec<String> = self.cpp_inherit_base_names(&name_str);
+        let base_clause = if cpp_inherit_bases.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " : {}",
+                cpp_inherit_bases
+                    .iter()
+                    .map(|b| format!("public {}", b))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         // #[repr(align(N))] must survive into C++: Layout::new_<T>() reads
         // alignof(T), so dropping it makes over-aligned Vec buffers silently
@@ -3418,7 +3404,7 @@ impl CodeGen {
         // protected and defaulted (C.67), so the implicit copy and move of
         // the implementor are well-formed; a `Copy`/`Clone` implementor
         // spells all four defaulted, a non-`Clone` one declares none.
-        if let Some(base) = &cpp_inherit_base {
+        if cpp_inherit_base.is_some() {
             if !has_drop_impl && !has_cpp_ctor_method {
                 let member_of = |rust_name: &str| -> String {
                     named_field_cpp_names
@@ -3455,7 +3441,12 @@ impl CodeGen {
                         .iter()
                         .map(|(fname, _, ty, _)| format!("{} {}_init", self.map_type(ty), fname))
                         .collect();
-                    let mut ctor_inits: Vec<String> = vec![format!("{}()", base)];
+                    // A `virtual X` base is initialised as `X()` (the most-derived
+                    // class constructs its virtual bases).
+                    let mut ctor_inits: Vec<String> = cpp_inherit_bases
+                        .iter()
+                        .map(|b| format!("{}()", b.trim_start_matches("virtual ")))
+                        .collect();
                     for (fname, member, _, is_ref) in &fieldwise {
                         let param = format!("{}_init", fname);
                         if *is_ref {
@@ -6385,6 +6376,48 @@ impl CodeGen {
         }
     }
 
+    /// Phase 0: emit the trait `trait_short` (of THIS module, not yet visited)
+    /// ahead of its implementor `implementor`, its own supertraits first — a
+    /// base must be complete at the derived class, and the subtrait's class
+    /// derives from the supertrait's.
+    fn hoist_cpp_inherit_trait_interface(&mut self, trait_short: &str, implementor: &str, depth: usize) {
+        if depth > 16 {
+            return;
+        }
+        let key = self.nonvtable_trait_key_here(trait_short);
+        let declared_here = self
+            .trait_declared_path_by_short_name
+            .get(trait_short)
+            .is_some_and(|declared| declared == &key);
+        if !declared_here
+            || self.hoisted_trait_interfaces.contains(&key)
+            || self.visited_trait_keys.contains(&key)
+        {
+            return;
+        }
+        let Some(t) = self.cpp_inherit_trait_items.get(&key).cloned() else {
+            return;
+        };
+        let supers: Vec<String> = t
+            .supertraits
+            .iter()
+            .filter_map(|b| match b {
+                syn::TypeParamBound::Trait(tb) => tb.path.segments.last().map(|s| s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        for s in supers {
+            self.hoist_cpp_inherit_trait_interface(&s, implementor, depth + 1);
+        }
+        self.writeln(&format!(
+            "// `{}` hoisted ahead of its implementor `{}` (a base must be complete here)",
+            trait_short, implementor
+        ));
+        self.emit_trait(&t);
+        self.newline();
+        self.hoisted_trait_interfaces.insert(key);
+    }
+
     /// A struct's C++ member names in declaration order (`_0, _1` for tuple
     /// fields), for the member-wise comparisons a `cpp_inherit` implementor
     /// spells instead of `= default` (phase 0).
@@ -6910,9 +6943,13 @@ impl CodeGen {
         let bases = if supertraits.is_empty() {
             String::new()
         } else {
+            // Book §3.2.2: supertraits are VIRTUAL bases, so a diamond
+            // (`PartialOrd: PartialEq`-shaped: two subtraits of one
+            // supertrait implemented by one type) has one base subobject
+            // and an unambiguous upcast (measured §3.2.17).
             let supers = supertraits
                 .iter()
-                .map(|s| format!("public {}", s))
+                .map(|s| format!("public virtual {}", s))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(" : {}", supers)
@@ -11228,15 +11265,11 @@ impl CodeGen {
                     .get(owner)
                     .or_else(|| self.cpp_inherit_by_value_methods.get(&scoped_owner))
                     .is_some_and(|methods| methods.contains(&method_ident))
-                    && self
-                        .cpp_inherit_trait
-                        .get(owner)
-                        .or_else(|| self.cpp_inherit_trait.get(&scoped_owner))
-                        .is_some_and(|trait_name| {
-                            !self
-                                .trait_class_skipped_method_keys
-                                .contains(&(trait_name.clone(), method_ident.clone()))
-                        })
+                    && self.cpp_inherit_traits_of(owner).iter().any(|trait_name| {
+                        !self
+                            .trait_class_skipped_method_keys
+                            .contains(&(trait_name.clone(), method_ident.clone()))
+                    })
             })
         {
             qualifier = " &&".to_string();
@@ -11458,12 +11491,7 @@ impl CodeGen {
         let cpp_inherit_override = !is_static
             && !is_drop_destructor
             && self.current_struct.as_ref().is_some_and(|owner| {
-                let scoped_owner = self.scoped_type_key(owner);
-                let trait_name = self
-                    .cpp_inherit_trait
-                    .get(owner)
-                    .or_else(|| self.cpp_inherit_trait.get(&scoped_owner));
-                trait_name.is_some_and(|trait_name| {
+                self.cpp_inherit_traits_of(owner).iter().any(|trait_name| {
                     self.ufcs_declared_trait_methods
                         .get(trait_name)
                         .is_some_and(|methods| methods.contains(&method_ident))
