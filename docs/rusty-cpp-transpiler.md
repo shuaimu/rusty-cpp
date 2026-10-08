@@ -2478,6 +2478,23 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   by its qualified path. The two expectations that pinned the directive are updated (the Phase-4
   ordering test asserts that none is emitted and the call is qualified). Oracle: see the gate row for
   this step.
+- **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
+  cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
+  needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the
+  float-literal typing gap (`Wrapper(1.5)`; a general lowering item). (2) The serde_bytes cross-crate
+  shadow (`namespace serde_bytes::serde_core::Serializer_`): the manifest step, phase 1. (3) The blanket
+  own-marker conjunct (`has_Score<T> && has_Super<T>`) so a default may be constrained beside a blanket
+  (step 5a; needs the emitter to know the blanket's marker was emitted). (4) A generic trait's consts and
+  no-receiver fns through `TraitsG` with the `rusty::tag<A…>` key (step 8). (5) bitflags' primitive-owner
+  body gaps (`<u128>::MAX` → `::MAX`, `__int128::from_str_radix`): a general lowering item, exposed by
+  step 8's newly emitted bodies. (6) The runtime-named-method hazard beyond the ladder's allowlist
+  (`iter`, `is_empty`, `len` — each verified as a namespace-scope `rusty::` free function): a crate trait
+  declaring another runtime-provided name routes every call of that name through its ladder; the
+  general answer is a receiver-aware gate or a wider verified allowlist. (7) Phase 3, together: the
+  `rusty_ext` twin's emission, serde's hardcoded `::de::rusty_ext::deserialize*` / `into_deserializer`
+  routes, the hand-written `ser::impls::rusty_ext` block, and (aa). (8) indexmap/hashbrown's `fill_empty`
+  on a `std::span<MaybeUninit<Tag>>` (a mapping gap of a known-fail row). (9) The incumbent-surface note
+  under (aa): the deleted directive was half of what two `cpp_inherit` tests asserted.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
@@ -2978,6 +2995,22 @@ keeps each push gate-green, not the table's order; the first is the §3.2.6 guar
 on failure), and the `using namespace Tr_;` deletion waits until every call site is measured to spell
 `Tr_::m` (default bodies and the shipped shim's member branches may still lean on the directive).
 
+> **Phase 2 landed (2026-10-08, main @ 6c15c2a1; §3.2.12 has each step's measurement).** Executed in
+> the order 6, 2, 4, 7, 8, 5a, 5b, 1. Step (3) closed under step (6) (CPO-first default bodies; the
+> body-kind flag is `ufcs_default_body_trait`). Step (5) split: (5a) the bound-qualified receiver past
+> `TraitOnly` names, (5b) the extension route's retarget — the `rusty_ext` twin's *emission* moved to
+> phase 3 with serde's hardcoded `rusty_ext` routes and (aa), because dropping it alone broke serde_core
+> (measured). The gates before any crate flips: the non-vtable members exist (step 8); assoc-const traits
+> have their namespace form (step 8; the interface stays skipped — not `dyn`-compatible in Rust either);
+> the negative test for the unreachable stubs exists (step 4); the §3.2.3 ladder is measured as emitted
+> (steps 2, 6, 7); and item (k) is satisfied by `rusty::dyn_lvalue(TrAdapterRefMut<…>(x))` — a runtime
+> lvalue lender whose temporary spans the call — rather than an emitter-level `StructBorrow`; the
+> expression-level borrow is not needed while the forwarder is a prvalue of the argument expression.
+> Three phase-0 items phase 2 already did: `rusty::intrinsics::unreachable_via_const_dyn` (step 4),
+> `Box<dyn>` construction through `Box`'s converting constructor and the generic forwarders (step 4,
+> with the `is_final` guard of step 7), and the call-site `&dyn` / `&mut dyn` coercion (step 4). The
+> remaining phase-0 list is as written below, less those three.
+
 **Phase 0 — prerequisites in the tier-1 lane** (every item is a measured defect, §3.2.12): multiple and
 virtual bases; `&&` slots for `self` receivers and move/copy insertion at their call sites; generic
 defaults and their transitive callers as explicit-object members; supertrait-calling defaults kept as
@@ -3111,7 +3144,11 @@ mismatch (the loader today reads no version and skips unparseable files).
   the `rusty_ext` namespace; step (5) stops emitting the twin wherever an `impl_` function exists.
   Either the incumbent is re-ratified against the `impl_` lane (the `Tr_` companions' precedent, the
   ABI-pinned row of §3.2.12) or the 25 symbols are kept as non-template forwarders in `rusty_ext`
-  for that one object — a decision for the owner of the ABI, not for the emitter.
+  for that one object — a decision for the owner of the ABI, not for the emitter. Addendum (step 1):
+  the deleted `using namespace <Tr>_;` was half of what the two `cpp_inherit` companion tests asserted;
+  it is not a symbol, but hand-written C++ that called a bare `Ready(job)` through the emitted directive
+  would now need `Job_::Ready(job)` (srpc's own inline fixtures write their own `using namespace
+  Serialize_;`, so the risk looks small) — the owner's check, not the emitter's assumption.
 - **(z) The tag/CPO protocol as the C++-interop surface for tier 2.** A C++ author implements a Rust
   trait for a type they cannot or will not modify by writing one free function per method — `R
   m(Tr_::impl_::tag, const Mine& self_, …)` in `Tr_::impl_` or in `Mine`'s namespace — plus `template<>
