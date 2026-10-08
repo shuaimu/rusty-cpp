@@ -45806,7 +45806,7 @@ fn test_module_mode_local_dyn_trait_box_and_hidden_cpp_inherit_are_nominal() {
     // suppressing them silently deletes provider-owned strong symbols.
     assert!(
         out.contains("namespace PollableBase_")
-            && out.contains("using namespace PollableBase_"),
+            && !out.contains("using namespace PollableBase_"),
         "cpp_inherit virtual overrides must also export the UFCS companions:\n{out}"
     );
 }
@@ -45862,8 +45862,8 @@ fn test_cpp_inherit_impl_keeps_both_virtual_members_and_ufcs_companions() {
         "cpp_inherit must keep the virtual member overrides:\n{out}"
     );
     assert!(
-        out.contains("namespace Job_") && out.contains("using namespace Job_;"),
-        "the UFCS companion namespace must survive a cpp_inherit impl:\n{out}"
+        out.contains("namespace Job_") && !out.contains("using namespace Job_;"),
+        "the UFCS companion namespace must survive a cpp_inherit impl (and no using-directive is emitted, step 1):\n{out}"
     );
     for signature in [
         "bool Ready(OneTimeJob& self_)",
@@ -45905,7 +45905,7 @@ fn test_module_mode_local_dyn_trait_box_keeps_ordinary_adapter_path() {
         "Box::new must construct the ordinary adapter specialization:\n{out}"
     );
     assert!(
-        out.contains("namespace Animal_") && out.contains("using namespace Animal_"),
+        out.contains("namespace Animal_") && !out.contains("using namespace Animal_"),
         "UFCS suppression must be limited to cpp_inherit impls:\n{out}"
     );
 }

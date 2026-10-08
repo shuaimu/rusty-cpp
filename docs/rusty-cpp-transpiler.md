@@ -2466,6 +2466,18 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   symbols ((aa) in §3.2.16) are phase 3's deletions, together, once the manifest carries the dependency
   trait's namespace for the cross-crate bridge. The ladder's runtime final arm is a verified allowlist
   (`iter`, `is_empty`, `len`).
+- *Step (5b) gate (2026-10-07, main @ e9fe96eb):* matrix 28 rows, 20 PASS, 5 FAIL (the pre-existing
+  set), 3 known-fail; unit 2581; the one integration red is the baseline's. bitflags' visible error set
+  moved within its documented primitive-owner tail (`is_empty` gone; clang's error limit now reaches the
+  `from_str_radix` sites). `main` carries steps 2–8, 5a and 5b locally, unpushed by the no-push-while-red
+  rule.
+- *2026-10-07 — step (1), the directive deleted:* the three `using namespace <Tr>_;` emission sites
+  (after each impl block, flat and nested-module, and after the default templates) are gone; nothing
+  needed them — every classified call spells `<Tr>_::m` from its resolved owner (steps 2, 6, 7, 5a, 5b),
+  default bodies and forwarder slots call the CPO, and the member-fallback ladders name the dispatcher
+  by its qualified path. The two expectations that pinned the directive are updated (the Phase-4
+  ordering test asserts that none is emitted and the call is qualified). Oracle: see the gate row for
+  this step.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

@@ -21693,9 +21693,12 @@ impl CodeGen {
             }
             self.indent -= 1;
             self.writeln("}");
-            // Bring the trait free functions into the enclosing scope so an
-            // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
-            self.writeln(&format!("using namespace {}_;", trait_name));
+            // Book §3.2.5 (phase-2 step 1): no `using namespace <Tr>_;` — every
+            // classified call spells `<Tr>_::m` from its resolved owner (steps
+            // 2, 6, 7, 5a, 5b); a directive at namespace scope leaked into
+            // child namespaces and reopened definitions, was defeated by
+            // inner-scope hiding, and let a local named like the method
+            // capture the bare call (measured, §3.2.15).
             self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
             self.ufcs_impl_module_path.clear();
             self.ufcs_tag_namespace = None;
@@ -21763,7 +21766,7 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
-        self.writeln(&format!("using namespace {}_;", trait_name));
+        // Step 1: no `using namespace <Tr>_;` (see the flat branch above).
         self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
         // Every impl re-opens `<Tr>_` to add its own using-declaration, so the
         // LAST marker is where the overload set is complete.
@@ -22809,7 +22812,8 @@ impl CodeGen {
                         }
                     }
                     self.ufcs_tag_namespace = None;
-                    self.writeln(&format!("using namespace {}_;", trait_name));
+                    // Step 1: no `using namespace <Tr>_;` after the default
+                    // templates either.
                 }
                 syn::Item::Mod(m) => {
                     // #[cfg(test)] modules are omitted from output; their

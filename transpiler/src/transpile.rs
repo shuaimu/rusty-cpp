@@ -6071,22 +6071,18 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         )
         .expect("ufcs transpile should succeed");
 
-        // Phase 4: a `using namespace Greet_;` is emitted so the call
-        // site's unqualified `hello(__self)` resolves to the trait free
-        // function, and it must appear BEFORE the call site (`use_it`) so
-        // ordinary lookup at the body sees it.
-        let using_pos = on
-            .find("using namespace Greet_;")
-            .expect("must emit `using namespace Greet_;`");
-        // Anchor on the call-site dispatch (uniquely in the function body),
-        // not `use_it`'s forward declaration (which precedes the using). The
-        // call is qualified (`Greet_::hello`) since one trait owns `hello`.
-        let call_pos = on
-            .find("requires { Greet_::hello(")
-            .expect("must emit the trait-call dispatch in use_it");
+        // Book §3.2.5 (phase-2 step 1): NO `using namespace Greet_;` is
+        // emitted — every classified call spells the trait's dispatcher
+        // (`Greet_::hello`) from its resolved owner, so nothing is injected
+        // and no scope can leak it (a namespace-scope directive flowed into
+        // child namespaces and reopened definitions, measured §3.2.15).
         assert!(
-            using_pos < call_pos,
-            "the trait `using` must precede the call site\nGot: {on}"
+            !on.contains("using namespace Greet_;"),
+            "no trait using-directive may be emitted (step 1)\nGot: {on}"
+        );
+        assert!(
+            on.contains("requires { Greet_::hello("),
+            "must emit the qualified trait-call dispatch in use_it\nGot: {on}"
         );
     }
 
