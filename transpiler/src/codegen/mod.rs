@@ -39,11 +39,10 @@ pub(crate) struct ExtensionImplMethod {
     /// lower their own bounds after trait declarations are available, separately
     /// from method generics merged into `method` for extension-function emission.
     foreign_adapter_generics: Option<(syn::Generics, Vec<String>)>,
-    /// UFCS Fix A part 2 (§ 3.2.4): an extra `requires`-clause to inject after
-    /// the template parameter list — used to CONSTRAIN a multi-owner default
-    /// method's template (`requires requires(const Self_& s){ Tr_::__ufcs_impls(s); }`)
-    /// so it matches only types implementing that trait. `None` for ordinary
-    /// methods.
+    /// Book §3.2.3 / §3.2.13: an extra `requires`-clause to inject after the
+    /// template parameter list — a default method's `requires has_<Tr><Self_>`
+    /// (the `impls_<Tr>` marker's concept), so the template matches only types
+    /// implementing that trait. `None` for ordinary methods.
     extra_template_requires: Option<String>,
     /// True for a trait DEFAULT method (book § 3.2.13): `self_ty` is the bare
     /// `Self`, which must be emitted as a leading template parameter
@@ -21939,18 +21938,18 @@ impl CodeGen {
         else {
             // Book §3.2.6 (2026-10-07): an impl block with no methods of its
             // own (`impl A for u8 {}`, every method defaulted) still makes its
-            // self type an IMPLEMENTOR. The multi-owner default templates are
-            // constrained on the Fix-A marker `<Tr>_::__ufcs_impls(const U&)`,
-            // which was emitted only beside declared methods — so `A_::foo(u8)`
-            // was non-viable and a two-owner call fell through to the other
-            // trait where rustc runs A's default (`1000`). Emit the marker alone.
+            // self type an IMPLEMENTOR. The default templates are constrained
+            // on the trait's marker (`has_<Tr><Self_>`, §3.2.3), which was once
+            // emitted only beside declared methods — so `A_::foo(u8)` was
+            // non-viable and a two-owner call fell through to the other trait
+            // where rustc runs A's default (`1000`). Emit the marker alone.
             if !(self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
                 && self.impl_is_tier1_inheriting(impl_block, module_path))
             {
                 // The marker's resolvability checks read the impl's module
                 // (a bare nested-module self type cannot be named globally).
                 self.ufcs_impl_module_path = module_path.to_vec();
-                self.emit_ufcs_multi_owner_marker_for_methodless_impl(impl_block, &trait_name);
+                self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
                 self.ufcs_impl_module_path.clear();
             }
             return;
@@ -22178,23 +22177,6 @@ impl CodeGen {
             cleaned.push_str(line);
         }
         self.output = cleaned;
-    }
-
-    /// The per-module helper sub-namespace name that holds a nested-module trait
-    /// impl's UFCS free-function declarations + definitions (serde_core Fix B,
-    /// body positions). Emitted under the impl's own module so module-relative
-    /// body paths resolve by lexical shadowing; bridged into `<Tr>_` with
-    /// using-declarations.
-    /// Book §3.2.6: the Fix-A implementor marker for an impl block that declares
-    /// no methods (see emit_ufcs_trait_impl_block_free_function_decls). Same
-    /// conditions as the method-bearing path: a concrete self type, of a trait
-    /// that shares a method name with another trait.
-    fn emit_ufcs_multi_owner_marker_for_methodless_impl(
-        &mut self,
-        impl_block: &syn::ItemImpl,
-        trait_name: &str,
-    ) {
-        self.emit_ufcs_impl_marker_specialization(impl_block, trait_name);
     }
 
     /// Book §3.2.3 (2026-10-07): the exact-type implementor marker, emitted once
@@ -22963,6 +22945,11 @@ impl CodeGen {
         format!("__ufcs_{}_defaults", escape_cpp_keyword(trait_name))
     }
 
+    /// The per-module helper sub-namespace name that holds a nested-module trait
+    /// impl's UFCS free-function declarations + definitions (serde_core Fix B,
+    /// body positions). Emitted under the impl's own module so module-relative
+    /// body paths resolve by lexical shadowing; bridged into `<Tr>_` with
+    /// using-declarations.
     fn ufcs_impl_helper_namespace_name(trait_name: &str) -> String {
         format!("__ufcs_{}", trait_name)
     }
@@ -23067,11 +23054,11 @@ impl CodeGen {
         Some((trait_name, specs))
     }
 
-    /// Fix A part 2: constrain a MULTI-OWNER default method's template so it
-    /// matches only types that implement THIS trait — `requires requires(const
-    /// Self_& s){ <Tr>_::__ufcs_impls(s); }` (the per-impl marker emitted by the
-    /// early decl emitter). Single-owner defaults are left unconstrained (no
-    /// ambiguity). No-op when the owner map isn't populated.
+    /// Book §3.2.3 / §3.2.13: constrain a default method's template so it
+    /// matches only types that implement THIS trait — `requires
+    /// has_<Tr><Self_>`, the concept over the `impls_<Tr>` marker each impl
+    /// specializes. Beside a blanket impl only a multi-owner default is
+    /// constrained (see the body). No-op when the owner map isn't populated.
     fn annotate_multi_owner_default_constraints(
         &self,
         trait_name: &str,
@@ -23266,14 +23253,12 @@ impl CodeGen {
                     if !flat_specs.is_empty() {
                         self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
                         self.indent += 1;
-                        // Fix A part 2: if this trait has a constrained (multi-owner)
-                        // default, guarantee `<Tr>_::__ufcs_impls` EXISTS even when
-                        // the trait has no concrete impl (hence no per-impl marker) —
-                        // a 0-arg base declaration. Then the default template's
-                        // `requires { <Tr>_::__ufcs_impls(s) }` is SFINAE-FALSE (soft,
-                        // no matching 1-arg overload) instead of a hard "no member
-                        // named __ufcs_impls" error. Per-impl `__ufcs_impls(const X&)`
-                        // overloads (from the impl decls) are the real witnesses.
+                        // The early declaration pass: every lane function is
+                        // declared ahead of any body. (The implementor witness
+                        // is the `impls_<Tr>` marker specialization, §3.2.3 —
+                        // the primary is defined false, so a default's
+                        // `requires has_<Tr><Self_>` is soft on a type with no
+                        // impl.)
                         for spec in &flat_specs {
                             if self.emit_extension_trait_free_function_declaration(spec) {
                                 let m = spec.method.sig.ident.to_string();
@@ -44306,10 +44291,9 @@ impl CodeGen {
     /// never the unqualified `m`, which would clash with a same-named
     /// module/namespace (serde's `de::size_hint`). `callees` are the qualified
     /// `<Owner>_::m` spellings in deterministic (sorted-trait) order; `member_leaf`
-    /// is the bare method for the final member fallback. (For full correctness on
-    /// multi-owner defaults whose BODIES call trait methods, these templates
-    /// additionally need per-trait `requires` constraints — the marker/constraint
-    /// completion; serde's `size_hint` body is `{ None }` so it needs only this.)
+    /// is the bare method for the final member fallback. (Each owner's default
+    /// template carries `requires has_<Owner><Self_>` (§3.2.13), so an owner the
+    /// receiver does not implement is non-viable rather than ambiguous.)
     /// Book §3.2.2 rule 7: does this trait's lane carry keys (a generic trait,
     /// or one with an `impl Tr for &T`)? Then every impl has its own keyed
     /// free function and the pre-key "preserved collapse member"

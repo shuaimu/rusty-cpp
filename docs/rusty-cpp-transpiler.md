@@ -2804,6 +2804,13 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   files silently; a missing file is still skipped (a dependency without traits writes none). A stale
   manifest in a modules cache trips the error on the first run: that is the measurement, and the cure
   is rebuilding the dependency (or clearing the cache).
+- *2026-10-08 — phase 3, step 3: the Fix A markers.* Measured already deleted: no emitter has
+  spelled `<Tr>_::__ufcs_impls` since phase 2 step 2 (the `impls_<Tr>` marker + `requires
+  has_<Tr><Self_>` is the mechanism, §3.2.3/§3.2.13); what remained were five comments and one
+  trivial wrapper describing the retired marker, now reworded/removed (behavior unchanged). Of the
+  four deletions §3.2.16 names for phase 3, three are closed (the `using` injection — phase 2 step 1;
+  the per-impl adapters — phase 2 step 4, pinned by the step-1 regression test; the Fix A markers);
+  `rusty_ext` is (aa), on its own branch for the ABI owner's call.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
