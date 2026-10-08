@@ -1005,6 +1005,11 @@ pub struct TranspileOptions {
     /// module that imports a crate trait still needs to know its interface
     /// class exists.
     pub cross_file_traits: Vec<syn::ItemTrait>,
+    /// Phase 1 (§3.2.16): the crate-wide tier verdicts computed by crate mode's
+    /// pre-pass over every source file (`tier_census::pair_verdicts_for_units`),
+    /// shared by the whole crate. `None` outside crate mode (the per-file
+    /// census stands in).
+    pub crate_tier_verdicts: Option<std::sync::Arc<crate::tier_census::CrateTierVerdicts>>,
     /// B: crate-wide (Rust name -> audited C++ name) for cpp_name identities
     /// owned by ANY file of the crate, so a caller in another file emits the
     /// owner's identity instead of the crate audit rejecting the reference.
@@ -2851,6 +2856,7 @@ impl Default for TranspileOptions {
             inline_rust_block: false,
             cross_file_enums: Vec::new(),
             cross_file_traits: Vec::new(),
+            crate_tier_verdicts: None,
             cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
@@ -3724,6 +3730,7 @@ fn transpile_full_with_options_impl(
     codegen.inline_rust_block = options.inline_rust_block;
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
     codegen.set_cross_file_traits(&options.cross_file_traits);
+    codegen.set_crate_tier_verdicts(options.crate_tier_verdicts.clone());
     codegen.set_cross_file_cpp_name_targets(options.cross_file_cpp_name_targets.clone());
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());

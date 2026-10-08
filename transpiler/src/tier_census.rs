@@ -431,9 +431,43 @@ pub struct CensusOutcome {
 /// Phase 1 (§3.2.16): the per-pair tier decision, ONE source of truth for the
 /// census log and the emitter.
 pub fn pair_verdicts(file: &syn::File) -> CensusOutcome {
+    pair_verdicts_for_units(&[(Vec::new(), file)])
+}
+
+/// The crate-wide tier verdicts of phase 1 (book §3.2.16, the program-wide
+/// pre-pass): the census over EVERY file of a crate, each file's items under
+/// its module path, so a trait declared in one file and implemented in
+/// another forms a pair. Keys are crate-scoped (`de::Expected`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrateTierVerdicts {
+    /// `(crate-scoped trait key, self type as written)` → verdict.
+    pub pairs: std::collections::HashMap<(String, String), Result<(), String>>,
+    /// Trait leaf name → the crate-scoped keys declaring it (one = unambiguous).
+    pub leaf_keys: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl CrateTierVerdicts {
+    pub fn from_outcome(outcome: &CensusOutcome) -> Self {
+        let mut pairs = std::collections::HashMap::new();
+        let mut leaf_keys: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for p in &outcome.pairs {
+            pairs.insert((p.trait_key.clone(), p.self_written.clone()), p.verdict.clone());
+            let leaf = p.trait_key.rsplit("::").next().unwrap_or(&p.trait_key).to_string();
+            let keys = leaf_keys.entry(leaf).or_default();
+            if !keys.contains(&p.trait_key) {
+                keys.push(p.trait_key.clone());
+            }
+        }
+        CrateTierVerdicts { pairs, leaf_keys }
+    }
+}
+
+pub fn pair_verdicts_for_units(units: &[(Vec<String>, &syn::File)]) -> CensusOutcome {
     let mut c = Census::default();
-    let mut module = Vec::new();
-    collect(&file.items, &mut module, &mut c);
+    for (module_path, file) in units {
+        let mut module = module_path.clone();
+        collect(&file.items, &mut module, &mut c);
+    }
     // resolve impl traits to crate traits
     let keys: Vec<Option<String>> = c.impls.iter().map(|i| resolve_trait(&c, &i.trait_written, &i.module)).collect();
     for (i, k) in c.impls.iter_mut().zip(keys) {
@@ -488,14 +522,23 @@ pub fn pair_verdicts(file: &syn::File) -> CensusOutcome {
             // trait_probes_collapse under the phase-1 switch): the pair stays
             // tier 2 so both bodies live in the lane.
             {
-                let value_written = imp.self_written.replace(' ', "");
-                let has_ref_twin = c.impls.iter().any(|o| {
+                // …and the same for `Box<T>` / `Rc<T>` / `Arc<T>` / `&T` twins:
+                // any OTHER impl of this trait whose self type mentions `T` as a
+                // path segment is reached through the lane's keyed/forwarded
+                // body, which a tier-1 `T` would shadow on a deref-coerced call.
+                let leaf = ty.key.rsplit("::").next().unwrap_or(&ty.key).to_string();
+                let mentions_leaf = |written: &str| -> bool {
+                    written
+                        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                        .any(|tok| tok == leaf)
+                };
+                let twin = c.impls.iter().find(|o| {
                     o.trait_key.as_deref() == Some(tk.as_str())
-                        && matches!(o.self_ty, syn::Type::Reference(_))
-                        && o.self_written.replace(' ', "").trim_start_matches('&').trim_start_matches("mut") == value_written
+                        && o.self_written != imp.self_written
+                        && mentions_leaf(&o.self_written)
                 });
-                if has_ref_twin {
-                    return Err(format!("A2 `impl {} for &{}` twin: the pair stays keyed in the lane", t.key.rsplit("::").next().unwrap_or(&t.key), imp.self_written));
+                if let Some(o) = twin {
+                    return Err(format!("A2 `impl {} for {}` twin: the pair stays keyed in the lane", t.key.rsplit("::").next().unwrap_or(&t.key), o.self_written));
                 }
             }
             // supertraits concretely implemented in this crate at tier 1
@@ -603,6 +646,10 @@ mod tests {
             pub struct Tw { pub v: i32 }
             impl RefTr for Tw { fn m(&self) -> i32 { self.v } }
             impl RefTr for &Tw { fn m(&self) -> i32 { self.v + 1000 } }
+            pub trait BoxTr { fn b(&self) -> i32; }
+            pub struct Bw { pub v: i32 }
+            impl BoxTr for Bw { fn b(&self) -> i32 { self.v } }
+            impl BoxTr for Box<Bw> { fn b(&self) -> i32 { self.v + 1 } }
             "#,
         )
         .unwrap();
@@ -625,9 +672,27 @@ mod tests {
         // a reference twin keeps the value pair in the lane (keyed by self_tag)
         assert!(find("RefTr", "Tw").unwrap_err().contains("twin"));
         assert!(find("RefTr", "& Tw").unwrap_err().contains("A2 self type"));
+        assert!(find("BoxTr", "Bw").unwrap_err().contains("twin"));
         // the same-name post-pass demotes BOTH tier-1 pairs on one type
         assert!(find("A", "Q").unwrap_err().contains("declared by two tier-1 traits"));
         assert!(find("B", "Q").unwrap_err().contains("declared by two tier-1 traits"));
         assert_eq!(outcome.demotions.len(), 1);
+    }
+
+    #[test]
+    fn pair_verdicts_for_units_pairs_a_trait_of_one_file_with_an_impl_in_another() {
+        let root: syn::File = syn::parse_str("pub trait Tr { fn v(&self) -> i32; } pub mod m;").unwrap();
+        let m: syn::File = syn::parse_str(
+            "pub struct X { pub k: i32 } impl crate::Tr for X { fn v(&self) -> i32 { self.k } } pub struct Y; impl super::Tr for &Y { fn v(&self) -> i32 { 0 } }",
+        )
+        .unwrap();
+        let units = vec![(Vec::new(), &root), (vec!["m".to_string()], &m)];
+        let outcome = pair_verdicts_for_units(&units);
+        let cv = CrateTierVerdicts::from_outcome(&outcome);
+        assert_eq!(cv.pairs.get(&("Tr".to_string(), "X".to_string())), Some(&Ok(())));
+        assert!(cv.pairs.get(&("Tr".to_string(), "& Y".to_string())).unwrap().is_err());
+        assert_eq!(cv.leaf_keys.get("Tr"), Some(&vec!["Tr".to_string()]));
+        // the per-file census of `m` alone has no pair at all
+        assert!(pair_verdicts(&m).pairs.is_empty());
     }
 }

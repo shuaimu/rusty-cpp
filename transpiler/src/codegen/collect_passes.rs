@@ -3272,9 +3272,7 @@ impl CodeGen {
                             let key = self.resolve_trait_scoped_key_for_impl(p, module_path);
                             let written =
                                 quote::ToTokens::to_token_stream(&impl_block.self_ty).to_string();
-                            self.tier1_pair_verdicts
-                                .get(&(key, written))
-                                .is_some_and(|v| v.is_ok())
+                            self.pair_is_tier1(&key, &written)
                         });
                     if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) || tier1_by_default {
                         if let Some(trait_short) = &trait_name {

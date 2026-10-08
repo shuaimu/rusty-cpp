@@ -3195,6 +3195,37 @@ fn prepare_crate_codegen(
     // bodies again would undo ABI lowering and collide with the adapted methods.
     options.cross_file_impl_blocks.clear();
     options.cross_file_traits = cross_file_traits;
+    // Phase 1 (§3.2.16): the crate-wide census — every file under its module
+    // path — so a trait declared in one file and implemented in another is a
+    // pair the tier decision sees. Printed beside the per-file census when
+    // `RUSTY_CPP_TIER_CENSUS` is set.
+    {
+        let parsed: Vec<(Vec<String>, syn::File)> = source_units
+            .iter()
+            .filter_map(|(path, source)| {
+                let file = syn::parse_file(source).ok()?;
+                let module = cmake::map_rs_to_cppm(path, crate_name).1;
+                let module_path = module.split('.').skip(1).map(str::to_string).collect::<Vec<_>>();
+                Some((module_path, file))
+            })
+            .collect();
+        let units: Vec<(Vec<String>, &syn::File)> =
+            parsed.iter().map(|(m, f)| (m.clone(), f)).collect();
+        let outcome = crate::tier_census::pair_verdicts_for_units(&units);
+        if std::env::var_os("RUSTY_CPP_TIER_CENSUS").is_some() {
+            let tier1 = outcome.pairs.iter().filter(|p| p.verdict.is_ok()).count();
+            eprintln!(
+                "census-crate\t{}\tpairs={}\ttier1={}\tsame-name-demotions={}",
+                crate_name,
+                outcome.pairs.len(),
+                tier1,
+                outcome.demotions.len()
+            );
+        }
+        options.crate_tier_verdicts = Some(std::sync::Arc::new(
+            crate::tier_census::CrateTierVerdicts::from_outcome(&outcome),
+        ));
+    }
     // B: the crate-wide audited-name map, so a caller in one file emits the
     // owner's C++ identity for a renamed sibling item.
     options.cross_file_cpp_name_targets = crate::cpp_name::crate_wide_function_targets(source_units);
@@ -12068,6 +12099,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
         cross_file_traits: Vec::new(),
+        crate_tier_verdicts: None,
         cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
         cross_file_drop_types: Vec::new(),
@@ -12794,6 +12826,7 @@ fn main() {
         cross_file_enums: Vec::new(),
         cross_file_impl_blocks: Vec::new(),
         cross_file_traits: Vec::new(),
+        crate_tier_verdicts: None,
         cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
         cross_file_structs: Vec::new(),
         cross_file_drop_types: Vec::new(),

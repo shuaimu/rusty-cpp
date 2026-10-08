@@ -10242,6 +10242,7 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
     assert!(cpp.contains("std::move(o).consumed()"), "non-Copy implementor: move: {cpp}");
     assert!(cpp.contains("rusty::clone(o).consumed()"), "prvalue receiver untouched: {cpp}");
     assert!(cpp.contains("int32_t consumed() && override { if constexpr (requires { Area_::consumed(std::move(value_)); })"), "owning forwarder consumes (CPO-first, the tier-1 bridge takes std::move(__self)): {cpp}");
+    assert!(cpp.contains("template<class S> requires (has_tier1_Area<S> && !std::is_lvalue_reference_v<S>) int32_t consumed(Area_::impl_::tag, S&& __self) { return std::move(__self).consumed(); }"), "{cpp}");
     assert!(cpp.contains("int32_t consumed() && override { rusty::intrinsics::unreachable_via_const_dyn(); }"), "reference forwarders stub: {cpp}");
     let late_def = cpp.find("class Late {").expect("Late interface");
     let early_def = cpp.find("struct Early : public Late {").expect("Early implementor");
@@ -10264,6 +10265,8 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
         r#"
 #include <cstdio>
 #include <string>
+template <class T> concept bridge_consumes_lvalue = requires (T& lv) { Area_::consumed(lv); };
+static_assert(!bridge_consumes_lvalue<Sq>, "an lvalue must not be consumed through the bridge");
 static int check(const char* cell, const std::string& got, const char* want) {
     if (got != want) { std::printf("FAIL %s: got [%s] want [%s]\n", cell, got.c_str(), want); return 1; }
     return 0;
@@ -10272,6 +10275,8 @@ int main() {
     int bad = 0;
     bad += check("copy", std::string(rusty::to_string_view(cell_copy())), "9 9 true");
     bad += check("by_value", std::string(rusty::to_string_view(cell_by_value())), "4000 16 300 300");
+    // the tier-1 bridge's by-value arm (an rvalue only) and the owning forwarder's `&&` slot
+    bad += check("bridge", std::to_string(Area_::consumed(Sq(static_cast<int32_t>(5)))) + " " + std::to_string(std::move(AreaAdapter<Sq>(Sq(static_cast<int32_t>(6)))).consumed()), "5000 6000");
     bad += check("clone_literal", std::string(rusty::to_string_view(cell_clone_literal())), "11 7 true false");
     bad += check("tuple_unit", std::string(rusty::to_string_view(cell_tuple_unit())), "pair(1,2) unit pair(3,4)+unit true");
     bad += check("early", std::string(rusty::to_string_view(cell_early())), "42 42");

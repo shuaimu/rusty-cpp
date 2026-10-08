@@ -2709,6 +2709,39 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   the force attributes' limit to the coverage-motivated tests (decision (w)); the opt-out attribute per
   impl; and flipping the switch's default, which waits for a matrix run with the switch on in every row
   (the four measurable tier-1 crates pass; `itertools` is disabled in the matrix, `indexmap` known-fail).
+- *2026-10-08 — phase 1, the review items after steps 1–4.* **What the gate proves here:** nothing
+  about tier 1 — the matrix carries no markers and the switch is off, so a green gate says only that
+  the unmarked crates are byte-stable (`trait_probes_thin` measured byte-identical). The evidence for
+  phase 1 is the full unit suite (2586 pass; three expectations flipped by design and re-run green)
+  and the four switch-on matrix rows. (i) The tier-1 bridge's **by-value arm** was unmeasured and
+  copied an lvalue (`S __self` deduced from `std::forward<S>(lvalue)`): it is now `S&& __self`
+  constrained `(has_tier1_Tr<S> && !std::is_lvalue_reference_v<S>)` — the CPO on an lvalue is not
+  viable rather than a silent copy where Rust moves (the call site spells `std::move(x)`/`auto(x)`, the
+  owning forwarder `std::move(value_)`); measured from C++: `Area_::consumed(Sq(5))` = 5000 through
+  the bridge, `std::move(AreaAdapter<Sq>(Sq(6))).consumed()` = 6000 through the forwarder's `&&`
+  slot, and a namespace-scope concept asserts the lvalue call is ill-formed (a requires-expression
+  outside a template is an error, not `false` — the cell's first spelling). (ii) The tier-1 impl
+  predicate keyed on the self type's LEAF, so `impl Tr for a::Foo` and `b::Foo` shared a verdict: it
+  reads the qualified name first, the leaf only for inline-rust blocks. (iii) The census twin rule
+  generalized from `&T` to any other impl of the trait whose self type mentions `T` (`Box<T>`,
+  `Rc<T>`, `Arc<T>`): the forwarder's `U` is the wrapper, `has_tier1_Tr<Box<T>>` is false, and a
+  deref-coerced call would reach `T`'s inherited body instead. (iv) A nested-module `pub` trait
+  hoisted into a SIBLING module's implementor position gets `export class Tr {` in module mode
+  (measured with `--precompile`). **Blocker for the switch's default:** `pair_verdicts` runs per
+  `emit_file`, not per crate — in a multi-file crate a trait declared in one file and implemented in
+  another forms no pair and silently stays tier 2; the book's program-wide pre-pass (the shape of
+  `set_cross_file_traits`) must land before the default flips.
+- *2026-10-08 — phase 1, step 6: the crate-wide census pre-pass* (the program-wide pre-pass of
+  §3.2.16 in its first, one-crate form). `tier_census::pair_verdicts_for_units` runs the census over
+  every file of a crate, each under its module path, so a trait declared in one file and implemented
+  in another forms a pair; crate mode's `prepare_crate_codegen` computes it once (`CrateTierVerdicts`:
+  crate-scoped keys plus a leaf index) and hands it to every file's codegen
+  (`TranspileOptions::crate_tier_verdicts`); `CodeGen::pair_is_tier1` consults it first — by the trait's
+  crate-scoped key when its leaf is unambiguous crate-wide, else by this file's module path plus the
+  file-relative key — then the per-file census, and the switch's marker-set extension translates the
+  crate keys to the file's relative form. `census-crate` is printed beside the per-file lines under
+  `RUSTY_CPP_TIER_CENSUS`. Measured: the matrix transpiles one cargo-expanded file per crate, so its per-file census was already crate-wide there (serde_core: 487 pairs, 2 tier 1 — `de::Expected` on `ExpectedInMap`/`ExpectedInSeq` — the row passes under the switch); the pre-pass matters for real crate mode (the mako ports), where a unit test shows a trait of one file paired with an impl of another (`pair_verdicts_for_units`), a pair the per-file census of the implementing file cannot see. Dependency crates' traits are
+  still not pairs (the manifest's `tier1_traits` exists; the cross-crate decision is the next step).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

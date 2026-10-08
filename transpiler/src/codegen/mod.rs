@@ -1800,6 +1800,9 @@ pub struct CodeGen {
     /// switch (`RUSTY_CPP_TIER1_DEFAULT=1`, or `set_tier1_default`) until the
     /// matrix census is read against it; the markers stay as force attributes.
     pub(crate) tier1_default: bool,
+    /// Phase 1: crate mode's crate-wide verdicts (see `TranspileOptions::
+    /// crate_tier_verdicts`); consulted before the per-file census.
+    pub(crate) crate_tier_verdicts: Option<std::sync::Arc<crate::tier_census::CrateTierVerdicts>>,
     /// Dependency traits emitted tier 1 (from their manifests): a local impl of
     /// one may inherit the dependency's exported interface class — the
     /// cross-crate tier decision of phase 1 reads this set.
@@ -3674,6 +3677,7 @@ impl CodeGen {
             demoted_member_dispatch_traits: std::collections::HashSet::new(),
             tier1_pair_verdicts: HashMap::new(),
             tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT").is_some(),
+            crate_tier_verdicts: None,
             dependency_tier1_traits: std::collections::HashSet::new(),
             dependency_trait_nonvtable_defaults: HashMap::new(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
@@ -6859,6 +6863,54 @@ impl CodeGen {
         self.tier1_default = on;
     }
 
+    /// Phase 1: crate mode's crate-wide tier verdicts.
+    pub fn set_crate_tier_verdicts(
+        &mut self,
+        verdicts: Option<std::sync::Arc<crate::tier_census::CrateTierVerdicts>>,
+    ) {
+        self.crate_tier_verdicts = verdicts;
+    }
+
+    /// This file's module path inside its crate (crate mode: `crate.de.value`
+    /// → `["de", "value"]`; empty at the crate root or outside crate mode).
+    fn file_module_path(&self) -> Vec<String> {
+        self.module_name
+            .as_deref()
+            .map(|m| m.split('.').skip(1).map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Phase 1: the tier verdict of a `(trait, impl)` pair — the crate-wide
+    /// census first (a trait of ANOTHER file is only there), keyed by the
+    /// trait's crate-scoped key when its leaf is unambiguous crate-wide or by
+    /// this file's module path plus the file-relative key, then the per-file
+    /// census. `Some(true)` = tier 1.
+    pub(crate) fn pair_is_tier1(&self, file_relative_trait_key: &str, written_self: &str) -> bool {
+        if let Some(cv) = &self.crate_tier_verdicts {
+            let leaf = file_relative_trait_key
+                .rsplit("::")
+                .next()
+                .unwrap_or(file_relative_trait_key);
+            let mut candidates: Vec<String> = Vec::new();
+            if let Some(keys) = cv.leaf_keys.get(leaf)
+                && keys.len() == 1
+            {
+                candidates.push(keys[0].clone());
+            }
+            let mut prefixed = self.file_module_path();
+            prefixed.extend(file_relative_trait_key.split("::").map(str::to_string));
+            candidates.push(prefixed.join("::"));
+            for key in candidates {
+                if let Some(v) = cv.pairs.get(&(key, written_self.to_string())) {
+                    return v.is_ok();
+                }
+            }
+        }
+        self.tier1_pair_verdicts
+            .get(&(file_relative_trait_key.to_string(), written_self.to_string()))
+            .is_some_and(|v| v.is_ok())
+    }
+
     pub fn set_interface_traits(&mut self, _enabled: bool) {
         // Always interface_traits = true — pro/proxy lowering removed.
     }
@@ -8657,12 +8709,32 @@ impl CodeGen {
         // takes the tier-1 interface shape (phase 0) — its lane exists anyway
         // (step 1), so its tier-2 impls, if any, keep working through it.
         if self.tier1_default {
-            let tier1_traits: Vec<String> = self
+            let mut tier1_traits: Vec<String> = self
                 .tier1_pair_verdicts
                 .iter()
                 .filter(|(_, v)| v.is_ok())
                 .map(|((t, _), _)| t.clone())
                 .collect();
+            // The crate-wide census: a trait of THIS file whose tier-1 pair
+            // lives in another file (its key translated to this file's
+            // relative form), and a trait of another file implemented here
+            // (its leaf, for the interface shape of its forwarders).
+            if let Some(cv) = &self.crate_tier_verdicts {
+                let prefix = self.file_module_path();
+                for ((key, _), v) in &cv.pairs {
+                    if v.is_err() {
+                        continue;
+                    }
+                    let parts: Vec<&str> = key.split("::").collect();
+                    if parts.len() > prefix.len()
+                        && parts[..prefix.len()].iter().zip(prefix.iter()).all(|(a, b)| a == b)
+                    {
+                        tier1_traits.push(parts[prefix.len()..].join("::"));
+                    } else if let Some(leaf) = parts.last() {
+                        tier1_traits.push((*leaf).to_string());
+                    }
+                }
+            }
             for t in tier1_traits {
                 self.cpp_trait_member_dispatch_traits.insert(t);
             }
@@ -21664,7 +21736,7 @@ impl CodeGen {
         self.ufcs_emitting_internal_linkage_trait =
             self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
-            && self.impl_is_tier1_inheriting(impl_block)
+            && self.impl_is_tier1_inheriting(impl_block, module_path)
         {
             // Phase 1 step 1: a tier-1 impl of a tier-1 trait — its body is
             // the override; the tier-1 bridge carries `Tr_::m` for it. (A
@@ -21835,7 +21907,7 @@ impl CodeGen {
             // was non-viable and a two-owner call fell through to the other
             // trait where rustc runs A's default (`1000`). Emit the marker alone.
             if !(self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
-                && self.impl_is_tier1_inheriting(impl_block))
+                && self.impl_is_tier1_inheriting(impl_block, module_path))
             {
                 // The marker's resolvability checks read the impl's module
                 // (a bare nested-module self type cannot be named globally).
@@ -21852,7 +21924,7 @@ impl CodeGen {
         self.ufcs_emitting_internal_linkage_trait =
             self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
-            && self.impl_is_tier1_inheriting(impl_block)
+            && self.impl_is_tier1_inheriting(impl_block, module_path)
         {
             // Phase 1 step 1: a tier-1 impl of a tier-1 trait — its body is
             // the override; the tier-1 bridge carries `Tr_::m` for it. (A
@@ -22295,7 +22367,7 @@ impl CodeGen {
     /// inheriting the impl's trait (`cpp_inherit` accepted, not a diagnosed
     /// no-op)? The impl's body is then the override and the lane emits no
     /// `impl_` functions for it.
-    fn impl_is_tier1_inheriting(&self, impl_block: &syn::ItemImpl) -> bool {
+    fn impl_is_tier1_inheriting(&self, impl_block: &syn::ItemImpl, module_path: &[String]) -> bool {
         let Some((_, trait_path, _)) = &impl_block.trait_ else {
             return false;
         };
@@ -22311,6 +22383,32 @@ impl CodeGen {
         let Some(self_simple) = tp.path.segments.last().map(|s| s.ident.to_string()) else {
             return false;
         };
+        // The QUALIFIED self type first (`a::Foo` and `b::Foo` are different
+        // types with different verdicts); the leaf alone only for the
+        // inline-rust blocks whose types carry no module qualification.
+        let raw: String = tp
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let qualified = crate::codegen::qualify_impl_type_name(
+            &raw,
+            module_path,
+            &self.declared_item_names,
+            &self.local_declared_types,
+        );
+        if let Some(first) = self.cpp_inherit_trait.get(&qualified) {
+            let mut all = vec![first.clone()];
+            if let Some(extra) = self.cpp_inherit_extra_traits.get(&qualified) {
+                all.extend(extra.iter().cloned());
+            }
+            return all.contains(&trait_short);
+        }
+        if qualified != self_simple && qualified.contains("::") {
+            return false;
+        }
         self.cpp_inherit_traits_of(&self_simple).contains(&trait_short)
     }
 
@@ -22396,19 +22494,28 @@ impl CodeGen {
                 continue;
             }
             let mname = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
-            let (recv_param, recv_expr) = if receiver.reference.is_none() {
-                ("S __self", "std::move(__self)")
+            // A by-value `self` arrives as an rvalue only (`S&&` with the
+            // lvalue deduction rejected): the CPO `Tr_::m(x)` on an lvalue is
+            // not viable rather than a silent copy where Rust moves — the
+            // call site spells `std::move(x)` / `auto(x)` (phase 0), the
+            // owning forwarder `std::move(value_)`.
+            let (recv_param, recv_expr, constraint) = if receiver.reference.is_none() {
+                (
+                    "S&& __self",
+                    "std::move(__self)",
+                    format!("(has_tier1_{}<S> && !std::is_lvalue_reference_v<S>)", cpp),
+                )
             } else if receiver.mutability.is_some() {
-                ("S& __self", "__self")
+                ("S& __self", "__self", format!("has_tier1_{}<S>", cpp))
             } else {
-                ("const S& __self", "__self")
+                ("const S& __self", "__self", format!("has_tier1_{}<S>", cpp))
             };
             let prefix = if ret.trim() == "void" { "" } else { "return " };
             let mut all: Vec<String> = vec![format!("{}_::impl_::tag", name), recv_param.to_string()];
             all.extend(params);
             lines.push(format!(
-                "template<class S> requires has_tier1_{cpp}<S> {ret} {m}({ps}) {{ {p}{r}.{m}({a}); }}",
-                cpp = cpp,
+                "template<class S> requires {c} {ret} {m}({ps}) {{ {p}{r}.{m}({a}); }}",
+                c = constraint,
                 ret = ret,
                 m = mname,
                 ps = all.join(", "),
