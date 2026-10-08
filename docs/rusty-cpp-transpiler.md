@@ -2811,6 +2811,39 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   four deletions §3.2.16 names for phase 3, three are closed (the `using` injection — phase 2 step 1;
   the per-impl adapters — phase 2 step 4, pinned by the step-1 regression test; the Fix A markers);
   `rusty_ext` is (aa), on its own branch for the ABI owner's call.
+- *2026-10-08 — phase 3 / (aa), step 1 (branch `wip/trait-phase3-rusty-ext`, NOT on main): a
+  lane-covered trait emits no `rusty_ext` twin.* Re-measured on top of phase 1: with the twin off
+  for every crate-declared trait (its functions are `Tr_::impl_` ones, reached through `Tr_::m`)
+  and the four places that could still spell it gated the same way — the receiver ladder's
+  `rusty_ext` fallback arm, the resolver's known-path set, the forward-declaration pass, and the
+  free-function metadata that registered a `rusty_ext::m` symbol even while emitting the lane's
+  `Tr_::impl_::m` — plus the call-site route for a method whose only impls are BLANKET ones
+  (`impl<T> TapOps for T`: no concrete owner in `ufcs_method_trait_owners`, so the call degraded
+  to member syntax `(10).tap()` once the twin was gone; the owner is now derived from the impl
+  collection) and the one hardcoded serde route that resolved its helper through those paths
+  (`into_deserializer` fell back to a `::de::value::rusty_ext` spelling that no longer exists — a
+  full-matrix regression of serde and serde_core that the single rows had not shown; it now names
+  the lane's `IntoDeserializer_` dispatcher, which takes the `<E>` argument) and the serde-family
+  routes that spell a MapAccess/SeqAccess/Expected method at its twin (`::de::rusty_ext::
+  next_element_seed` in a hardcoded default-body override, `::de::rusty_ext::next_key<Seed>` in the
+  path-call routes — seen only once the into_deserializer errors stopped masking them): one output
+  pass (`retarget_rusty_ext_twin_spellings_to_lane`, before the crate wrap) retargets a twin
+  spelling of a method that exactly one lane-covered trait declares, in call position, to the
+  lane's dispatcher (`SeqAccess_::next_element_seed`), never touching the hand-written prelude's
+  own members — smallvec, serde_core, serde, tap and vec pass and the full matrix is the baseline
+  (28 rows: 20 PASS, 5 FAIL — the pre-existing alloc, bitflags, path, rusty, serde_bytes — 3
+  known-fail; unit 2594 green). serde_core's seven twin blocks (Serializer, Serialize, SeqAccess, MapAccess, IntoDeserializer,
+  Expected, DeserializeSeed) are gone (42742 → 41619 lines); eleven unit expectations moved from
+  the twin's spellings (`K call_mut(F& self_, A arg)`, `rusty_ext::tap_err(`) to the lane's
+  (`K call_mut(KeyFunction_::impl_::tag, F& self_, A arg, rusty::tag<A>)`, `TapResultOps_::tap_err(`).
+  `RUSTY_CPP_RUSTY_EXT_TWIN=1` restores the twin for measurement. The step-5b breakage this
+  entry's predecessor recorded no longer reproduces: phase 1's lane dispatchers for every trait
+  carry the calls. What the branch does NOT do, and why it is a branch: the `rusty_ext`
+  NAMESPACE stays — it is also the home of the hand-written serde runtime prelude
+  (`de::rusty_ext::deserialize_any` and its family: 5161 references in serde_core alone), the
+  de/ser crate-wrap bridges and the `ser::impls::rusty_ext` block in rusty.hpp, and the 25
+  incumbent symbols of rrr.serializable's ratified object are among the twins this step stops
+  emitting — (aa) is the ABI owner's call.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
@@ -3459,7 +3492,8 @@ mismatch (the loader today reads no version and skips unparseable files).
   marker (loud; one line per impl; required for all-default traits and for generic required methods) vs. a
   concept through the CPOs (zero per-impl lines; silent memoization). Recommendation: the marker as the
   predicate; a CPO-`requires` conjunct admissible for non-generic required methods.
-- **(aa) The incumbent's `rusty_ext` symbols vs. phase 3 (open, 2026-10-07).** rrr.serializable's
+- **(aa) The incumbent's `rusty_ext` symbols vs. phase 3 (open, 2026-10-07; measured on a branch
+  2026-10-08 — see the §3.2.12 entry "phase 3 / (aa), step 1").** rrr.serializable's
   ratified object owns 25 `rusty_ext` symbols beside its 25 `Serialize_`/`Deserialize_` ones
   (`test_ufcs_layer_linkage_is_narrow_and_source_authenticated`, measured with `nm`). Phase 3 deletes
   the `rusty_ext` namespace; step (5) stops emitting the twin wherever an `impl_` function exists.

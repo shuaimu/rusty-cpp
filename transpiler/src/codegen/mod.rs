@@ -1800,6 +1800,12 @@ pub struct CodeGen {
     /// `TranspileOptions::tier1_default`) is the opt-out; the markers stay as
     /// force attributes.
     pub(crate) tier1_default: bool,
+    /// Book §3.2.16 phase 3 / (aa): emit the `rusty_ext` twin of a trait the
+    /// `impl_` lane covers (a crate-declared trait whose impls emit
+    /// `Tr_::impl_` functions)? Off by default on this branch — a call on such
+    /// a method reaches `Tr_::m` (phase-2 step 5b); `RUSTY_CPP_RUSTY_EXT_TWIN=1`
+    /// restores the twin for measurement.
+    pub(crate) emit_rusty_ext_twin: bool,
     /// Phase 1: crate mode's crate-wide verdicts (see `TranspileOptions::
     /// crate_tier_verdicts`); consulted before the per-file census.
     pub(crate) crate_tier_verdicts: Option<std::sync::Arc<crate::tier_census::CrateTierVerdicts>>,
@@ -3680,6 +3686,8 @@ impl CodeGen {
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
             demoted_member_dispatch_traits: std::collections::HashSet::new(),
             tier1_pair_verdicts: HashMap::new(),
+            emit_rusty_ext_twin: std::env::var_os("RUSTY_CPP_RUSTY_EXT_TWIN")
+                .is_some_and(|v| v == "1"),
             tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT")
                 .map(|v| v != "0")
                 .unwrap_or(true),
@@ -23519,8 +23527,12 @@ impl CodeGen {
                 .next()
                 .map(str::to_string)
                 .unwrap_or(trait_key.clone());
-            self.emit_extension_trait_free_functions(&trait_name, &methods);
-            self.newline();
+            // (aa): the twin of a lane-covered trait is not emitted — its
+            // functions live in `Tr_::impl_` and call sites reach `Tr_::m`.
+            if !self.rusty_ext_twin_retired_for(&trait_name) {
+                self.emit_extension_trait_free_functions(&trait_name, &methods);
+                self.newline();
+            }
             // --interface-traits (§ 3.2.9): for each `impl Trait for U`,
             // also emit `TraitAdapter<U>` specialization that delegates to
             // the rusty_ext:: free function bodies emitted above.
@@ -24178,6 +24190,10 @@ impl CodeGen {
                 .next()
                 .map(str::to_string)
                 .unwrap_or_else(|| key.clone());
+            // (aa): no twin, no forward declarations of it.
+            if self.rusty_ext_twin_retired_for(&trait_name) {
+                continue;
+            }
             if let Some(methods) = self.extension_trait_impl_methods.get(&key) {
                 for method in methods {
                     methods_to_emit.push((trait_name.clone(), method.clone()));
@@ -25050,6 +25066,18 @@ impl CodeGen {
     /// of its methods reaches `Tr_::m`? (The `rusty_ext` twin stays emitted
     /// until phase 3: serde's hardcoded `rusty_ext` routes still name it —
     /// measured, serde_core `into_deserializer`.)
+    /// Book §3.2.16 phase 3 / (aa): is the `rusty_ext` twin of this trait (by
+    /// short name) retired — the twin off, and the trait lane-covered (a
+    /// crate-declared trait whose impls emit `Tr_::impl_` functions)? Every
+    /// site that emitted, declared, resolved or spelled the twin asks this.
+    pub(super) fn rusty_ext_twin_retired_for(&self, trait_short: &str) -> bool {
+        !self.emit_rusty_ext_twin
+            && self
+                .trait_declared_path_by_short_name
+                .get(trait_short)
+                .is_some_and(|full| self.ufcs_impl_lane_covers_trait_key(full))
+    }
+
     pub(super) fn ufcs_impl_lane_covers_trait_key(&self, trait_key: &str) -> bool {
         if !self.trait_declared_paths.contains(trait_key) {
             return false;
@@ -26046,12 +26074,20 @@ impl CodeGen {
                     _ => None,
                 })
             {
-                let callee = match method_name.as_str() {
-                    "next_key" => Some("::de::rusty_ext::next_key_seed"),
-                    "next_value" => Some("::de::rusty_ext::next_value_seed"),
-                    "next_element" => Some("::de::rusty_ext::next_element_seed"),
+                let leaf = match method_name.as_str() {
+                    "next_key" => Some("next_key_seed"),
+                    "next_value" => Some("next_value_seed"),
+                    "next_element" => Some("next_element_seed"),
                     _ => None,
                 };
+                // (aa): the required method this default calls is a lane
+                // function (`MapAccess_::next_key_seed`); the `de::rusty_ext`
+                // twin it used to name is not emitted. The tag namespace is
+                // the owning trait's, set for the lane's emission.
+                let callee = leaf.map(|leaf| match self.ufcs_tag_namespace.as_deref() {
+                    Some(ns) if !self.emit_rusty_ext_twin => format!("{}::{}", ns, leaf),
+                    _ => format!("::de::rusty_ext::{}", leaf),
+                });
                 if let Some(callee) = callee {
                     self.writeln(&format!(
                         "return {}(self_, ::de::PhantomData<{}>{{}});",
@@ -26467,6 +26503,13 @@ impl CodeGen {
     }
 
     fn record_extension_free_function_symbol(&mut self, method_name: &str) {
+        // (aa): a function emitted into `Tr_::impl_` (the tag namespace is
+        // set for the lane's emission) is not a `rusty_ext` symbol — the twin
+        // recorded its own when it was emitted; without the twin, recording
+        // it here made the resolver spell a path that no longer exists.
+        if !self.emit_rusty_ext_twin && self.ufcs_tag_namespace.is_some() {
+            return;
+        }
         let scoped_name = if self.module_stack.is_empty() {
             format!("rusty_ext::{}", method_name)
         } else {
@@ -44210,6 +44253,11 @@ impl CodeGen {
                                     == callee_leaf
                             })
                         {
+                            return None;
+                        }
+                        // (aa): the twin of a lane-covered trait is not emitted —
+                        // naming it here would be a hard error, not a soft arm.
+                        if self.rusty_ext_twin_retired_for(key_trait) {
                             return None;
                         }
 

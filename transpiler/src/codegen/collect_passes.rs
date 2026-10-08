@@ -7214,7 +7214,11 @@ impl CodeGen {
         }
         for (trait_key, methods) in &self.extension_trait_impl_methods {
             let mut parts: Vec<&str> = trait_key.split("::").collect();
-            if parts.pop().is_none() {
+            let Some(trait_leaf) = parts.pop() else {
+                continue;
+            };
+            // (aa): a lane-covered trait has no `rusty_ext` twin to know.
+            if self.rusty_ext_twin_retired_for(trait_leaf) {
                 continue;
             }
             let module_scope = parts.join("::");
@@ -7239,7 +7243,13 @@ impl CodeGen {
         let mut out = HashSet::new();
         for (trait_key, methods) in &self.extension_trait_impl_methods {
             let mut parts: Vec<&str> = trait_key.split("::").collect();
-            if parts.pop().is_none() {
+            let Some(trait_leaf) = parts.pop() else {
+                continue;
+            };
+            // (aa): a lane-covered trait has no `rusty_ext` twin — its
+            // functions are `Tr_::impl_` ones, reached through `Tr_::m`; a
+            // path into the absent twin must not be "known" to the resolver.
+            if self.rusty_ext_twin_retired_for(trait_leaf) {
                 continue;
             }
             let module_scope = parts.join("::");

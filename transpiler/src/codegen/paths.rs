@@ -83,6 +83,127 @@ impl CodeGen {
         result
     }
 
+    /// Book §3.2.16 phase 3 / (aa): the serde-family hardcoded routes spell a
+    /// trait method at its `rusty_ext` twin (`::de::rusty_ext::next_element_seed`,
+    /// `::de::rusty_ext::next_key<Seed>`); a lane-covered trait has no twin, so
+    /// such a spelling is retargeted to the lane's dispatcher
+    /// (`SeqAccess_::next_element_seed`, `MapAccess_::next_key<Seed>`) — only
+    /// for a method name a single lane-covered trait declares, only in call
+    /// position (followed by `(` or `<`), and never for the hand-written
+    /// runtime prelude's own members, which live in `de::rusty_ext` /
+    /// `ser::rusty_ext` for real. Runs before the crate wrap (the spellings are
+    /// still crate-relative). No-op with the twin on.
+    fn retarget_rusty_ext_twin_spellings_to_lane(&mut self) {
+        if self.emit_rusty_ext_twin || !self.output.contains("rusty_ext::") {
+            return;
+        }
+        const PRELUDE: [&str; 10] = [
+            "deserialize",
+            "deserialize_any",
+            "deserialize_in_place",
+            "serialize",
+            "serialize_value",
+            "serialize_bytes",
+            "forward_serializer",
+            "__ser_result_t",
+            "detail",
+            "into_deserializer",
+        ];
+        let mut owners: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for (trait_name, methods) in &self.ufcs_declared_trait_methods {
+            if !self.rusty_ext_twin_retired_for(trait_name) {
+                continue;
+            }
+            let Some(full) = self.trait_declared_path_by_short_name.get(trait_name) else {
+                continue;
+            };
+            let module = full
+                .rsplit_once("::")
+                .map(|(m, _)| m.to_string())
+                .unwrap_or_default();
+            for m in methods {
+                owners
+                    .entry(m.clone())
+                    .or_default()
+                    .push((trait_name.clone(), module.clone()));
+            }
+        }
+        // (module_cpp, leaf) → lane spelling
+        let mut map: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        for (m, traits) in &owners {
+            if traits.len() != 1 || PRELUDE.contains(&m.as_str()) {
+                continue;
+            }
+            let (trait_name, module) = &traits[0];
+            let module_cpp = module
+                .split("::")
+                .filter(|s| !s.is_empty())
+                .map(escape_cpp_keyword)
+                .collect::<Vec<_>>()
+                .join("::");
+            let leaf = escape_cpp_keyword(m);
+            let lane = format!("{}::{}", self.ufcs_trait_namespace(trait_name), leaf);
+            map.insert((module_cpp, leaf), lane);
+        }
+        if map.is_empty() {
+            return;
+        }
+        let src = std::mem::take(&mut self.output);
+        let bytes = src.as_bytes();
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while let Some(rel) = src[i..].find("rusty_ext::") {
+            let pos = i + rel;
+            let leaf_start = pos + "rusty_ext::".len();
+            let leaf_end = leaf_start
+                + src[leaf_start..]
+                    .bytes()
+                    .take_while(|b| is_ident(*b))
+                    .count();
+            // Walk back over `ident::` segments and an optional leading `::`.
+            let mut start = pos;
+            loop {
+                if start >= 2 && &src[start - 2..start] == "::" {
+                    let seg_end = start - 2;
+                    let seg_len = src[..seg_end]
+                        .bytes()
+                        .rev()
+                        .take_while(|b| is_ident(*b))
+                        .count();
+                    if seg_len > 0 {
+                        start = seg_end - seg_len;
+                        continue;
+                    }
+                    start = seg_end;
+                }
+                break;
+            }
+            let in_call_position =
+                leaf_end < src.len() && matches!(bytes[leaf_end], b'(' | b'<');
+            let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+            let module_cpp = src[start..pos]
+                .trim_start_matches("::")
+                .trim_end_matches("::")
+                .to_string();
+            let key = (module_cpp, src[leaf_start..leaf_end].to_string());
+            if in_call_position
+                && before_ok
+                && let Some(lane) = map.get(&key)
+            {
+                out.push_str(&src[i..start]);
+                out.push_str(lane);
+            } else {
+                out.push_str(&src[i..leaf_end]);
+            }
+            i = leaf_end;
+        }
+        out.push_str(&src[i..]);
+        self.output = out;
+    }
+
     pub(super) fn normalize_private_rusty_ext_paths_in_output(&mut self) {
         if self.output.contains("\r\n") {
             self.output = self.output.replace("\r\n", "\n");
@@ -131,6 +252,7 @@ impl CodeGen {
                 self.output = self.output.replace(from, to);
             }
         }
+        self.retarget_rusty_ext_twin_spellings_to_lane();
         if self.output.contains("using namespace private_;") {
             self.output = self
                 .output

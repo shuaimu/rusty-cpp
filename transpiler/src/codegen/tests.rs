@@ -756,14 +756,16 @@ fn test_leaf411_extension_impl_emits_free_function_and_rewrites_call() {
         fn f() { let _ = 10.tap(); }
     "#,
     );
-    assert!(out.contains("namespace rusty_ext {"));
-    assert!(out.contains("T tap(T self_) {"));
-    // Call may be a direct invocation (`rusty_ext::tap(10)`) or an IIFE
-    // probe that selects between bare and deref-wrapped argument shapes.
-    let direct = out.contains("static_cast<void>(rusty_ext::tap(10));");
-    let probe = out.contains("rusty_ext::tap(std::forward<decltype(__self)>(__self))")
-        && out.contains("rusty_ext::tap(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)))");
+    // §3.2.16 phase 3 / (aa): a lane-covered trait's blanket impl is a
+    // `TapOps_::impl_` function (no `rusty_ext` twin), and the call reaches it
+    // through the `TapOps_::tap` dispatcher — directly or in the receiver
+    // ladder that selects between bare and deref-wrapped argument shapes.
+    assert!(!out.contains("T tap(T self_)"), "{out}");
+    assert!(out.contains("T tap(TapOps_::impl_::tag, T self_) {"), "{out}");
+    let direct = out.contains("static_cast<void>(TapOps_::tap(10));");
+    let probe = out.contains("TapOps_::tap(std::forward<decltype(__self)>(__self))");
     assert!(direct || probe, "{out}");
+    assert!(!out.contains("(10).tap()"), "{out}");
 }
 
 #[test]
@@ -791,7 +793,12 @@ fn test_leaf411_extension_impl_merged_impl_generics_emit_template_prefix() {
             || out.contains("template<typename A, typename F, typename K>"),
         "{out}"
     );
-    assert!(out.contains("K call_mut(F& self_, A arg) {"), "{out}");
+    // (aa): the blanket impl's function is the lane's, not a `rusty_ext` twin.
+    assert!(
+        out.contains("K call_mut(KeyFunction_::impl_::tag, F& self_, A arg, rusty::tag<A>) {"),
+        "{out}"
+    );
+    assert!(!out.contains("K call_mut(F& self_, A arg)"), "{out}");
 }
 
 #[test]
@@ -820,7 +827,11 @@ fn test_leaf411_extension_impl_module_forward_decl_keeps_assoc_bound_generics() 
             || out.contains("template<typename A, typename F, typename K>"),
         "{out}"
     );
-    assert!(out.contains("K call_mut(F& self_, A arg);"), "{out}");
+    // (aa): the blanket impl's declaration is the lane's.
+    assert!(
+        out.contains("K call_mut(KeyFunction_::impl_::tag, F& self_, A arg, rusty::tag<A>"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -847,7 +858,7 @@ fn test_leaf411_extension_impl_keeps_multi_char_assoc_binding_generics() {
         "{out}"
     );
     assert!(
-        out.contains("std::tuple<FromA> multiunzip(IT self_);"),
+        out.contains("std::tuple<FromA> multiunzip(MultiUnzip_::impl_::tag, IT self_"),
         "{out}"
     );
 }
@@ -874,7 +885,7 @@ fn test_leaf411_extension_impl_tuple_return_keeps_generic_param_usage() {
         "{out}"
     );
     assert!(
-        out.contains("std::tuple<FromA> multiunzip(IT self_);"),
+        out.contains("std::tuple<FromA> multiunzip(MultiUnzip_::impl_::tag, IT self_"),
         "{out}"
     );
 }
@@ -1061,9 +1072,10 @@ fn test_leaf411_option_none_extension_call_uses_typed_option_receiver() {
     );
     // Call may use direct ctor `(rusty::Option<int32_t>(rusty::None), ...)`
     // or list-initializer ctor `rusty::Option<int32_t>{rusty::None}` wrapped
-    // in an IIFE probe via `rusty_ext::tap_none(...)`.
-    let direct = out.contains("rusty_ext::tap_none(rusty::Option<int32_t>(rusty::None),");
-    let probe = out.contains("rusty_ext::tap_none")
+    // in an IIFE probe via the lane's `TapOptionOps_::tap_none(...)` ((aa):
+    // no `rusty_ext` twin).
+    let direct = out.contains("TapOptionOps_::tap_none(rusty::Option<int32_t>(rusty::None),");
+    let probe = out.contains("TapOptionOps_::tap_none")
         && out.contains("rusty::Option<int32_t>{rusty::None}");
     assert!(direct || probe, "{out}");
 }
@@ -1192,7 +1204,7 @@ fn test_leaf133_tap_call_shape_keeps_deref_closure_param() {
             ),
         "{out}"
     );
-    assert!(out.contains("rusty_ext::tap("));
+    assert!(out.contains("TapOps_::tap("), "{out}");
     assert!(
         out.contains("foo += *v") || out.contains("foo += rusty::deref_mut(v)"),
         "{out}"
@@ -1220,7 +1232,7 @@ fn test_leaf133_tap_err_call_shape_keeps_deref_closure_param() {
     );
     // Same live-emission spelling note as the test above: `f(val)`.
     assert!(out.contains("static_cast<void>(f(val));"));
-    assert!(out.contains("rusty_ext::tap_err("));
+    assert!(out.contains("TapResultOps_::tap_err("), "{out}");
     assert!(
         out.contains("foo += *error") || out.contains("foo += rusty::deref_mut(error)"),
         "{out}"
@@ -1255,7 +1267,7 @@ fn test_leaf133_tap_some_call_shape_keeps_deref_closure_param() {
             || out.contains("static_cast<void>(rusty::detail::deref_if_pointer_like(f)(&val));"),
         "{out}"
     );
-    assert!(out.contains("rusty_ext::tap_some("));
+    assert!(out.contains("TapOptionOps_::tap_some("), "{out}");
     assert!(
         out.contains("foo += *value") || out.contains("foo += rusty::deref_mut(value)"),
         "{out}"
@@ -1414,7 +1426,7 @@ fn test_leaf415_block_closure_keeps_extension_method_rewrite_context() {
             || out.contains("rusty::filter_map(rusty::iter(values),"),
         "{out}"
     );
-    assert!(out.contains("rusty_ext::tap_err("));
+    assert!(out.contains("TapResultOps_::tap_err("), "{out}");
     assert!(!out.contains("result.tap_err("));
 }
 
@@ -48727,7 +48739,7 @@ fn foreign_ordinary_trait_impl_stays_with_extension_owner() {
     impl_cg.emit_file(&source, Some("example.encode"));
     let implementation_output = impl_cg.into_output();
     assert!(implementation_output.contains("template <class U> class EncodeAdapter final : public Encode"), "{implementation_output}");
-    assert!(implementation_output.contains("void encode(const Number& self_, Archive& archive)"), "{implementation_output}");
+    assert!(implementation_output.contains("void encode(Encode_::impl_::tag, const Number& self_, Archive& archive)"), "{implementation_output}");
     assert!(implementation_output.contains(".total += self_.value"), "canonical body must remain emitted: {implementation_output}");
     assert!(!implementation_output.contains("#if 0"), "{implementation_output}");
 }

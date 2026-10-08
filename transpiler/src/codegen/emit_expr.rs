@@ -10828,6 +10828,26 @@ impl CodeGen {
                         "rusty_ext",
                         "into_deserializer",
                     )
+                })
+                .or_else(|| {
+                    // (aa): with no twin to resolve, the crate's
+                    // `IntoDeserializer` impls are carried by the lane's
+                    // dispatcher, which takes the `<E>` argument the by-value
+                    // primitive overloads need (`IntoDeserializer_::
+                    // into_deserializer<E>(recv)`); without this the hardcoded
+                    // `::de::value::rusty_ext` spelling below is probed on a
+                    // namespace that no longer exists (serde_core, measured).
+                    if self.emit_rusty_ext_twin {
+                        return None;
+                    }
+                    let key = self.nonvtable_trait_key("IntoDeserializer")?;
+                    if !self.ufcs_impl_lane_covers_trait_key(&key) {
+                        return None;
+                    }
+                    Some(format!(
+                        "{}::into_deserializer",
+                        self.ufcs_trait_namespace("IntoDeserializer")
+                    ))
                 });
             if let Some(err_cpp) = self.into_deserializer_error_cpp_type(expected_ty) {
                 if let Some(ctor_expr) =
@@ -13985,9 +14005,40 @@ impl CodeGen {
             // exist on this receiver — the name is not `TraitOnly` here), the
             // dispatcher first for a keyed call or a bound type-parameter
             // receiver.
-            if let Some(owners) = self.ufcs_method_trait_owners.get(&method_name)
-                && owners.len() == 1
-                && let Some(owner) = owners.iter().next()
+            // (aa): a method whose only impls are BLANKET ones has no concrete
+            // owner in `ufcs_method_trait_owners`; its functions are in the
+            // lane all the same (`TapOps_::impl_::tap(tag, T)`), and the twin
+            // the fallbacks named is gone — derive the owner from the impl
+            // collection: the one lane-covered trait with an impl method of
+            // this name.
+            let blanket_owner: Option<String> = if !self.emit_rusty_ext_twin
+                && !self.ufcs_method_trait_owners.contains_key(&method_name)
+            {
+                let mut owners: Vec<String> = self
+                    .extension_trait_impl_methods
+                    .iter()
+                    .filter(|(_, methods)| {
+                        methods.iter().any(|m| {
+                            m.method.sig.ident == method_name
+                                && matches!(m.method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)))
+                        })
+                    })
+                    .map(|(key, _)| key.rsplit("::").next().unwrap_or(key).to_string())
+                    .filter(|leaf| self.rusty_ext_twin_retired_for(leaf))
+                    .collect();
+                owners.sort();
+                owners.dedup();
+                if owners.len() == 1 { owners.pop() } else { None }
+            } else {
+                None
+            };
+            let single_owner: Option<String> = self
+                .ufcs_method_trait_owners
+                .get(&method_name)
+                .filter(|owners| owners.len() == 1)
+                .and_then(|owners| owners.iter().next().cloned())
+                .or(blanket_owner);
+            if let Some(owner) = single_owner.as_deref()
                 && self
                     .nonvtable_trait_key(owner)
                     .is_some_and(|key| self.ufcs_impl_lane_covers_trait_key(&key))
