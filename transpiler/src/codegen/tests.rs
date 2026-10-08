@@ -10497,6 +10497,117 @@ int main() {
 }
 
 #[test]
+fn test_tier1_phase0_default_methods_clang_runtime() {
+    // Book §3.2.13 / §3.2.16 phase 0, default methods on a tier-1 trait:
+    //   twice — a single-expression default: a non-pure virtual (shipped);
+    //   sum   — a default calling a SUPERTRAIT method: inlined too (the
+    //           supertrait's class is a virtual base, `this->v()` resolves);
+    //   multi — a multi-statement default: a non-pure virtual with the full
+    //           body (a pure slot left every implementor abstract);
+    //   gen   — a generic default (`where Self: Sized`): a non-virtual
+    //           explicit-object member template, inherited by the implementor;
+    //   neg   — on a crate-local trait NAMED `Sub`: no `operator-` rename (the
+    //           mapping keys on the resolved std operator trait, not the name);
+    //   Y overrides `twice` and `sum`: the overrides win, directly and via dyn.
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping tier-1 default-method cells: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+#[cfg_attr(any(), cpp_trait_member_dispatch)]
+pub trait Base { fn v(&self) -> i32; fn twice(&self) -> i32 { self.v() * 2 } }
+#[cfg_attr(any(), cpp_trait_member_dispatch)]
+pub trait Sub: Base {
+    fn k(&self) -> i32;
+    fn sum(&self) -> i32 { self.k() + self.v() }
+    fn multi(&self) -> i32 { let a = self.k(); let b = self.twice(); a * 10 + b }
+    fn gen<T: core::fmt::Display>(&self, t: T) -> String where Self: Sized { format!("{}:{}", self.k(), t) }
+    fn neg(&self) -> i32 { -self.k() }
+}
+pub struct X { pub x: i32 }
+#[cfg_attr(any(), cpp_inherit)]
+impl Base for X { fn v(&self) -> i32 { self.x } }
+#[cfg_attr(any(), cpp_inherit)]
+impl Sub for X { fn k(&self) -> i32 { self.x + 1 } }
+pub struct Y { pub y: i32 }
+#[cfg_attr(any(), cpp_inherit)]
+impl Base for Y { fn v(&self) -> i32 { self.y } fn twice(&self) -> i32 { 1000 } }
+#[cfg_attr(any(), cpp_inherit)]
+impl Sub for Y { fn k(&self) -> i32 { 7 } fn sum(&self) -> i32 { 99 } }
+pub fn cell_defaults() -> String {
+    let x = X { x: 2 };
+    let y = Y { y: 5 };
+    let dx: &dyn Sub = &x;
+    let dy: &dyn Sub = &y;
+    format!("{} {} {} {} {} | {} {} {} {} {} | {} {}", x.twice(), x.sum(), x.multi(), x.gen(3), x.neg(),
+            y.twice(), y.sum(), y.multi(), y.gen(4), y.neg(), dx.sum() + dx.multi() + dx.twice(), dy.sum() + dy.multi() + dy.twice())
+}
+        "#,
+    );
+    assert!(cpp.contains("virtual int32_t sum() const { return this->k() + this->v(); }"), "{cpp}");
+    assert!(cpp.contains("virtual int32_t multi() const {"), "{cpp}");
+    assert!(!cpp.contains("virtual int32_t multi() const = 0;"), "{cpp}");
+    assert!(cpp.contains("rusty::String gen(this auto const& self_, T t) {"), "{cpp}");
+    assert!(cpp.contains("int32_t X::k() const {"), "{cpp}");
+    assert!(!cpp.contains("X::operator-"), "a crate-local trait named `Sub` is not core::ops::Sub: {cpp}");
+    assert!(!cpp.contains("int32_t operator-() const override"), "{cpp}");
+    assert!(cpp.contains("virtual int32_t neg() const { return -this->k(); }"), "{cpp}");
+    cpp.push_str(
+        r#"
+#include <cstdio>
+#include <string>
+int main() {
+    std::string got(rusty::to_string_view(cell_defaults()));
+    const char* want = "4 5 34 3:3 -3 | 1000 99 1070 7:4 -7 | 43 2169";
+    if (got != want) { std::printf("FAIL defaults: got [%s] want [%s]\n", got.c_str(), want); return 1; }
+    return 0;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("tier1_defaults.cpp");
+    let binary_path = temp.path().join("tier1_defaults");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "tier-1 default-method cells C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "tier-1 default-method cells runtime proof failed (exit {:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+#[test]
 fn test_interface_traits_three_forward_decls_emitted_per_trait() {
     // The trait header should forward-declare all three adapter
     // primary templates so dyn type mappings can name them even

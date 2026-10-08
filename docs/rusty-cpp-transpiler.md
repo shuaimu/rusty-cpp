@@ -2595,6 +2595,27 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   it `virtual` as well (`struct Dog : public virtual Named, public Animal, public Pet`). (xiv) The hoist
   ahead of an implementor emits a trait's supertraits first. Measured: `4 rex ann rex rex | 9 12 21`
   (`test_tier1_phase0_multiple_and_virtual_bases_clang_runtime`).
+- *2026-10-08 — phase 0, default methods on a tier-1 trait (fourth commit):* measured on a probe
+  whose trait is NAMED `Sub` (`test_tier1_phase0_default_methods_clang_runtime`; before the change
+  the implementors were abstract and `k` was emitted as `operator-`). (xv) A single-expression default
+  that calls a **supertrait** method (`fn sum(&self) { self.k() + self.v() }`, `v` on `Base`) inlines
+  as a non-pure virtual too — the supertrait's class is a virtual base, so `this->v()` resolves; the
+  guard reads the supertraits' kept items (`interface_supertrait_method_names`). (xvi) A
+  multi-statement default whose `self.m()` calls all name members of the interface is a non-pure
+  virtual with the **full body** (`virtual int32_t multi() const { … }`); a pure slot left every
+  tier-1 implementor abstract. (xvii) A generic default (`where Self: Sized`), and every default that
+  transitively calls one on `self`, is a non-virtual **explicit-object member** of the interface
+  (§3.2.13: `template <class T> rusty::String gen(this auto const& self_, T t) { using Self_ = …; … }`,
+  `this auto&` for `&mut self`, `this auto&&` for `self`); the implementor inherits it, its own member
+  of that name hides it (no `override`: the pair is recorded as skipped), and it is not a slot.
+  APIT and const-generic defaults keep the TODO. (xviii) The `operator-` mis-emission: the operator
+  rename keyed on the trait's bare NAME, so a crate-local `trait Sub` (or `Neg`, `Add`, …) had its
+  impls' methods renamed to `operator-`; `operator_trait_cpp_name_for_impl` now resolves the written
+  path and declines when it names a declaration of this crate (Rust's operators only ever bind
+  `core::ops`). All three collect sites use it. Measured: `4 5 34 3:3 -3 | 1000 99 1070 7:4 -7 | 43
+  2169` = rustc, overrides winning directly and through `&dyn Sub`. Phase-0 items now open: only
+  **assoc-const traits given an interface** (step 8 gave them the namespace form; the interface is
+  still skipped), plus the residue list above.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

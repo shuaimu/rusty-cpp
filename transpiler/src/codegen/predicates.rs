@@ -924,6 +924,26 @@ impl CodeGen {
     /// fieldwise + move ctor) instead of the default `TraitAdapter<Type>`
     /// wrapper, so existing call sites that upcast `Arc<Type>` /
     /// `shared_ptr<Type>` to the trait base keep compiling. Opt-in only.
+    /// Book §3.2.16 phase 0 (the `operator-` mis-emission): an impl's methods
+    /// are renamed to a C++ operator only when the trait IS the std operator
+    /// trait. A crate-local trait that merely shares its name (`Sub`, `Neg`,
+    /// `Add`, …) resolves to a declaration of this crate and keeps its method
+    /// names — Rust's operators only ever bind `core::ops`.
+    pub(super) fn operator_trait_cpp_name_for_impl(
+        &self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) -> Option<String> {
+        let (_, path, _) = impl_block.trait_.as_ref()?;
+        let name = path.segments.last()?.ident.to_string();
+        let op = map_operator_trait(&name)?;
+        let key = self.resolve_trait_scoped_key_for_impl(path, module_path);
+        if self.trait_declared_paths.contains(&key) {
+            return None;
+        }
+        Some(op.to_string())
+    }
+
     pub(super) fn has_cpp_inherit_attr(
         &self,
         attrs: &[syn::Attribute],

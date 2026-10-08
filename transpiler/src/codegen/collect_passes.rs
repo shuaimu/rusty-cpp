@@ -3462,9 +3462,7 @@ impl CodeGen {
                         let scoped = self.scoped_type_key(&type_name);
                         self.crate_intoiter_impl_types.insert(scoped);
                     }
-                    let op_name = trait_name
-                        .as_ref()
-                        .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
+                    let op_name = self.operator_trait_cpp_name_for_impl(impl_block, module_path);
                     let impl_is_automatically_derived =
                         impl_block_is_automatically_derived(impl_block);
                     let type_is_declared_alias =
@@ -3828,9 +3826,8 @@ impl CodeGen {
                                 }
                                 let is_drop_trait = trait_name.as_deref() == Some("Drop");
                                 // Check if this is an operator trait impl (BitOr, BitAnd, etc.)
-                                let op_name = trait_name.as_ref().and_then(|name| {
-                                    map_operator_trait(name).map(|s| s.to_string())
-                                });
+                                let op_name =
+                                    self.operator_trait_cpp_name_for_impl(impl_block, module_path);
                                 let impl_is_automatically_derived =
                                     impl_block_is_automatically_derived(impl_block);
                                 let owner_is_locally_declared =
@@ -5223,9 +5220,7 @@ impl CodeGen {
             if !is_inherent_impl && !allow_non_inherent_trait_impl {
                 continue;
             }
-            let op_name = trait_name
-                .as_ref()
-                .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
+            let op_name = self.operator_trait_cpp_name_for_impl(impl_block, &self.module_stack);
 
             let entry = local_impl_blocks.entry(type_name.clone()).or_default();
             let seen_method_keys = local_impl_method_conflict_keys

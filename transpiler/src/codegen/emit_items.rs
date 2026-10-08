@@ -6376,6 +6376,192 @@ impl CodeGen {
         }
     }
 
+    /// The method names a block calls on `self` (`self.m(…)`, through parens
+    /// and derefs), for the default-body guards of phase 0.
+    pub(super) fn block_self_method_call_names(block: &syn::Block) -> HashSet<String> {
+        use syn::visit::Visit;
+        struct V(HashSet<String>);
+        impl<'a> Visit<'a> for V {
+            fn visit_expr_method_call(&mut self, mc: &'a syn::ExprMethodCall) {
+                if CodeGen::peel_self_receiver(&mc.receiver).is_some_and(|n| n == "self") {
+                    self.0.insert(mc.method.to_string());
+                }
+                syn::visit::visit_expr_method_call(self, mc);
+            }
+        }
+        let mut v = V(HashSet::new());
+        v.visit_block(block);
+        v.0
+    }
+
+    /// The method names declared by the trait's (transitive) supertraits that
+    /// are emitted as bases of its interface (phase 0: supertraits are virtual
+    /// bases), read from the kept trait items.
+    pub(super) fn interface_supertrait_method_names(&self, t: &syn::ItemTrait) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut stack: Vec<String> = t
+            .supertraits
+            .iter()
+            .filter_map(|b| match b {
+                syn::TypeParamBound::Trait(tb) => tb.path.segments.last().map(|s| s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(name) = stack.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let key = self.nonvtable_trait_key_here(&name);
+            let Some(st) = self
+                .cpp_inherit_trait_items
+                .get(&key)
+                .or_else(|| self.cpp_inherit_trait_items.get(&name))
+            else {
+                continue;
+            };
+            for item in &st.items {
+                if let syn::TraitItem::Fn(f) = item {
+                    out.insert(f.sig.ident.to_string());
+                }
+            }
+            for b in &st.supertraits {
+                if let syn::TypeParamBound::Trait(tb) = b
+                    && let Some(seg) = tb.path.segments.last()
+                {
+                    stack.push(seg.ident.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Book §3.2.13: a generic default, and every default that transitively
+    /// calls one on `self`, is a non-virtual explicit-object member of the
+    /// interface (not a slot). The closure over the trait's own defaults.
+    pub(super) fn explicit_object_default_names(t: &syn::ItemTrait) -> HashSet<String> {
+        let defaults: Vec<(&syn::TraitItemFn, HashSet<String>)> = t
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(f) if f.default.is_some() => {
+                    let calls = Self::block_self_method_call_names(f.default.as_ref().unwrap());
+                    Some((f, calls))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut out: HashSet<String> = defaults
+            .iter()
+            .filter(|(f, _)| {
+                f.sig.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_)))
+                    || f.sig.inputs.iter().any(|a| {
+                        matches!(a, syn::FnArg::Typed(pt) if matches!(pt.ty.as_ref(), syn::Type::ImplTrait(_)))
+                    })
+            })
+            .map(|(f, _)| f.sig.ident.to_string())
+            .collect();
+        loop {
+            let before = out.len();
+            for (f, calls) in &defaults {
+                if calls.iter().any(|c| out.contains(c)) {
+                    out.insert(f.sig.ident.to_string());
+                }
+            }
+            if out.len() == before {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Phase 0 (§3.2.13): one explicit-object member of the interface for a
+    /// generic default or a default that calls one — `template <class T> R
+    /// m(this auto const& self_, T t) { … }`. The object parameter deduces the
+    /// implementor's static type, so `self_.m2(…)` in the body binds the
+    /// implementor's own member when it has one (Rust's override, by name
+    /// hiding) and the interface's default otherwise. Non-virtual: not a slot.
+    fn emit_interface_explicit_object_default(
+        &mut self,
+        method: &syn::TraitItemFn,
+        receiver: &syn::Receiver,
+        body: &syn::Block,
+    ) {
+        let generic_names: Vec<String> = method
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut scope: HashSet<String> = generic_names.iter().cloned().collect();
+        scope.insert("Self_".to_string());
+        self.type_param_scopes.push(scope);
+        self.callable_type_param_return_scopes.push(HashMap::new());
+        let prev_struct = self.current_struct.clone();
+        self.current_struct = Some("Self_".to_string());
+        let mapped_return = self.map_return_type(&method.sig.output);
+        let return_type = if mapped_return.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "Self" || w == "Self_")
+            || matches!(&method.sig.output, syn::ReturnType::Type(_, ty) if matches!(ty.as_ref(), syn::Type::ImplTrait(_)))
+        {
+            "auto".to_string()
+        } else {
+            mapped_return
+        };
+        let object_param = if receiver.reference.is_none() {
+            "this auto&& self_"
+        } else if receiver.mutability.is_some() {
+            "this auto& self_"
+        } else {
+            "this auto const& self_"
+        };
+        let mut params: Vec<String> = vec![object_param.to_string()];
+        for (idx, arg) in method.sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(pt) = arg else {
+                continue;
+            };
+            let ty = self.map_type(&pt.ty);
+            let name = match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                _ => format!("_arg{}", idx),
+            };
+            params.push(format!("{} {}", ty, name));
+        }
+        if !generic_names.is_empty() {
+            self.writeln(&format!(
+                "template <{}>",
+                generic_names.iter().map(|g| format!("class {}", g)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        self.writeln(&format!(
+            "{} {}({}) {{",
+            return_type,
+            escape_cpp_keyword_in_member_position(&method.sig.ident.to_string()),
+            params.join(", ")
+        ));
+        self.indent += 1;
+        self.writeln("using Self_ = std::remove_cvref_t<decltype(self_)>;");
+        self.push_return_value_scope(&return_type);
+        self.push_return_type_hint(&method.sig.output);
+        self.push_param_bindings(&method.sig.inputs);
+        self.push_self_receiver_ref_scope(&method.sig.inputs);
+        self.push_self_path_override(Some("self_".to_string()));
+        self.emit_block(body);
+        self.pop_self_path_override();
+        self.pop_self_receiver_ref_scope();
+        self.pop_param_bindings();
+        self.pop_return_type_hint();
+        self.pop_return_value_scope();
+        self.indent -= 1;
+        self.writeln("}");
+        self.current_struct = prev_struct;
+        self.callable_type_param_return_scopes.pop();
+        self.type_param_scopes.pop();
+    }
+
     /// Phase 0: emit the trait `trait_short` (of THIS module, not yet visited)
     /// ahead of its implementor `implementor`, its own supertraits first — a
     /// base must be complete at the derived class, and the subtrait's class
@@ -7123,6 +7309,30 @@ impl CodeGen {
             // not yet supported. Skip the method declaration entirely
             // rather than emit `virtual R m(W w) const = 0;` with `W`
             // unbound in the class scope.
+            // Book §3.2.13 (phase 0): on a tier-1 trait a generic DEFAULT, and
+            // every default that transitively calls one, is a non-virtual
+            // explicit-object member; the implementor's member of the same
+            // name, if any, hides it (no `override`: recorded as skipped).
+            let explicit_object = trait_is_member_dispatch
+                && !consuming
+                && method.default.is_some()
+                && Self::explicit_object_default_names(t).contains(&method.sig.ident.to_string())
+                && method
+                    .sig
+                    .generics
+                    .params
+                    .iter()
+                    .all(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Lifetime(_)))
+                && !method.sig.inputs.iter().any(|a| {
+                    matches!(a, syn::FnArg::Typed(pt) if matches!(pt.ty.as_ref(), syn::Type::ImplTrait(_)))
+                });
+            if explicit_object {
+                let body = method.default.as_ref().expect("default checked above");
+                self.emit_interface_explicit_object_default(method, receiver, body);
+                self.trait_class_skipped_method_keys
+                    .insert((trait_name_str.clone(), method.sig.ident.to_string()));
+                continue;
+            }
             if !method.sig.generics.params.is_empty() {
                 let m_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
                 self.writeln(&format!(
@@ -7214,6 +7424,34 @@ impl CodeGen {
                 .and_then(|body| {
                     self.maybe_inline_trait_default_method_body(body, t, &method.sig.ident)
                 });
+            // Phase 0: on a tier-1 trait a multi-statement default whose
+            // `self.m()` calls all name members of this interface (its own or
+            // a supertrait base's) is a non-pure virtual with the FULL body —
+            // `this->k()` dispatches to the implementor; a pure slot would
+            // leave every tier-1 implementor abstract.
+            let full_body_default: Option<&syn::Block> = if inline_body.is_none()
+                && trait_is_member_dispatch
+                && !consuming
+                && let Some(body) = method.default.as_ref()
+            {
+                let mut members: HashSet<String> = t
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                members.extend(self.interface_supertrait_method_names(t));
+                let calls = Self::block_self_method_call_names(body);
+                if calls.iter().all(|c| members.contains(c)) {
+                    Some(body)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             if let Some(body_expr) = inline_body {
                 self.writeln(&format!(
                     "virtual {} {}({}){} {{ return {}; }}",
@@ -7223,6 +7461,26 @@ impl CodeGen {
                     const_suffix,
                     body_expr
                 ));
+            } else if let Some(body) = full_body_default {
+                self.writeln(&format!(
+                    "virtual {} {}({}){} {{",
+                    return_type,
+                    method_name,
+                    params.join(", "),
+                    const_suffix
+                ));
+                self.indent += 1;
+                self.push_return_value_scope(&return_type);
+                self.push_return_type_hint(&method.sig.output);
+                self.push_param_bindings(&method.sig.inputs);
+                self.push_self_receiver_ref_scope(&method.sig.inputs);
+                self.emit_block(body);
+                self.pop_self_receiver_ref_scope();
+                self.pop_param_bindings();
+                self.pop_return_type_hint();
+                self.pop_return_value_scope();
+                self.indent -= 1;
+                self.writeln("}");
             } else {
                 self.writeln(&format!(
                     "virtual {} {}({}){} = 0;",

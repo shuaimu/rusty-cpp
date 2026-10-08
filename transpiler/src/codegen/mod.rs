@@ -21053,7 +21053,7 @@ impl CodeGen {
         };
 
         // Collect the set of method names declared on this same trait.
-        let trait_method_names: HashSet<String> = t
+        let mut trait_method_names: HashSet<String> = t
             .items
             .iter()
             .filter_map(|item| {
@@ -21064,6 +21064,11 @@ impl CodeGen {
                 }
             })
             .collect();
+        // Phase 0 (§3.2.16): a supertrait's class is a (virtual) base of this
+        // interface, so its methods resolve on `this` too — a default calling
+        // them inlines rather than falling to a pure slot that leaves every
+        // tier-1 implementor abstract.
+        trait_method_names.extend(self.interface_supertrait_method_names(t));
 
         // Walk `tail_expr` and reject if any `self.<m>` / `Self::<m>` call
         // references a name not in `trait_method_names`.
