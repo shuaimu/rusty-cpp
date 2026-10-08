@@ -2552,6 +2552,38 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   as explicit-object members, supertrait-calling defaults). Measured but deferred to phase 1: a
   tier-1 trait has no `Tr_` namespace in the shipped lane, so `&dyn Tr` over a foreign tier-2
   implementor cannot reach its impl through the generic forwarder until every trait emits `Tr_`.
+- *2026-10-08 — phase 0, by-value `self` and the tier decision (second commit, gate-green):*
+  (x) a by-value `self` method of a tier-1 (`cpp_trait_member_dispatch`) trait is the `&&` slot of
+  §3.2.2 — `virtual int32_t consumed() && = 0;` — the implementor's member is `&&` too (an overrider
+  carries the virtual's ref-qualifier; the out-of-line body is `int32_t Sq::consumed() && { … }`),
+  the owning forwarder consumes `std::move(value_)` through the same tagged-member/member chain, the
+  two reference forwarders stub (`unreachable_via_const_dyn`: nothing consumes what it borrows), and
+  a default body for such a method is never inlined into the slot. The call site decides by the
+  receiver's STATIC type: an lvalue of a `cpp_inherit` implementor whose trait declares the method by
+  value is moved (`std::move(o).consumed()`), or decay-copied for a `Copy` implementor
+  (`auto(p).consumed()`, C++23 — Rust copies there, and a `const` binding stays callable); a prvalue
+  receiver (`rusty::clone(o).consumed()`) is left alone; `self` inside the type's own methods is
+  `(*this)` under the same rule. The shipped lane's traits keep the skipped slot (their implementors'
+  members are not ref-qualified and their per-impl adapters would not override it); Rust cannot call
+  `fn m(self)` on `dyn Tr` at all, so the slot's only consumers are C++ interop and the tier-2
+  by-value bridge `consume(tag, S s)` — which waits for phase 1, when every trait has its `Tr_`
+  namespace. Registry: `cpp_inherit_by_value_methods` (per implementor), filled only for
+  member-dispatch traits. (xi) The skip-list decides the TIER: `tier_census::axis1_verdicts`
+  (§3.2.1 axis 1 — a `Self` parameter or return, a generic required method, RPITIT/APIT/`async`, a
+  generic default without `where Self: Sized`, a foreign supertrait, a method a supertrait also
+  declares, and now a GAT) runs over the file in `emit_file`; a `cpp_trait_member_dispatch` marker
+  on a trait with an `Err` verdict is a **diagnosed no-op** (stderr, with the excluding test), the
+  trait takes the free-function lane (`demoted_member_dispatch_traits`), and `cpp_inherit` on its
+  impls is diagnosed and ignored too — measured: `Same { fn same(&self, other: &Self) }` and
+  `Gen { fn show<T: Debug>(&self, t: T) }` marked and implemented beside an eligible `Fine`:
+  `namespace Same_`/`Gen_` emitted, `struct P : public Fine` only, program runs. Tests:
+  `test_tier1_phase0_emission_cells_clang_runtime` (now 8 cells) and
+  `test_tier1_phase0_member_dispatch_marker_on_ineligible_trait_is_a_diagnosed_no_op`. Phase-0
+  items still open: multiple and virtual bases (the registry holds ONE trait per implementor —
+  `cpp_inherit_trait: HashMap<String, String>` — so a type implementing two tier-1 traits is the
+  next structural step), generic defaults and their transitive callers as explicit-object members,
+  supertrait-calling defaults kept as virtual bodies (and the `operator-` mis-emission), assoc-const
+  traits given an interface.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

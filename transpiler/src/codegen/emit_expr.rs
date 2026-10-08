@@ -7070,6 +7070,69 @@ impl CodeGen {
         Some(self.emit_expr_to_string(&syn::Expr::MethodCall(method_call)))
     }
 
+    /// Book §3.2.2 / §3.2.16 phase 0: a by-value `self` method of a tier-1
+    /// implementor is a `&&`-qualified member (it overrides the trait's `&&`
+    /// slot), so a call on an lvalue receiver must spell an rvalue:
+    /// `std::move(x).m(…)`, or `auto(x).m(…)` (C++23 decay-copy) for a `Copy`
+    /// implementor — Rust copies there, and a `const` binding stays callable.
+    /// A prvalue receiver (a call, a literal) is left alone. Gated on the
+    /// receiver's STATIC type being a `cpp_inherit` implementor whose trait
+    /// declares `m` by value; everything else keeps its lowering.
+    fn try_emit_cpp_inherit_consuming_member_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.turbofish.is_some() || self.cpp_inherit_by_value_methods.is_empty() {
+            return None;
+        }
+        let method_name = mc.method.to_string();
+        let receiver = self.peel_paren_group_expr(&mc.receiver);
+        let is_self = matches!(receiver, syn::Expr::Path(p)
+            if p.qself.is_none() && p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
+        let type_simple: String = if is_self {
+            self.current_struct.clone()?
+        } else {
+            let ty = self.infer_simple_expr_type(receiver)?;
+            let ty = self.peel_reference_paren_group_type(&ty);
+            let syn::Type::Path(tp) = ty else {
+                return None;
+            };
+            tp.path.segments.last()?.ident.to_string()
+        };
+        let scoped = self.scoped_type_key(&type_simple);
+        let declares = self
+            .cpp_inherit_by_value_methods
+            .get(&type_simple)
+            .or_else(|| self.cpp_inherit_by_value_methods.get(&scoped))
+            .is_some_and(|methods| methods.contains(&method_name));
+        if !declares {
+            return None;
+        }
+        let is_copy = self.copy_derived_types.contains(&type_simple)
+            || self.copy_derived_types.contains(&scoped);
+        let raw = if is_self {
+            "(*this)".to_string()
+        } else {
+            self.emit_expr_to_string(receiver)
+        };
+        let lvalue = is_self
+            || matches!(
+                receiver,
+                syn::Expr::Path(_) | syn::Expr::Field(_) | syn::Expr::Index(_) | syn::Expr::Unary(_)
+            );
+        let wrapped = if !lvalue {
+            raw
+        } else if is_copy {
+            format!("auto({})", raw)
+        } else {
+            format!("std::move({})", raw)
+        };
+        let args: Vec<String> = mc.args.iter().map(|a| self.emit_expr_maybe_move(a)).collect();
+        Some(format!(
+            "{}.{}({})",
+            wrapped,
+            Self::escape_cpp_method_name(&method_name),
+            args.join(", ")
+        ))
+    }
+
     fn try_emit_default_body_self_trait_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         let trait_name = self.ufcs_default_body_trait.as_ref()?;
         if mc.turbofish.is_some() {
@@ -7141,6 +7204,9 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(call) = self.try_emit_default_body_self_trait_call(mc) {
+            return call;
+        }
+        if let Some(call) = self.try_emit_cpp_inherit_consuming_member_call(mc) {
             return call;
         }
         if mc.method == "file" && mc.args.is_empty()

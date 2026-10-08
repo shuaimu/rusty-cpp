@@ -6307,7 +6307,12 @@ impl CodeGen {
                         }
                     })
                     .collect();
-                let stub = slot.is_mut && matches!(kind, AdapterStorageKind::ConstRef);
+                // A consuming slot: the owning forwarder consumes its value
+                // (`std::move(value_)`); neither reference forwarder can consume
+                // what it borrows (book §3.2.2: the stub).
+                let stub = (slot.is_mut && matches!(kind, AdapterStorageKind::ConstRef))
+                    || (slot.is_consuming && !matches!(kind, AdapterStorageKind::Owning));
+                let recv = if slot.is_consuming { "std::move(value_)" } else { "value_" };
                 let prefix = if slot.return_type.trim() == "void" { "" } else { "return " };
                 let body = if stub {
                     "rusty::intrinsics::unreachable_via_const_dyn();".to_string()
@@ -6318,7 +6323,8 @@ impl CodeGen {
                         slot.rust_name
                     );
                     format!(
-                        "if constexpr (requires {{ value_.{tagged}({a}); }}) {{ {p}value_.{tagged}({a}); }} else {{ {p}value_.{m}({a}); }}",
+                        "if constexpr (requires {{ {r}.{tagged}({a}); }}) {{ {p}{r}.{tagged}({a}); }} else {{ {p}{r}.{m}({a}); }}",
+                        r = recv,
                         tagged = tagged,
                         a = args.join(", "),
                         p = prefix,
@@ -6333,7 +6339,7 @@ impl CodeGen {
                     // them, exactly as the retired `DynAdapter` probed. A
                     // requires-expression on `value_` is dependent: decided at
                     // the consumer's instantiation point, where its members exist.
-                    let mut call_args = vec!["value_".to_string()];
+                    let mut call_args = vec![recv.to_string()];
                     call_args.extend(args.iter().cloned());
                     // Book §3.2.2 rule 7: the forwarders carry the keys as
                     // template parameters and pass them in every slot.
@@ -6356,8 +6362,9 @@ impl CodeGen {
                         slot.rust_name
                     );
                     format!(
-                        "if constexpr (requires {{ {call}; }}) {{ {p}{call}; }} else if constexpr (requires {{ value_.{tagged}({a}); }}) {{ {p}value_.{tagged}({a}); }} else {{ {p}value_.{m}({a}); }}",
+                        "if constexpr (requires {{ {call}; }}) {{ {p}{call}; }} else if constexpr (requires {{ {r}.{tagged}({a}); }}) {{ {p}{r}.{tagged}({a}); }} else {{ {p}{r}.{m}({a}); }}",
                         call = call,
+                        r = recv,
                         p = prefix,
                         tagged = tagged,
                         a = args.join(", "),
@@ -7044,9 +7051,19 @@ impl CodeGen {
                 continue;
             };
 
-            // By-value `self` (consuming receivers) need a different lowering;
-            // skip in Phase 1.
-            if receiver.reference.is_none() {
+            // By-value `self`: on a tier-1 (member-dispatch) trait it is a
+            // `&&`-qualified slot (book §3.2.2: `virtual R m() && = 0;` —
+            // measured legal, callable directly and through an owning `dyn`);
+            // the implementor's member is `&&` too, and its call sites spell an
+            // rvalue receiver (emit_expr). On the shipped lane's traits the
+            // slot is still skipped: their implementors' members are not
+            // ref-qualified and their per-impl adapters would not override it.
+            let consuming = receiver.reference.is_none();
+            let trait_is_member_dispatch = self.cpp_trait_member_dispatch_traits.iter().any(|k| {
+                k == &trait_name_str
+                    || k.rsplit("::").next() == Some(trait_name_str.as_str())
+            });
+            if consuming && !trait_is_member_dispatch {
                 let m_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
                 self.writeln(&format!(
                     "// TODO(interface_traits): by-value `self` method `{}` not yet supported",
@@ -7078,7 +7095,7 @@ impl CodeGen {
                 continue;
             }
 
-            let is_const = receiver.mutability.is_none();
+            let is_const = receiver.mutability.is_none() && !consuming;
 
             let method_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
             let return_type = self.map_return_type(&method.sig.output);
@@ -7135,7 +7152,13 @@ impl CodeGen {
                 continue;
             }
 
-            let const_suffix = if is_const { " const" } else { "" };
+            let const_suffix = if consuming {
+                " &&"
+            } else if is_const {
+                " const"
+            } else {
+                ""
+            };
             // Default method bodies frequently call other trait methods on
             // `self` (`this->next()`, `this->all(...)`, etc.). When those
             // methods belong to a foreign or skipped supertrait (e.g.,
@@ -7150,6 +7173,7 @@ impl CodeGen {
             let inline_body = method
                 .default
                 .as_ref()
+                .filter(|_| !consuming)
                 .and_then(|body| {
                     self.maybe_inline_trait_default_method_body(body, t, &method.sig.ident)
                 });
@@ -7179,8 +7203,9 @@ impl CodeGen {
                 cpp_name: method_name.clone(),
                 params: params.clone(),
                 const_suffix,
-                is_mut: !is_const,
+                is_mut: !is_const && !consuming,
                 rust_name: method.sig.ident.to_string(),
+                is_consuming: consuming,
             });
         }
 
@@ -11188,6 +11213,33 @@ impl CodeGen {
             // C++ destructors cannot be static/const-qualified and have no return type.
             qualifier.clear();
             is_static = false;
+        }
+        // Book §3.2.2: a `cpp_inherit` implementor's by-value `self` method
+        // overrides the tier-1 trait's `&&` slot, so it carries the same
+        // ref-qualifier (an overrider must match the virtual's). Its call
+        // sites spell an rvalue receiver (emit_expr).
+        if !is_static
+            && !is_drop_destructor
+            && matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(r)) if r.reference.is_none())
+            && self.current_struct.as_ref().is_some_and(|owner| {
+                let method_ident = method.sig.ident.to_string();
+                let scoped_owner = self.scoped_type_key(owner);
+                self.cpp_inherit_by_value_methods
+                    .get(owner)
+                    .or_else(|| self.cpp_inherit_by_value_methods.get(&scoped_owner))
+                    .is_some_and(|methods| methods.contains(&method_ident))
+                    && self
+                        .cpp_inherit_trait
+                        .get(owner)
+                        .or_else(|| self.cpp_inherit_trait.get(&scoped_owner))
+                        .is_some_and(|trait_name| {
+                            !self
+                                .trait_class_skipped_method_keys
+                                .contains(&(trait_name.clone(), method_ident.clone()))
+                        })
+            })
+        {
+            qualifier = " &&".to_string();
         }
 
         // Build params list (skip self receiver)

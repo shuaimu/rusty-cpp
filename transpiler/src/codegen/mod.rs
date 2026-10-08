@@ -155,6 +155,9 @@ pub(crate) struct InterfaceSlot {
     /// The Rust method name (for the `rusty_<Trait>_<m>` tagged member a
     /// member-dispatch implementor keeps beside a same-named inherent method).
     pub(crate) rust_name: String,
+    /// By-value `self` (book §3.2.2): the slot is `&&`-qualified, the owning
+    /// forwarder consumes `std::move(value_)`, the reference forwarders stub.
+    pub(crate) is_consuming: bool,
 }
 
 /// Storage shape for a `--interface-traits` Adapter specialization.
@@ -1779,6 +1782,14 @@ pub struct CodeGen {
     /// their interface/Adapter surface but stay on concrete member dispatch;
     /// no additive `<Trait>_` UFCS helpers are emitted for them.
     pub(crate) cpp_trait_member_dispatch_traits: std::collections::HashSet<String>,
+    /// Traits whose `cpp_trait_member_dispatch` marker was a diagnosed no-op
+    /// (book §3.2.16 phase 0): the trait fails §3.2.1 axis 1 (a `Self`
+    /// parameter, RPITIT/APIT/async, a generic required method or default
+    /// without `where Self: Sized`, a GAT, a foreign supertrait, a method a
+    /// supertrait also declares), so no C++ interface can carry it; it takes
+    /// the tier-2 lane and `cpp_inherit` on its impls is a no-op too. Keys as
+    /// in `cpp_trait_member_dispatch_traits`.
+    pub(crate) demoted_member_dispatch_traits: std::collections::HashSet<String>,
     pub(crate) ufcs_declared_trait_modules: std::collections::BTreeMap<String, String>,
     /// `Trait::Assoc` → short bound-trait name, from LOCAL trait declarations
     /// plus every dependency manifest (§208 phase 2 projection routing).
@@ -3136,6 +3147,11 @@ pub struct CodeGen {
     /// `#[cpp_inherit]` implementor: their class is never TU-local, whatever
     /// the trait's own visibility (phase 0; see `pub_declared_type_names`).
     pub(crate) traits_with_pub_cpp_inherit_implementor: HashSet<String>,
+    /// Per `#[cpp_inherit]` implementor (simple and module-scoped keys): the
+    /// by-value `self` methods of its tier-1 trait. Their member is
+    /// `&&`-qualified (it overrides the trait's `&&` slot), so a call on an
+    /// lvalue receiver spells `std::move(x).m(…)` (`auto(x).m(…)` for `Copy`).
+    pub(crate) cpp_inherit_by_value_methods: HashMap<String, HashSet<String>>,
     /// Tracks `(trait_name, self_cpp)` pairs we've already emitted
     /// Adapter specs for under `--interface-traits`. Prevents duplicate
     /// `template <> class TraitAdapter<U>` definitions when the same
@@ -3635,6 +3651,7 @@ impl CodeGen {
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
+            demoted_member_dispatch_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
             ufcs_trait_assoc_bounds: std::collections::BTreeMap::new(),
             ufcs_trait_method_return_assoc: std::collections::BTreeMap::new(),
@@ -3923,6 +3940,7 @@ impl CodeGen {
             cpp_inherit_implementors: HashMap::new(),
             pub_declared_type_names: HashSet::new(),
             traits_with_pub_cpp_inherit_implementor: HashSet::new(),
+            cpp_inherit_by_value_methods: HashMap::new(),
             emitted_foreign_adapter_specs: HashSet::new(),
             crate_name: None,
             module_stack: Vec::new(),
@@ -8521,6 +8539,27 @@ impl CodeGen {
         // UFCS Phase 3: classify method names for call-site lowering.
         self.cpp_trait_member_dispatch_traits =
             Self::collect_cpp_trait_member_dispatch_traits(&file.items);
+        // Book §3.2.16 phase 0: the skip-list decides the TIER, not only slot
+        // emission. A marked trait that fails §3.2.1 axis 1 cannot be an
+        // interface class; the marker is a diagnosed no-op and the trait keeps
+        // the tier-2 lane (its `cpp_inherit` impls follow, in collect_impl_blocks).
+        if !self.cpp_trait_member_dispatch_traits.is_empty() {
+            let verdicts = crate::tier_census::axis1_verdicts(file);
+            let mut demoted: Vec<String> = Vec::new();
+            for key in &self.cpp_trait_member_dispatch_traits {
+                if let Some(Err(why)) = verdicts.get(key) {
+                    eprintln!(
+                        "[rusty-cpp] warning: `#[cpp_trait_member_dispatch]` on trait `{}` is ignored ({}): the trait cannot be a C++ interface class and takes the free-function lane (book §3.2.1 axis 1, §3.2.16 phase 0)",
+                        key, why
+                    );
+                    demoted.push(key.clone());
+                }
+            }
+            for key in demoted {
+                self.cpp_trait_member_dispatch_traits.remove(&key);
+                self.demoted_member_dispatch_traits.insert(key);
+            }
+        }
         self.ufcs_method_classes = crate::transpile::classify_method_names_excluding_traits(
             &file.items,
             &self.cpp_trait_member_dispatch_traits,

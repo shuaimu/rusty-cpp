@@ -3304,12 +3304,24 @@ impl CodeGen {
                                     }
                                     _ => false,
                                 });
-                            if !self_is_local || concrete_on_generic {
+                            let scoped_trait_key_here = if module_path.is_empty() {
+                                trait_short.clone()
+                            } else {
+                                format!("{}::{}", module_path.join("::"), trait_short)
+                            };
+                            let trait_demoted = self.demoted_member_dispatch_traits.iter().any(|k| {
+                                k == trait_short
+                                    || k == &scoped_trait_key_here
+                                    || k.rsplit("::").next() == Some(trait_short.as_str())
+                            });
+                            if !self_is_local || concrete_on_generic || trait_demoted {
                                 eprintln!(
                                     "[rusty-cpp] warning: `#[cpp_inherit]` on `impl {} for {}` is ignored ({}); the impl is lowered through the trait's `{}_` namespace (book §3.2.16, phase 0)",
                                     trait_short,
                                     raw_type_name,
-                                    if concrete_on_generic {
+                                    if trait_demoted {
+                                        "the trait cannot be a C++ interface class (§3.2.1 axis 1)"
+                                    } else if concrete_on_generic {
                                         "a concrete instantiation of a generic local type cannot inherit"
                                     } else {
                                         "the self type is not declared in this crate"
@@ -3322,7 +3334,43 @@ impl CodeGen {
                                 self.cpp_inherit_trait
                                     .insert(type_name.clone(), trait_short.clone());
                                 let scoped = self.scoped_type_key(&simple_type_name);
-                                self.cpp_inherit_trait.insert(scoped, trait_short.clone());
+                                self.cpp_inherit_trait.insert(scoped.clone(), trait_short.clone());
+                                // Book §3.2.2: a by-value `self` method of a
+                                // tier-1 (member-dispatch) trait is a `&&` slot;
+                                // record the implementor's such methods for the
+                                // call-site move/copy (emit_expr).
+                                let scoped_trait_key = if module_path.is_empty() {
+                                    trait_short.clone()
+                                } else {
+                                    format!("{}::{}", module_path.join("::"), trait_short)
+                                };
+                                let trait_is_member_dispatch = self
+                                    .cpp_trait_member_dispatch_traits
+                                    .iter()
+                                    .any(|t| t == trait_short || t == &scoped_trait_key);
+                                if trait_is_member_dispatch {
+                                    let by_value: Vec<String> = impl_block
+                                        .items
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            syn::ImplItem::Fn(f) => match f.sig.inputs.first() {
+                                                Some(syn::FnArg::Receiver(r)) if r.reference.is_none() => {
+                                                    Some(f.sig.ident.to_string())
+                                                }
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !by_value.is_empty() {
+                                        for key in [simple_type_name.clone(), type_name.clone(), scoped] {
+                                            self.cpp_inherit_by_value_methods
+                                                .entry(key)
+                                                .or_default()
+                                                .extend(by_value.iter().cloned());
+                                        }
+                                    }
+                                }
                                 let implementors = self
                                     .cpp_inherit_implementors
                                     .entry(trait_short.clone())

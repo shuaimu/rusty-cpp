@@ -16,6 +16,9 @@ struct TraitInfo {
     supertraits: Vec<String>, // as written (last segment kept with path)
     methods: Vec<MethodInfo>,
     has_generics: bool,
+    /// A generic associated type (`type Item<'a>;` / `type T<U>;`): no C++
+    /// member of a class can be a template alias overridden per implementor.
+    has_gat: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +169,9 @@ fn collect(items: &[syn::Item], module: &mut Vec<String>, c: &mut Census) {
                         _ => None,
                     })
                     .collect();
+                let has_gat = t.items.iter().any(|ti| {
+                    matches!(ti, syn::TraitItem::Type(at) if !at.generics.params.is_empty())
+                });
                 c.traits.insert(
                     key.clone(),
                     TraitInfo {
@@ -173,6 +179,7 @@ fn collect(items: &[syn::Item], module: &mut Vec<String>, c: &mut Census) {
                         supertraits,
                         methods,
                         has_generics: t.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_))),
+                        has_gat,
                     },
                 );
             }
@@ -279,6 +286,9 @@ fn axis1(c: &Census, key: &str, seen: &mut Vec<String>) -> Result<(), String> {
         return Ok(()); // cycle guard
     }
     seen.push(t.key.clone());
+    if t.has_gat {
+        return Err("A1 generic associated type".to_string());
+    }
     for m in &t.methods {
         if m.required && (m.generic_over_type || m.returns_impl_trait) && !m.where_self_sized {
             return Err(format!("A1 generic required method `{}`", m.name));
@@ -375,6 +385,23 @@ fn self_type_key<'c>(c: &'c Census, imp: &ImplInfo) -> Result<&'c TypeInfo, Stri
         return Err(format!("A2 extra bound on the impl's parameters (`{}`)", imp.self_written));
     }
     Ok(ty)
+}
+
+/// Book §3.2.1 axis 1 for every crate trait of `file`, keyed by the
+/// module-scoped trait name (`m::Tr`, or `Tr` at the root): `Ok(())` when the
+/// trait can be a C++ interface class, else the excluding test. Phase 0
+/// (§3.2.16) consults it to make a `cpp_trait_member_dispatch` marker on an
+/// ineligible trait a diagnosed no-op; phase 1 decides every trait's tier by it.
+pub fn axis1_verdicts(file: &syn::File) -> std::collections::HashMap<String, Result<(), String>> {
+    let mut c = Census::default();
+    let mut module = Vec::new();
+    collect(&file.items, &mut module, &mut c);
+    let mut out = std::collections::HashMap::new();
+    for key in c.traits.keys() {
+        let mut seen = Vec::new();
+        out.insert(key.clone(), axis1(&c, key, &mut seen));
+    }
+    out
 }
 
 pub fn run(file: &syn::File, label: &str) {

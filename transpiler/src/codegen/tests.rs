@@ -10120,7 +10120,10 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
     //   foreign       — `cpp_inherit` on a foreign self type is a diagnosed
     //                   no-op; the impl takes the tier-2 lane, and path syntax
     //                   `Named::name(&x)` is the method call (per receiver).
-    // By-value `self` slots (`&&`) are the next phase-0 item and are not here.
+    //   by_value      — a by-value `self` method is a `&&` slot; the
+    //                   implementor's member is `&&` too, and an lvalue
+    //                   receiver is moved (`std::move(o)`) or, for a `Copy`
+    //                   implementor, decay-copied (`auto(p)`).
     let compiler = ["clang++", "clang++-22", "clang++-21"]
         .into_iter()
         .find(|candidate| {
@@ -10140,18 +10143,29 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
         #[cfg_attr(any(), cpp_trait_member_dispatch)]
         pub trait Area {
             fn area(&self) -> i32;
+            fn consumed(self) -> i32;
         }
         #[derive(Clone, Copy, Debug, PartialEq)]
         pub struct Sq { pub s: i32 }
         #[cfg_attr(any(), cpp_inherit)]
         impl Area for Sq {
             fn area(&self) -> i32 { self.s * self.s }
+            fn consumed(self) -> i32 { self.s * 1000 }
         }
         #[derive(Clone, Debug, PartialEq, PartialOrd)]
         pub struct Owned { pub a: i32, pub b: i32 }
         #[cfg_attr(any(), cpp_inherit)]
         impl Area for Owned {
             fn area(&self) -> i32 { self.a + self.b }
+            fn consumed(self) -> i32 { (self.a + self.b) * 100 }
+        }
+        pub fn cell_by_value() -> String {
+            let p = Sq { s: 4 };
+            let a = p.consumed();
+            let o = Owned { a: 1, b: 2 };
+            let b = o.clone().consumed();
+            let c = o.consumed();
+            format!("{} {} {} {}", a, p.area(), b, c)
         }
         pub fn cell_copy() -> String {
             let p = Sq { s: 3 };
@@ -10211,6 +10225,15 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
     assert!(cpp.contains("bool operator==(const Sq& other) const { return this->s == other.s; }"), "{cpp}");
     assert!(cpp.contains("Owned clone() const { return Owned(rusty::clone(this->a), rusty::clone(this->b)); }"), "{cpp}");
     assert!(cpp.contains("Pair(int32_t _0_init, int32_t _1_init) : Named(), _0(std::move(_0_init)), _1(std::move(_1_init)) {}"), "{cpp}");
+    // by_value: the `&&` slot, the `&&` overrides, the rvalue receivers.
+    assert!(cpp.contains("virtual int32_t consumed() && = 0;"), "{cpp}");
+    assert!(cpp.contains("int32_t consumed() && override;"), "{cpp}");
+    assert!(cpp.contains("int32_t Sq::consumed() && {"), "{cpp}");
+    assert!(cpp.contains("auto(p).consumed()"), "Copy implementor: decay-copy: {cpp}");
+    assert!(cpp.contains("std::move(o).consumed()"), "non-Copy implementor: move: {cpp}");
+    assert!(cpp.contains("rusty::clone(o).consumed()"), "prvalue receiver untouched: {cpp}");
+    assert!(cpp.contains("int32_t consumed() && override { if constexpr (requires { std::move(value_).rusty_Area_consumed(); })"), "owning forwarder consumes: {cpp}");
+    assert!(cpp.contains("int32_t consumed() && override { rusty::intrinsics::unreachable_via_const_dyn(); }"), "reference forwarders stub: {cpp}");
     let late_def = cpp.find("class Late {").expect("Late interface");
     let early_def = cpp.find("struct Early : public Late {").expect("Early implementor");
     assert!(late_def < early_def, "interface must precede its implementor: {cpp}");
@@ -10239,6 +10262,7 @@ static int check(const char* cell, const std::string& got, const char* want) {
 int main() {
     int bad = 0;
     bad += check("copy", std::string(rusty::to_string_view(cell_copy())), "9 9 true");
+    bad += check("by_value", std::string(rusty::to_string_view(cell_by_value())), "4000 16 300 300");
     bad += check("clone_literal", std::string(rusty::to_string_view(cell_clone_literal())), "11 7 true false");
     bad += check("tuple_unit", std::string(rusty::to_string_view(cell_tuple_unit())), "pair(1,2) unit pair(3,4)+unit true");
     bad += check("early", std::string(rusty::to_string_view(cell_early())), "42 42");
@@ -10314,6 +10338,43 @@ int main() {
         "hidden-trait / pub-implementor module precompile failed:\n{}",
         String::from_utf8_lossy(&precompile.stderr)
     );
+}
+
+#[test]
+fn test_tier1_phase0_member_dispatch_marker_on_ineligible_trait_is_a_diagnosed_no_op() {
+    // Book §3.2.16 phase 0: the skip-list decides the TIER. A trait with a
+    // `Self` parameter (rustc E0038: not dyn-compatible), a generic required
+    // method, an `impl Trait` return, or a GAT cannot be a C++ interface
+    // class; its `cpp_trait_member_dispatch` marker is a diagnosed no-op and
+    // `cpp_inherit` on its impls follows: the trait keeps the free-function
+    // lane, the implementor gains no base.
+    let cpp = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Same { fn same(&self, other: &Self) -> bool; }
+        pub struct P { pub val: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Same for P { fn same(&self, other: &Self) -> bool { self.val == other.val } }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Gen { fn show<T: core::fmt::Debug>(&self, t: T) -> String; }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Gen for P { fn show<T: core::fmt::Debug>(&self, t: T) -> String { format!("{:?}", t) } }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Fine { fn v(&self) -> i32; }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Fine for P { fn v(&self) -> i32 { self.val } }
+        pub fn go() -> bool { let a = P { val: 1 }; let b = P { val: 1 }; a.same(&b) && a.v() == 1 }
+        "#,
+    );
+    // The ineligible traits took the free-function lane...
+    assert!(cpp.contains("namespace Same_"), "{cpp}");
+    assert!(cpp.contains("namespace Gen_"), "{cpp}");
+    assert!(!cpp.contains("struct P : public Same"), "{cpp}");
+    assert!(!cpp.contains("struct P : public Gen"), "{cpp}");
+    // ...and the eligible one kept tier 1.
+    assert!(cpp.contains("struct P : public Fine {"), "{cpp}");
+    assert!(cpp.contains("int32_t v() const override;"), "{cpp}");
+    assert!(!cpp.contains("namespace Fine_"), "{cpp}");
 }
 
 #[test]
