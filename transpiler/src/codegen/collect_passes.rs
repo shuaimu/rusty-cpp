@@ -3304,16 +3304,12 @@ impl CodeGen {
                                     }
                                     _ => false,
                                 });
-                            let scoped_trait_key_here = if module_path.is_empty() {
-                                trait_short.clone()
-                            } else {
-                                format!("{}::{}", module_path.join("::"), trait_short)
-                            };
-                            let trait_demoted = self.demoted_member_dispatch_traits.iter().any(|k| {
-                                k == trait_short
-                                    || k == &scoped_trait_key_here
-                                    || k.rsplit("::").next() == Some(trait_short.as_str())
-                            });
+                            // The demoted set holds the trait's own scoped key; resolve
+                            // the impl's written path to it (a same-leaf trait of
+                            // another module is a different trait).
+                            let trait_demoted = trait_path
+                                .map(|p| self.resolve_trait_scoped_key_for_impl(p, module_path))
+                                .is_some_and(|k| self.demoted_member_dispatch_traits.contains(&k));
                             if !self_is_local || concrete_on_generic || trait_demoted {
                                 eprintln!(
                                     "[rusty-cpp] warning: `#[cpp_inherit]` on `impl {} for {}` is ignored ({}); the impl is lowered through the trait's `{}_` namespace (book §3.2.16, phase 0)",

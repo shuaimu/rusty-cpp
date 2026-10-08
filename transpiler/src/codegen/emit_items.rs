@@ -6451,6 +6451,28 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        fn block_mentions_self_path(block: &syn::Block) -> bool {
+            use syn::visit::Visit;
+            struct V(bool);
+            impl<'a> Visit<'a> for V {
+                fn visit_path(&mut self, p: &'a syn::Path) {
+                    if p.segments.len() >= 2 && p.segments[0].ident == "Self" {
+                        self.0 = true;
+                    }
+                    syn::visit::visit_path(self, p);
+                }
+                // `format!("{}", Self::K)`: the path lives in macro tokens.
+                fn visit_macro(&mut self, m: &'a syn::Macro) {
+                    if m.tokens.to_string().contains("Self ::") {
+                        self.0 = true;
+                    }
+                    syn::visit::visit_macro(self, m);
+                }
+            }
+            let mut v = V(false);
+            v.visit_block(block);
+            v.0
+        }
         let mut out: HashSet<String> = defaults
             .iter()
             .filter(|(f, _)| {
@@ -6458,6 +6480,9 @@ impl CodeGen {
                     || f.sig.inputs.iter().any(|a| {
                         matches!(a, syn::FnArg::Typed(pt) if matches!(pt.ty.as_ref(), syn::Type::ImplTrait(_)))
                     })
+                    // `Self::K` / `Self::Assoc` in the body: the implementor's
+                    // static, reachable only through the deduced `Self_`.
+                    || f.default.as_ref().is_some_and(block_mentions_self_path)
             })
             .map(|(f, _)| f.sig.ident.to_string())
             .collect();
@@ -6742,7 +6767,16 @@ impl CodeGen {
             .items
             .iter()
             .any(|i| matches!(i, syn::TraitItem::Const(_)));
-        if has_assoc_const {
+        // Book §3.2.16 phase 0: a tier-1 (member-dispatch) trait with
+        // associated constants gets its interface class all the same — the
+        // constants are `static constexpr` members of each implementor, a
+        // default reading `Self::K` is an explicit-object member (`Self_::K`),
+        // and no `dyn` is lost (Rust forms none for such a trait). Only the
+        // free-function lane keeps the runtime-helper shape.
+        let trait_is_member_dispatch_here = self.cpp_trait_member_dispatch_traits.iter().any(|k| {
+            k == &trait_name_str || k.rsplit("::").next() == Some(trait_name_str.as_str())
+        });
+        if has_assoc_const && !trait_is_member_dispatch_here {
             self.writeln(&format!(
                 "// TODO(interface_traits): trait `{}` has associated constants, not yet supported",
                 trait_name
@@ -6831,7 +6865,8 @@ impl CodeGen {
                 return false;
             };
             if r.reference.is_none() {
-                return false;
+                // Phase 0: a by-value `self` is a `&&` slot on a tier-1 trait.
+                return trait_is_member_dispatch_here;
             }
             true
         });

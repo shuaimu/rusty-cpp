@@ -8323,6 +8323,17 @@ impl CodeGen {
         self.trait_declared_path_by_short_name.clear();
         self.cpp_inherit_trait.clear();
         self.cpp_inherit_extra_traits.clear();
+        // Phase 0 registries: per file, like `cpp_inherit_trait` (a stale
+        // `hoisted_trait_interfaces` entry would make `emit_trait` drop a
+        // same-keyed trait of a later file silently).
+        self.cpp_inherit_trait_items.clear();
+        self.hoisted_trait_interfaces.clear();
+        self.visited_trait_keys.clear();
+        self.cpp_inherit_implementors.clear();
+        self.pub_declared_type_names.clear();
+        self.traits_with_pub_cpp_inherit_implementor.clear();
+        self.cpp_inherit_by_value_methods.clear();
+        self.demoted_member_dispatch_traits.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
         self.tuple_type_aliases.clear();
@@ -14008,7 +14019,13 @@ impl CodeGen {
         // forward-declared `template <…> class <Tr>;` here makes that alias a
         // `redefinition … as a different kind of symbol` (arrayvec's
         // `ArrayVecImpl { const CAPACITY: usize; }`, baseline 2026-10-07).
-        if t.items.iter().any(|item| matches!(item, syn::TraitItem::Const(_))) {
+        // Phase 0 (§3.2.16): a tier-1 (member-dispatch) trait with associated
+        // constants DOES get its interface class, so it is forward-declared.
+        let key_here = self.nonvtable_trait_key_here(&t.ident.to_string());
+        let member_dispatch = self.cpp_trait_member_dispatch_traits.iter().any(|k| {
+            k == &key_here || k.rsplit("::").next() == Some(name)
+        });
+        if t.items.iter().any(|item| matches!(item, syn::TraitItem::Const(_))) && !member_dispatch {
             return;
         }
         // Keep this structurally identical to emit_trait_interface_pattern:
@@ -24571,12 +24588,21 @@ impl CodeGen {
         let short = trait_key.rsplit("::").next().unwrap_or(trait_key);
         let ns = format!("{}_", escape_cpp_keyword(short));
         let b = self_spelling;
+        // Phase 0 (§3.2.16): a tier-1 (member-dispatch) trait has no `<Tr>_`
+        // namespace, so its map reads the implementor's static member only.
+        let member_dispatch = self
+            .cpp_trait_member_dispatch_traits
+            .iter()
+            .any(|k| k == trait_key || k.rsplit("::").next() == Some(short));
         let mut out = String::new();
         for (name, _, _) in &consts {
             let n = escape_cpp_keyword(name);
             match forward_to {
                 Some(target) => out.push_str(&format!(
                     "static constexpr decltype(auto) {n}() {{ return {target}::{n}(); }} "
+                )),
+                None if member_dispatch => out.push_str(&format!(
+                    "template<class B_ = {b}> static constexpr decltype(auto) {n}() {{ return B_::{n}; }} "
                 )),
                 // The probe must be DEPENDENT (an explicit specialization names a
                 // concrete self type, where `int8_t::NAME` is a hard error, not a
@@ -24591,6 +24617,9 @@ impl CodeGen {
             match forward_to {
                 Some(target) => out.push_str(&format!(
                     "template<class... A> static decltype(auto) {n}(A&&... a) {{ return {target}::{n}(std::forward<A>(a)...); }} "
+                )),
+                None if member_dispatch => out.push_str(&format!(
+                    "template<class B_ = {b}, class... A> static decltype(auto) {n}(A&&... a) {{ return B_::{n}(std::forward<A>(a)...); }} "
                 )),
                 None => out.push_str(&format!(
                     "template<class B_ = {b}, class... A> static decltype(auto) {n}(A&&... a) {{ if constexpr (requires {{ B_::{n}(std::forward<A>(a)...); }}) {{ return B_::{n}(std::forward<A>(a)...); }} else {{ return {ns}::{n}(rusty::self_tag<B_>{{}}, std::forward<A>(a)...); }} }} "

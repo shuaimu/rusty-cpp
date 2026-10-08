@@ -10608,6 +10608,101 @@ int main() {
 }
 
 #[test]
+fn test_tier1_phase0_assoc_const_trait_interface_clang_runtime() {
+    // Book §3.2.16 phase 0: a tier-1 trait with associated constants gets
+    // its interface class (the free-function lane keeps the runtime-helper
+    // shape): the constants are `static constexpr` members of each
+    // implementor, a default reading `Self::SIDES` is an explicit-object
+    // member (`Self_::SIDES`), the implementor's override of such a default
+    // hides it, and the struct inherits the class. No `dyn` is lost — Rust
+    // forms none for an assoc-const trait.
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping tier-1 assoc-const cells: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+#[cfg_attr(any(), cpp_trait_member_dispatch)]
+pub trait Shape {
+    const SIDES: i32;
+    fn side(&self) -> i32;
+    fn perimeter(&self) -> i32 { self.side() * Self::SIDES }
+    fn describe(&self) -> String { format!("{}x{}", Self::SIDES, self.side()) }
+}
+pub struct Tri { pub s: i32 }
+#[cfg_attr(any(), cpp_inherit)]
+impl Shape for Tri { const SIDES: i32 = 3; fn side(&self) -> i32 { self.s } }
+pub struct Quad { pub s: i32 }
+#[cfg_attr(any(), cpp_inherit)]
+impl Shape for Quad { const SIDES: i32 = 4; fn side(&self) -> i32 { self.s } fn describe(&self) -> String { "quad".to_string() } }
+pub fn cell_assoc() -> String {
+    let t = Tri { s: 2 };
+    let q = Quad { s: 5 };
+    format!("{} {} {} {} {} {}", t.perimeter(), t.describe(), q.perimeter(), q.describe(), Tri::SIDES, <Quad as Shape>::SIDES)
+}
+        "#,
+    );
+    assert!(cpp.contains("class Shape {"), "{cpp}");
+    assert!(!cpp.contains("has associated constants, not yet supported"), "{cpp}");
+    assert!(cpp.contains("struct Tri : public Shape {"), "{cpp}");
+    assert!(cpp.contains("static constexpr int32_t SIDES = static_cast<int32_t>(3);"), "{cpp}");
+    assert!(cpp.contains("int32_t perimeter(this auto const& self_) {"), "{cpp}");
+    assert!(cpp.contains("virtual int32_t side() const = 0;"), "{cpp}");
+    cpp.push_str(
+        r#"
+#include <cstdio>
+#include <string>
+int main() {
+    std::string got(rusty::to_string_view(cell_assoc()));
+    const char* want = "6 3x2 20 quad 3 4";
+    if (got != want) { std::printf("FAIL assoc: got [%s] want [%s]\n", got.c_str(), want); return 1; }
+    return 0;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("tier1_assoc.cpp");
+    let binary_path = temp.path().join("tier1_assoc");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "tier-1 assoc-const cells C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "tier-1 assoc-const cells runtime proof failed (exit {:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+#[test]
 fn test_interface_traits_three_forward_decls_emitted_per_trait() {
     // The trait header should forward-declare all three adapter
     // primary templates so dyn type mappings can name them even

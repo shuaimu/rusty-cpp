@@ -3326,6 +3326,17 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         };
         let trait_key = self.nonvtable_owner_trait(owner, name, true)?;
         let trait_short = trait_key.rsplit("::").next().unwrap_or(&trait_key).to_string();
+        // Phase 0 (§3.2.16): inside a tier-1 trait's explicit-object default,
+        // `Self_` is the implementor itself and its associated const is a
+        // `static constexpr` member — `Self_::K`, no map (which would also
+        // name the `<Tr>_` namespace a member-dispatch trait does not have).
+        if owner_cpp == "Self_"
+            && self.cpp_trait_member_dispatch_traits.iter().any(|k| {
+                k == &trait_key || k.rsplit("::").next() == Some(trait_short.as_str())
+            })
+        {
+            return Some(format!("Self_::{}", escape_cpp_keyword(name)));
+        }
         // A universally blanket-implemented trait (`impl<T> Tr for T {}`) never
         // overrides a defaulted const, so the default body inlined with the
         // owner substituted (the shipped lowering, below) is exact and stays

@@ -2616,6 +2616,24 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   2169` = rustc, overrides winning directly and through `&dyn Sub`. Phase-0 items now open: only
   **assoc-const traits given an interface** (step 8 gave them the namespace form; the interface is
   still skipped), plus the residue list above.
+- *2026-10-08 — phase 0, assoc-const traits given an interface (fifth commit; the phase-0 list is now
+  landed):* (xix) a tier-1 (member-dispatch) trait with associated constants gets its interface class
+  (and its forward declaration) all the same — the free-function lane keeps the runtime-helper shape;
+  the constants are the implementors' `static constexpr` members, a default that names `Self::K`
+  (in an expression or inside a macro's tokens — `format!("{}", Self::SIDES)`) is an explicit-object
+  member whose `Self::K` is `Self_::K` (the implementor's static, never the `<Tr>Traits` map, which
+  for such a trait would also name the `<Tr>_` namespace it does not have), and the trait's
+  `<Tr>Traits` map reads `B_::K` only. A by-value `self` method counts as an emittable slot in the
+  empty-shell test. No `dyn` is lost: Rust forms none for an assoc-const trait. Measured:
+  `6 3x2 20 quad 3 4` (`test_tier1_phase0_assoc_const_trait_interface_clang_runtime`; before, `struct
+  Tri : public Shape` was `expected class name`). **Phase 0 status:** every item of the §3.2.16 list
+  is landed (multiple/virtual bases, `&&` slots, explicit-object generic defaults and their callers,
+  supertrait-calling defaults, the tier-deciding skip-list, assoc-const interfaces, tuple/unit
+  constructors, `clone()`/literals/comparisons, protected defaulted special members, hoisting, the
+  anonymous-namespace rule, the foreign/concrete-on-generic no-op, per-receiver path syntax, the
+  `operator-` mis-emission) except the three phase 2 already did; the tier-2 by-value bridge and
+  `&dyn` over a foreign implementor of a member-dispatch trait wait for phase 1's `<Tr>_` namespace on
+  every trait. Six clang-runtime tests (`test_tier1_phase0_*`) are the lane's regression guard.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
