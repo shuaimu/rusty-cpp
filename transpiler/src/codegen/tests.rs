@@ -25,16 +25,26 @@ fn standard_source_locations_lower_without_a_facade_type() {
     assert!(!cpp.contains("rusty::SourceLocation"), "{cpp}");
 }
 
+/// The unit suite pins the free-function lane (`set_tier1_default(false)`):
+/// its expectations describe that lane; tier 1 — the binary's default since
+/// phase 1 — is measured by the `test_tier1_*` tests, which opt in, and by the
+/// parity matrix.
+fn test_codegen() -> CodeGen {
+    let mut cg = CodeGen::new();
+    cg.set_tier1_default(false);
+    cg
+}
+
 fn transpile_str(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.emit_file(&file, None);
     cg.into_output()
 }
 
 fn transpile_str_with_authenticated_cpp_inherit(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
     cg.emit_file(&file, None);
     cg.into_output()
@@ -42,7 +52,7 @@ fn transpile_str_with_authenticated_cpp_inherit(rust_code: &str) -> String {
 
 fn transpile_str_module(rust_code: &str, module_name: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.emit_file(&file, Some(module_name));
     cg.into_output()
 }
@@ -53,7 +63,7 @@ fn transpile_str_module(rust_code: &str, module_name: &str) -> String {
 /// `inject_rusty_module_import_if_needed`.
 fn transpile_str_module_in_umbrella_closure(rust_code: &str, module_name: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_in_umbrella_closure(true);
     cg.emit_file(&file, Some(module_name));
     cg.into_output()
@@ -71,7 +81,7 @@ fn transpile_str_module_with_sibling_modules(
     sibling_module_names: &[&str],
 ) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     let crate_root = module_name.split('.').next().unwrap_or(module_name);
     cg.set_crate_name(crate_root);
     cg.set_crate_module_names(
@@ -92,7 +102,7 @@ fn transpile_str_module_with_cxx_namespace(
     cxx_namespace: &str,
 ) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some(cxx_namespace.to_string()));
     cg.emit_file(&file, Some(module_name));
     cg.into_output()
@@ -104,7 +114,7 @@ fn transpile_str_module_with_cpp_members(
     cpp_module_member_symbols: HashMap<String, HashSet<String>>,
 ) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cpp_module_member_symbols(cpp_module_member_symbols);
     cg.emit_file(&file, Some(module_name));
     cg.into_output()
@@ -112,7 +122,7 @@ fn transpile_str_module_with_cpp_members(
 
 fn transpile_str_with_by_value_cycle_breaking_prototype(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_by_value_cycle_breaking_prototype(true);
     cg.emit_file(&file, None);
     cg.into_output()
@@ -145,7 +155,7 @@ fn cpp_abi_method_facade_scheduling_mismatch_is_a_fatal_diagnostic() {
         })
         .expect("lowered facade method");
 
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cpp_abi_plan(plan);
     cg.current_struct = Some("Codec".to_string());
     cg.emit_method(&method);
@@ -162,7 +172,7 @@ fn cpp_abi_method_facade_scheduling_mismatch_is_a_fatal_diagnostic() {
 /// (deterministic via the setter, independent of the ambient env var).
 fn transpile_str_infer_engine(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_infer_engine(true);
     cg.emit_file(&file, None);
     cg.into_output()
@@ -1269,7 +1279,7 @@ fn test_leaf131_collects_callable_bound_metadata_for_extension_method_where_clau
     "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.collect_local_declared_types(&file.items, &[]);
     cg.collect_extension_trait_impl_methods(&file.items, &[]);
 
@@ -1330,7 +1340,7 @@ fn test_leaf131_collects_callable_bound_metadata_for_fn_families_and_ref_shapes(
     "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.collect_local_declared_types(&file.items, &[]);
     cg.collect_extension_trait_impl_methods(&file.items, &[]);
 
@@ -6551,7 +6561,7 @@ fn test_drop_in_place_mut_slice_view_passes_range_not_temporary_address() {
         syn::Expr::Call(call) => call,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert!(
         out.contains("drop_in_place(rusty::slice_full((*this)))"),
@@ -6572,7 +6582,7 @@ fn test_mem_swap_mut_deref_args_pass_lvalue_references() {
         syn::Expr::Call(call) => call,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert!(
         out.contains("swap(rusty::detail::deref_if_pointer_like(p_r), rusty::detail::deref_if_pointer_like(p_w))")
@@ -7890,7 +7900,7 @@ fn test_match_catch_all_binding() {
 /// (see § 3.2.9 of `docs/rusty-cpp-transpiler.md`).
 fn transpile_str_interface_traits(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.emit_file(&file, None);
     cg.into_output()
@@ -7898,7 +7908,7 @@ fn transpile_str_interface_traits(rust_code: &str) -> String {
 
 fn transpile_str_interface_traits_with_authenticated_cpp_inherit(rust_code: &str) -> String {
     let file: syn::File = syn::parse_str(rust_code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
     cg.emit_file(&file, None);
@@ -8857,7 +8867,7 @@ fn test_interface_traits_generic_assoc_adapter_named_module_clang_runtime() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.emit_file(&source, Some("generic_assoc_review"));
     let module = cg.into_output();
@@ -9137,7 +9147,7 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.emit_file(&source, Some("trait_dispatch_scope_review"));
     let module = cg.into_output();
@@ -10243,6 +10253,8 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
     assert!(cpp.contains("rusty::clone(o).consumed()"), "prvalue receiver untouched: {cpp}");
     assert!(cpp.contains("int32_t consumed() && override { if constexpr (requires { Area_::consumed(std::move(value_)); })"), "owning forwarder consumes (CPO-first, the tier-1 bridge takes std::move(__self)): {cpp}");
     assert!(cpp.contains("template<class S> requires (has_tier1_Area<S> && !std::is_lvalue_reference_v<S>) int32_t consumed(Area_::impl_::tag, S&& __self) { return std::move(__self).consumed(); }"), "{cpp}");
+    // a forced cpp_inherit impl's §3.2.12 companion moves its by-value receiver into the bridge
+    assert!(cpp.contains("inline int32_t consumed(Sq self_) { return impl_::consumed(impl_::tag{}, std::move(self_)); }"), "{cpp}");
     assert!(cpp.contains("int32_t consumed() && override { rusty::intrinsics::unreachable_via_const_dyn(); }"), "reference forwarders stub: {cpp}");
     let late_def = cpp.find("class Late {").expect("Late interface");
     let early_def = cpp.find("struct Early : public Late {").expect("Early implementor");
@@ -10265,7 +10277,7 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
         r#"
 #include <cstdio>
 #include <string>
-template <class T> concept bridge_consumes_lvalue = requires (T& lv) { Area_::consumed(lv); };
+template <class T> concept bridge_consumes_lvalue = requires (T& lv) { Area_::impl_::consumed(Area_::impl_::tag{}, lv); };
 static_assert(!bridge_consumes_lvalue<Sq>, "an lvalue must not be consumed through the bridge");
 static int check(const char* cell, const std::string& got, const char* want) {
     if (got != want) { std::printf("FAIL %s: got [%s] want [%s]\n", cell, got.c_str(), want); return 1; }
@@ -10734,7 +10746,7 @@ fn test_tier1_default_switch_inherits_without_attributes() {
         pub fn go(p: &P) -> i32 { p.v() + 7.v() }
     "#;
     let file: syn::File = syn::parse_str(src).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_tier1_default(true);
     cg.emit_file(&file, None);
@@ -10746,7 +10758,7 @@ fn test_tier1_default_switch_inherits_without_attributes() {
     assert!(on.contains("has_tier1_Fine"), "{on}");
     assert!(on.contains("int32_t v(Fine_::impl_::tag, const int32_t& self_)"), "tier-2 impl of a tier-1 trait keeps its functions: {on}");
     let file: syn::File = syn::parse_str(src).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.emit_file(&file, None);
     let off = cg.into_output();
@@ -10781,7 +10793,7 @@ fn test_manifest_carries_tier1_traits_supertraits_and_nonvtable_defaults() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.emit_file(&file, Some("depmod"));
     let manifest = cg.build_ufcs_trait_manifest("depmod");
@@ -10825,7 +10837,7 @@ fn test_tier1_force_attribute_limits_and_per_impl_opt_out() {
         impl Fine for Dflt { fn v(&self) -> i32 { self.x } }
     "#;
     let file: syn::File = syn::parse_str(src).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
     cg.set_tier1_default(true);
@@ -10835,6 +10847,40 @@ fn test_tier1_force_attribute_limits_and_per_impl_opt_out() {
     assert!(out.contains("struct Packed : public Fine {"), "a coverage test is: {out}");
     assert!(!out.contains("struct Plain : public Fine"), "the opt-out: {out}");
     assert!(out.contains("struct Dflt : public Fine {"), "the default: {out}");
+}
+
+#[test]
+fn test_tier1_default_keeps_cpp_inherit_abi_companions() {
+    // Under tier 1 by default the `Job`/`OneTimeJob` pair inherits WITHOUT the
+    // lane's impl functions — but the srpc incumbent ABI owns
+    // `rrr::Job_::{Ready,Work,Done}(OneTimeJob&)` (§3.2.12), so a FORCED
+    // `cpp_inherit` impl keeps its companions, forwarding into the tier-1
+    // bridge (`impl_::Ready(tag, S&) requires has_tier1_Job<S>`).
+    let file: syn::File = syn::parse_str(
+        r#"
+        use rusty::cpp_inherit;
+        pub trait Job { fn Ready(&mut self) -> bool; fn Done(&mut self) -> bool; }
+        pub struct OneTimeJob { pub done_: bool }
+        #[cpp_inherit]
+        impl Job for OneTimeJob {
+            fn Ready(&mut self) -> bool { !self.done_ }
+            fn Done(&mut self) -> bool { self.done_ }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let out = cg.into_output();
+    assert!(out.contains("struct OneTimeJob : public Job {"), "{out}");
+    assert!(out.contains("bool Ready() override;"), "{out}");
+    assert!(out.contains("inline bool Ready(OneTimeJob& self_) { return impl_::Ready(impl_::tag{}, self_); }"), "companion: {out}");
+    assert!(out.contains("inline bool Done(OneTimeJob& self_) { return impl_::Done(impl_::tag{}, self_); }"), "companion: {out}");
+    assert!(out.contains("template<class S> requires has_tier1_Job<S> bool Ready(Job_::impl_::tag, S& __self) { return __self.Ready(); }"), "bridge: {out}");
+    assert!(!out.contains("bool Ready(Job_::impl_::tag, OneTimeJob& self_)"), "no impl function for a tier-1 impl: {out}");
+    assert!(out.contains("OneTimeJob() = default;"), "{out}");
 }
 
 #[test]
@@ -12489,7 +12535,7 @@ fn test_leaf10536_call_arg_expected_types_specialize_from_explicit_turbofish() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     std::rc::Rc::make_mut(&mut cg.function_type_param_names)
         .insert("case_".to_string(), vec!["T".to_string()]);
     std::rc::Rc::make_mut(&mut cg.function_arg_expected_types).insert(
@@ -12539,7 +12585,7 @@ fn test_leaf10536_call_arg_expected_types_specialize_from_fn_path_inference() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     std::rc::Rc::make_mut(&mut cg.function_type_param_names)
         .insert("case_".to_string(), vec!["T".to_string()]);
     std::rc::Rc::make_mut(&mut cg.function_arg_expected_types).insert(
@@ -12587,7 +12633,7 @@ fn test_leaf10536_tuple_expected_context_uses_typed_tuple_constructor() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     std::rc::Rc::make_mut(&mut cg.function_type_param_names)
         .insert("case_".to_string(), vec!["T".to_string()]);
     std::rc::Rc::make_mut(&mut cg.function_arg_expected_types).insert(
@@ -13647,7 +13693,7 @@ fn test_typeid_of_module_std_surface_is_available() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_use_import_std_in_modules(true);
     cg.emit_file(&file, Some("type_id_probe"));
     let out = cg.into_output();
@@ -15320,7 +15366,7 @@ fn test_sibling_file_unit_struct_emits_as_a_constructed_value() {
     let file: syn::File =
         syn::parse_str("use super::inner::{sink, Zst};\npub fn call() -> usize { sink(1, Zst) }")
             .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cross_file_structs(vec![sibling]);
     cg.emit_file(&file, Some("my_crate.user"));
     let out = cg.into_output();
@@ -15343,7 +15389,7 @@ fn test_sibling_file_drop_struct_literal_uses_its_constructor() {
         "use super::reactor::Guard;\npub fn arm() -> u32 { let g = Guard { code: 7, armed: true }; g.code }",
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cross_file_structs(vec![sibling.clone()]);
     cg.set_cross_file_drop_types(&["Guard".to_string()]);
     cg.emit_file(&file, Some("my_crate.user"));
@@ -15351,7 +15397,7 @@ fn test_sibling_file_drop_struct_literal_uses_its_constructor() {
     assert!(out.contains("auto g = Guard(true, 7);"), "{out}");
     assert!(!out.contains("Guard{.armed"), "{out}");
     // Without the crate-wide Drop fact the literal stays an aggregate init.
-    let mut plain = CodeGen::new();
+    let mut plain = test_codegen();
     plain.set_cross_file_structs(vec![sibling]);
     plain.emit_file(&file, Some("my_crate.user"));
     let plain = plain.into_output();
@@ -15908,7 +15954,7 @@ fn test_leaf_module_mode_crate_named_wrapper_prefixes_module_name() {
     "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("semver");
     cg.emit_file(&file, Some("test_autotrait"));
     let out = cg.into_output();
@@ -15927,7 +15973,7 @@ fn test_leaf_module_mode_crate_named_nonpub_libtest_fns_are_static() {
     "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("semver");
     cg.emit_file(&file, Some("test_autotrait"));
     let out = cg.into_output();
@@ -18006,7 +18052,7 @@ fn test_use_external_crate_comment() {
 #[test]
 fn test_use_external_dependency_alias_mapping_skips_unresolved_comment() {
     let file: syn::File = syn::parse_file("use serde_core::de;").expect("parse file");
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     let mut aliases = HashMap::new();
     aliases.insert("serde_core".to_string(), "serde_core".to_string());
     cg.set_external_crate_module_aliases(aliases);
@@ -18025,7 +18071,7 @@ fn test_use_std_no_external_comment() {
 #[test]
 fn test_leaf221_use_cpp_import_is_classified_as_foreign_module_import() {
     let file: syn::File = syn::parse_file("use cpp::std;").expect("parse file");
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.emit_file(&file, None);
 
     assert!(
@@ -18041,7 +18087,7 @@ fn test_leaf221_use_cpp_import_is_classified_as_foreign_module_import() {
 #[test]
 fn test_leaf221_use_cpp_alias_import_records_alias_binding() {
     let file: syn::File = syn::parse_file("use cpp::std as cpp_std;").expect("parse file");
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.emit_file(&file, None);
 
     assert!(
@@ -20381,7 +20427,7 @@ fn lexical_block_tail_preserves_typed_and_inferred_box_shadows() {
 }
 
 fn consuming_receiver_import_fixture() -> CodeGen {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.current_physical_module = crate::cpp_abi::ModulePath(vec!["consumer".into()]);
     let provider: syn::File = syn::parse_quote! {
         pub struct Queue { value: i32 }
@@ -20554,7 +20600,7 @@ fn consuming_receiver_imported_field_return_uses_preflight_provenance() {
     let (lowered, plan) = crate::cpp_abi::lower(&syn::parse_file(consumer).unwrap(), None)
         .unwrap().unwrap();
     let provider_ast = syn::parse_file(provider).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("example");
     cg.set_crate_module_names(vec!["example.queue".into(), "example.consumer".into()]);
     cg.set_cxx_namespace(Some("example".into()));
@@ -20780,7 +20826,7 @@ fn test_crate_module_import_as_underscore_is_private_and_alias_free() {
         "#[allow(unused_imports)] use crate::provider as _;\npub fn value() -> i32 { 7 }",
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("probe");
     cg.set_crate_module_names(
         ["probe.provider", "probe.consumer"]
@@ -20832,7 +20878,7 @@ fn exact_qualified_flat_type_path_imports_and_rewrites_its_proven_provider() {
         nullable_callback_alias_source: None,
     };
 
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("rrr");
     cg.set_crate_module_names(
         ["rrr.channel", "rrr.fiber_channel"]
@@ -20858,7 +20904,7 @@ fn exact_qualified_flat_type_path_imports_and_rewrites_its_proven_provider() {
     assert!(!out.contains("::channel::OnFrameCallback"), "{out}");
     assert!(!out.contains("using ::rrr::OnFrameCallback;"), "{out}");
 
-    let mut missing = CodeGen::new();
+    let mut missing = test_codegen();
     missing.set_crate_name("rrr");
     missing.set_crate_module_names(vec!["rrr.fiber_channel".to_string()]);
     missing.set_cxx_namespace(Some("rrr".to_string()));
@@ -21390,7 +21436,7 @@ fn test_cfg_const_and_static_reject_unsupported_predicates() {
         ),
     ] {
         let file: syn::File = syn::parse_str(source).unwrap();
-        let mut cg = CodeGen::new();
+        let mut cg = test_codegen();
         cg.emit_file(&file, None);
         let error = cg
             .take_codegen_error()
@@ -21416,7 +21462,7 @@ fn test_known_false_cfg_const_and_static_skip_before_unsupported_check() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.emit_file(&file, None);
     assert!(cg.take_codegen_error().is_none());
     let out = cg.into_output();
@@ -22844,7 +22890,7 @@ fn test_leaf5197_tuple_statement_match_fnmut_payload_patterns_are_runtime_match_
         panic!("expected match expression");
     };
 
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     for (idx, arm) in match_expr.arms.iter().enumerate() {
         let mut bindings = Vec::new();
         let matched = cg.collect_runtime_match_binding_stmts_and_condition(
@@ -29424,7 +29470,7 @@ fn test_external_fmt_path_not_attributed_to_local_mod_fmt() {
     // dependency edge and a false ordering cycle (the unsafe-libyaml fmt<->yaml
     // bug, where yaml's Debug impls created a spurious yaml->fmt edge).
     use std::collections::{HashMap, HashSet};
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let mut known_modules: HashSet<String> = HashSet::new();
     known_modules.insert("fmt".to_string());
     known_modules.insert("data".to_string());
@@ -33794,7 +33840,7 @@ fn test_leaf5153_external_root_buffer_path_keeps_crate_namespace() {
     "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     let mut aliases = HashMap::new();
     // Namespace-wrapped deps keep their crate prefix (main.rs alias_target).
     aliases.insert("itoa".to_string(), "itoa".to_string());
@@ -34029,7 +34075,7 @@ fn test_private_namespace_alias_precedes_reexported_forward_decl_signature() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     let mut aliases = HashMap::new();
     aliases.insert("serde_core".to_string(), String::new());
     cg.set_external_crate_module_aliases(aliases);
@@ -35340,7 +35386,7 @@ fn test_leaf5173_into_iter_next_keeps_rust_option_surface() {
 #[test]
 fn test_leaf5174_map_deref_chain_infers_array_assertion_element_type() {
     let expr: syn::Expr = syn::parse_str("v.iter().map(|v| **v)").unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     let mut scope = HashMap::new();
     scope.insert(
         "v".to_string(),
@@ -36572,7 +36618,7 @@ fn test_leaf5202_missing_visit_method_fallback_is_typed_from_expected_result() {
         _ => panic!("expected method call"),
     };
     let expected_ty: syn::Type = syn::parse_str("Result<V::Value, Error>").unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_name = Some("serde_like".to_string());
 
     let out = cg
@@ -36591,7 +36637,7 @@ fn test_leaf5202_missing_visit_method_fallback_is_typed_from_expected_result() {
 #[test]
 fn test_leaf5202_serde_json_formatter_default_call_uses_runtime_fallback() {
     let receiver: syn::Expr = syn::parse_str("self.formatter").unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_name = Some("serde_json".to_string());
 
     let out = cg.emit_receiver_member_call(
@@ -36657,7 +36703,7 @@ fn test_leaf5202_missing_visit_method_fallback_uses_return_result_error_hint() {
         _ => panic!("expected method call"),
     };
     let return_ty: syn::ReturnType = syn::parse_str("-> Result<V::Value, Error>").unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_name = Some("serde_like".to_string());
     cg.push_return_type_hint(&return_ty);
 
@@ -36689,7 +36735,7 @@ fn test_leaf5202_missing_visit_method_fallback_uses_result_alias_error_hint() {
     };
     let return_ty: syn::ReturnType = syn::parse_str("-> Result<V::Value>").unwrap();
     let alias_target: syn::Type = syn::parse_str("result::Result<T, Error>").unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_name = Some("serde_like".to_string());
     std::rc::Rc::make_mut(&mut cg.type_alias_targets)
         .insert("Result".to_string(), alias_target);
@@ -36716,7 +36762,7 @@ fn test_leaf5202_missing_visit_method_fallback_uses_result_alias_error_hint() {
 
 #[test]
 fn test_leaf5202_current_deserializer_param_recovery_tolerates_scoped_keys() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack.push("de".to_string());
     cg.current_struct = Some("Deserializer".to_string());
     cg.declared_type_params
@@ -36732,7 +36778,7 @@ fn test_leaf5202_current_deserializer_param_recovery_tolerates_scoped_keys() {
 
 #[test]
 fn test_leaf5202_visit_access_ctor_arg_uses_current_deserializer_param() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack.push("de".to_string());
     cg.current_struct = Some("Deserializer".to_string());
     cg.declared_type_params
@@ -38385,7 +38431,7 @@ fn test_detect_ufcs_trait_call_with_mut_receiver() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let info = cg
         .detect_ufcs_trait_method_call(&call)
         .expect("should detect UFCS call");
@@ -38403,7 +38449,7 @@ fn test_detect_ufcs_trait_call_with_shared_receiver() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let info = cg
         .detect_ufcs_trait_method_call(&call)
         .expect("should detect UFCS call");
@@ -38421,7 +38467,7 @@ fn test_detect_ufcs_trait_call_rejects_non_reference_receiver() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
 }
 
@@ -38432,7 +38478,7 @@ fn test_detect_ufcs_trait_call_rejects_plain_function_call() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
 }
 
@@ -38443,7 +38489,7 @@ fn test_detect_ufcs_trait_call_rejects_namespaced_free_function() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
 }
 
@@ -38454,7 +38500,7 @@ fn test_leaf429_detect_ufcs_trait_call_rejects_constructor_like_new_path() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
 }
 
@@ -38465,7 +38511,7 @@ fn test_emit_ufcs_read_call_common_pattern() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "cursor.read(buf)");
 }
@@ -38477,7 +38523,7 @@ fn test_emit_ufcs_trait_call_with_self_receiver() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "tick(1)");
 }
@@ -38489,7 +38535,7 @@ fn test_emit_ufcs_write_call_common_pattern() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "writer.write(buf)");
 }
@@ -38502,7 +38548,7 @@ fn test_leaf41543333333231_emit_ufcs_io_write_fmt_uses_io_dispatch_helper() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "rusty::io::write_fmt(writer, std::string{})");
 }
@@ -38514,7 +38560,7 @@ fn test_emit_ufcs_iterator_next_common_pattern() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "it.next()");
 }
@@ -38526,7 +38572,7 @@ fn test_emit_ufcs_custom_trait_method_common_pattern() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "obj.apply(value)");
 }
@@ -38538,7 +38584,7 @@ fn test_emit_serialize_trait_assoc_call_uses_serialize_dispatch() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert!(out.contains("::ser::rusty_ext::serialize_value("));
     assert!(out.contains("bytes"));
@@ -38553,7 +38599,7 @@ fn test_emit_namespaced_serialize_trait_assoc_call_uses_serialize_dispatch() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert!(out.contains("::ser::rusty_ext::serialize_value("));
     assert!(out.contains("bytes"));
@@ -38567,7 +38613,7 @@ fn test_leaf429_emit_constructor_like_new_path_keeps_function_call_shape() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert!(out.starts_with("rusty::io::cursor_new("));
     assert!(!out.contains(".new("));
@@ -38580,7 +38626,7 @@ fn test_leaf4295_cursor_new_empty_array_lowers_to_concrete_empty_buffer() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(
         out,
@@ -38595,7 +38641,7 @@ fn test_leaf4160_zero_arg_ordering_variant_call_lowers_to_enum_value() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "Ordering::Equal");
 }
@@ -38607,7 +38653,7 @@ fn test_leaf4160_zero_arg_core_ordering_variant_call_maps_without_parens() {
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "rusty::cmp::Ordering::Greater");
 }
@@ -38619,7 +38665,7 @@ fn test_leaf4160_parenthesized_zero_arg_ordering_variant_call_maps_without_paren
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
     assert_eq!(out, "Ordering::Less");
 }
@@ -39061,7 +39107,7 @@ fn test_leaf415433333335_omitted_assoc_static_call_recovers_decltype_template_ar
         syn::Expr::Call(c) => c,
         _ => panic!("expected call expression"),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     let file = syn::parse_file(
         r#"
         mod errors { pub struct CapacityError<T> { value: T } }
@@ -40310,7 +40356,7 @@ fn test_leaf4154445_crate_name_prefix_stripped_from_type_paths() {
         }
     "#;
     let file: syn::File = syn::parse_str(code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("semver");
     cg.emit_file(&file, None);
     let out = cg.into_output();
@@ -40337,7 +40383,7 @@ fn test_leaf4154445_crate_name_prefix_stripped_from_turbofish() {
         }
     "#;
     let file: syn::File = syn::parse_str(code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("semver");
     cg.emit_file(&file, None);
     let out = cg.into_output();
@@ -40360,7 +40406,7 @@ fn test_leaf5193_current_crate_prefixed_either_import_does_not_rewrite_to_runtim
         use either::{Either, Left, Right};
     "#;
     let file: syn::File = syn::parse_str(code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("either");
     cg.emit_file(&file, None);
     let out = cg.into_output();
@@ -40389,7 +40435,7 @@ fn test_leaf5198_crate_named_module_reexport_keeps_namespace_prefix() {
         pub use crate::arrayvec::{ArrayVec, IntoIter, Drain};
     "#;
     let file: syn::File = syn::parse_str(code).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("arrayvec");
     cg.emit_file(&file, None);
     let out = cg.into_output();
@@ -40445,7 +40491,7 @@ fn test_leaf5198_reexported_imported_impl_target_keeps_actual_owner_path() {
 
 #[test]
 fn test_rewrite_global_using_path_for_local_module_root_in_current_scope() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack = vec!["decoder".to_string()];
     cg.declared_module_paths
         .insert("decoder::scalar".to_string());
@@ -40456,7 +40502,7 @@ fn test_rewrite_global_using_path_for_local_module_root_in_current_scope() {
 
 #[test]
 fn test_rewrite_global_using_path_for_local_module_root_in_ancestor_scope() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack = vec!["decoder".to_string(), "string".to_string()];
     cg.declared_module_paths
         .insert("decoder::scalar".to_string());
@@ -40467,7 +40513,7 @@ fn test_rewrite_global_using_path_for_local_module_root_in_ancestor_scope() {
 
 #[test]
 fn test_rewrite_global_using_path_keeps_unknown_global_root() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack = vec!["decoder".to_string()];
     cg.declared_module_paths
         .insert("decoder::scalar".to_string());
@@ -40478,7 +40524,7 @@ fn test_rewrite_global_using_path_keeps_unknown_global_root() {
 
 #[test]
 fn test_rewrite_global_using_path_keeps_global_when_root_matches_current_scope_tail() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack = vec!["private_".to_string()];
     cg.declared_module_paths
         .insert("private_::seed".to_string());
@@ -40490,7 +40536,7 @@ fn test_rewrite_global_using_path_keeps_global_when_root_matches_current_scope_t
 
 #[test]
 fn test_rewrite_global_using_path_keeps_global_when_root_matches_ancestor_scope() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.module_stack = vec!["de".to_string(), "parser".to_string(), "key".to_string()];
     cg.declared_module_paths.insert("de::parser".to_string());
 
@@ -43887,7 +43933,7 @@ fn try_infer_ternary_arm_type_either_constructors_with_concrete_args() {
     // idents stay variables — so we expect None (fallback to
     // local CTAD). This proves the bridge connects without
     // pretending to solve cases it can't.
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let arm_a: syn::Expr = syn::parse_str("Either::Left(cursor_a)").unwrap();
     let arm_b: syn::Expr = syn::parse_str("Either::Right(cursor_b)").unwrap();
     assert!(
@@ -43902,7 +43948,7 @@ fn try_infer_ternary_arm_type_unrecognized_constructors_yield_none() {
     // engine has no rule for it, so it can't pin any parameters,
     // and the bridge returns None. Confirms the API doesn't try
     // to invent a type.
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let arm_a: syn::Expr = syn::parse_str("Foo::A(x)").unwrap();
     let arm_b: syn::Expr = syn::parse_str("Foo::B(y)").unwrap();
     assert!(cg.try_infer_ternary_arm_type(&arm_a, &arm_b).is_none());
@@ -43948,7 +43994,7 @@ fn test_own_crate_use_imports_skipped() {
          fn f() {}",
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("itertools");
     cg.emit_file(&file, Some("test_core"));
     let out = cg.into_output();
@@ -44067,7 +44113,7 @@ fn test_find_invalid_auto_template_arg_allows_legitimate_auto() {
 #[test]
 fn test_to_owned_owned_type_mapping() {
     // `<Self as ToOwned>::Owned`: bespoke impls (str/[T]/Path) + Clone blanket.
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     let norm = |t: &syn::Type| {
         use quote::ToTokens;
         t.to_token_stream().to_string().replace(' ', "")
@@ -44202,7 +44248,7 @@ fn reconcile_telemetry_does_not_change_emit() {
     let src = "pub fn t() -> Vec<u8> { let mut v = Vec::new(); v.push(1u8); v }";
     let baseline = transpile_str(src);
     let file: syn::File = syn::parse_str(src).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_print_inference(true);
     cg.emit_file(&file, None);
     let with_telemetry = cg.into_output();
@@ -44231,7 +44277,7 @@ fn test_into_iter_cross_source_hint_not_routed_to_unqualified_rusty_ext() {
         fn g(w: W) { let _ = w.into_iter(); }
     "#;
     let file: syn::File = syn::parse_str(src).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.external_extension_method_hints.insert("into_iter".to_string());
     cg.emit_file(&file, None);
     let out = cg.into_output();
@@ -44482,7 +44528,7 @@ fn test_flat_umbrella_reexport_does_not_bind_deep_sibling_same_named_type() {
     // the de-side use sites a type missing their `Str`/`ByteBuf`/`Newtype`
     // variants (incomplete-type + no-member compile errors). Keep it flat so the
     // emitter's own `using` binds the correct type.
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.local_declared_types
         .insert("private_::ser::content::Content".to_string());
     assert_eq!(
@@ -46956,7 +47002,7 @@ fn transpile_str_module_with_consumer_map(rust_code: &str, module_name: &str) ->
         )
     })
     .collect();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.set_consumer_module_map(
         crate::transpile::ConsumerModuleMap { modules },
@@ -47038,7 +47084,7 @@ fn test_consumer_module_map_current_rust_scope_override_keeps_canonical_owner_un
             interface,
         )]),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_consumer_module_map(
         map,
         Some("rrr.epoll_wrapper"),
@@ -47077,7 +47123,7 @@ fn test_consumer_module_map_canonical_fallback_does_not_enable_override_normaliz
             interface,
         )]),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_consumer_module_map(map, Some("rrr.epoll_wrapper"), None);
 
     assert_eq!(cg.consumer_rust_module.as_deref(), Some("runtime::epoll"));
@@ -47101,7 +47147,7 @@ fn test_consumer_module_map_rejects_configured_external_root_direct_and_import_a
             entry,
         )]),
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_consumer_module_map(
         map,
         Some("rrr.epoll_wrapper"),
@@ -47281,7 +47327,7 @@ fn auto_trait_specializations_land_outside_the_crate_namespace_wrap() {
          unsafe impl Send for Identifier {} }",
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_crate_name("semverish");
     cg.emit_file(&file, Some("semverish"));
     let out = cg.into_output();
@@ -47622,7 +47668,7 @@ fn test_extern_c_foreign_rust_abi_fn_pointer_rejects() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     let error = cg
@@ -47648,7 +47694,7 @@ fn test_extern_c_foreign_variadic_fn_pointer_param() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     assert!(cg.take_codegen_error().is_none());
@@ -47694,7 +47740,7 @@ fn test_module_mode_sync_imported_weak_dyn_agrees_across_surfaces() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
@@ -47760,7 +47806,7 @@ fn test_module_mode_rc_imported_weak_dyn_stays_rc() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
@@ -47800,7 +47846,7 @@ fn test_smart_pointer_assoc_owner_comes_from_argument_declared_type() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
@@ -47849,7 +47895,7 @@ fn test_non_pub_interface_trait_forward_decl_shares_the_anon_namespace() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
@@ -47962,7 +48008,7 @@ fn test_waker_wake_fn_mismatched_callable_contract_rejects() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     let error = cg
@@ -48150,7 +48196,7 @@ fn test_owning_trait_object_in_adt_keeps_its_crate_trait_target() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.set_cross_file_traits(&traits);
@@ -48183,7 +48229,7 @@ fn test_owning_trait_object_of_a_foreign_trait_still_erases() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_interface_traits(true);
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
@@ -48214,7 +48260,7 @@ fn test_concrete_alias_parameters_keep_their_nominal_type() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     let out = cg.into_output();
@@ -48314,7 +48360,7 @@ fn test_namespace_placement_contract_places_items_in_the_global_namespace() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     assert!(cg.take_codegen_error().is_none());
@@ -48368,7 +48414,7 @@ fn test_no_namespace_placement_contract_leaves_emission_untouched() {
         }
         "#;
     let file: syn::File = syn::parse_str(source).unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     let out = cg.into_output();
@@ -48394,7 +48440,7 @@ fn test_overlapping_namespace_placement_contract_rejects() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     let error = cg
@@ -48420,7 +48466,7 @@ fn test_relative_namespace_placement_target_rejects() {
         "#,
     )
     .unwrap();
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cxx_namespace(Some("rrr".to_string()));
     cg.emit_file(&file, Some("rrr.reactor"));
     let error = cg
@@ -48475,7 +48521,7 @@ fn test_ambiguous_or_relative_placement_contracts_reject() {
         ),
     ] {
         let file: syn::File = syn::parse_str(source).unwrap();
-        let mut cg = CodeGen::new();
+        let mut cg = test_codegen();
         cg.set_cxx_namespace(Some("rrr".to_string()));
         cg.emit_file(&file, Some("rrr.reactor"));
         let error = cg
@@ -48635,7 +48681,7 @@ fn foreign_ordinary_trait_impl_stays_with_extension_owner() {
     let inherent: syn::ItemImpl = syn::parse_quote!(impl Number {
         pub fn twice(&self) -> i32 { self.value * 2 }
     });
-    let mut host_cg = CodeGen::new();
+    let mut host_cg = test_codegen();
     host_cg.set_cross_file_traits(std::slice::from_ref(&encode));
     host_cg.set_cross_file_impl_blocks(vec![implementation.clone(), inherent]);
     let host_file = syn::File { shebang: None, attrs: vec![], items: vec![syn::Item::Struct(host.clone())] };
@@ -48645,7 +48691,7 @@ fn foreign_ordinary_trait_impl_stays_with_extension_owner() {
     assert!(!host_output.contains("Archive"), "ordinary trait must not add reverse dependency: {host_output}");
     assert!(!host_output.contains("encode("), "{host_output}");
 
-    let mut impl_cg = CodeGen::new();
+    let mut impl_cg = test_codegen();
     impl_cg.set_cross_file_structs(vec![host]);
     impl_cg.set_cross_file_traits(std::slice::from_ref(&encode));
     let source: syn::File = syn::parse_quote! {
@@ -48671,7 +48717,7 @@ fn foreign_structural_trait_impl_keeps_explicit_host_members() {
         impl Size for Number { fn size(&self) -> i32 { self.value } }
     };
     let source: syn::File = syn::parse_quote! { pub struct Number { pub value: i32 } };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cross_file_traits(&[trait_decl]);
     cg.set_cross_file_impl_blocks(vec![implementation]);
     cg.emit_file(&source, Some("example.number"));
@@ -48711,7 +48757,7 @@ fn imported_type_alias_does_not_absorb_foreign_inherent_impls() {
         type Worker = crate::provider::Worker;
         fn read(worker: &Worker) -> i32 { worker.read() }
     };
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cross_file_structs(vec![host]);
     cg.set_cross_file_impl_blocks(vec![implementation]);
     cg.emit_file(&source, Some("example.consumer"));
@@ -48723,7 +48769,7 @@ fn imported_type_alias_does_not_absorb_foreign_inherent_impls() {
 
 #[test]
 fn flat_alias_resolution_requires_exact_proof_and_respects_shadowing() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.current_physical_module = crate::cpp_abi::ModulePath(vec!["consumer".into()]);
     cg.set_cross_file_type_aliases(vec![syn::parse_quote!(
         pub type Proxy = std::sync::Arc<u64>;
@@ -48818,7 +48864,7 @@ fn wrapper_aliases_keep_const_callbacks_and_real_mutation() {
 
 #[test]
 fn closure_capture_patterns_obey_lexical_scope() {
-    let cg = CodeGen::new();
+    let cg = test_codegen();
     for expression in [
         "move || { if let Some(future) = pending { consume(future); } }",
         "move || { while let Some(future) = pending.take() { consume(future); } }",
@@ -49010,7 +49056,7 @@ fn guarded_callable_syntax_dereferences_protected_callback() {
 
 #[test]
 fn imported_inherent_receiver_shape_requires_proven_unique_host() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.current_physical_module = crate::cpp_abi::ModulePath(vec!["consumer".into()]);
     let host: syn::ItemStruct = syn::parse_quote!(pub struct Worker { value: i32 });
     cg.set_cross_file_structs(vec![host.clone()]);
@@ -49049,7 +49095,7 @@ fn imported_inherent_receiver_shape_requires_proven_unique_host() {
 
 #[test]
 fn physical_struct_ufcs_proof_rejects_unowned_paths_and_aliases() {
-    let mut cg = CodeGen::new();
+    let mut cg = test_codegen();
     cg.set_cross_file_structs(vec![syn::parse_quote!(pub struct Worker { value: i32 })]);
     cg.set_cross_file_impl_blocks(vec![syn::parse_quote!(impl Worker {
         pub fn read(&self) -> i32 { self.value }

@@ -1795,10 +1795,11 @@ pub struct CodeGen {
     /// may be emitted tier 1, else the excluding §3.2.1 test. ONE source of
     /// truth with the census log; step 3's default flip reads it.
     pub(crate) tier1_pair_verdicts: HashMap<(String, String), Result<(), String>>,
-    /// Phase 1 step 3 (book §3.2.16): tier 1 is the DEFAULT for every
-    /// `(trait, impl)` pair passing §3.2.1 — no attribute needed. Behind a
-    /// switch (`RUSTY_CPP_TIER1_DEFAULT=1`, or `set_tier1_default`) until the
-    /// matrix census is read against it; the markers stay as force attributes.
+    /// Phase 1 (book §3.2.16): tier 1 is the DEFAULT for every `(trait, impl)`
+    /// pair passing §3.2.1 — no attribute needed (measured matrix-neutral on
+    /// all 28 rows). `RUSTY_CPP_TIER1_DEFAULT=0` (or `set_tier1_default(false)`,
+    /// `TranspileOptions::tier1_default`) is the opt-out; the markers stay as
+    /// force attributes.
     pub(crate) tier1_default: bool,
     /// Phase 1: crate mode's crate-wide verdicts (see `TranspileOptions::
     /// crate_tier_verdicts`); consulted before the per-file census.
@@ -1900,6 +1901,10 @@ pub struct CodeGen {
     /// §3.2.12): collected while the impl's `impl_` functions emit, written
     /// into `namespace <Tr>_` right after.
     pub(crate) ufcs_abi_companion_wanted: bool,
+    /// §3.2.12 companions WITHOUT the impl functions: a `cpp_inherit` impl of
+    /// a tier-1 trait — its body is the override, the tier-1 bridge carries
+    /// `Tr_::m`, and the incumbent ABI still owns `Tr_::m(Self&, …)`.
+    pub(crate) ufcs_abi_companion_only: bool,
     pub(crate) ufcs_abi_companions_pending: Vec<String>,
     /// UFCS Phase 7 / § 3.2.13: `(trait, method)` pairs for which a
     /// `<Tr>_::m` free function was ACTUALLY emitted (the declaration emitter
@@ -3676,7 +3681,9 @@ impl CodeGen {
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
             demoted_member_dispatch_traits: std::collections::HashSet::new(),
             tier1_pair_verdicts: HashMap::new(),
-            tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT").is_some(),
+            tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             crate_tier_verdicts: None,
             dependency_tier1_traits: std::collections::HashSet::new(),
             dependency_trait_nonvtable_defaults: HashMap::new(),
@@ -3702,6 +3709,7 @@ impl CodeGen {
             ufcs_traits_with_generic_impls: HashSet::new(),
             ufcs_tag_namespace: None,
             ufcs_abi_companion_wanted: false,
+            ufcs_abi_companion_only: false,
             ufcs_abi_companions_pending: Vec::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_bridge_emitted_traits: std::collections::HashSet::new(),
@@ -21766,8 +21774,12 @@ impl CodeGen {
             // Phase 1 step 1: a tier-1 impl of a tier-1 trait — its body is
             // the override; the tier-1 bridge carries `Tr_::m` for it. (A
             // `cpp_inherit` that was a diagnosed no-op — a foreign self type —
-            // is a tier-2 impl and emits its functions.)
-            return;
+            // is a tier-2 impl and emits its functions.) A FORCED impl keeps its
+            // §3.2.12 ABI companions, which forward into the bridge.
+            if !self.has_cpp_inherit_attr(&impl_block.attrs, module_path) {
+                return;
+            }
+            self.ufcs_abi_companion_only = true;
         }
         // Cross-crate dedup: drop methods an imported dependency already provides
         // (the shared `<Trait>_` namespace would otherwise declare the same C++
@@ -21849,6 +21861,7 @@ impl CodeGen {
     /// into `namespace <Tr>_` beside the dispatchers.
     fn emit_pending_ufcs_abi_companions(&mut self, trait_name: &str) {
         self.ufcs_abi_companion_wanted = false;
+        self.ufcs_abi_companion_only = false;
         if self.ufcs_abi_companions_pending.is_empty() {
             return;
         }
@@ -21951,10 +21964,10 @@ impl CodeGen {
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
             && self.impl_is_tier1_inheriting(impl_block, module_path)
         {
-            // Phase 1 step 1: a tier-1 impl of a tier-1 trait — its body is
-            // the override; the tier-1 bridge carries `Tr_::m` for it. (A
-            // `cpp_inherit` that was a diagnosed no-op — a foreign self type —
-            // is a tier-2 impl and emits its functions.)
+            // Phase 1 step 1: a tier-1 impl of a tier-1 trait declares no impl
+            // functions (its body is the override; the tier-1 bridge carries
+            // `Tr_::m`). A forced impl's ABI companions are DEFINITIONS, emitted
+            // by the definition pass in companion-only mode.
             return;
         }
         // Cross-crate dedup (mirrors the definition emitter): drop methods an
@@ -25780,6 +25793,7 @@ impl CodeGen {
         return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         self.record_extension_free_function_symbol(&method_name);
         if self.ufcs_abi_companion_wanted
+            && receiver_opt.is_some()
             && free_generics.params.is_empty()
             && self.ufcs_tag_namespace.is_some()
             && params.len() >= 2
@@ -25788,9 +25802,20 @@ impl CodeGen {
             // `<Tr>_::m(Self&, …)` as a non-template forwarder beside the
             // dispatcher (a non-template may share the name; measured).
             let plain_params: Vec<&str> = params[1..].iter().map(String::as_str).collect();
-            let arg_names: Vec<&str> = plain_params
+            // A by-value parameter (the receiver of a by-value `self`, a
+            // by-value argument) is moved on: the tier-1 bridge's by-value
+            // arm takes rvalues only, and a copy would double the object.
+            let arg_names: Vec<String> = plain_params
                 .iter()
-                .map(|p| p.rsplit(' ').next().unwrap_or(p))
+                .map(|p| {
+                    let (ty, name) = p.rsplit_once(' ').unwrap_or(("", p));
+                    let ty = ty.trim_end();
+                    if ty.ends_with('&') || ty.ends_with('*') {
+                        name.to_string()
+                    } else {
+                        format!("std::move({})", name)
+                    }
+                })
                 .collect();
             self.ufcs_abi_companions_pending.push(format!(
                 "{}inline {} {}({}) {{ return impl_::{}(impl_::tag{{}}, {}); }}",
@@ -25801,6 +25826,11 @@ impl CodeGen {
                 escaped_method_name,
                 arg_names.join(", ")
             ));
+        }
+        if self.ufcs_abi_companion_only {
+            // The companion is the whole of this impl's lane presence (the
+            // type-parameter scope and the signature flag were restored above).
+            return;
         }
         // Fix A part 2: inject the multi-owner default's `requires` constraint
         // after the template parameter list (must match the declaration);

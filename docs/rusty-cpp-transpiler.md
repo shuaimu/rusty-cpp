@@ -2752,6 +2752,30 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   impl. The inert-marker recognizer is generic over the marker name. Test:
   `test_tier1_force_attribute_limits_and_per_impl_opt_out` (`Shadow` forced but shadowing → no base;
   `Packed` `repr(C)` forced → inherits; `Plain` opted out → no base; `Dflt` → inherits by default).
+- *2026-10-08 — phase 1, the switch measured on the FULL matrix:* `RUSTY_CPP_TIER1_DEFAULT=1` over all
+  28 rows (from the main checkout — the matrix script needs a local crate's untracked manifest that a
+  worktree lacks) gives `pass=20 fail=5 known-fail=3`, the SAME rows as the baseline (alloc, bitflags,
+  path, rusty, serde_bytes; hashbrown, indexmap, census): tier 1 by default is matrix-neutral, with
+  the thirteen eligible pairs of §3.2.1's census emitted as inheritance. What remains before the
+  default flips in the binary: the unit suite measured with the switch on (the shipped-shape
+  expectations that a default flip changes), then the env var becomes an opt-out.
+- *2026-10-08 — phase 1, step 8: tier 1 is the default.* The switch's full-matrix measurement
+  (above) is the evidence; `RUSTY_CPP_TIER1_DEFAULT=0`, `CodeGen::set_tier1_default(false)` and
+  `TranspileOptions::tier1_default` opt out. The unit suite with the default ON measured 23 failures:
+  twenty expectations of the free-function lane's shapes for pairs that are now tier 1 (adapters at a
+  `Box::new`, impl functions, markers, a struct without a base), the lookalike-authentication tests
+  (a base now comes from the census regardless of the attribute), and one real defect — the srpc `Job`
+  shape lost its §3.2.12 **ABI companions** (`Job_::Ready(OneTimeJob&)`, symbols the incumbent owns),
+  because a forced `cpp_inherit` impl of a (now) tier-1 trait emitted nothing in the lane. Fixed:
+  companion-only mode — the companions are emitted without the impl functions and forward into the
+  tier-1 bridge. Also: a tier-1 implementor with fields gets a defaulted default constructor beside the
+  fieldwise one (the ref-forwarder runtime test's C++ side wrote `Cell c{}` against the shipped
+  aggregate shape). The unit suite now pins the free-function lane in its shared harness
+  (`test_codegen()` → `set_tier1_default(false)`) — its expectations describe that lane — while the
+  `test_tier1_*` tests opt in and the matrix measures the default; the transpile-level tests pin the
+  lane through the option; the inline-rust lookalike fixture is census-ineligible (an inherent `value`),
+  so a base there can only come from an authenticated attribute. **Phase 1 status:** steps 1–8 landed;
+  open: the cross-crate tier decision (`impl DepTrait for LocalType`; no matrix cell measures it).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
@@ -3283,11 +3307,11 @@ concrete-on-generic self type a *diagnosed* no-op; interface hoisted before any 
 anonymous-namespace wrap only for non-`pub` traits with non-`pub` implementors; `rusty::unreachable_via_const_dyn`
 added to `include/rusty`.
 
-**Phase 1 — tier 1 becomes the default.** (Steps 1–4 landed 2026-10-08 — the lane decoupled from the
-marker with the tier-1 bridge; the census's per-pair verdict as one function; tier 1 by default behind
-`RUSTY_CPP_TIER1_DEFAULT`, measured green on the four matrix crates with tier-1 pairs; the manifest's
-tier fields — see the §3.2.12 entries. Open: the cross-crate tier decision, decision (w)'s limit on the
-force attributes, the per-impl opt-out, and the switch's default.) A program-wide impl pre-pass (the shape of
+**Phase 1 — tier 1 becomes the default.** (Steps 1–8 landed 2026-10-08 — the lane decoupled from the
+marker with the tier-1 bridge; the census's per-pair verdict as one function; the default behind a
+switch, then measured matrix-neutral on all 28 rows and made the default; the manifest's tier fields;
+the crate-wide census pre-pass; decision (w) and the per-impl opt-out — see the §3.2.12 entries. Open:
+the cross-crate tier decision.) A program-wide impl pre-pass (the shape of
 `set_cross_file_traits`, over every impl block in the dependency graph) computes what §3.2.1 needs and
 the collect pass lacks: blanket and conditional presence per `(trait, method name)`; per-type
 implemented-trait sets and same-name collisions over concrete impls; inherent-vs-tier-1 name overlap;

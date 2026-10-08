@@ -1010,6 +1010,10 @@ pub struct TranspileOptions {
     /// shared by the whole crate. `None` outside crate mode (the per-file
     /// census stands in).
     pub crate_tier_verdicts: Option<std::sync::Arc<crate::tier_census::CrateTierVerdicts>>,
+    /// Phase 1: `Some(false)` pins the free-function lane for every pair
+    /// (the pre-phase-1 shape), `Some(true)` forces tier 1 by default, `None`
+    /// leaves the codegen default (tier 1, `RUSTY_CPP_TIER1_DEFAULT=0` opts out).
+    pub tier1_default: Option<bool>,
     /// B: crate-wide (Rust name -> audited C++ name) for cpp_name identities
     /// owned by ANY file of the crate, so a caller in another file emits the
     /// owner's identity instead of the crate audit rejecting the reference.
@@ -2857,6 +2861,7 @@ impl Default for TranspileOptions {
             cross_file_enums: Vec::new(),
             cross_file_traits: Vec::new(),
             crate_tier_verdicts: None,
+            tier1_default: None,
             cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             cross_file_cpp_inherit: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
@@ -3731,6 +3736,9 @@ fn transpile_full_with_options_impl(
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
     codegen.set_cross_file_traits(&options.cross_file_traits);
     codegen.set_crate_tier_verdicts(options.crate_tier_verdicts.clone());
+    if let Some(on) = options.tier1_default {
+        codegen.set_tier1_default(on);
+    }
     codegen.set_cross_file_cpp_name_targets(options.cross_file_cpp_name_targets.clone());
     codegen.set_cross_file_cpp_inherit(options.cross_file_cpp_inherit.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
@@ -5984,6 +5992,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         // `impl Greet for Foo` is emitted as a free
         // function in `namespace Greet_`, with `self` rewritten to `self_`.
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6017,6 +6026,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         // `f.hello()` (a trait-only crate method) lowers to the
         // free-function dispatch form `... requires { hello(__self) } ...`.
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6058,6 +6068,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         "#;
 
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6088,6 +6099,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             fn use_it(f: &Foo) -> i32 { f.hello() }
         "#;
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6128,6 +6140,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             fn use_generic<T: Producer>(t: &T) -> T::Output { t.produce() }
         "#;
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6167,6 +6180,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             fn use_it(f: &Foo) -> i32 { f.hello() }
         "#;
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6223,6 +6237,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             fn via_qualified(p: &Person) -> i32 { <Person as Greet>::name(p) }
         "#;
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6267,6 +6282,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             fn read(x: &Flags) -> u32 { let bits = x.bits(); bits }
         "#;
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6306,6 +6322,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             fn d_foo(f: &Foo) -> i32 { f.describe() }
         "#;
         let options = TranspileOptions {
+            tier1_default: Some(false),
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -6353,6 +6370,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_emit_test.json");
         let _ = std::fs::remove_file(&path);
         let options = TranspileOptions {
+            tier1_default: Some(false),
             emit_ufcs_trait_manifest_path: Some(path.clone()),
             ..TranspileOptions::default()
         };
@@ -6574,6 +6592,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             std::env::temp_dir().join("rusty_ufcs_manifest_variant_roundtrip_test.json");
         let _ = std::fs::remove_file(&manifest_path);
         let options = TranspileOptions {
+            tier1_default: Some(false),
             emit_ufcs_trait_manifest_path: Some(manifest_path.clone()),
             ..TranspileOptions::default()
         };

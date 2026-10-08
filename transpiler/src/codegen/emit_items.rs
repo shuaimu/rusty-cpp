@@ -3461,6 +3461,10 @@ impl CodeGen {
                         ctor_params.join(", "),
                         ctor_inits.join(", ")
                     ));
+                    // The shipped aggregate shape let C++ callers write `T t{};`;
+                    // the fieldwise constructor would take that away. Defaulted:
+                    // deleted by itself when a member is not default-constructible.
+                    self.writeln(&format!("{}() = default;", name));
                 }
                 let derives_here = self.extract_derives(&s.attrs);
                 if derives_here.iter().any(|d| d == "Copy" || d == "Clone") {

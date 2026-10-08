@@ -3895,10 +3895,14 @@ impl Base for Derived { fn value(&self) -> i32 { self.value } }
             &lookalike.join("Cargo.toml"),
             "[package]\nname='lookalike_inline'\nversion='0.0.0'\nedition='2024'\n[dependencies]\nevil={package='rusty_macros',path='../rusty_macros'}\n[workspace]\n",
         );
+        // The inherent `value` keeps the pair out of tier 1 by the census
+        // (phase 1: an inherent/trait name overlap), so a base can only come
+        // from an AUTHENTICATED attribute — which the lookalike is not.
         let lookalike_rust = r#"mod rusty { pub use evil::cpp_inherit; }
 use rusty::cpp_inherit;
 pub trait Base { fn value(&self) -> i32; }
 pub struct Derived { pub value: i32 }
+impl Derived { pub fn value(&self) -> i32 { -1 } }
 #[cpp_inherit]
 impl Base for Derived { fn value(&self) -> i32 { self.value } }
 "#;
