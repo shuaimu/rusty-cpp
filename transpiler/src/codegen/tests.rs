@@ -9007,7 +9007,7 @@ int main() {
 }
 
 #[test]
-fn test_exact_inactive_trait_member_dispatch_suppresses_ufcs_helpers() {
+fn test_exact_inactive_trait_member_dispatch_keeps_the_free_function_lane() {
     let exact = transpile_str_interface_traits(
         r#"
         #[cfg_attr(any(), cpp_trait_member_dispatch)]
@@ -9022,14 +9022,18 @@ fn test_exact_inactive_trait_member_dispatch_suppresses_ufcs_helpers() {
         pub fn call(sink: &mut BufferSink) -> i32 { sink.deposit(2) }
         "#,
     );
-    assert!(!exact.contains("namespace SinkBase_"), "{exact}");
+    // Phase 1 step 1 (book §3.2.2): the marker no longer suppresses the
+    // free-function lane — every crate trait has its `<Tr>_` namespace
+    // (dispatchers, marker, concept, the tier-1 bridges), the forwarders are
+    // CPO-first, and the marker chooses inheritance and the interface shape
+    // only. No `using namespace`, ever.
+    assert!(exact.contains("namespace SinkBase_"), "{exact}");
     assert!(!exact.contains("using namespace SinkBase_"), "{exact}");
-    assert!(exact.contains("return value_.deposit(value);"), "{exact}");
-    assert!(!exact.contains("SinkBase_::deposit(value_"), "{exact}");
-    assert!(
-        exact.contains("sink.deposit(static_cast<int32_t>(2))"),
-        "{exact}"
-    );
+    assert!(exact.contains("SinkBase_::deposit(value_"), "{exact}");
+    assert!(exact.contains("concept has_tier1_SinkBase = std::derived_from<std::remove_cvref_t<U>, SinkBase>;"), "{exact}");
+    assert!(exact.contains("template<class S> requires has_tier1_SinkBase<S> int32_t deposit(SinkBase_::impl_::tag, S& __self, int32_t value) { return __self.deposit(std::move(value)); }"), "{exact}");
+    // The call site takes the §3.2.3 ladder (the member arm, then the CPO).
+    assert!(exact.contains(".deposit(std::forward<decltype(__arg0)>(__arg0))"), "{exact}");
 
     for attribute in [
         "#[cpp_trait_member_dispatch]",
@@ -9138,41 +9142,40 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     cg.emit_file(&source, Some("trait_dispatch_scope_review"));
     let module = cg.into_output();
 
-    assert!(!module.contains("namespace RootDispatch_"), "{module}");
-    assert_eq!(module.matches("namespace Clash_::impl_ {").count(), 2, "{module}");
-    assert_eq!(module.matches("namespace Layer_::impl_ {").count(), 1, "{module}");
-    assert!(
-        !module.contains("using ::marked::__ufcs_Clash::value")
-            && !module.contains("using ::marked::deep::__ufcs_Layer::depth"),
-        "marked lexical owners leaked UFCS helpers:\n{module}"
-    );
-    // Book §3.2.10: per TRAIT (one marked `Clash`, two unmarked; one marked and
-    // one unmarked `Layer`), three generic forwarders each — not per
-    // implementor. A marked owner's slot probes the member first; an unmarked
-    // owner's slot the CPO first.
+    // Phase 1 step 1 (book §3.2.2): the marked traits have their `<Tr>_` lanes
+    // too — three `Clash` traits and two `Layer` traits each emit their impl
+    // functions (the nested-module ones through the per-module helper
+    // namespace and its using-bridge), and the forwarders are CPO-first for
+    // every trait; the marker chooses inheritance and the interface shape only.
+    assert!(module.contains("namespace RootDispatch_"), "{module}");
+    assert_eq!(module.matches("namespace Clash_::impl_ {").count(), 6, "{module}");
+    assert_eq!(module.matches("namespace Layer_::impl_ {").count(), 3, "{module}");
+    assert!(module.contains("using ::marked::__ufcs_Clash::value"), "{module}");
+    // Book §3.2.10: per TRAIT, three generic forwarders each — not per
+    // implementor — every slot CPO-first.
     assert_eq!(
-        module.matches("{ if constexpr (requires { value_.rusty_RootDispatch_root_value(); })").count(),
+        module.matches("{ if constexpr (requires { RootDispatch_::root_value(value_); })").count(),
         3,
         "{module}"
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { value_.rusty_Clash_value(); })").count(),
-        3,
+        0,
         "{module}"
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
-        6,
+        9,
         "{module}"
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { value_.rusty_Layer_depth(); })").count(),
-        3,
+        0,
         "{module}"
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { Layer_::depth(value_); })").count(),
-        3,
+        6,
         "{module}"
     );
 
@@ -9400,8 +9403,8 @@ pub mod external_glob {
     let out = transpile_str_interface_traits(source);
     assert_eq!(
         out.matches("namespace Clash_::impl_ {").count(),
-        1,
-        "only the nearer child-local unmarked trait may retain UFCS lowering:\n{out}"
+        5,
+        "phase 1 step 1: every `Clash` — marked or not — has its lane:\n{out}"
     );
     // `marked::Clash` is a cpp_trait_member_dispatch trait: an impl resolved to
     // it gets NO UFCS impl function (member dispatch); the nearer child-local
@@ -9412,8 +9415,11 @@ pub mod external_glob {
         "::local_chain::ChainHost",
         "::local_reexport_chain::ReexportHost",
     ] {
+        // Phase 1 step 1: the marked `Clash` has its lane, so an impl resolved
+        // to it emits its function there (the external same-leaf `Selected`
+        // still gets nothing — asserted above).
         assert!(
-            !out.contains(&format!("value(Clash_::impl_::tag, const {host}& self_)")),
+            out.contains(&format!("value(Clash_::impl_::tag, const {host}& self_)")),
             "local spelling did not resolve to marked::Clash ({host}):\n{out}"
         );
     }
@@ -9427,17 +9433,18 @@ pub mod external_glob {
             && !out.contains("namespace Selected_"),
         "external/import spelling acquired local trait behavior:\n{out}"
     );
-    // Two marked `Clash` traits (root, `marked`) → three generic forwarders each
-    // dispatching to the member first; the unmarked child-local one forwards
-    // through its CPO first (members only as the cross-crate fallback).
+    // Phase 1 step 1: three `Clash` traits (root, `marked`, the child-local
+    // one) → three generic forwarders each, every slot CPO-first (the tier-1
+    // bridge reaches an inheriting implementor; members only as the
+    // cross-crate fallback behind the CPO).
     assert_eq!(
         out.matches("{ if constexpr (requires { value_.rusty_Clash_value(); })").count(),
-        6,
+        0,
         "{out}"
     );
     assert_eq!(
         out.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
-        3,
+        9,
         "{out}"
     );
 }
@@ -10214,7 +10221,8 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
         impl Named for i32 { fn name(&self) -> String { format!("i{}", self) } }
         pub fn cell_foreign() -> String {
             let x: i32 = 7;
-            format!("{} {}", x.name(), Named::name(&x))
+            let d: &dyn Named = &x;
+            format!("{} {} {}", x.name(), Named::name(&x), d.name())
         }
         "#,
     );
@@ -10233,7 +10241,7 @@ fn test_tier1_phase0_emission_cells_clang_runtime() {
     assert!(cpp.contains("auto(p).consumed()"), "Copy implementor: decay-copy: {cpp}");
     assert!(cpp.contains("std::move(o).consumed()"), "non-Copy implementor: move: {cpp}");
     assert!(cpp.contains("rusty::clone(o).consumed()"), "prvalue receiver untouched: {cpp}");
-    assert!(cpp.contains("int32_t consumed() && override { if constexpr (requires { std::move(value_).rusty_Area_consumed(); })"), "owning forwarder consumes: {cpp}");
+    assert!(cpp.contains("int32_t consumed() && override { if constexpr (requires { Area_::consumed(std::move(value_)); })"), "owning forwarder consumes (CPO-first, the tier-1 bridge takes std::move(__self)): {cpp}");
     assert!(cpp.contains("int32_t consumed() && override { rusty::intrinsics::unreachable_via_const_dyn(); }"), "reference forwarders stub: {cpp}");
     let late_def = cpp.find("class Late {").expect("Late interface");
     let early_def = cpp.find("struct Early : public Late {").expect("Early implementor");
@@ -10268,7 +10276,7 @@ int main() {
     bad += check("tuple_unit", std::string(rusty::to_string_view(cell_tuple_unit())), "pair(1,2) unit pair(3,4)+unit true");
     bad += check("early", std::string(rusty::to_string_view(cell_early())), "42 42");
     bad += check("hidden", std::string(rusty::to_string_view(cell_hidden())), "42");
-    bad += check("foreign", std::string(rusty::to_string_view(cell_foreign())), "i7 i7");
+    bad += check("foreign", std::string(rusty::to_string_view(cell_foreign())), "i7 i7 i7");
     return bad;
 }
 "#,
@@ -10375,7 +10383,8 @@ fn test_tier1_phase0_member_dispatch_marker_on_ineligible_trait_is_a_diagnosed_n
     // ...and the eligible one kept tier 1.
     assert!(cpp.contains("struct P : public Fine {"), "{cpp}");
     assert!(cpp.contains("int32_t v() const override;"), "{cpp}");
-    assert!(!cpp.contains("namespace Fine_"), "{cpp}");
+    // Phase 1 step 1: the eligible trait has its `<Tr>_` lane too.
+    assert!(cpp.contains("namespace Fine_"), "{cpp}");
 }
 
 #[test]
@@ -10701,6 +10710,43 @@ int main() {
         run.status.code(),
         String::from_utf8_lossy(&run.stdout)
     );
+}
+
+#[test]
+fn test_tier1_default_switch_inherits_without_attributes() {
+    // Book §3.2.16 phase 1 step 3: with the switch on, a `(trait, impl)` pair
+    // that passes §3.2.1 is tier 1 with NO attribute — the implementor inherits
+    // the interface and its methods override; a pair that fails (a `Self`
+    // parameter; a foreign self type) keeps the free-function lane, and the
+    // trait's lane exists for both. With the switch off nothing changes.
+    let src = r#"
+        pub trait Fine { fn v(&self) -> i32; }
+        pub trait Same { fn same(&self, other: &Self) -> bool; }
+        pub struct P { pub val: i32 }
+        impl Fine for P { fn v(&self) -> i32 { self.val } }
+        impl Same for P { fn same(&self, other: &Self) -> bool { self.val == other.val } }
+        impl Fine for i32 { fn v(&self) -> i32 { *self } }
+        pub fn go(p: &P) -> i32 { p.v() + 7.v() }
+    "#;
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let on = cg.into_output();
+    assert!(on.contains("struct P : public Fine {"), "{on}");
+    assert!(on.contains("int32_t v() const override;"), "{on}");
+    assert!(!on.contains("struct P : public Same"), "{on}");
+    assert!(on.contains("namespace Fine_"), "{on}");
+    assert!(on.contains("has_tier1_Fine"), "{on}");
+    assert!(on.contains("int32_t v(Fine_::impl_::tag, const int32_t& self_)"), "tier-2 impl of a tier-1 trait keeps its functions: {on}");
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.emit_file(&file, None);
+    let off = cg.into_output();
+    assert!(!off.contains("struct P : public Fine"), "{off}");
+    assert!(!off.contains("has_tier1_Fine"), "{off}");
 }
 
 #[test]
@@ -49233,8 +49279,8 @@ fn test_ufcs_multi_owner_in_scope_pair_is_guarded_with_e0034_assert() {
         "two in-scope owners must be guarded (rustc E0034):\n{def}"
     );
     assert!(
-        def.contains("static_cast<int>(impls_A<__ufcs_S>::value) + static_cast<int>(impls_B<__ufcs_S>::value)"),
-        "the guard must count implementors by the exact-type marker, not call viability:\n{def}"
+        def.contains("static_cast<int>(has_A<__ufcs_S>) + static_cast<int>(has_B<__ufcs_S>)"),
+        "the guard must count implementors by the exact-type marker (through the concept, which a tier-1 implementor satisfies by inheritance), not call viability:\n{def}"
     );
     assert!(def.contains("A_::foo(") && def.contains("B_::foo("), "{def}");
 }

@@ -404,7 +404,33 @@ pub fn axis1_verdicts(file: &syn::File) -> std::collections::HashMap<String, Res
     out
 }
 
-pub fn run(file: &syn::File, label: &str) {
+/// Book §3.2.1 applied to one crate-trait `(trait, impl)` pair: `Ok(())` when
+/// the pair may be emitted tier 1, else the excluding test (`A1 …` / `A2 …`).
+#[derive(Debug, Clone)]
+pub struct PairVerdict {
+    /// The trait's module-scoped key (`m::Tr`, or `Tr` at the root).
+    pub trait_key: String,
+    /// The impl's self type as written.
+    pub self_written: String,
+    /// The self type's module-scoped key when it is a declared struct/enum.
+    pub self_type_key: Option<String>,
+    /// The impl's module path.
+    pub module: Vec<String>,
+    pub verdict: Result<(), String>,
+}
+
+/// The census of one file: every crate-trait pair with its verdict, and the
+/// same-name demotions of the post-pass (a method declared by two tier-1
+/// traits on one type demotes BOTH pairs — the member name would collide).
+pub struct CensusOutcome {
+    pub pairs: Vec<PairVerdict>,
+    /// (type key, method, the traits declaring it)
+    pub demotions: Vec<(String, String, Vec<String>)>,
+}
+
+/// Phase 1 (§3.2.16): the per-pair tier decision, ONE source of truth for the
+/// census log and the emitter.
+pub fn pair_verdicts(file: &syn::File) -> CensusOutcome {
     let mut c = Census::default();
     let mut module = Vec::new();
     collect(&file.items, &mut module, &mut c);
@@ -431,16 +457,14 @@ pub fn run(file: &syn::File, label: &str) {
     // per-type tier-1 impl bookkeeping for the same-name / instantiation tests
     let mut tier1_methods_by_type: HashMap<String, Vec<(String, String)>> = HashMap::new(); // type key → (method, trait)
     let mut generic_trait_insts: HashMap<(String, String), usize> = HashMap::new(); // (type key, trait key) → count
-    let mut pairs = 0usize;
-    let mut tier1 = 0usize;
-    let mut lines: Vec<String> = Vec::new();
-    let mut tier1_pairs: Vec<(usize, String, String)> = Vec::new();
-    for (idx, imp) in c.impls.iter().enumerate() {
+    let mut pairs: Vec<PairVerdict> = Vec::new();
+    for imp in c.impls.iter() {
         let Some(tk) = &imp.trait_key else { continue }; // foreign trait: not a crate-trait pair
-        pairs += 1;
+        let mut self_type_key_out: Option<String> = None;
         let verdict: Result<(), String> = (|| {
             trait_verdict.get(tk).cloned().unwrap_or_else(|| Err("unknown".into()))?;
             let ty = self_type_key(&c, imp)?;
+            self_type_key_out = Some(ty.key.clone());
             if ty.repr_c_or_transparent {
                 return Err("A2 repr(C)/repr(transparent)".into());
             }
@@ -455,6 +479,23 @@ pub fn run(file: &syn::File, label: &str) {
                 *e += 1;
                 if *e > 1 {
                     return Err("A2 second instantiation of a generic trait on one type".into());
+                }
+            }
+            // book §3.2.14: `impl Tr for &T` beside `impl Tr for T` is the keyed
+            // (`self_tag`) twin of the lane — references are never tier-1 self
+            // types, and a tier-1 `T` beside its twin would make every `&T`
+            // coercion to `dyn Tr` pick the inherited value body (measured on
+            // trait_probes_collapse under the phase-1 switch): the pair stays
+            // tier 2 so both bodies live in the lane.
+            {
+                let value_written = imp.self_written.replace(' ', "");
+                let has_ref_twin = c.impls.iter().any(|o| {
+                    o.trait_key.as_deref() == Some(tk.as_str())
+                        && matches!(o.self_ty, syn::Type::Reference(_))
+                        && o.self_written.replace(' ', "").trim_start_matches('&').trim_start_matches("mut") == value_written
+                });
+                if has_ref_twin {
+                    return Err(format!("A2 `impl {} for &{}` twin: the pair stays keyed in the lane", t.key.rsplit("::").next().unwrap_or(&t.key), imp.self_written));
                 }
             }
             // supertraits concretely implemented in this crate at tier 1
@@ -472,18 +513,17 @@ pub fn run(file: &syn::File, label: &str) {
             for m in &c.traits[tk].methods {
                 tier1_methods_by_type.entry(ty_key.clone()).or_default().push((m.name.clone(), tk.clone()));
             }
-            tier1_pairs.push((idx, ty_key, tk.clone()));
         });
-        match verdict {
-            Ok(()) => {
-                tier1 += 1;
-                lines.push(format!("census\t{label}\t{tk}\t{}\tTIER1\t-", imp.self_written));
-            }
-            Err(reason) => lines.push(format!("census\t{label}\t{tk}\t{}\tTIER2\t{reason}", imp.self_written)),
-        }
+        pairs.push(PairVerdict {
+            trait_key: tk.clone(),
+            self_written: imp.self_written.clone(),
+            self_type_key: self_type_key_out,
+            module: imp.module.clone(),
+            verdict,
+        });
     }
-    // same-name test across the type's tier-1 impls (post-pass)
-    let mut demoted = 0usize;
+    // same-name test across the type's tier-1 impls (post-pass): demote both pairs
+    let mut demotions: Vec<(String, String, Vec<String>)> = Vec::new();
     for (ty_key, entries) in &tier1_methods_by_type {
         let mut by_name: BTreeMap<&String, BTreeSet<&String>> = BTreeMap::new();
         for (m, tr) in entries {
@@ -491,13 +531,103 @@ pub fn run(file: &syn::File, label: &str) {
         }
         for (m, traits) in by_name {
             if traits.len() > 1 {
-                demoted += 1;
-                lines.push(format!("census\t{label}\t{}\t{ty_key}\tTIER2\tA2 `{m}` declared by two tier-1 traits on one type", traits.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("+")));
+                let traits: Vec<String> = traits.iter().map(|s| s.to_string()).collect();
+                for p in pairs.iter_mut() {
+                    if p.verdict.is_ok()
+                        && p.self_type_key.as_deref() == Some(ty_key.as_str())
+                        && traits.contains(&p.trait_key)
+                    {
+                        p.verdict = Err(format!("A2 `{m}` declared by two tier-1 traits on one type"));
+                    }
+                }
+                demotions.push((ty_key.clone(), m.clone(), traits));
             }
         }
     }
-    for l in &lines {
-        eprintln!("{l}");
+    CensusOutcome { pairs, demotions }
+}
+
+pub fn run(file: &syn::File, label: &str) {
+    let outcome = pair_verdicts(file);
+    let mut tier1 = 0usize;
+    for p in &outcome.pairs {
+        match &p.verdict {
+            Ok(()) => {
+                tier1 += 1;
+                eprintln!("census\t{label}\t{}\t{}\tTIER1\t-", p.trait_key, p.self_written);
+            }
+            Err(reason) => eprintln!("census\t{label}\t{}\t{}\tTIER2\t{reason}", p.trait_key, p.self_written),
+        }
     }
-    eprintln!("census-summary\t{label}\tpairs={pairs}\ttier1={}\tsame-name-demotions={demoted}", tier1);
+    for (ty_key, m, traits) in &outcome.demotions {
+        eprintln!(
+            "census\t{label}\t{}\t{ty_key}\tTIER2\tA2 `{m}` declared by two tier-1 traits on one type",
+            traits.join("+")
+        );
+    }
+    eprintln!(
+        "census-summary\t{label}\tpairs={}\ttier1={}\tsame-name-demotions={}",
+        outcome.pairs.len(),
+        tier1,
+        outcome.demotions.len()
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pair_verdicts_apply_both_axes_and_the_same_name_demotion() {
+        let file: syn::File = syn::parse_str(
+            r#"
+            pub trait Same { fn same(&self, other: &Self) -> bool; }
+            pub trait Gen { fn show<T: core::fmt::Debug>(&self, t: T) -> String; }
+            pub trait Fine { fn v(&self) -> i32; }
+            pub trait Gat { type Item<'a>; fn first(&self) -> i32; }
+            pub struct P { pub val: i32 }
+            impl Same for P { fn same(&self, other: &Self) -> bool { self.val == other.val } }
+            impl Gen for P { fn show<T: core::fmt::Debug>(&self, t: T) -> String { format!("{:?}", t) } }
+            impl Fine for P { fn v(&self) -> i32 { self.val } }
+            impl Gat for P { type Item<'a> = &'a i32; fn first(&self) -> i32 { 1 } }
+            pub trait A { fn k(&self) -> i32; }
+            pub trait B { fn k(&self) -> i32; }
+            pub struct Q;
+            impl A for Q { fn k(&self) -> i32 { 1 } }
+            impl B for Q { fn k(&self) -> i32 { 2 } }
+            pub struct R { pub x: i32 }
+            impl R { pub fn v(&self) -> i32 { self.x } }
+            impl Fine for R { fn v(&self) -> i32 { self.x } }
+            impl Fine for i32 { fn v(&self) -> i32 { *self } }
+            pub trait RefTr { fn m(&self) -> i32; }
+            pub struct Tw { pub v: i32 }
+            impl RefTr for Tw { fn m(&self) -> i32 { self.v } }
+            impl RefTr for &Tw { fn m(&self) -> i32 { self.v + 1000 } }
+            "#,
+        )
+        .unwrap();
+        let outcome = pair_verdicts(&file);
+        let find = |t: &str, s: &str| -> Result<(), String> {
+            outcome
+                .pairs
+                .iter()
+                .find(|p| p.trait_key == t && p.self_written == s)
+                .unwrap_or_else(|| panic!("no pair {t} for {s}"))
+                .verdict
+                .clone()
+        };
+        assert!(find("Same", "P").unwrap_err().contains("A1 `Self` outside receiver"));
+        assert!(find("Gen", "P").unwrap_err().contains("A1 generic required method"));
+        assert!(find("Gat", "P").unwrap_err().contains("A1 generic associated type"));
+        assert_eq!(find("Fine", "P"), Ok(()));
+        assert!(find("Fine", "R").unwrap_err().contains("A2 inherent method `v` shadows"));
+        assert!(find("Fine", "i32").unwrap_err().contains("A2 self type `i32` not declared"));
+        // a reference twin keeps the value pair in the lane (keyed by self_tag)
+        assert!(find("RefTr", "Tw").unwrap_err().contains("twin"));
+        assert!(find("RefTr", "& Tw").unwrap_err().contains("A2 self type"));
+        // the same-name post-pass demotes BOTH tier-1 pairs on one type
+        assert!(find("A", "Q").unwrap_err().contains("declared by two tier-1 traits"));
+        assert!(find("B", "Q").unwrap_err().contains("declared by two tier-1 traits"));
+        assert_eq!(outcome.demotions.len(), 1);
+    }
 }

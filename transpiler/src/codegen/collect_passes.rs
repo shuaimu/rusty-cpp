@@ -3264,7 +3264,19 @@ impl CodeGen {
                     // uses direct-inheritance emission (see cpp_inherit_trait
                     // doc in mod.rs). Keyed by the simple type name (matches
                     // `emit_struct`'s `s.ident`) and the module-scoped key.
-                    if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) {
+                    // Phase 1 step 3: with the switch on, a pair the census passes
+                    // inherits without any attribute (`cpp_inherit` stays a force
+                    // attribute; a demoted or failing pair keeps the lane).
+                    let tier1_by_default = self.tier1_default
+                        && trait_path.is_some_and(|p| {
+                            let key = self.resolve_trait_scoped_key_for_impl(p, module_path);
+                            let written =
+                                quote::ToTokens::to_token_stream(&impl_block.self_ty).to_string();
+                            self.tier1_pair_verdicts
+                                .get(&(key, written))
+                                .is_some_and(|v| v.is_ok())
+                        });
+                    if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) || tier1_by_default {
                         if let Some(trait_short) = &trait_name {
                             let simple_type_name = tp
                                 .path

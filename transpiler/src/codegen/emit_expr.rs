@@ -7006,13 +7006,11 @@ impl CodeGen {
             return None;
         }
         let owner = hits.pop()?;
-        if self
-            .cpp_trait_member_dispatch_traits
-            .iter()
-            .any(|t| t == &owner || t.rsplit("::").next() == Some(owner.as_str()))
-        {
-            return None;
-        }
+        // Phase 1 step 1: a marked (tier-1) trait's default bodies call the
+        // CPO like any other trait's — its lane exists; the tier-1 bridge
+        // reaches an inheriting implementor's override, a tier-2 implementor's
+        // function wins over an inherent method of the same name (the
+        // `inherent_shadow` cell of trait_probes_defaults, measured).
         Some(owner)
     }
 
@@ -7042,6 +7040,14 @@ impl CodeGen {
             t == owner || t == &scoped_owner || t.rsplit("::").next() == Some(owner.as_str())
         });
         if !is_member_dispatch {
+            return None;
+        }
+        // Phase 1 step 1: a marked trait has its `<Tr>_` lane, so the generic
+        // UFCS route handles path syntax — with the keys (`self_tag` for an
+        // `impl Tr for &T`, `qself`, trait arguments) this rewrite would drop:
+        // `<&Tr2 as RefTr>::m(&r)` must reach the reference impl, not the
+        // value member (trait_probes_collapse under the default switch).
+        if self.ufcs_declared_trait_names.contains(owner) {
             return None;
         }
         let method_name = segments.last()?.clone();
@@ -7161,13 +7167,6 @@ impl CodeGen {
                     .get(t)
                     .is_some_and(|methods| methods.iter().any(|m| m == &method_name))
             })?;
-        if self
-            .cpp_trait_member_dispatch_traits
-            .iter()
-            .any(|t| t == &owner || t.rsplit("::").next() == Some(owner.as_str()))
-        {
-            return None;
-        }
         let receiver = self.emit_expr_to_string(&mc.receiver);
         let args: Vec<String> = mc.args.iter().map(|a| self.emit_expr_to_string(a)).collect();
         let escaped = escape_cpp_keyword_in_member_position(&method_name);

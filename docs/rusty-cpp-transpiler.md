@@ -2634,6 +2634,70 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `operator-` mis-emission) except the three phase 2 already did; the tier-2 by-value bridge and
   `&dyn` over a foreign implementor of a member-dispatch trait wait for phase 1's `<Tr>_` namespace on
   every trait. Six clang-runtime tests (`test_tier1_phase0_*`) are the lane's regression guard.
+- *2026-10-08 — phase 1, step 1: the lane is decoupled from the marker.* Book §3.2.2's rule — the
+  trait's module emits the marker primary, the concept, the `<Tr>_` namespace and the generic
+  forwarders for EVERY trait, because a bound anywhere must admit a later tier-2 impl — now holds for a
+  `cpp_trait_member_dispatch` trait too; the marker chooses only the interface shape (phase 0) and
+  inheritance. What changed: `ufcs_trait_gets_marker_primary` is "declared", the two default-template
+  emitters, the method-name classification, the owner map, `ufcs_impl_lane_covers_trait_key`, the
+  forwarders' ladder order and the `<Tr>Traits` map's CPO arm no longer read the marker; a tier-2 impl
+  of a marked trait (a foreign self type — the diagnosed no-op of phase 0) emits its `impl_`
+  functions, a tier-1 impl (its self type registered as inheriting) emits none. The **tier-1 bridge**
+  of §3.2.2 (3) exists: `template<class S> requires has_tier1_Tr<S> R m(Tr_::impl_::tag, const S&
+  __self, …) { return __self.m(…); }` per receiver method (`S&` for `&mut self`; `S __self` and
+  `std::move(__self).m()` for a by-value `self`), beside a forward declaration of the interface class
+  in its namespace and linkage, with `has_tier1_Tr<U> = std::derived_from<remove_cvref_t<U>, Tr>` a
+  NAMED concept and `has_Tr = impls_Tr<…>::value || has_tier1_Tr<U>` — named so that the bridge's
+  constraint subsumes the default template's `has_Tr<Self_>` and the bridge wins ([temp.constr.order]:
+  two spellings of `derived_from` with different parameter mappings would not subsume, and the call
+  would be ambiguous); a concrete tier-2 impl, a non-template, beats both. Measured: the phase-0
+  foreign cell that had to be cut — `&dyn Named` over `i32` — now reaches `Named_::name` through the
+  generic forwarder (`i7 i7 i7`); every phase-0 cell unchanged; the unmarked `trait_probes_thin` crate's
+  emitted module is byte-identical to the previous binary's (the matrix carries no markers, so the
+  decoupling cannot change a row). The marker's old contract ("no additive `<Trait>_` helpers", mod.rs
+  `cpp_trait_member_dispatch_traits` doc and
+  `test_exact_inactive_trait_member_dispatch_suppresses_ufcs_helpers`, now
+  `…_keeps_the_free_function_lane`) is flipped by design: the additions are templates and a
+  forward declaration — no new strong symbol; a cpp_inherit impl's ABI companions (the srpc `Job`
+  shape) are untouched. **For Shuai's review:** the flipped contract, if the mako incumbent relied on
+  the marked traits' `<Tr>_` namespace being ABSENT rather than merely free of strong symbols.
+- *2026-10-08 — phase 1, steps 2 and 3.* (Step 2) `tier_census::pair_verdicts(file)` returns every
+  crate-trait `(trait, impl)` pair with its §3.2.1 verdict — the computation the census log prints
+  under `RUSTY_CPP_TIER_CENSUS=1`, one source of truth — and the same-name post-pass now demotes BOTH
+  pairs' verdicts (a method declared by two tier-1 traits on one type would be one member); axis 1
+  gained the GAT test; `emit_file` keeps the map in `tier1_pair_verdicts`; a unit test covers each
+  axis and the demotion. (Step 3) **Tier 1 by default, behind a switch** (`RUSTY_CPP_TIER1_DEFAULT=1`,
+  or `CodeGen::set_tier1_default`): a pair the census passes inherits with no attribute and its trait
+  takes the tier-1 interface shape; a failing or demoted pair keeps the free-function lane (which every
+  trait has since step 1); `cpp_trait_member_dispatch` / `cpp_inherit` stay as force attributes (the
+  opt-out attribute per impl and the force attributes' limit to the coverage-motivated tests — decision
+  (w) — are not yet written). The switch stays OFF until the matrix census is measured against it per
+  crate (the eligible pairs today: serde_core's `de::Expected` on `ExpectedInMap`/`ExpectedInSeq`,
+  itertools' `KeyXorValue` on `KeyValue`/`JustValue`, indexmap's three `Sealed`s, cfg-if's test-only
+  pair, and the probe crates' `Score`/`Greet`/`ConvT`/`RefTr`/`Shape`).
+- *2026-10-08 — phase 1, the switch measured on the matrix crates with tier-1 pairs* (`thin`,
+  `defaults`, `collapse`, `serde_core`; `RUSTY_CPP_TIER1_DEFAULT=1`, one row at a time): `thin` passed
+  first; the others found five lane sites the marker had been hiding, each fixed and re-measured.
+  (1) A tier-1 trait's **default bodies** still took the member-first ladder (the default-body CPO
+  route excluded marked traits): `inherent_shadow_is_not_seen_by_default_body` saw the inherent
+  method — the silent-override case — until the default body calls the CPO like any trait's (the
+  bridge reaches the override, the impl function beats the inherent name). (2) The phase-0 path-syntax
+  route (`Tr::m(&x)` → `x.m()`) dropped the **keys**: `<&Tr2 as RefTr>::m(&r)` reached the value
+  member instead of the reference impl; the route is off for any trait with a lane (all of them). (3)
+  An `impl Tr for &T` is never a tier-1 impl even when `T` inherits — the tier-1 impl predicate reads the
+  self type as written, not through the reference, so the keyed `self_tag<const T&>` function is
+  emitted. (4) The **E0034 guard** counted implementors by the raw marker (`impls_Tr<S>::value`), which
+  a tier-1 implementor never specializes; it counts through the concept `has_Tr<S>` now. (5) A tier-1
+  trait declared in an **ancestor module** of its implementor (serde_core's `de::Expected`,
+  implemented in `de::value::private_`) was not hoisted (`base class has incomplete type`): the hoist
+  closes the implementor's namespaces to the common ancestor, opens the trait's, emits it there with
+  the module stack set to its module, and reopens. (6) A tier-1 `T` beside its **reference twin**
+  (`impl Tr for &T`, §3.2.14) made every `&T` coercion to `dyn Tr` pick the inherited value body
+  (`collapse_ref_impl_through_coercion_and_box`): the census keeps such a pair in the lane — axis 2
+  gained the twin test — so both bodies stay keyed by `self_tag`, as phase 2 measured them. With the
+  six fixes all four crates pass under the switch (`thin`, `defaults`, `collapse`, `serde_core`).
+  Unit-test expectations that encoded the marker's old suppression flipped by measurement
+  (`namespace Clash_::impl_` counts, the forwarders' arms, `sink.deposit(2)` through the ladder).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
@@ -3165,7 +3229,8 @@ concrete-on-generic self type a *diagnosed* no-op; interface hoisted before any 
 anonymous-namespace wrap only for non-`pub` traits with non-`pub` implementors; `rusty::unreachable_via_const_dyn`
 added to `include/rusty`.
 
-**Phase 1 — tier 1 becomes the default.** A program-wide impl pre-pass (the shape of
+**Phase 1 — tier 1 becomes the default.** (Step 1 — the lane decoupled from the marker, the tier-1
+bridge — landed 2026-10-08; see the §3.2.12 entry.) A program-wide impl pre-pass (the shape of
 `set_cross_file_traits`, over every impl block in the dependency graph) computes what §3.2.1 needs and
 the collect pass lacks: blanket and conditional presence per `(trait, method name)`; per-type
 implemented-trait sets and same-name collisions over concrete impls; inherent-vs-tier-1 name overlap;

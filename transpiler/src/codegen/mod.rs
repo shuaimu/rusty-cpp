@@ -1790,6 +1790,16 @@ pub struct CodeGen {
     /// the tier-2 lane and `cpp_inherit` on its impls is a no-op too. Keys as
     /// in `cpp_trait_member_dispatch_traits`.
     pub(crate) demoted_member_dispatch_traits: std::collections::HashSet<String>,
+    /// Phase 1 step 2 (book §3.2.16): the census's per-pair tier verdicts for
+    /// this file — `(trait key, self type as written)` → `Ok(())` when the pair
+    /// may be emitted tier 1, else the excluding §3.2.1 test. ONE source of
+    /// truth with the census log; step 3's default flip reads it.
+    pub(crate) tier1_pair_verdicts: HashMap<(String, String), Result<(), String>>,
+    /// Phase 1 step 3 (book §3.2.16): tier 1 is the DEFAULT for every
+    /// `(trait, impl)` pair passing §3.2.1 — no attribute needed. Behind a
+    /// switch (`RUSTY_CPP_TIER1_DEFAULT=1`, or `set_tier1_default`) until the
+    /// matrix census is read against it; the markers stay as force attributes.
+    pub(crate) tier1_default: bool,
     pub(crate) ufcs_declared_trait_modules: std::collections::BTreeMap<String, String>,
     /// `Trait::Assoc` → short bound-trait name, from LOCAL trait declarations
     /// plus every dependency manifest (§208 phase 2 projection routing).
@@ -3656,6 +3666,8 @@ impl CodeGen {
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
             demoted_member_dispatch_traits: std::collections::HashSet::new(),
+            tier1_pair_verdicts: HashMap::new(),
+            tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT").is_some(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
             ufcs_trait_assoc_bounds: std::collections::BTreeMap::new(),
             ufcs_trait_method_return_assoc: std::collections::BTreeMap::new(),
@@ -6770,6 +6782,11 @@ impl CodeGen {
     /// No-op: interface+adapter trait lowering is now the only path.
     /// The setter is kept so external callers compile; the argument
     /// is ignored.
+    /// Phase 1 step 3: tier 1 by default for every pair passing §3.2.1.
+    pub fn set_tier1_default(&mut self, on: bool) {
+        self.tier1_default = on;
+    }
+
     pub fn set_interface_traits(&mut self, _enabled: bool) {
         // Always interface_traits = true — pro/proxy lowering removed.
     }
@@ -8334,6 +8351,7 @@ impl CodeGen {
         self.traits_with_pub_cpp_inherit_implementor.clear();
         self.cpp_inherit_by_value_methods.clear();
         self.demoted_member_dispatch_traits.clear();
+        self.tier1_pair_verdicts.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
         self.tuple_type_aliases.clear();
@@ -8556,6 +8574,27 @@ impl CodeGen {
         // UFCS Phase 3: classify method names for call-site lowering.
         self.cpp_trait_member_dispatch_traits =
             Self::collect_cpp_trait_member_dispatch_traits(&file.items);
+        // Phase 1 step 2: the census's per-pair verdicts, kept for the tier
+        // decision (step 3) — the same computation the census log prints.
+        self.tier1_pair_verdicts = crate::tier_census::pair_verdicts(file)
+            .pairs
+            .into_iter()
+            .map(|p| ((p.trait_key, p.self_written), p.verdict))
+            .collect();
+        // Phase 1 step 3: with the switch on, every trait with a tier-1 pair
+        // takes the tier-1 interface shape (phase 0) — its lane exists anyway
+        // (step 1), so its tier-2 impls, if any, keep working through it.
+        if self.tier1_default {
+            let tier1_traits: Vec<String> = self
+                .tier1_pair_verdicts
+                .iter()
+                .filter(|(_, v)| v.is_ok())
+                .map(|((t, _), _)| t.clone())
+                .collect();
+            for t in tier1_traits {
+                self.cpp_trait_member_dispatch_traits.insert(t);
+            }
+        }
         // Book §3.2.16 phase 0: the skip-list decides the TIER, not only slot
         // emission. A marked trait that fails §3.2.1 axis 1 cannot be an
         // interface class; the marker is a diagnosed no-op and the trait keeps
@@ -8577,9 +8616,11 @@ impl CodeGen {
                 self.demoted_member_dispatch_traits.insert(key);
             }
         }
+        // Phase 1 step 1: a marked (tier-1) trait's methods classify like any
+        // crate trait's — its `<Tr>_` lane exists.
         self.ufcs_method_classes = crate::transpile::classify_method_names_excluding_traits(
             &file.items,
-            &self.cpp_trait_member_dispatch_traits,
+            &std::collections::HashSet::new(),
         );
         // UFCS Phase 7: scope emission to crate-declared traits.
         self.ufcs_declared_trait_names =
@@ -8616,7 +8657,7 @@ impl CodeGen {
             crate::transpile::collect_concrete_trait_impl_method_owners_excluding_traits(
                 &file.items,
                 &self.ufcs_declared_trait_names,
-                &self.cpp_trait_member_dispatch_traits,
+                &std::collections::HashSet::new(),
             );
         // UFCS cross-crate (book § 3.2.7): fold dependency trait manifests
         // into the classifier so calls to a dependency's trait methods
@@ -21550,7 +21591,13 @@ impl CodeGen {
         // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
         self.ufcs_emitting_internal_linkage_trait =
             self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
-        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
+        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
+            && self.impl_is_tier1_inheriting(impl_block)
+        {
+            // Phase 1 step 1: a tier-1 impl of a tier-1 trait — its body is
+            // the override; the tier-1 bridge carries `Tr_::m` for it. (A
+            // `cpp_inherit` that was a diagnosed no-op — a foreign self type —
+            // is a tier-2 impl and emits its functions.)
             return;
         }
         // Cross-crate dedup: drop methods an imported dependency already provides
@@ -21715,7 +21762,9 @@ impl CodeGen {
             // which was emitted only beside declared methods — so `A_::foo(u8)`
             // was non-viable and a two-owner call fell through to the other
             // trait where rustc runs A's default (`1000`). Emit the marker alone.
-            if !self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
+            if !(self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
+                && self.impl_is_tier1_inheriting(impl_block))
+            {
                 // The marker's resolvability checks read the impl's module
                 // (a bare nested-module self type cannot be named globally).
                 self.ufcs_impl_module_path = module_path.to_vec();
@@ -21730,7 +21779,13 @@ impl CodeGen {
         // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
         self.ufcs_emitting_internal_linkage_trait =
             self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
-        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path) {
+        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
+            && self.impl_is_tier1_inheriting(impl_block)
+        {
+            // Phase 1 step 1: a tier-1 impl of a tier-1 trait — its body is
+            // the override; the tier-1 bridge carries `Tr_::m` for it. (A
+            // `cpp_inherit` that was a diagnosed no-op — a foreign self type —
+            // is a tier-2 impl and emits its functions.)
             return;
         }
         // Cross-crate dedup (mirrors the definition emitter): drop methods an
@@ -21976,22 +22031,14 @@ impl CodeGen {
     /// set made them differ, leaving the declared template undefined (measured:
     /// undefined reference to `rusty_ext::m<Sc>`).
     fn ufcs_trait_gets_marker_primary(&self, name: &str) -> bool {
-        if !self.ufcs_declared_trait_names.contains(name) {
-            return false;
-        }
-        let marked = |key: &str| self.cpp_trait_member_dispatch_traits.iter().any(|t| t == key);
-        let declared_keys: Vec<&String> = self
-            .trait_declared_paths
-            .iter()
-            .filter(|k| k.rsplit("::").next() == Some(name))
-            .collect();
-        let all_marked = if declared_keys.is_empty() {
-            marked(name)
-        } else {
-            declared_keys.iter().all(|k| marked(k) || marked(name))
-                && !declared_keys.iter().any(|k| !marked(k) && !marked(name))
-        };
-        !all_marked
+        // Phase 1 step 1 (book §3.2.2): EVERY crate-declared trait emits its
+        // marker primary, concept and `<Tr>_` namespace — a bound anywhere
+        // (`T: Tr`) must admit a later tier-2 impl, and the forwarders, default
+        // bodies and generic callers are CPO-first whatever the implementor's
+        // tier. The `cpp_trait_member_dispatch` marker now chooses only the
+        // interface shape and inheritance; a tier-1 implementor is reached
+        // through the tier-1 bridge (`emit_ufcs_tier1_bridges`).
+        self.ufcs_declared_trait_names.contains(name)
     }
 
     fn emit_ufcs_trait_marker_primaries(&mut self) {
@@ -22035,10 +22082,46 @@ impl CodeGen {
                 "{}template<class U> struct impls_{} : {} {{}};",
                 export, cpp, base
             ));
-            self.writeln(&format!(
-                "{}template<class U> concept has_{} = impls_{}<std::remove_cvref_t<U>>::value;",
-                export, cpp, cpp
-            ));
+            if let Some((t, iface)) = self.ufcs_tier1_interface(&name, &key) {
+                // Phase 1 step 1: the interface is a plain class that tier-1
+                // implementors inherit; declare it here (the definition comes
+                // later) so the concept can name it, in its own namespace and
+                // linkage, and let `has_Tr` admit `derived_from` through a NAMED
+                // concept — the tier-1 bridge's constraint is that same concept,
+                // so it subsumes the default template's `has_Tr<Self_>` and wins.
+                let bare = iface.trim_start_matches("::");
+                let (ns, leaf) = match bare.rsplit_once("::") {
+                    Some((ns, leaf)) => (Some(ns.to_string()), leaf.to_string()),
+                    None => (None, bare.to_string()),
+                };
+                // The declaration's linkage and export are the CLASS's (a
+                // non-`pub` trait with a `pub` implementor is at namespace
+                // scope but not exported: `cannot export redeclaration`).
+                let decl = if self.trait_uses_internal_linkage(&name, &key) {
+                    format!("namespace {{ class {}; }}", leaf)
+                } else if self.module_name.is_some() && self.should_export_item(&t.vis, &name) {
+                    format!("export class {};", leaf)
+                } else {
+                    format!("class {};", leaf)
+                };
+                match ns {
+                    Some(ns) => self.writeln(&format!("namespace {} {{ {} }}", ns, decl)),
+                    None => self.writeln(&decl),
+                }
+                self.writeln(&format!(
+                    "{}template<class U> concept has_tier1_{} = std::derived_from<std::remove_cvref_t<U>, {}>;",
+                    export, cpp, iface
+                ));
+                self.writeln(&format!(
+                    "{}template<class U> concept has_{} = impls_{}<std::remove_cvref_t<U>>::value || has_tier1_{}<U>;",
+                    export, cpp, cpp, cpp
+                ));
+            } else {
+                self.writeln(&format!(
+                    "{}template<class U> concept has_{} = impls_{}<std::remove_cvref_t<U>>::value;",
+                    export, cpp, cpp
+                ));
+            }
             // Step 8: forward-declare the `<Tr>Traits` map here, in the trait's
             // module namespace — generic code hoisted ahead of the trait's own
             // position names it (`<Tr>Traits<A>::size()`); the definition
@@ -22127,10 +22210,155 @@ impl CodeGen {
             }
             self.indent -= 1;
             self.writeln("}");
+            if let Some((t, iface)) = self.ufcs_tier1_interface(&name, &key) {
+                self.emit_ufcs_tier1_bridges(&name, &cpp, &iface, &t, export);
+            }
         }
         if emitted_any {
             self.newline();
         }
+    }
+
+    /// Phase 1 step 1: is this impl a tier-1 one — its self type REGISTERED as
+    /// inheriting the impl's trait (`cpp_inherit` accepted, not a diagnosed
+    /// no-op)? The impl's body is then the override and the lane emits no
+    /// `impl_` functions for it.
+    fn impl_is_tier1_inheriting(&self, impl_block: &syn::ItemImpl) -> bool {
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return false;
+        };
+        let Some(trait_short) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        // A reference self type (`impl Tr for &T`) is never tier 1 (book
+        // §3.2.14): it is the keyed `self_tag<const T&>` impl of the lane
+        // even when `T` itself inherits the interface.
+        let syn::Type::Path(tp) = impl_block.self_ty.as_ref() else {
+            return false;
+        };
+        let Some(self_simple) = tp.path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        self.cpp_inherit_traits_of(&self_simple).contains(&trait_short)
+    }
+
+    /// Phase 1 step 1: a marked (tier-1) trait whose interface is a plain
+    /// class (no type generics, no associated types) — the item and the
+    /// class's absolute spelling. `None` for every other trait.
+    fn ufcs_tier1_interface(&self, name: &str, key: &str) -> Option<(syn::ItemTrait, String)> {
+        let marked = self
+            .cpp_trait_member_dispatch_traits
+            .iter()
+            .any(|k| k == key || k == name);
+        if !marked {
+            return None;
+        }
+        let t = self
+            .cpp_inherit_trait_items
+            .get(key)
+            .or_else(|| self.cpp_inherit_trait_items.get(name))?
+            .clone();
+        if t.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_)))
+            || t.items.iter().any(|i| matches!(i, syn::TraitItem::Type(_)))
+        {
+            return None;
+        }
+        Some((t, self.cpp_inherit_base_spelling(name)))
+    }
+
+    /// Book §3.2.2 (3): the tier-1 bridge — a receiver that INHERITS the
+    /// interface is reached through its virtual member. One constrained
+    /// function template per receiver method in `Tr_::impl_`, so the CPO
+    /// `Tr_::m(x)` on a tier-1 implementor resolves to the override, and the
+    /// forwarders, default bodies and generic callers stay CPO-first whatever
+    /// the implementor's tier. Constrained by the NAMED `has_tier1_Tr` concept
+    /// (it subsumes `has_Tr`, so the bridge beats the default template; a
+    /// concrete tier-2 impl, a non-template, beats both).
+    fn emit_ufcs_tier1_bridges(
+        &mut self,
+        name: &str,
+        cpp: &str,
+        iface: &str,
+        t: &syn::ItemTrait,
+        export: &str,
+    ) {
+        let mut lines: Vec<String> = Vec::new();
+        for item in &t.items {
+            let syn::TraitItem::Fn(method) = item else {
+                continue;
+            };
+            let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+                continue;
+            };
+            if !method.sig.generics.params.is_empty() {
+                continue;
+            }
+            let ret = self.map_return_type(&method.sig.output);
+            let mut params: Vec<String> = Vec::new();
+            let mut args: Vec<String> = Vec::new();
+            let mut unsupported = false;
+            for (idx, arg) in method.sig.inputs.iter().enumerate() {
+                let syn::FnArg::Typed(pt) = arg else {
+                    continue;
+                };
+                if matches!(pt.ty.as_ref(), syn::Type::ImplTrait(_)) {
+                    unsupported = true;
+                }
+                let ty = self.map_type(&pt.ty);
+                if ty.contains("Self") || ty.contains("auto") {
+                    unsupported = true;
+                }
+                let pname = match pt.pat.as_ref() {
+                    syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                    _ => format!("__a{}", idx),
+                };
+                let trimmed = ty.trim_end();
+                args.push(if trimmed.ends_with('&') || trimmed.ends_with('*') {
+                    pname.clone()
+                } else {
+                    format!("std::move({})", pname)
+                });
+                params.push(format!("{} {}", ty, pname));
+            }
+            if unsupported || ret.contains("Self") || ret.contains("auto") {
+                continue;
+            }
+            let mname = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
+            let (recv_param, recv_expr) = if receiver.reference.is_none() {
+                ("S __self", "std::move(__self)")
+            } else if receiver.mutability.is_some() {
+                ("S& __self", "__self")
+            } else {
+                ("const S& __self", "__self")
+            };
+            let prefix = if ret.trim() == "void" { "" } else { "return " };
+            let mut all: Vec<String> = vec![format!("{}_::impl_::tag", name), recv_param.to_string()];
+            all.extend(params);
+            lines.push(format!(
+                "template<class S> requires has_tier1_{cpp}<S> {ret} {m}({ps}) {{ {p}{r}.{m}({a}); }}",
+                cpp = cpp,
+                ret = ret,
+                m = mname,
+                ps = all.join(", "),
+                p = prefix,
+                r = recv_expr,
+                a = args.join(", ")
+            ));
+        }
+        if lines.is_empty() {
+            return;
+        }
+        self.writeln(&format!(
+            "// Book §3.2.2 (3): tier-1 bridges — a receiver that inherits `{}` is reached through its virtual member",
+            iface
+        ));
+        self.writeln(&format!("{}namespace {}_::impl_ {{", export, name));
+        self.indent += 1;
+        for line in lines {
+            self.writeln(&line);
+        }
+        self.indent -= 1;
+        self.writeln("}");
     }
 
     /// Book §3.2.3 (2026-10-07): does `spelling` name a crate-declared generic
@@ -22680,12 +22908,6 @@ impl CodeGen {
                     } else {
                         format!("{}::{}", module_path.join("::"), trait_name)
                     };
-                    if self
-                        .cpp_trait_member_dispatch_traits
-                        .contains(&trait_key)
-                    {
-                        continue;
-                    }
                     // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
                     // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
                     // ported surface — rrr.serializable's incumbent object owns 50 of
@@ -22798,12 +23020,6 @@ impl CodeGen {
                     } else {
                         format!("{}::{}", module_path.join("::"), trait_name)
                     };
-                    if self
-                        .cpp_trait_member_dispatch_traits
-                        .contains(&trait_key)
-                    {
-                        continue;
-                    }
                     // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
                     // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
                     // ported surface — rrr.serializable's incumbent object owns 50 of
@@ -24588,12 +24804,9 @@ impl CodeGen {
         let short = trait_key.rsplit("::").next().unwrap_or(trait_key);
         let ns = format!("{}_", escape_cpp_keyword(short));
         let b = self_spelling;
-        // Phase 0 (§3.2.16): a tier-1 (member-dispatch) trait has no `<Tr>_`
-        // namespace, so its map reads the implementor's static member only.
-        let member_dispatch = self
-            .cpp_trait_member_dispatch_traits
-            .iter()
-            .any(|k| k == trait_key || k.rsplit("::").next() == Some(short));
+        // Phase 1 step 1: every trait has its `<Tr>_` namespace again, so the
+        // map's CPO arm is always well-formed.
+        let member_dispatch = false;
         let mut out = String::new();
         for (name, _, _) in &consts {
             let n = escape_cpp_keyword(name);
@@ -24639,11 +24852,8 @@ impl CodeGen {
         if !self.trait_declared_paths.contains(trait_key) {
             return false;
         }
-        let short = trait_key.rsplit("::").next().unwrap_or(trait_key);
-        !self
-            .cpp_trait_member_dispatch_traits
-            .iter()
-            .any(|t| t == trait_key || t.rsplit("::").next() == Some(short))
+        // Phase 1 step 1: the marker no longer takes a trait out of the lane.
+        true
     }
 
     /// Step 8: does the trait (scoped key) have any non-vtable member?
@@ -44186,8 +44396,10 @@ impl CodeGen {
                     .iter()
                     .map(|owner| {
                         let short = owner.rsplit("::").next().unwrap_or(owner);
+                        // Phase 1: through the concept — a tier-1 implementor
+                        // satisfies `has_Tr` by inheritance and has no marker.
                         format!(
-                            "static_cast<int>(impls_{}<__ufcs_S>::value)",
+                            "static_cast<int>(has_{}<__ufcs_S>)",
                             escape_cpp_keyword(short)
                         )
                     })
@@ -44202,7 +44414,7 @@ impl CodeGen {
                 for (i, (owner, callee)) in owners.iter().zip(callees.iter()).enumerate() {
                     let short = owner.rsplit("::").next().unwrap_or(owner);
                     arms.push_str(&format!(
-                        "if constexpr (impls_{}<__ufcs_S>::value) {{ return {}({}{}); }} else ",
+                        "if constexpr (has_{}<__ufcs_S>) {{ return {}({}{}); }} else ",
                         escape_cpp_keyword(short),
                         callee,
                         direct_args,

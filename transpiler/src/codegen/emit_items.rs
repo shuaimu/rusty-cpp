@@ -6225,9 +6225,10 @@ impl CodeGen {
         // got no `<Tr>_` namespace at all.
         // Keyed by the DECLARED path only: a marked root-level `Clash` must not
         // turn an unmarked `nested::selected::Clash` into member dispatch.
-        let member_dispatch = |this: &Self, short: &str, key: &str| -> bool {
+        // Phase 1 step 1: every crate trait's forwarders are CPO-first; a
+        // tier-1 implementor is reached through the tier-1 bridge.
+        let member_dispatch = |this: &Self, short: &str, _key: &str| -> bool {
             !this.ufcs_declared_trait_names.contains(short)
-                || this.cpp_trait_member_dispatch_traits.contains(key)
         };
         let base_cpp = format!("{}{}", trait_name, trait_generic_arglist);
         for (suffix, kind) in [
@@ -6595,19 +6596,25 @@ impl CodeGen {
         if depth > 16 {
             return;
         }
-        let key = self.nonvtable_trait_key_here(trait_short);
-        let declared_here = self
-            .trait_declared_path_by_short_name
-            .get(trait_short)
-            .is_some_and(|declared| declared == &key);
-        if !declared_here
-            || self.hoisted_trait_interfaces.contains(&key)
-            || self.visited_trait_keys.contains(&key)
-        {
+        // The trait's own scoped key (where it is DECLARED), which may be a
+        // module other than the implementor's (serde_core's `de::Expected`
+        // implemented in `de::value::private_`, measured under the phase-1
+        // switch): the hoist then closes the implementor's namespaces down to
+        // the common ancestor, opens the trait's, emits it there with the
+        // module stack set to ITS module, and reopens the implementor's.
+        let Some(key) = self.trait_declared_path_by_short_name.get(trait_short).cloned() else {
+            return;
+        };
+        if self.hoisted_trait_interfaces.contains(&key) || self.visited_trait_keys.contains(&key) {
             return;
         }
         let Some(t) = self.cpp_inherit_trait_items.get(&key).cloned() else {
             return;
+        };
+        let trait_module: Vec<String> = {
+            let mut parts: Vec<String> = key.split("::").map(|s| s.to_string()).collect();
+            parts.pop();
+            parts
         };
         let supers: Vec<String> = t
             .supertraits
@@ -6624,7 +6631,37 @@ impl CodeGen {
             "// `{}` hoisted ahead of its implementor `{}` (a base must be complete here)",
             trait_short, implementor
         ));
-        self.emit_trait(&t);
+        if trait_module == self.module_stack {
+            self.emit_trait(&t);
+        } else {
+            let current = self.module_stack.clone();
+            let current_cpp = self.renamed_module_scope_segments(&current);
+            let trait_cpp = self.renamed_module_scope_segments(&trait_module);
+            let common = current
+                .iter()
+                .zip(trait_module.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for _ in common..current.len() {
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            for seg in &trait_cpp[common..] {
+                self.writeln(&format!("namespace {} {{", seg));
+                self.indent += 1;
+            }
+            self.module_stack = trait_module.clone();
+            self.emit_trait(&t);
+            self.module_stack = current.clone();
+            for _ in common..trait_module.len() {
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            for seg in &current_cpp[common..] {
+                self.writeln(&format!("namespace {} {{", seg));
+                self.indent += 1;
+            }
+        }
         self.newline();
         self.hoisted_trait_interfaces.insert(key);
     }
