@@ -2785,6 +2785,18 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   interface base; the variant structs over `std::variant` are the type), pinned in the census unit
   test. The unit suite's lane pin (`test_codegen()`) is re-measurable: `RUSTY_CPP_TEST_TIER1=1` runs the
   whole suite with the default ON — the measurement that found the default's defects.
+- *2026-10-08 — phase 3, step 1 (measured already done).* Phase 3's two internal deletions had both
+  been made by phase 2: the `__ufcs_impls` markers and their `requires` clauses by step (2) (the name
+  survives only in comments), and the per-impl forwarding-adapter specializations by step (4) — the two
+  "adapter specialization" emitters now write only the `<Tr>Traits` assoc-type helper specializations
+  (a short-circuit of them, tried here, broke four assoc-type tests and was reverted). A regression
+  test pins the absence of `template<> class TrAdapter<X>` for a local impl. Phase 3's remaining items:
+  the manifest's `version` 2 with a consumer hard-error on mismatch (a stale manifest in
+  `.rusty-modules-cache` will trip it on the first gate — that is the measurement), and the
+  `rusty_ext` namespace with serde's hardcoded `::de::rusty_ext::*` routes and the hand-written
+  `ser::impls::rusty_ext` block in `rusty.hpp` — (aa): the rrr.serializable incumbent object owns 25 of
+  those symbols (~400 mentions across seven transpiler files), so this goes on a separate branch for
+  Shuai's call.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

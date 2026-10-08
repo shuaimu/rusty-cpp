@@ -10888,6 +10888,27 @@ fn test_tier1_default_keeps_cpp_inherit_abi_companions() {
 }
 
 #[test]
+fn test_phase3_per_impl_adapter_specializations_are_retired() {
+    // Book §3.2.16 phase 3: no `template<> class TrAdapter<X>` per impl — the
+    // generic forwarders (§3.2.10) carry every slot CPO-first; `Box::new(x)`
+    // into `Box<dyn Tr>` instantiates the primary. (Already true since phase-2
+    // step (4); this pins it — the two "adapter specialization" emitters now
+    // emit only the assoc-type helper specializations.)
+    let out = transpile_str_interface_traits(
+        r#"
+        pub trait Animal { fn legs(&self) -> i32; }
+        pub struct Dog { pub n: i32 }
+        impl Animal for Dog { fn legs(&self) -> i32 { 4 } }
+        pub fn make() -> Box<dyn Animal> { Box::new(Dog { n: 1 }) }
+        "#,
+    );
+    assert!(!out.contains("template <> class AnimalAdapter<Dog>"), "{out}");
+    assert!(!out.contains("template<> class AnimalAdapter<Dog>"), "{out}");
+    assert!(out.contains("template <class U> class AnimalAdapter final : public Animal {"), "{out}");
+    assert!(out.contains("rusty::Box<AnimalAdapter<Dog>>::new_("), "{out}");
+}
+
+#[test]
 fn test_interface_traits_three_forward_decls_emitted_per_trait() {
     // The trait header should forward-declare all three adapter
     // primary templates so dyn type mappings can name them even
