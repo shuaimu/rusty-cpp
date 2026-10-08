@@ -1800,6 +1800,12 @@ pub struct CodeGen {
     /// switch (`RUSTY_CPP_TIER1_DEFAULT=1`, or `set_tier1_default`) until the
     /// matrix census is read against it; the markers stay as force attributes.
     pub(crate) tier1_default: bool,
+    /// Dependency traits emitted tier 1 (from their manifests): a local impl of
+    /// one may inherit the dependency's exported interface class — the
+    /// cross-crate tier decision of phase 1 reads this set.
+    pub(crate) dependency_tier1_traits: std::collections::HashSet<String>,
+    /// Dependency trait → its non-vtable defaults (from their manifests).
+    pub(crate) dependency_trait_nonvtable_defaults: HashMap<String, Vec<String>>,
     pub(crate) ufcs_declared_trait_modules: std::collections::BTreeMap<String, String>,
     /// `Trait::Assoc` → short bound-trait name, from LOCAL trait declarations
     /// plus every dependency manifest (§208 phase 2 projection routing).
@@ -3668,6 +3674,8 @@ impl CodeGen {
             demoted_member_dispatch_traits: std::collections::HashSet::new(),
             tier1_pair_verdicts: HashMap::new(),
             tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT").is_some(),
+            dependency_tier1_traits: std::collections::HashSet::new(),
+            dependency_trait_nonvtable_defaults: HashMap::new(),
             ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
             ufcs_trait_assoc_bounds: std::collections::BTreeMap::new(),
             ufcs_trait_method_return_assoc: std::collections::BTreeMap::new(),
@@ -5883,6 +5891,53 @@ impl CodeGen {
                 })
                 .collect(),
             method_owners,
+            tier1_traits: {
+                let mut v: Vec<String> = self
+                    .ufcs_declared_trait_names
+                    .iter()
+                    .filter(|name| {
+                        let key = match self.ufcs_declared_trait_modules.get(*name) {
+                            Some(module) if !module.is_empty() => format!("{}::{}", module, name),
+                            _ => (*name).clone(),
+                        };
+                        self.ufcs_tier1_interface(name, &key).is_some()
+                    })
+                    .cloned()
+                    .collect();
+                v.sort();
+                v
+            },
+            trait_supertraits: self
+                .ufcs_trait_supertraits
+                .iter()
+                .filter(|(name, _)| self.ufcs_declared_trait_names.contains(*name))
+                .map(|(name, supers)| (name.clone(), supers.clone()))
+                .collect(),
+            trait_nonvtable_defaults: {
+                let mut out: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for name in &self.ufcs_declared_trait_names {
+                    let key = match self.ufcs_declared_trait_modules.get(name) {
+                        Some(module) if !module.is_empty() => format!("{}::{}", module, name),
+                        _ => name.clone(),
+                    };
+                    let Some(t) = self
+                        .cpp_inherit_trait_items
+                        .get(&key)
+                        .or_else(|| self.cpp_inherit_trait_items.get(name))
+                    else {
+                        continue;
+                    };
+                    let mut names: Vec<String> =
+                        Self::explicit_object_default_names(t).into_iter().collect();
+                    if names.is_empty() {
+                        continue;
+                    }
+                    names.sort();
+                    out.insert(name.clone(), names);
+                }
+                out
+            },
             declared_types,
             hygiene_aliases,
             root_exported_names: {
@@ -6514,6 +6569,23 @@ impl CodeGen {
     fn merge_dependency_ufcs_trait_manifests(&mut self) {
         let manifests = std::mem::take(&mut self.dependency_ufcs_trait_manifests);
         for m in &manifests {
+            // Phase 1 (§3.2.14): the dependency's tier-1 traits, supertraits
+            // and non-vtable defaults.
+            for t in &m.tier1_traits {
+                self.dependency_tier1_traits.insert(t.clone());
+                self.dependency_tier1_traits
+                    .insert(format!("{}::{}", m.module, t));
+            }
+            for (t, supers) in &m.trait_supertraits {
+                self.ufcs_trait_supertraits
+                    .entry(t.clone())
+                    .or_insert_with(|| supers.clone());
+            }
+            for (t, names) in &m.trait_nonvtable_defaults {
+                self.dependency_trait_nonvtable_defaults
+                    .entry(t.clone())
+                    .or_insert_with(|| names.clone());
+            }
             // §208 phase 2: projection routing needs the DECLARING crate's
             // assoc-type bounds; local decls win on key collision.
             for (k, v) in &m.trait_assoc_type_bounds {

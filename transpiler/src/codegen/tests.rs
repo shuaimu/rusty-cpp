@@ -10750,6 +10750,52 @@ fn test_tier1_default_switch_inherits_without_attributes() {
 }
 
 #[test]
+fn test_manifest_carries_tier1_traits_supertraits_and_nonvtable_defaults() {
+    // Book §3.2.14 / §3.2.16 phase 1: the cross-crate manifest names the
+    // traits emitted tier 1, their supertraits and their non-vtable
+    // (explicit-object) defaults — what a consumer needs for `impl DepTrait
+    // for LocalType` and for a subtrait default calling an upstream one.
+    let file: syn::File = syn::parse_str(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Base { fn v(&self) -> i32; }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Sub: Base {
+            fn k(&self) -> i32;
+            fn gen<T: core::fmt::Display>(&self, t: T) -> String where Self: Sized { format!("{}:{}", self.k(), t) }
+            fn via(&self) -> String where Self: Sized { self.gen(1) }
+            fn plain(&self) -> i32 { self.k() + 1 }
+        }
+        pub trait Lane { fn w(&self) -> i32; }
+        pub struct X { pub x: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Base for X { fn v(&self) -> i32 { self.x } }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Sub for X { fn k(&self) -> i32 { self.x + 1 } }
+        impl Lane for X { fn w(&self) -> i32 { 0 } }
+        "#,
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.emit_file(&file, Some("depmod"));
+    let manifest = cg.build_ufcs_trait_manifest("depmod");
+    assert_eq!(manifest.tier1_traits, vec!["Base".to_string(), "Sub".to_string()]);
+    assert_eq!(
+        manifest.trait_supertraits.get("Sub"),
+        Some(&vec!["Base".to_string()])
+    );
+    assert_eq!(
+        manifest.trait_nonvtable_defaults.get("Sub"),
+        Some(&vec!["gen".to_string(), "via".to_string()])
+    );
+    assert!(!manifest.trait_nonvtable_defaults.contains_key("Base"));
+    let json = serde_json::to_string(&manifest).unwrap();
+    let back: crate::transpile::UfcsTraitManifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.tier1_traits, manifest.tier1_traits);
+}
+
+#[test]
 fn test_interface_traits_three_forward_decls_emitted_per_trait() {
     // The trait header should forward-declare all three adapter
     // primary templates so dyn type mappings can name them even

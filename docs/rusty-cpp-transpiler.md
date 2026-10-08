@@ -2698,6 +2698,17 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   six fixes all four crates pass under the switch (`thin`, `defaults`, `collapse`, `serde_core`).
   Unit-test expectations that encoded the marker's old suppression flipped by measurement
   (`namespace Clash_::impl_` counts, the forwarders' arms, `sink.deposit(2)` through the ladder).
+- *2026-10-08 — phase 1, step 4: the manifest's tier-1 fields (§3.2.14).* `tier1_traits` (the declared
+  traits emitted tier 1 — whose interface the implementors inherit), `trait_supertraits` (short names,
+  markers excluded) and `trait_nonvtable_defaults` (the explicit-object members of §3.2.13), all
+  `#[serde(default)]` so an older manifest still loads; the consumer records them
+  (`dependency_tier1_traits`, `dependency_trait_nonvtable_defaults`, the supertraits into
+  `ufcs_trait_supertraits`). **Not yet written:** the cross-crate tier decision itself — `impl DepTrait
+  for LocalType` stays on the free-function lane (a dependency trait is not a crate-trait pair for the
+  census), as does a consumer subtrait's classification of a call into an upstream non-vtable default;
+  the force attributes' limit to the coverage-motivated tests (decision (w)); the opt-out attribute per
+  impl; and flipping the switch's default, which waits for a matrix run with the switch on in every row
+  (the four measurable tier-1 crates pass; `itertools` is disabled in the matrix, `indexmap` known-fail).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
@@ -3229,8 +3240,11 @@ concrete-on-generic self type a *diagnosed* no-op; interface hoisted before any 
 anonymous-namespace wrap only for non-`pub` traits with non-`pub` implementors; `rusty::unreachable_via_const_dyn`
 added to `include/rusty`.
 
-**Phase 1 — tier 1 becomes the default.** (Step 1 — the lane decoupled from the marker, the tier-1
-bridge — landed 2026-10-08; see the §3.2.12 entry.) A program-wide impl pre-pass (the shape of
+**Phase 1 — tier 1 becomes the default.** (Steps 1–4 landed 2026-10-08 — the lane decoupled from the
+marker with the tier-1 bridge; the census's per-pair verdict as one function; tier 1 by default behind
+`RUSTY_CPP_TIER1_DEFAULT`, measured green on the four matrix crates with tier-1 pairs; the manifest's
+tier fields — see the §3.2.12 entries. Open: the cross-crate tier decision, decision (w)'s limit on the
+force attributes, the per-impl opt-out, and the switch's default.) A program-wide impl pre-pass (the shape of
 `set_cross_file_traits`, over every impl block in the dependency graph) computes what §3.2.1 needs and
 the collect pass lacks: blanket and conditional presence per `(trait, method name)`; per-type
 implemented-trait sets and same-name collisions over concrete impls; inherent-vs-tier-1 name overlap;

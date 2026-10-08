@@ -157,6 +157,23 @@ pub struct UfcsTraitManifest {
     /// function signatures.
     #[serde(default)]
     pub function_arg_pass_styles: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Book §3.2.14 / §3.2.16 phase 1: the declared traits emitted TIER 1 —
+    /// whose interface class the implementors inherit (a marked trait, or one
+    /// with a tier-1 pair under the default switch). A consumer implementing
+    /// one on a local type needs the tier the moment a second crate exists.
+    #[serde(default)]
+    pub tier1_traits: Vec<String>,
+    /// Declared trait name → its supertraits (short names, markers excluded),
+    /// so a consumer's subtrait classifies calls into inherited slots and a
+    /// consumer implementor's base list is complete.
+    #[serde(default)]
+    pub trait_supertraits: BTreeMap<String, Vec<String>>,
+    /// Declared trait name → the names of its NON-vtable defaults (generic
+    /// defaults, their transitive callers, `Self::`-mentioning defaults —
+    /// §3.2.13's explicit-object members): a consumer's subtrait default that
+    /// calls one classifies that call as non-slot.
+    #[serde(default)]
+    pub trait_nonvtable_defaults: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>>,
     /// C-like enum VARIANT name → the enum's crate-relative C++ path
@@ -6369,6 +6386,9 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         let manifest = UfcsTraitManifest {
             declared_trait_modules: std::collections::BTreeMap::new(),
             version: 1,
+            tier1_traits: Vec::new(),
+            trait_supertraits: std::collections::BTreeMap::new(),
+            trait_nonvtable_defaults: std::collections::BTreeMap::new(),
             module: "depmod".to_string(),
             declared_traits: vec!["Greet".to_string()],
             declared_trait_methods: std::collections::BTreeMap::from([(
@@ -6461,6 +6481,9 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         let manifest = UfcsTraitManifest {
             declared_trait_modules: std::collections::BTreeMap::new(),
             version: 1,
+            tier1_traits: Vec::new(),
+            trait_supertraits: std::collections::BTreeMap::new(),
+            trait_nonvtable_defaults: std::collections::BTreeMap::new(),
             module: "depmod".to_string(),
             declared_traits: vec!["Greet".to_string()],
             declared_trait_methods: std::collections::BTreeMap::from([(
