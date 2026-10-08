@@ -2797,6 +2797,13 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `ser::impls::rusty_ext` block in `rusty.hpp` — (aa): the rrr.serializable incumbent object owns 25 of
   those symbols (~400 mentions across seven transpiler files), so this goes on a separate branch for
   Shuai's call.
+- *2026-10-08 — phase 3, step 2: the trait manifest is version 2.* `UFCS_TRAIT_MANIFEST_VERSION = 2`
+  (the phase-1 manifest: tier-1 traits, supertraits, non-vtable defaults); the loader stops with an
+  error naming the dependency to rebuild when a manifest carries another version (a missing `version`
+  is a version-1 manifest) or does not parse — the old loader read no version and skipped unparseable
+  files silently; a missing file is still skipped (a dependency without traits writes none). A stale
+  manifest in a modules cache trips the error on the first run: that is the measurement, and the cure
+  is rebuilding the dependency (or clearing the cache).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

@@ -229,24 +229,47 @@ fn default_args_inline() -> bool {
     true
 }
 
+/// Book §3.2.16 phase 3: the manifest format this transpiler writes. Version
+/// 2 = the phase-1 manifest (tier-1 traits, supertraits, non-vtable defaults
+/// — fields a version-1 reader silently defaulted). A consumer reading a
+/// manifest of another version stops with an error naming the dependency to
+/// rebuild; the old loader read no version and skipped unparseable files.
+pub const UFCS_TRAIT_MANIFEST_VERSION: u32 = 2;
+
 fn default_ufcs_trait_manifest_version() -> u32 {
     1
 }
 
 /// Load + merge dependency UFCS trait manifests (book § 3.2.7). Later entries
 /// don't conflict in practice (distinct crate modules); on the same method/trait
-/// the union is taken. Missing files are skipped (best-effort, like dep .cppm).
-pub fn load_ufcs_trait_manifests(paths: &[PathBuf]) -> Vec<UfcsTraitManifest> {
+/// the union is taken. A MISSING file is skipped (a dependency without traits
+/// writes none; best-effort, like a dep .cppm); a file that does not parse or
+/// carries another version is a hard error (phase 3).
+pub fn load_ufcs_trait_manifests(paths: &[PathBuf]) -> Result<Vec<UfcsTraitManifest>, String> {
     let mut out = Vec::new();
     for p in paths {
         let Ok(text) = fs::read_to_string(p) else {
             continue;
         };
-        if let Ok(m) = serde_json::from_str::<UfcsTraitManifest>(&text) {
-            out.push(m);
+        let m = serde_json::from_str::<UfcsTraitManifest>(&text).map_err(|e| {
+            format!(
+                "dependency trait manifest `{}` does not parse ({}): rebuild the dependency with this transpiler",
+                p.display(),
+                e
+            )
+        })?;
+        if m.version != UFCS_TRAIT_MANIFEST_VERSION {
+            return Err(format!(
+                "dependency trait manifest `{}` is version {} but this transpiler writes version {}: rebuild the dependency (`{}`) with this transpiler, or clear the modules cache",
+                p.display(),
+                m.version,
+                UFCS_TRAIT_MANIFEST_VERSION,
+                m.module
+            ));
         }
+        out.push(m);
     }
-    out
+    Ok(out)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3771,7 +3794,7 @@ fn transpile_full_with_options_impl(
     if !options.dependency_ufcs_trait_manifests.is_empty() {
         codegen.set_dependency_ufcs_trait_manifests(load_ufcs_trait_manifests(
             &options.dependency_ufcs_trait_manifests,
-        ));
+        )?);
     }
     log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
@@ -6410,7 +6433,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         // job is CLASSIFICATION (member-call → UFCS free call).
         let manifest = UfcsTraitManifest {
             declared_trait_modules: std::collections::BTreeMap::new(),
-            version: 1,
+            version: UFCS_TRAIT_MANIFEST_VERSION,
             tier1_traits: Vec::new(),
             trait_supertraits: std::collections::BTreeMap::new(),
             trait_nonvtable_defaults: std::collections::BTreeMap::new(),
@@ -6505,7 +6528,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         // `::itertools::Itertools::cartesian_product(0..6, 0..9)`.
         let manifest = UfcsTraitManifest {
             declared_trait_modules: std::collections::BTreeMap::new(),
-            version: 1,
+            version: UFCS_TRAIT_MANIFEST_VERSION,
             tier1_traits: Vec::new(),
             trait_supertraits: std::collections::BTreeMap::new(),
             trait_nonvtable_defaults: std::collections::BTreeMap::new(),
@@ -8505,5 +8528,31 @@ fn f() -> i32 {
              impl ForeignClone for Foo { fn clone(&self) -> Foo { Foo } }",
         );
         assert_eq!(m.get("clone"), Some(&MethodNameClass::Inherent));
+    }
+}
+
+#[cfg(test)]
+mod manifest_version_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_loader_rejects_other_versions_and_garbage_and_skips_missing() {
+        let dir = std::env::temp_dir().join(format!("rusty_manifest_version_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("current.json");
+        let old = dir.join("old.json");
+        let garbage = dir.join("garbage.json");
+        let missing = dir.join("missing.json");
+        std::fs::write(&current, format!(r#"{{"version":{},"module":"depmod"}}"#, UFCS_TRAIT_MANIFEST_VERSION)).unwrap();
+        std::fs::write(&old, r#"{"module":"oldmod"}"#).unwrap(); // no `version` = a version-1 manifest
+        std::fs::write(&garbage, "{not json").unwrap();
+        let ok = load_ufcs_trait_manifests(&[current.clone(), missing.clone()]).unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].module, "depmod");
+        let err = load_ufcs_trait_manifests(&[current.clone(), old.clone()]).unwrap_err();
+        assert!(err.contains("is version 1") && err.contains("oldmod"), "{err}");
+        let err = load_ufcs_trait_manifests(&[garbage.clone()]).unwrap_err();
+        assert!(err.contains("does not parse"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -5854,7 +5854,7 @@ impl CodeGen {
             }
         }
         crate::transpile::UfcsTraitManifest {
-            version: 1,
+            version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
             module: module.to_string(),
             declared_traits,
             declared_trait_modules: self
